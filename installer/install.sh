@@ -685,18 +685,22 @@ fi
 
 ui_step "Node.js toolchain"
 
-# Node/npm is a hard dependency for the dashboard UI build right below
-# (the pi-coder + opencode bundled agents used to need it too — both shelled
-# out to npm — but those speculative drivers were deleted; hal0 v0.3 only
-# ever ships hermes, which doesn't need Node). Provisioning it here, once,
-# up front covers the dashboard build instead of only warning in the
-# Dashboard UI step below. Best-effort: resolve_node tries an
-# already-present Node >=20 first, then auto-installs via the detected
-# package manager (NodeSource setup script on Debian/Ubuntu, since their
-# base repos ship an ancient Node; direct package install elsewhere); never
-# fatal — a Node-less box still installs, just without the dashboard build
-# until Node is added later.
-if [[ "${DEV_MODE}" -eq 1 ]]; then
+UI_DIR="${REPO_ROOT}/ui"
+UI_DIST="${UI_DIR}/dist"
+_ui_has_build_inputs=0
+[[ -f "${UI_DIR}/package.json" ]] && _ui_has_build_inputs=1
+_ui_prebuilt_release=0
+if [[ "${_ui_has_build_inputs}" -eq 0 && -s "${UI_DIST}/index.html" ]]; then
+    _ui_prebuilt_release=1
+fi
+
+# Node/npm is a dependency only when this tree contains the dashboard npm
+# project. Signed release trees intentionally ship a verified ui/dist without
+# ui/package.json; provisioning Node there cannot rebuild anything and would be
+# misleading work. Source/git installs retain the existing best-effort setup.
+if [[ "${_ui_has_build_inputs}" -eq 0 ]]; then
+    info "dashboard npm project not shipped — Node.js toolchain not required"
+elif [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping Node.js auto-provisioning (install manually if exercising the dashboard build)"
 elif HAL0_NODE_AUTOINSTALL=1 resolve_node; then
     info "node: $(node -v 2>/dev/null || echo present) (>= ${NODE_MIN_MAJOR} LTS)"
@@ -707,15 +711,11 @@ fi
 
 ui_step "Dashboard UI"
 
-UI_DIR="${REPO_ROOT}/ui"
-UI_DIST="${UI_DIR}/dist"
-# Staleness gate (same class as the venv same-version trap): "dist exists"
-# is NOT "dist is current" — a bare index.html check kept the FIRST build a
-# box ever produced alive through every later redeploy, silently serving an
-# old dashboard. Stamp the built dist with the ui/ tree hash and skip only
-# on an exact match; no git / no stamp → rebuild (safe default).
+# Staleness gate for source trees (same class as the venv same-version trap):
+# "dist exists" is NOT "dist is current". Stamp a local build with the ui/
+# tree hash and skip only on an exact match; no git / no stamp → rebuild.
 _ui_tree_hash=""
-if command -v git >/dev/null 2>&1; then
+if [[ "${_ui_has_build_inputs}" -eq 1 ]] && command -v git >/dev/null 2>&1; then
     _ui_tree_hash="$(git -C "${REPO_ROOT}" rev-parse HEAD:ui 2>/dev/null || true)"
 fi
 _ui_dist_current=0
@@ -724,7 +724,16 @@ if [[ -f "${UI_DIST}/index.html" && -n "${_ui_tree_hash}" \
       && "$(cat "${UI_DIST}/.hal0-build-stamp" 2>/dev/null)" == "${_ui_tree_hash}" ]]; then
     _ui_dist_current=1
 fi
-if [[ "${_ui_dist_current}" -eq 1 ]]; then
+
+# A distribution-only tree has no source freshness signal or npm project by
+# design. Its prebuilt bundle is part of the already-verified release artifact,
+# so reuse a non-empty index explicitly and never attempt an impossible rebuild.
+if [[ "${_ui_prebuilt_release}" -eq 1 ]]; then
+    info "using release's prebuilt ui/dist — npm rebuild not required"
+elif [[ "${_ui_has_build_inputs}" -eq 0 ]]; then
+    warn "no valid prebuilt ui/dist/index.html; dashboard cannot rebuild without ui/package.json"
+    warn "dashboard at :${HAL0_PORT}/ will return 404 until a complete release tree is installed"
+elif [[ "${_ui_dist_current}" -eq 1 ]]; then
     info "ui/dist already built for this ui/ tree (${_ui_tree_hash:0:12}) — left alone"
 elif command -v npm >/dev/null 2>&1; then
     # ui/package.json pins vite ^6.0.3 + @tailwindcss/vite ^4.2.2, both of

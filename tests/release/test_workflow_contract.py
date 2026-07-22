@@ -101,3 +101,45 @@ def test_channel_pointer_advancement_is_a_separate_final_gate() -> None:
     text = _workflow_text()
     assert "channel pointer" in text.lower()
     assert "separately verified" in text.lower()
+
+
+def test_release_tree_pins_installer_and_updater_runtime_inputs() -> None:
+    text = _workflow_text()
+    stage = text.split("      - name: Stage release tree", 1)[1].split(
+        "      - name: Stage release notes", 1
+    )[0]
+
+    for copy in (
+        "src",
+        "manifest.json",
+        "pyproject.toml",
+        "installer",
+        "packaging",
+    ):
+        assert re.search(rf"cp -a {re.escape(copy)}\s+\"\$\{{STAGE\}}/\"", stage)
+
+    for required in (
+        "src/hal0/updater/updater.py",
+        "manifest.json",
+        "pyproject.toml",
+        "installer/install.sh",
+        "installer/lib/ui.sh",
+        "packaging/systemd/hal0-openwebui.service",
+        "ui/dist/index.html",
+        "VERSION",
+    ):
+        assert f'"${{STAGE}}/{required}"' in stage
+
+
+def test_release_tree_is_explicitly_prebuilt_ui_only() -> None:
+    text = _workflow_text()
+    stage = text.split("      - name: Stage release tree", 1)[1].split(
+        "      - name: Stage release notes", 1
+    )[0]
+
+    assert "if [[ -s ui/dist/index.html ]]" in stage
+    assert 'cp -a ui/dist            "${STAGE}/ui/dist"' in stage
+    assert '"${STAGE}/ui/package.json"' in stage
+    assert '"${STAGE}/ui/node_modules"' in stage
+    assert "ui-dist/" not in stage
+    assert "npm fallback" not in stage
