@@ -328,6 +328,12 @@ def test_release_policy_controls_manifest_targets() -> None:
     text = Path(".github/workflows/release.yml").read_text()
     assert "manifest_targets" in text
     assert "publish_pypi" in text
+
+
+def test_release_signs_and_uploads_every_manifest_bundle() -> None:
+    text = Path(".github/workflows/release.yml").read_text()
+    assert 'cosign sign-blob --yes --bundle "${MANIFEST}.bundle" "${MANIFEST}"' in text
+    assert '"${MANIFEST}.bundle"' in text
 ```
 
 Add policy matrix tests that assert:
@@ -358,7 +364,12 @@ preview/stable behavior from a string comparison such as `channel == nightly`.
 Generate one manifest per `manifest_targets` target. For a stable final, the stable
 and preview manifests must differ only in target `channel` and self-reference URL;
 artifact version, digest, signer, and release kind remain identical. Run
-`ReleaseManifest` validation on every generated manifest.
+`ReleaseManifest` validation on every generated manifest. For each exact generated
+manifest file, run `cosign sign-blob --bundle "${MANIFEST}.bundle" "${MANIFEST}"`,
+self-verify the bundle using the client-pinned release-workflow identity and issuer,
+and upload both `${channel}.json` and `${channel}.json.bundle`. The updater's
+manifest verification intentionally derives the latter sibling URL, so missing or
+unsigned bundles must make the workflow contract test fail.
 
 - [ ] **Step 4: Implement collision-safe publication.**
 
