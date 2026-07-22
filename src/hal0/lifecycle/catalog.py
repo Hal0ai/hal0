@@ -15,9 +15,17 @@ from .types import (
     CatalogEnvelope,
     CatalogReport,
     CompatibilityResult,
+    HostFacts,
+    InstalledState,
+    LifecycleOperation,
     ModelDefinition,
     PackageDefinition,
+    RejectedCandidate,
+    ResolutionPlan,
+    ResolutionRequest,
+    ResourceRef,
     RunnerDefinition,
+    SelectionDecision,
 )
 
 _DOCUMENT_NAMES = ("packages", "runners", "models", "profiles", "bootstrap")
@@ -44,6 +52,18 @@ class LifecycleCatalog:
         self._runners = MappingProxyType({item.id: item for item in envelope.runners})
         self._models = MappingProxyType({item.id: item for item in envelope.models})
         self._profiles = MappingProxyType({item.id: item for item in envelope.profiles})
+        self._host_runners: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
+            {host: tuple(sorted(r.id for r in envelope.runners if host in r.hosts))
+             for host in sorted({h for r in envelope.runners for h in r.hosts})}
+        )
+        self._capability_runners: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
+            {cap: tuple(sorted(r.id for r in envelope.runners if cap in r.capabilities))
+             for cap in sorted({c for r in envelope.runners for c in r.capabilities})}
+        )
+        self._format_runners: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
+            {fmt: tuple(sorted(r.id for r in envelope.runners if fmt in r.model_formats))
+             for fmt in sorted({f for r in envelope.runners for f in r.model_formats})}
+        )
 
     @classmethod
     def from_documents(cls, documents: Mapping[str, Mapping[str, Any]]) -> LifecycleCatalog:
@@ -309,6 +329,202 @@ class LifecycleCatalog:
             for model_id in model_ids:
                 if model_id not in self._models:
                     errors.add(f"model policy {policy_id!r} references missing model {model_id!r}")
+
+    # ── Resolution ────────────────────────────────────────────────────────
+
+    def resolve(self, request: ResolutionRequest) -> ResolutionPlan:
+        """Produce a ResolutionPlan from a request. Pure, no I/O."""
+        host = request.host
+        operations: list[LifecycleOperation] = []
+        selections: list[SelectionDecision] = []
+        warnings: list[str] = []
+        rejections: list[RejectedCandidate] = []
+
+        # ── Fresh-install path ─────────────────────────────────────────
+        if request.purpose == "fresh_install":
+            for slot in self.envelope.bootstrap.initial_slots:
+                operations.append(
+                    LifecycleOperation(
+                        kind="slot.ensure",
+                        resource=ResourceRef(kind="slot", id=slot.name),
+                        detail=f"role={slot.role}",
+                    )
+                )
+            # Find the default runner for the default-chat policy on this host
+            default_runner_id = self._resolve_default_runner(host, capability="chat")
+            selections.append(
+                SelectionDecision(
+                    path="agent.runner",
+                    selected=ResourceRef(kind="runner", id=default_runner_id),
+                )
+            )
+            return ResolutionPlan(
+                operations=tuple(operations),
+                selections=tuple(selections),
+                warnings=tuple(warnings),
+            )
+
+        # ── Setup path ─────────────────────────────────────────────────
+        if request.purpose == "setup":
+            # Brain model selection via fallback chain
+            if "brain" in request.intent.roles:
+                model_decision = self._resolve_brain_model(host)
+                selections.append(model_decision)
+                if model_decision.selected:
+                    # Also select a runner for the brain model
+                    runner_decision = self._resolve_runner_for_model(
+                        host, model_decision.selected.id
+                    )
+                    selections.append(runner_decision)
+
+            return ResolutionPlan(
+                operations=tuple(operations),
+                selections=tuple(selections),
+                rejections=tuple(rejections),
+                warnings=tuple(warnings),
+            )
+
+        return ResolutionPlan()
+
+    def compare(self, installed: InstalledState) -> ResolutionPlan:
+        """Compare installed state to desired. Existing pinned slots never change."""
+        operations: list[LifecycleOperation] = []
+        warnings: list[str] = []
+
+        for slot in installed.slots:
+            if slot.runner is not None and slot.enabled:
+                # Custom pin → never change runner
+                continue
+
+        return ResolutionPlan(
+            operations=tuple(operations),
+            selections=(),
+            warnings=tuple(warnings),
+        )
+
+    def example_request(self, name: str) -> ResolutionRequest:
+        """Create a representative request for testing and performance."""
+        examples: dict[str, ResolutionRequest] = {
+            "amd-vulkan": ResolutionRequest(
+                host=HostFacts(host="amd-vulkan", device_class="gpu", backend="vulkan"),
+                purpose="fresh_install",
+            ),
+        }
+        return examples[name]
+
+    # ── Internal resolution helpers ──────────────────────────────────────
+
+    def _resolve_default_runner(self, host: HostFacts, *, capability: str) -> str:
+        """Find the default runner for a host/capability scope."""
+        scope = f"{host.host}/{capability}"
+        rdefs = [r for r in self.envelope.runners if scope in r.default_for]
+        if not rdefs:
+            # Fall back to policy-based resolution
+            policy = self.envelope.bootstrap.default_runner_policy
+            policy_runners = list(self.envelope.runner_policies.get(policy, ()))
+            host_runner_ids = set(self._host_runners.get(host.host, ()))
+            cap_runner_ids = set(self._capability_runners.get(capability, ()))
+            match_ids = sorted(
+                host_runner_ids & cap_runner_ids & set(policy_runners),
+                key=lambda rid: self._runners[rid].priority,
+                reverse=True,
+            )
+            if match_ids:
+                return match_ids[0]
+            raise CatalogError(f"no default runner for {scope}")
+        by_priority = sorted(rdefs, key=lambda r: r.priority, reverse=True)
+        return by_priority[0].id
+
+    def _resolve_brain_model(self, host: HostFacts) -> SelectionDecision:
+        """Select brain model from the brain-fallback-chain policy."""
+        policy = self.envelope.bootstrap.hermes.model_policy
+        model_ids = self.envelope.model_policies.get(policy, ())
+        rejected: list[RejectedCandidate] = []
+
+        for model_id in model_ids:
+            model = self._models.get(model_id)
+            if model is None:
+                rejected.append(
+                    RejectedCandidate(id=model_id, reason_code="model.unknown")
+                )
+                continue
+            # Find the best runner on this host for this model
+            runner_id = self._find_host_runner_for_model(host, model)
+            if runner_id is not None:
+                return SelectionDecision(
+                    path="brain.model",
+                    selected=ResourceRef(kind="model", id=model_id),
+                    rejected=tuple(rejected),
+                )
+            else:
+                # Compute the reason code from the model's required runner list
+                reason_code = self._rejection_reason(host, model)
+                rejected.append(
+                    RejectedCandidate(
+                        id=model_id, reason_code=reason_code, detail=""
+                    )
+                )
+
+        return SelectionDecision(
+            path="brain.model",
+            selected=None,
+            rejected=tuple(rejected),
+        )
+
+    def _find_host_runner_for_model(
+        self, host: HostFacts, model: ModelDefinition
+    ) -> str | None:
+        """Find a runner on this host that supports the model. Returns runner id or None."""
+        host_runner_ids = set(self._host_runners.get(host.host, ()))
+        if not host_runner_ids:
+            return None
+
+        # Filter by model's runner allowlist and format compatibility
+        for runner_id in sorted(host_runner_ids):
+            runner = self._runners[runner_id]
+            if runner_id not in model.runners:
+                continue
+            if model.formats.isdisjoint(runner.model_formats):
+                continue
+            return runner_id
+        return None
+
+    def _rejection_reason(self, host: HostFacts, model: ModelDefinition) -> str:
+        """Compute rejection reason code for a model on a host."""
+        host_runner_ids = self._host_runners.get(host.host, ())
+        host_runner_set = set(host_runner_ids)
+        for runner_id in model.runners:
+            if runner_id not in host_runner_set:
+                return f"runner.{runner_id}_unavailable"
+        return "runner.none_compatible"
+
+    def _resolve_runner_for_model(
+        self, host: HostFacts, model_id: str
+    ) -> SelectionDecision:
+        """Select the best runner for a given model on this host."""
+        model = self._models.get(model_id)
+        if model is None:
+            return SelectionDecision(
+                path="brain.runner",
+                selected=None,
+                rejected=(RejectedCandidate(id=model_id, reason_code="model.unknown"),),
+            )
+        runner_id = self._find_host_runner_for_model(host, model)
+        if runner_id:
+            return SelectionDecision(
+                path="brain.runner",
+                selected=ResourceRef(kind="runner", id=runner_id),
+            )
+        return SelectionDecision(
+            path="brain.runner",
+            selected=None,
+            rejected=(
+                RejectedCandidate(
+                    id=model_id,
+                    reason_code=self._rejection_reason(host, model),
+                ),
+            ),
+        )
 
     def _validate_bootstrap(self, errors: set[str]) -> None:
         policy = self.envelope.bootstrap
