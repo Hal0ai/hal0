@@ -211,6 +211,31 @@ def test_target_without_v_is_unchanged(stub_api: dict, monkeypatch: pytest.Monke
     assert stub_api["prepare_json"] == {"version": "0.1.1"}
 
 
+def test_prepare_pin_mismatch_never_posts_commit(
+    stub_api: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed prepare job stops the CLI before the activation request."""
+
+    def failed_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
+        return {
+            "id": job_id,
+            "state": "failed",
+            "error": "requested version does not match authenticated channel manifest",
+        }
+
+    monkeypatch.setattr(uc, "_poll_job", failed_poll)
+
+    result = runner.invoke(app, ["update", "--target", "0.1.1"])
+
+    assert result.exit_code != 0
+    assert "authenticated channel" in result.output
+    assert "manifest" in result.output
+    assert stub_api["prepare_json"] == {"version": "0.1.1"}
+    assert stub_api["commit_json"] is None
+
+
 def test_prepare_then_commit_flow(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI stages via /prepare, then activates via /commit with the resolved version."""
     result = runner.invoke(app, ["update", "--target", "0.1.1"])

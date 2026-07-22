@@ -1077,6 +1077,86 @@ def test_apply_repip_failure_rolls_back_symlink(
 # ── prepare / commit split ─────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("requested_version", ["0.0.2", "../../outside"])
+def test_prepare_rejects_mismatched_pin_before_staging_paths(
+    requested_version: str,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An authenticated channel manifest cannot be staged under a caller label."""
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"})
+
+    async def fake_fetch(
+        channel: str, *, job_id: str | None = None
+    ) -> tuple[dict[str, Any], ReleaseManifest, str]:
+        return manifest.model_dump(by_alias=True), manifest, "https://example.test/stable.json"
+
+    async def unexpected_download(url: str, dest: Path) -> None:
+        raise AssertionError(f"artifact download reached for mismatched pin: {url} -> {dest}")
+
+    def unexpected_path(version: str) -> Path:
+        raise AssertionError(f"staging path constructed for mismatched pin: {version}")
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_fetch_verified_release_manifest", fake_fetch)
+    monkeypatch.setattr(updater_module, "_download", unexpected_download)
+    monkeypatch.setattr(updater_module, "_cache_dir", unexpected_path)
+    monkeypatch.setattr(updater_module, "_versioned_install_dir", unexpected_path)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").prepare(requested_version))
+
+    assert exc_info.value.details == {
+        "channel": "stable",
+        "requested_version": requested_version,
+        "manifest_version": "0.0.1",
+    }
+
+
+@pytest.mark.parametrize("requested_version", ["0.0.1", " 0.0.1 "])
+def test_prepare_matching_pin_stages_authenticated_manifest_version(
+    requested_version: str,
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+) -> None:
+    """An exact optimistic pin preserves the normal prepare flow after trimming."""
+    res = asyncio.run(Updater().prepare(requested_version))
+
+    assert res["version"] == "0.0.1"
+    assert _versioned_install_dir("0.0.1").is_dir()
+    assert updater_module._manifest_cache_path("0.0.1").is_file()
+
+
+def test_apply_mismatched_pin_never_commits(
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single-step apply propagates pin mismatch without activation."""
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"})
+    committed = False
+
+    async def fake_fetch(
+        channel: str, *, job_id: str | None = None
+    ) -> tuple[dict[str, Any], ReleaseManifest, str]:
+        return manifest.model_dump(by_alias=True), manifest, "https://example.test/stable.json"
+
+    async def fake_commit(version: str) -> dict[str, Any]:
+        nonlocal committed
+        committed = True
+        return {}
+
+    updater = Updater(channel="stable")
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_fetch_verified_release_manifest", fake_fetch)
+    monkeypatch.setattr(updater, "commit", fake_commit)
+
+    with pytest.raises(UpdateManifestInvalid):
+        asyncio.run(updater.apply("0.0.2"))
+
+    assert committed is False
+    assert not _current_symlink().exists()
+
+
 def test_prepare_stages_without_swap(synthetic_release: dict[str, Any], cosign_skip: None) -> None:
     """prepare() downloads + verifies + extracts but activates nothing.
 
@@ -1109,6 +1189,32 @@ def test_commit_without_prepare_raises(tmp_hal0_home: str, monkeypatch: pytest.M
     monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
     with pytest.raises(UpdateError):
         asyncio.run(Updater().commit("0.0.1"))
+
+
+def test_commit_rejects_cached_manifest_for_different_version(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """commit() never activates a staged tree whose cached manifest names another version."""
+    target_version = "0.0.1"
+    install_dir = _versioned_install_dir(target_version)
+    install_dir.mkdir(parents=True)
+    manifest_path = updater_module._manifest_cache_path(target_version)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps({**VALID_MANIFEST, "version": "0.0.2"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").commit(target_version))
+
+    assert exc_info.value.details == {
+        "channel": "stable",
+        "target_version": target_version,
+        "manifest_version": "0.0.2",
+    }
+    assert not _current_symlink().exists()
 
 
 def test_prepare_then_commit_swaps(synthetic_release: dict[str, Any], cosign_skip: None) -> None:

@@ -1666,19 +1666,24 @@ class Updater:
         log.info("updater.prepare_start", job_id=self.job_id, channel=self.channel, pinned=version)
         raw, manifest, _ = await _fetch_verified_release_manifest(self.channel, job_id=self.job_id)
 
-        # Step 2: confirm target version.
-        target_version = (version or "").strip() or manifest.version
-        if not target_version:
+        # Step 2: treat the optional version as an optimistic exact pin. It is
+        # never a historical resolver or a caller-controlled staging label:
+        # authenticated manifest.version remains the sole target authority.
+        requested_version = (version or "").strip() or None
+        if requested_version is not None and requested_version != manifest.version:
+            raise UpdateManifestInvalid(
+                "requested version does not match authenticated channel manifest",
+                details={
+                    "channel": self.channel,
+                    "requested_version": requested_version,
+                    "manifest_version": manifest.version,
+                },
+            )
+        target_version = manifest.version
+        if not target_version.strip():
             raise UpdateManifestInvalid(
                 "release manifest has no usable version",
                 details={"channel": self.channel},
-            )
-        if version and version != manifest.version:
-            log.info(
-                "updater.version_pinned_mismatch",
-                job_id=self.job_id,
-                pinned=version,
-                manifest=manifest.version,
             )
 
         # Step 3: download tarball + Sigstore bundle (survives cert expiry, #1159).
@@ -1772,8 +1777,18 @@ class Updater:
                 f"nothing staged for {target_version} — call prepare() before commit()",
                 details={"version": target_version, "install_dir": str(install_dir)},
             )
-        # Manifest cached by prepare(); needed for min_data_version below.
+        # Manifest cached by prepare(); needed for min_data_version below. Recheck
+        # its authenticated target binding before any migration or activation.
         manifest = _parse_manifest(_load_cached_manifest(target_version))
+        if manifest.version != target_version:
+            raise UpdateManifestInvalid(
+                "cached manifest version does not match prepared target",
+                details={
+                    "channel": self.channel,
+                    "target_version": target_version,
+                    "manifest_version": manifest.version,
+                },
+            )
         log.info("updater.commit_start", job_id=self.job_id, version=target_version)
 
         # Step 7: config migrations.

@@ -681,6 +681,44 @@ def test_apply_target_strips_leading_v(
 # ── prepare / commit split ─────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("endpoint", ["prepare", "apply"])
+def test_version_pin_mismatch_fails_update_job(
+    endpoint: str,
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API prepare/apply jobs preserve the updater's typed pin-mismatch failure."""
+    from hal0.api.routes import updater as u_mod
+    from hal0.updater import UpdateManifestInvalid
+
+    async def reject_pin(self: object, version: str | None = None) -> dict:
+        raise UpdateManifestInvalid(
+            "requested version does not match authenticated channel manifest",
+            details={
+                "channel": "stable",
+                "requested_version": version,
+                "manifest_version": "9.9.9",
+            },
+        )
+
+    monkeypatch.setattr(u_mod.Updater, endpoint, reject_pin)
+    response = isolated_client.post(f"/api/updates/{endpoint}", json={"version": "0.0.1"})
+    assert response.status_code == 202, response.text
+    job_id = response.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] in ("prepared", "applied", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") == "failed", final
+    assert final.get("error_code") == "UpdateManifestInvalid"
+    assert "authenticated channel manifest" in final.get("error", "")
+
+
 def test_prepare_route_returns_queued_prepare_job(isolated_client: TestClient) -> None:
     """POST /api/updates/prepare returns a queued job tagged phase=prepare."""
     r = isolated_client.post("/api/updates/prepare", json={})
