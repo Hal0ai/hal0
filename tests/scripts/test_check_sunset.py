@@ -70,6 +70,9 @@ def test_catalog_deprecation_status_is_not_a_scar_marker(
     )
     assert check_sunset.scar_count() == 1
 
+    catalog_file.write_text('message = "runner.deprecated"\n', encoding="utf-8")
+    assert check_sunset.scar_count() == 1
+
 
 def test_prerelease_does_not_trigger_same_ga_sunset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

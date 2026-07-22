@@ -20,8 +20,10 @@ Usage:
 
 from __future__ import annotations
 
+import io
 import re
 import sys
+import tokenize
 import tomllib
 from contextlib import suppress
 from dataclasses import dataclass
@@ -35,11 +37,6 @@ BASELINE = Path(__file__).resolve().parent / "scar_baseline.txt"
 SCAR_RE = re.compile(r"removed in #|DEPRECATED|deprecated|\blegacy\b|backward.compat|compat shim")
 CATALOG_TYPES = Path("src/hal0/lifecycle/types.py")
 CATALOG_RESOLVER = Path("src/hal0/lifecycle/catalog.py")
-CATALOG_STATUS_FIELD_RE = re.compile(r"^(\s*)deprecated(?=\s*:\s*bool\b)", re.IGNORECASE)
-CATALOG_STATUS_ACCESS_RE = re.compile(
-    r"\b(?:package|runner|model|r)\.deprecated\b|self\._runners\[rid\]\.deprecated\b",
-    re.IGNORECASE,
-)
 SUNSET_RE = re.compile(r"HAL0-SUNSET:\s*v?(\d+)\.(\d+)(?:\.(\d+))?")
 PROJECT_VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?(.*)$")
 PEP440_PRERELEASE_RE = re.compile(r"^\.?(?:a|alpha|b|beta|rc|pre|preview|dev)", re.IGNORECASE)
@@ -79,15 +76,65 @@ def _py_files() -> list[Path]:
     return sorted(SRC.rglob("*.py"))
 
 
+def _catalog_status_spans(path: Path, line: str) -> list[tuple[int, int]]:
+    """Locate typed catalog status identifiers, excluding strings and comments."""
+    relative_path = path.relative_to(ROOT)
+    if relative_path not in (CATALOG_TYPES, CATALOG_RESOLVER):
+        return []
+
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(line).readline))
+    except (IndentationError, tokenize.TokenError):
+        return []
+    significant = [
+        token
+        for token in tokens
+        if token.type
+        not in {
+            tokenize.COMMENT,
+            tokenize.DEDENT,
+            tokenize.ENDMARKER,
+            tokenize.INDENT,
+            tokenize.NEWLINE,
+            tokenize.NL,
+        }
+    ]
+
+    spans: list[tuple[int, int]] = []
+    for index, token in enumerate(significant):
+        if token.type != tokenize.NAME or token.string.lower() != "deprecated":
+            continue
+        if relative_path == CATALOG_TYPES:
+            following = significant[index + 1 : index + 3]
+            is_status = [item.string for item in following] == [":", "bool"]
+        else:
+            preceding = [item.string for item in significant[max(0, index - 7) : index]]
+            direct_owner = len(preceding) >= 2 and preceding[-2] in {
+                "model",
+                "package",
+                "r",
+                "runner",
+            } and preceding[-1] == "."
+            indexed_runner = preceding[-7:] == [
+                "self",
+                ".",
+                "_runners",
+                "[",
+                "rid",
+                "]",
+                ".",
+            ]
+            is_status = direct_owner or indexed_runner
+        if is_status:
+            spans.append((token.start[1], token.end[1]))
+    return spans
+
+
 def _is_scar_line(path: Path, line: str) -> bool:
     """Match migration scars without counting typed catalog status expressions."""
-    relative_path = path.relative_to(ROOT)
-    code, separator, comment = line.partition("#")
-    if relative_path == CATALOG_TYPES:
-        code = CATALOG_STATUS_FIELD_RE.sub(r"\1catalog_status", code, count=1)
-    elif relative_path == CATALOG_RESOLVER:
-        code = CATALOG_STATUS_ACCESS_RE.sub("catalog_status", code)
-    return SCAR_RE.search(code + separator + comment) is not None
+    for start, end in reversed(_catalog_status_spans(path, line)):
+        line = f"{line[:start]}catalog_status{line[end:]}"
+    return SCAR_RE.search(line) is not None
 
 
 def scar_count() -> int:
