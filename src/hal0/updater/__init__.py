@@ -38,6 +38,7 @@ from hal0.updater.updater import (
     fetch_release_manifest,
     releases_url,
     validate_manifest_for_channel,
+    validate_release_version,
 )
 
 __all__ = [
@@ -56,4 +57,5 @@ __all__ = [
     "fetch_release_manifest",
     "releases_url",
     "validate_manifest_for_channel",
+    "validate_release_version",
 ]

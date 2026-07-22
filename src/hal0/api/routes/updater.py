@@ -47,7 +47,7 @@ from hal0.config import paths
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
 from hal0.release.policy import ReleaseKind
-from hal0.updater import Updater, fetch_release_manifest, releases_url
+from hal0.updater import Updater, fetch_release_manifest, releases_url, validate_release_version
 
 log = structlog.get_logger(__name__)
 
@@ -593,14 +593,7 @@ async def apply_update(request: Request) -> dict[str, Any]:
         body = await request.json()
     except Exception:
         body = {}
-    version: str | None = None
-    if isinstance(body, dict):
-        v = body.get("version")
-        if isinstance(v, str) and v.strip():
-            # Strip a leading "v" so {"version": "v0.1.1"} and "0.1.1"
-            # drive the same target - matches the CLI's --target handling
-            # (#510). lstrip is fine here: versions never start with "v".
-            version = v.strip().lstrip("v") or None
+    version = _body_version(body)
 
     channel = _current_channel(request)
     jobs = _update_jobs(request)
@@ -643,11 +636,11 @@ def _spawn_update_task(request: Request, coro: Any) -> None:
 
 
 def _body_version(body: Any) -> str | None:
-    """Extract a normalised ``version`` from a request body (strip a leading v)."""
+    """Extract ``version``, normalising one compatible leading ``v`` only."""
     if isinstance(body, dict):
-        v = body.get("version")
-        if isinstance(v, str) and v.strip():
-            return v.strip().lstrip("v") or None
+        version = body.get("version")
+        if isinstance(version, str) and version:
+            return version[1:] if version.startswith("v") else version
     return None
 
 
@@ -706,6 +699,13 @@ async def commit_update(request: Request) -> dict[str, Any]:
             "commit requires a 'version' — the resolved_version from /prepare",
             details={"hint": "POST /api/updates/prepare first, then commit its resolved_version"},
         )
+    try:
+        version = validate_release_version(version)
+    except ValueError as exc:
+        raise BadRequest(
+            "commit version must be an exact supported release version",
+            details={"version": version, "error": str(exc)},
+        ) from exc
     channel = _current_channel(request)
     jobs = _update_jobs(request)
     job_id = uuid.uuid4().hex[:12]

@@ -10,6 +10,7 @@ import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -781,11 +782,62 @@ def test_commit_route_requires_version(isolated_client: TestClient) -> None:
     assert "error" in body
 
 
-def test_commit_route_accepts_version(isolated_client: TestClient) -> None:
-    """POST /api/updates/commit with a version queues a phase=commit job (202)."""
-    r = isolated_client.post("/api/updates/commit", json={"version": "0.0.1"})
+@pytest.mark.parametrize(
+    ("supplied", "normalized"),
+    [
+        ("1.2.3", "1.2.3"),
+        ("v1.2.3", "1.2.3"),
+        ("1.2.3-rc.1", "1.2.3-rc.1"),
+        ("1.2.3-nightly.20260721060000", "1.2.3-nightly.20260721060000"),
+    ],
+)
+def test_commit_route_accepts_canonical_version_before_queueing(
+    supplied: str,
+    normalized: str,
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical versions queue, including compatible single-leading-v input."""
+    from hal0.api.routes import updater as u_mod
+
+    def discard_task(request: object, coro: Any) -> None:
+        coro.close()
+
+    monkeypatch.setattr(u_mod, "_spawn_update_task", discard_task)
+    r = isolated_client.post("/api/updates/commit", json={"version": supplied})
     assert r.status_code == 202, r.text
     body = r.json()
     assert body["phase"] == "commit"
     assert body["state"] == "queued"
-    assert body["version"] == "0.0.1"
+    assert body["version"] == normalized
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "../../outside",
+        "1.2.3/../../outside",
+        r"1.2.3\..\outside",
+        "/tmp/outside",
+        " 1.2.3 ",
+        "1.2.3-preview.1",
+    ],
+)
+def test_commit_route_rejects_invalid_version_before_queueing(
+    version: str,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hostile commit labels return a typed 400 without touching job storage."""
+    from hal0.api.routes import updater as u_mod
+
+    def unexpected_jobs(request: object) -> dict:
+        raise AssertionError("invalid commit version reached the update queue")
+
+    monkeypatch.setattr(u_mod, "_update_jobs", unexpected_jobs)
+    response = isolated_client.post("/api/updates/commit", json={"version": version})
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "validation.invalid"
+    assert not (Path(tmp_hal0_home) / "var-lib" / "hal0" / "update-jobs").exists()

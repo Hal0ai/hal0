@@ -63,7 +63,7 @@ from hal0.config.loader import (
 )
 from hal0.config.migrations import latest_version, run_migrations
 from hal0.errors import Hal0Error
-from hal0.release.policy import ReleaseKind
+from hal0.release.policy import ReleaseKind, ReleasePolicy, ReleaseTagError
 
 log = structlog.get_logger(__name__)
 
@@ -157,6 +157,34 @@ class UpdateRollbackUnavailable(UpdateError):
 # ── Release-manifest schema (pydantic) ─────────────────────────────────────────
 
 
+def validate_release_version(version: str) -> str:
+    """Return an exact supported release version or raise ``ValueError``.
+
+    ReleasePolicy is the stdlib source of truth shared with release publishing;
+    updater paths only accept its canonical, leading-``v``-free version form.
+    """
+    if not isinstance(version, str):
+        raise ValueError(f"release version must be a string, got {type(version).__name__}")
+    try:
+        policy = ReleasePolicy.from_tag(f"v{version}")
+    except ReleaseTagError as exc:
+        raise ValueError(f"unsupported release version: {version!r}") from exc
+    if policy.version != version:
+        raise ValueError(f"noncanonical release version: {version!r}")
+    return policy.version
+
+
+def _require_release_version(version: str, *, field: str) -> str:
+    """Translate release-policy rejection into the updater's typed 400 error."""
+    try:
+        return validate_release_version(version)
+    except ValueError as exc:
+        raise UpdateManifestInvalid(
+            f"{field} must be an exact supported release version",
+            details={field: version, "error": str(exc)},
+        ) from exc
+
+
 class ReleaseManifest(BaseModel):
     """Schema-validated release-manifest payload.
 
@@ -241,6 +269,11 @@ class ReleaseManifest(BaseModel):
         default_factory=dict,
         description="Mirror of manifest.json's toolbox_images block.",
     )
+
+    @field_validator("version")
+    @classmethod
+    def _version_is_supported(cls, v: str) -> str:
+        return validate_release_version(v)
 
     @field_validator("digest_sha256")
     @classmethod
@@ -1669,22 +1702,26 @@ class Updater:
         # Step 2: treat the optional version as an optimistic exact pin. It is
         # never a historical resolver or a caller-controlled staging label:
         # authenticated manifest.version remains the sole target authority.
-        requested_version = (version or "").strip() or None
-        if requested_version is not None and requested_version != manifest.version:
+        requested_version = (
+            _require_release_version(version, field="requested_version")
+            if version is not None
+            else None
+        )
+        target_version = _require_release_version(manifest.version, field="manifest_version")
+        if requested_version is not None and requested_version != target_version:
             raise UpdateManifestInvalid(
                 "requested version does not match authenticated channel manifest",
                 details={
                     "channel": self.channel,
                     "requested_version": requested_version,
-                    "manifest_version": manifest.version,
+                    "manifest_version": target_version,
                 },
             )
-        target_version = manifest.version
-        if not target_version.strip():
-            raise UpdateManifestInvalid(
-                "release manifest has no usable version",
-                details={"channel": self.channel},
-            )
+
+        # Residual: concurrent prepares for the same version share cache/install
+        # paths and are not serialized. A lock redesign is intentionally out of
+        # scope; signed immutable same-version assets limit current release risk
+        # because both prepares authenticate the same publisher-pinned bytes.
 
         # Step 3: download tarball + Sigstore bundle (survives cert expiry, #1159).
         cache = _cache_dir(target_version)
@@ -1764,12 +1801,7 @@ class Updater:
         shape as the old single-step apply.
         """
         _raise_if_editable_install()
-        target_version = (version or "").strip()
-        if not target_version:
-            raise UpdateManifestInvalid(
-                "commit requires an explicit prepared version",
-                details={"channel": self.channel},
-            )
+        target_version = _require_release_version(version, field="commit_version")
         install_dir = _versioned_install_dir(target_version)
         cache = _cache_dir(target_version)
         if not install_dir.exists():

@@ -337,6 +337,38 @@ def test_manifest_schema_accepts_full_payload(tmp_path: Path) -> None:
     assert len(m.digest_sha256) == 64
 
 
+@pytest.mark.parametrize(
+    "version",
+    [
+        "1.2.3",
+        "1.2.3-alpha.0",
+        "1.2.3-beta.2",
+        "1.2.3-rc.1",
+        "1.2.3-nightly.20260721060000",
+    ],
+)
+def test_manifest_schema_accepts_canonical_release_versions(version: str) -> None:
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": version})
+    assert manifest.version == version
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "../../outside",
+        "1.2.3/../../outside",
+        r"1.2.3\..\outside",
+        "/tmp/outside",
+        " 1.2.3 ",
+        "1.2.3-preview.1",
+        "1.2.3-alpha1",
+    ],
+)
+def test_manifest_schema_rejects_hostile_or_noncanonical_versions(version: str) -> None:
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest({**VALID_MANIFEST, "version": version})
+
+
 def test_manifest_schema_rejects_missing_required_fields() -> None:
     """The pydantic schema rejects manifests without bundle_url / digest_sha256."""
     with pytest.raises(UpdateManifestInvalid):
@@ -1097,13 +1129,12 @@ def test_apply_repip_failure_rolls_back_symlink(
 # ── prepare / commit split ─────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("requested_version", ["0.0.2", "../../outside"])
 def test_prepare_rejects_mismatched_pin_before_staging_paths(
-    requested_version: str,
     tmp_hal0_home: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An authenticated channel manifest cannot be staged under a caller label."""
+    requested_version = "0.0.2"
     manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"})
 
     async def fake_fetch(
@@ -1133,14 +1164,80 @@ def test_prepare_rejects_mismatched_pin_before_staging_paths(
     }
 
 
-@pytest.mark.parametrize("requested_version", ["0.0.1", " 0.0.1 "])
-def test_prepare_matching_pin_stages_authenticated_manifest_version(
+@pytest.mark.parametrize(
+    "requested_version",
+    [
+        "../../outside",
+        "1.2.3/../../outside",
+        r"1.2.3\..\outside",
+        "/tmp/outside",
+        " 0.0.1 ",
+        "1.2.3-preview.1",
+    ],
+)
+def test_prepare_rejects_invalid_pin_before_staging_paths(
     requested_version: str,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"})
+
+    async def fake_fetch(
+        channel: str, *, job_id: str | None = None
+    ) -> tuple[dict[str, Any], ReleaseManifest, str]:
+        return manifest.model_dump(by_alias=True), manifest, "https://example.test/stable.json"
+
+    def unexpected_path(version: str) -> Path:
+        raise AssertionError(f"staging path constructed for invalid pin: {version}")
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_fetch_verified_release_manifest", fake_fetch)
+    monkeypatch.setattr(updater_module, "_cache_dir", unexpected_path)
+    monkeypatch.setattr(updater_module, "_manifest_cache_path", unexpected_path)
+    monkeypatch.setattr(updater_module, "_versioned_install_dir", unexpected_path)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").prepare(requested_version))
+
+    assert exc_info.value.status == 400
+    assert exc_info.value.details["requested_version"] == requested_version
+
+
+@pytest.mark.parametrize("manifest_version", ["../../outside", "/tmp/outside", r"1.2.3\x"])
+def test_prepare_revalidates_manifest_version_before_staging_paths(
+    manifest_version: str,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense in depth holds even if a caller bypasses pydantic construction."""
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"}).model_copy(
+        update={"version": manifest_version}
+    )
+
+    async def fake_fetch(
+        channel: str, *, job_id: str | None = None
+    ) -> tuple[dict[str, Any], ReleaseManifest, str]:
+        return {**VALID_MANIFEST, "version": manifest_version}, manifest, "https://example.test/x"
+
+    def unexpected_path(version: str) -> Path:
+        raise AssertionError(f"staging path constructed for invalid manifest: {version}")
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_fetch_verified_release_manifest", fake_fetch)
+    monkeypatch.setattr(updater_module, "_cache_dir", unexpected_path)
+    monkeypatch.setattr(updater_module, "_manifest_cache_path", unexpected_path)
+    monkeypatch.setattr(updater_module, "_versioned_install_dir", unexpected_path)
+
+    with pytest.raises(UpdateManifestInvalid):
+        asyncio.run(Updater(channel="stable").prepare())
+
+
+def test_prepare_matching_pin_stages_authenticated_manifest_version(
     synthetic_release: dict[str, Any],
     cosign_skip: None,
 ) -> None:
-    """An exact optimistic pin preserves the normal prepare flow after trimming."""
-    res = asyncio.run(Updater().prepare(requested_version))
+    """An exact optimistic pin preserves the normal prepare flow."""
+    res = asyncio.run(Updater().prepare("0.0.1"))
 
     assert res["version"] == "0.0.1"
     assert _versioned_install_dir("0.0.1").is_dir()
@@ -1209,6 +1306,40 @@ def test_commit_without_prepare_raises(tmp_hal0_home: str, monkeypatch: pytest.M
     monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
     with pytest.raises(UpdateError):
         asyncio.run(Updater().commit("0.0.1"))
+
+
+@pytest.mark.parametrize(
+    "commit_version",
+    [
+        "../../outside",
+        "1.2.3/../../outside",
+        r"1.2.3\..\outside",
+        "/tmp/outside",
+        " 1.2.3 ",
+        "1.2.3-preview.1",
+    ],
+)
+def test_commit_rejects_invalid_version_before_any_staging_path(
+    commit_version: str,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_path(version: str) -> Path:
+        raise AssertionError(f"staging path constructed for invalid commit: {version}")
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_cache_dir", unexpected_path)
+    monkeypatch.setattr(updater_module, "_manifest_cache_path", unexpected_path)
+    monkeypatch.setattr(updater_module, "_versioned_install_dir", unexpected_path)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater().commit(commit_version))
+
+    assert exc_info.value.status == 400
+    assert exc_info.value.details["commit_version"] == commit_version
+    home = Path(tmp_hal0_home)
+    assert not (home / "var-lib" / "hal0" / "cache").exists()
+    assert not (home / "usr-lib" / "hal0").exists()
 
 
 def test_commit_rejects_cached_manifest_for_different_version(
