@@ -582,11 +582,10 @@ def _ensure_supported_python(
     runner: Any = subprocess,
     running: tuple[int, int] | None = None,
 ) -> str | None:
-    """Resolve a venv interpreter: system Python first, uv-managed as fallback.
+    """Resolve the exact Python 3.12 interpreter for the Hermes venv.
 
-    A qualifying system interpreter always wins — the uv download only fires
-    when PATH and the running interpreter both fail the range check, so hosts
-    with a packaged 3.11-3.13 never pull a managed build (#1250).
+    A qualifying system ``python3.12`` wins before uv downloads a managed 3.12;
+    explicit and persisted overrides are validated before either fallback.
     """
     configured = os.environ.get("HAL0_HERMES_PYTHON")
     if configured is None:
@@ -605,15 +604,10 @@ def _resolve_supported_python(
     *,
     running: tuple[int, int] | None = None,
 ) -> str | None:
-    """Find an interpreter in hermes-agent's supported range, newest first.
+    """Find an exact Python 3.12 interpreter for Hermes venv creation.
 
-    Probes explicit ``python3.13`` → ``python3.11`` binaries on PATH so the
-    venv pins its minor version regardless of what ``sys.executable`` is.
-    Falls back to the running interpreter only when it is itself inside the
-    range — NOT merely ``>= 3.11``: on a Python-3.14-only host (Ubuntu 26.04)
-    the old fallback built the venv on 3.14, where pip filters out every
-    hermes-agent 0.16+ wheel (``requires-python <3.14``) and resolution
-    lands on the broken 0.15.2 build (#1248).
+    Probes explicit ``python3.12`` on PATH so the venv minor is deterministic.
+    The running interpreter is accepted only when it is itself Python 3.12.
     """
     for minor in range(PYTHON_MAX_EXCLUSIVE[1] - 1, PYTHON_MIN[1] - 1, -1):
         explicit = prober(f"python3.{minor}")
@@ -654,9 +648,9 @@ def _install_venv(
 ) -> None:
     """Create the venv at ``venv`` and install ``requirements`` into it.
 
-    Two-step: ``python3.x -m venv`` then ``pip install -r``. The venv itself
+    Two-step: ``python3.12 -m venv`` then ``pip install -r``. The venv itself
     is stdlib-built — uv enters only inside the resolver, as the last-resort
-    interpreter fetch on hosts with no packaged 3.11-3.13 (#1250).
+    interpreter fetch on hosts with no packaged Python 3.12.
     """
     py = python_resolver()
     if py is None:
@@ -673,8 +667,6 @@ def _install_venv(
     try:
         env = _hal0_subprocess_env()
         target_preexists = target.exists()
-        if not target_preexists:
-            target.mkdir(parents=True, exist_ok=True)
         if needs_replacement or not target_preexists:
             runner.run([py, "-m", "venv", str(target)], check=True, env=env)  # nosec B603
         pip = _venv_python(target)
