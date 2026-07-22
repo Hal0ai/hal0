@@ -4,6 +4,7 @@ These tests deliberately inspect the workflow text: they protect security-critic
 GitHub Actions wiring without publishing a release during the test suite.
 """
 
+import re
 from pathlib import Path
 
 
@@ -29,11 +30,44 @@ def test_release_resolves_policy_before_building() -> None:
         assert f"{output}: ${{{{ steps.policy.outputs.{output} }}}}" in text
 
 
-def test_release_checks_out_resolved_tag_in_build_and_pypi_jobs() -> None:
+def test_resolve_first_rejects_every_noncanonical_repository() -> None:
     text = _workflow_text()
-    assert text.count("ref: ${{ needs.resolve.outputs.tag }}") >= 2
-    assert 'git rev-parse HEAD' in text
-    assert 'git rev-list -n1 "${TAG}"' in text
+    resolve_steps = text.split("  resolve:", 1)[1].split("    steps:\n", 1)[1]
+    first_step = resolve_steps.split("\n      - name:", 1)[0]
+
+    assert '"${GITHUB_REPOSITORY,,}" != "hal0ai/hal0"' in first_step
+    assert "GITHUB_EVENT_NAME" not in first_step
+    assert "workflow_call" not in first_step
+    assert "refusing noncanonical repository" in first_step
+
+
+def test_resolve_uses_only_the_tag_namespace_and_exports_target_sha() -> None:
+    text = _workflow_text()
+    assert "target_sha: ${{ steps.policy.outputs.target_sha }}" in text
+    assert "ref: refs/tags/${{ steps.requested.outputs.tag }}" in text
+    assert 'git show-ref --verify --quiet "refs/tags/${TAG}"' in text
+    assert 'git rev-parse "refs/tags/${TAG}^{commit}"' in text
+    assert 'echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"' in text
+
+
+def test_release_checkouts_pin_canonical_repository_and_immutable_tag() -> None:
+    text = _workflow_text()
+    checkout_with_blocks = re.findall(
+        r"(?m)^        uses: actions/checkout@[^\n]+\n"
+        r"        with:\n((?:          [^\n]+\n)+)",
+        text,
+    )
+
+    assert text.count("uses: actions/checkout@") == 3
+    assert len(checkout_with_blocks) == 3
+    assert all(
+        block.count("repository: Hal0ai/hal0") == 1
+        for block in checkout_with_blocks
+    )
+    assert sum(block.count("repository: Hal0ai/hal0") for block in checkout_with_blocks) == 3
+    assert text.count("ref: refs/tags/${{ needs.resolve.outputs.tag }}") == 2
+    assert text.count("EXPECTED_SHA: ${{ needs.resolve.outputs.target_sha }}") == 2
+    assert text.count('if [[ "${HEAD_SHA}" != "${EXPECTED_SHA}" ]]') == 2
 
 
 def test_preview_release_is_not_latest_and_upload_is_immutable() -> None:

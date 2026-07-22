@@ -76,8 +76,16 @@ jobs:
       github_prerelease: ${{ steps.policy.outputs.github_prerelease }}
       github_latest: ${{ steps.policy.outputs.github_latest }}
       publish_pypi: ${{ steps.policy.outputs.publish_pypi }}
+      target_sha: ${{ steps.policy.outputs.target_sha }}
 
     steps:
+      - name: Reject noncanonical repository
+        run: |
+          if [[ "${GITHUB_REPOSITORY,,}" != "hal0ai/hal0" ]]; then
+            echo "::error::refusing noncanonical repository ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+
       - name: Resolve requested tag
         id: requested
         env:
@@ -101,7 +109,8 @@ jobs:
       - name: Checkout requested tag for policy resolution
         uses: actions/checkout@v6
         with:
-          ref: ${{ steps.requested.outputs.tag }}
+          repository: Hal0ai/hal0
+          ref: refs/tags/${{ steps.requested.outputs.tag }}
           fetch-depth: 0
 
       - name: Verify requested tag and export policy
@@ -110,12 +119,17 @@ jobs:
           TAG: ${{ steps.requested.outputs.tag }}
           INPUT_CHANNEL: ${{ inputs.channel }}
         run: |
-          HEAD_SHA="$(git rev-parse HEAD)"
-          TAG_SHA="$(git rev-list -n1 "${TAG}")"
-          if [[ "${HEAD_SHA}" != "${TAG_SHA}" ]]; then
-            echo "::error::checked-out ref ${HEAD_SHA} does not match ${TAG} (${TAG_SHA})"
+          if ! git show-ref --verify --quiet "refs/tags/${TAG}"; then
+            echo "::error::requested ref is not a tag: refs/tags/${TAG}"
             exit 1
           fi
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TARGET_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          if [[ "${HEAD_SHA}" != "${TARGET_SHA}" ]]; then
+            echo "::error::checked-out ref ${HEAD_SHA} does not match ${TAG} (${TARGET_SHA})"
+            exit 1
+          fi
+          echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
           PYTHONPATH=src python3 -m hal0.release.policy "${TAG}" --format github >> "$GITHUB_OUTPUT"
           KIND="$(sed -n 's/^kind=//p' "$GITHUB_OUTPUT" | tail -n1)"
           if [[ -n "${INPUT_CHANNEL}" && "${INPUT_CHANNEL}" != "${KIND}" ]]; then
@@ -133,17 +147,18 @@ jobs:
       - name: Checkout exact release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          repository: Hal0ai/hal0
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
           fetch-depth: 0
 
       - name: Verify exact release commit
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.target_sha }}
         run: |
           HEAD_SHA="$(git rev-parse HEAD)"
-          TAG_SHA="$(git rev-list -n1 "${TAG}")"
-          if [[ "${HEAD_SHA}" != "${TAG_SHA}" ]]; then
-            echo "::error::checked-out ref ${HEAD_SHA} does not match ${TAG} (${TAG_SHA})"
+          if [[ "${HEAD_SHA}" != "${EXPECTED_SHA}" ]]; then
+            echo "::error::checked-out tag ${TAG} resolved to ${HEAD_SHA}, expected ${EXPECTED_SHA}"
             exit 1
           fi
 
@@ -621,17 +636,18 @@ jobs:
       - name: Checkout exact release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          repository: Hal0ai/hal0
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
           fetch-depth: 0
 
       - name: Verify exact release commit
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.target_sha }}
         run: |
           HEAD_SHA="$(git rev-parse HEAD)"
-          TAG_SHA="$(git rev-list -n1 "${TAG}")"
-          if [[ "${HEAD_SHA}" != "${TAG_SHA}" ]]; then
-            echo "::error::checked-out ref ${HEAD_SHA} does not match ${TAG} (${TAG_SHA})"
+          if [[ "${HEAD_SHA}" != "${EXPECTED_SHA}" ]]; then
+            echo "::error::checked-out tag ${TAG} resolved to ${HEAD_SHA}, expected ${EXPECTED_SHA}"
             exit 1
           fi
 
