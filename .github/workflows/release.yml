@@ -792,13 +792,74 @@ jobs:
           RELEASE_JSON="${VERIFY_DIR}/release.json"
           LATEST_JSON="${VERIFY_DIR}/latest.json"
           ASSET_INDEX="${VERIFY_DIR}/assets.tsv"
+          ATTEMPT_DIR="${VERIFY_DIR}/attempts"
           DOWNLOAD_DIR="${VERIFY_DIR}/downloaded"
-          mkdir "${DOWNLOAD_DIR}"
+          mkdir "${ATTEMPT_DIR}" "${DOWNLOAD_DIR}"
+          GH_API_MAX_ATTEMPTS=5
+          GH_API_BACKOFF_SECONDS=2
+
+          github_api_read() {
+            local ENDPOINT="$1"
+            local DESTINATION="$2"
+            local LABEL="$3"
+            local ATTEMPT ATTEMPT_PATH
+            for ((ATTEMPT = 1; ATTEMPT <= GH_API_MAX_ATTEMPTS; ATTEMPT++)); do
+              ATTEMPT_PATH="${ATTEMPT_DIR}/${LABEL}.attempt-${ATTEMPT}"
+              rm -f -- "${ATTEMPT_PATH}"
+              if gh api "${ENDPOINT}" > "${ATTEMPT_PATH}"; then
+                mv -- "${ATTEMPT_PATH}" "${DESTINATION}"
+                return 0
+              fi
+              rm -f -- "${ATTEMPT_PATH}"
+              if ((ATTEMPT < GH_API_MAX_ATTEMPTS)); then
+                echo "::warning::GitHub API read failed for ${LABEL} (attempt ${ATTEMPT}/${GH_API_MAX_ATTEMPTS}); retrying"
+                sleep "$((GH_API_BACKOFF_SECONDS * ATTEMPT))"
+              fi
+            done
+            echo "::error::GitHub API read failed for ${LABEL} after ${GH_API_MAX_ATTEMPTS} attempts"
+            return 1
+          }
+
+          download_asset() {
+            local ASSET_NAME="$1"
+            local ASSET_ID="$2"
+            local DECLARED_SIZE="$3"
+            local DESTINATION="$4"
+            local ATTEMPT ATTEMPT_PATH OBSERVED_SIZE
+            for ((ATTEMPT = 1; ATTEMPT <= GH_API_MAX_ATTEMPTS; ATTEMPT++)); do
+              ATTEMPT_PATH="${ATTEMPT_DIR}/asset-${ASSET_ID}.attempt-${ATTEMPT}"
+              rm -f -- "${ATTEMPT_PATH}"
+              if gh api -H "Accept: application/octet-stream" \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${ASSET_ID}" \
+                > "${ATTEMPT_PATH}"; then
+                OBSERVED_SIZE="$(wc -c < "${ATTEMPT_PATH}")"
+                if [[ "${OBSERVED_SIZE}" == "${DECLARED_SIZE}" ]]; then
+                  mv -- "${ATTEMPT_PATH}" "${DESTINATION}"
+                  return 0
+                fi
+                echo "::warning::remote asset size mismatch for ${ASSET_NAME}: declared=${DECLARED_SIZE}, downloaded=${OBSERVED_SIZE} (attempt ${ATTEMPT}/${GH_API_MAX_ATTEMPTS})"
+              else
+                echo "::warning::GitHub API download failed for ${ASSET_NAME} (attempt ${ATTEMPT}/${GH_API_MAX_ATTEMPTS})"
+              fi
+              rm -f -- "${ATTEMPT_PATH}"
+              if ((ATTEMPT < GH_API_MAX_ATTEMPTS)); then
+                sleep "$((GH_API_BACKOFF_SECONDS * ATTEMPT))"
+              fi
+            done
+            echo "::error::failed to download exact declared bytes for ${ASSET_NAME} after ${GH_API_MAX_ATTEMPTS} attempts"
+            return 1
+          }
 
           # Query one exact release. The latest endpoint is consulted only to
           # observe GitHub's computed flag; it is never used to choose assets.
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > "${RELEASE_JSON}"
-          gh api "repos/${GITHUB_REPOSITORY}/releases/latest" > "${LATEST_JSON}"
+          # Each successful response is atomically promoted from an attempt file;
+          # exhausted API failures stop authorization rather than changing policy.
+          github_api_read \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+            "${RELEASE_JSON}" "release-metadata"
+          github_api_read \
+            "repos/${GITHUB_REPOSITORY}/releases/latest" \
+            "${LATEST_JSON}" "latest-release"
 
           python3 - "${RELEASE_JSON}" "${LATEST_JSON}" "${ASSET_INDEX}" <<'PY'
           import json
@@ -860,22 +921,21 @@ jobs:
               asset_id = asset.get("id")
               if not isinstance(asset_id, int) or asset_id <= 0:
                   raise SystemExit(f"invalid numeric asset ID: {name}")
-              rows.append((name, asset_id))
-          index_path.write_text("".join(f"{name}\t{asset_id}\n" for name, asset_id in rows))
+              rows.append((name, asset_id, asset["size"]))
+          index_path.write_text(
+              "".join(
+                  f"{name}\t{asset_id}\t{size}\n" for name, asset_id, size in rows
+              )
+          )
           PY
 
-          while IFS=$'\t' read -r ASSET_NAME ASSET_ID; do
+          while IFS=$'\t' read -r ASSET_NAME ASSET_ID DECLARED_SIZE; do
             DESTINATION="${DOWNLOAD_DIR}/${ASSET_NAME}"
             if [[ -e "${DESTINATION}" ]]; then
               echo "::error::refusing duplicate asset destination ${ASSET_NAME}"
               exit 1
             fi
-            gh api -H "Accept: application/octet-stream" \
-              "repos/${GITHUB_REPOSITORY}/releases/assets/${ASSET_ID}" > "${DESTINATION}"
-            if [[ ! -s "${DESTINATION}" ]]; then
-              echo "::error::downloaded empty asset ${ASSET_NAME}"
-              exit 1
-            fi
+            download_asset "${ASSET_NAME}" "${ASSET_ID}" "${DECLARED_SIZE}" "${DESTINATION}"
           done < "${ASSET_INDEX}"
 
           TARBALL="${DOWNLOAD_DIR}/hal0-${VERSION}.tar.gz"

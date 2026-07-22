@@ -43,6 +43,12 @@ def _step(job_id: str, name: str) -> dict[str, Any]:
     return next(step for step in _job(job_id)["steps"] if step.get("name") == name)
 
 
+def _shell_function(script: str, name: str) -> str:
+    match = re.search(rf"(?ms)^\s*{re.escape(name)}\(\) \{{\n(?P<body>.*?)^\s*\}}$", script)
+    assert match is not None, f"missing shell function: {name}"
+    return match.group("body")
+
+
 def test_executable_scalar_traversal_covers_every_yaml_run_form_and_uses() -> None:
     fixture = """
 name: traversal-regression
@@ -220,9 +226,83 @@ def test_release_exposes_digest_and_authorizer_redownloads_exact_remote_asset_se
     assert "gh release download" not in run
     assert "--pattern" not in run
     assert "--clobber" not in run
-    assert "releases/latest" not in re.sub(
-        r'gh api "repos/\$\{GITHUB_REPOSITORY\}/releases/latest"[^\n]*', "", run
+    assert run.count("repos/${GITHUB_REPOSITORY}/releases/latest") == 1
+
+
+def test_authorizer_retries_every_github_api_read_and_fails_closed() -> None:
+    run = _step("authorize-pointer", "Download and verify exact remote publication")["run"]
+    api_read = _shell_function(run, "github_api_read").replace("\\\n", " ")
+    asset_download = _shell_function(run, "download_asset").replace("\\\n", " ")
+    run_without_continuations = run.replace("\\\n", " ")
+
+    assert re.search(r"(?m)^GH_API_MAX_ATTEMPTS=5$", run)
+    assert re.search(r"(?m)^GH_API_BACKOFF_SECONDS=2$", run)
+    retry_loop = r"for \(\(ATTEMPT = 1; ATTEMPT <= GH_API_MAX_ATTEMPTS; ATTEMPT\+\+\)\); do"
+    for body in (api_read, asset_download):
+        assert re.search(retry_loop, body)
+        assert re.search(
+            r"if \(\(ATTEMPT < GH_API_MAX_ATTEMPTS\)\); then\s+"
+            r'(?:echo "::warning::[^\n]+"\s+)?'
+            r'sleep "\$\(\(GH_API_BACKOFF_SECONDS \* ATTEMPT\)\)"',
+            body,
+        )
+        assert re.search(r'done\s+echo "::error::[^\n]+"\s+return 1\s*$', body)
+
+    assert re.search(
+        r'if gh api "\$\{ENDPOINT\}" > "\$\{ATTEMPT_PATH\}"; then\s+'
+        r'mv -- "\$\{ATTEMPT_PATH\}" "\$\{DESTINATION\}"\s+'
+        r"return 0",
+        api_read,
     )
+    assert 'rm -f -- "${ATTEMPT_PATH}"' in api_read
+    assert re.search(
+        r"github_api_read\s+"
+        r'"repos/\$\{GITHUB_REPOSITORY\}/releases/tags/\$\{TAG\}"\s+'
+        r'"\$\{RELEASE_JSON\}"',
+        run_without_continuations,
+    )
+    assert re.search(
+        r"github_api_read\s+"
+        r'"repos/\$\{GITHUB_REPOSITORY\}/releases/latest"\s+'
+        r'"\$\{LATEST_JSON\}"',
+        run_without_continuations,
+    )
+    assert "|| true" not in "\n".join(
+        line for line in run.splitlines() if "github_api_read" in line
+    )
+    # The only gh invocations are inside the two retry functions, so no
+    # evidence endpoint or octet-stream download can bypass bounded retries.
+    assert run.count("gh api ") == 2
+
+
+def test_authorizer_retries_size_mismatches_and_atomically_accepts_assets() -> None:
+    run = _step("authorize-pointer", "Download and verify exact remote publication")["run"]
+    download = _shell_function(run, "download_asset").replace("\\\n", " ")
+
+    assert 'rows.append((name, asset_id, asset["size"]))' in run
+    assert 'f"{name}\\t{asset_id}\\t{size}\\n"' in run
+    assert "while IFS=$'\\t' read -r ASSET_NAME ASSET_ID DECLARED_SIZE; do" in run
+    assert re.search(
+        r'download_asset "\$\{ASSET_NAME\}" "\$\{ASSET_ID\}" '
+        r'"\$\{DECLARED_SIZE\}" "\$\{DESTINATION\}"',
+        run,
+    )
+    assert re.search(
+        r'if gh api -H "Accept: application/octet-stream"\s+'
+        r'"repos/\$\{GITHUB_REPOSITORY\}/releases/assets/\$\{ASSET_ID\}"\s+'
+        r'> "\$\{ATTEMPT_PATH\}"; then\s+'
+        r'OBSERVED_SIZE="\$\(wc -c < "\$\{ATTEMPT_PATH\}"\)"\s+'
+        r'if \[\[ "\$\{OBSERVED_SIZE\}" == "\$\{DECLARED_SIZE\}" \]\]; then\s+'
+        r'mv -- "\$\{ATTEMPT_PATH\}" "\$\{DESTINATION\}"\s+'
+        r"return 0",
+        download,
+    )
+    assert "remote asset size mismatch for ${ASSET_NAME}" in download
+    assert 'rm -f -- "${ATTEMPT_PATH}"' in download
+    assert 'ATTEMPT_PATH="${ATTEMPT_DIR}/asset-${ASSET_ID}.attempt-${ATTEMPT}"' in download
+    assert 'DESTINATION="${DOWNLOAD_DIR}/${ASSET_NAME}"' in run
+    assert 'mv -- "${ATTEMPT_PATH}" "${DESTINATION}"' in download
+    assert "gh release download" not in run
 
 
 def test_authorizer_verifies_flags_digests_policy_and_all_signatures() -> None:
