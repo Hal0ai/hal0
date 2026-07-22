@@ -16,17 +16,21 @@
 # Tool-calling note: on the FPX brain runtime a 1B can't emit tool calls the
 # native parser accepts (it leaks/500s), so the steward chat routes TOOL turns
 # to a capable model via `[brain_chat] tool_model` — the 1B here serves the
-# steward's plain chat. Confirmed clean native tool-callers on this runtime are
-# the chadrock family: `hal0/code` (27B coder, lighter) and `hal0/agent` (35B
-# anchor). Recommended `tool_model = "hal0/code"` (falls back to the always-on
-# `agent` slot when the code slot isn't loaded). See board_chat.
+# steward's plain chat. Default `tool_model = "hal0/agent"` per
+# spec-p3-brain.final.md §5a + ADR-0023 (hal0/agent is the always-on
+# anchor every fallback chain ends in). The chadrock family are confirmed
+# clean native tool-callers on this runtime: `hal0/code` (27B coder, lighter)
+# and `hal0/agent` (35B anchor). The brain's `tool_model` config field is the
+# override knob (default hal0/agent; can be flipped to hal0/code).
 name = "brain"
 type = "llm"
 device = "gpu-vulkan"
 runtime = "container"
-profile = "chat"
+profile = "brain"
 enabled = true
 port = 8089
+n_gpu_layers = -1
+threads = 0
 
 [model]
 default = "MiniCPM5-1B-Agentic-Tooluse"

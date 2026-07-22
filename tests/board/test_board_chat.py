@@ -1025,17 +1025,17 @@ def test_explicit_request_model_wins_over_config_override(tmp_path) -> None:
     assert stub.calls[0]["model"] == "hal0/utility"
 
 
-def test_tool_model_routes_tool_turns_to_capable_model(tmp_path) -> None:
-    # The steward always offers tools, so tool_model routes the whole loop to a
-    # capable, tool-format-compatible model (the "split": 1B chat, capable tools).
+def test_brain_model_keeps_tool_turns_internal_when_tool_model_configured(tmp_path) -> None:
+    # Brain routes board/memory tool turns internally now; a configured tool_model
+    # is still available for lower-level fallback, but it should not override the
+    # steward's own chat model.
     rec = _Recorder()
     stub = _StubLLM([_final_response("hi")])
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, model="hal0/brain", tool_model="hal0/agent")
 
     client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
-    # tool_model wins over model because tools are surfaced.
-    assert stub.calls[0]["model"] == "hal0/agent"
+    assert stub.calls[0]["model"] == "hal0/brain"
 
 
 def test_explicit_request_model_wins_over_tool_model(tmp_path) -> None:

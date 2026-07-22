@@ -47,13 +47,13 @@ async def test_create_adopts_compatible_preferred_profile(tmp_hal0_home: str) ->
     assert cfg["profile"] == "chat"
 
 
-async def test_create_ignores_incompatible_preferred_profile(tmp_hal0_home: str) -> None:
-    # cpu-chat is device_class=cpu — must NOT be forced onto a GPU slot.
+async def test_create_adopts_device_agnostic_preferred_profile(tmp_hal0_home: str) -> None:
+    # 1.0 seeds are device-agnostic logical recipes; the slot keeps its device.
     _register("cpu-pref", profile="cpu-chat")
     sm = SlotManager()
     await sm.create("g", _gpu_vulkan_cfg("g", "cpu-pref"))
     cfg = await sm.get_config("g")
-    assert not cfg.get("profile")
+    assert cfg.get("profile") == "cpu-chat"
 
 
 async def test_create_ignores_cross_backend_preferred_profile(tmp_hal0_home: str) -> None:
@@ -79,15 +79,15 @@ async def test_apply_preferred_profile_swaps_when_compatible(tmp_hal0_home: str)
     assert (await sm.get_config("g"))["profile"] == "dense"
 
 
-async def test_apply_preferred_profile_skips_incompatible(tmp_hal0_home: str) -> None:
+async def test_apply_preferred_profile_adopts_device_agnostic_seed(tmp_hal0_home: str) -> None:
     _register("cpu-chat-pref", profile="cpu-chat")
     sm = SlotManager()
     cfg = _gpu_vulkan_cfg("g", "cpu-chat-pref")
     cfg["profile"] = "chat"
     await sm.create("g", cfg)
     changed = await sm._apply_preferred_profile("g", "cpu-chat-pref")
-    assert changed is False
-    assert (await sm.get_config("g"))["profile"] == "chat"
+    assert changed is True
+    assert (await sm.get_config("g"))["profile"] == "cpu-chat"
 
 
 def test_profile_fits_slot_matrix(tmp_hal0_home: str) -> None:
@@ -95,6 +95,6 @@ def test_profile_fits_slot_matrix(tmp_hal0_home: str) -> None:
     gpu_vulkan = {"type": "llm", "device": "gpu-vulkan"}
     assert fits("chat", gpu_vulkan) is True
     assert fits("chat", {"type": "llm", "device": "gpu-rocm"}) is True
-    assert fits("cpu-chat", gpu_vulkan) is False  # wrong device class
+    assert fits("cpu-chat", gpu_vulkan) is True  # seed is device-agnostic
     assert fits("comfyui", gpu_vulkan) is False  # img profile, wrong type+class
     assert fits("does-not-exist", gpu_vulkan) is False

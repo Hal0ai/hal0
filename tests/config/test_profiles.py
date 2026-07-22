@@ -196,9 +196,14 @@ class TestLoadProfilesConfig:
         assert cfg.profile["chat"].mtp is False
 
     def test_seed_rocmfpx_grid_mtp_true(self, tmp_path: Path) -> None:
+        """Non-MTP profiles stay False; MTP-capable family profiles are True."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
+        _MTP_TRUE_PROFILES = {"chadrock-dense", "chadrock-moe"}
         for name in SEED_PROFILES:
-            assert cfg.profile[name].mtp is False
+            expected_mtp = name in _MTP_TRUE_PROFILES
+            assert cfg.profile[name].mtp is expected_mtp, (
+                f"profile {name}: expected mtp={expected_mtp}, got mtp={cfg.profile[name].mtp}"
+            )
 
     def test_seed_vulkan_uses_rocmfpx_default(self, tmp_path: Path) -> None:
         """Canonical GPU seeds do not pin a backend or runner image."""
@@ -377,16 +382,14 @@ def test_kokoro_seed_profile() -> None:
 # ── device_class + backend + DEVICE_DEFAULT_PROFILES ──────────────────────────
 
 
-def test_profile_device_class_defaults_gpu() -> None:
-    assert ProfileConfig().device_class == "gpu"
+def test_profile_device_class_defaults_none() -> None:
+    """Per spec §4.1: device_class defaults to None (device-agnostic)."""
+    assert ProfileConfig().device_class is None
 
 
 def test_seed_device_classes() -> None:
-    for name in ("chat", "chat-long-context", "moe", "dense"):
-        assert SEED_PROFILES[name]["device_class"] == "gpu"
-    assert SEED_PROFILES["flm"]["device_class"] == "npu"
-    assert SEED_PROFILES["kokoro"]["device_class"] == "cpu"
-    assert SEED_PROFILES["comfyui"]["device_class"] == "img"
+    """Every 1.0 seed is device-agnostic; the slot owns the device."""
+    assert all("device_class" not in profile for profile in SEED_PROFILES.values())
 
 
 def test_seed_backends() -> None:

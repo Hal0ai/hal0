@@ -19,6 +19,8 @@ runtime = "container"
 profile = "comfyui"
 enabled = false
 port = 8188
+n_gpu_layers = -1
+threads = 0
 
 [image]                       # persisted image-gen settings (#599)
 idle_restore_minutes = 60

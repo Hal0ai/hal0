@@ -239,9 +239,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			.catch(() => {});
 	}, []);
 	React.useEffect(() => {
-		if (slot?.device !== "npu") return;
+		if (device !== "npu") return;
 		refreshFlmModels();
-	}, [slot?.name]);
+	}, [slot?.name, device]);
 
 	// Apply an NPU modality/model change and cold-restart the container. Lifted
 	// to component scope (out of the render IIFE) so the pull-completion effect
@@ -480,10 +480,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					body: defaultsBody,
 				});
 			}
-			await editMut.mutateAsync({
-				name: slot.name,
-				body: slotBody,
-			});
+			if (Object.keys(slotBody).length > 0) {
+				await editMut.mutateAsync({
+					name: slot.name,
+					body: slotBody,
+				});
+			}
 		} catch (err) {
 			setSubmitErr(err?.message || "save failed");
 			return;
@@ -788,14 +790,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					/>
 				</div>
 
-				{/* ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────
-          The slot owns the physical/placement layer as 4 typed fields:
-          DEVICE · IMAGE · BINARY · THREADS · NGL. Every
-          HW change is a cold restart, applied on Save. */}
-				<FieldGroup
-					label="Slot"
-					hint="device · image · binary · threads · ngl"
-				>
+				{/* Slot identity — names are mutable labels; the stable slot id is not. */}
+				<FieldGroup label="Slot">
 					<div className="form-row">
 						<div className="form-lbl">
 							<span>Name</span>
@@ -830,12 +826,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							<select className="input mono" defaultValue={slot.type} disabled>
 								<option>{slot.type}</option>
 							</select>
-							<div className="hint">
-								Type is fixed once created. Make a new slot for a different
-								kind.
-							</div>
+							<FieldInfoIcon description="Type is fixed once created. Make a new slot for a different kind." />
 						</div>
 					</div>
+				</FieldGroup>
+
+				{/* Hardware ownership — changes apply on Save and require a restart. */}
+				<FieldGroup label="Hardware">
 					{(() => {
 						const devices = Array.isArray(metaEnums?.devices)
 							? metaEnums.devices
@@ -867,7 +864,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Device</span>
-										<FieldInfoIcon description="⟳ GPU class: rocm / vulkan / cpu / npu" />
+										<FieldInfoIcon description="Changing device changes the hardware class/backend and requires a restart." />
 									</div>
 									<div className="form-ctl">
 										<select
@@ -892,8 +889,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Container Image</span>
-										<FieldInfoIcon description="⟳ Override the container image for this slot" />
+										<span>Image pin</span>
+										<FieldInfoIcon description="Optional container image override for a debug build, A/B test, or rollback. Empty uses the release default." />
 									</div>
 									<div className="form-ctl">
 										<input
@@ -918,13 +915,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											<div className="hint" style={{ color: "var(--err)" }}>
 												{fieldErrs.imagePin}
 											</div>
-										) : (
-											<div className="hint">
-												Override the container image for a debug build, A/B
-												test, or rollback. Empty uses the profile's default
-												image.
-											</div>
-										)}
+										) : null}
 									</div>
 								</div>
 
@@ -1005,7 +996,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Ngl</span>
+										<span>NGL</span>
 										<FieldInfoIcon description="GPU layers to offload — emits -ngl to the runner.
 											-1 = all layers, 0 = CPU only." />
 									</div>
@@ -1035,11 +1026,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					})()}
 				</FieldGroup>
 
-				{slot.device !== "npu" && (
-					<FieldGroup
-						label="Model"
-						hint="model · ctx · template · parallel · extra_args"
-					>
+				{device !== "npu" && (
+					<FieldGroup label="Model">
 						{/* Task 1: live model swap — mirrors the card's ModelPicker but with the
           full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
           Swap is its own POST /slots/{name}/swap (not part of the batched
@@ -1065,9 +1053,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Model</span>
-										<FieldInfoIcon description="{isContainer
-												? &quot;Swap restarts the container to load the new model&quot;
-												: &quot;Applies immediately&quot;}" />
+										<FieldInfoIcon description={isContainer ? "Swap restarts the container to load the new model" : "Applies immediately"} />
 									</div>
 									<div className="form-ctl">
 										<select
@@ -1255,7 +1241,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							const t = slot.type || "llm";
 							if (
 								!["llm", "embedding", "reranking"].includes(t) ||
-								slot.device === "npu"
+								device === "npu"
 							)
 								return null;
 							const parNum = Number(String(parallel).trim());
@@ -1283,11 +1269,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												setFieldErrs((p) => ({ ...p, parallel: undefined }));
 											}}
 										/>
-										<div className="hint">
-											How many requests can share the loaded model at once.
-											Leave empty to use the profile default. Higher values =
-											more concurrent users but lower per-request speed.
-										</div>
 										{showPool && (
 											<div className="hint mono">
 												{parNum} slots share the{" "}
@@ -1343,7 +1324,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					</FieldGroup>
 				)}
 				{/* NPU capability matrix — replaces Model+Template for NPU slots */}
-				{slot.device === "npu" &&
+				{device === "npu" &&
 					(() => {
 						// Full catalogue per lane (installed + downloadable) — NOT filtered by
 						// `installed`, so any tag can be picked and pulled on demand. Lane
@@ -1468,7 +1449,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						);
 					})()}
 
-				<FieldGroup label="Inference" hint="behavior">
+				<FieldGroup label="Inference">
 					{/* C4 — Reasoning pill (llm slots only). Instant-apply via
           PUT /config { enable_thinking }; the server reads it live on the next
           request, no restart needed. Optimistic set-before-mutate +
@@ -2108,7 +2089,7 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 					>
 						<div className="nm">
 							{m.longName}
-							<FieldInfoIcon description="{m.repo}" />
+							<FieldInfoIcon description={m.repo} />
 						</div>
 						<div className="sz num">{m.size}</div>
 						<div className={"fit" + (fits ? "" : " no")}>

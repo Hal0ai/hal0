@@ -804,8 +804,8 @@ function ModelDrawer({ open, onClose, model }) {
 				{/* ── Identity ── */}
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>display name</span>
-						<span className="sub">empty keeps the model id</span>
+						<span>Display name</span>
+						<FieldInfoIcon description="empty keeps the model id" />
 					</div>
 					<div className="form-ctl">
 						<input
@@ -819,10 +819,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>types</span>
-						<span className="sub">
-							capability tags · drive routing &amp; slot features
-						</span>
+						<span>Types</span>
+						<FieldInfoIcon description="capability tags · drive routing &amp; slot features" />
 					</div>
 					<div
 						className="form-ctl"
@@ -850,10 +848,8 @@ function ModelDrawer({ open, onClose, model }) {
 				{/* ── Per-type default marker (Set / Remove) ── */}
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>default for {typeLabel}</span>
-						<span className="sub">
-							the model this type falls back to · one per type
-						</span>
+						<span>Default for {typeLabel}</span>
+						<FieldInfoIcon description="the model this type falls back to · one per type" />
 					</div>
 					<div
 						className="form-ctl"
@@ -1104,9 +1100,7 @@ function ModelDrawer({ open, onClose, model }) {
 				<div className="form-row">
 					<div className="form-lbl">
 						<span>Thinking</span>
-						<span className="sub">
-							Show reasoning steps before the answer. Auto defers to profile.
-						</span>
+						<FieldInfoIcon description="Show reasoning steps before the answer. Auto defers to profile." />
 					</div>
 					<div className="form-ctl">
 						<TypedCapSeg
@@ -1118,10 +1112,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>mtp</span>
-						<span className="sub">
-							Speculative decode. Auto defers to eligibility.
-						</span>
+						<span>MTP</span>
+						<FieldInfoIcon description="Speculative decode. Auto defers to eligibility." />
 					</div>
 					<div className="form-ctl">
 						<TypedCapSeg id="mtp" value={mtp} onChange={setMtp} />
@@ -1129,8 +1121,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>jinja</span>
-						<span className="sub">jinja chat-template rendering</span>
+						<span>Jinja</span>
+						<FieldInfoIcon description="jinja chat-template rendering" />
 					</div>
 					<div className="form-ctl">
 						<TypedCapSeg id="jinja" value={jinja} onChange={setJinja} />
@@ -1138,10 +1130,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>chat_template</span>
-						<span className="sub">
-							auto = use the template embedded in the GGUF
-						</span>
+						<span>Chat template</span>
+						<FieldInfoIcon description="auto = use the template embedded in the GGUF" />
 					</div>
 					<div className="form-ctl">
 						<select
@@ -1163,8 +1153,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>modality</span>
-						<span className="sub">derived from capabilities</span>
+						<span>Modality</span>
+						<FieldInfoIcon description="derived from capabilities" />
 					</div>
 					<div className="form-ctl">
 						<span
@@ -1188,10 +1178,8 @@ function ModelDrawer({ open, onClose, model }) {
 				{/* ── Numeric tune (typed source of the managed --ctx-size) ── */}
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>context_size</span>
-						<span className="sub">
-							tokens · empty = launcher default · sets managed --ctx-size
-						</span>
+						<span>Context size</span>
+						<FieldInfoIcon description="tokens · empty = launcher default · sets managed --ctx-size" />
 					</div>
 					<div className="form-ctl">
 						<input
@@ -1214,10 +1202,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>capabilities</span>
-						<span className="sub">
-							dispatch / omni eligibility · canonical vocab
-						</span>
+						<span>Capabilities</span>
+						<FieldInfoIcon description="dispatch / omni eligibility · canonical vocab" />
 					</div>
 					<div
 						className="form-ctl"
@@ -1243,10 +1229,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>backends</span>
-						<span className="sub">
-							runners this model can bind · drives compatible-runner filtering
-						</span>
+						<span>Backends</span>
+						<FieldInfoIcon description="runners this model can bind · drives compatible-runner filtering" />
 					</div>
 					<div
 						className="form-ctl"
@@ -1282,8 +1266,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>mmproj</span>
-						<span className="sub">vision projector sidecar path</span>
+						<span>MMProj</span>
+						<FieldInfoIcon description="vision projector sidecar path" />
 					</div>
 					<div className="form-ctl">
 						<input
@@ -1302,8 +1286,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>hf_repo</span>
-						<span className="sub">HuggingFace repo · needed to re-pull</span>
+						<span>HF repo</span>
+						<FieldInfoIcon description="HuggingFace repo · needed to re-pull" />
 					</div>
 					<div className="form-ctl">
 						<input
@@ -1317,8 +1301,8 @@ function ModelDrawer({ open, onClose, model }) {
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>hf_filename</span>
-						<span className="sub">variant filename within the repo</span>
+						<span>HF filename</span>
+						<FieldInfoIcon description="variant filename within the repo" />
 					</div>
 					<div className="form-ctl">
 						<input

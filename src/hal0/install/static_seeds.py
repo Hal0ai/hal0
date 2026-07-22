@@ -30,7 +30,7 @@ log = structlog.get_logger(__name__)
 
 #: Slot names with a static seed TOML in installer/etc-hal0/slots/.
 #: MUST mirror install.sh's:
-#:   for seed_slot in flm tts rerank utility img agent brain; do
+#:   for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
 STATIC_SEED_SLOTS: tuple[str, ...] = (
     "flm",
     "tts",
@@ -39,6 +39,9 @@ STATIC_SEED_SLOTS: tuple[str, ...] = (
     "img",
     "agent",
     "brain",
+    "qwen3tts",
+    "coder",
+    "embed",
 )
 
 

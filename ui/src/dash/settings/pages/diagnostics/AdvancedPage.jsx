@@ -90,7 +90,7 @@ export function AdvancedPage() {
             <Fragment key={g.title}>
               <div className="s-panel" style={{marginBottom: 12}}>
                 <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-                  <div className="k"><span>{g.title}</span><FieldInfoIcon description="{g.sub}" /></div>
+                  <div className="k"><span>{g.title}</span><FieldInfoIcon description={g.sub} /></div>
                 </div>
                 {g.keys.map(k => (
                   <AdvRow

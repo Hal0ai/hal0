@@ -1,21 +1,24 @@
 # Rerank slot — llama-server --reranking in a podman container (hal0-slot@rerank).
 #
-# Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a model-less
-# box boots a grey tile (no surprise download, no crash-loop). The operator picks
-# a reranker later; that flips the slot enabled. device/profile are the widest-
-# compatible GPU-Vulkan tile defaults — the guided / answer-file setup path
-# derives them from the up-front preflight (hardware.json, #1097).
+# Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a
+# model-less box boots a GREY tile (no surprise download, no crash-loop).
+# The operator picks a reranker later; that flips the slot enabled.
+# device/profile are the widest-compatible GPU-Vulkan tile defaults — the
+# guided / answer-file setup path derives them from the up-front preflight
+# (hardware.json, #1097).
+#
+# Per spec §5.4: port drift fix. Was 8083 (which conflicted with
+# _SETUP_SLOTS["embed"] = 8083); now 8086 per _SETUP_SLOTS["rerank"].
+# Existing installs keep their old port (seeds never overwrite).
 name = "rerank"
 type = "reranking"
 device = "gpu-vulkan"
 runtime = "container"
 profile = "reranking"
 enabled = false
-port = 8083
+port = 8086
+n_gpu_layers = -1
+threads = 0
 
 [model]
 context_size = 4096
-
-[server]
-# llama-server reranking mode (serves /rerank + /v1/rerank natively).
-extra_args = "--reranking"

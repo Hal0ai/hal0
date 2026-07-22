@@ -3,7 +3,7 @@
  *
  * Covers the six lifecycle paths the slot panel must drive end-to-end:
  *   1. Create  — `New slot` modal POSTs /api/slots.
- *   2. Edit    — drawer PUTs /config + PATCHes /defaults (ctx_size).
+ *   2. Edit    — drawer PATCHes /defaults for a ctx-only change.
  *   3. Delete  — Edit drawer danger button → confirm → DELETE /api/slots/{name}.
  *   4. Swap    — inline popover POSTs /api/slots/{name}/swap.
  *   5. Restart — card button POSTs /api/slots/{name}/restart.
@@ -72,7 +72,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     expect(seen[0].profile).toBeUndefined()
   })
 
-  test('Edit slot — drawer PATCHes /defaults with ctx_size + PUTs /config', async ({ page }) => {
+  test('Edit slot — ctx-only change PATCHes /defaults without PUT /config', async ({ page }) => {
     const patchBodies: any[] = []
     const putBodies: any[] = []
     await page.route('**/api/slots/primary/defaults', async (route) => {
@@ -94,15 +94,20 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     )
 
     await page.goto('/#slots/primary')
-    // ctx_size lives in the now-collapsed Advanced section — expand it first.
-    await page.locator('.drawer details.adv-disclosure summary').click()
-    const ctxInput = page.locator('.drawer .form-row', { hasText: 'ctx_size' }).locator('input')
+    const modelGroup = page.locator('.drawer .field-group').filter({
+      has: page.locator('.field-group-label', { hasText: /^Model$/ }),
+    })
+    const contextRow = modelGroup.locator('.form-row').filter({
+      has: page.locator('.form-lbl > span', { hasText: /^Context$/ }),
+    })
+    const ctxInput = contextRow.locator('input')
     await expect(ctxInput).toBeVisible()
     await ctxInput.fill('16384')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => patchBodies.length).toBeGreaterThan(0)
     expect(patchBodies[0].ctx_size).toBe(16384)
-    await expect.poll(() => putBodies.length).toBeGreaterThan(0)
+    await expect(page.locator('.drawer')).toHaveCount(0)
+    expect(putBodies).toEqual([])
   })
 
   test('Delete slot — drawer danger button → confirm → DELETE /api/slots/{name}', async ({ page }) => {

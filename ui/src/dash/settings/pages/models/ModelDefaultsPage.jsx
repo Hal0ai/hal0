@@ -89,9 +89,9 @@ function ModelDefaultsRow({ model, templates }) {
       <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
         <div className="k">
           <span className="mono">{model.longName || model.id}</span>
-          <FieldInfoIcon description="{model.architecture ? `arch: ${model.architecture}` : model.type || 'model'}
-            {model.quant ? ` · ${model.quant}` : ''}
-            {model.preferred_runner ? ` · runner: ${model.preferred_runner}` : ''}" />
+          <FieldInfoIcon
+            description={`${model.architecture ? `arch: ${model.architecture}` : model.type || 'model'}${model.quant ? ` · ${model.quant}` : ''}${model.preferred_runner ? ` · runner: ${model.preferred_runner}` : ''}`}
+          />
         </div>
         <div className="ac" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           <ApplyBadge settingsKey="model.defaults.context_size" />
