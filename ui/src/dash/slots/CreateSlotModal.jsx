@@ -121,7 +121,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>model <span className="req">*</span></span>
-          <span className="sub">carries the tune, device &amp; runner</span>
+          <FieldInfoIcon description="carries the tune, device &amp; runner" />
         </div>
         <div className="form-ctl">
           <select className="input mono" data-testid="create-slot-model" value={modelId} onChange={(e) => setModelId(e.target.value)}>
@@ -139,7 +139,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>name <span className="req">*</span></span>
-          <span className="sub">a display label — you can change it later</span>
+          <FieldInfoIcon description="a display label — you can change it later" />
         </div>
         <div className="form-ctl">
           <input className="input mono" data-testid="create-slot-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="coder" autoFocus />
@@ -177,7 +177,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       <div className="form-row" style={{ marginTop: 8 }}>
         <div className="form-lbl">
           <span>default for {selModel?.type || "type"}?</span>
-          <span className="sub">makes this model the {selModel?.type || "type"} default; demotes the current one</span>
+          <FieldInfoIcon description="makes this model the {selModel?.type || &quot;type&quot;} default; demotes the current one" />
         </div>
         <div className="form-ctl">
           <label className="checkbox-row">

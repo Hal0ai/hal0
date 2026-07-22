@@ -658,6 +658,69 @@ function FieldGroup({ label, hint, children }) {
 // ─── PillToggle — two-state sliding pill ─────────────────────────────────
 // Generalized from slots.jsx NpuSwitch.
 // Fixed label; the on/off STATE is shown by the pill, never by a changing label.
+// ─── FieldInfoIcon — inline info popover for drawer field descriptions ─────
+function FieldInfoIcon({ description }) {
+  const [open, setOpen] = useStateP(false);
+  const btnRef = useRefP(null);
+  const popRef = useRefP(null);
+
+  useEffectP(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    const onClick = (e) => {
+      if (popRef.current && !popRef.current.contains(e.target) &&
+          btnRef.current && !btnRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onClick);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onClick);
+    };
+  }, [open]);
+
+  return (
+    <span style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+      <button
+        ref={btnRef}
+        type="button"
+        className="field-info-btn"
+        aria-label="Info"
+        onClick={() => setOpen(!open)}
+        style={{
+          width: 15, height: 15, borderRadius: "50%",
+          border: `1px solid var(--line-soft)`, background: "transparent",
+          color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 10,
+          fontWeight: 600, cursor: "pointer", display: "inline-flex",
+          alignItems: "center", justifyContent: "center",
+          padding: 0, lineHeight: 1, marginLeft: 4, flexShrink: 0,
+        }}
+      >
+        i
+      </button>
+      {open && (
+        <div
+          ref={popRef}
+          className="field-info-pop"
+          style={{
+            position: "absolute", left: 22, top: -4, zIndex: 60,
+            background: "var(--bg-2)", border: "1px solid var(--line-soft)",
+            borderRadius: "var(--rad-md)", padding: "6px 10px",
+            fontSize: 11, color: "var(--fg-2)", lineHeight: 1.5,
+            maxWidth: 280, whiteSpace: "normal",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+          }}
+        >
+          {description}
+        </div>
+      )}
+    </span>
+  );
+}
+
+
 export function PillToggle({ on, disabled, label, stateText, onToggle }) {
   return (
     <div className="pill-toggle-row">
@@ -1035,4 +1098,4 @@ function ImportDialog({
   );
 }
 
-Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, PillToggle, MtpControl, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });
+Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, FieldInfoIcon, PillToggle, MtpControl, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });

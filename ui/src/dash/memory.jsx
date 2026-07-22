@@ -866,7 +866,7 @@ function MemNewBankForm({ onClose }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>Reflect mission</span>
-          <span className="sub">optional — identity/context used by reflect</span>
+          <FieldInfoIcon description="optional — identity/context used by reflect" />
         </div>
         <div className="form-ctl">
           <input

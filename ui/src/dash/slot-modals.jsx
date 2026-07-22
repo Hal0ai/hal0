@@ -799,10 +799,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					<div className="form-row">
 						<div className="form-lbl">
 							<span>Name</span>
-							<span className="sub">
-								A display label. Rename any time — the stable slot number never
-								changes.
-							</span>
+							<FieldInfoIcon description="A display label. Rename any time — the stable slot number never
+								changes." />
 						</div>
 						<div
 							className="form-ctl"
@@ -869,9 +867,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Device</span>
-										<span className="sub">
-											⟳ GPU class: rocm / vulkan / cpu / npu
-										</span>
+										<FieldInfoIcon description="⟳ GPU class: rocm / vulkan / cpu / npu" />
 									</div>
 									<div className="form-ctl">
 										<select
@@ -897,9 +893,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Container Image</span>
-										<span className="sub">
-											⟳ Override the container image for this slot
-										</span>
+										<FieldInfoIcon description="⟳ Override the container image for this slot" />
 									</div>
 									<div className="form-ctl">
 										<input
@@ -937,11 +931,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Binary</span>
-										<span className="sub">
-											⟳ Which runner build to use. Empty = auto-detect from
+										<FieldInfoIcon description="⟳ Which runner build to use. Empty = auto-detect from
 											device. (The bound runner shows on the slot card chip —
-											change it by picking a different model.)
-										</span>
+											change it by picking a different model.)" />
 									</div>
 									<div className="form-ctl">
 										<select
@@ -986,10 +978,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Threads</span>
-										<span className="sub">
-											CPU thread count for the runner. 0 = let the runtime
-											decide.
-										</span>
+										<FieldInfoIcon description="CPU thread count for the runner. 0 = let the runtime
+											decide." />
 									</div>
 									<div className="form-ctl">
 										<input
@@ -1016,10 +1006,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Ngl</span>
-										<span className="sub">
-											GPU layers to offload — emits -ngl to the runner.
-											-1 = all layers, 0 = CPU only.
-										</span>
+										<FieldInfoIcon description="GPU layers to offload — emits -ngl to the runner.
+											-1 = all layers, 0 = CPU only." />
 									</div>
 									<div className="form-ctl">
 										<input
@@ -1077,11 +1065,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Model</span>
-										<span className="sub">
-											{isContainer
-												? "Swap restarts the container to load the new model"
-												: "Applies immediately"}
-										</span>
+										<FieldInfoIcon description="{isContainer
+												? &quot;Swap restarts the container to load the new model&quot;
+												: &quot;Applies immediately&quot;}" />
 									</div>
 									<div className="form-ctl">
 										<select
@@ -1128,10 +1114,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Context</span>
-								<span className="sub">
-									⟳ ctx_size — context window in tokens. PATCHes /defaults;
-									takes effect on next request. (~model-load seconds)
-								</span>
+								<FieldInfoIcon description="⟳ ctx_size — context window in tokens. PATCHes /defaults;
+									takes effect on next request. (~model-load seconds)" />
 							</div>
 							<div className="form-ctl">
 								<input
@@ -1169,10 +1153,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Template</span>
-										<span className="sub">
-											⟳ Pick a chat format for this model. Auto uses the
-											built-in template.
-										</span>
+										<FieldInfoIcon description="⟳ Pick a chat format for this model. Auto uses the
+											built-in template." />
 									</div>
 									<div className="form-ctl">
 										{!overrideOpen ? (
@@ -1283,10 +1265,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Parallel</span>
-										<span className="sub">
-											⟳ How many requests can run at once. Empty = use the
-											profile default.
-										</span>
+										<FieldInfoIcon description="⟳ How many requests can run at once. Empty = use the
+											profile default." />
 									</div>
 									<div className="form-ctl">
 										<input
@@ -1334,10 +1314,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Extra Args</span>
-								<span className="sub">
-									extra_args — per-slot override flags appended to the runner
-									argv. Takes precedence over the profile defaults.
-								</span>
+								<FieldInfoIcon description="extra_args — per-slot override flags appended to the runner
+									argv. Takes precedence over the profile defaults." />
 							</div>
 							<div className="form-ctl">
 								<input
@@ -1387,10 +1365,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>NPU · Chat</span>
-										<span className="sub">
-											NPU language model. Pick any model — downloads
-											automatically.
-										</span>
+										<FieldInfoIcon description="NPU language model. Pick any model — downloads
+											automatically." />
 									</div>
 									<div className="form-ctl">
 										<span
@@ -1434,10 +1410,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>NPU · ASR</span>
-										<span className="sub">
-											Speech-to-text on the NPU (whisper). Shares the NPU
-											process.
-										</span>
+										<FieldInfoIcon description="Speech-to-text on the NPU (whisper). Shares the NPU
+											process." />
 									</div>
 									<div className="form-ctl">
 										<span
@@ -1462,10 +1436,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>NPU · Embed</span>
-										<span className="sub">
-											Text embeddings on the NPU (embed-gemma). Shares the NPU
-											process.
-										</span>
+										<FieldInfoIcon description="Text embeddings on the NPU (embed-gemma). Shares the NPU
+											process." />
 									</div>
 									<div className="form-ctl">
 										<span
@@ -1506,10 +1478,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Reasoning</span>
-								<span className="sub">
-									Stream reasoning before the answer. Off = faster, direct
-									replies. Applies to the next message.
-								</span>
+								<FieldInfoIcon description="Stream reasoning before the answer. Off = faster, direct
+									replies. Applies to the next message." />
 							</div>
 							<div className="form-ctl">
 								<PillToggle
@@ -1587,10 +1557,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>MTP</span>
-										<span className="sub">
-											Multi-token speculative decoding. Auto follows the model
-											+ profile; On/Off force it. Restarts the container.
-										</span>
+										<FieldInfoIcon description="Multi-token speculative decoding. Auto follows the model
+											+ profile; On/Off force it. Restarts the container." />
 									</div>
 									<div className="form-ctl">
 										<MtpControl
@@ -1657,10 +1625,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							<div className="form-row">
 								<div className="form-lbl">
 									<span>Vision</span>
-									<span className="sub">
-										Let the slot accept images. Off saves ~0.9 GB of VRAM (text
-										only).
-									</span>
+									<FieldInfoIcon description="Let the slot accept images. Off saves ~0.9 GB of VRAM (text
+										only)." />
 								</div>
 								<div className="form-ctl">
 									<PillToggle
@@ -2142,7 +2108,7 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 					>
 						<div className="nm">
 							{m.longName}
-							<span className="sub">{m.repo}</span>
+							<FieldInfoIcon description="{m.repo}" />
 						</div>
 						<div className="sz num">{m.size}</div>
 						<div className={"fit" + (fits ? "" : " no")}>

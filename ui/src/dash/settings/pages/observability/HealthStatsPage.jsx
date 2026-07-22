@@ -51,7 +51,7 @@ function HealthOverviewPanel() {
   return (
     <div className="s-panel">
       <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-        <div className="k"><span>Health checks</span><span className="sub">/api/health/system · per-dependency status</span></div>
+        <div className="k"><span>Health checks</span><FieldInfoIcon description="/api/health/system · per-dependency status" /></div>
       </div>
       <SRow
         k="Overall status"
@@ -69,7 +69,7 @@ function HardwarePanel() {
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>
       <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-        <div className="k"><span>Live hardware</span><span className="sub">/api/stats/hardware · polled every 2.5s</span></div>
+        <div className="k"><span>Live hardware</span><FieldInfoIcon description="/api/stats/hardware · polled every 2.5s" /></div>
       </div>
       {stats.isPending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>Reading live counters…</div>}
       {stats.isError && <div className="err">{stats.error?.message || 'Failed to read /api/stats/hardware'}</div>}
@@ -93,7 +93,7 @@ function PowerPanel() {
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>
       <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-        <div className="k"><span>Power &amp; thermal</span><span className="sub">/api/stats/power · sysfs hwmon, sensor-dependent</span></div>
+        <div className="k"><span>Power &amp; thermal</span><FieldInfoIcon description="/api/stats/power · sysfs hwmon, sensor-dependent" /></div>
       </div>
       {power.isPending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>source pending — no hwmon sensor exposed on this host</div>}
       {!power.isPending && P && (
@@ -115,7 +115,7 @@ function RequestsPanel() {
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>
       <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-        <div className="k"><span>Requests</span><span className="sub">/api/stats/requests · dispatcher /v1 rollup, last 60s</span></div>
+        <div className="k"><span>Requests</span><FieldInfoIcon description="/api/stats/requests · dispatcher /v1 rollup, last 60s" /></div>
       </div>
       {pending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>source pending</div>}
       {!pending && data && (
@@ -142,7 +142,7 @@ function ServicesPanel() {
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>
       <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-        <div className="k"><span>Services</span><span className="sub">/api/services/health · per-service up/down</span></div>
+        <div className="k"><span>Services</span><FieldInfoIcon description="/api/services/health · per-service up/down" /></div>
       </div>
       {pending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>source pending</div>}
       {!pending && services.length === 0 && (

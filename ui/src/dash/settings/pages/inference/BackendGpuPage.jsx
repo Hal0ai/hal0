@@ -61,7 +61,7 @@ export function BackendGpuPage() {
       {/* ── Detected hardware (read-only, /api/hardware) ─────────────────── */}
       <div className="s-panel">
         <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-          <div className="k"><span>Detected hardware</span><span className="sub">host accelerators · /api/hardware</span></div>
+          <div className="k"><span>Detected hardware</span><FieldInfoIcon description="host accelerators · /api/hardware" /></div>
         </div>
         {hw.isPending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>Probing hardware…</div>}
         {hw.isError && <div className="err">{hw.error?.message || 'Failed to read hardware'}</div>}
@@ -89,7 +89,7 @@ export function BackendGpuPage() {
       {/* ── Available backends / runners (read-only, /api/backends) ──────── */}
       <div className="s-panel" style={{ marginTop: 12 }}>
         <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-          <div className="k"><span>Available backends</span><span className="sub">installed inference backends · /api/backends</span></div>
+          <div className="k"><span>Available backends</span><FieldInfoIcon description="installed inference backends · /api/backends" /></div>
         </div>
         {backendsQuery.isPending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>Loading backends…</div>}
         {backendsQuery.isError && <div className="err">{backendsQuery.error?.message || 'Failed to load backends'}</div>}
@@ -111,7 +111,7 @@ export function BackendGpuPage() {
       {/* ── Runner registry reference (ML-4 taxonomy, read-only meta) ────── */}
       <div className="s-panel" style={{ marginTop: 12 }}>
         <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-          <div className="k"><span>Runner registry</span><span className="sub">shipped taxonomy (ML-4) · resolution reference</span></div>
+          <div className="k"><span>Runner registry</span><FieldInfoIcon description="shipped taxonomy (ML-4) · resolution reference" /></div>
         </div>
         <SRow k="Runtime families" sub="Runner families the registry can launch (RUNNER_IMAGES.runtime_family)" mono v={<span style={{ color: 'var(--fg-3)' }}>{(enums.runtime_families || []).join(' · ') || '—'}</span>} />
         <SRow k="Selectable backends" sub="Backends a GPU slot may pick (device → runner)" mono v={<span style={{ color: 'var(--fg-3)' }}>{(enums.selectable_backends || []).join(' · ') || '—'}</span>} />
@@ -126,7 +126,7 @@ export function BackendGpuPage() {
       {/* ── Gated controls (feature-flagged, not yet built) ──────────────── */}
       <div className="s-panel" style={{ marginTop: 12, opacity: 0.6 }}>
         <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-          <div className="k"><span>Backend controls</span><span className="sub">coming with the model-config lane (spec §7.1b / §21.2)</span></div>
+          <div className="k"><span>Backend controls</span><FieldInfoIcon description="coming with the model-config lane (spec §7.1b / §21.2)" /></div>
         </div>
         <SRow k="ROCm channel / image pin" sub="Pin a runner image + digest per backend" v={<span className="chip" style={{ fontSize: 10, color: 'var(--fg-4)', borderColor: 'var(--fg-4)' }}>⛔ gated</span>} />
         <SRow k="gfx guard (HSA_OVERRIDE)" sub="Required HIP arch check before slot launch" v={<span className="chip" style={{ fontSize: 10, color: 'var(--fg-4)', borderColor: 'var(--fg-4)' }}>⛔ gated</span>} />

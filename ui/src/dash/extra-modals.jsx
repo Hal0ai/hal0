@@ -115,7 +115,7 @@ export function AddSecretModal({ open, onClose, initialName }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>Key <span className="req">*</span></span>
-          <span className="sub">picker auto-snaps if the value matches a known prefix</span>
+          <FieldInfoIcon description="picker auto-snaps if the value matches a known prefix" />
         </div>
         <div className="form-ctl">
           <select className="input mono" value={picked} onChange={e => setPicked(e.target.value)}>
@@ -131,7 +131,7 @@ export function AddSecretModal({ open, onClose, initialName }) {
         <div className="form-row">
           <div className="form-lbl">
             <span>Custom key name <span className="req">*</span></span>
-            <span className="sub">SCREAMING_SNAKE_CASE · exported to slot containers as env var</span>
+            <FieldInfoIcon description="SCREAMING_SNAKE_CASE · exported to slot containers as env var" />
           </div>
           <div className="form-ctl">
             <input
@@ -147,7 +147,7 @@ export function AddSecretModal({ open, onClose, initialName }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>Value <span className="req">*</span></span>
-          <span className="sub">never shown again after save · paste from clipboard</span>
+          <FieldInfoIcon description="never shown again after save · paste from clipboard" />
         </div>
         <div className="form-ctl">
           <div style={{position: "relative"}}>

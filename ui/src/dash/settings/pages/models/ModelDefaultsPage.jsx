@@ -89,11 +89,9 @@ function ModelDefaultsRow({ model, templates }) {
       <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
         <div className="k">
           <span className="mono">{model.longName || model.id}</span>
-          <span className="sub">
-            {model.architecture ? `arch: ${model.architecture}` : model.type || 'model'}
+          <FieldInfoIcon description="{model.architecture ? `arch: ${model.architecture}` : model.type || 'model'}
             {model.quant ? ` · ${model.quant}` : ''}
-            {model.preferred_runner ? ` · runner: ${model.preferred_runner}` : ''}
-          </span>
+            {model.preferred_runner ? ` · runner: ${model.preferred_runner}` : ''}" />
         </div>
         <div className="ac" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           <ApplyBadge settingsKey="model.defaults.context_size" />
@@ -149,7 +147,7 @@ export function ModelDefaultsPage() {
       {/* ── Resolution reference (read-only meta) ────────────────────────── */}
       <div className="s-panel">
         <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-          <div className="k"><span>Defaults resolution</span><span className="sub">how launch flags are chosen · REWORK §D</span></div>
+          <div className="k"><span>Defaults resolution</span><FieldInfoIcon description="how launch flags are chosen · REWORK §D" /></div>
         </div>
         <SRow
           k="Precedence"

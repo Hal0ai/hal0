@@ -179,7 +179,7 @@ function PersonaEditModal({ open, onClose, persona }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>Name</span>
-          <span className="sub">unique within personas</span>
+          <FieldInfoIcon description="unique within personas" />
         </div>
         <div className="form-ctl">
           <input className="input mono" value={name} onChange={e => setName(e.target.value)} placeholder="hermes-coder" />
@@ -189,7 +189,7 @@ function PersonaEditModal({ open, onClose, persona }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>Routes to slot</span>
-          <span className="sub">only llm-type slots are eligible</span>
+          <FieldInfoIcon description="only llm-type slots are eligible" />
         </div>
         <div className="form-ctl">
           <select className="input mono" value={slot} onChange={e => setSlot(e.target.value)}>
@@ -203,7 +203,7 @@ function PersonaEditModal({ open, onClose, persona }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>Tone</span>
-          <span className="sub">descriptive label · doesn't affect routing</span>
+          <FieldInfoIcon description="descriptive label · doesn't affect routing" />
         </div>
         <div className="form-ctl">
           <select className="input mono" value={tone} onChange={e => setTone(e.target.value)} disabled={enums.isLoading}>
@@ -222,7 +222,7 @@ function PersonaEditModal({ open, onClose, persona }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>System prompt</span>
-          <span className="sub">prepended on every request to this persona</span>
+          <FieldInfoIcon description="prepended on every request to this persona" />
         </div>
         <div className="form-ctl">
           <textarea
@@ -240,7 +240,7 @@ function PersonaEditModal({ open, onClose, persona }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>Allowed tools</span>
-          <span className="sub">subset of OmniRouter tools this persona can call</span>
+          <FieldInfoIcon description="subset of OmniRouter tools this persona can call" />
         </div>
         <div className="form-ctl" style={{display: "flex", flexWrap: "wrap", gap: 8}}>
           {enums.isLoading && (

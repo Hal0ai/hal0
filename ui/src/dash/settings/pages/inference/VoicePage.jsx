@@ -135,7 +135,7 @@ export function VoicePage() {
       {/* ── STT ── */}
       <div className="s-panel" style={{marginBottom: 12}}>
         <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-          <div className="k"><span>STT</span><span className="sub">speech-to-text · voice.stt slot</span></div>
+          <div className="k"><span>STT</span><FieldInfoIcon description="speech-to-text · voice.stt slot" /></div>
           <div className="v">{statusChip(sttStatus)}</div>
         </div>
         <SRow k="Enabled" v={
@@ -167,7 +167,7 @@ export function VoicePage() {
       {/* ── TTS ── */}
       <div className="s-panel">
         <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-          <div className="k"><span>TTS</span><span className="sub">text-to-speech · voice.tts slot</span></div>
+          <div className="k"><span>TTS</span><FieldInfoIcon description="text-to-speech · voice.tts slot" /></div>
           <div className="v">{statusChip(ttsStatus)}</div>
         </div>
         <SRow k="Enabled" v={
