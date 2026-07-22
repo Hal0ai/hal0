@@ -3,7 +3,21 @@
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 
 Rules:
+
 - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+## hindsight
+
+This project has long-term memory via Hindsight at <http://10.0.1.142:9177>. Memories persist across sessions and agents.
+
+Rules:
+
+- **Before answering "what did we do", "what's configured", "do you remember" — call `hindsight_recall` first.** Don't guess; check.
+- **When the user states a durable preference, decision, or fact — call `hindsight_retain`.** Be specific: include who, what, when, why. Format: "User prefers X because Y" / "Decided to use Z for W (2026-07-22)".
+- **Use `hindsight_reflect` for synthesis.** Unlike recall (raw results), reflect generates a coherent answer from memory. Use it to answer "what do you know about X".
+- **Auto-recall runs on session_start; auto-retain runs every 3 turns.** These handle transient session context. Explicit retain/recall calls are for durable long-term facts.
+- **Dynamic bank support is available** — set `dynamicBankId: true` in `~/.pi/agent/settings.json` under the `hindsight` block to auto-isolate memory per project (e.g., `pi-coder::hal0` vs `pi-coder::myapp`).
+- **Check status** with `hindsight_status` before assuming memories are gone — it shows reachability, resolved bank, and bank count.

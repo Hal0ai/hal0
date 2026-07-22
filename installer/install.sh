@@ -2225,22 +2225,17 @@ else
         # "split-brain" root-owned tree `hal0 doctor perms` flags as Hermes
         # ownership drift (check_hermes_ownership's stray_home check; see
         # installer/lib/run-as-hal0.sh's docstring, which names this same
-        # failure mode #843). Drop to hal0 first (same runuser -> setpriv ->
-        # sudo cascade run-as-hal0.sh uses) so this subprocess never runs as
-        # root and never creates /root/.hermes.
-        if command -v runuser >/dev/null 2>&1; then
-            runuser -u hal0 -- env -u HERMES_HOME HOME=/var/lib/hal0 \
-                /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
-                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
-        elif command -v setpriv >/dev/null 2>&1; then
-            setpriv --reuid hal0 --regid hal0 --init-groups -- env -u HERMES_HOME HOME=/var/lib/hal0 \
-                /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
-                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
-        else
-            sudo -H -u hal0 -- env -u HERMES_HOME \
-                /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
-                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
-        fi
+        # `hermes gateway install --system` checks os.geteuid() == 0
+        # internally and refuses when invoked by a non-root user. The
+        # `--run-as-user hal0` flag tells the hermes CLI which runtime
+        # user to write into the systemd unit — we do NOT drop to that
+        # user here. Run the install command AS ROOT directly (the
+        # #843 safeguard for /root/.hermes is satisfied by the
+        # $HOME=/var/lib/hal0 override and the fact that 'pip install'
+        # was already done as hal0 earlier in the provisioning block).
+        env -u HERMES_HOME HOME=/var/lib/hal0 \
+            /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
+            || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
         # Only enable/start if hermes actually laid down the unit. If the
         # install genuinely failed the file is absent; `systemctl enable` would
         # otherwise emit a scary "Unit file … does not exist" error and trip
@@ -2256,7 +2251,7 @@ else
             fi
         else
             warn "hermes-gateway unit not installed (${GATEWAY_UNIT_DST} missing) — Telegram/Discord bridge unavailable"
-            warn "  retry with 'sudo -u hal0 env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null'"
+            warn "  retry with 'HERMES_HOME= /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null'"
         fi
     elif [[ -f "${AGENT_UNIT_DST}" ]]; then
         # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)

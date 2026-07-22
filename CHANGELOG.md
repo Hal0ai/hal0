@@ -24,6 +24,7 @@ applying. Add those subsections to a version's section to surface them; see
 ### Fixed
 
 - **Slot drawer — restore the per-slot `Reasoning` and `MTP` controls** (fixes γ-suite, #1333). The `feat(ui): slot drawer & model drawer rework` landed with Reasoning + MTP removed from the slot drawer under "now model-owned"; the model drawer carries model-level defaults but operators need a per-slot override. Re-added the Reasoning pill (llm slots only, instant-apply via `PUT /config { enable_thinking }`) and the MTP pill (llm slots only, tri-state Auto/On/Off, instant-apply via `PUT /config { mtp }` + non-blocking cold restart) into the `Inference` FieldGroup. Renamed the HW grid `Hardware` FieldGroup → `Slot` (the drawer is now Slot / Model / Inference) and the runner-binary select label `Profile` → `Binary` (the bound runner stays on the slot card chip — no editable profile select in the drawer). The 12 γ-suite slot-drawer tests that were red on main since 2026-07-20 (#1333) all pass.
+- **Hermes gateway install runs as root** — fix installer `sudo -u hal0` → root call (PR #1337). The installer was dropping to the `hal0` user before running `hermes gateway install --system`, which checks `os.geteuid() == 0` and refuses non-root. The `--run-as-user hal0` flag already tells hermes which runtime user to bake into the systemd unit. Validated on halo150 (10.0.1.150, podman 4.9.3).
 
 ## [1.0.0] — unreleased (R5 · the rework release)
 
