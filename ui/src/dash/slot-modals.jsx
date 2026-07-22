@@ -727,14 +727,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         <ReadOnlyStrip k="image status" v={slot.image_status || "present"} />
       </div>
 
-				{/* ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────
-          The slot owns the physical/placement layer as 4 typed fields:
-          DEVICE · IMAGE · BINARY · THREADS · NGL. Every
-          HW change is a cold restart, applied on Save. */}
-				<FieldGroup
-					label="Slot"
-					hint="device · image · binary · threads · ngl"
-				>
+				<FieldGroup label="Slot" hint="this instance">
 					<div className="form-row">
 						<div className="form-lbl">
 							<span>Name</span>
@@ -775,61 +768,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							</div>
 						</div>
 					</div>
-					{(() => {
-						const devices = Array.isArray(metaEnums?.devices)
-							? metaEnums.devices
-							: [];
-						const backends = systemInfoQuery.data?.backends ?? {};
-						const binaryKeys = Object.keys(backends);
-						const devBackend = deviceBackend(device);
-						// Fit-check (§4): the selected device's backend must be in the chosen
-						// BINARY's supported_backends. WARN at assignment, never block. Only
-						// when a BINARY is explicitly picked (empty = HW-gated default).
-						const selRunner = binary ? backends[binary] : null;
-						const supported =
-							selRunner &&
-							Array.isArray(selRunner.supported_backends) &&
-							selRunner.supported_backends.length
-								? selRunner.supported_backends
-								: selRunner && selRunner.backend
-									? [selRunner.backend]
-									: null;
-						const fitWarn =
-							binary &&
-							devBackend &&
-							supported &&
-							!supported.includes(devBackend)
-								? `Device backend "${devBackend}" is not in ${binary}'s supported backends (${supported.join(", ")}). The slot may fall back or fail at spawn.`
-								: null;
-						return (
-							<>
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Device</span>
-										<FieldInfoIcon description="⟳ GPU class: rocm / vulkan / cpu / npu" />
-									</div>
-									<div className="form-ctl">
-										<select
-											className="input mono"
-											data-testid="slot-hw-device"
-											value={device}
-											onChange={(e) => setDevice(e.target.value)}
-										>
-											{/* keep an out-of-vocab persisted device selectable */}
-											{device && !devices.some((d) => d.id === device) && (
-												<option value={device}>{device}</option>
-											)}
-											{devices.map((d) => (
-												<option key={d.id} value={d.id} title={d.description}>
-													{d.label}
-													{d.recommended ? " ★" : ""}
-												</option>
-											))}
-										</select>
-									</div>
-								</div>
-
-      </FieldGroup>
+				</FieldGroup>
 
       {/* ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────
           The slot owns the physical/placement layer as 4 typed fields:
@@ -979,66 +918,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
           );
         })()}
       </FieldGroup>
-
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Threads</span>
-										<FieldInfoIcon description="CPU thread count for the runner. 0 = let the runtime
-											decide." />
-									</div>
-									<div className="form-ctl">
-										<input
-											className={
-												"input mono" + (fieldErrs.threads ? " input-err" : "")
-											}
-											data-testid="slot-hw-threads"
-											value={threads}
-											onChange={(e) => {
-												setThreads(e.target.value);
-												setFieldErrs((p) => ({ ...p, threads: undefined }));
-											}}
-											placeholder="0"
-											inputMode="numeric"
-										/>
-										{fieldErrs.threads && (
-											<div className="hint" style={{ color: "var(--err)" }}>
-												{fieldErrs.threads}
-											</div>
-										)}
-									</div>
-								</div>
-
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Ngl</span>
-										<FieldInfoIcon description="GPU layers to offload — emits -ngl to the runner.
-											-1 = all layers, 0 = CPU only." />
-									</div>
-									<div className="form-ctl">
-										<input
-											className={
-												"input mono" + (fieldErrs.ngl ? " input-err" : "")
-											}
-											data-testid="slot-hw-ngl"
-											value={nGpuLayers}
-											onChange={(e) => {
-												setNGpuLayers(e.target.value);
-												setFieldErrs((p) => ({ ...p, ngl: undefined }));
-											}}
-											placeholder="-1"
-											inputMode="numeric"
-										/>
-										{fieldErrs.ngl && (
-											<div className="hint" style={{ color: "var(--err)" }}>
-												{fieldErrs.ngl}
-											</div>
-										)}
-									</div>
-								</div>
-							</>
-						);
-					})()}
-				</FieldGroup>
 
 				{slot.device !== "npu" && (
 					<FieldGroup
@@ -1241,6 +1120,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								</div>
 							);
 						})()}
+					</FieldGroup>
+				)}
 
       <FieldGroup label="Inference" hint="behavior">
       {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
