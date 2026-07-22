@@ -178,8 +178,9 @@ def test_command_migrates_tree_and_writes_backup(
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "chat.toml").write_text('[slot]\nname = "chat"\nport = 8081\n')
 
-    # No live systemd in the test env — _active_hal0_units naturally reports
-    # nothing running (FileNotFoundError path), so the safety gate passes.
+    # Exercise the filesystem migration independently of host systemd state.
+    # The safety gate keeps its dedicated coverage above.
+    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
     slot_migrate_id_keying(yes=True, stop_services=False, dry_run=False)
 
     remaining = sorted(p.name for p in config_dir.glob("*.toml"))

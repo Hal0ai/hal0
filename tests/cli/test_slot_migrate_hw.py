@@ -57,8 +57,9 @@ def test_apply_folds_slot_image_to_image_pin_and_backs_up(
         'name = "chat"\nport = 8081\nimage = "ghcr.io/test/custom:v1"\n',
     )
 
-    # No live systemd in the test env — _active_hal0_units reports nothing, so
-    # the safety gate passes; --apply performs the real (filesystem) fold.
+    # Exercise the filesystem fold independently of host systemd state. The
+    # safety gate itself retains dedicated coverage in the id-keying tests.
+    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
     slot_migrate_hw(apply=True, yes=True, stop_services=False)
 
     raw = tomllib.loads(slot.read_text(encoding="utf-8"))
