@@ -10,6 +10,7 @@ import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -42,9 +43,23 @@ def isolated_client(
     """TestClient with HAL0_RELEASES_URL pointing at a tmp file."""
     manifest = _write_manifest(
         tmp_path / "latest.json",
-        {"version": "9.9.9", "url": "https://example.test/hal0-9.9.9.tar.gz"},
+        {
+            "_schema": "hal0.releases.v1",
+            "version": "9.9.9",
+            "channel": "stable",
+            "release_kind": "stable",
+            "url": "https://example.test/hal0-9.9.9.tar.gz",
+            "bundle_url": "https://example.test/hal0-9.9.9.tar.gz.bundle",
+            "digest_sha256": "0" * 64,
+            "signer_identity": (
+                r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+                r"\.github/workflows/release\.yml@refs/tags/v9\.9\.9$"
+            ),
+        },
     )
+    Path(f"{manifest}.bundle").write_bytes(b"manifest-bundle-placeholder\n")
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest))
+    monkeypatch.setattr("hal0.updater.updater._verify_cosign", lambda *args, **kwargs: None)
 
     app: FastAPI = create_app()
     with TestClient(app) as c:
@@ -345,6 +360,19 @@ def test_channel_get_returns_stable_default(isolated_client: TestClient) -> None
 
 def test_channel_put_persists_to_hal0_toml(isolated_client: TestClient, tmp_hal0_home: str) -> None:
     """PUT /api/updates/channel writes telemetry.channel into hal0.toml."""
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        version="9.9.9-nightly.20260722123000",
+        channel="nightly",
+        release_kind="nightly",
+        signer_identity=(
+            r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+            r"\.github/workflows/release\.yml@refs/heads/main$"
+        ),
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
     r = isolated_client.put("/api/updates/channel", json={"channel": "nightly"})
     assert r.status_code == 200, r.text
     assert r.json() == {"channel": "nightly"}
@@ -360,6 +388,133 @@ def test_channel_put_persists_to_hal0_toml(isolated_client: TestClient, tmp_hal0
     # GET reflects the change.
     r2 = isolated_client.get("/api/updates/channel")
     assert r2.json() == {"channel": "nightly"}
+
+
+def test_channel_put_accepts_preview(isolated_client: TestClient, tmp_hal0_home: str) -> None:
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        version="9.9.9-alpha.1",
+        channel="preview",
+        release_kind="preview",
+        prerelease_stage="alpha",
+        signer_identity=(
+            r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+            r"\.github/workflows/release\.yml@refs/tags/v9\.9\.9-alpha\.1$"
+        ),
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    response = isolated_client.put("/api/updates/channel", json={"channel": "preview"})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"channel": "preview"}
+
+
+def test_channel_put_keeps_previous_channel_when_validation_fails(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    config_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
+    initial = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+    assert initial.status_code == 200, initial.text
+    previous_contents = config_path.read_bytes()
+
+    # The preview URL resolves, but serves a stable-channel manifest.
+    response = isolated_client.put("/api/updates/channel", json={"channel": "preview"})
+
+    assert response.status_code in {400, 502}
+    assert config_path.read_bytes() == previous_contents
+    assert isolated_client.get("/api/updates/channel").json() == {"channel": "stable"}
+
+
+def test_same_channel_put_rejects_invalid_manifest_without_mutation(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """An idempotent PUT must still authenticate the current channel manifest."""
+    config_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
+    initial = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+    assert initial.status_code == 200, initial.text
+    previous_contents = config_path.read_bytes()
+    previous_config = isolated_client.app.state.hal0_config
+    cache_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "cache"
+    assert not cache_path.exists()
+
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest_path.write_text("{not json", encoding="utf-8")
+
+    response = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "system.update_error"
+    assert config_path.read_bytes() == previous_contents
+    assert isolated_client.app.state.hal0_config is previous_config
+    assert not cache_path.exists()
+
+
+def test_channel_put_rejects_malformed_target_manifest_without_mutation(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """Schema-invalid signing metadata cannot authorize a channel switch."""
+    config_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
+    initial = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+    assert initial.status_code == 200, initial.text
+    previous_contents = config_path.read_bytes()
+    previous_config = isolated_client.app.state.hal0_config
+
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(channel="preview", release_kind="preview", prerelease_stage="beta")
+    manifest.pop("bundle_url")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    response = isolated_client.put("/api/updates/channel", json={"channel": "preview"})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "system.update_manifest_invalid"
+    assert config_path.read_bytes() == previous_contents
+    assert isolated_client.app.state.hal0_config is previous_config
+
+
+def test_channel_put_rejects_signature_invalid_manifest_without_mutation(
+    isolated_client: TestClient, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reachable coherent manifest must not persist unless its bundle verifies."""
+    from hal0.updater import UpdateCosignFailed
+
+    config_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
+    initial = isolated_client.put("/api/updates/channel", json={"channel": "stable"})
+    assert initial.status_code == 200, initial.text
+    previous_contents = config_path.read_bytes()
+    previous_config = isolated_client.app.state.hal0_config
+    cache_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "cache"
+    assert not cache_path.exists()
+
+    manifest_path = isolated_client.__dict__["_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        version="9.9.9-rc.1",
+        channel="preview",
+        release_kind="preview",
+        prerelease_stage="rc",
+        signer_identity=(
+            r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+            r"\.github/workflows/release\.yml@refs/tags/v9\.9\.9-rc\.1$"
+        ),
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def reject_signature(*args: object, **kwargs: object) -> None:
+        raise UpdateCosignFailed("test signature rejected")
+
+    monkeypatch.setattr("hal0.updater.updater._verify_cosign", reject_signature)
+
+    response = isolated_client.put("/api/updates/channel", json={"channel": "preview"})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "system.update_cosign_failed"
+    assert config_path.read_bytes() == previous_contents
+    assert isolated_client.app.state.hal0_config is previous_config
+    assert not cache_path.exists()
 
 
 def test_channel_put_invalid_value_returns_envelope(isolated_client: TestClient) -> None:
@@ -546,6 +701,44 @@ def test_apply_target_strips_leading_v(
 # ── prepare / commit split ─────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("endpoint", ["prepare", "apply"])
+def test_version_pin_mismatch_fails_update_job(
+    endpoint: str,
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API prepare/apply jobs preserve the updater's typed pin-mismatch failure."""
+    from hal0.api.routes import updater as u_mod
+    from hal0.updater import UpdateManifestInvalid
+
+    async def reject_pin(self: object, version: str | None = None) -> dict:
+        raise UpdateManifestInvalid(
+            "requested version does not match authenticated channel manifest",
+            details={
+                "channel": "stable",
+                "requested_version": version,
+                "manifest_version": "9.9.9",
+            },
+        )
+
+    monkeypatch.setattr(u_mod.Updater, endpoint, reject_pin)
+    response = isolated_client.post(f"/api/updates/{endpoint}", json={"version": "0.0.1"})
+    assert response.status_code == 202, response.text
+    job_id = response.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] in ("prepared", "applied", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") == "failed", final
+    assert final.get("error_code") == "UpdateManifestInvalid"
+    assert "authenticated channel manifest" in final.get("error", "")
+
+
 def test_prepare_route_returns_queued_prepare_job(isolated_client: TestClient) -> None:
     """POST /api/updates/prepare returns a queued job tagged phase=prepare."""
     r = isolated_client.post("/api/updates/prepare", json={})
@@ -608,11 +801,66 @@ def test_commit_route_requires_version(isolated_client: TestClient) -> None:
     assert "error" in body
 
 
-def test_commit_route_accepts_version(isolated_client: TestClient) -> None:
-    """POST /api/updates/commit with a version queues a phase=commit job (202)."""
-    r = isolated_client.post("/api/updates/commit", json={"version": "0.0.1"})
+@pytest.mark.parametrize(
+    ("supplied", "normalized"),
+    [
+        ("1.2.3", "1.2.3"),
+        ("v1.2.3", "1.2.3"),
+        ("1.2.3-rc.1", "1.2.3-rc.1"),
+        ("1.2.3-nightly.20260721060000", "1.2.3-nightly.20260721060000"),
+        ("1.2.3-nightly.20260721", "1.2.3-nightly.20260721"),
+    ],
+)
+def test_commit_route_accepts_supported_version_before_queueing(
+    supplied: str,
+    normalized: str,
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current and legacy-compatible versions queue after leading-v normalization."""
+    from hal0.api.routes import updater as u_mod
+
+    def discard_task(request: object, coro: Any) -> None:
+        coro.close()
+
+    monkeypatch.setattr(u_mod, "_spawn_update_task", discard_task)
+    r = isolated_client.post("/api/updates/commit", json={"version": supplied})
     assert r.status_code == 202, r.text
     body = r.json()
     assert body["phase"] == "commit"
     assert body["state"] == "queued"
-    assert body["version"] == "0.0.1"
+    assert body["version"] == normalized
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "../../outside",
+        "1.2.3/../../outside",
+        r"1.2.3\..\outside",
+        "/tmp/outside",
+        " 1.2.3 ",
+        "1.2.3-preview.1",
+        "1.2.3-nightly.2026072",
+        "1.2.3-nightly.202607210",
+        "1.2.3-nightly.2026072106",
+    ],
+)
+def test_commit_route_rejects_invalid_version_before_queueing(
+    version: str,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hostile commit labels return a typed 400 without touching job storage."""
+    from hal0.api.routes import updater as u_mod
+
+    def unexpected_jobs(request: object) -> dict:
+        raise AssertionError("invalid commit version reached the update queue")
+
+    monkeypatch.setattr(u_mod, "_update_jobs", unexpected_jobs)
+    response = isolated_client.post("/api/updates/commit", json={"version": version})
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "validation.invalid"
+    assert not (Path(tmp_hal0_home) / "var-lib" / "hal0" / "update-jobs").exists()

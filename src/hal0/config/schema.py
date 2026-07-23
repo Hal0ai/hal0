@@ -39,6 +39,7 @@ from hal0.model_meta import (
 from hal0.model_meta import (
     VALID_DEVICES as _VALID_DEVICES,
 )
+from hal0.release.policy import ReleaseKind
 
 log = logging.getLogger(__name__)
 
@@ -1992,17 +1993,10 @@ class TelemetryConfig(BaseModel):
         default=False,
         description="Opt-in anonymous telemetry.  Off by default.  See PLAN.md §14.",
     )
-    channel: str = Field(
+    channel: ReleaseKind = Field(
         default="stable",
-        description="Update channel: 'stable' | 'nightly'.",
+        description="Update channel: 'stable' | 'preview' | 'nightly'.",
     )
-
-    @field_validator("channel")
-    @classmethod
-    def channel_valid(cls, v: str) -> str:
-        if v not in ("stable", "nightly"):
-            raise ValueError(f"channel {v!r} must be 'stable' or 'nightly'")
-        return v
 
 
 # ── MemoryGraphConfig (ADR-0023) ──────────────────────────────────────────────

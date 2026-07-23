@@ -53,6 +53,8 @@ update_app = typer.Typer(
 
 class UpdateChannel(StrEnum):
     stable = "stable"
+    preview = "preview"
+    nightly = "nightly"
 
 
 def _print_check(body: dict) -> None:
@@ -238,7 +240,7 @@ def update(
     channel: UpdateChannel | None = typer.Option(
         None,
         "--channel",
-        help="Persist the update channel (stable), then check.",
+        help="Persist the update channel (stable, preview, or nightly), then check.",
     ),
     check: bool = typer.Option(
         False,
@@ -253,7 +255,7 @@ def update(
     target: str | None = typer.Option(
         None,
         "--target",
-        help="Pin a specific version (e.g. v0.1.1). Overrides the latest manifest version.",
+        help="Require the authenticated channel manifest to exactly match this version.",
     ),
     yes: bool = typer.Option(
         False,

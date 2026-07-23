@@ -12,7 +12,7 @@ export function UpdatesPage() {
   // Phase B1: live state + check + apply mutations. While the query is
   // in flight or 5xx'd we render an empty envelope and let the SRow
   // fallbacks show '—' rather than fabricated versions.
-  // Issue #546: channel switch (stable | nightly) is wired to
+  // Issue #546: channel switch (stable | preview | nightly) is wired to
   // useSetUpdateChannel → PUT /api/updates/channel; reads the current
   // value from useUpdateState().hal0.channel on load.
   const stateQuery = useUpdateState();
@@ -147,21 +147,24 @@ export function UpdatesPage() {
               value={currentChannel}
               disabled={setChannelM.isPending}
               onChange={(e) => {
-                const next = e.target.value === 'nightly' ? 'nightly' : 'stable';
-                if (next === currentChannel) return;
-                setChannelM.mutate(next, {
-                  onSuccess: () => {
-                    window.__hal0Toast && window.__hal0Toast(`Channel set to ${next}`, "ok");
-                  },
-                  onError: (err) => {
-                    const msg = (err && err.message) || "could not set channel";
-                    window.__hal0Toast && window.__hal0Toast(`Channel change failed: ${msg}`, "err");
-                  },
-                });
+                const next = e.target.value;
+                if (next === 'stable' || next === 'preview' || next === 'nightly') {
+                  if (next === currentChannel) return;
+                  setChannelM.mutate(next, {
+                    onSuccess: () => {
+                      window.__hal0Toast && window.__hal0Toast(`Channel set to ${next}`, "ok");
+                    },
+                    onError: (err) => {
+                      const msg = (err && err.message) || "could not set channel";
+                      window.__hal0Toast && window.__hal0Toast(`Channel change failed: ${msg}`, "err");
+                    },
+                  });
+                }
               }}
               style={{maxWidth: 160}}
             >
               <option value="stable">stable</option>
+              <option value="preview">preview</option>
               <option value="nightly">nightly</option>
             </select>
           }

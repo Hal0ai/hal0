@@ -197,6 +197,7 @@ class TestApplyHonchoEnv:
 def test_deriver_flush_enabled_by_default(monkeypatch):
     from hal0.memory import honcho_env as he
 
+    monkeypatch.setattr(he, "SECRETS_PATH", _NO_SECRETS)
     out = he.render_env(_honcho_cfg())
     assert "DERIVER_FLUSH_ENABLED=true" in out
 
@@ -204,6 +205,7 @@ def test_deriver_flush_enabled_by_default(monkeypatch):
 def test_deriver_json_object_mode_local_only(monkeypatch):
     from hal0.memory import honcho_env as he
 
+    monkeypatch.setattr(he, "SECRETS_PATH", _NO_SECRETS)
     out = he.render_env(_honcho_cfg())
     assert "DERIVER_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=json_object" in out
 

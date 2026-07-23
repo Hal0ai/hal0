@@ -1,8 +1,8 @@
 """Tests for ``hal0 doctor bundle`` (§21.4 §3).
 
-Runs the real ``build_bundle`` orchestration against ``tmp_hal0_home`` (no
-live API, no real podman/systemd — this dev sandbox has neither, which is
-exactly the "graceful degrade" path §21.4 HARD REQUIREMENT #5 calls for).
+Runs the real ``build_bundle`` orchestration against ``tmp_hal0_home`` with
+no live API. Tests that assert missing-tool degradation force that condition
+explicitly instead of depending on binaries installed in the test sandbox.
 Asserts: the layout lands, the manifest is well-formed, ``commands.tsv`` has
 one row per probe, and a sensitive-keyed ``hal0.toml`` value gets redacted
 rather than echoed.
@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from hal0.cli import doctor_bundle
 from hal0.cli.doctor_bundle import build_bundle
 
 
@@ -29,7 +30,22 @@ def _no_live_api(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_shared, "api_get", _boom)
 
 
-def test_bundle_layout_matches_spec(tmp_hal0_home: str, tmp_path: Path) -> None:
+def _force_rocminfo_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make only rocminfo unavailable while preserving every other real probe."""
+    original_run = doctor_bundle.subprocess.run
+
+    def run_without_rocminfo(argv, *args, **kwargs):
+        if argv[0] == "rocminfo":
+            raise FileNotFoundError("forced missing rocminfo")
+        return original_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_bundle.subprocess, "run", run_without_rocminfo)
+
+
+def test_bundle_layout_matches_spec(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force_rocminfo_missing(monkeypatch)
     out = tmp_path / "bundle"
     written, _failed = build_bundle(out)
 
@@ -41,8 +57,7 @@ def test_bundle_layout_matches_spec(tmp_hal0_home: str, tmp_path: Path) -> None:
     assert (out / "doctor-summary.txt").is_file()
     # Every _CORE_PROBES command produced SOME file (present or a stub).
     assert (out / "system" / "uname.txt").is_file()
-    # Missing binaries (rocminfo etc, absent on this sandbox) degrade to a
-    # stub, not a crash.
+    # The deterministically missing rocminfo binary degrades to a stub.
     assert "not found" in (out / "system" / "rocminfo.txt").read_text()
 
 
@@ -146,9 +161,10 @@ def test_bundle_no_logs_flag_skips_logs_dir(tmp_hal0_home: str, tmp_path: Path) 
 
 
 def test_bundle_returns_nonzero_failed_count_when_probes_missing(
-    tmp_hal0_home: str, tmp_path: Path
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _force_rocminfo_missing(monkeypatch)
     out = tmp_path / "bundle"
     _, failed = build_bundle(out, include_rocm_smi=True)
-    # rocminfo/rocm-smi/podman/ss are all absent on this dev sandbox.
+    # The forced rocminfo failure guarantees at least one failed probe.
     assert failed > 0

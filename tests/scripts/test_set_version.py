@@ -9,6 +9,7 @@ a hyphen.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -117,6 +118,18 @@ def _populate_project(tmp_path: Path, version: str) -> dict[str, Path]:
     return paths
 
 
+def _original_bytes(paths: dict[str, Path]) -> dict[str, bytes]:
+    """Snapshot every versioned artifact for rollback assertions."""
+    return {name: path.read_bytes() for name, path in paths.items()}
+
+
+def _assert_original_bytes(paths: dict[str, Path], originals: dict[str, bytes]) -> None:
+    """Assert every versioned artifact and transaction cleanup were restored."""
+    assert {name: path.read_bytes() for name, path in paths.items()} == originals
+    root = paths["pyproject.toml"].parent
+    assert not list(root.glob(".set-version.*"))
+
+
 def _replace_lock_version(lock_text: str, new_version: str) -> str:
     """Replace the PEP 440 version line for ``name = "hal0ai"``."""
     import tomllib
@@ -186,6 +199,134 @@ class TestSetVersion:
         lock_data = tomllib.loads(lock_text)
         hal0ai = next(p for p in lock_data["package"] if p["name"] == "hal0ai")
         assert hal0ai["version"] == "1.0.0a2"
+
+    def test_transaction_temps_share_repository_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Replacement candidates live under root, independent of TMPDIR."""
+        _populate_project(tmp_path, "1.0.0-alpha.0")
+        mod = _load_set_version()
+        real_mkdtemp = mod.tempfile.mkdtemp
+        real_replace = mod.os.replace
+        temp_parents: list[Path] = []
+        replacement_devices: list[tuple[int, int]] = []
+
+        def recording_mkdtemp(*args: object, **kwargs: object) -> str:
+            temp_dir = Path(real_mkdtemp(*args, **kwargs))
+            temp_parents.append(temp_dir.parent)
+            return str(temp_dir)
+
+        def same_filesystem_replace(src: str, dst: str) -> None:
+            replacement_devices.append((os.stat(src).st_dev, os.stat(Path(dst).parent).st_dev))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(mod.tempfile, "mkdtemp", recording_mkdtemp)
+        monkeypatch.setattr(mod.os, "replace", same_filesystem_replace)
+        monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: None)
+
+        mod.set_version(tmp_path, "1.0.0-alpha.2")
+
+        assert temp_parents == [tmp_path]
+        assert replacement_devices
+        assert all(src_device == dst_device for src_device, dst_device in replacement_devices)
+        assert not list(tmp_path.glob(".set-version.*"))
+
+    def test_mid_replacement_failure_rolls_back_every_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A one-time replacement failure restores all five original files."""
+        paths = _populate_project(tmp_path, "1.0.0-alpha.0")
+        originals = _original_bytes(paths)
+        mod = _load_set_version()
+        real_replace = mod.os.replace
+        calls = 0
+
+        def fail_once_mid_replacement(src: str, dst: str) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError("injected mid-replacement failure")
+            real_replace(src, dst)
+
+        monkeypatch.setattr(mod.os, "replace", fail_once_mid_replacement)
+        monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: None)
+
+        with pytest.raises(OSError, match="injected mid-replacement failure"):
+            mod.set_version(tmp_path, "1.0.0-alpha.2")
+
+        _assert_original_bytes(paths, originals)
+
+    def test_rollback_failure_preserves_original_backup_and_reports_recovery_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed restore retains the original bytes and recovery instructions."""
+        paths = _populate_project(tmp_path, "1.0.0-alpha.0")
+        originals = _original_bytes(paths)
+        mod = _load_set_version()
+        real_replace = mod.os.replace
+        calls = 0
+
+        def fail_update_and_restore(src: str, dst: str) -> None:
+            nonlocal calls
+            calls += 1
+            if calls in {3, 4}:
+                raise OSError(f"injected replacement failure {calls}")
+            real_replace(src, dst)
+
+        monkeypatch.setattr(mod.os, "replace", fail_update_and_restore)
+        monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: None)
+
+        with pytest.raises(RuntimeError, match="ROLLBACK FAILED") as exc_info:
+            mod.set_version(tmp_path, "1.0.0-alpha.2")
+
+        transaction_dirs = list(tmp_path.glob(".set-version.*"))
+        assert len(transaction_dirs) == 1
+        failed_backup = transaction_dirs[0] / ".original.0"
+        assert failed_backup.read_bytes() == originals["pyproject.toml"]
+        error = str(exc_info.value)
+        assert str(failed_backup) in error
+        assert str(paths["pyproject.toml"]) in error
+        assert sorted(path.name for path in transaction_dirs[0].iterdir()) == [".original.0"]
+
+    def test_uv_lock_failure_rolls_back_every_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed uv lock restores all five original files and cleans up."""
+        paths = _populate_project(tmp_path, "1.0.0-alpha.0")
+        originals = _original_bytes(paths)
+        mod = _load_set_version()
+
+        def fail_uv_lock(*args: object, **kwargs: object) -> None:
+            raise mod.subprocess.CalledProcessError(1, ["uv", "lock"])
+
+        monkeypatch.setattr(mod.subprocess, "run", fail_uv_lock)
+
+        with pytest.raises(mod.subprocess.CalledProcessError):
+            mod.set_version(tmp_path, "1.0.0-alpha.2")
+
+        _assert_original_bytes(paths, originals)
+
+    def test_post_lock_revalidation_failure_restores_every_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A post-lock mismatch restores all originals and removes transaction state."""
+        paths = _populate_project(tmp_path, "1.0.0-alpha.0")
+        originals = _original_bytes(paths)
+        mod = _load_set_version()
+
+        def corrupt_regenerated_lock(*args: object, **kwargs: object) -> None:
+            lock_path = tmp_path / "uv.lock"
+            lock_path.write_text(
+                _replace_lock_version(lock_path.read_text(encoding="utf-8"), "9.9.9"),
+                encoding="utf-8",
+            )
+
+        monkeypatch.setattr(mod.subprocess, "run", corrupt_regenerated_lock)
+
+        with pytest.raises(RuntimeError, match="post-lock re-validation"):
+            mod.set_version(tmp_path, "1.0.0-alpha.2")
+
+        _assert_original_bytes(paths, originals)
 
     def test_nightly_is_rejected(self, tmp_path: Path) -> None:
         """Nightly versions are rejected because they don't rewrite source."""

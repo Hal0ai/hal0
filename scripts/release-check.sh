@@ -5,14 +5,18 @@
 # safety net between "main looks good" and `git tag`.
 #
 # Usage:
-#   bash scripts/release-check.sh [--channel stable|nightly] [--tag vX.Y.Z]
+#   bash scripts/release-check.sh [--local] [--channel stable|preview|nightly] [--tag vX.Y.Z]
+#
+# --local is a publication-read-only rehearsal: it never creates or mutates a
+# tag, release, or published artifact, though dependency/build caches may change.
+# It skips the remote tier-γ report gate, so a local pass never authorizes a release.
 #
 # Gates (in order):
 #   1.  Backend tests green (pytest)
 #   2.  UI build clean (npm run build)
 #   3.  Lint clean (ruff + shellcheck if present)
 #   4.  Toolbox image manifest pinned (manifest.json digests non-empty)
-#   5.  Release-gate report present, fresh (≤24h), all-pass
+#   5.  Release-gate report present, fresh (≤24h), coherent, no failures
 #   6.  Working tree clean, proposed tag doesn't exist
 #   7.  pyproject.toml version matches the proposed tag
 #   8.  Release preflight — policy, tag/release collisions, PyPI
@@ -42,11 +46,24 @@ fail() {
 	FAILURES=$((FAILURES + 1))
 }
 step() { printf "\n${BOLD}── %s${RESET}\n" "$*"; }
+usage() {
+	cat <<'EOF'
+Usage: bash scripts/release-check.sh [options]
+
+Options:
+  --channel stable|preview|nightly  Release channel (default: stable)
+  --tag vX.Y.Z                     Proposed immutable release tag
+  --dry-run                        Run read-only preflight; never publish or tag
+  --local                          Publication-read-only rehearsal; dependency/build caches may change
+  -h, --help                       Show this help
+EOF
+}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANNEL="${HAL0_CHANNEL:-stable}"
 PROPOSED_TAG=""
 DRY_RUN=false
+LOCAL=false
 FAILURES=0
 
 while [[ $# -gt 0 ]]; do
@@ -73,26 +90,65 @@ while [[ $# -gt 0 ]]; do
 		DRY_RUN=true
 		shift
 		;;
-	*)
-		warn "unknown arg: $1 (ignored)"
+	--local)
+		LOCAL=true
+		DRY_RUN=true
 		shift
+		;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	*)
+		usage >&2
+		printf "Unknown argument: %s\n" "$1" >&2
+		exit 2
 		;;
 	esac
 done
 
+case "${CHANNEL}" in
+stable | preview | nightly) ;;
+*)
+	usage >&2
+	printf "Invalid channel: %s (expected stable|preview|nightly)\n" "${CHANNEL}" >&2
+	exit 2
+	;;
+esac
+
+# Every Python gate runs from the locked repository environment with an
+# isolated application home. This prevents a global pytest/ruff or an editable
+# checkout elsewhere on the machine from affecting release results.
+CHECK_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/hal0-release-check.XXXXXX")"
+HAL0_CHECK_HOME="${CHECK_TMPDIR}/hal0-home"
+mkdir -p "${HAL0_CHECK_HOME}"
+cleanup() {
+	rm -rf "${CHECK_TMPDIR}"
+}
+trap cleanup EXIT
+
+run_repo_python() {
+	PYTHONPATH="${REPO_ROOT}/src" HAL0_HOME="${HAL0_CHECK_HOME}" \
+		uv run --isolated --locked --python 3.12 --extra dev "$@"
+}
+
+if [[ "${LOCAL}" == true ]]; then
+	warn "LOCAL rehearsal is publication-read-only (--dry-run implied); dependency/build caches may change"
+fi
+
 # ── 1. Backend tests ──────────────────────────────────────────────────────────
 step "1. Backend tests"
 
-if command -v pytest &>/dev/null; then
+if command -v uv &>/dev/null; then
 	# Unit tier only — tier β + γ run elsewhere (the integration workflow
 	# and `make release-test` respectively).
-	if pytest "${REPO_ROOT}/tests/" -q -m "not integration" 2>&1; then
-		info "pytest (-m 'not integration'): green"
+	if run_repo_python pytest "${REPO_ROOT}/tests/" -q -m "not integration" 2>&1; then
+		info "isolated locked Python 3.12 pytest (-m 'not integration'): green"
 	else
 		fail "pytest: test failures — fix before release"
 	fi
 else
-	fail "pytest not installed — required for release-check"
+	fail "uv not installed — repository environment is required for release-check"
 fi
 
 # ── 2. UI build ───────────────────────────────────────────────────────────────
@@ -113,14 +169,14 @@ fi
 # ── 3. Lint ───────────────────────────────────────────────────────────────────
 step "3. Lint"
 
-if command -v ruff &>/dev/null; then
-	if ruff check "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" 2>&1; then
-		info "ruff: clean"
+if command -v uv &>/dev/null; then
+	if run_repo_python ruff check "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" 2>&1; then
+		info "isolated locked Python 3.12 ruff: clean"
 	else
 		fail "ruff found lint errors"
 	fi
 else
-	warn "ruff not installed — skipping Python lint (pip install ruff)"
+	fail "uv not installed — cannot run repository ruff"
 fi
 
 if command -v shellcheck &>/dev/null; then
@@ -179,23 +235,63 @@ fi
 step "5. Release-gate report (tier γ)"
 
 REPORT="${REPO_ROOT}/tests/release-gate-report.json"
-if [[ -f "${REPORT}" ]]; then
+if [[ "${LOCAL}" == true ]]; then
+	warn "LOCAL rehearsal: skipping remote tier-γ release-gate report"
+	warn "Local success is insufficient for release authorization; a fresh coherent non-local report is required"
+elif [[ -f "${REPORT}" ]]; then
 	if python3 - "${REPORT}" <<'PY'; then
 import json, sys, time
 report = json.loads(open(sys.argv[1]).read())
+if not isinstance(report, dict):
+    sys.exit("release-test report must be an object")
+if report.get("_schema") != "hal0.release-gate-report.v1":
+    sys.exit("release-test report _schema must equal 'hal0.release-gate-report.v1'")
 generated = report.get("generated", 0)
+if type(generated) is not int or generated <= 0:
+    sys.exit("release-test report generated must be a positive integer timestamp")
 age_s = time.time() - generated
-if generated <= 0 or age_s > 24 * 3600:
+if age_s < -5 * 60:
+    sys.exit(f"report timestamp is in the future (skew={-age_s:.0f}s) — check clocks and re-run `make release-test`")
+if age_s > 24 * 3600:
     sys.exit(f"report is stale (age={age_s/3600:.1f}h) — re-run `make release-test`")
-summary = report.get("summary", {})
-if summary.get("fail", 0):
-    sys.exit(f"release-test has {summary['fail']} failed row(s)")
-print(f"release-test fresh (age={age_s/3600:.1f}h), {summary.get('pass', 0)} pass, "
-      f"{summary.get('skip', 0)} skip, {summary.get('deferred', 0)} deferred")
+summary = report.get("summary")
+if not isinstance(summary, dict):
+    sys.exit("report summary must be an object")
+keys = ("total", "pass", "fail", "skip", "deferred")
+counts = {}
+for key in keys:
+    value = summary.get(key)
+    if type(value) is not int or value < 0:
+        sys.exit(f"report summary {key!r} must be a nonnegative integer")
+    counts[key] = value
+if counts["total"] <= 0:
+    sys.exit("release-test report has no rows")
+if counts["total"] != sum(counts[key] for key in keys[1:]):
+    sys.exit("release-test summary total does not equal status counts")
+rows = report.get("rows")
+if not isinstance(rows, list):
+    sys.exit("release-test rows must be present and must be an array")
+if not rows:
+    sys.exit("release-test rows must not be empty")
+row_counts = {key: 0 for key in keys[1:]}
+for index, row in enumerate(rows):
+    if not isinstance(row, dict) or row.get("status") not in row_counts:
+        sys.exit(f"release-test row {index} has an invalid status")
+    row_counts[row["status"]] += 1
+if len(rows) != counts["total"]:
+    sys.exit("release-test rows length does not match summary total")
+if any(row_counts[key] != counts[key] for key in row_counts):
+    sys.exit("release-test row statuses do not match summary counts")
+if counts["pass"] <= 0:
+    sys.exit("release-test report must contain at least one passed row")
+if counts["fail"] != 0:
+    sys.exit(f"release-test has {counts['fail']} failed row(s)")
+print(f"release-test fresh (age={age_s/3600:.1f}h): {counts['pass']} pass, "
+      f"{counts['skip']} skip, {counts['deferred']} deferred; no failed rows")
 PY
-		info "release-gate report fresh and clean"
+		info "release-gate report accepted"
 	else
-		fail "release-gate report is stale or has failures — run 'make release-test'"
+		fail "release-gate report is invalid, stale, or has failures — run 'make release-test'"
 	fi
 else
 	fail "tests/release-gate-report.json not found — run 'make release-test'"
@@ -205,10 +301,33 @@ fi
 step "6. Git state"
 
 cd "${REPO_ROOT}"
-if [[ -z "$(git status --porcelain)" ]]; then
-	info "working tree clean"
+TRACKED_DIRT="$(
+	{
+		git diff --name-only -- . \
+			':(exclude).pi/shepherd/**' \
+			':(exclude)graphify-out/**'
+		git diff --cached --name-only -- . \
+			':(exclude).pi/shepherd/**' \
+			':(exclude)graphify-out/**'
+	}
+)"
+UNTRACKED_DIRT="$(
+	{
+		git ls-files --others --exclude-standard -- . \
+			':(exclude).pi/shepherd/**' \
+			':(exclude).pi-subagents/**' \
+			':(exclude)graphify-out/**'
+		# `.pi/` is ignored globally, so explicitly surface any ignored
+		# untracked entry outside the two generated runtime subtrees.
+		git ls-files --others -- .pi \
+			':(exclude).pi/shepherd/**' \
+			':(exclude).pi-subagents/**'
+	}
+)"
+if [[ -z "${TRACKED_DIRT}" && -z "${UNTRACKED_DIRT}" ]]; then
+	info "working tree clean (excluding generated state)"
 else
-	fail "working tree is dirty — commit or stash before tagging"
+	fail "working tree is dirty — commit or stash source changes before tagging"
 fi
 
 if [[ -n "${PROPOSED_TAG}" ]]; then
@@ -237,9 +356,28 @@ PY
 info "pyproject.toml version: ${PYPROJ_VERSION:-<unknown>}"
 
 if [[ -n "${PROPOSED_TAG}" ]]; then
-	# Strip leading "v" if present so `v0.1.0` and `0.1.0` both match.
-	NORMALISED_TAG="${PROPOSED_TAG#v}"
-	if [[ "${PYPROJ_VERSION}" == "${NORMALISED_TAG}" ]]; then
+	case "${CHANNEL}" in
+	stable)
+		[[ "${PROPOSED_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+			fail "stable tag must match vX.Y.Z"
+		;;
+	preview)
+		[[ "${PROPOSED_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.(0|[1-9][0-9]*)$ ]] ||
+			fail "preview tag must match vX.Y.Z-(alpha|beta|rc).N"
+		;;
+	nightly)
+		[[ "${PROPOSED_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{14}$ ]] ||
+			fail "nightly tag must match vX.Y.Z-nightly.YYYYMMDDhhmmss"
+		;;
+	esac
+
+	TAG_BASE="$(PYTHONPATH=src python3 -c 'import sys; from hal0.release.channel import base_version; print(base_version(sys.argv[1]))' "${PROPOSED_TAG}")"
+	PYPROJECT_BASE="$(PYTHONPATH=src python3 -c 'import sys; from hal0.release.channel import base_version; print(base_version(sys.argv[1]))' "${PYPROJ_VERSION}")"
+	if [[ "${TAG_BASE}" != "${PYPROJECT_BASE}" ]]; then
+		fail "tag base '${TAG_BASE}' does not match pyproject.toml base '${PYPROJECT_BASE}'"
+	elif [[ "${CHANNEL}" == "nightly" ]]; then
+		info "nightly tag base matches pyproject.toml"
+	elif [[ "${PYPROJ_VERSION}" == "${PROPOSED_TAG#v}" ]]; then
 		info "version matches proposed tag"
 	else
 		fail "pyproject.toml version '${PYPROJ_VERSION}' does not match tag '${PROPOSED_TAG}'"
@@ -254,34 +392,40 @@ cd "${REPO_ROOT}"
 if [[ -z "${PROPOSED_TAG}" ]]; then
 	warn "no --tag provided — skipping preflight"
 else
-	# Derive policy from the proposed tag
+	# Derive every publication decision from the shared release policy.
 	POLICY_JSON="$(PYTHONPATH=src python3 -m hal0.release.policy "${PROPOSED_TAG}" --format json 2>/dev/null || true)"
 	if [[ -z "${POLICY_JSON}" ]]; then
 		fail "release.policy failed for tag '${PROPOSED_TAG}'"
 	else
 		POLICY_VERSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])' <<<"${POLICY_JSON}")"
 		POLICY_KIND="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["kind"])' <<<"${POLICY_JSON}")"
+		POLICY_PYTHON_VERSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["python_version"] or "")' <<<"${POLICY_JSON}")"
+		POLICY_PUBLISH_PYPI="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["publish_pypi"]).lower())' <<<"${POLICY_JSON}")"
 		info "policy: ${POLICY_VERSION} (${POLICY_KIND})"
 
-		# Compare normalised source versions
-		NORMALISED_TAG_VERSION="${PROPOSED_TAG#v}"
-		if [[ "${POLICY_VERSION}" != "${NORMALISED_TAG_VERSION}" ]]; then
+		if [[ "${POLICY_KIND}" != "${CHANNEL}" ]]; then
+			fail "channel '${CHANNEL}' conflicts with tag policy '${POLICY_KIND}'"
+		else
+			info "channel agrees with tag policy"
+		fi
+
+		if [[ "${POLICY_VERSION}" != "${PROPOSED_TAG#v}" ]]; then
 			fail "policy version '${POLICY_VERSION}' does not match tag '${PROPOSED_TAG}'"
 		else
 			info "policy version agrees with tag"
 		fi
 
-		if [[ "${POLICY_KIND}" != "nightly" ]] && [[ "${DRY_RUN}" == false ]]; then
-			# Check tag target = origin/main
-			TAG_SHA="$(git rev-parse "${PROPOSED_TAG}" 2>/dev/null || true)"
+		# Official stable/preview tags must be cut from origin/main. All checks
+		# here are reads, including --dry-run mode.
+		if [[ "${POLICY_KIND}" != "nightly" ]]; then
+			TAG_SHA="$(git rev-list -n1 "${PROPOSED_TAG}" 2>/dev/null || true)"
 			MAIN_SHA="$(git rev-parse origin/main 2>/dev/null || true)"
 			if [[ -z "${MAIN_SHA}" ]]; then
 				warn "cannot resolve origin/main — skipping target check"
-			elif [[ -n "${TAG_SHA}" ]] && [[ "${TAG_SHA}" != "${MAIN_SHA}" ]]; then
+			elif [[ -n "${TAG_SHA}" && "${TAG_SHA}" != "${MAIN_SHA}" ]]; then
 				fail "tag '${PROPOSED_TAG}' points to ${TAG_SHA}, not origin/main (${MAIN_SHA})"
 			fi
 
-			# Query GitHub checks for the target SHA (requires gh CLI)
 			if command -v gh &>/dev/null && [[ -n "${MAIN_SHA}" ]]; then
 				GH_CHECKS="$(gh api "repos/:owner/:repo/commits/${MAIN_SHA}/check-runs" --jq '.check_runs[].conclusion' 2>/dev/null || true)"
 				if echo "${GH_CHECKS}" | grep -q -v "success" 2>/dev/null; then
@@ -292,35 +436,39 @@ else
 			else
 				warn "gh CLI not available or no main SHA — skipping GitHub check query"
 			fi
+		fi
 
-			# Reject existing local/remote tags
-			if git rev-parse "${PROPOSED_TAG}" >/dev/null 2>&1; then
-				fail "tag '${PROPOSED_TAG}' already exists locally"
-			fi
-			if git ls-remote --tags origin "${PROPOSED_TAG}" 2>/dev/null | grep -q "${PROPOSED_TAG}"; then
-				fail "tag '${PROPOSED_TAG}' already exists on origin"
-			fi
+		if git ls-remote --tags origin "${PROPOSED_TAG}" 2>/dev/null | grep -q "refs/tags/${PROPOSED_TAG}"; then
+			fail "tag '${PROPOSED_TAG}' already exists on origin"
+		else
+			info "remote tag '${PROPOSED_TAG}' is available"
+		fi
 
-			# Reject existing GitHub Release (requires gh CLI)
-			if command -v gh &>/dev/null; then
-				if gh release view "${PROPOSED_TAG}" 2>/dev/null | head -1 | grep -q .; then
-					fail "GitHub Release '${PROPOSED_TAG}' already exists"
-				fi
-			fi
-
-			# Reject existing PyPI version
-			NORMALISED_TAG_VERSION="${PROPOSED_TAG#v}"
-			if curl -sf "https://pypi.org/pypi/hal0ai/${NORMALISED_TAG_VERSION}/json" >/dev/null 2>&1; then
-				fail "PyPI already has hal0ai==${NORMALISED_TAG_VERSION}"
+		if command -v gh &>/dev/null; then
+			if gh release view "${PROPOSED_TAG}" >/dev/null 2>&1; then
+				fail "GitHub Release '${PROPOSED_TAG}' already exists"
 			else
-				info "PyPI does not have hal0ai==${NORMALISED_TAG_VERSION}"
+				info "GitHub Release '${PROPOSED_TAG}' is available"
 			fi
-		elif [[ "${POLICY_KIND}" == "nightly"* ]]; then
-			info "nightly tag — keeping existing base-match and collision behavior (gate 6)"
+		else
+			warn "gh CLI not available — skipping GitHub Release collision check"
+		fi
+
+		if [[ "${POLICY_PUBLISH_PYPI}" == "true" ]]; then
+			STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/hal0ai/${POLICY_PYTHON_VERSION}/json" || true)"
+			if [[ "${STATUS}" == "200" ]]; then
+				fail "PyPI already has hal0ai==${POLICY_PYTHON_VERSION}"
+			elif [[ "${STATUS}" == "404" ]]; then
+				info "PyPI does not have hal0ai==${POLICY_PYTHON_VERSION}"
+			else
+				fail "PyPI collision preflight returned HTTP ${STATUS:-<none>}"
+			fi
+		else
+			info "policy disables PyPI publication"
 		fi
 
 		if [[ "${DRY_RUN}" == true ]]; then
-			info "DRY-RUN: policy printed above; no tag or release mutation performed"
+			info "DRY-RUN: all preflight operations were read-only; no tag or release mutation performed"
 		fi
 	fi
 fi
@@ -328,7 +476,12 @@ fi
 # ── Summary ───────────────────────────────────────────────────────────────────
 printf "\n"
 if [[ "${FAILURES}" -eq 0 ]]; then
-	printf "${GREEN}${BOLD}Release check passed${RESET} (channel: %s)\n\n" "${CHANNEL}"
+	if [[ "${LOCAL}" == true ]]; then
+		warn "Local success is insufficient for release authorization; run the non-local check with a fresh coherent report"
+		printf "${GREEN}${BOLD}Local release rehearsal passed${RESET} (channel: %s)\n\n" "${CHANNEL}"
+	else
+		printf "${GREEN}${BOLD}Release check passed${RESET} (channel: %s)\n\n" "${CHANNEL}"
+	fi
 	exit 0
 else
 	printf "${RED}${BOLD}Release check FAILED${RESET} — %d gate(s) failed.\n\n" "${FAILURES}"

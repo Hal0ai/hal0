@@ -416,6 +416,9 @@ class TestHal0Config:
         assert c.telemetry.enabled is False
         assert c.telemetry.channel == "stable"
 
+    def test_preview_channel_is_valid(self) -> None:
+        assert TelemetryConfig(channel="preview").channel == "preview"
+
     def test_invalid_channel_raises(self) -> None:
         with pytest.raises(ValidationError) as ei:
             TelemetryConfig(channel="beta")

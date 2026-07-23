@@ -21,12 +21,13 @@ plus ``tests/api/test_auth_core.py``.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from starlette.routing import BaseRoute, Mount
 
-from hal0.api import create_app
+from hal0.api import _mount_dashboard, create_app
 from hal0.security.exposure import OPEN_ALLOWLIST, AuthClass, classify, match_rule
 
 
@@ -111,8 +112,13 @@ def _classify_method(method: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def app_routes() -> set[tuple[str, str]]:
-    app = create_app()
+def app_routes(tmp_path_factory: pytest.TempPathFactory) -> set[tuple[str, str]]:
+    hal0_home = tmp_path_factory.mktemp("exposure-hal0-home")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("HAL0_HOME", str(hal0_home))
+        monkeypatch.setattr("hal0.api._mount_dashboard", lambda _app: None)
+        app = create_app()
+
     routes = _enumerate_routes(app)
     assert len(routes) > 100, (
         f"only found {len(routes)} routes -- the route walker probably isn't "
@@ -163,6 +169,30 @@ def test_open_allowlist_is_exact(app_routes: set[tuple[str, str]]) -> None:
         f"Newly OPEN (not expected): {sorted(actual_open - OPEN_ALLOWLIST)}\n"
         f"Missing (expected but not OPEN): {sorted(OPEN_ALLOWLIST - actual_open)}"
     )
+
+
+def test_dashboard_route_templates_are_open_when_mounted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "brand").mkdir()
+    (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+    (dist / "favicon.svg").write_text("<svg></svg>", encoding="utf-8")
+    monkeypatch.setenv("HAL0_UI_DIST", str(dist))
+
+    app = FastAPI()
+    _mount_dashboard(app)
+    mounted = _enumerate_routes(app)
+    expected = {
+        ("GET", "/assets"),
+        ("GET", "/brand"),
+        ("GET", "/favicon.svg"),
+        ("GET", "/{full_path:path}"),
+    }
+
+    assert expected <= mounted
+    assert all(classify(method, path) is AuthClass.OPEN for method, path in expected)
 
 
 def test_bootstrap_class_covers_installer(app_routes: set[tuple[str, str]]) -> None:

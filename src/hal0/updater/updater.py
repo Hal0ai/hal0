@@ -5,8 +5,8 @@ Updater handles the full update lifecycle:
      for a newer version.
   2. Download tarball + cosign signature to ``/var/lib/hal0/cache/<version>/``.
   3. Verify the SHA-256 digest against the release manifest.
-  4. ``cosign verify-blob`` against the GitHub Actions OIDC identity
-     declared in the manifest (``signer_identity`` / ``signer_issuer``).
+  4. ``cosign verify-blob`` against the exact GitHub Actions OIDC identity
+     derived from the authenticated release kind and version.
   5. Extract to ``/usr/lib/hal0-<version>/`` (refuses non-empty paths).
   6. Run pending config migrations (``hal0.config.migrations.run_migrations``)
      when ``min_data_version`` advances the schema.
@@ -63,8 +63,65 @@ from hal0.config.loader import (
 )
 from hal0.config.migrations import latest_version, run_migrations
 from hal0.errors import Hal0Error
+from hal0.release.policy import ReleaseKind, ReleasePolicy, ReleaseTagError
 
 log = structlog.get_logger(__name__)
+
+
+# Read/install compatibility for nightly manifests published before the current
+# 14-digit timestamp policy. This does not make older date-only tags publishable
+# through ReleasePolicy; it only preserves existing manifest and staged-release reads.
+_LEGACY_NIGHTLY_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}$")
+
+
+# Client-pinned trust roots for authenticating release manifests. Admission is
+# selected only from the locally requested channel, before any JSON is decoded.
+# Stable and preview admit only their respective immutable tag grammars. Nightly
+# is signed by the reusable release workflow as invoked from main, so its sole
+# admitted identity is release.yml@refs/heads/main. After authenticated parsing,
+# every manifest is bound to one exact release identity before artifact fields
+# are consumed.
+_MANIFEST_IDENTITY_PREFIX = (
+    r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+    r"\.github/workflows/release\.yml@"
+)
+_MANIFEST_SIGNER_ISSUER = "https://token.actions.githubusercontent.com"
+_STABLE_MANIFEST_ADMISSION_IDENTITY = _MANIFEST_IDENTITY_PREFIX + r"refs/tags/v\d+\.\d+\.\d+$"
+_PREVIEW_MANIFEST_ADMISSION_IDENTITY = (
+    _MANIFEST_IDENTITY_PREFIX + r"refs/tags/v\d+\.\d+\.\d+(-(alpha|beta|rc)\.(0|[1-9]\d*))?$"
+)
+_NIGHTLY_MANIFEST_IDENTITY = _MANIFEST_IDENTITY_PREFIX + r"refs/heads/main$"
+
+
+def manifest_admission_identity(channel: str) -> str:
+    """Return the first-verification identity for a trusted requested channel."""
+    identities = {
+        "stable": _STABLE_MANIFEST_ADMISSION_IDENTITY,
+        "preview": _PREVIEW_MANIFEST_ADMISSION_IDENTITY,
+        "nightly": _NIGHTLY_MANIFEST_IDENTITY,
+    }
+    try:
+        return identities[channel]
+    except KeyError as exc:
+        raise ValueError(f"unknown requested channel {channel!r}") from exc
+
+
+def exact_manifest_identity(release_kind: str, version: str) -> str:
+    """Derive the sole accepted signer identity from authenticated release policy."""
+    if release_kind == "nightly" and _LEGACY_NIGHTLY_VERSION_RE.fullmatch(version):
+        return _NIGHTLY_MANIFEST_IDENTITY
+    try:
+        policy = ReleasePolicy.from_tag(f"v{version}")
+    except ReleaseTagError as exc:
+        raise ValueError(f"unsupported release version: {version!r}") from exc
+    if policy.version != version or policy.kind != release_kind:
+        raise ValueError(
+            f"release kind {release_kind!r} does not match version policy {policy.kind!r}"
+        )
+    if policy.kind == "nightly":
+        return _NIGHTLY_MANIFEST_IDENTITY
+    escaped_tag = f"v{version}".replace(".", r"\.")
+    return _MANIFEST_IDENTITY_PREFIX + f"refs/tags/{escaped_tag}$"
 
 
 # ── Typed errors (system.update_*) ─────────────────────────────────────────────
@@ -140,6 +197,38 @@ class UpdateRollbackUnavailable(UpdateError):
 # ── Release-manifest schema (pydantic) ─────────────────────────────────────────
 
 
+def validate_release_version(version: str) -> str:
+    """Return an exact supported updater version or raise ``ValueError``.
+
+    ReleasePolicy remains the source of truth for every currently publishable
+    version. The updater additionally accepts the documented, path-safe date-only
+    nightly read/install form ``X.Y.Z-nightly.YYYYMMDD`` for already-issued
+    manifests and staged releases.
+    """
+    if not isinstance(version, str):
+        raise ValueError(f"release version must be a string, got {type(version).__name__}")
+    try:
+        policy = ReleasePolicy.from_tag(f"v{version}")
+    except ReleaseTagError as exc:
+        if _LEGACY_NIGHTLY_VERSION_RE.fullmatch(version):
+            return version
+        raise ValueError(f"unsupported release version: {version!r}") from exc
+    if policy.version != version:
+        raise ValueError(f"noncanonical release version: {version!r}")
+    return policy.version
+
+
+def _require_release_version(version: str, *, field: str) -> str:
+    """Translate release-policy rejection into the updater's typed 400 error."""
+    try:
+        return validate_release_version(version)
+    except ValueError as exc:
+        raise UpdateManifestInvalid(
+            f"{field} must be an exact supported release version",
+            details={field: version, "error": str(exc)},
+        ) from exc
+
+
 class ReleaseManifest(BaseModel):
     """Schema-validated release-manifest payload.
 
@@ -153,10 +242,10 @@ class ReleaseManifest(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "allow"}
 
-    schema_id: str = Field(default="hal0.releases.v1", alias="_schema")
+    schema_id: Literal["hal0.releases.v1"] = Field(alias="_schema")
     version: str = Field(..., description="Release version, e.g. '0.1.1'.")
-    channel: str = Field(default="stable", description="Release channel.")
-    release_kind: Literal["stable", "nightly", "preview"] = Field(
+    channel: ReleaseKind = Field(default="stable", description="Release channel.")
+    release_kind: ReleaseKind = Field(
         default="stable",
         description="Kind of release: stable, nightly, or preview.",
     )
@@ -191,8 +280,8 @@ class ReleaseManifest(BaseModel):
     signer_identity: str = Field(
         ...,
         description=(
-            "GitHub Actions OIDC subject. Used as a regex for "
-            "``cosign verify-blob --certificate-identity-regexp``."
+            "Exact generated GitHub Actions OIDC subject regex for this release. "
+            "Clients derive and enforce the same value from release_kind + version."
         ),
     )
     signer_issuer: str = Field(
@@ -225,6 +314,11 @@ class ReleaseManifest(BaseModel):
         description="Mirror of manifest.json's toolbox_images block.",
     )
 
+    @field_validator("version")
+    @classmethod
+    def _version_is_supported(cls, v: str) -> str:
+        return validate_release_version(v)
+
     @field_validator("digest_sha256")
     @classmethod
     def _digest_is_hex(cls, v: str) -> str:
@@ -241,7 +335,8 @@ class ReleaseManifest(BaseModel):
 
         Rules:
         - preview requires prerelease_stage in (alpha, beta, rc) and channel="preview".
-        - stable/nightly require no prerelease_stage and channel matches release_kind.
+        - stable requires no prerelease_stage and may target stable or preview.
+        - nightly requires no prerelease_stage and channel="nightly".
         - non-empty operator_migrations require rollback_policy in
           ("backup-required", "blocked").
         """
@@ -254,16 +349,26 @@ class ReleaseManifest(BaseModel):
                 raise ValueError(
                     f"preview release_kind requires channel='preview', got {self.channel!r}"
                 )
-        if self.release_kind in ("stable", "nightly"):
+        if self.release_kind == "stable":
             if self.prerelease_stage is not None:
                 raise ValueError(
-                    f"{self.release_kind} release_kind must not have a "
+                    "stable release_kind must not have a "
                     f"prerelease_stage, got {self.prerelease_stage!r}"
                 )
-            if self.channel != self.release_kind:
+            if self.channel not in ("stable", "preview"):
                 raise ValueError(
-                    f"{self.release_kind} release_kind requires "
-                    f"channel={self.release_kind!r}, got {self.channel!r}"
+                    "stable release_kind requires channel='stable' or 'preview', "
+                    f"got {self.channel!r}"
+                )
+        if self.release_kind == "nightly":
+            if self.prerelease_stage is not None:
+                raise ValueError(
+                    "nightly release_kind must not have a "
+                    f"prerelease_stage, got {self.prerelease_stage!r}"
+                )
+            if self.channel != "nightly":
+                raise ValueError(
+                    f"nightly release_kind requires channel='nightly', got {self.channel!r}"
                 )
         if self.operator_migrations and self.rollback_policy not in (
             "backup-required",
@@ -275,6 +380,33 @@ class ReleaseManifest(BaseModel):
                 f"got {self.rollback_policy!r}"
             )
         return self
+
+
+_ACCEPTED_RELEASE_KINDS: dict[str, frozenset[ReleaseKind]] = {
+    "stable": frozenset({"stable"}),
+    "preview": frozenset({"preview", "stable"}),
+    "nightly": frozenset({"nightly"}),
+}
+
+
+def validate_manifest_for_channel(
+    manifest: ReleaseManifest, requested_channel: str
+) -> ReleaseManifest:
+    """Return ``manifest`` when it is safe to consume for the requested channel."""
+    if requested_channel not in _ACCEPTED_RELEASE_KINDS:
+        raise ValueError(f"unknown requested channel {requested_channel!r}")
+    if manifest.channel != requested_channel:
+        raise ValueError(
+            f"manifest channel {manifest.channel!r} does not match "
+            f"requested channel {requested_channel!r}"
+        )
+    accepted_kinds = _ACCEPTED_RELEASE_KINDS[requested_channel]
+    if manifest.release_kind not in accepted_kinds:
+        raise ValueError(
+            f"release kind {manifest.release_kind!r} is not accepted for "
+            f"requested channel {requested_channel!r}"
+        )
+    return manifest
 
 
 @dataclasses.dataclass(frozen=True)
@@ -327,26 +459,24 @@ def releases_url(channel: str = "stable") -> str:
     return f"https://releases.hal0.dev/{channel}.json"
 
 
-async def fetch_release_manifest(channel: str = "stable") -> dict[str, Any]:
-    """Fetch and parse the release manifest for ``channel``.
+def _release_manifest_bundle_url(manifest_url: str) -> str:
+    """Return the sibling Sigstore bundle URL for a channel manifest."""
+    parsed = urlparse(manifest_url)
+    if parsed.scheme in ("http", "https", "file"):
+        return parsed._replace(path=f"{parsed.path}.bundle").geturl()
+    return f"{manifest_url}.bundle"
 
-    Returns the parsed JSON dict. Supports both ``http(s)://`` URLs (via
-    httpx) and ``file://`` URLs / bare paths (for tests). Raises
-    ``OSError`` on transport failures and ``ValueError`` on bad JSON so
-    callers can produce typed envelopes.
-    """
+
+async def _fetch_release_manifest_bytes(channel: str = "stable") -> bytes:
+    """Fetch the exact manifest bytes so their sibling bundle can verify them."""
     url = releases_url(channel)
     parsed = urlparse(url)
     if parsed.scheme in ("", "file"):
         path = parsed.path if parsed.scheme == "file" else url
         try:
-            raw = Path(path).read_text(encoding="utf-8")
+            return Path(path).read_bytes()
         except OSError as exc:
             raise OSError(f"could not read release manifest at {path}: {exc}") from exc
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"release manifest at {path} is not valid JSON: {exc}") from exc
 
     import httpx
 
@@ -357,10 +487,30 @@ async def fetch_release_manifest(channel: str = "stable") -> dict[str, Any]:
         raise OSError(f"release manifest fetch failed for {url}: {exc}") from exc
     if resp.status_code != 200:
         raise OSError(f"release manifest fetch returned HTTP {resp.status_code} from {url}")
+    return resp.content
+
+
+def _decode_release_manifest(raw_bytes: bytes, url: str) -> dict[str, Any]:
+    """Decode exact fetched bytes as a JSON object."""
     try:
-        return resp.json()
-    except ValueError as exc:
+        raw = json.loads(raw_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"release manifest at {url} is not valid JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"release manifest at {url} must be a JSON object")
+    return raw
+
+
+async def fetch_release_manifest(channel: str = "stable") -> dict[str, Any]:
+    """Fetch and parse the release manifest for ``channel``.
+
+    Returns the parsed JSON dict. Supports both ``http(s)://`` URLs (via
+    httpx) and ``file://`` URLs / bare paths (for tests). Raises
+    ``OSError`` on transport failures and ``ValueError`` on bad JSON so
+    callers can produce typed envelopes.
+    """
+    url = releases_url(channel)
+    return _decode_release_manifest(await _fetch_release_manifest_bytes(channel), url)
 
 
 def _parse_manifest(raw: dict[str, Any]) -> ReleaseManifest:
@@ -611,6 +761,96 @@ def _verify_cosign(
             },
         )
     log.info("updater.cosign_verify_ok", job_id=job_id)
+
+
+async def _fetch_verified_release_manifest(
+    channel: str, *, job_id: str | None = None
+) -> tuple[dict[str, Any], ReleaseManifest, str]:
+    """Fetch and authenticate exact manifest bytes before parsing any JSON.
+
+    The first identity depends only on the trusted requested channel. Once the
+    admitted bytes pass schema and channel policy, they are rebound to the exact
+    identity derived from authenticated ``release_kind`` + ``version``. Temporary
+    files live outside the updater cache, so rejection cannot stage update state.
+    """
+    try:
+        admission_identity = manifest_admission_identity(channel)
+    except ValueError as exc:
+        raise UpdateManifestInvalid(
+            f"release manifest channel is invalid: {exc}",
+            details={"channel": channel, "error": str(exc)},
+        ) from exc
+
+    url = releases_url(channel)
+    try:
+        raw_bytes = await _fetch_release_manifest_bytes(channel)
+    except OSError as exc:
+        raise UpdateError(
+            f"could not fetch release manifest: {exc}",
+            details={"channel": channel, "url": url, "error": str(exc)},
+        ) from exc
+
+    bundle_url = _release_manifest_bundle_url(url)
+    with tempfile.TemporaryDirectory(prefix="hal0-manifest-") as work:
+        manifest_path = Path(work) / "manifest.json"
+        bundle_path = Path(work) / "manifest.json.bundle"
+        manifest_path.write_bytes(raw_bytes)
+        await _download(bundle_url, bundle_path)
+        await asyncio.to_thread(
+            _verify_cosign,
+            manifest_path,
+            bundle_path,
+            identity_regexp=admission_identity,
+            issuer=_MANIFEST_SIGNER_ISSUER,
+            job_id=job_id,
+        )
+
+        try:
+            raw = _decode_release_manifest(raw_bytes, url)
+        except ValueError as exc:
+            raise UpdateError(
+                f"release manifest is not valid JSON: {exc}",
+                details={"channel": channel, "url": url, "error": str(exc)},
+            ) from exc
+        manifest = _parse_manifest(raw)
+        try:
+            validate_manifest_for_channel(manifest, channel)
+            exact_identity = exact_manifest_identity(manifest.release_kind, manifest.version)
+        except ValueError as exc:
+            raise UpdateManifestInvalid(
+                f"release manifest is not accepted for channel {channel!r}: {exc}",
+                details={"channel": channel, "error": str(exc)},
+            ) from exc
+        if manifest.signer_identity != exact_identity:
+            raise UpdateManifestInvalid(
+                "release manifest signer_identity does not match exact release identity",
+                details={
+                    "channel": channel,
+                    "expected_signer_identity": exact_identity,
+                    "manifest_signer_identity": manifest.signer_identity,
+                },
+            )
+        if manifest.signer_issuer != _MANIFEST_SIGNER_ISSUER:
+            raise UpdateManifestInvalid(
+                "release manifest signer_issuer does not match the pinned issuer",
+                details={
+                    "channel": channel,
+                    "expected_signer_issuer": _MANIFEST_SIGNER_ISSUER,
+                    "manifest_signer_issuer": manifest.signer_issuer,
+                },
+            )
+
+        if exact_identity != admission_identity:
+            await asyncio.to_thread(
+                _verify_cosign,
+                manifest_path,
+                bundle_path,
+                identity_regexp=exact_identity,
+                issuer=_MANIFEST_SIGNER_ISSUER,
+                job_id=job_id,
+            )
+
+    return raw, manifest, url
 
 
 # ── Extraction + migration helpers ─────────────────────────────────────────────
@@ -1471,30 +1711,11 @@ class Updater:
             UpdateManifestInvalid: Manifest is missing required fields.
         """
         ch = channel or self.channel
-        url = releases_url(ch)
-        try:
-            raw = await fetch_release_manifest(ch)
-        except OSError as exc:
-            raise UpdateError(
-                f"could not fetch release manifest: {exc}",
-                details={"channel": ch, "url": url, "error": str(exc)},
-            ) from exc
-        except ValueError as exc:
-            raise UpdateError(
-                f"release manifest is not valid JSON: {exc}",
-                details={"channel": ch, "url": url, "error": str(exc)},
-            ) from exc
+        raw, manifest, url = await _fetch_verified_release_manifest(ch, job_id=self.job_id)
 
-        # Soft-validate: some routes (test fixture) ship a minimal manifest
-        # with just {"version": "9.9.9"} — surface it without forcing a
-        # full schema match. Strict validation happens inside ``apply()``.
-        latest = ""
-        revoked = False
-        revoked_reason = ""
-        if isinstance(raw, dict):
-            latest = str(raw.get("version") or raw.get("latest_version") or "")
-            revoked = bool(raw.get("revoked", False))
-            revoked_reason = str(raw.get("revoked_reason") or "")
+        latest = manifest.version
+        revoked = manifest.revoked
+        revoked_reason = manifest.revoked_reason
         # A revoked (yanked/withdrawn) latest is never recommended — the
         # operator should not be nudged toward a release we've pulled. The
         # version is still surfaced (revoked + reason) so the dashboard can
@@ -1513,13 +1734,13 @@ class Updater:
             channel=ch,
             update_available=update_available,
             manifest_url=url,
-            digest_sha256=raw.get("digest_sha256") if isinstance(raw, dict) else None,
-            signer_identity=raw.get("signer_identity") if isinstance(raw, dict) else None,
-            min_data_version=raw.get("min_data_version") if isinstance(raw, dict) else None,
-            notes_url=raw.get("notes_url") if isinstance(raw, dict) else None,
+            digest_sha256=manifest.digest_sha256,
+            signer_identity=manifest.signer_identity,
+            min_data_version=manifest.min_data_version,
+            notes_url=manifest.notes_url,
             revoked=revoked,
             revoked_reason=revoked_reason,
-            raw_manifest=raw if isinstance(raw, dict) else {},
+            raw_manifest=raw,
         )
 
     # ── apply ──────────────────────────────────────────────────────────────────
@@ -1555,31 +1776,33 @@ class Updater:
         # silently extract a tarball that is never actually loaded.
         _raise_if_editable_install()
 
-        # Step 1: fetch + validate manifest.
+        # Step 1: fetch, validate, and authenticate the manifest itself.
         log.info("updater.prepare_start", job_id=self.job_id, channel=self.channel, pinned=version)
-        try:
-            raw = await fetch_release_manifest(self.channel)
-        except (OSError, ValueError) as exc:
-            raise UpdateError(
-                f"could not fetch release manifest: {exc}",
-                details={"channel": self.channel, "error": str(exc)},
-            ) from exc
-        manifest = _parse_manifest(raw)
+        raw, manifest, _ = await _fetch_verified_release_manifest(self.channel, job_id=self.job_id)
 
-        # Step 2: confirm target version.
-        target_version = (version or "").strip() or manifest.version
-        if not target_version:
+        # Step 2: treat the optional version as an optimistic exact pin. It is
+        # never a historical resolver or a caller-controlled staging label:
+        # authenticated manifest.version remains the sole target authority.
+        requested_version = (
+            _require_release_version(version, field="requested_version")
+            if version is not None
+            else None
+        )
+        target_version = _require_release_version(manifest.version, field="manifest_version")
+        if requested_version is not None and requested_version != target_version:
             raise UpdateManifestInvalid(
-                "release manifest has no usable version",
-                details={"channel": self.channel},
+                "requested version does not match authenticated channel manifest",
+                details={
+                    "channel": self.channel,
+                    "requested_version": requested_version,
+                    "manifest_version": target_version,
+                },
             )
-        if version and version != manifest.version:
-            log.info(
-                "updater.version_pinned_mismatch",
-                job_id=self.job_id,
-                pinned=version,
-                manifest=manifest.version,
-            )
+
+        # Residual: concurrent prepares for the same version share cache/install
+        # paths and are not serialized. A lock redesign is intentionally out of
+        # scope; signed immutable same-version assets limit current release risk
+        # because both prepares authenticate the same publisher-pinned bytes.
 
         # Step 3: download tarball + Sigstore bundle (survives cert expiry, #1159).
         cache = _cache_dir(target_version)
@@ -1614,13 +1837,15 @@ class Updater:
             )
         log.info("updater.sha256_ok", job_id=self.job_id, digest=got_digest)
 
-        # Step 5: cosign verify-blob.
+        # Step 5: verify against the identity derived from authenticated release
+        # policy, never a manifest-selected broader expression.
+        expected_identity = exact_manifest_identity(manifest.release_kind, manifest.version)
         await asyncio.to_thread(
             _verify_cosign,
             tarball_path,
             bundle_path,
-            identity_regexp=manifest.signer_identity,
-            issuer=manifest.signer_issuer,
+            identity_regexp=expected_identity,
+            issuer=_MANIFEST_SIGNER_ISSUER,
             job_id=self.job_id,
         )
 
@@ -1659,12 +1884,7 @@ class Updater:
         shape as the old single-step apply.
         """
         _raise_if_editable_install()
-        target_version = (version or "").strip()
-        if not target_version:
-            raise UpdateManifestInvalid(
-                "commit requires an explicit prepared version",
-                details={"channel": self.channel},
-            )
+        target_version = _require_release_version(version, field="commit_version")
         install_dir = _versioned_install_dir(target_version)
         cache = _cache_dir(target_version)
         if not install_dir.exists():
@@ -1672,8 +1892,25 @@ class Updater:
                 f"nothing staged for {target_version} — call prepare() before commit()",
                 details={"version": target_version, "install_dir": str(install_dir)},
             )
-        # Manifest cached by prepare(); needed for min_data_version below.
+        # Manifest cached by prepare(); needed for min_data_version below. Recheck
+        # its authenticated target binding before any migration or activation.
         manifest = _parse_manifest(_load_cached_manifest(target_version))
+        if manifest.version != target_version:
+            raise UpdateManifestInvalid(
+                "cached manifest version does not match prepared target",
+                details={
+                    "channel": self.channel,
+                    "target_version": target_version,
+                    "manifest_version": manifest.version,
+                },
+            )
+        try:
+            validate_manifest_for_channel(manifest, self.channel)
+        except ValueError as exc:
+            raise UpdateManifestInvalid(
+                f"cached manifest is not accepted for channel {self.channel!r}: {exc}",
+                details={"channel": self.channel, "error": str(exc)},
+            ) from exc
         log.info("updater.commit_start", job_id=self.job_id, version=target_version)
 
         # Step 7: config migrations.
@@ -1982,4 +2219,5 @@ __all__ = [
     "ensure_seed_profiles",
     "fetch_release_manifest",
     "releases_url",
+    "validate_manifest_for_channel",
 ]

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Atomic version synchronisation across hal0 release artifacts.
+"""Rollback-capable version synchronisation across hal0 release artifacts.
 
 Updates all top-level version fields (pyproject.toml, ui/package.json,
 ui/package-lock.json, manifest.json) and the PEP 440 version of the
-editable ``hal0ai`` package in uv.lock in a single atomic transaction:
-every candidate is written to a temporary file first, all candidates are
-validated, and only then are originals replaced via ``os.replace``.
-
-After a successful replacement ``uv lock`` is re-run and the resulting
-lock version is re-validated.
+editable ``hal0ai`` package in uv.lock. Every candidate is validated before
+per-file atomic replacement via ``os.replace``. Originals are retained in a
+repository-local transaction directory. Replacement, ``uv lock``, and
+postvalidation failures trigger per-file atomic restoration; the five-file
+update is not globally atomic.
 
 Usage::
 
@@ -25,6 +24,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 
@@ -157,7 +157,7 @@ def _update_file_atomic(dst: Path, content: str, tmpdir: Path) -> Path:
 
 
 def set_version(root: Path, version: str) -> None:
-    """Atomically update all version fields to *version*.
+    """Update all version fields with per-file atomic replacement and rollback.
 
     Args:
         root: Repository root directory.
@@ -166,7 +166,7 @@ def set_version(root: Path, version: str) -> None:
     Raises:
         ValueError: If the version is nightly or a required file is
             malformed.
-        RuntimeError: If ``uv lock`` fails or re-validation fails.
+        RuntimeError: If postvalidation or rollback fails.
     """
     # 1. Resolve channel and PEP 440 form; reject nightly
     channel = _resolve_channel(version)
@@ -246,8 +246,11 @@ def set_version(root: Path, version: str) -> None:
             )
     candidates.append((lock_path, lock_text_new))
 
-    # 3. Write every candidate to a temporary file in a shared tmpdir
-    tmpdir = Path(tempfile.mkdtemp(prefix=".set-version."))
+    # 3. Write every candidate to a shared transaction directory under the
+    # repository root.  Keeping candidates beside their destinations guarantees
+    # os.replace() stays on one filesystem (and cannot fail with EXDEV).
+    tmpdir = Path(tempfile.mkdtemp(prefix=".set-version.", dir=root))
+    preserve_transaction = False
     try:
         temp_paths: list[tuple[Path, Path]] = []
         for dst, content in candidates:
@@ -288,39 +291,76 @@ def set_version(root: Path, version: str) -> None:
                         f"{hal0ai_ver!r} != expected {pep440!r}"
                     )
 
-        # 4. All good — atomically replace originals
-        for tmp_path, dst_path in temp_paths:
-            os.replace(str(tmp_path), str(dst_path))
+        # 4. Preserve every original before replacing any destination.
+        backups: list[tuple[Path, Path]] = []
+        for index, (_, dst_path) in enumerate(temp_paths):
+            backup_path = tmpdir / f".original.{index}"
+            shutil.copy2(dst_path, backup_path)
+            backups.append((backup_path, dst_path))
 
+        try:
+            # Each destination replacement is atomic, but the group is guarded
+            # by rollback rather than claiming impossible global atomicity.
+            for tmp_path, dst_path in temp_paths:
+                os.replace(str(tmp_path), str(dst_path))
+
+            # 5. Re-run uv lock while originals remain available for rollback.
+            subprocess.run(
+                ["uv", "lock"],
+                cwd=str(root),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # 6. Re-validate lock version before committing the transaction.
+            lock_text_final = lock_path.read_text(encoding="utf-8")
+            lock_data_final = tomllib.loads(lock_text_final)
+            hal0ai_final = next(
+                (
+                    p["version"]
+                    for p in lock_data_final.get("package", [])
+                    if p.get("name") == "hal0ai"
+                ),
+                None,
+            )
+            if hal0ai_final != pep440:
+                raise RuntimeError(
+                    f"post-lock re-validation: uv.lock hal0ai version "
+                    f"{hal0ai_final!r} != expected {pep440!r}"
+                )
+        except Exception as update_error:
+            rollback_errors: list[tuple[Path, Path, Exception]] = []
+            for backup_path, dst_path in backups:
+                try:
+                    os.replace(str(backup_path), str(dst_path))
+                except Exception as rollback_error:  # continue restoring every file
+                    rollback_errors.append((backup_path, dst_path, rollback_error))
+            if rollback_errors:
+                preserve_transaction = True
+                # Updated candidates cannot recover original data, so remove any
+                # that were not consumed when it is safe to do so. Cleanup must
+                # never endanger the retained original backups.
+                for candidate_path, _ in temp_paths:
+                    with suppress(OSError):
+                        candidate_path.unlink(missing_ok=True)
+                details = "; ".join(
+                    f"restore {backup_path} -> {dst_path} ({rollback_error!r})"
+                    for backup_path, dst_path, rollback_error in rollback_errors
+                )
+                raise RuntimeError(
+                    f"version update failed ({update_error!r}); ROLLBACK FAILED; "
+                    f"recovery required: {details}"
+                ) from update_error
+            raise
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    # 5. Re-run uv lock and re-validate
-    subprocess.run(
-        ["uv", "lock"],
-        cwd=str(root),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    # 6. Re-validate lock version
-    lock_text_final = lock_path.read_text(encoding="utf-8")
-    lock_data_final = tomllib.loads(lock_text_final)
-    hal0ai_final = next(
-        (p["version"] for p in lock_data_final.get("package", []) if p.get("name") == "hal0ai"),
-        None,
-    )
-    if hal0ai_final != pep440:
-        raise RuntimeError(
-            f"post-lock re-validation: uv.lock hal0ai version "
-            f"{hal0ai_final!r} != expected {pep440!r}"
-        )
+        if not preserve_transaction:
+            shutil.rmtree(tmpdir)
 
 
 def _main() -> None:
     parser = argparse.ArgumentParser(
-        description="Atomically synchronize version across hal0 release artifacts."
+        description=("Synchronize version artifacts with per-file atomic replacement and rollback.")
     )
     parser.add_argument(
         "version",

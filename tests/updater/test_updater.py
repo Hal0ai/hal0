@@ -1,11 +1,11 @@
 """Tests for hal0.updater.Updater — apply, rollback, check semantics.
 
 These tests run entirely against ``HAL0_HOME`` tmp dirs and ``file://``
-release manifests; no network, no real cosign. The ``cosign_skip`` fixture
-stubs :func:`hal0.updater.updater._verify_cosign` to a no-op for the
-happy-path tests so the swap orchestration can be exercised without a real
-signed artifact — cosign verification itself is mandatory in production and
-has no runtime bypass.
+release manifests; no network and no cryptographic claims. Most happy-path
+swap tests use the ``cosign_skip`` verification seam. Preview rehearsal tests
+instead execute the real :func:`hal0.updater.updater._verify_cosign` subprocess
+path against a hermetic fake ``cosign`` executable that validates and records
+its bundle/blob arguments; cosign remains mandatory in production.
 """
 
 from __future__ import annotations
@@ -14,13 +14,17 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
+import sys
 import tarfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import hal0.updater as updater_package
+import hal0.updater.updater as updater_module
 from hal0.updater import (
     ReleaseInfo,
     ReleaseManifest,
@@ -47,6 +51,34 @@ from hal0.updater.updater import (
 )
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+
+
+_IDENTITY_PREFIX = (
+    r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+    r"\.github/workflows/release\.yml@"
+)
+_MAIN_IDENTITY = _IDENTITY_PREFIX + r"refs/heads/main$"
+
+
+def _test_exact_identity(release_kind: str, version: str) -> str:
+    if release_kind == "nightly":
+        return _MAIN_IDENTITY
+    return _IDENTITY_PREFIX + "refs/tags/v" + version.replace(".", r"\.") + "$"
+
+
+VALID_MANIFEST: dict[str, Any] = {
+    "_schema": "hal0.releases.v1",
+    "version": "1.0.0",
+    "channel": "stable",
+    "release_kind": "stable",
+    "url": "https://example.test/hal0.tar.gz",
+    "bundle_url": "https://example.test/hal0.tar.gz.bundle",
+    "digest_sha256": "0" * 64,
+    "signer_identity": (
+        r"^https://github\.com/(Hal0ai|hal0ai)/hal0/"
+        r"\.github/workflows/release\.yml@refs/tags/v1\.0\.0$"
+    ),
+}
 
 
 def _build_release_tarball(
@@ -90,9 +122,9 @@ def _write_release_manifest(
 ) -> dict[str, Any]:
     """Write a full hal0.releases.v1 manifest pointing at file:// URLs.
 
-    The manifest carries a ``bundle_url`` (a Sigstore bundle that embeds the
-    cert + signature + Rekor SET, #1159) — the only signing scheme the
-    updater accepts.
+    The synthetic manifest has the production ``bundle_url`` shape, but its
+    placeholder bundle bytes are only for exercising test verification seams;
+    they are not cryptographic signatures.
     """
     bundle = bundle if bundle is not None else Path(f"{tarball}.bundle")
     if not bundle.exists():
@@ -104,7 +136,6 @@ def _write_release_manifest(
         "url": f"file://{tarball}",
         "bundle_url": f"file://{bundle}",
         "digest_sha256": _sha256_of(tarball),
-        "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
         "signer_issuer": "https://token.actions.githubusercontent.com",
         "min_data_version": 1,
         "released_at": "2026-05-15T12:00:00Z",
@@ -113,8 +144,80 @@ def _write_release_manifest(
     }
     if overrides:
         payload.update(overrides)
+    payload.setdefault(
+        "signer_identity",
+        _test_exact_identity(str(payload.get("release_kind", "stable")), version),
+    )
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    Path(f"{manifest_path}.bundle").write_bytes(b"manifest-bundle-placeholder\n")
     return payload
+
+
+def _install_fake_cosign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, reject: bool = False
+) -> Path:
+    """Install a hermetic cosign verifier that validates pairs and logs argv.
+
+    This exercises the updater's real subprocess wrapper, not cryptography.
+    The executable requires the exact production ``verify-blob`` argument
+    shape, existing files, and a sibling ``<blob>.bundle`` path.
+    """
+    fake_bin = tmp_path / "fake-cosign-bin"
+    fake_bin.mkdir(exist_ok=True)
+    log_path = tmp_path / "fake-cosign-invocations.jsonl"
+    fake = fake_bin / "cosign"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        + """import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if len(args) != 8 or args[0] != "verify-blob":
+    print(f"unexpected cosign argv: {args!r}", file=sys.stderr)
+    raise SystemExit(64)
+if args[1] != "--bundle" or args[3] != "--certificate-identity-regexp":
+    print(f"unexpected cosign flags: {args!r}", file=sys.stderr)
+    raise SystemExit(64)
+if args[5] != "--certificate-oidc-issuer":
+    print(f"unexpected cosign flags: {args!r}", file=sys.stderr)
+    raise SystemExit(64)
+
+bundle = Path(args[2])
+blob = Path(args[7])
+if bundle != Path(f"{blob}.bundle"):
+    print(f"bundle/blob mismatch: {bundle} != {blob}.bundle", file=sys.stderr)
+    raise SystemExit(65)
+if not blob.is_file() or not bundle.is_file():
+    print(f"missing verification input: blob={blob} bundle={bundle}", file=sys.stderr)
+    raise SystemExit(66)
+
+entry = {
+    "args": args,
+    "blob": str(blob),
+    "bundle": str(bundle),
+    "blob_sha256": hashlib.sha256(blob.read_bytes()).hexdigest(),
+    "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
+}
+with Path(os.environ["HAL0_FAKE_COSIGN_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(entry) + "\\n")
+if os.environ.get("HAL0_FAKE_COSIGN_MODE") == "reject":
+    print("synthetic signature rejection", file=sys.stderr)
+    raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("HAL0_FAKE_COSIGN_LOG", str(log_path))
+    monkeypatch.setenv("HAL0_FAKE_COSIGN_MODE", "reject" if reject else "accept")
+    return log_path
+
+
+def _fake_cosign_calls(log_path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
 
 @pytest.fixture
@@ -167,6 +270,40 @@ def synthetic_release(
     }
 
 
+@pytest.fixture
+def synthetic_preview_release(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Build local alpha bytes for the updater's synthetic verification seam.
+
+    The bundle files are placeholders accepted by the fake cosign executable;
+    this fixture does not represent or claim real cryptographic verification.
+    """
+    artifacts = tmp_path / "preview-artifacts"
+    artifacts.mkdir()
+    version = "99.0.0-alpha.1"
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
+    manifest_path = artifacts / "preview-manifest.json"
+    payload = _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version=version,
+        overrides={
+            "channel": "preview",
+            "release_kind": "preview",
+            "prerelease_stage": "alpha",
+        },
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", manifest_path.as_uri())
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    return {
+        "version": version,
+        "tarball": tarball,
+        "manifest_path": manifest_path,
+        "payload": payload,
+    }
+
+
 # ── releases_url ───────────────────────────────────────────────────────────────
 
 
@@ -174,6 +311,7 @@ def test_releases_url_defaults_per_channel(monkeypatch: pytest.MonkeyPatch) -> N
     """Without the override env var the URL is per-channel under releases.hal0.dev."""
     monkeypatch.delenv("HAL0_RELEASES_URL", raising=False)
     assert releases_url("stable") == "https://releases.hal0.dev/stable.json"
+    assert releases_url("preview") == "https://releases.hal0.dev/preview.json"
     assert releases_url("nightly") == "https://releases.hal0.dev/nightly.json"
 
 
@@ -212,10 +350,80 @@ def test_manifest_schema_accepts_full_payload(tmp_path: Path) -> None:
     assert len(m.digest_sha256) == 64
 
 
+@pytest.mark.parametrize(
+    "version",
+    [
+        "1.2.3",
+        "1.2.3-alpha.0",
+        "1.2.3-beta.2",
+        "1.2.3-rc.1",
+        "1.2.3-nightly.20260721060000",
+    ],
+)
+def test_manifest_schema_accepts_canonical_release_versions(version: str) -> None:
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": version})
+    assert manifest.version == version
+
+
+def test_manifest_schema_accepts_legacy_date_only_nightly_version() -> None:
+    version = "1.2.3-nightly.20260721"
+    manifest = _parse_manifest(
+        {
+            **VALID_MANIFEST,
+            "version": version,
+            "channel": "nightly",
+            "release_kind": "nightly",
+        }
+    )
+    assert manifest.version == version
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "../../outside",
+        "1.2.3/../../outside",
+        r"1.2.3\..\outside",
+        "/tmp/outside",
+        " 1.2.3 ",
+        "1.2.3-preview.1",
+        "1.2.3-alpha1",
+        "1.2.3-nightly.2026072",
+        "1.2.3-nightly.202607210",
+        "1.2.3-nightly.2026072106",
+        "1.2.3-nightly.2026072106000",
+        "1.2.3-nightly.202607210600000",
+    ],
+)
+def test_manifest_schema_rejects_hostile_or_noncanonical_versions(version: str) -> None:
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest({**VALID_MANIFEST, "version": version})
+
+
 def test_manifest_schema_rejects_missing_required_fields() -> None:
     """The pydantic schema rejects manifests without bundle_url / digest_sha256."""
     with pytest.raises(UpdateManifestInvalid):
         _parse_manifest({"version": "9.9.9", "url": "https://x/y.tar.gz"})
+
+
+@pytest.mark.parametrize(
+    ("schema_value", "missing"),
+    [
+        pytest.param(None, True, id="missing"),
+        pytest.param("hal0.releases.v2", False, id="unknown"),
+        pytest.param(1, False, id="number"),
+        pytest.param(None, False, id="null"),
+    ],
+)
+def test_manifest_schema_requires_exact_v1_schema(schema_value: object, missing: bool) -> None:
+    payload = dict(VALID_MANIFEST)
+    if missing:
+        payload.pop("_schema")
+    else:
+        payload["_schema"] = schema_value
+
+    with pytest.raises(UpdateManifestInvalid):
+        _parse_manifest(payload)
 
 
 def test_manifest_schema_rejects_malformed_digest() -> None:
@@ -273,6 +481,55 @@ def test_manifest_schema_accepts_revoked(tmp_path: Path) -> None:
 
 
 # ── preview / release-kind manifest validation ────────────────────────────────
+
+
+def test_preview_manifest_accepts_preview_channel() -> None:
+    manifest = _parse_manifest(
+        {
+            **VALID_MANIFEST,
+            "channel": "preview",
+            "release_kind": "preview",
+            "prerelease_stage": "alpha",
+        }
+    )
+    assert updater_module.validate_manifest_for_channel(manifest, "preview") is manifest
+
+
+def test_promoted_stable_manifest_is_accepted_by_preview_channel() -> None:
+    manifest = _parse_manifest(
+        {
+            **VALID_MANIFEST,
+            "channel": "preview",
+            "release_kind": "stable",
+            "prerelease_stage": None,
+        }
+    )
+    assert updater_module.validate_manifest_for_channel(manifest, "preview") is manifest
+
+
+def test_stable_channel_rejects_preview_manifest() -> None:
+    manifest = _parse_manifest(
+        {
+            **VALID_MANIFEST,
+            "channel": "preview",
+            "release_kind": "preview",
+            "prerelease_stage": "alpha",
+        }
+    )
+    with pytest.raises(ValueError, match=r"requested channel.*stable"):
+        updater_module.validate_manifest_for_channel(manifest, "stable")
+
+
+def test_requested_channel_must_match_manifest_channel() -> None:
+    manifest = _parse_manifest({**VALID_MANIFEST, "channel": "nightly", "release_kind": "nightly"})
+    with pytest.raises(ValueError, match=r"manifest channel.*nightly"):
+        updater_module.validate_manifest_for_channel(manifest, "preview")
+
+
+def test_unknown_requested_channel_is_rejected() -> None:
+    manifest = _parse_manifest(VALID_MANIFEST)
+    with pytest.raises(ValueError, match="unknown requested channel"):
+        updater_module.validate_manifest_for_channel(manifest, "beta")
 
 
 def test_manifest_schema_accepts_alpha_preview() -> None:
@@ -411,7 +668,9 @@ def test_manifest_schema_defaults_for_old_stable() -> None:
 # ── check ──────────────────────────────────────────────────────────────────────
 
 
-def test_check_returns_typed_release_info(synthetic_release: dict[str, Any]) -> None:
+def test_check_returns_typed_release_info(
+    synthetic_release: dict[str, Any], cosign_skip: None
+) -> None:
     """Updater.check() returns a ReleaseInfo dataclass with the manifest fields."""
     info = asyncio.run(Updater().check())
     assert isinstance(info, ReleaseInfo)
@@ -420,6 +679,280 @@ def test_check_returns_typed_release_info(synthetic_release: dict[str, Any]) -> 
     assert info.digest_sha256 == synthetic_release["payload"]["digest_sha256"]
     assert info.signer_identity == synthetic_release["payload"]["signer_identity"]
     assert info.update_available is True or info.update_available is False  # type sanity
+
+
+def test_preview_check_and_prepare_exercise_cosign_subprocess_without_activation(
+    synthetic_preview_release: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Rehearse preview verification plumbing with synthetic file:// inputs."""
+    cosign_log = _install_fake_cosign(tmp_path, monkeypatch)
+    download_urls: list[str] = []
+    original_download = updater_module._download
+
+    async def record_local_download(url: str, destination: Path) -> None:
+        download_urls.append(url)
+        await original_download(url, destination)
+
+    monkeypatch.setattr(updater_module, "_download", record_local_download)
+
+    updater = Updater(channel="preview")
+    info = asyncio.run(updater.check())
+
+    version = synthetic_preview_release["version"]
+    manifest_path = synthetic_preview_release["manifest_path"]
+    payload = synthetic_preview_release["payload"]
+    assert info.latest == version
+    assert info.channel == "preview"
+    assert info.raw_manifest["release_kind"] == "preview"
+    assert not updater_module._cache_dir(version).exists()
+
+    prepared = asyncio.run(updater.prepare())
+
+    assert prepared["version"] == version
+    assert Path(prepared["install_dir"]).is_dir()
+    assert updater_module._manifest_cache_path(version).is_file()
+    assert not _current_symlink().is_symlink()
+    assert download_urls == [
+        f"{manifest_path.as_uri()}.bundle",
+        f"{manifest_path.as_uri()}.bundle",
+        payload["url"],
+        payload["bundle_url"],
+    ]
+    assert all(url.startswith("file://") for url in download_urls)
+
+    verification_calls = _fake_cosign_calls(cosign_log)
+    assert [Path(call["blob"]).name for call in verification_calls] == [
+        "manifest.json",
+        "manifest.json",
+        "manifest.json",
+        "manifest.json",
+        synthetic_preview_release["tarball"].name,
+    ]
+    manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    manifest_bundle_digest = hashlib.sha256(
+        Path(f"{manifest_path}.bundle").read_bytes()
+    ).hexdigest()
+    for index, call in enumerate(verification_calls[:4]):
+        assert call["blob_sha256"] == manifest_digest
+        assert call["bundle_sha256"] == manifest_bundle_digest
+        expected_identity = (
+            updater_module.manifest_admission_identity("preview")
+            if index % 2 == 0
+            else payload["signer_identity"]
+        )
+        assert call["args"] == [
+            "verify-blob",
+            "--bundle",
+            call["bundle"],
+            "--certificate-identity-regexp",
+            expected_identity,
+            "--certificate-oidc-issuer",
+            updater_module._MANIFEST_SIGNER_ISSUER,
+            call["blob"],
+        ]
+
+    artifact_call = verification_calls[4]
+    cached_tarball = updater_module._cache_dir(version) / f"hal0-{version}.tar.gz"
+    assert artifact_call["blob"] == str(cached_tarball)
+    assert artifact_call["bundle"] == f"{cached_tarball}.bundle"
+    assert artifact_call["blob_sha256"] == _sha256_of(synthetic_preview_release["tarball"])
+    assert artifact_call["args"] == [
+        "verify-blob",
+        "--bundle",
+        str(Path(f"{cached_tarball}.bundle")),
+        "--certificate-identity-regexp",
+        payload["signer_identity"],
+        "--certificate-oidc-issuer",
+        payload["signer_issuer"],
+        str(cached_tarball),
+    ]
+
+
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+def test_preview_manifest_verification_failure_leaves_no_staged_state(
+    operation: str,
+    synthetic_preview_release: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A fake-cosign rejection cannot reach artifact staging or activation."""
+    cosign_log = _install_fake_cosign(tmp_path, monkeypatch, reject=True)
+    download_urls: list[str] = []
+    original_download = updater_module._download
+
+    async def record_local_download(url: str, destination: Path) -> None:
+        download_urls.append(url)
+        await original_download(url, destination)
+
+    monkeypatch.setattr(updater_module, "_download", record_local_download)
+
+    updater = Updater(channel="preview")
+    with pytest.raises(UpdateCosignFailed):
+        asyncio.run(getattr(updater, operation)())
+
+    version = synthetic_preview_release["version"]
+    manifest_path = synthetic_preview_release["manifest_path"]
+    assert download_urls == [f"{manifest_path.as_uri()}.bundle"]
+    assert len(_fake_cosign_calls(cosign_log)) == 1
+    assert not updater_module._cache_dir(version).exists()
+    assert not updater_module._manifest_cache_path(version).exists()
+    assert not _versioned_install_dir(version).exists()
+    assert not _current_symlink().is_symlink()
+
+
+def test_check_uses_channel_admission_before_parsing_untrusted_manifest(
+    synthetic_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Untrusted JSON fields cannot influence the first verification identity."""
+    payload = synthetic_release["payload"]
+    payload.update(
+        release_kind="nightly",
+        signer_identity=_MAIN_IDENTITY,
+    )
+    synthetic_release["manifest_path"].write_text(json.dumps(payload), encoding="utf-8")
+    events: list[tuple[str, str]] = []
+    original_decode = updater_module._decode_release_manifest
+
+    def record_verify(
+        blob: Path,
+        bundle: Path,
+        *,
+        identity_regexp: str,
+        issuer: str,
+        job_id: str | None = None,
+    ) -> None:
+        events.append(("verify", identity_regexp))
+
+    def record_decode(raw_bytes: bytes, url: str) -> dict[str, Any]:
+        events.append(("decode", ""))
+        return original_decode(raw_bytes, url)
+
+    monkeypatch.setattr(updater_module, "_verify_cosign", record_verify)
+    monkeypatch.setattr(updater_module, "_decode_release_manifest", record_decode)
+
+    with pytest.raises(UpdateManifestInvalid):
+        asyncio.run(Updater(channel="stable").check())
+
+    assert events == [
+        ("verify", updater_module.manifest_admission_identity("stable")),
+        ("decode", ""),
+    ]
+    assert _MAIN_IDENTITY not in [value for event, value in events if event == "verify"]
+
+
+def test_authenticated_manifest_rejects_broad_signer_before_exact_reverify(
+    synthetic_release: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = synthetic_release["payload"]
+    payload["signer_identity"] = updater_module.manifest_admission_identity("preview")
+    synthetic_release["manifest_path"].write_text(json.dumps(payload), encoding="utf-8")
+    identities: list[str] = []
+
+    def record_verify(
+        blob: Path,
+        bundle: Path,
+        *,
+        identity_regexp: str,
+        issuer: str,
+        job_id: str | None = None,
+    ) -> None:
+        identities.append(identity_regexp)
+
+    monkeypatch.setattr(updater_module, "_verify_cosign", record_verify)
+
+    with pytest.raises(UpdateManifestInvalid, match="signer_identity"):
+        asyncio.run(Updater(channel="stable").check())
+
+    assert identities == [updater_module.manifest_admission_identity("stable")]
+
+
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+def test_authenticated_manifest_rejects_forged_issuer_before_artifact_download(
+    operation: str,
+    synthetic_release: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = synthetic_release["payload"]
+    payload["signer_issuer"] = "https://issuer.attacker.example"
+    synthetic_release["manifest_path"].write_text(json.dumps(payload), encoding="utf-8")
+    verified_issuers: list[str] = []
+    downloads: list[str] = []
+    original_download = updater_module._download
+
+    def record_verify(
+        blob: Path,
+        bundle: Path,
+        *,
+        identity_regexp: str,
+        issuer: str,
+        job_id: str | None = None,
+    ) -> None:
+        verified_issuers.append(issuer)
+
+    async def record_download(url: str, destination: Path) -> None:
+        downloads.append(url)
+        await original_download(url, destination)
+
+    monkeypatch.setattr(updater_module, "_verify_cosign", record_verify)
+    monkeypatch.setattr(updater_module, "_download", record_download)
+
+    with pytest.raises(UpdateManifestInvalid, match="signer_issuer"):
+        asyncio.run(getattr(Updater(channel="stable"), operation)())
+
+    manifest_path = synthetic_release["manifest_path"]
+    assert verified_issuers == [updater_module._MANIFEST_SIGNER_ISSUER]
+    assert downloads == [f"{manifest_path}.bundle"]
+    assert not updater_module._cache_dir(synthetic_release["version"]).exists()
+    assert not _current_symlink().exists()
+
+
+@pytest.mark.parametrize(
+    ("channel", "accepted", "rejected"),
+    [
+        (
+            "stable",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/main",
+        ),
+        (
+            "preview",
+            "https://github.com/hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3-rc.1",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/main",
+        ),
+        (
+            "nightly",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/heads/main",
+            "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3-nightly.20260722123000",
+        ),
+    ],
+)
+def test_manifest_admission_identity_is_channel_scoped(
+    channel: str, accepted: str, rejected: str
+) -> None:
+    identity = updater_module.manifest_admission_identity(channel)
+    assert re.fullmatch(identity, accepted)
+    assert re.fullmatch(identity, rejected) is None
+
+
+def test_preview_admission_accepts_promoted_stable_tag() -> None:
+    identity = updater_module.manifest_admission_identity("preview")
+    subject = "https://github.com/Hal0ai/hal0/.github/workflows/release.yml@refs/tags/v1.2.3"
+    assert re.fullmatch(identity, subject)
+
+
+@pytest.mark.parametrize(
+    ("release_kind", "version", "expected"),
+    [
+        ("stable", "1.2.3", _test_exact_identity("stable", "1.2.3")),
+        ("preview", "1.2.3-beta.4", _test_exact_identity("preview", "1.2.3-beta.4")),
+        ("nightly", "1.2.3-nightly.20260722123000", _MAIN_IDENTITY),
+        ("nightly", "1.2.3-nightly.20260722", _MAIN_IDENTITY),
+    ],
+)
+def test_exact_manifest_identity_matrix(release_kind: str, version: str, expected: str) -> None:
+    assert updater_module.exact_manifest_identity(release_kind, version) == expected
 
 
 def test_check_handles_missing_manifest(
@@ -431,8 +964,79 @@ def test_check_handles_missing_manifest(
         asyncio.run(Updater().check())
 
 
+def test_check_rejects_wrong_channel_manifest(
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cosign_skip: None,
+) -> None:
+    """check() rejects a manifest that prepare() would reject for the channel."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    tarball = _build_release_tarball(tmp=artifacts, version="99.0.0")
+    manifest_path = artifacts / "latest.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version="99.0.0",
+        overrides={"channel": "nightly", "release_kind": "nightly"},
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").check())
+
+    assert exc_info.value.code == "system.update_manifest_invalid"
+    assert exc_info.value.details["channel"] == "stable"
+
+
+def test_prepare_rejects_wrong_channel_before_download_or_cache_write(
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cosign_skip: None,
+) -> None:
+    """prepare() validates channel coherence before creating staged state."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    tarball = _build_release_tarball(tmp=artifacts, version="99.0.0")
+    manifest_path = artifacts / "latest.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version="99.0.0",
+        overrides={"channel": "nightly", "release_kind": "nightly"},
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    downloads: list[str] = []
+
+    async def record_download(url: str, destination: Path) -> None:
+        downloads.append(url)
+
+    monkeypatch.setattr(updater_module, "_download", record_download)
+
+    with pytest.raises(UpdateManifestInvalid):
+        asyncio.run(Updater(channel="stable").prepare())
+
+    assert downloads == [f"{manifest_path}.bundle"]
+    assert not updater_module._cache_dir("99.0.0").exists()
+
+
+def test_validate_manifest_for_channel_is_public_export() -> None:
+    """The shared channel validator is available from the updater package."""
+    assert "validate_manifest_for_channel" in updater_package.__all__
+    assert (
+        updater_package.validate_manifest_for_channel
+        is updater_module.validate_manifest_for_channel
+    )
+
+
 def test_check_does_not_recommend_revoked_latest(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cosign_skip: None,
 ) -> None:
     """A revoked latest manifest is NOT reported as an available update."""
     artifacts = tmp_path / "artifacts"
@@ -456,7 +1060,10 @@ def test_check_does_not_recommend_revoked_latest(
 
 
 def test_check_recommends_non_revoked_newer_latest(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cosign_skip: None,
 ) -> None:
     """A non-revoked newer manifest IS reported as an available update."""
     artifacts = tmp_path / "artifacts"
@@ -656,6 +1263,189 @@ def test_apply_repip_failure_rolls_back_symlink(
 # ── prepare / commit split ─────────────────────────────────────────────────────
 
 
+def test_prepare_rejects_mismatched_pin_before_staging_paths(
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An authenticated channel manifest cannot be staged under a caller label."""
+    requested_version = "0.0.2"
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"})
+
+    async def fake_fetch(
+        channel: str, *, job_id: str | None = None
+    ) -> tuple[dict[str, Any], ReleaseManifest, str]:
+        return manifest.model_dump(by_alias=True), manifest, "https://example.test/stable.json"
+
+    async def unexpected_download(url: str, dest: Path) -> None:
+        raise AssertionError(f"artifact download reached for mismatched pin: {url} -> {dest}")
+
+    def unexpected_path(version: str) -> Path:
+        raise AssertionError(f"staging path constructed for mismatched pin: {version}")
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_fetch_verified_release_manifest", fake_fetch)
+    monkeypatch.setattr(updater_module, "_download", unexpected_download)
+    monkeypatch.setattr(updater_module, "_cache_dir", unexpected_path)
+    monkeypatch.setattr(updater_module, "_versioned_install_dir", unexpected_path)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").prepare(requested_version))
+
+    assert exc_info.value.details == {
+        "channel": "stable",
+        "requested_version": requested_version,
+        "manifest_version": "0.0.1",
+    }
+
+
+@pytest.mark.parametrize(
+    "requested_version",
+    [
+        "../../outside",
+        "1.2.3/../../outside",
+        r"1.2.3\..\outside",
+        "/tmp/outside",
+        " 0.0.1 ",
+        "1.2.3-preview.1",
+        "1.2.3-nightly.2026072",
+        "1.2.3-nightly.202607210",
+        "1.2.3-nightly.2026072106",
+    ],
+)
+def test_prepare_rejects_invalid_pin_before_staging_paths(
+    requested_version: str,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"})
+
+    async def fake_fetch(
+        channel: str, *, job_id: str | None = None
+    ) -> tuple[dict[str, Any], ReleaseManifest, str]:
+        return manifest.model_dump(by_alias=True), manifest, "https://example.test/stable.json"
+
+    def unexpected_path(version: str) -> Path:
+        raise AssertionError(f"staging path constructed for invalid pin: {version}")
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_fetch_verified_release_manifest", fake_fetch)
+    monkeypatch.setattr(updater_module, "_cache_dir", unexpected_path)
+    monkeypatch.setattr(updater_module, "_manifest_cache_path", unexpected_path)
+    monkeypatch.setattr(updater_module, "_versioned_install_dir", unexpected_path)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").prepare(requested_version))
+
+    assert exc_info.value.status == 400
+    assert exc_info.value.details["requested_version"] == requested_version
+
+
+@pytest.mark.parametrize("manifest_version", ["../../outside", "/tmp/outside", r"1.2.3\x"])
+def test_prepare_revalidates_manifest_version_before_staging_paths(
+    manifest_version: str,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense in depth holds even if a caller bypasses pydantic construction."""
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"}).model_copy(
+        update={"version": manifest_version}
+    )
+
+    async def fake_fetch(
+        channel: str, *, job_id: str | None = None
+    ) -> tuple[dict[str, Any], ReleaseManifest, str]:
+        return {**VALID_MANIFEST, "version": manifest_version}, manifest, "https://example.test/x"
+
+    def unexpected_path(version: str) -> Path:
+        raise AssertionError(f"staging path constructed for invalid manifest: {version}")
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_fetch_verified_release_manifest", fake_fetch)
+    monkeypatch.setattr(updater_module, "_cache_dir", unexpected_path)
+    monkeypatch.setattr(updater_module, "_manifest_cache_path", unexpected_path)
+    monkeypatch.setattr(updater_module, "_versioned_install_dir", unexpected_path)
+
+    with pytest.raises(UpdateManifestInvalid):
+        asyncio.run(Updater(channel="stable").prepare())
+
+
+def test_prepare_matching_pin_stages_authenticated_manifest_version(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+) -> None:
+    """An exact optimistic pin preserves the normal prepare flow."""
+    res = asyncio.run(Updater().prepare("0.0.1"))
+
+    assert res["version"] == "0.0.1"
+    assert _versioned_install_dir("0.0.1").is_dir()
+    assert updater_module._manifest_cache_path("0.0.1").is_file()
+
+
+def test_legacy_nightly_exact_prepare_pin_and_commit_are_accepted(
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cosign_skip: None,
+) -> None:
+    """Legacy date-only nightlies remain readable, stageable, and installable."""
+    version = "1.2.3-nightly.20260721"
+    artifacts = tmp_path / "legacy-nightly-artifacts"
+    artifacts.mkdir()
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
+    manifest_path = artifacts / "nightly.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version=version,
+        overrides={"channel": "nightly", "release_kind": "nightly"},
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(
+        updater_module,
+        "_reinstall_into_venv",
+        lambda install_dir, *, job_id=None: None,
+    )
+
+    updater = Updater(channel="nightly")
+    prepared = asyncio.run(updater.prepare(version))
+    committed = asyncio.run(updater.commit(version))
+
+    assert prepared["version"] == version
+    assert committed["version"] == version
+    assert Path(os.readlink(_current_symlink())).name == f"hal0-{version}"
+
+
+def test_apply_mismatched_pin_never_commits(
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single-step apply propagates pin mismatch without activation."""
+    manifest = ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"})
+    committed = False
+
+    async def fake_fetch(
+        channel: str, *, job_id: str | None = None
+    ) -> tuple[dict[str, Any], ReleaseManifest, str]:
+        return manifest.model_dump(by_alias=True), manifest, "https://example.test/stable.json"
+
+    async def fake_commit(version: str) -> dict[str, Any]:
+        nonlocal committed
+        committed = True
+        return {}
+
+    updater = Updater(channel="stable")
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_fetch_verified_release_manifest", fake_fetch)
+    monkeypatch.setattr(updater, "commit", fake_commit)
+
+    with pytest.raises(UpdateManifestInvalid):
+        asyncio.run(updater.apply("0.0.2"))
+
+    assert committed is False
+    assert not _current_symlink().exists()
+
+
 def test_prepare_stages_without_swap(synthetic_release: dict[str, Any], cosign_skip: None) -> None:
     """prepare() downloads + verifies + extracts but activates nothing.
 
@@ -688,6 +1478,130 @@ def test_commit_without_prepare_raises(tmp_hal0_home: str, monkeypatch: pytest.M
     monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
     with pytest.raises(UpdateError):
         asyncio.run(Updater().commit("0.0.1"))
+
+
+@pytest.mark.parametrize(
+    "commit_version",
+    [
+        "../../outside",
+        "1.2.3/../../outside",
+        r"1.2.3\..\outside",
+        "/tmp/outside",
+        " 1.2.3 ",
+        "1.2.3-preview.1",
+        "1.2.3-nightly.2026072",
+        "1.2.3-nightly.202607210",
+        "1.2.3-nightly.2026072106",
+    ],
+)
+def test_commit_rejects_invalid_version_before_any_staging_path(
+    commit_version: str,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_path(version: str) -> Path:
+        raise AssertionError(f"staging path constructed for invalid commit: {version}")
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_module, "_cache_dir", unexpected_path)
+    monkeypatch.setattr(updater_module, "_manifest_cache_path", unexpected_path)
+    monkeypatch.setattr(updater_module, "_versioned_install_dir", unexpected_path)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater().commit(commit_version))
+
+    assert exc_info.value.status == 400
+    assert exc_info.value.details["commit_version"] == commit_version
+    home = Path(tmp_hal0_home)
+    assert not (home / "var-lib" / "hal0" / "cache").exists()
+    assert not (home / "usr-lib" / "hal0").exists()
+
+
+def test_commit_rejects_cached_manifest_for_different_version(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """commit() never activates a staged tree whose cached manifest names another version."""
+    target_version = "0.0.1"
+    install_dir = _versioned_install_dir(target_version)
+    install_dir.mkdir(parents=True)
+    manifest_path = updater_module._manifest_cache_path(target_version)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps({**VALID_MANIFEST, "version": "0.0.2"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").commit(target_version))
+
+    assert exc_info.value.details == {
+        "channel": "stable",
+        "target_version": target_version,
+        "manifest_version": "0.0.2",
+    }
+    assert not _current_symlink().exists()
+
+
+def test_commit_revalidates_cached_manifest_channel_before_activation(
+    synthetic_preview_release: dict[str, Any],
+    cosign_skip: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version = synthetic_preview_release["version"]
+    asyncio.run(Updater(channel="preview").prepare())
+    side_effects: list[str] = []
+
+    def unexpected_migration(*args: Any, **kwargs: Any) -> tuple[int, int]:
+        side_effects.append("migration")
+        return (1, 1)
+
+    def unexpected_swap(*args: Any, **kwargs: Any) -> None:
+        side_effects.append("symlink")
+
+    monkeypatch.setattr(updater_module, "_maybe_run_config_migrations", unexpected_migration)
+    monkeypatch.setattr(updater_module, "_atomic_symlink_swap", unexpected_swap)
+
+    with pytest.raises(UpdateManifestInvalid) as exc_info:
+        asyncio.run(Updater(channel="stable").commit(version))
+
+    assert exc_info.value.details["channel"] == "stable"
+    assert side_effects == []
+    assert not _current_symlink().exists()
+    assert _versioned_install_dir(version).is_dir()
+
+
+def test_preview_commit_accepts_promoted_stable_manifest(
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cosign_skip: None,
+) -> None:
+    version = "99.0.0"
+    artifacts = tmp_path / "promoted-stable-artifacts"
+    artifacts.mkdir()
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
+    manifest_path = artifacts / "preview.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version=version,
+        overrides={"channel": "preview", "release_kind": "stable"},
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(
+        updater_module,
+        "_reinstall_into_venv",
+        lambda install_dir, *, job_id=None: None,
+    )
+
+    updater = Updater(channel="preview")
+    asyncio.run(updater.prepare())
+    committed = asyncio.run(updater.commit(version))
+
+    assert committed["version"] == version
+    assert Path(os.readlink(_current_symlink())).name == f"hal0-{version}"
 
 
 def test_prepare_then_commit_swaps(synthetic_release: dict[str, Any], cosign_skip: None) -> None:
@@ -1012,25 +1926,27 @@ def test_rollback_repip_failure_re_swaps_symlink_forward(
 
 
 def test_check_uses_per_channel_url(
-    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cosign_skip: None,
 ) -> None:
-    """The check() method honours the channel argument when looking up the URL.
-
-    With HAL0_RELEASES_URL set to a file:// path, the channel parameter
-    doesn't rewrite the URL but the returned ReleaseInfo.channel reflects
-    the requested channel — exactly the contract the route layer needs.
-    """
+    """The check() method honours its channel argument when looking up the URL."""
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    tarball = _build_release_tarball(tmp=artifacts, version="0.0.1")
+    version = "0.0.1-nightly.20260722123000"
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
     manifest_path = artifacts / "latest.json"
-    _write_release_manifest(manifest_path=manifest_path, tarball=tarball, version="0.0.1")
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        version=version,
+        overrides={"channel": "nightly", "release_kind": "nightly"},
+    )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
 
-    info_stable = asyncio.run(Updater(channel="stable").check())
-    info_nightly = asyncio.run(Updater(channel="nightly").check())
-    assert info_stable.channel == "stable"
-    assert info_nightly.channel == "nightly"
+    info = asyncio.run(Updater(channel="stable").check(channel="nightly"))
+    assert info.channel == "nightly"
 
 
 # ── #510: dead-code sweep ──────────────────────────────────────────────────────
