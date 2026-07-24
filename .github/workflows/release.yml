@@ -120,6 +120,9 @@ jobs:
         env:
           TAG: ${{ steps.requested.outputs.tag }}
           INPUT_CHANNEL: ${{ inputs.channel }}
+          # Reusable workflows inherit the caller's github context, including
+          # event_name and workflow_ref. Authenticate that caller explicitly.
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
           if ! git show-ref --verify --quiet "refs/tags/${TAG}"; then
             echo "::error::requested ref is not a tag: refs/tags/${TAG}"
@@ -144,10 +147,23 @@ jobs:
           # stable/preview execute directly at their immutable tag ref.
           IDENT_PREFIX='^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@'
           if [[ "${KIND}" == "nightly" ]]; then
-            if [[ "${GITHUB_EVENT_NAME}" != "workflow_call" ]]; then
-              echo "::error::nightly releases require workflow_call"
+            # In a reusable workflow, github.event_name remains the caller's
+            # original event (schedule or workflow_dispatch); it is not
+            # rewritten to workflow_call. github.workflow_ref likewise names
+            # the caller, so bind nightly authority to the canonical scheduler
+            # on main instead of relying on the inherited event name alone.
+            EXPECTED_NIGHTLY_CALLER='hal0ai/hal0/.github/workflows/nightly.yml@refs/heads/main'
+            if [[ "${CALLER_WORKFLOW_REF,,}" != "${EXPECTED_NIGHTLY_CALLER}" ]]; then
+              echo "::error::nightly release caller ${CALLER_WORKFLOW_REF} must be ${EXPECTED_NIGHTLY_CALLER}"
               exit 1
             fi
+            case "${GITHUB_EVENT_NAME}" in
+              schedule | workflow_dispatch) ;;
+              *)
+                echo "::error::nightly caller event ${GITHUB_EVENT_NAME} must be schedule or workflow_dispatch"
+                exit 1
+                ;;
+            esac
             if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
               echo "::error::nightly release workflow must execute from refs/heads/main"
               exit 1

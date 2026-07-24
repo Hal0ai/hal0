@@ -125,6 +125,18 @@ def test_resolve_uses_only_tag_namespace_and_exports_target_sha() -> None:
     assert 'echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"' in text
 
 
+def test_nightly_release_authenticates_the_inherited_caller_context() -> None:
+    step = _step("resolve", "Verify requested tag and export policy")
+    assert step["env"]["CALLER_WORKFLOW_REF"] == "${{ github.workflow_ref }}"
+
+    run = step["run"]
+    assert "hal0ai/hal0/.github/workflows/nightly.yml@refs/heads/main" in run.lower()
+    assert '"${CALLER_WORKFLOW_REF,,}"' in run
+    assert '"${GITHUB_REF}" != "refs/heads/main"' in run
+    assert "schedule | workflow_dispatch" in run
+    assert '"${GITHUB_EVENT_NAME}" != "workflow_call"' not in run
+
+
 def test_release_checkouts_pin_canonical_repository_tag_and_sha() -> None:
     checkouts = [
         step
