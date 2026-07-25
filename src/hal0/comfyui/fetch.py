@@ -189,7 +189,13 @@ def _run_sequence(rec: dict, script_path: str, fetch_steps: tuple[tuple[str, ...
             return
 
         cmd = ["bash", script_path, *step_args]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+        # Discard the child's stdout/stderr rather than capturing to a PIPE we
+        # never read: proc.wait() on an unread PIPE deadlocks once the child
+        # fills the ~64 KB OS pipe buffer, and the get_*.sh downloaders emit
+        # MBs of hf progress (Popen docs' deadlock warning). Nothing here ever
+        # consumed the captured bytes, so DEVNULL is behaviour-preserving for
+        # callers while removing the hang — and keeps wait() as the join point.
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         rec["_proc"] = proc
 
         rc = proc.wait()
