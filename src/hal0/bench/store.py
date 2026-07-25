@@ -173,18 +173,22 @@ class Store:
                     ),
                 )
                 n += 1
-            # current_cells: newest ok record per cell_key. run_id sorts
-            # lexicographically by its leading UTC stamp, so MAX(run_id) among ok
-            # rows is the newest ok record for the key.
+            # current_cells: newest ok record per cell_key. "Newest" is APPEND
+            # order (rowid_seq is AUTOINCREMENT in insertion = chronological
+            # order), matching newest_ok_by_cell()'s source-of-truth definition
+            # ("later ok records overwrite earlier ones"). MAX(run_id) is wrong:
+            # run_id is "<UTC-stamp>-<random hex>", so two ok records that share a
+            # wall-clock second (v1 imports, fast re-measures) tie-break on the
+            # RANDOM suffix and can surface an OLDER record as current.
             conn.executescript(
                 """
                 CREATE VIEW current_cells AS
                 SELECT r.* FROM records r
                 JOIN (
-                    SELECT cell_key, MAX(run_id) AS newest_ok
+                    SELECT cell_key, MAX(rowid_seq) AS newest_ok
                     FROM records WHERE outcome = 'ok'
                     GROUP BY cell_key
-                ) w ON r.cell_key = w.cell_key AND r.run_id = w.newest_ok;
+                ) w ON r.rowid_seq = w.newest_ok;
                 """
             )
             conn.commit()

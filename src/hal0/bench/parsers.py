@@ -187,7 +187,10 @@ def _sa_run_to_rep(run: dict) -> Rep | None:
         return None
     draft_n = run.get("draft_n")
     accepted = run.get("draft_n_accepted")
-    accept = (accepted / draft_n) if draft_n else None
+    # Acceptance is only computable when BOTH counts are present: a spec run can
+    # report draft_n without a paired draft_n_accepted (null/older timings), and
+    # `None / draft_n` would crash the whole cell parse. Unknowable → null.
+    accept = (accepted / draft_n) if (draft_n and accepted is not None) else None
     return Rep(
         t_s=run.get("wall_s"),
         prefill_ts=run.get("prompt_per_second"),
