@@ -488,7 +488,12 @@ def toolbox_pull(
             rows.append(_probe_one(name, entry, client=client))
 
     if json_output:
-        console.print_json(jsonlib.dumps(rows))
+        # Machine-output contract: emit plain, parseable JSON. rich's
+        # ``console.print_json`` re-highlights with ANSI escapes whenever it
+        # thinks it's on a terminal (which its heuristics report as True even
+        # when stdout is piped — e.g. ``… --json | jq``), corrupting the
+        # bytes a consumer parses. Print the raw dump straight to stdout.
+        print(jsonlib.dumps(rows, indent=2))
     else:
         table = Table(title="ghcr.io toolbox-image pull probe (anonymous)")
         table.add_column("Image", style="bold")
