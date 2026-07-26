@@ -67,6 +67,22 @@ async function seedSlots(page: Page, slots: any[]) {
 // were removed with the surface they covered. The remaining tests exercise the
 // slot *edit drawer* (opened via the #slots/:name route), which is unchanged.
 
+// spec-hw-slot-ownership §1 assertion helper. Matches the field LABEL exactly
+// rather than the row's full text: Playwright's `hasText` string form is a
+// case-INSENSITIVE substring match, so `hasText: 'MTP'` also matched the Model
+// row whenever the model dropdown carried a model whose *name* contains "mtp"
+// (the fixture catalogue has fictional `qwen3.6-27b-mtp` entries) — a false
+// red that says nothing about whether a pill is present.
+async function expectNoModelOwnedPills(page: Page) {
+  for (const label of [/^Reasoning$/, /^MTP$/, /^Vision$/]) {
+    await expect(
+      page.locator('.drawer .form-row').filter({
+        has: page.locator('.form-lbl > span', { hasText: label }),
+      }),
+    ).toHaveCount(0)
+  }
+}
+
 test.describe('Slot edit controls (/slots)', () => {
   test('C4 — Reasoning/MTP/Vision pills are gone from the slot drawer (llm slot)', async ({ page }) => {
     // spec-hw-slot-ownership §1: these are model-owned typed capabilities
@@ -75,18 +91,14 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/primary')
     await expect(page.locator('.drawer')).toBeVisible()
-    await expect(page.locator('.drawer .form-row', { hasText: 'Reasoning' })).toHaveCount(0)
-    await expect(page.locator('.drawer .form-row', { hasText: 'MTP' })).toHaveCount(0)
-    await expect(page.locator('.drawer .form-row', { hasText: 'Vision' })).toHaveCount(0)
+    await expectNoModelOwnedPills(page)
   })
 
   test('C4 — Reasoning/MTP/Vision pills are gone for non-llm slots too', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/embed')
     await expect(page.locator('.drawer')).toBeVisible()
-    await expect(page.locator('.drawer .form-row', { hasText: 'Reasoning' })).toHaveCount(0)
-    await expect(page.locator('.drawer .form-row', { hasText: 'MTP' })).toHaveCount(0)
-    await expect(page.locator('.drawer .form-row', { hasText: 'Vision' })).toHaveCount(0)
+    await expectNoModelOwnedPills(page)
   })
 
   test('C5 — NGL lives in the HW grid, editable with the -1 default', async ({ page }) => {
@@ -322,7 +334,7 @@ test.describe('Slot edit controls (/slots)', () => {
       has: page.locator('.field-group-label', { hasText: /^Model$/ }),
     })
     const contextRow = modelGroup.locator('.form-row').filter({
-      has: page.locator('.form-lbl > span', { hasText: /^Context$/ }),
+      has: page.locator('.form-lbl > span', { hasText: /^Context \(slot override\)$/ }),
     })
     await expect(contextRow).toBeVisible()
     await contextRow.locator('input').fill('16384')

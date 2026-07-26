@@ -98,7 +98,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
       has: page.locator('.field-group-label', { hasText: /^Model$/ }),
     })
     const contextRow = modelGroup.locator('.form-row').filter({
-      has: page.locator('.form-lbl > span', { hasText: /^Context$/ }),
+      has: page.locator('.form-lbl > span', { hasText: /^Context \(slot override\)$/ }),
     })
     const ctxInput = contextRow.locator('input')
     await expect(ctxInput).toBeVisible()
