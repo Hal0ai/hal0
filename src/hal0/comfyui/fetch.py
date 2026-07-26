@@ -189,7 +189,11 @@ def _run_sequence(rec: dict, script_path: str, fetch_steps: tuple[tuple[str, ...
             return
 
         cmd = ["bash", script_path, *step_args]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+        # Drain child output to /dev/null: it was never read anywhere, and an
+        # unread stdout=PIPE deadlocks proc.wait() once the child fills the
+        # ~64 KB OS pipe buffer (a real `hf` download emits MBs of progress) —
+        # the fetch job then hangs in `running` forever.
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         rec["_proc"] = proc
 
         rc = proc.wait()
