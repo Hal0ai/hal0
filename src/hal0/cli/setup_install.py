@@ -23,16 +23,32 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import os
+import time
 
 import httpx
 import typer
 
 from hal0.cli._shared import _api_base, _auth_headers
 
+log = logging.getLogger(__name__)
+
+# Default HTTP timeout for ``POST /api/install/apply-selections``. The endpoint
+# is heavy on cold-start (Python imports + module load + hermes preflight +
+# pip --no-index cache hit), so 30s was too tight (issue: 150lxc installer
+# timeout — see ``docs/rework/deploy-validation/2026-07-21-installer-150lxc.md``).
+# 300s (5 min) covers the long tail of slow hardware without hanging past the
+# "user has given up and refreshed the page" ceiling. Operators on known-slow
+# or known-fast hardware can override via ``HAL0_SETUP_TIMEOUT_SECS``.
+try:
+    SETUP_HTTP_TIMEOUT_SECS = float(os.environ.get("HAL0_SETUP_TIMEOUT_SECS", "300.0"))
+except ValueError:
+    SETUP_HTTP_TIMEOUT_SECS = 300.0
+
 # Imported as a MODULE ATTRIBUTE (not `from ... import _api_reachable` used at
 # call-site only) so tests can monkeypatch ``hal0.cli.setup_install._api_reachable``.
-from hal0.cli.setup_command import _api_reachable
+from hal0.cli.setup_command import _api_reachable  # noqa: E402
 
 
 def choose_apply_mode() -> str:
@@ -231,8 +247,12 @@ async def _apply_via_api(sel) -> None:
     """
     payload = dataclasses.asdict(sel)
     url = f"{_api_base()}/api/install/apply-selections"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), headers=_auth_headers()) as client:
+    timeout = httpx.Timeout(SETUP_HTTP_TIMEOUT_SECS)
+    t0 = time.monotonic()
+    async with httpx.AsyncClient(timeout=timeout, headers=_auth_headers()) as client:
         resp = await client.post(url, json=payload)
+    elapsed = time.monotonic() - t0
+    log.info("hal0 setup apply-selections: %.1fs (status=%s)", elapsed, resp.status_code)
     if resp.status_code in (401, 403):
         typer.echo(
             f"hal0 setup: not authorized ({resp.status_code}) to apply via the live API "

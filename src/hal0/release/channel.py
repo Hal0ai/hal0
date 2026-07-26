@@ -11,16 +11,18 @@ from __future__ import annotations
 
 import re
 
+from hal0.release.policy import ReleasePolicy
+
 _NIGHTLY_RE = re.compile(r"-nightly\.(\d+)")
 
 
 def channel_for_tag(tag: str) -> str:
     """Return the release channel implied by a git tag.
 
-    A version carrying a ``-nightly.<date>`` segment is on the ``nightly``
-    channel; everything else (stable, alpha, beta, rc) is ``stable``.
+    Delegates to :class:`hal0.release.policy.ReleasePolicy` for
+    tag classification.
     """
-    return "nightly" if _NIGHTLY_RE.search(tag or "") else "stable"
+    return ReleasePolicy.from_tag(tag).kind
 
 
 def base_version(version: str) -> str:
@@ -57,11 +59,10 @@ def nightly_tag(base: str, stamp: str) -> str:
 def base_matches(pyproject_version: str, tag: str) -> bool:
     """True when ``tag`` and ``pyproject_version`` share the same base X.Y.Z.
 
-    The relaxed gate for nightly: pyproject stays on its dev version
-    (e.g. ``0.5.0-alpha.1``) while the nightly tag is
-    ``v0.5.0-nightly.20260614`` — both reduce to base ``0.5.0``.
+    Both values are normalised via :class:`hal0.release.policy.ReleasePolicy`
+    for consistency.
     """
-    return base_version(pyproject_version) == base_version(tag)
+    return ReleasePolicy.from_tag(tag).base_version == base_version(pyproject_version)
 
 
 def nightlies_to_prune(tags: list[str], keep: int = 7) -> list[str]:

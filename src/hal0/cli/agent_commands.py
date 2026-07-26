@@ -403,7 +403,20 @@ def _hermes_root_prelude() -> None:
     import pwd as _pwd
     from pathlib import Path as _Path
 
-    from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER, _install_cli_wrapper
+    from hal0.agents.hermes_provision import (
+        REPO_ROOT_FOR_INSTALLER,
+        _install_cli_wrapper,
+        _persist_hermes_python,
+        resolve_hermes_python,
+    )
+
+    try:
+        hermes_python = resolve_hermes_python()
+        _persist_hermes_python(hermes_python)
+        _os.environ["HAL0_HERMES_PYTHON"] = hermes_python
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[yellow]hermes Python 3.12 resolver hint:[/yellow] {exc}")
+        raise
 
     wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hermes"
     if wrapper_src.is_file():

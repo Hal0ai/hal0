@@ -10,12 +10,14 @@ running daemon.
 from __future__ import annotations
 
 import inspect
+from typing import get_args
 
 import pytest
 from typer.testing import CliRunner
 
 from hal0.cli import update_commands as uc
 from hal0.cli.main import app
+from hal0.release.policy import ReleaseKind
 
 runner = CliRunner()
 
@@ -81,6 +83,26 @@ def stub_api(monkeypatch: pytest.MonkeyPatch) -> dict:
     monkeypatch.setattr(uc, "api_put", fake_put)
     monkeypatch.setattr(uc, "_poll_job", fake_poll)
     return captured
+
+
+def test_update_channel_values_match_shared_release_kinds() -> None:
+    assert {channel.value for channel in uc.UpdateChannel} == set(get_args(ReleaseKind))
+
+
+@pytest.mark.parametrize("channel", get_args(ReleaseKind))
+def test_channel_posts_shared_release_kind_payload(channel: str, stub_api: dict) -> None:
+    result = runner.invoke(app, ["update", "--channel", channel, "--check"])
+
+    assert result.exit_code == 0, result.output
+    assert stub_api["put_json"] == {"channel": channel}
+
+
+def test_channel_help_lists_all_shared_release_kinds() -> None:
+    result = runner.invoke(app, ["update", "--help"])
+
+    assert result.exit_code == 0, result.output
+    for channel in get_args(ReleaseKind):
+        assert channel in result.output
 
 
 def test_restart_slots_flag_present_and_drift_aware() -> None:
@@ -200,6 +222,31 @@ def test_target_without_v_is_unchanged(stub_api: dict, monkeypatch: pytest.Monke
     result = runner.invoke(app, ["update", "--target", "0.1.1"])
     assert result.exit_code == 0, result.output
     assert stub_api["prepare_json"] == {"version": "0.1.1"}
+
+
+def test_prepare_pin_mismatch_never_posts_commit(
+    stub_api: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed prepare job stops the CLI before the activation request."""
+
+    def failed_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
+        return {
+            "id": job_id,
+            "state": "failed",
+            "error": "requested version does not match authenticated channel manifest",
+        }
+
+    monkeypatch.setattr(uc, "_poll_job", failed_poll)
+
+    result = runner.invoke(app, ["update", "--target", "0.1.1"])
+
+    assert result.exit_code != 0
+    assert "authenticated channel" in result.output
+    assert "manifest" in result.output
+    assert stub_api["prepare_json"] == {"version": "0.1.1"}
+    assert stub_api["commit_json"] is None
 
 
 def test_prepare_then_commit_flow(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:

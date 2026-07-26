@@ -28,6 +28,7 @@ keys off the concrete managed-venv artifacts instead.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -195,6 +196,10 @@ class HermesDriver(AgentDriver):
         self._write_env_file(bearer_token=bearer_token)
 
     def uninstall(self) -> None:
+        # Stop the running service BEFORE removing files so the agent
+        # doesn't recreate them while we're tearing down (#453).
+        self._stop_services()
+
         # Order matters (#348 + #349): we MUST read provision.json
         # BEFORE the manager strips the state dir. The manager calls
         # ``driver.uninstall()`` first specifically so the driver can
@@ -257,6 +262,30 @@ class HermesDriver(AgentDriver):
         return "broken"
 
     # ── Internals ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _stop_services() -> None:
+        """Stop + disable the hermes-agent systemd service so it doesn't
+        recreate files during uninstall (#453). Best-effort — missing
+        systemctl or a missing unit is not an error; the uninstall proceeds
+        regardless."""
+        unit = "hal0-agent@hermes.service"
+        if shutil.which("systemctl") is None:
+            return
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(  # nosec B603 — known-safe argv
+                ["systemctl", "stop", unit],
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(  # nosec B603 — known-safe argv
+                ["systemctl", "disable", unit],
+                check=False,
+                capture_output=True,
+                timeout=5,
+            )
 
     def _data_dir(self) -> Path:
         return _paths.var_lib() / "agents" / self.name

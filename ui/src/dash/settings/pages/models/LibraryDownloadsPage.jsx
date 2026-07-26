@@ -36,7 +36,7 @@ export function LibraryDownloadsPage() {
 
       <div className="s-panel">
         <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-          <div className="k"><span>Catalog</span><span className="sub">/api/models · blessed + pulled models</span></div>
+          <div className="k"><span>Catalog</span><FieldInfoIcon description="/api/models · blessed + pulled models" /></div>
         </div>
         {modelsQuery.isPending && (
           <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>Loading catalog…</div>
@@ -54,7 +54,7 @@ export function LibraryDownloadsPage() {
 
       <div className="s-panel" style={{ marginTop: 12 }}>
         <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-          <div className="k"><span>Downloads</span><span className="sub">/api/models/pulls · background pull jobs, live</span></div>
+          <div className="k"><span>Downloads</span><FieldInfoIcon description="/api/models/pulls · background pull jobs, live" /></div>
         </div>
         {window.DownloadsPane ? <window.DownloadsPane /> : (
           <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>

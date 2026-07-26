@@ -219,16 +219,17 @@ be evicted out from under a streaming request.
   ComfyUI in the `img` slot container (ROCm). `hal0 setup` lets you
   select image-gen as part of the initial configuration.
 - **Atomic self-update with rollback** — `hal0 update --channel
-  stable|nightly`. Cosign-verified tarballs swap a
+  stable|preview|nightly`. Cosign-verified tarballs swap a
   `/usr/lib/hal0/current` symlink; `--rollback` reverts.
 - **One-line install** — `curl -fsSL https://hal0.dev/install.sh | bash`
   writes the first-run sentinel and wiring automatically — no model picks,
   no download, no interaction needed. Run `hal0 setup` afterward to choose
   models and configure apps and agents.
   (`--models-dir=PATH` or `HAL0_MODELS_DIR=PATH` redirects model pulls
-  off `/var/lib/hal0/models`). The bootstrap fetches the release
-  manifest, sha256-verifies the tarball, cosign-verifies the signature
-  against the workflow OIDC identity, then hands off to
+  off `/var/lib/hal0/models`). The bootstrap requires `jq` and `cosign`,
+  authenticates the exact channel manifest before strict schema/channel
+  parsing, then sha256- and Sigstore-bundle-verifies the tarball before
+  handing off to
   [`installer/install.sh`](./installer/install.sh).
   Rerun `hal0 setup` at any time to add slots, change storage, or
   install extensions — the provisioning endpoints are idempotent.

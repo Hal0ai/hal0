@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 # that resolves this project by distribution name must use "hal0ai".
 [project]
 name = "hal0ai"
-version = "0.9.8"
+version = "1.0.0-alpha.2"
 description = "Open-source home AI inference platform"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -39,7 +39,7 @@ dependencies = [
   # ADR-0004 (Phase 8): hal0 ships /mcp/admin + /mcp/memory MCP servers.
   # MIT-licensed Python SDK; consumed by hal0.mcp.* — required at
   # import time, hence core (not optional).
-  "mcp==1.27.0",
+  "mcp==1.28.1",
   # v0.3 Hermes-Agent bootstrap (issue #241): config_write phase
   # renders $HERMES_HOME/config.yaml from a Jinja2 template + deep-merges
   # /etc/hal0/agents/hermes/overrides.yaml. Both libs were already
@@ -121,6 +121,9 @@ addopts = "-ra --strict-markers"
 # whole files/dirs (tests/api hanging on a slow/absent podman or journalctl
 # probe was the recurring local-only pain point). A future CI tier split can
 # reuse the same markers; do not repurpose them for anything else.
+filterwarnings = [
+  "ignore::starlette.exceptions.StarletteDeprecationWarning",
+]
 markers = [
   "slow: tests that take >1s wall-clock (engine-contract fixtures, etc.)",
   "podman: needs a real container runtime (podman/docker) reachable on the host",

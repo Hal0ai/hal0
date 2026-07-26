@@ -83,7 +83,7 @@ export function NpuPage() {
       {npuSlots.length > 0 && (
         <div className="s-panel">
           <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-            <div className="k"><span>FLM slot</span><span className="sub">{npuName} · device=npu · profile=flm</span></div>
+            <div className="k"><span>FLM slot</span><FieldInfoIcon description={`${npuName} · device=npu · profile=flm`} /></div>
             <div className="v">
               <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-3)"}}>{npuName}</span>
             </div>
@@ -139,7 +139,7 @@ export function NpuPage() {
       {occ?.present && (
         <div className="s-panel" style={{marginTop: 12}}>
           <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-            <div className="k"><span>Occupancy</span><span className="sub">live AIE column allocation · single-tenant</span></div>
+            <div className="k"><span>Occupancy</span><FieldInfoIcon description="live AIE column allocation · single-tenant" /></div>
             <div className="v">
               <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: occ.cols_used > 0 ? "var(--ok)" : "var(--fg-4)", borderColor: occ.cols_used > 0 ? "var(--ok)" : "var(--line)"}}>
                 {occ.cols_used}/{occ.cols_total} cols

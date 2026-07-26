@@ -1,0 +1,238 @@
+{
+  "runId": "59e03388-4d5a-4efe-a56f-2f7345ba0481",
+  "agent": "delegate",
+  "task": "You are implementing the first task of the official prerelease release publication plan: `Task 1: Deep release-policy module`\n\nRead your task brief FIRST: /home/mint/hal0/.superpowers/sdd/task-1-brief.md\nIt contains the full task text, exact types, interfaces, tests, commands, and commit message.\n\nYour working directory is: /home/mint/hal0/.worktrees/prerelease-channel\n\nContext: this is a stdlib-only module whose one interface — `ReleasePolicy.from_tag(tag)` — powers tag classification, channel routing, and GitHub/PyPI publication decisions.\n\n## Global Constraints\n- Stdlib-only: `re`, `dataclasses`, `argparse`, `json`, `Literal` from `typing`\n- Tag forms: `v1.0.0-alpha.N`, `v1.0.0-beta.N`, `v1.0.0-rc.N`, `v1.0.0`, `v1.0.0-nightly.14digit`\n- `to_github_outputs()` returns lowercase string booleans\n\n## Your Job\n1. Read the brief, implement via TDD, run tests with `HAL0_HOME=$(mktemp -d)`\n2. `uv sync` first to get the editable install\n3. `uv run ruff check` and `uv run mypy` before committing\n4. Write a concise report to: /home/mint/hal0/.superpowers/sdd/task-1-report.md\n\nReturn ONLY: status, commits, test line-count, and concerns.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/mint/hal0/.superpowers/sdd/task-1-report.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    },\n    {\n      \"id\": \"criterion-2\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openrouter/deepseek/deepseek-v4-flash:low",
+  "attemptedModels": [
+    "openrouter/deepseek/deepseek-v4-flash:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 140135,
+        "output": 25513,
+        "cacheRead": 3126400,
+        "cacheWrite": 0,
+        "cost": 0.080011218,
+        "turns": 84
+      }
+    }
+  ],
+  "acceptance": {
+    "status": "checked",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "reviewed",
+      "explicit": false,
+      "inferredReason": [
+        "async write-capable or risky run"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Implement the requested change without widening scope",
+          "evidence": [
+            "changed-files",
+            "tests-added",
+            "commands-run",
+            "validation-output",
+            "residual-risks",
+            "no-staged-files"
+          ],
+          "severity": "required"
+        },
+        {
+          "id": "criterion-2",
+          "must": "Return evidence sufficient for an independent acceptance review",
+          "evidence": [
+            "changed-files",
+            "tests-added",
+            "commands-run",
+            "validation-output",
+            "residual-risks",
+            "no-staged-files"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "changed-files",
+        "tests-added",
+        "commands-run",
+        "validation-output",
+        "residual-risks",
+        "no-staged-files"
+      ],
+      "verify": [],
+      "review": {
+        "agent": "reviewer",
+        "required": true
+      },
+      "stopRules": []
+    },
+    "inferredReason": [
+      "async write-capable or risky run"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Implement the requested change without widening scope",
+        "evidence": [
+          "changed-files",
+          "tests-added",
+          "commands-run",
+          "validation-output",
+          "residual-risks",
+          "no-staged-files"
+        ],
+        "severity": "required"
+      },
+      {
+        "id": "criterion-2",
+        "must": "Return evidence sufficient for an independent acceptance review",
+        "evidence": [
+          "changed-files",
+          "tests-added",
+          "commands-run",
+          "validation-output",
+          "residual-risks",
+          "no-staged-files"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "criterion:criterion-1",
+        "status": "passed",
+        "message": "Required criterion 'criterion-1' satisfied."
+      },
+      {
+        "id": "criterion:criterion-2",
+        "status": "passed",
+        "message": "Required criterion 'criterion-2' satisfied."
+      },
+      {
+        "id": "evidence:changed-files",
+        "status": "passed",
+        "message": "changed-files evidence present."
+      },
+      {
+        "id": "evidence:tests-added",
+        "status": "passed",
+        "message": "tests-added evidence present."
+      },
+      {
+        "id": "evidence:commands-run",
+        "status": "passed",
+        "message": "commands-run evidence present."
+      },
+      {
+        "id": "evidence:validation-output",
+        "status": "passed",
+        "message": "validation-output evidence present."
+      },
+      {
+        "id": "evidence:residual-risks",
+        "status": "passed",
+        "message": "residual-risks evidence present."
+      },
+      {
+        "id": "evidence:no-staged-files",
+        "status": "passed",
+        "message": "no-staged-files evidence present."
+      },
+      {
+        "id": "no-staged-files",
+        "status": "passed",
+        "message": "No staged files detected."
+      }
+    ],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Implemented ReleasePolicy frozen dataclass, from_tag regex classification, to_github_outputs, and CLI as specified in the brief. Channel.py delegated to policy. No scope creep."
+        },
+        {
+          "id": "criterion-2",
+          "status": "satisfied",
+          "evidence": "All changed files listed, 28 tests passing, ruff+mypy clean, commit created, no staged files."
+        }
+      ],
+      "changedFiles": [
+        "src/hal0/release/policy.py",
+        "src/hal0/release/channel.py",
+        "tests/release/test_policy.py",
+        "tests/release/test_channel.py"
+      ],
+      "testsAddedOrUpdated": [
+        "tests/release/test_policy.py (new, 83 lines, 7 tests)",
+        "tests/release/test_channel.py (updated, +preview cases, +type annotations)"
+      ],
+      "commandsRun": [
+        {
+          "command": "uv sync --extra dev",
+          "result": "passed",
+          "summary": "Dev dependencies installed (pytest, mypy, ruff)"
+        },
+        {
+          "command": "uv run pytest tests/release/test_policy.py tests/release/test_channel.py -q",
+          "result": "passed",
+          "summary": "28 passed in 0.05s"
+        },
+        {
+          "command": "uv run ruff check src/hal0/release/policy.py src/hal0/release/channel.py tests/release/test_policy.py tests/release/test_channel.py",
+          "result": "passed",
+          "summary": "All checks passed"
+        },
+        {
+          "command": "uv run mypy src/hal0/release/policy.py src/hal0/release/channel.py tests/release/test_policy.py tests/release/test_channel.py",
+          "result": "passed",
+          "summary": "Success: no issues found"
+        },
+        {
+          "command": "git add && git commit",
+          "result": "passed",
+          "summary": "4798ec72 feat(release): derive stable preview and nightly policy from tags"
+        }
+      ],
+      "validationOutput": [
+        "Policy matrix 5/5 correct tags pass",
+        "Invalid tags 7/7 raise ReleaseTagError",
+        "to_github_outputs() returns lowercase string booleans",
+        "channel_for_tag() delegates correctly to policy",
+        "base_matches() uses policy base_version"
+      ],
+      "residualRisks": [
+        "Nightly regex requires 14-digit stamp (YYYYMMDDHHMMSS); 8-digit legacy tags rejected by ReleasePolicy",
+        "nightlies_to_prune unaffected (uses separate search pattern)"
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "4 files changed, 263 insertions(+), 24 deletions(-)",
+      "reviewFindings": [
+        "no blockers"
+      ],
+      "manualNotes": "Editable install required: uv sync --extra dev (dev deps not previously installed, causing pytest/mypy/ruff to resolve to system Python 3.14). Nightly test_channel tags upgraded from 8-digit to 14-digit stamp to satisfy ReleasePolicy regex."
+    },
+    "reviewResult": {
+      "status": "needs-parent-decision",
+      "findings": [
+        {
+          "severity": "non-blocking",
+          "issue": "Reviewed acceptance requires an independent reviewer result.",
+          "rationale": "The run cannot be marked reviewed from child evidence alone."
+        }
+      ]
+    }
+  },
+  "transcriptPath": "/home/mint/hal0/.worktrees/prerelease-channel/.pi-subagents/artifacts/59e03388-4d5a-4efe-a56f-2f7345ba0481_delegate_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784567848193
+}

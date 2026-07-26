@@ -241,3 +241,100 @@ def test_gen_release_notes_script_writes_both_files(tmp_path):
     assert data["version"] == "0.10.0"
     assert data["breaking"] == ["removed rocm-moe / rocm-dnse", "renamed rocmfpx-moe -> vkfpx-moe"]
     assert data["migrations"] == ["slots on removed profiles auto-fall-back to rocm/vulkan"]
+
+
+# ── Preview channel notes ───────────────────────────────────────────────────
+
+
+_PREVIEW_CHANGELOG = """\
+# Changelog
+
+## [v0.11.0-preview.1] — 2026-08-01
+
+Preview cut for release validation.
+
+### Highlights
+- preview feature flag system
+
+### Breaking
+- removed legacy foo
+"""
+
+
+def test_preview_notes_include_required_headings(tmp_path):
+    """Preview release notes include Audience, Known issues, Supported upgrades,
+    Operator migrations, and Rollback headings."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "gen_release_notes.py"
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(_PREVIEW_CHANGELOG, encoding="utf-8")
+    out = tmp_path / "stage"
+
+    r = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--tag",
+            "v0.11.0-preview.1",
+            "--channel",
+            "preview",
+            "--out-dir",
+            str(out),
+            "--changelog",
+            str(changelog),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert r.returncode == 0, r.stderr
+    notes = (out / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+    for heading in (
+        "Audience",
+        "Known issues",
+        "Supported upgrades",
+        "Operator migrations",
+        "Rollback",
+    ):
+        assert f"## {heading}" in notes, f"missing heading: {heading}"
+    import json as _json
+
+    data = _json.loads((out / "release.json").read_text(encoding="utf-8"))
+    assert data["channel"] == "preview"
+
+
+def test_preview_notes_heading_audience_present(tmp_path):
+    """Preview notes must contain ## Audience (required)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "gen_release_notes.py"
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(_PREVIEW_CHANGELOG, encoding="utf-8")
+    out = tmp_path / "stage"
+
+    r = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--tag",
+            "v0.11.0-preview.1",
+            "--channel",
+            "preview",
+            "--out-dir",
+            str(out),
+            "--changelog",
+            str(changelog),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert r.returncode == 0, r.stderr
+    notes = (out / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+    assert "## Audience" in notes
+    assert "## Known issues" in notes

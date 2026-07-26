@@ -98,7 +98,7 @@ export function LoadedModelsPage() {
       {!slotsQuery.isPending && !slotsQuery.isError && types.length > 0 && (
         <div className="s-panel" style={{marginBottom: 12}}>
           <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-            <div className="k"><span>Default slots</span><span className="sub">For each modality with multiple slots, pick the one that serves type-routed requests</span></div>
+            <div className="k"><span>Default slots</span><FieldInfoIcon description="For each modality with multiple slots, pick the one that serves type-routed requests" /></div>
           </div>
           {types.map(type => {
             const cur = (byType[type].find(s => s.isDefault) || {}).name || "";
@@ -128,7 +128,7 @@ export function LoadedModelsPage() {
       {/* --- Runtime --- */}
       <div className="s-panel">
         <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-          <div className="k"><span>Runtime</span><span className="sub">hal0.toml [slots]</span></div>
+          <div className="k"><span>Runtime</span><FieldInfoIcon description="hal0.toml [slots]" /></div>
         </div>
         {RUNTIME_KEYS.map(k => (
           <AdvRow

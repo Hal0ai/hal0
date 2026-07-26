@@ -1,0 +1,16 @@
+{
+  "id": "pi-mrsz1gym-13swfg",
+  "taskName": "pi-session",
+  "sessionFile": "/home/mint/.pi/agent/sessions/--home-mint-hal0--/2026-07-20T08-37-19-516Z_019f7eac-281b-72bb-89c6-5886f18c1992.jsonl",
+  "provider": "pi",
+  "model": "unknown",
+  "status": "stopped",
+  "startedAt": "2026-07-20T08:37:21.310Z",
+  "trace": [],
+  "changeset": {
+    "binding": "workspace",
+    "files": []
+  },
+  "artifacts": [],
+  "endedAt": "2026-07-20T08:37:49.181Z"
+}

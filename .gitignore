@@ -112,6 +112,10 @@ graphify-out/*
 !graphify-out/wiki/
 .claude/branch-status.json
 
+# pi agent artefacts — session-scoped, never committed
+.pi/
+.pi-subagents/
+
 # never track node_modules anywhere (incl. symlinks)
 node_modules
 **/node_modules
@@ -125,3 +129,6 @@ node_modules
 
 # ad-hoc QA screenshots at repo root
 /logs-*.png
+
+# git worktrees (project-local isolation; see superpowers:using-git-worktrees)
+/.worktrees/

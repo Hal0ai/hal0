@@ -79,7 +79,7 @@ function ThEyebrow({ dot, live, label, sub, right }) {
     <div className="th-eyebrow">
       {dot && <span className={'d' + (live ? ' live' : '')} style={{ background: dot, color: dot }} />}
       <span>{label}</span>
-      {sub && <span className="sub">{sub}</span>}
+      {sub && <FieldInfoIcon description={sub} />}
       {right && <span className="right">{right}</span>}
     </div>
   )
@@ -428,10 +428,8 @@ function ThRuler({ slots }) {
                     {s.name} · {s.bytesGb.toFixed(1)}G
                   </span>
                   {s.toks != null && (
-                    <span className="sub">
-                      <span className="dot serving th-ruler-dot" />
-                      {Math.round(s.toks)} tok/s
-                    </span>
+                    <FieldInfoIcon description="<span className=&quot;dot serving th-ruler-dot&quot; />
+                      {Math.round(s.toks)} tok/s" />
                   )}
                 </>
               )}

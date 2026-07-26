@@ -108,12 +108,17 @@ These are honoured by the installer / bootstrap scripts.
 | Variable                    | What it does                                                       | Default  |
 |-----------------------------|-------------------------------------------------------------------|----------|
 | `HAL0_PREFIX`               | Installation root.                                                 | `/usr/lib/hal0` (system) / `$PWD/.hal0ai` (no-sudo) |
-| `HAL0_CHANNEL`              | Release channel for the default download URL.                     | `stable` |
+| `HAL0_CHANNEL`              | Bootstrap channel (`stable`, `preview`, or `nightly`) for the default manifest URL. | `stable` |
+| `HAL0_RELEASES_URL`         | Full channel-manifest URL override; its exact sibling `.bundle` and the artifact `bundle_url` remain mandatory. | `https://releases.hal0.dev/<channel>.json` |
 | `HAL0_INSTALL_SKIP_VERIFY`  | Install from an unverified source (skip the cosign check). Not recommended. | `0`      |
 | `HAL0_UPDATE_SKIP_COSIGN`   | Skip cosign signature verify on updates. Only honoured on pre-release/dev builds — silently ignored on stable v1+. Not recommended. | `0`      |
 | `HAL0_NO_PROBE`             | Skip the hardware probe during install.                           | unset    |
 | `HAL0_INSTALL_HONCHO`       | Install the optional self-hosted Honcho v3 memory stack (docker compose: clone, build, `hal0-honcho.service`). See [Honcho memory](/docs/guides/honcho-memory). | `0` (skipped) |
 | `HONCHO_REF`                | Git ref of `plastic-labs/honcho` the installer clones when `HAL0_INSTALL_HONCHO=1`. | `v3.0.9` |
+
+The bootstrap requires `jq` and `cosign`. It authenticates the exact manifest
+bytes before jq applies the strict `hal0.releases.v1` channel/kind/stage policy;
+no manifest field influences that first signature verification.
 
 <Aside type="caution">
 `HAL0_INSTALL_SKIP_VERIFY=1` and `HAL0_UPDATE_SKIP_COSIGN=1` disable the

@@ -202,4 +202,4 @@ def test_cpu_llm_profile_exists_in_seed_profiles():
     assert profile.get("backend") is None, (
         "cpu-llm profile must have backend=None so the #807 coherence check passes"
     )
-    assert profile.get("device_class") == "cpu"
+    assert profile.get("device_class") is None

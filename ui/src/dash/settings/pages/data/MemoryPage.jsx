@@ -65,7 +65,7 @@ function MemoryEnginePanel({ registry }) {
   return (
     <div className="s-panel" style={{marginBottom: 12}}>
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-        <div className="k"><span>Engine</span><span className="sub">hal0.toml [memory] · requires restart to switch</span></div>
+        <div className="k"><span>Engine</span><FieldInfoIcon description="hal0.toml [memory] · requires restart to switch" /></div>
       </div>
       <p className="desc" style={{margin: "8px 12px 0", fontSize: 11}}>
         Per-agent provider routing (which agents use Hindsight vs. Honcho) now lives on the{" "}
@@ -193,7 +193,7 @@ function HonchoPanel({ registry }) {
   return (
     <div className="s-panel" style={{marginBottom: 12}} data-testid="settings-honcho-panel">
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-        <div className="k"><span>Honcho</span><span className="sub">hal0.toml [honcho] · self-hosted memory-provider stack</span></div>
+        <div className="k"><span>Honcho</span><FieldInfoIcon description="hal0.toml [honcho] · self-hosted memory-provider stack" /></div>
       </div>
 
       <div className="s-panel" style={{margin: "10px 12px", padding: 12, fontFamily: "var(--jbm)", fontSize: 11.5, color: "var(--fg-3)", borderLeft: "2px solid var(--accent)"}}>
@@ -208,7 +208,7 @@ function HonchoPanel({ registry }) {
       <div className="s-row" style={{cursor: "pointer"}} onClick={() => setRoutesOpen(o => !o)}>
         <div className="k">
           <span>{routesOpen ? "▾" : "▸"} LLM routes</span>
-          <span className="sub">per-feature model routing (deriver · dialectic · summary · dream · embedding) + embedding dimensions</span>
+          <FieldInfoIcon description="per-feature model routing (deriver · dialectic · summary · dream · embedding) + embedding dimensions" />
         </div>
       </div>
 
@@ -292,7 +292,7 @@ function MemoryRerankerPanel({ registry }) {
   return (
     <div className="s-panel" style={{marginBottom: 12}}>
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-        <div className="k"><span>Reranker</span><span className="sub">hal0.toml [memory.embedding] · second-pass ranking after recall</span></div>
+        <div className="k"><span>Reranker</span><FieldInfoIcon description="hal0.toml [memory.embedding] · second-pass ranking after recall" /></div>
       </div>
       {RERANK_KEYS.map(k => (
         <AdvRow
@@ -400,7 +400,7 @@ function MemoryGraphPanel() {
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
         <div className="k">
           <span>Memory graph extraction</span>
-          <span className="sub">hal0.toml [memory.graph] · builds a knowledge graph from stored memories via a local LLM slot</span>
+          <FieldInfoIcon description="hal0.toml [memory.graph] · builds a knowledge graph from stored memories via a local LLM slot" />
         </div>
         <div className="v">{stateChip}</div>
       </div>

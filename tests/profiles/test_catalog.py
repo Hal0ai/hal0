@@ -22,9 +22,9 @@ def test_resolve_qwen3tts_seed_is_gpu_tts_family(tmp_hal0_home: str) -> None:
 
     assert profile.seed is True
     assert profile.runtime_family == "qwen3tts"
-    # GPU TTS engine: a TTS-only slot type on a ROCm GPU device.
+    # Qwen3-TTS is a TTS-only runtime family; seeded profiles are device-agnostic.
     assert profile.supported_slot_types == ("tts",)
-    assert profile.device_class == "gpu"
+    assert profile.device_class is None
     assert profile.backend is None
     assert profile.rtf == 0.48
 

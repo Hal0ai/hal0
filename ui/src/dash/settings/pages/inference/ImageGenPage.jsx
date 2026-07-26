@@ -115,7 +115,7 @@ export function ImageGenPage() {
 
       <div className="s-panel">
         <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-          <div className="k"><span>Image-gen</span><span className="sub">img.img slot · ComfyUI engine</span></div>
+          <div className="k"><span>Image-gen</span><FieldInfoIcon description="img.img slot · ComfyUI engine" /></div>
           <div className="v">{statusChip(imgStatus)}</div>
         </div>
         <SRow k="Enabled" v={
@@ -160,7 +160,7 @@ export function ImageGenPage() {
         <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
           <div className="k">
             <span>Generation defaults</span>
-            <span className="sub">img slot config · applied when a /v1/images request omits the param</span>
+            <FieldInfoIcon description="img slot config · applied when a /v1/images request omits the param" />
           </div>
           <div className="v">
             {imgSlotName

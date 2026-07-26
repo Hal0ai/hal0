@@ -173,18 +173,22 @@ class Store:
                     ),
                 )
                 n += 1
-            # current_cells: newest ok record per cell_key. run_id sorts
-            # lexicographically by its leading UTC stamp, so MAX(run_id) among ok
-            # rows is the newest ok record for the key.
+            # current_cells: newest ok record per cell_key by INSERTION order
+            # (rowid_seq AUTOINCREMENT), matching newest_ok_by_cell()/the planner.
+            # run_id is "<UTC-stamp>-<random hex>", so two ok records in the same
+            # wall-clock second (routine for v1 imports sharing a timestamp, and
+            # fast re-measures) tie-break on the random suffix under MAX(run_id) —
+            # surfacing an OLDER record as current while the planner picks the
+            # newer. rowid_seq is monotonic append order, so both agree.
             conn.executescript(
                 """
                 CREATE VIEW current_cells AS
                 SELECT r.* FROM records r
                 JOIN (
-                    SELECT cell_key, MAX(run_id) AS newest_ok
+                    SELECT cell_key, MAX(rowid_seq) AS newest_ok
                     FROM records WHERE outcome = 'ok'
                     GROUP BY cell_key
-                ) w ON r.cell_key = w.cell_key AND r.run_id = w.newest_ok;
+                ) w ON r.cell_key = w.cell_key AND r.rowid_seq = w.newest_ok;
                 """
             )
             conn.commit()

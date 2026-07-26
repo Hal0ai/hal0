@@ -210,7 +210,9 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
 #:     the dashboard voice settings (PUT /api/slots/tts/config).
 #:   - ``slot``           — the nested on-disk [slot] table shape (hoisted on load).
 TOLERATED_SLOT_CONFIG_KEYS: frozenset[str] = frozenset(
-    {"type", "default", "lru", "default_voice", "default_language", "slot"}
+    # image_pin and binary are declared SlotConfig fields but the running backend may
+    # predate them — tolerate so the drawer Save always works.
+    {"type", "default", "lru", "default_voice", "default_language", "slot", "image_pin", "binary"}
 )
 
 #: Extra keys tolerated inside specific sub-tables, keyed by sub-table name.

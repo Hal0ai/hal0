@@ -84,11 +84,12 @@ export function useUpdateRollback() {
 }
 
 // Channel switch (issue #546). PUT /api/updates/channel with {channel:
-// "stable" | "nightly"} persists to hal0.toml; on success the updates/
-// state query is invalidated so the per-component channel fields (which
-// the UI binds to for the current value) refetch the persisted channel
+// "stable" | "preview" | "nightly"} persists to hal0.toml; on success the
+// updates/state query is invalidated so the per-component channel fields
+// (which the UI binds to for the current value) refetch the persisted channel
 // before the next render.
-export type UpdateChannelName = 'stable' | 'nightly'
+export const UPDATE_CHANNEL_NAMES = ['stable', 'preview', 'nightly'] as const
+export type UpdateChannelName = (typeof UPDATE_CHANNEL_NAMES)[number]
 
 export function useSetUpdateChannel() {
   const qc = useQueryClient()

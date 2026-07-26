@@ -24,7 +24,7 @@ _KANBAN_DB_TABLES = (
     "task_attachments",
     "kanban_notify_subs",
 )
-_KANBAN_INIT_DB_RE = re.compile(r"init_db\((['\"])(.*?)\1\)")
+_KANBAN_INIT_DB_RE = re.compile(r"init_db\(\(?.*\)?\(?(['\"])(.*?)\1\)?\)")
 
 
 class _Completed:

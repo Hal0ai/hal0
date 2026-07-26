@@ -9,7 +9,7 @@ export const SRow = ({ k, sub, v, mono, children, actions }) => (
   <div className="s-row">
     <div className="k">
       <span>{k}</span>
-      {sub && <span className="sub">{sub}</span>}
+      {sub && <FieldInfoIcon description={sub} />}
     </div>
     <div className={"v" + (mono ? " mono" : "")}>{children || v}</div>
     {actions && <div className="ac">{actions}</div>}

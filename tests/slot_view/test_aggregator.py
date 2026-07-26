@@ -22,6 +22,8 @@ from typing import Any
 
 import pytest
 
+from hal0.config.schema import ProfileConfig
+from hal0.profiles import ProfileCatalog
 from hal0.slot_view import (
     SlotView,
     SlotViewAggregator,
@@ -458,11 +460,12 @@ class TestContainerEnrichment:
         assert e["resolved_command"] is None
 
     async def test_device_class_lifted_from_profile(self, tmp_hal0_home: str) -> None:
-        # A profile-backed GPU slot surfaces profile device_class so the UI can
-        # group logical workload families. Backend remains slot hardware state,
-        # not a profile-derived selector.
+        # A custom profile with explicit device_class surfaces that metadata so
+        # the UI can group logical workload families. Backend remains slot
+        # hardware state, not a profile-derived selector.
+        ProfileCatalog().create("explicit-gpu", ProfileConfig(flags="", device_class="gpu"))
         out = await container_enrichment(
-            [_container_cfg(profile="chat")],
+            [_container_cfg(profile="explicit-gpu")],
             pull_jobs={},
             provider=FakeContainerProvider(active=True, healthy=True),
         )
@@ -471,9 +474,10 @@ class TestContainerEnrichment:
         assert e["backend"] is None
 
     async def test_device_class_for_non_gpu_profile(self, tmp_hal0_home: str) -> None:
-        # Non-GPU profile: device_class drives display; backend is None.
+        # Non-GPU custom profile: device_class drives display; backend is None.
+        ProfileCatalog().create("explicit-cpu", ProfileConfig(flags="", device_class="cpu"))
         out = await container_enrichment(
-            [_container_cfg(name="tts-slot", profile="kokoro")],
+            [_container_cfg(name="tts-slot", profile="explicit-cpu")],
             pull_jobs={},
             provider=FakeContainerProvider(active=True, healthy=True),
         )

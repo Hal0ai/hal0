@@ -87,7 +87,11 @@ def evaluate_model_fit(
             )
 
         expected_profile_class = _DEVICE_TO_PROFILE_CLASS.get(device)
-        if expected_profile_class is not None and profile.device_class != expected_profile_class:
+        if (
+            expected_profile_class is not None
+            and profile.device_class is not None
+            and profile.device_class != expected_profile_class
+        ):
             # NPU/img mismatches are hard failures: they route to different
             # runtime families. GPU/CPU mismatches are degraded because a
             # custom llama-server image may still run, but operator attention

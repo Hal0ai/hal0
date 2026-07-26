@@ -1211,12 +1211,16 @@ def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> No
         from hal0.slots.argv import _deny_managed_flags, _deny_slot_hardware_flags
 
         seg = "model defaults.extra_args"
+        raw = defaults["extra_args"]
+        # Strip trailing backslash that would otherwise make shlex.split()
+        # raise "No escaped character" (a common copy-paste artefact).
+        stripped = raw.rstrip().rstrip("\\")
         # O10 guard (spec §3): catch a bare double-quoted JSON value the shell
         # would eat BEFORE the denylist/parse checks so the operator gets the
         # actionable "single-quote it" message.
-        screen_extra_args_json(defaults["extra_args"], segment=seg)
+        screen_extra_args_json(stripped, segment=seg)
         try:
-            tokens = shlex.split(defaults["extra_args"])
+            tokens = shlex.split(stripped)
         except ValueError as exc:
             raise BadRequest(
                 f"defaults.extra_args is not parseable as a flag string: {exc}",

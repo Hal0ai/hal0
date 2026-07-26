@@ -658,6 +658,28 @@ function FieldGroup({ label, hint, children }) {
 // ─── PillToggle — two-state sliding pill ─────────────────────────────────
 // Generalized from slots.jsx NpuSwitch.
 // Fixed label; the on/off STATE is shown by the pill, never by a changing label.
+// ─── FieldInfoIcon — hover/focus-only help for drawer field descriptions ───
+function FieldInfoIcon({ description }) {
+  const descriptionId = React.useId();
+  return (
+    <span className="field-info-wrap">
+      <button
+        type="button"
+        className="field-info-btn"
+        aria-label="Info"
+        aria-describedby={descriptionId}
+        onPointerDown={(event) => event.preventDefault()}
+      >
+        i
+      </button>
+      <span id={descriptionId} role="tooltip" className="field-info-pop">
+        {description}
+      </span>
+    </span>
+  );
+}
+
+
 export function PillToggle({ on, disabled, label, stateText, onToggle }) {
   return (
     <div className="pill-toggle-row">
@@ -1035,4 +1057,4 @@ function ImportDialog({
   );
 }
 
-Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, PillToggle, MtpControl, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });
+Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, FieldInfoIcon, PillToggle, MtpControl, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });
