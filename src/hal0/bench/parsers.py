@@ -187,7 +187,10 @@ def _sa_run_to_rep(run: dict) -> Rep | None:
         return None
     draft_n = run.get("draft_n")
     accepted = run.get("draft_n_accepted")
-    accept = (accepted / draft_n) if draft_n else None
+    # Only compute acceptance when BOTH counts are present. A run can report
+    # draft_n>0 with draft_n_accepted null/absent (partial or older llama.cpp
+    # timings) — `None / draft_n` would TypeError and drop the whole run.
+    accept = (accepted / draft_n) if (draft_n and accepted is not None) else None
     return Rep(
         t_s=run.get("wall_s"),
         prefill_ts=run.get("prompt_per_second"),

@@ -488,7 +488,11 @@ def toolbox_pull(
             rows.append(_probe_one(name, entry, client=client))
 
     if json_output:
-        console.print_json(jsonlib.dumps(rows))
+        # Emit raw, plain JSON — `console.print_json` re-highlights with ANSI
+        # escapes (rich reports is_terminal=True even when stdout is a pipe), so
+        # `toolbox-pull --json | jq` would choke on colour codes. The --json
+        # contract must be deterministic parseable JSON regardless of tty.
+        print(jsonlib.dumps(rows, indent=2))
     else:
         table = Table(title="ghcr.io toolbox-image pull probe (anonymous)")
         table.add_column("Image", style="bold")
