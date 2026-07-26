@@ -1836,6 +1836,33 @@ class SlotsConfig(BaseModel):
             "back above the floor. 0 disables pressure eviction."
         ),
     )
+    preload_evict_enabled: bool = Field(
+        default=True,
+        description=(
+            "Free memory SYNCHRONOUSLY before a load starts, when the "
+            "incoming model's estimated footprint plus "
+            "preload_evict_headroom_mb would not fit in projected free "
+            "memory. Evicts idle lru-eligible resident slots in "
+            "least-recently-used order — the same eligibility "
+            "evict_pressure_mb uses — until it fits, or fails the load "
+            "with a clear error if it still doesn't fit after evicting "
+            "everything eligible. Set to false to rely solely on the "
+            "reactive pressure sweeper (#903), which only reacts after "
+            "the fact on a timer."
+        ),
+    )
+    preload_evict_headroom_mb: int = Field(
+        default=1024,
+        ge=0,
+        description=(
+            "Extra free-RAM slack (MiB) required on top of a model's "
+            "estimated footprint before pre-load eviction "
+            "(preload_evict_enabled) considers a load safe to start. "
+            "Absorbs error in the coarse file-size + KV-cache footprint "
+            "estimate and runtime/container overhead the estimate doesn't "
+            "capture."
+        ),
+    )
     publish_host: str = Field(
         default="127.0.0.1",
         description=(

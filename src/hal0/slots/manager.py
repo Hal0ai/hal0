@@ -64,6 +64,8 @@ from hal0.slots.drift import compute_config_drift as _compute_config_drift
 from hal0.slots.layout import is_id_stem
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
+from hal0.slots.preload_evict import _DEFAULT_HEADROOM_MB
+from hal0.slots.preload_evict import admit as _preload_admit
 from hal0.slots.profile_adopt import (
     apply_preferred_profile as _profile_adopt_apply_preferred_profile,
 )
@@ -277,6 +279,8 @@ class SlotManager:
         evict_after_s: float = _EVICT_AFTER_S,
         evict_pressure_mb: float = 8192.0,
         evict_pressure_pct: float | None = None,
+        preload_evict_enabled: bool = True,
+        preload_evict_headroom_mb: float = _DEFAULT_HEADROOM_MB,
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
         event_bus: Any | None = None,
         upstreams_registry: Any | None = None,
@@ -387,6 +391,22 @@ class SlotManager:
         # GTT pool grows/shrinks). None (default) keeps the absolute
         # ``evict_pressure_mb`` floor above — purely additive.
         self._evict_pressure_pct: float | None = evict_pressure_pct
+        # Pre-load eviction (synchronous, at admission time — see
+        # hal0.slots.preload_evict): before a load starts, free idle
+        # lru-eligible slots until the incoming model's estimated
+        # footprint + headroom fits in projected free memory, instead of
+        # waiting for the next pressure-sweep tick. `_preload_evict_enabled
+        # = False` disables the gate entirely (reactive TTL/pressure
+        # eviction still applies). `_admission_lock` serializes the
+        # fit-decision across concurrently loading slots; each admitted-
+        # but-not-yet-resident load reserves its estimated footprint in
+        # `_preload_reserved_mb` (keyed by slot name) so a second
+        # concurrent admission doesn't also conclude it fits against the
+        # same stale free-memory snapshot.
+        self._preload_evict_enabled: bool = preload_evict_enabled
+        self._preload_evict_headroom_mb: float = float(preload_evict_headroom_mb)
+        self._preload_reserved_mb: dict[str, float] = {}
+        self._admission_lock: asyncio.Lock = asyncio.Lock()
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         # Idle/eviction background loop (P3-slots §1b) — SlotReaper owns its
         # own task handle; see reaper.py.
@@ -1377,33 +1397,50 @@ class SlotManager:
                     )
                     assert self._pull_runner is not None  # _needs_pull guards
                     await self._pull_runner(resolved_model)
-                await self._transition(
-                    slot_name,
-                    SlotState.STARTING,
-                    model_id=resolved_model,
-                    port=_cfg_port(cfg),
-                )
-                await self._spawn_locked(slot_name, cfg, resolved_model)
-                await self._transition(
-                    slot_name,
-                    SlotState.WARMING,
-                    model_id=resolved_model,
-                    port=_cfg_port(cfg),
-                )
-                # _await_ready returns READY when the upstream has a
-                # model loaded and serves inference, or IDLE when the
-                # process is up but ``/v1/models`` is empty (issue #31:
-                # llama-server --model "" lands here). Either is a
-                # successful load — callers downstream pick READY slots
-                # for routing and IDLE slots for "ready to accept a
-                # model" UX.
-                resolved_state = await self._await_ready(slot_name, _cfg_port(cfg))
-                await self._transition(
-                    slot_name,
-                    resolved_state,
-                    model_id=resolved_model,
-                    port=_cfg_port(cfg),
-                )
+                # Resolved once and threaded through both the pre-load
+                # eviction estimate and _spawn_locked below so a load never
+                # hits the model registry twice for the same model_id.
+                model_info = await self._resolve_model_info(resolved_model)
+                # Pre-load eviction (O26): estimate resolved_model's
+                # footprint and, if projected free memory is short, evict
+                # idle/LRU-eligible resident slots until it fits — BEFORE
+                # starting the container, not after the box is already
+                # tight. Raises PreloadEvictionFailed (caught by the
+                # except below, which stamps ERROR and re-raises) when it
+                # still won't fit after evicting everything eligible; the
+                # reservation this holds is released on any exit from the
+                # `async with`, success or failure. See
+                # hal0.slots.preload_evict for the policy.
+                async with _preload_admit(
+                    self, slot_name=slot_name, model_id=resolved_model, model_info=model_info
+                ):
+                    await self._transition(
+                        slot_name,
+                        SlotState.STARTING,
+                        model_id=resolved_model,
+                        port=_cfg_port(cfg),
+                    )
+                    await self._spawn_locked(slot_name, cfg, resolved_model, model_info=model_info)
+                    await self._transition(
+                        slot_name,
+                        SlotState.WARMING,
+                        model_id=resolved_model,
+                        port=_cfg_port(cfg),
+                    )
+                    # _await_ready returns READY when the upstream has a
+                    # model loaded and serves inference, or IDLE when the
+                    # process is up but ``/v1/models`` is empty (issue #31:
+                    # llama-server --model "" lands here). Either is a
+                    # successful load — callers downstream pick READY slots
+                    # for routing and IDLE slots for "ready to accept a
+                    # model" UX.
+                    resolved_state = await self._await_ready(slot_name, _cfg_port(cfg))
+                    await self._transition(
+                        slot_name,
+                        resolved_state,
+                        model_id=resolved_model,
+                        port=_cfg_port(cfg),
+                    )
                 # Persist explicit model_id to TOML so reconciliation
                 # after an api restart doesn't drift back to "no
                 # model.default" ERROR. Only fires when caller passed
@@ -1833,6 +1870,8 @@ class SlotManager:
         slot_name: str,
         slot_cfg: SlotConfig | dict[str, Any],
         model_id: str | None,
+        *,
+        model_info: dict[str, Any] | None = None,
     ) -> None:
         """Spawn body — caller already holds the per-slot lock.
 
@@ -1842,10 +1881,17 @@ class SlotManager:
         ``model_id`` (when set) overrides the slot config's
         ``model.default`` for swap semantics.
 
+        ``model_info``: pass the already-resolved registry lookup (see
+        :meth:`_resolve_model_info`) when the caller (``load()``) has one,
+        so a single load doesn't hit the model registry twice — once for
+        the pre-load eviction footprint estimate, once here. ``None``
+        (the default, used by every other caller) resolves it fresh.
+
         Any exception is let through as-is; the calling ``load()``
         ``except Exception -> ERROR`` branch records a stable error envelope.
         """
-        model_info = await self._resolve_model_info(model_id)
+        if model_info is None:
+            model_info = await self._resolve_model_info(model_id)
 
         cfg = _cfg_to_dict(slot_cfg)
         if model_id:
