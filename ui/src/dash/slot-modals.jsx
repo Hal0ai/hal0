@@ -21,7 +21,7 @@ import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useMetaEnums } from "@/api/hooks/useMeta";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
-import { normalizeApiModel, isUpstreamModel, isMtpEligibleModel } from "@/lib/normalizeApiModel";
+import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
 import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
 
 const {
@@ -136,11 +136,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const [ctx, setCtx] = useStateSM(
 		slot?.ctx_max ?? (slot?.metrics?.ctx || 8192),
 	);
-	// C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
-	// button through PATCH /defaults ([model].n_gpu_layers; -1/empty = unset →
-	// sends null). Both seed from the slot list payload.
-	const [thinking, setThinking] = useStateSM(slot?.enable_thinking === true);
-	const [thinkingPending, setThinkingPending] = useStateSM(false);
+	// n_gpu_layers rides the Save button through PATCH /defaults
+	// ([model].n_gpu_layers; -1/empty = unset → sends null), seeded from the
+	// slot list payload. (Reasoning/enable_thinking moved to the model drawer
+	// — spec-hw-slot-ownership §1.)
 	// ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────────
 	// The slot owns the physical layer as typed fields: device (enum) · NGL ·
 	// THREADS · BINARY (runner image ref) + an optional image_pin escape hatch.
@@ -181,9 +180,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// (type-to-confirm the slot name), mirroring DeleteModelDialog — replaces
 	// the raw window.confirm that used to gate onDeleteClick.
 	const [delOpen, setDelOpen] = useStateSM(false);
-	// Inline error for the instant-apply thinking toggle (task 3): surface the
-	// failure next to the control instead of only reverting state silently.
-	const [thinkingErr, setThinkingErr] = useStateSM(null);
 	// Per-field validation errors for numeric inputs (#548).
 	const [fieldErrs, setFieldErrs] = useStateSM({});
 	// Task 5: per-slot chat_template override.
@@ -191,17 +187,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// overrideOpen tracks whether the user has clicked [Override] to reveal the select.
 	const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
 	const [overrideOpen, setOverrideOpen] = useStateSM(!!slot?.chat_template);
-	// MTP local state — TRI-STATE after the profile↔model separation:
-	// null = Auto (defer to model-eligibility × profile opt-in), true = force on,
-	// false = force off. Seeds from slot.mtp (undefined/null → Auto). Optimistic
-	// set-before-mutate / revert-on-error, mirroring the reasoning toggle.
-	const [mtp, setMtp] = useStateSM(slot?.mtp ?? null);
-	// #901: per-slot vision toggle (instant-apply + cold restart). Default-ON:
-	// the mmproj sidecar loads unless explicitly disabled, so null/undefined →
-	// on. Optimistic local state with revert-on-error (mirrors reasoning).
-	const [vision, setVision] = useStateSM(slot?.vision !== false);
-	const [visionPending, setVisionPending] = useStateSM(false);
-	const [visionErr, setVisionErr] = useStateSM(null);
+	// (MTP / Vision moved to the model drawer — spec-hw-slot-ownership §1.
+	// ModelDefaults.mtp / .vision are the single source now.)
 	// Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
 	// device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
 	// revert-on-error.
@@ -325,8 +312,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	useEffectSM(() => {
 		if (slot) {
 			setCtx(slot.ctx_max ?? (slot.metrics?.ctx || 8192));
-			setThinking(slot.enable_thinking === true);
-			setThinkingPending(false);
 			// HW grid re-seed from the (possibly-updated) slot prop.
 			setDevice(slot.device || "gpu-rocm");
 			setNGpuLayers(
@@ -342,17 +327,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			setSubmitErr(null);
 			setDiscardOpen(false);
 			setPendingSwap(null);
-			setThinkingErr(null);
 			setFieldErrs({});
 			// Task 5: re-seed chat_template override from the slot prop.
 			setChatTemplate(slot.chat_template || "");
 			setOverrideOpen(!!slot.chat_template);
-			// Wave 8: re-seed the instant-apply toggles from the (possibly-updated)
-			// slot prop.
-			setMtp(slot.mtp ?? null);
-			setVision(slot.vision !== false);
-			setVisionPending(false);
-			setVisionErr(null);
 			setNpuAsr(slot.npu?.asr === true);
 			setNpuEmbed(slot.npu?.embed === true);
 			// Re-seed the chat pill + all three model selects too, so a save +
@@ -603,8 +581,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 	// UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields (HW
 	// grid, extra_args, ctx, parallel, chat_template override). The instant-apply
-	// toggles (thinking / MTP / enable) fire their own PUT/POST outside Save and
-	// are intentionally excluded — a flipped toggle is already persisted.
+	// toggle (enable) fires its own PUT outside Save and is intentionally
+	// excluded — a flipped toggle is already persisted. (Reasoning/MTP/Vision
+	// no longer live here — they moved to the model drawer.)
 	// ctx dirty test matches the SAVE path's numeric comparison (ctxChanged in
 	// onSaveClick: Number(ctx) !== Number(ctxBaseline)).
 	const ctxDirty = Number(String(ctx).trim()) !== Number(ctxBaseline);
@@ -1099,9 +1078,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 						<div className="form-row">
 							<div className="form-lbl">
-								<span>Context</span>
-								<FieldInfoIcon description="⟳ ctx_size — context window in tokens. PATCHes /defaults;
-									takes effect on next request. (~model-load seconds)" />
+								<span>Context (slot override)</span>
+								<FieldInfoIcon description="⟳ [model].context_size — an OVERRIDE of the bound model's
+									default context window (Model drawer → context_size), scoped to this
+									slot only. PATCHes /defaults; takes effect on next request.
+									(~model-load seconds)" />
 							</div>
 							<div className="form-ctl">
 								<input
@@ -1449,214 +1430,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						);
 					})()}
 
-				<FieldGroup label="Inference">
-					{/* C4 — Reasoning pill (llm slots only). Instant-apply via
-          PUT /config { enable_thinking }; the server reads it live on the next
-          request, no restart needed. Optimistic set-before-mutate +
-          revert-on-error (mirrors MTP/Vision). Default-OFF: null/undefined
-          on disk renders as off. */}
-					{slot.type === "llm" && (
-						<div className="form-row">
-							<div className="form-lbl">
-								<span>Reasoning</span>
-								<FieldInfoIcon description="Stream reasoning before the answer. Off = faster, direct
-									replies. Applies to the next message." />
-							</div>
-							<div className="form-ctl">
-								<PillToggle
-									on={thinking}
-									disabled={thinkingPending || saving}
-									label="Reasoning"
-									stateText={thinking ? "On" : "Off"}
-									onToggle={async (next) => {
-										setThinking(next);
-										setThinkingPending(true);
-										setSubmitErr(null);
-										setThinkingErr(null);
-										try {
-											await editMut.mutateAsync({
-												name: slot.name,
-												body: { enable_thinking: next },
-											});
-											window.__hal0Toast &&
-												window.__hal0Toast(
-													`${slot.name} reasoning ${next ? "on" : "off"} — applies to next message`,
-													"ok",
-												);
-										} catch (err) {
-											setThinking(!next);
-											setThinkingErr(
-												err?.message || "reasoning toggle failed",
-											);
-										} finally {
-											setThinkingPending(false);
-										}
-									}}
-								/>
-								{thinkingErr && (
-									<div className="hint" style={{ color: "var(--err)" }}>
-										{thinkingErr}
-									</div>
-								)}
-							</div>
-						</div>
-					)}
-					{/* MTP — tri-state (Auto / On / Off) after the profile↔model separation.
-          Renders whenever the slot is an LLM (operator feedback: hiding the
-          row when the model was ineligible left the state undiscoverable —
-          you couldn't see WHY MTP was off, couldn't find Auto, and the
-          force-on escape hatch had no UI). Non-LLM slot types
-          (embed/rerank/tts/…) skip the row, where MTP is meaningless.
-          Auto (null) defers to model-eligibility × profile opt-in; the
-          MtpControl surfaces whether Auto is currently effective so "Auto"
-          never masks an inactive state. Instant-apply via PUT /config +
-          non-blocking cold restart. */}
-					{slot.type === "llm" &&
-						(() => {
-							const cur = slot.model_id || slot.model || "";
-							const m = (modelsQuery.data ?? [])
-								.map(normalizeApiModel)
-								.find((x) => x.id === cur);
-							// Same eligibility rule as the server
-							// (`model_is_mtp_eligible`): the `mtp` tag OR a delimited MTP name
-							// marker on the model.
-							const modelEligible = isMtpEligibleModel(m);
-							// Auto is effective only when the model is eligible AND the slot's
-							// profile opts into MTP — mirror the server's _effective_mtp rule so
-							// the hint never disagrees with what actually launches.
-							const prof = (profilesQuery.data ?? []).find(
-								(p) => p.name === slot.profile,
-							);
-							const profileOptsIn = !!prof?.mtp;
-							const autoActive = modelEligible && profileOptsIn;
-							const inactiveReason = !modelEligible && !profileOptsIn
-								? "model has no MTP heads and profile doesn't enable MTP"
-								: !modelEligible
-									? "model has no MTP heads"
-									: "profile doesn't enable MTP";
-							return (
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>MTP</span>
-										<FieldInfoIcon description="Multi-token speculative decoding. Auto follows the model
-											+ profile; On/Off force it. Restarts the container." />
-									</div>
-									<div className="form-ctl">
-										<MtpControl
-											value={mtp}
-											autoActive={autoActive}
-											inactiveReason={inactiveReason}
-											forceOnRisky={!modelEligible}
-											disabled={saving}
-											onChange={async (next) => {
-												// Optimistic — set local state before the PUT, revert on
-												// error (mirrors Vision).
-												const prev = mtp;
-												setMtp(next);
-												setSubmitErr(null);
-												const word = next == null
-													? "auto"
-													: next
-														? "on"
-														: "off";
-												try {
-													await editMut.mutateAsync({
-														name: slot.name,
-														body: { mtp: next },
-													});
-													restartMut.mutate(slot.name, {
-														onError: (err) =>
-															window.__hal0Toast &&
-																	window.__hal0Toast(
-																		`MTP restart failed — ${err?.message || "see logs"}`,
-																		"err",
-																	),
-													});
-													window.__hal0Toast &&
-														window.__hal0Toast(
-															`${slot.name} MTP ${word} — restarting in the background`,
-															"info",
-														);
-												} catch (err) {
-													setMtp(prev);
-													setSubmitErr(
-														err?.message || "MTP change failed",
-													);
-												}
-											}}
-										/>
-									</div>
-								</div>
-							);
-						})()}
-					{/* #901: Vision pill — gated to slots whose bound model carries an mmproj
-          sidecar (the registry Model.mmproj presence flag). Toggling drops or
-          adds the ~0.9 GB projector; instant-apply via PUT /config {vision}
-          plus a non-blocking cold restart (mirrors MTP). Default-ON, so a
-          null/absent on-disk value renders as on. */}
-					{(() => {
-						const cur = slot.model_id || slot.model || "";
-						const m = (modelsQuery.data ?? [])
-							.map(normalizeApiModel)
-							.find((x) => x.id === cur);
-						// mmproj is a presence flag on the registry row (path or marker string);
-						// any truthy value means the model ships a vision projector sidecar.
-						if (!m || !m.mmproj) return null;
-						return (
-							<div className="form-row">
-								<div className="form-lbl">
-									<span>Vision</span>
-									<FieldInfoIcon description="Let the slot accept images. Off saves ~0.9 GB of VRAM (text
-										only)." />
-								</div>
-								<div className="form-ctl">
-									<PillToggle
-										on={vision}
-										disabled={visionPending || saving}
-										label="Vision"
-										stateText={vision ? "On" : "Off"}
-										onToggle={async (next) => {
-											// Optimistic set-before-mutate + revert-on-error (mirrors MTP).
-											setVision(next);
-											setVisionPending(true);
-											setVisionErr(null);
-											setSubmitErr(null);
-											try {
-												await editMut.mutateAsync({
-													name: slot.name,
-													body: { vision: next },
-												});
-												restartMut.mutate(slot.name, {
-													onError: (err) =>
-														window.__hal0Toast &&
-														window.__hal0Toast(
-															`Vision restart failed — ${err?.message || "see logs"}`,
-															"err",
-														),
-												});
-												window.__hal0Toast &&
-													window.__hal0Toast(
-														`${slot.name} vision ${next ? "on" : "off"} — restarting in the background`,
-														"info",
-													);
-											} catch (err) {
-												setVision(!next);
-												setVisionErr(err?.message || "vision toggle failed");
-											} finally {
-												setVisionPending(false);
-											}
-										}}
-									/>
-									{visionErr && (
-										<div className="hint" style={{ color: "var(--err)" }}>
-											{visionErr}
-										</div>
-									)}
-								</div>
-							</div>
-						);
-					})()}
-				</FieldGroup>
+				{/* spec-hw-slot-ownership §1: Reasoning / MTP / Vision moved to the
+          MODEL drawer (ModelDefaults.enable_thinking / .mtp / .vision) — the
+          slot pills that used to live in an "Inference" FieldGroup here are
+          removed. A slot config write can no longer set any of the three
+          (hal0.slots.config_write.MODEL_OWNED_SLOT_KEYS hard-rejects it);
+          edit the bound model instead. */}
 
 				{/* Task 4: Advanced fields (mostly read-only, profile-owned) are
           collapsed by default — minimal native <details> disclosure (no

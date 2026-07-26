@@ -205,10 +205,10 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     expect(createBodies[0].profile).toBeUndefined()
   })
 
-  // ─── MTP pill (Task 2) ───────────────────────────────────────────────────
+  // ─── MTP/Reasoning/Vision moved to the MODEL drawer (spec-hw-slot-ownership §1) ──
 
   const MTP_SLOT = { name: 'chat', type: 'llm', device: 'gpu-rocm', profile: 'rocm-mtp', backend: 'rocm',
-    model_id: 'qwen-mtp', model: 'qwen-mtp', state: 'serving', port: 8092, runtime: 'container', enabled: true, mtp: false }
+    model_id: 'qwen-mtp', model: 'qwen-mtp', state: 'serving', port: 8092, runtime: 'container', enabled: true }
 
   async function seedSlotsAndModels(page: Page, slots: any[], models: any[]) {
     await page.addInitScript(({ slots, models }: { slots: any[]; models: any[] }) => {
@@ -220,55 +220,18 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     }, { slots, models })
   }
 
-  test('C7i — MTP control shows for MTP-capable model; On writes mtp:true + restart, Auto writes mtp:null', async ({ page }) => {
-    const puts: any[] = []
-    let restarted = false
-    await page.route('**/api/slots/chat/config', async (route) => {
-      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await page.route('**/api/slots/chat/restart', async (route) => { restarted = true; await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }) })
+  test('C7i — MTP/Reasoning/Vision controls are gone from the slot drawer', async ({ page }) => {
+    // spec-hw-slot-ownership §1: mtp/enable_thinking/vision are model-owned
+    // typed capabilities now — a slot config write can no longer set any of
+    // them (server hard-rejects it), and the drawer no longer offers the
+    // pills at all, MTP-eligible model or not.
     await seedSlotsAndModels(page, [MTP_SLOT], [{ id: 'qwen-mtp', name: 'qwen-mtp', capabilities: ['chat'], tags: ['rocmfp4', 'mtp'] }])
     await page.goto('/#slots/chat')
-    // Use the exact label span text to avoid false-matches on "qwen-mtp" / "rocm-mtp" substrings
-    const row = page.locator('.drawer .form-row').filter({ has: page.locator('.form-lbl span', { hasText: /^MTP$/ }) })
-    await expect(row).toBeVisible()
-    // Tri-state: forcing On writes mtp:true and restarts.
-    await row.getByTestId('mtp-seg-on').click()
-    await expect.poll(() => puts.length).toBeGreaterThan(0)
-    expect(puts[0].mtp).toBe(true)
-    await expect.poll(() => restarted).toBe(true)
-    // Returning to Auto writes mtp:null (defer to model × profile).
-    await row.getByTestId('mtp-seg-auto').click()
-    await expect.poll(() => puts.length).toBeGreaterThan(1)
-    expect(puts[1].mtp).toBeNull()
-  })
-
-  test('C7j — MTP control visible for a non-MTP model, with reason + force-on warning', async ({ page }) => {
-    // Operator feedback: hiding the row for ineligible models made the state
-    // undiscoverable (can't see WHY it's off; the force-on escape hatch had no
-    // UI). The row is now ALWAYS shown on llm slots — for an ineligible model
-    // it explains Auto is off and warns before a force-on that would fail at
-    // launch. Fixture model carries neither the tag nor a name marker, and the
-    // slot has NO override (mtp: null = Auto) — MTP_SLOT's mtp:false would
-    // legitimately select "Off" instead of Auto.
-    const slot = { ...MTP_SLOT, model_id: 'qwen-plain', model: 'qwen-plain', mtp: null }
-    await seedSlotsAndModels(page, [slot], [{ id: 'qwen-plain', name: 'qwen-plain', capabilities: ['chat'], tags: ['rocmfp4'] }])
-    await page.route('**/api/slots/chat/config', async (route) => {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await page.route('**/api/slots/chat/restart', async (route) => {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await page.goto('/#slots/chat')
-    const row = page.locator('.drawer .form-row').filter({ has: page.locator('.form-lbl span', { hasText: /^MTP$/ }) })
-    await expect(row).toBeVisible()
-    // Auto is selected and the reason line names the model.
-    await expect(row.getByTestId('mtp-seg-auto')).toHaveAttribute('aria-checked', 'true')
-    await expect(row.locator('.mtp-eff').first()).toContainText('model has no MTP heads')
-    // Forcing On surfaces the crash warning (escape hatch stays usable).
-    await row.getByTestId('mtp-seg-on').click()
-    await expect(row.getByTestId('mtp-force-warn')).toBeVisible()
+    await expect(page.locator('.drawer')).toBeVisible()
+    const mtpRow = page.locator('.drawer .form-row').filter({ has: page.locator('.form-lbl span', { hasText: /^MTP$/ }) })
+    await expect(mtpRow).toHaveCount(0)
+    await expect(page.locator('.drawer .form-row', { hasText: 'Reasoning' })).toHaveCount(0)
+    await expect(page.locator('.drawer .form-row', { hasText: 'Vision' })).toHaveCount(0)
   })
 
   // ─── Chat-template override (Task 5) ────────────────────────────────────────

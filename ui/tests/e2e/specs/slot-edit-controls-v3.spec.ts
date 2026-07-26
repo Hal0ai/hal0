@@ -3,8 +3,10 @@
  *
  * Covers the operator controls added to the slots page:
  *   C3. enabled toggle on the slot CARD → PUT /config { enabled } + fade.
- *   C4. enable_thinking toggle in the edit DRAWER (llm slots only) →
- *       PUT /config { enable_thinking } instantly.
+ *   C4. (spec-hw-slot-ownership §1) enable_thinking/mtp/vision moved OFF the
+ *       slot drawer entirely — they are model-owned typed capabilities now,
+ *       edited on the model drawer (ModelDefaults.*) instead. A slot config
+ *       write can no longer set any of the three (hard-rejected server-side).
  *   C5. NGL lives in the typed Hardware grid (spec-hw-slot-ownership §2),
  *       a TOP-LEVEL slot-owned field persisted via PUT /config { n_gpu_layers }
  *       (reversing the §5 fold into [model].n_gpu_layers). -1/empty = the "all
@@ -66,29 +68,25 @@ async function seedSlots(page: Page, slots: any[]) {
 // slot *edit drawer* (opened via the #slots/:name route), which is unchanged.
 
 test.describe('Slot edit controls (/slots)', () => {
-  test('C4 — drawer reasoning pill PUTs /config { enable_thinking:true }', async ({ page }) => {
-    const puts: any[] = []
-    await page.route('**/api/slots/primary/config', async (route) => {
-      if (route.request().method() === 'PUT') {
-        puts.push(JSON.parse(route.request().postData() || '{}'))
-      }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
+  test('C4 — Reasoning/MTP/Vision pills are gone from the slot drawer (llm slot)', async ({ page }) => {
+    // spec-hw-slot-ownership §1: these are model-owned typed capabilities
+    // now (ModelDefaults.enable_thinking / .mtp / .vision) — the slot drawer
+    // no longer offers them, even for an llm slot.
     await seedSlots(page, [PRIMARY, EMBED])
-
     await page.goto('/#slots/primary')
-    const row = page.locator('.drawer .form-row', { hasText: 'Reasoning' })
-    await expect(row).toBeVisible()
-    await row.locator('button[role="switch"]').click()
-    await expect.poll(() => puts.length).toBeGreaterThan(0)
-    expect(puts[0].enable_thinking).toBe(true)
+    await expect(page.locator('.drawer')).toBeVisible()
+    await expect(page.locator('.drawer .form-row', { hasText: 'Reasoning' })).toHaveCount(0)
+    await expect(page.locator('.drawer .form-row', { hasText: 'MTP' })).toHaveCount(0)
+    await expect(page.locator('.drawer .form-row', { hasText: 'Vision' })).toHaveCount(0)
   })
 
-  test('C4 — reasoning pill is hidden for non-llm slots', async ({ page }) => {
+  test('C4 — Reasoning/MTP/Vision pills are gone for non-llm slots too', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/embed')
     await expect(page.locator('.drawer')).toBeVisible()
     await expect(page.locator('.drawer .form-row', { hasText: 'Reasoning' })).toHaveCount(0)
+    await expect(page.locator('.drawer .form-row', { hasText: 'MTP' })).toHaveCount(0)
+    await expect(page.locator('.drawer .form-row', { hasText: 'Vision' })).toHaveCount(0)
   })
 
   test('C5 — NGL lives in the HW grid, editable with the -1 default', async ({ page }) => {
@@ -389,38 +387,19 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.locator('.drawer .form-row', { hasText: 'workers' })).toHaveCount(0)
   })
 
-  test('C4 — reasoning pill toggles enable_thinking and keeps a fixed label', async ({ page }) => {
-    const puts: any[] = []
-    await page.route('**/api/slots/primary/config', async (route) => {
-      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await seedSlots(page, [PRIMARY, EMBED])
-    await page.goto('/#slots/primary')
-
-    const row = page.locator('.drawer .form-row', { hasText: 'Reasoning' })
-    await expect(row).toBeVisible()
-    await expect(row.locator('.form-lbl span').first()).toHaveText('Reasoning')
-    const pill = row.locator('button[role="switch"]')
-    await expect(pill).toHaveAttribute('aria-checked', 'false')
-
-    await pill.click()
-    await expect.poll(() => puts.length).toBeGreaterThan(0)
-    expect(puts[0].enable_thinking).toBe(true)
-    await expect(pill).toHaveAttribute('aria-checked', 'true')
-  })
-
-  test('drawer fields are grouped under SLOT / MODEL / INFERENCE', async ({ page }) => {
+  test('drawer fields are grouped under SLOT / MODEL (Inference group is gone)', async ({ page }) => {
+    // spec-hw-slot-ownership §1: the "Inference" FieldGroup only ever held
+    // the Reasoning/MTP/Vision pills, all three now model-owned — the group
+    // itself is removed from the slot drawer along with them.
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/primary')
     await expect(page.locator('.drawer')).toBeVisible()
-    for (const label of ['Slot', 'Model', 'Inference']) {
+    for (const label of ['Slot', 'Model']) {
       await expect(page.locator('.field-group-label', { hasText: new RegExp(`^${label}$`, 'i') })).toHaveCount(1)
     }
+    await expect(page.locator('.field-group-label', { hasText: /^Inference$/i })).toHaveCount(0)
     const modelGroup = page.locator('.field-group', { has: page.locator('.field-group-label', { hasText: /^Model$/i }) })
     await expect(modelGroup.locator('.form-row', { hasText: 'Model' }).locator('select')).toBeVisible()
-    const infGroup = page.locator('.field-group', { has: page.locator('.field-group-label', { hasText: /^Inference$/i }) })
-    await expect(infGroup.locator('.form-row', { hasText: 'Reasoning' })).toBeVisible()
   })
 
   test('default-for-type row is gone from the edit drawer and Save omits default', async ({ page }) => {

@@ -106,6 +106,7 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await page.getByTestId('model-ctx-input').fill('16384')
     await page.getByTestId('model-chat-template').selectOption('chatml')
     await page.getByTestId('cap-mtp-off').click()
+    await page.getByTestId('cap-vision-off').click()
     await page.getByTestId('cap-thinking-on').click()
     await page.getByTestId('cap-jinja-off').click()
     await page.getByTestId('model-save').click()
@@ -124,6 +125,7 @@ test.describe('Model drawer — complete save and compact field help', () => {
       profile: 'rocm-save',
       chat_template: 'chatml',
       mtp: false,
+      vision: false,
       enable_thinking: true,
       jinja: false,
       rope_freq_base: 1_000_000,
@@ -141,9 +143,9 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     const drawer = page.locator('.drawer.open')
     const labels = drawer.locator('.form-lbl')
-    await expect(labels).toHaveCount(14)
+    await expect(labels).toHaveCount(15)
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
-    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(14)
+    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(15)
 
     const displayNameLabel = labels.filter({ hasText: 'Display name' })
     const info = displayNameLabel.getByRole('button', { name: 'Info' })
