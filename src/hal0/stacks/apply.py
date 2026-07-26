@@ -239,16 +239,17 @@ class StackApplyEngine:
             updates["provider"] = entry.provider
         if entry.profile is not None:
             updates["profile"] = entry.profile
-        # ``vision`` is a plain bool (no inherit) → declaratively written.
-        updates["vision"] = entry.vision
-        # ``mtp`` is declaratively written INCLUDING None: a stack row set to
-        # Auto (null) must clear any forced true/false already on the slot, or
-        # the stack UI's "Auto" hint disagrees with what actually launches.
-        # merge_slot_config treats None as delete-key, so Auto rows reset the
-        # slot to the derived decision (model eligibility x profile opt-in).
-        updates["mtp"] = entry.mtp
-        if entry.enable_thinking is not None:
-            updates["enable_thinking"] = entry.enable_thinking
+        # spec-hw-slot-ownership §1: vision / mtp / enable_thinking are
+        # model-owned typed capabilities now — a slot config write can no
+        # longer carry them (reconcile_slot_updates hard-rejects it, the
+        # same guard a dashboard PUT /config hits). ``entry.vision`` /
+        # ``entry.mtp`` / ``entry.enable_thinking`` still round-trip on the
+        # portable ``StackSlotEntry`` shape (reading an older exported stack
+        # JSON must not fail validation), but applying a stack no longer
+        # projects them anywhere — folding them onto ``entry.model``'s
+        # defaults needs a model-registry write inside this engine's
+        # currently slot-TOML-only plan/commit split, which is a follow-up,
+        # not a silent write here.
         if entry.server_extra_args is not None:
             updates["server"] = {"extra_args": entry.server_extra_args}
 

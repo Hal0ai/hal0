@@ -119,9 +119,20 @@ def test_mtp_bundle_absent_on_cuda_runner_even_for_tagged_model():
     assert "--spec-type" not in _extra_args(scalars)
 
 
-def test_slot_mtp_true_forces_bundle_even_on_cuda():
-    scalars = _resolve_llama_scalars({"name": "s", "mtp": True}, _plain_model(), _cuda_profile())
+def test_model_defaults_mtp_true_forces_bundle_even_on_cuda():
+    """spec-hw-slot-ownership §1: the MODEL is the sole mtp authority now —
+    an explicit defaults.mtp=True is an unconditional curator override, same
+    contract the old slot.mtp escape hatch had."""
+    model = _plain_model(defaults={"mtp": True})
+    scalars = _resolve_llama_scalars({"name": "s"}, model, _cuda_profile())
     assert "--spec-type draft-mtp" in _extra_args(scalars)
+
+
+def test_slot_mtp_key_has_no_effect_anymore():
+    """A stray slot-side ``mtp`` key (pre-migration TOML) is ignored — only
+    ``ModelDefaults.mtp`` decides now."""
+    scalars = _resolve_llama_scalars({"name": "s", "mtp": True}, _plain_model(), _cuda_profile())
+    assert "--spec-type" not in _extra_args(scalars)
 
 
 # ── slot owns -ngl; model/profile inert ───────────────────────────────────────

@@ -434,24 +434,26 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
     return False
 
 
-async def _slot_thinking_default(request: Request, model_id: str) -> bool:
-    """Per-slot reasoning default: the ``enable_thinking`` flag of the slot whose
-    default model is ``model_id``. Falls back to False (global suppression) when
-    no slot sets it. Always overridable per request."""
-    sm = getattr(request.app.state, "slot_manager", None)
-    if sm is None:
+async def _model_thinking_default(request: Request, model_id: str) -> bool:
+    """Per-model reasoning default: ``ModelDefaults.enable_thinking`` for
+    ``model_id``. Falls back to False (global suppression) when the model
+    has no opinion (or isn't registered). Always overridable per request.
+
+    spec-hw-slot-ownership §1: reasoning is a model-owned typed capability
+    now — the model registry is the single source (replaces the former
+    per-slot ``SlotConfig.enable_thinking`` scan, which iterated every slot
+    config looking for one bound to this model)."""
+    registry = getattr(request.app.state, "model_registry", None)
+    if registry is None:
         return False
     try:
-        for cfg in await sm.iter_configs():
-            if not isinstance(cfg, dict):
-                continue
-            model = cfg.get("model")
-            default_model = model.get("default") if isinstance(model, dict) else None
-            if default_model == model_id and cfg.get("enable_thinking") is not None:
-                return bool(cfg["enable_thinking"])
+        if not registry.has(model_id):
+            return False
+        model = registry.get(model_id)
+        thinking = model.defaults.enable_thinking if model.defaults is not None else None
+        return bool(thinking) if thinking is not None else False
     except Exception:
         return False
-    return False
 
 
 async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -500,7 +502,7 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
 
     model_id = body.get("model")
     if isinstance(model_id, str) and not _is_remote_model(request, model_id):
-        default_thinking = await _slot_thinking_default(request, model_id)
+        default_thinking = await _model_thinking_default(request, model_id)
         body = apply_thinking_policy(body, default_thinking=default_thinking)
 
     import contextlib

@@ -119,6 +119,36 @@ class ModelDefaults(BaseModel):
             "providers.container._resolve_llama_scalars."
         ),
     )
+    enable_thinking: bool | None = Field(
+        default=None,
+        description=(
+            "spec-hw-slot-ownership §1: tri-state reasoning default — the "
+            "MODEL is now the single authority (replaces the old "
+            "SlotConfig.enable_thinking dual-writer). True → requests "
+            "dispatched against this model default to thinking ON; False → "
+            "OFF; None → global suppression default. Always overridable per "
+            "request via top-level enable_thinking / chat_template_kwargs "
+            "(see hal0.normalize.thinking.apply_thinking_policy and "
+            "hal0.api.routes.v1's per-model default lookup)."
+        ),
+    )
+    vision: bool | None = Field(
+        default=None,
+        description=(
+            "spec-hw-slot-ownership §1: tri-state vision toggle (#901) — the "
+            "MODEL is now the single authority (replaces the old "
+            "SlotConfig.vision dual-writer). This is an override of whether "
+            "the mmproj sidecar (:attr:`Model.mmproj`) actually loads at "
+            "launch, not a primary capability source. None (default) = load "
+            "it whenever one is present — the historical default-on "
+            "behavior. False = force-suppress the projector (no --mmproj) "
+            "even though the model is vision-capable, e.g. on a memory-tight "
+            "host (the projector is ~0.9 GB resident). True is accepted for "
+            "symmetry with the tri-state UI control but has no additional "
+            "effect beyond None — there is nothing to force on without an "
+            "mmproj sidecar. See providers.container._resolve_llama_scalars."
+        ),
+    )
 
 
 class Model(BaseModel):

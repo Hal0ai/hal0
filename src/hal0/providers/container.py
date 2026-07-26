@@ -317,7 +317,6 @@ def _profile_image_and_flags(
 
 
 def _effective_mtp(
-    slot_mtp: bool | None,
     model_info: Mapping[str, Any],
     runner: Any,
     *,
@@ -325,19 +324,18 @@ def _effective_mtp(
 ) -> bool:
     """Resolve whether MTP speculative decoding is on for this slot launch.
 
-    §7.1a / ML-5: MTP is a MODEL property, not a profile-template one —
-    ``profile.mtp`` is no longer consulted at all. Precedence:
+    spec-hw-slot-ownership §1: MTP is a MODEL property, and the MODEL is now
+    the SOLE authority (the former per-slot ``SlotConfig.mtp`` override —
+    §7.1a / ML-5's "slot decides first" escape hatch — is removed; a slot
+    config write can no longer set ``mtp`` at all, see
+    ``hal0.slots.config_write.MODEL_OWNED_SLOT_KEYS``). Precedence:
 
-    * **slot** decides first — an explicit :attr:`SlotConfig.mtp` (``True`` /
-      ``False``) always wins, an unconditional operator escape hatch (even
-      for a runner that can't actually draft — the operator asked for it).
-    * **model** decides next — an explicit ``ModelDefaults.mtp`` tri-state
+    * **model** decides first — an explicit ``ModelDefaults.mtp`` tri-state
       (``True``/``False``) wins in EITHER direction over the registry
-      ``mtp`` tag, same unconditional-escape-hatch contract as slot.mtp (a
-      curator who explicitly tagged the model's launcher defaults knows
-      what they're doing).
-    * **AUTO** (both above are ``None``) enables MTP only when the model
-      carries the registry ``mtp`` tag (:func:`hal0.model_meta.
+      ``mtp`` tag (a curator who explicitly tagged the model's launcher
+      defaults knows what they're doing).
+    * **AUTO** (``ModelDefaults.mtp`` is ``None``) enables MTP only when the
+      model carries the registry ``mtp`` tag (:func:`hal0.model_meta.
       model_is_mtp_eligible` — no filename/GGUF-name sniffing anymore)
       AND the resolved :class:`~hal0.runners.Runner` actually supports MTP
       drafting (``runner.supports.mtp`` — off for the cuda/cpu llama-server
@@ -354,8 +352,6 @@ def _effective_mtp(
     once-per-launch hint into a ~0.4/s stream per polling client for every
     AUTO slot on an untagged model.
     """
-    if slot_mtp is not None:
-        return bool(slot_mtp)
     defaults = model_info.get("defaults")
     model_mtp = defaults.get("mtp") if isinstance(defaults, Mapping) else None
     if model_mtp is not None:
@@ -1075,9 +1071,7 @@ def _resolve_llama_scalars(
     # the mtp/jinja capability gates below, so they can never drift onto two
     # different runners (§7.1a / ML-5).
     runner = _effective_runner(slot_cfg, profile, model_info)
-    effective_mtp = _effective_mtp(
-        slot_cfg.get("mtp"), model_info, runner, log_ineligible=for_launch
-    )
+    effective_mtp = _effective_mtp(model_info, runner, log_ineligible=for_launch)
     # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
     # resolving the profile's flags — the profile flag resolver
     # (:func:`resolve_profile_flags`) is NOT consulted at launch. The model's
@@ -1125,13 +1119,16 @@ def _resolve_llama_scalars(
         str(Path(model_store_root()) / "chat-templates" / f"{tmpl_id}.jinja") if tmpl_id else None
     )
 
-    # Vision projector sidecar, gated by the per-slot ``vision`` toggle (#901).
-    mmproj = model_info.get("mmproj")
-    if not slot_cfg.get("vision", True):
-        mmproj = None
-
     defaults = model_info.get("defaults")
     model_defaults = dict(defaults) if isinstance(defaults, dict) else None
+
+    # Vision projector sidecar, gated by the MODEL-owned ``vision`` tri-state
+    # (#901 / spec-hw-slot-ownership §1 — replaces the old per-slot toggle).
+    # None (unset) keeps the historical default-on behavior; False
+    # force-suppresses the sidecar even though the model carries one.
+    mmproj = model_info.get("mmproj")
+    if model_defaults is not None and model_defaults.get("vision") is False:
+        mmproj = None
 
     # Family-architecture overrides (e.g. gemma → f16 KV): the middle layer
     # between the profile's generic flags and the slot's own [model].defaults.

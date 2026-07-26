@@ -265,15 +265,54 @@ def check_default_uniqueness(
         )
 
 
+# ── model-owned tune keys (spec-hw-slot-ownership §1) ───────────────────────
+#
+# mtp / enable_thinking / vision are typed capability fields the MODEL owns
+# now (alongside jinja/chat_template) — the old shape let a slot pill AND the
+# model drawer both persist the same fact, so a slot could silently disagree
+# with its own bound model (the exact "two writers, one fact" failure mode
+# the hardware axis was already fixed for). A slot config write may no longer
+# set any of these three; the model drawer (``PUT /api/models/{id}``,
+# ``ModelDefaults.mtp`` / ``.enable_thinking`` / ``.vision``) is the only
+# writer now. Symmetric to :data:`hal0.slots.argv.SLOT_HARDWARE_FLAGS`, which
+# hard-rejects the opposite direction (a model/profile flag save carrying a
+# slot-owned hardware flag).
+MODEL_OWNED_SLOT_KEYS: frozenset[str] = frozenset({"mtp", "enable_thinking", "vision"})
+
+
+def _deny_model_owned_keys(updates: dict[str, Any]) -> None:
+    """Raise :class:`SlotConfigError` if ``updates`` sets a model-owned tune key.
+
+    Called at the top of :func:`reconcile_slot_updates` so both
+    ``SlotManager.update_config`` and the stacks apply engine
+    (:func:`reconcile_and_guard_slot_config`) refuse a slot-side write of
+    ``mtp``/``enable_thinking``/``vision`` before the merge ever runs —
+    neither writer can silently persist a stale/conflicting typed capability
+    on the slot side of the partition.
+    """
+    offenders = sorted(MODEL_OWNED_SLOT_KEYS & updates.keys())
+    if offenders:
+        raise SlotConfigError(
+            f"slot config may not set {', '.join(offenders)}; these are "
+            "model-owned typed capabilities now (spec-hw-slot-ownership §1) "
+            "— set them on the model instead (PUT /api/models/{id} "
+            "defaults.mtp / .enable_thinking / .vision).",
+            code="slot.model_owned_key_denied",
+            details={"keys": offenders},
+        )
+
+
 def reconcile_slot_updates(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     """Normalize + merge ``updates`` onto ``base`` and keep device/profile coherent.
 
     The write-side projection shared by ``SlotManager.update_config`` and the
-    stacks apply engine: the copy-safe one-level merge + #585 ctx_size fold
-    (:func:`hal0.slot_config.merge_slot_config`) followed by
-    :func:`_reconcile_device_profile` driven by exactly the keys the caller
-    changed. Returns a fresh dict; ``base`` is never mutated.
+    stacks apply engine: guards against a model-owned key first
+    (:func:`_deny_model_owned_keys`), then the copy-safe one-level merge +
+    #585 ctx_size fold (:func:`hal0.slot_config.merge_slot_config`) followed
+    by :func:`_reconcile_device_profile` driven by exactly the keys the
+    caller changed. Returns a fresh dict; ``base`` is never mutated.
     """
+    _deny_model_owned_keys(updates)
     merged = merge_slot_config(base, updates)
     _reconcile_device_profile(merged, set(updates.keys()))
     return merged
@@ -301,8 +340,10 @@ def reconcile_and_guard_slot_config(
 
 
 __all__ = [
+    "MODEL_OWNED_SLOT_KEYS",
     "_base_profile_for_backend",
     "_cfg_effective_backend",
+    "_deny_model_owned_keys",
     "_iter_peer_configs",
     "_read_slot_toml_dict",
     "_reconcile_device_profile",

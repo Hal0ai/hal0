@@ -47,6 +47,14 @@ _CONTEXT_LENGTH_KEY = "context_length"
 _CAPABILITY_FLAGS_EXTRA_KEY = "_capability_flags"
 _MODALITIES_OVERRIDE_EXTRA_KEY = "_modalities_override"
 
+#: spec-hw-slot-ownership §1: ``ModelDefaults.enable_thinking`` / ``.vision``
+#: are tri-state bools with no reserved column either (same "no schema
+#: migration" fold as ``capability_flags``/``modalities_override`` above) —
+#: only written when non-None, so a pre-existing row round-trips with both
+#: reading back as None (no opinion), same as any other unset tri-state.
+_ENABLE_THINKING_EXTRA_KEY = "_enable_thinking"
+_VISION_EXTRA_KEY = "_vision"
+
 #: Per-type default marker (:attr:`hal0.registry.model.Model.default`) also
 #: rides the ``extra`` blob under a reserved key rather than getting its own
 #: column — the single-holder invariant is enforced in Python (the
@@ -151,6 +159,13 @@ def model_to_row(
         metadata[_CAPABILITY_FLAGS_EXTRA_KEY] = capability_flags
     if model.modalities_override is not None:
         metadata[_MODALITIES_OVERRIDE_EXTRA_KEY] = [m.value for m in model.modalities_override]
+    # spec-hw-slot-ownership §1: enable_thinking/vision have no reserved
+    # column (see _ENABLE_THINKING_EXTRA_KEY docstring above) — only stamped
+    # when the tri-state is explicitly set.
+    if defaults.enable_thinking is not None:
+        metadata[_ENABLE_THINKING_EXTRA_KEY] = defaults.enable_thinking
+    if defaults.vision is not None:
+        metadata[_VISION_EXTRA_KEY] = defaults.vision
     # Per-type default marker — only stamped when set (see _DEFAULT_EXTRA_KEY).
     if model.default:
         metadata[_DEFAULT_EXTRA_KEY] = True
@@ -392,7 +407,14 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
     )
     default = bool(metadata.pop(_DEFAULT_EXTRA_KEY, False))
 
+    raw_enable_thinking = metadata.pop(_ENABLE_THINKING_EXTRA_KEY, None)
+    raw_vision = metadata.pop(_VISION_EXTRA_KEY, None)
+
     defaults_kwargs = {col: row[col] for col in _DEFAULTS_COLUMNS}
+    defaults_kwargs["enable_thinking"] = (
+        raw_enable_thinking if isinstance(raw_enable_thinking, bool) else None
+    )
+    defaults_kwargs["vision"] = raw_vision if isinstance(raw_vision, bool) else None
     # NOTE: `n_gpu_layers`/`context_size` can legitimately be 0, which is
     # falsy — must check `is not None`, not truthiness, or a real all-
     # zero-but-set ModelDefaults would collapse to None on read.

@@ -987,11 +987,13 @@ def test_patch_defaults_canonicalizes_ctx_size_key(
 # ── config-field enrichment (ported from the retired enrichment suite) ──────
 #
 # /api/slots enriches every entry with TOML-derived fields via
-# ``hal0.slot_view.config_enrichment``: drawer seeds (enable_thinking,
-# n_gpu_layers, rope_freq_base, idle_timeout_s, workers, llamacpp_args),
-# persona-surface fields (type, model_default, labels, enabled), the
-# normalized ``declared_backend`` token, and ``coresident_group`` for the
-# NPU FLM trio.
+# ``hal0.slot_view.config_enrichment``: drawer seeds (n_gpu_layers,
+# rope_freq_base, idle_timeout_s, workers, llamacpp_args), persona-surface
+# fields (type, model_default, labels, enabled), the normalized
+# ``declared_backend`` token, and ``coresident_group`` for the NPU FLM trio.
+# ``enable_thinking``/``mtp``/``vision`` are model-owned typed capabilities
+# now (spec-hw-slot-ownership §1) and are deliberately NOT lifted here — see
+# test_list_slots_omits_model_owned_tune_keys below.
 
 
 # ── coresident_group field ──────────────────────────────────────────────────
@@ -1151,17 +1153,50 @@ def test_list_slots_skips_coresident_for_disabled_sibling(
 # ── config-field exposure (Spec 1 / Component 1) ───────────────────────────
 #
 # The slot-edit panel seeds its card + drawer controls from the slot list
-# payload. Three SlotConfig fields must ride along so the UI doesn't have to
-# fetch /config per slot: ``enabled`` (top-level), ``enable_thinking``
-# (top-level), ``n_gpu_layers`` (from [model]).
+# payload. Two SlotConfig fields must ride along so the UI doesn't have to
+# fetch /config per slot: ``enabled`` (top-level), ``n_gpu_layers`` (from
+# [model]). ``enable_thinking`` used to ride along too, but spec-hw-slot-
+# ownership §1 made it (and mtp/vision) model-owned — see
+# test_list_slots_omits_model_owned_tune_keys below.
 
 
-def test_list_slots_exposes_enable_thinking_and_n_gpu_layers(
+def test_list_slots_exposes_n_gpu_layers(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """A slot's enable_thinking + [model].n_gpu_layers ride along in the payload."""
+    """A slot's [model].n_gpu_layers rides along in the payload."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "chat",
+        [
+            'name = "chat"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3"',
+            "n_gpu_layers = 99",
+        ],
+    )
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["chat"]
+    assert primary["n_gpu_layers"] == 99
+    assert primary["enabled"] is True
+
+
+def test_list_slots_omits_model_owned_tune_keys(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """A pre-migration slot TOML may still carry raw mtp/enable_thinking/vision
+    keys (SlotConfig's ``extra="allow"`` round-trips them harmlessly), but
+    spec-hw-slot-ownership §1 made all three model-owned — /api/slots must not
+    surface them (the model drawer reads them from GET /api/models instead)."""
     _seed_slot_toml(
         tmp_hal0_home,
         "chat",
@@ -1172,35 +1207,8 @@ def test_list_slots_exposes_enable_thinking_and_n_gpu_layers(
             'type = "llm"',
             "enabled = true",
             "enable_thinking = true",
-            "[model]",
-            'default = "qwen3"',
-            "n_gpu_layers = 99",
-        ],
-    )
-    r = isolated_client.get("/api/slots")
-    assert r.status_code == 200, r.text
-    by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["chat"]
-    assert primary["enable_thinking"] is True
-    assert primary["n_gpu_layers"] == 99
-    assert primary["enabled"] is True
-
-
-def test_list_slots_enable_thinking_null_when_unset(
-    tmp_hal0_home: str,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-) -> None:
-    """No enable_thinking in TOML → payload reports it as null (effective OFF)."""
-    _seed_slot_toml(
-        tmp_hal0_home,
-        "chat",
-        [
-            'name = "chat"',
-            "port = 8081",
-            'device = "gpu-rocm"',
-            'type = "llm"',
-            "enabled = true",
+            "mtp = true",
+            "vision = false",
             "[model]",
             'default = "qwen3"',
         ],
@@ -1208,7 +1216,9 @@ def test_list_slots_enable_thinking_null_when_unset(
     r = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r.json()}
     primary = by_name["chat"]
-    assert primary["enable_thinking"] is None
+    assert "enable_thinking" not in primary
+    assert "mtp" not in primary
+    assert "vision" not in primary
     # n_gpu_layers absent from [model] → field still present, default sentinel
     assert "n_gpu_layers" in primary
 

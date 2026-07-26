@@ -1,9 +1,11 @@
-"""Per-slot `vision` toggle gates the --mmproj emit (#901).
+"""MODEL-owned `vision` toggle gates the --mmproj emit (#901).
 
-The container provider emits --mmproj from the model sidecar (#900). This
-adds a per-slot opt-out: `vision = false` boots the slot text-only (no
---mmproj → modalities.vision:false), default-on where a sidecar exists so
-the chat slot gets vision for free.
+The container provider emits --mmproj from the model sidecar (#900). Vision
+is a per-model opt-out now (spec-hw-slot-ownership §1 — replaces the former
+per-slot `SlotConfig.vision` dual-writer): `ModelDefaults.vision = false`
+boots every slot bound to that model text-only (no --mmproj →
+modalities.vision:false), default-on where a sidecar exists so a chat model
+gets vision for free.
 """
 
 from __future__ import annotations
@@ -11,8 +13,9 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
-from hal0.config.schema import ProfileConfig, SlotConfig
+from hal0.config.schema import ProfileConfig
 from hal0.providers.container import ContainerProvider
+from hal0.registry.model import ModelDefaults
 
 _SIDECAR = "/mnt/ai-models/qwopus3.6-27b-v2/mmproj-F32.mmproj"
 
@@ -37,8 +40,10 @@ def _slot_cfg(**overrides: Any) -> dict[str, Any]:
     return base
 
 
-def _model_info(**overrides: Any) -> dict[str, Any]:
+def _model_info(*, vision: bool | None = None, **overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {"path": "/mnt/ai-models/qwopus/qwopus.gguf", "_model_key": "chat-vlm"}
+    if vision is not None:
+        base["defaults"] = {"vision": vision}
     base.update(overrides)
     return base
 
@@ -56,18 +61,18 @@ def _build_spec(slot_cfg: dict[str, Any], model_info: dict[str, Any]):
         return provider.container_spec(slot_cfg, model_info)
 
 
-# ── schema: the flag exists, default-on ──────────────────────────────────────
+# ── schema: the flag lives on ModelDefaults now, tri-state, default-on ──────
 
 
-class TestSlotConfigVisionField:
-    def test_vision_defaults_on(self) -> None:
-        cfg = SlotConfig(name="chat", port=8102, model={"default": "chat-vlm"})
-        assert cfg.vision is True
+class TestModelDefaultsVisionField:
+    def test_vision_defaults_none(self) -> None:
+        defaults = ModelDefaults()
+        assert defaults.vision is None
 
     def test_vision_opt_out_round_trips(self) -> None:
-        cfg = SlotConfig(name="chat", port=8102, model={"default": "chat-vlm"}, vision=False)
-        assert cfg.vision is False
-        assert cfg.model_dump()["vision"] is False
+        defaults = ModelDefaults(vision=False)
+        assert defaults.vision is False
+        assert defaults.model_dump()["vision"] is False
 
 
 # ── container_spec gating ────────────────────────────────────────────────────
@@ -75,22 +80,32 @@ class TestSlotConfigVisionField:
 
 class TestVisionToggleGatesMmproj:
     def test_default_on_emits_mmproj(self) -> None:
-        """No explicit vision flag + sidecar present → --mmproj emitted."""
+        """No explicit vision opinion + sidecar present → --mmproj emitted."""
         spec = _build_spec(_slot_cfg(), _model_info(mmproj=_SIDECAR))
         assert "--mmproj" in spec.command
         assert spec.command[spec.command.index("--mmproj") + 1] == _SIDECAR
 
     def test_vision_true_emits_mmproj(self) -> None:
-        spec = _build_spec(_slot_cfg(vision=True), _model_info(mmproj=_SIDECAR))
+        spec = _build_spec(_slot_cfg(), _model_info(vision=True, mmproj=_SIDECAR))
         assert "--mmproj" in spec.command
 
     def test_vision_false_suppresses_mmproj(self) -> None:
-        """vision=false → text-only, no --mmproj even though a sidecar exists."""
-        spec = _build_spec(_slot_cfg(vision=False), _model_info(mmproj=_SIDECAR))
+        """defaults.vision=false → text-only, no --mmproj even though a sidecar exists."""
+        spec = _build_spec(_slot_cfg(), _model_info(vision=False, mmproj=_SIDECAR))
         assert "--mmproj" not in spec.command, (
-            f"vision=false must suppress --mmproj: {spec.command}"
+            f"defaults.vision=false must suppress --mmproj: {spec.command}"
         )
 
     def test_no_sidecar_no_mmproj_regardless(self) -> None:
-        spec = _build_spec(_slot_cfg(vision=True), _model_info())  # no sidecar
+        spec = _build_spec(_slot_cfg(), _model_info(vision=True))  # no sidecar
         assert "--mmproj" not in spec.command
+
+    def test_slot_config_can_no_longer_carry_vision(self) -> None:
+        """A stray slot-side `vision` key has NO effect on the launch decision —
+        only ModelDefaults.vision is read now (spec-hw-slot-ownership §1). A
+        pre-migration slot TOML may still have the key (round-trips harmlessly
+        via SlotConfig's extra="allow"), but it must not gate --mmproj."""
+        spec = _build_spec(_slot_cfg(vision=False), _model_info(mmproj=_SIDECAR))
+        assert "--mmproj" in spec.command, (
+            "a slot-side vision=false must be ignored; only the model decides"
+        )

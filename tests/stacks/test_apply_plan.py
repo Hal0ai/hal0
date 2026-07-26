@@ -55,7 +55,6 @@ def _stack() -> StackConfig:
                 slot="agent",
                 model="chadrock-35b-ace-saber",
                 device="gpu-rocm",
-                vision=True,
             )
         ],
     )
@@ -79,7 +78,7 @@ class TestPlanComputeOnly:
 
 
 class TestReconciliation:
-    def test_after_sets_model_device_vision(self, tmp_hal0_home: str) -> None:
+    def test_after_sets_model_device(self, tmp_hal0_home: str) -> None:
         slot_path = _write_agent_slot(tmp_hal0_home)
         plan = StackApplyEngine().plan("saber", _stack())
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
@@ -91,7 +90,6 @@ class TestReconciliation:
         # ``backend`` mirror is no longer written.
         assert after["device"] == "gpu-rocm"
         assert "backend" not in after
-        assert after["vision"] is True
 
     def test_changed_true_when_model_differs(self, tmp_hal0_home: str) -> None:
         _write_agent_slot(tmp_hal0_home)
@@ -109,7 +107,11 @@ class TestReconciliation:
         plan = StackApplyEngine().plan("saber", _stack())
         assert any("agent" in line for line in plan.summary)
 
-    def test_vision_false_overwrites_on_disk_true(self, tmp_hal0_home: str) -> None:
+    def test_vision_is_not_projected_onto_the_slot(self, tmp_hal0_home: str) -> None:
+        """spec-hw-slot-ownership §1: vision is model-owned now — applying a
+        stack row with vision=False must NOT write it onto the slot (that
+        would hit the same MODEL_OWNED_SLOT_KEYS guard a dashboard PUT
+        /config hits); an on-disk value is left exactly as it was."""
         slot_path = _slots_dir(tmp_hal0_home) / "agent.toml"
         slot_path.write_text(
             "\n".join(
@@ -120,7 +122,7 @@ class TestReconciliation:
         stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="m", vision=False)])
         plan = StackApplyEngine().plan("s", stack)
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
-        assert after["vision"] is False
+        assert after["vision"] is True
 
 
 class TestGuardedReconcile:

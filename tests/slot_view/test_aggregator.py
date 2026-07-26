@@ -300,18 +300,19 @@ class TestConfigEnrichment:
         assert "coresident_group" not in out["stt-npu"]
 
     def test_config_fields_surfaced(self) -> None:
+        # spec-hw-slot-ownership §1: enable_thinking/mtp/vision are
+        # model-owned typed capabilities now — no longer part of the slot
+        # cfg surface this aggregator lifts (see test_model_owned_fields_
+        # not_surfaced below).
         cfg = _llm_cfg(
-            enable_thinking=True,
             idle_timeout_s=900,
             workers=2,
-            vision=False,
             server={"extra_args": "--flash-attn on"},
             npu={"asr": True, "embed": False},
         )
         cfg["model"]["n_gpu_layers"] = 24
         cfg["model"]["rope_freq_base"] = 10000.0
         cfg["model"]["labels"] = ["tool-calling"]
-        cfg["mtp"] = True
         cfg["chat_template"] = "chatml"
         out = config_enrichment([cfg])
         e = out["chat"]
@@ -319,17 +320,24 @@ class TestConfigEnrichment:
         assert e["model_default"] == "qwen3-4b"
         assert e["labels"] == ["tool-calling"]
         assert e["enabled"] is True
-        assert e["enable_thinking"] is True
-        assert e["mtp"] is True
         assert e["chat_template"] == "chatml"
         assert e["n_gpu_layers"] == 24
         assert e["rope_freq_base"] == 10000.0
-        # #901: vision toggle lifted (default-on; explicit false persisted).
-        assert e["vision"] is False
         assert e["idle_timeout_s"] == 900
         assert e["workers"] == 2
         assert e["llamacpp_args"] == "--flash-attn on"
         assert e["npu"] == {"asr": True, "embed": False, "chat": True}
+
+    def test_model_owned_fields_not_surfaced(self) -> None:
+        # A pre-migration slot TOML may still carry raw mtp/enable_thinking/
+        # vision keys (extra="allow" round-trips them); the aggregator must
+        # not lift them into the dashboard payload — they are model-owned now.
+        cfg = _llm_cfg(enable_thinking=True, vision=False)
+        cfg["mtp"] = True
+        e = config_enrichment([cfg])["chat"]
+        assert "enable_thinking" not in e
+        assert "mtp" not in e
+        assert "vision" not in e
 
     def test_hw_grid_fields_surfaced_top_level(self) -> None:
         # spec-hw-slot-ownership §2/§3: NGL / THREADS / BINARY / image_pin are
@@ -388,13 +396,9 @@ class TestConfigEnrichment:
     def test_absent_config_fields_surface_as_defaults(self) -> None:
         out = config_enrichment([_llm_cfg()])
         e = out["chat"]
-        assert e["enable_thinking"] is None
-        assert e["mtp"] is None
         assert e["chat_template"] is None
         assert e["n_gpu_layers"] == -1
         assert e["rope_freq_base"] is None
-        # #901: vision surfaces as None when absent (UI treats null as on).
-        assert e["vision"] is None
         assert e["idle_timeout_s"] is None
         assert e["workers"] is None
         assert e["llamacpp_args"] is None

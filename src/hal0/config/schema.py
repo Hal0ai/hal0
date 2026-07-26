@@ -435,26 +435,14 @@ class SlotConfig(BaseModel):
             "container-runtime design doc §1."
         ),
     )
-    enable_thinking: bool | None = Field(
-        default=None,
-        description=(
-            "Per-slot reasoning default. true → requests routed to this slot "
-            "default to thinking ON; false → OFF; None → global default "
-            "(suppressed). Always overridable per request via top-level "
-            "enable_thinking / chat_template_kwargs. See normalize/thinking.py."
-        ),
-    )
-    mtp: bool | None = Field(
-        default=None,
-        description=(
-            "Per-slot MTP (multi-token-prediction speculative decoding) override. "
-            "true → force on; false → force off; None → AUTO. Auto enables MTP only "
-            "when the profile opts in (profile.mtp) AND the model actually ships MTP "
-            "heads (registry `mtp` tag or an MTP name marker), so a non-MTP model on "
-            "an MTP profile no longer launches with dead --spec-draft-* flags. "
-            "See providers.container._effective_mtp and build_mtp_flag_bundle."
-        ),
-    )
+    # spec-hw-slot-ownership §1: enable_thinking / mtp are model-owned typed
+    # capabilities now (see ModelDefaults.enable_thinking / .mtp in
+    # hal0.registry.model) — the former SlotConfig fields let a slot pill and
+    # the model drawer both persist the same fact, which could silently
+    # disagree. A slot config write can no longer set either key
+    # (hal0.slots.config_write.MODEL_OWNED_SLOT_KEYS hard-rejects it); the
+    # one-shot hal0.config.migrations.model_tune_ownership migrator folds any
+    # pre-existing slot value onto the assigned model before dropping it.
     # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
     # This slot-level parallelism knob no longer reaches the launch argv; the
     # migrator folds an effective ``--parallel N`` (plus ``--kv-unified`` when
@@ -488,21 +476,12 @@ class SlotConfig(BaseModel):
             "resolve_chat_template and slot_flags_fold."
         ),
     )
-    vision: bool = Field(
-        default=True,
-        description=(
-            "Per-slot vision toggle (#901). §7.1d: this is an OVERRIDE of the "
-            "registry model's derived ``Modality.VISION`` membership (see "
-            "hal0.model_meta.modality.derive_modalities), not a primary "
-            "modality source — the model's own mmproj presence is what "
-            "actually determines vision capability. When the bound model "
-            "carries an mmproj sidecar, the container provider loads it "
-            "(--mmproj) so the slot accepts images — default-on. Set false "
-            "to force-suppress it (no --mmproj) on memory-tight hosts even "
-            "though the model is vision-capable; the projector is ~0.9 GB "
-            "resident. No effect when the model has no sidecar."
-        ),
-    )
+    # spec-hw-slot-ownership §1: vision (#901) is a model-owned typed
+    # capability now (ModelDefaults.vision) — the former per-slot toggle let
+    # a slot pill and the model drawer both persist the same fact. A slot
+    # config write can no longer set it (MODEL_OWNED_SLOT_KEYS hard-rejects
+    # it); the container provider reads ``model.defaults.vision`` at launch
+    # (see providers.container._resolve_llama_scalars).
 
     # ── TTS request defaults (Settings → Voice) ─────────────────────────
     # Read by /v1/audio/speech at request time: when the body omits the

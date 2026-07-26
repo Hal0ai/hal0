@@ -207,10 +207,12 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     """Per-slot TOML-derived fields for slot snapshots. Pure.
 
     Lifts the edit-drawer seed fields (type, model default + labels,
-    enabled, enable_thinking, n_gpu_layers, rope_freq_base,
-    idle_timeout_s, workers, llamacpp_args) plus the NPU trio grouping
-    so the dashboard renders cards + drawers without a per-slot
-    ``/config`` fetch.
+    enabled, n_gpu_layers, rope_freq_base, idle_timeout_s, workers,
+    llamacpp_args) plus the NPU trio grouping so the dashboard renders
+    cards + drawers without a per-slot ``/config`` fetch. ``enable_thinking``
+    / ``mtp`` / ``vision`` are model-owned typed capabilities now
+    (spec-hw-slot-ownership §1) and are no longer lifted here — the model
+    drawer seeds them from ``GET /api/models``.
 
     Coresident grouping:
       A slot of type=llm + device=npu serving as the chat anchor and
@@ -275,16 +277,10 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
             if isinstance(ctx_max, int):
                 entry["ctx_max"] = ctx_max
 
-        # Spec 1 / Component 1: surface the three edit-panel config fields so
-        # the card + drawer seed their controls without a per-slot /config
-        # fetch. ``enable_thinking`` is tri-valued on disk (true/false/absent);
-        # absent → null (effective OFF). ``n_gpu_layers`` falls back to the
-        # ModelConfig default sentinel (-1 = all layers) when unset.
-        entry["enable_thinking"] = cfg.get("enable_thinking")
-        # MTP per-slot override (tri-valued like enable_thinking: true/false/
-        # absent → null). Surfaced so the edit-drawer MTP pill seeds its on/off
-        # state from disk instead of defaulting to off after a reopen.
-        entry["mtp"] = cfg.get("mtp")
+        # spec-hw-slot-ownership §1: enable_thinking/mtp are model-owned typed
+        # capabilities now — the slot edit-drawer no longer carries pills for
+        # them (the model drawer does), and SlotConfig no longer declares the
+        # fields, so there is nothing left to lift here.
         # Per-slot chat_template override (tri-valued: string/None/absent → null).
         # Surfaced so the edit-drawer Template row seeds its override select
         # from disk instead of defaulting to "auto" on every reopen.
@@ -329,14 +325,9 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # the truth source the dashboard uses to dirty-track changes,
         # so an absent on-disk field surfaces as null/None, not the
         # schema default.
-        # #901: per-slot vision toggle (tri-valued: true/false/absent → null).
-        # Surfaced so the edit-drawer Vision pill seeds from disk. The
-        # SlotConfig default is ON (True) — the mmproj sidecar loads unless
-        # explicitly disabled — so the UI treats null as "on" and only writes
-        # back when the operator turns the ~0.9 GB projector off. Mirrors the
-        # idle_timeout_s lift below (absent surfaces as None, not the schema
-        # default, so the dashboard can dirty-track real on-disk state).
-        entry["vision"] = cfg.get("vision")
+        # spec-hw-slot-ownership §1: vision (#901) is a model-owned typed
+        # capability now too — no per-slot pill to seed, so nothing is
+        # lifted here either (mirrors the enable_thinking/mtp removal above).
         entry["idle_timeout_s"] = cfg.get("idle_timeout_s")
         entry["workers"] = cfg.get("workers")
         # Continuous batching: --parallel sequence slots (absent → null so the

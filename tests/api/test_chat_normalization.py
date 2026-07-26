@@ -21,13 +21,38 @@ class _Upstreams:
         return self._ups
 
 
-def _make_request(*, cfgs=None, loaded=None, upstreams=None, upstream_models=None):
+class _ModelRegistry:
+    """Minimal ``model_registry`` stand-in for ``_model_thinking_default``.
+
+    spec-hw-slot-ownership §1: reasoning is a model-owned typed capability
+    now — ``_model_thinking_default`` reads ``ModelDefaults.enable_thinking``
+    off the model registry instead of scanning slot configs, so the fixture
+    needs a model-id -> enable_thinking map, not a slot-config list.
+    """
+
+    def __init__(self, thinking_defaults: dict | None = None):
+        self._thinking = dict(thinking_defaults or {})
+
+    def has(self, model_id):
+        return model_id in self._thinking
+
+    def get(self, model_id):
+        thinking = self._thinking[model_id]
+        return SimpleNamespace(defaults=SimpleNamespace(enable_thinking=thinking))
+
+
+def _make_request(
+    *, cfgs=None, loaded=None, upstreams=None, upstream_models=None, model_thinking=None
+):
     """Build a minimal request stand-in.
 
     ``loaded`` materialises as a container-backed remote upstream
     (kind="remote" + slot_name) whose cached catalog carries the given
     model ids — that is how `_normalize_loaded_models` derives the loaded
     set post-container-cutover (#662): there is no separate health probe.
+
+    ``model_thinking`` is a model-id -> enable_thinking bool map backing the
+    ``model_registry`` stand-in the per-model reasoning default reads.
     """
     ups = list(upstreams or [])
     models = dict(upstream_models or {})
@@ -38,6 +63,7 @@ def _make_request(*, cfgs=None, loaded=None, upstreams=None, upstream_models=Non
         slot_manager=_SlotManager(cfgs or []),
         upstreams=_Upstreams(ups),
         upstream_models=models,
+        model_registry=_ModelRegistry(model_thinking),
     )
     return SimpleNamespace(app=SimpleNamespace(state=state), _body=b"")
 
@@ -91,30 +117,18 @@ async def test_caller_top_level_thinking_translated_to_kwarg():
     assert "enable_thinking" not in out
 
 
-_PRIMARY_THINKING = [
-    {
-        "name": "agent",
-        "type": "llm",
-        "enabled": True,
-        "device": "gpu-rocm",
-        "role": None,
-        "enable_thinking": True,
-        "model": {"default": "big", "context_size": 4096},
-    }
-]
-
-
 @pytest.mark.asyncio
-async def test_per_slot_enable_thinking_default_applied():
-    # Slot configured enable_thinking=true → requests to its model default to ON.
-    req = _make_request(cfgs=_PRIMARY_THINKING, loaded={"big"})
+async def test_per_model_enable_thinking_default_applied():
+    # Model registered with defaults.enable_thinking=true → requests to it
+    # default to ON (spec-hw-slot-ownership §1: model-owned, not slot-owned).
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"}, model_thinking={"big": True})
     out = await v1._normalize_chat_body(req, {"model": "big", "messages": []})
     assert out["chat_template_kwargs"]["enable_thinking"] is True
 
 
 @pytest.mark.asyncio
-async def test_per_slot_default_overridden_by_request():
-    req = _make_request(cfgs=_PRIMARY_THINKING, loaded={"big"})
+async def test_per_model_default_overridden_by_request():
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"}, model_thinking={"big": True})
     out = await v1._normalize_chat_body(req, {"model": "big", "enable_thinking": False})
     assert out["chat_template_kwargs"]["enable_thinking"] is False
 
