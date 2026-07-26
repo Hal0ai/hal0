@@ -105,7 +105,17 @@ def patched_spawn(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """
     spawned: list[str] = []
 
-    async def fake_spawn(self: SlotManager, name: str, cfg: object, model: object) -> None:
+    async def fake_spawn(
+        self: SlotManager,
+        name: str,
+        cfg: object,
+        model: object,
+        **kwargs: object,
+    ) -> None:
+        # ``**kwargs`` absorbs the keyword-only ``model_info`` that ``load()``
+        # threads through (O26 pre-load eviction resolves the registry entry
+        # once and hands it to the spawn) without pinning this stub to the
+        # real signature.
         spawned.append(name)
 
     async def fake_await_ready(self: SlotManager, *a: object, **k: object) -> SlotState:
