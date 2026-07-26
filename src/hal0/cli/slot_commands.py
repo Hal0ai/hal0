@@ -1160,3 +1160,105 @@ def slot_migrate_hw(
     console.print(
         "\n[yellow]Restart hal0-api (and daemon-reload) to pick up the slot HW grid.[/yellow]"
     )
+
+
+# ── migrate-caps (spec-hw-slot-ownership §1 — mtp/reasoning/vision stick to models) ──
+#
+# Deploy-window manual trigger for the standalone one-shot fold in
+# hal0.config.migrations.model_owned_caps (mirrors migrate-hw's shape, reversed
+# direction: slot debris -> model defaults). NOT wired into any automatic
+# boot/update path.
+
+
+@app.command("migrate-caps")
+def slot_migrate_caps(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Actually write the fold. Without it the command is a DRY-RUN preview only.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt (for scripted use)."
+    ),
+    stop_services: bool = typer.Option(
+        False,
+        "--stop-services",
+        help=(
+            "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
+            "then proceed. Without this flag --apply only WARNS and refuses to run "
+            "while any of those units is active."
+        ),
+    ),
+) -> None:
+    """One-shot: mtp/enable_thinking/vision stick to MODELS (spec-hw-slot-ownership §1).
+
+    Folds each slot's ``mtp`` / ``enable_thinking`` / ``vision`` tri-state override
+    into its bound model's ``defaults`` (only when the model has no opinion yet —
+    an existing curator-set default always wins); two slots bound to the same
+    model that disagree report the conflict (first slot, stable file order, wins)
+    rather than silently dropping it. Either way, the slot's own keys are then
+    dropped (SlotConfig no longer declares them; the API rejects new writes of
+    them). Idempotent + re-runnable.
+
+    DRY-RUN by default — prints the computed plan and exits. Pass ``--apply`` to
+    write. DESTRUCTIVE + OPERATOR-RUN ONLY (deploy window): a timestamped backup
+    of the slot config/state + registry DB is written BEFORE anything changes;
+    it is never wired into any automatic boot/update path.
+    """
+    from hal0.config import paths
+    from hal0.config.migrations.model_owned_caps import run_migration
+
+    if not apply:
+        lines = run_migration(deploy_window=False, dry_run=True)
+        console.print("[bold]Dry run — no files written, no model rows changed.[/bold]")
+        if not lines:
+            console.print("  [dim](nothing to fold)[/dim]")
+        for line in lines:
+            console.print(f"  {line}")
+        console.print("\n[dim]Re-run with --apply to write (stop hal0 first).[/dim]")
+        return
+
+    # --apply: a real deploy-window write. Guard against a live runtime — the
+    # fold rewrites slot TOMLs the running process still resolves.
+    active = _active_hal0_units()
+    if active:
+        console.print(
+            "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
+        )
+        if stop_services:
+            console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
+            for unit in active:
+                subprocess.run(["systemctl", "stop", unit], check=False)
+            active = _active_hal0_units()
+        if active:
+            console.print(
+                "[red]✗[/red]  refusing to fold while hal0 is live — rewriting slot TOMLs "
+                "under a running runtime split-brains it.\n"
+                "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
+                "--stop-services."
+            )
+            raise typer.Exit(1)
+
+    if not yes:
+        typer.confirm(
+            "This rewrites slot TOMLs and model defaults rows (a backup is taken first). Proceed?",
+            abort=True,
+        )
+
+    backup_path = _backup_slot_state(
+        config_dir=paths.slots_config_dir(),
+        data_dir=paths.var_lib() / "slots",
+        db_file=paths.db_path(),
+        backup_root=paths.var_lib() / "backups",
+    )
+    console.print(f"[green]✓[/green]  backup written to {backup_path}")
+
+    lines = run_migration(deploy_window=True, dry_run=False)
+    console.print("\n[bold]Applied model-ownership fold:[/bold]")
+    if not lines:
+        console.print("  [dim](nothing to fold)[/dim]")
+    for line in lines:
+        console.print(f"  {line}")
+    console.print(
+        "\n[yellow]Restart hal0-api to pick up the model-owned mtp/reasoning/vision defaults.[/yellow]"
+    )
