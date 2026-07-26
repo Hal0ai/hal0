@@ -215,6 +215,42 @@ TOLERATED_SLOT_CONFIG_KEYS: frozenset[str] = frozenset(
     {"type", "default", "lru", "default_voice", "default_language", "slot", "image_pin", "binary"}
 )
 
+# ── model-owned slot-write partition (spec-hw-slot-ownership §1) ─────────────
+#
+# The tri-state capability keys the MODEL now exclusively owns: mtp (already
+# established), plus enable_thinking (reasoning) and vision (mmproj gate),
+# moved off the slot in this pass. None of the three is a declared SlotConfig
+# field anymore, so an un-partitioned boundary would just report them as
+# generic "unknown slot config key(s)" — this dedicated check runs FIRST so
+# the operator gets the actionable "belongs on the model" message instead,
+# symmetric to the model-side SLOT_HARDWARE_FLAGS hard-reject
+# (hal0.slots.argv._deny_slot_hardware_flags).
+MODEL_OWNED_SLOT_KEYS: frozenset[str] = frozenset({"mtp", "enable_thinking", "vision"})
+
+
+def reject_model_owned_slot_keys(payload: dict[str, Any]) -> None:
+    """400 when a slot-config write body carries a MODEL-owned key.
+
+    ``mtp`` / ``enable_thinking`` / ``vision`` are typed model tuning (spec-
+    hw-slot-ownership §1) — ``SlotConfig`` declares none of them, so a write
+    trying to set one on the slot is refused loudly instead of silently
+    round-tripping through ``extra="allow"`` as inert debris. Checked at the
+    TOP level only (these are top-level SlotConfig-adjacent keys, never
+    nested under ``[model]``/``[server]``).
+    """
+    from hal0.errors import BadRequest
+
+    offenders = sorted(k for k in payload if k in MODEL_OWNED_SLOT_KEYS)
+    if offenders:
+        flags = ", ".join(repr(k) for k in offenders)
+        raise BadRequest(
+            f"key(s) {flags} belong on the model, not the slot (spec-hw-slot-"
+            "ownership §1) — set them via PUT /api/models/{id} defaults instead.",
+            details={"keys": offenders},
+            code="slot.model_owned_key_denied",
+        )
+
+
 #: Extra keys tolerated inside specific sub-tables, keyed by sub-table name.
 #: ``[model].ctx_size`` is the documented legacy alias of ``context_size``
 #: (#585) — accepted on write, folded by :func:`fold_ctx_size_alias`.
@@ -628,6 +664,7 @@ def _write_state(fs: FileState) -> None:
 
 
 __all__ = [
+    "MODEL_OWNED_SLOT_KEYS",
     "TOLERATED_SLOT_CONFIG_KEYS",
     "ChangeSet",
     "FileState",
@@ -635,6 +672,7 @@ __all__ = [
     "SlotSelection",
     "fold_ctx_size_alias",
     "merge_slot_config",
+    "reject_model_owned_slot_keys",
     "slot_write_lock",
     "unknown_slot_config_keys",
     "write_slot_toml",

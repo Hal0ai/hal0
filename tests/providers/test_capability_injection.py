@@ -119,8 +119,23 @@ def test_mtp_bundle_absent_on_cuda_runner_even_for_tagged_model():
     assert "--spec-type" not in _extra_args(scalars)
 
 
-def test_slot_mtp_true_forces_bundle_even_on_cuda():
+def test_slot_mtp_key_no_longer_has_any_effect():
+    """spec-hw-slot-ownership §1: mtp is model-owned now — a slot ``mtp``
+    key (pre-migration debris, or a stray write that predates the API
+    reject) is simply not consulted. Only ``ModelDefaults.mtp`` can force
+    the bundle on (see ``test_defaults_mtp_true_forces_bundle_even_on_cuda``
+    below)."""
     scalars = _resolve_llama_scalars({"name": "s", "mtp": True}, _plain_model(), _cuda_profile())
+    assert "--spec-type" not in _extra_args(scalars)
+
+
+def test_defaults_mtp_true_forces_bundle_even_on_cuda():
+    """The MODEL's explicit ``defaults.mtp = True`` is the unconditional
+    curator escape hatch now — it forces the bundle on even for an
+    untagged model on a non-drafting runner (mirrors the old slot.mtp
+    force-on, just moved to the model)."""
+    model = _plain_model(defaults={"mtp": True})
+    scalars = _resolve_llama_scalars({"name": "s"}, model, _cuda_profile())
     assert "--spec-type draft-mtp" in _extra_args(scalars)
 
 

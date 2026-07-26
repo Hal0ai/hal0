@@ -108,6 +108,7 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await page.getByTestId('cap-mtp-off').click()
     await page.getByTestId('cap-thinking-on').click()
     await page.getByTestId('cap-jinja-off').click()
+    await page.getByTestId('cap-vision-off').click()
     await page.getByTestId('model-save').click()
 
     await expect.poll(() => putBody).not.toBeNull()
@@ -126,6 +127,7 @@ test.describe('Model drawer — complete save and compact field help', () => {
       mtp: false,
       enable_thinking: true,
       jinja: false,
+      vision: false,
       rope_freq_base: 1_000_000,
     })
     expect(putBody.defaults).not.toHaveProperty('n_gpu_layers')
@@ -141,9 +143,11 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     const drawer = page.locator('.drawer.open')
     const labels = drawer.locator('.form-lbl')
-    await expect(labels).toHaveCount(14)
+    // +1 vs the pre-existing 14: the new "Vision" tri-state row
+    // (spec-hw-slot-ownership §1 — vision moved off the per-slot toggle).
+    await expect(labels).toHaveCount(15)
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
-    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(14)
+    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(15)
 
     const displayNameLabel = labels.filter({ hasText: 'Display name' })
     const info = displayNameLabel.getByRole('button', { name: 'Info' })

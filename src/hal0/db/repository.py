@@ -47,6 +47,19 @@ _CONTEXT_LENGTH_KEY = "context_length"
 _CAPABILITY_FLAGS_EXTRA_KEY = "_capability_flags"
 _MODALITIES_OVERRIDE_EXTRA_KEY = "_modalities_override"
 
+#: spec-hw-slot-ownership §1: ``ModelDefaults.enable_thinking`` / ``.vision``
+#: are tri-state (None/False/True) reasoning + vision-projector owners, moved
+#: onto the model from the slot. Like ``capability_flags`` /
+#: ``modalities_override`` above, they have no dedicated column yet, so they
+#: ride the catch-all ``extra`` JSON blob under these reserved keys — a
+#: pydantic tri-state can't distinguish "column NULL" from "False" the way a
+#: dedicated INTEGER column can without a migration, but the extra blob keys
+#: are only written when non-None (mirrors ``_DEFAULT_EXTRA_KEY``'s "only
+#: stamped when set" rule), so absence reads back as None (AUTO) with no
+#: schema migration.
+_ENABLE_THINKING_EXTRA_KEY = "_enable_thinking"
+_VISION_EXTRA_KEY = "_vision"
+
 #: Per-type default marker (:attr:`hal0.registry.model.Model.default`) also
 #: rides the ``extra`` blob under a reserved key rather than getting its own
 #: column — the single-holder invariant is enforced in Python (the
@@ -154,6 +167,13 @@ def model_to_row(
     # Per-type default marker — only stamped when set (see _DEFAULT_EXTRA_KEY).
     if model.default:
         metadata[_DEFAULT_EXTRA_KEY] = True
+    # spec-hw-slot-ownership §1: enable_thinking/vision — only stamped when
+    # the curator has an explicit opinion (tri-state None = AUTO, the common
+    # case, costs nothing on disk).
+    if defaults.enable_thinking is not None:
+        metadata[_ENABLE_THINKING_EXTRA_KEY] = defaults.enable_thinking
+    if defaults.vision is not None:
+        metadata[_VISION_EXTRA_KEY] = defaults.vision
     extra_json = json.dumps(metadata, separators=(",", ":")) if metadata else None
 
     ts = updated_at or now_iso()
@@ -391,8 +411,14 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
         list(raw_modalities_override) if isinstance(raw_modalities_override, list) else None
     )
     default = bool(metadata.pop(_DEFAULT_EXTRA_KEY, False))
+    raw_enable_thinking = metadata.pop(_ENABLE_THINKING_EXTRA_KEY, None)
+    enable_thinking = raw_enable_thinking if isinstance(raw_enable_thinking, bool) else None
+    raw_vision = metadata.pop(_VISION_EXTRA_KEY, None)
+    vision = raw_vision if isinstance(raw_vision, bool) else None
 
-    defaults_kwargs = {col: row[col] for col in _DEFAULTS_COLUMNS}
+    defaults_kwargs: dict[str, Any] = {col: row[col] for col in _DEFAULTS_COLUMNS}
+    defaults_kwargs["enable_thinking"] = enable_thinking
+    defaults_kwargs["vision"] = vision
     # NOTE: `n_gpu_layers`/`context_size` can legitimately be 0, which is
     # falsy — must check `is not None`, not truthiness, or a real all-
     # zero-but-set ModelDefaults would collapse to None on read.
