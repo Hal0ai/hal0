@@ -181,16 +181,21 @@ async def _create_missing_slots(
             continue
         device = entry.device or "gpu-vulkan"
         profile = entry.profile or DEVICE_TO_DEFAULT_PROFILE.get(device, "")
+        # spec-hw-slot-ownership §1: vision/mtp are model-owned typed
+        # capabilities now, so a stack-created slot must not be born carrying
+        # them. `SlotManager.create` doesn't route through
+        # `reconcile_slot_updates`, so the MODEL_OWNED_SLOT_KEYS guard can't
+        # catch this path — dropping them here is what keeps stack-created
+        # slots on the right side of the partition. `entry.vision`/`entry.mtp`
+        # stay on the stack schema for back-compat but no longer project onto
+        # the slot (matching `stacks.apply._reconciled_stack_slot`).
         body: dict[str, Any] = {
             "name": entry.slot,
             "type": "llm",
             "model": entry.model,
             "device": device,
             "profile": profile,
-            "vision": bool(entry.vision),
         }
-        if entry.mtp is not None:
-            body["mtp"] = bool(entry.mtp)
         if entry.server_extra_args:
             body["server"] = {"extra_args": entry.server_extra_args}
         try:
