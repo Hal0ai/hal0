@@ -11,8 +11,9 @@ capability. Covers:
   - model_is_mtp_eligible(model_info): explicit ``defaults.mtp`` tri-state
     wins in EITHER direction over the registry ``mtp`` tag; the old
     filename/GGUF-name ``MTP`` marker sniff is REMOVED.
-  - _effective_mtp(slot_mtp, model_info, runner) precedence: slot.mtp ->
-    model.defaults.mtp -> (registry mtp tag AND runner.supports.mtp).
+  - _effective_mtp(model_info, runner) precedence (spec-hw-slot-ownership §1:
+    MTP is model-owned, no slot override exists anymore): model.defaults.mtp
+    -> (registry mtp tag AND runner.supports.mtp).
 """
 
 from hal0.config.schema import (
@@ -141,7 +142,7 @@ def test_defaults_mtp_none_falls_back_to_tag():
     )
 
 
-# ── _effective_mtp: slot -> model.defaults.mtp -> (tag AND runner.supports.mtp) ──
+# ── _effective_mtp: model.defaults.mtp -> (tag AND runner.supports.mtp) ──────
 
 
 _ROCMFPX = get_runner("rocmfpx")  # supports.mtp = True
@@ -161,47 +162,39 @@ def _plain_model(**overrides):
 
 
 def test_auto_on_when_tag_eligible_and_runner_supports_mtp():
-    assert _effective_mtp(None, _mtp_model(), _ROCMFPX) is True
+    assert _effective_mtp(_mtp_model(), _ROCMFPX) is True
 
 
 def test_auto_off_when_model_not_eligible():
     # The dead-flags fix: a plain (untagged) model does NOT speculate.
-    assert _effective_mtp(None, _plain_model(), _ROCMFPX) is False
+    assert _effective_mtp(_plain_model(), _ROCMFPX) is False
 
 
 def test_auto_off_when_runner_does_not_support_mtp():
     """NEW (§7.1a / ML-5): a tag-eligible model on a runner that can't draft
     (e.g. the cuda llama-server lane) stays off under auto — the old
     profile.mtp gate is replaced by this runner-capability gate."""
-    assert _effective_mtp(None, _mtp_model(), _CUDA) is False
-
-
-def test_slot_override_true_forces_on_even_for_plain_model_or_unsupported_runner():
-    assert _effective_mtp(True, _plain_model(), _CUDA) is True
-
-
-def test_slot_override_false_forces_off_even_for_eligible():
-    assert _effective_mtp(False, _mtp_model(), _ROCMFPX) is False
+    assert _effective_mtp(_mtp_model(), _CUDA) is False
 
 
 def test_defaults_mtp_true_beats_absent_tag_and_is_unconditional():
-    """defaults.mtp is an explicit, unconditional curator override — like
-    slot.mtp, it wins even for an untagged model AND even on a runner that
-    doesn't support MTP drafting (an operator/curator override, not a
-    guess)."""
+    """defaults.mtp is an explicit, unconditional curator override — it wins
+    even for an untagged model AND even on a runner that doesn't support MTP
+    drafting (spec-hw-slot-ownership §1: the MODEL is the sole authority now,
+    there is no slot-level escape hatch anymore)."""
     model = _plain_model(defaults={"mtp": True})
-    assert _effective_mtp(None, model, _CUDA) is True
+    assert _effective_mtp(model, _CUDA) is True
 
 
 def test_defaults_mtp_false_beats_present_tag():
     model = _mtp_model(defaults={"mtp": False})
-    assert _effective_mtp(None, model, _ROCMFPX) is False
+    assert _effective_mtp(model, _ROCMFPX) is False
 
 
 def test_defaults_mtp_none_falls_back_to_tag_and_runner_gate():
     model = _mtp_model(defaults={"mtp": None})
-    assert _effective_mtp(None, model, _ROCMFPX) is True
-    assert _effective_mtp(None, model, _CUDA) is False
+    assert _effective_mtp(model, _ROCMFPX) is True
+    assert _effective_mtp(model, _CUDA) is False
 
 
 def test_auto_off_breadcrumb_only_on_launch_path(caplog):
@@ -213,10 +206,10 @@ def test_auto_off_breadcrumb_only_on_launch_path(caplog):
 
     with caplog.at_level(logging.INFO, logger="hal0.providers.container"):
         # Preview/status path (default): silent.
-        assert _effective_mtp(None, _plain_model(), _ROCMFPX) is False
+        assert _effective_mtp(_plain_model(), _ROCMFPX) is False
         assert not [r for r in caplog.records if "auto_off" in r.getMessage()]
         # Launch path: exactly one breadcrumb.
-        assert _effective_mtp(None, _plain_model(), _ROCMFPX, log_ineligible=True) is False
+        assert _effective_mtp(_plain_model(), _ROCMFPX, log_ineligible=True) is False
         assert len([r for r in caplog.records if "auto_off" in r.getMessage()]) == 1
 
 

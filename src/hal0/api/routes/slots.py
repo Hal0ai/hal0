@@ -441,6 +441,11 @@ def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
     derived dynamically from the pydantic models, tolerating the documented
     legacy aliases like ``[model].ctx_size`` and the string ``image``
     override) and rejects unknown keys with the paths listed.
+
+    Called AFTER :func:`_reject_model_owned_config_keys` at every call site —
+    ``mtp``/``enable_thinking``/``vision`` would otherwise just fall out as
+    generic "unknown slot config key(s)" here instead of the more actionable
+    "belongs on the model" message.
     """
     from hal0.slot_config import unknown_slot_config_keys
 
@@ -455,6 +460,21 @@ def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
             },
             code="validation.unknown_keys",
         )
+
+
+def _reject_model_owned_config_keys(payload: dict[str, Any]) -> None:
+    """400 when a slot-config write body carries a MODEL-owned key.
+
+    Thin route-layer wrapper over
+    :func:`hal0.slot_config.reject_model_owned_slot_keys` — ``mtp`` /
+    ``enable_thinking`` / ``vision`` moved to ``ModelDefaults`` (spec-hw-
+    slot-ownership §1); called BEFORE :func:`_reject_unknown_config_keys` at
+    every slot-config write boundary so the operator gets the specific
+    "belongs on the model" message instead of a generic unknown-key 400.
+    """
+    from hal0.slot_config import reject_model_owned_slot_keys
+
+    reject_model_owned_slot_keys(payload)
 
 
 def _device_backend(device: str | None) -> str:
@@ -602,6 +622,7 @@ async def create_slot(request: Request) -> dict[str, object]:
     )
     if isinstance(body.get("port"), int):
         _reject_port_conflict(int(body["port"]), name, runtime_ports)
+    _reject_model_owned_config_keys(body)
     _reject_unknown_config_keys(body)
     async with record_action(
         request,
@@ -1011,6 +1032,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
         ) from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
+    _reject_model_owned_config_keys(body)
     _reject_unknown_config_keys(body)
     # Port moves go through the registry so an edit can't land on a port
     # another slot (config or runtime) or listener already owns.
