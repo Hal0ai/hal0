@@ -435,23 +435,22 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
 
 
 async def _slot_thinking_default(request: Request, model_id: str) -> bool:
-    """Per-slot reasoning default: the ``enable_thinking`` flag of the slot whose
-    default model is ``model_id``. Falls back to False (global suppression) when
-    no slot sets it. Always overridable per request."""
-    sm = getattr(request.app.state, "slot_manager", None)
-    if sm is None:
+    """Per-model reasoning default: ``ModelDefaults.enable_thinking`` of
+    ``model_id`` (spec-hw-slot-ownership §1 — reasoning is MODEL-owned tuning,
+    not a slot fact; the former per-slot ``enable_thinking`` override is gone).
+    Falls back to False (global suppression) when the model has no explicit
+    opinion (tri-state None) or is unregistered. Always overridable per
+    request via top-level ``enable_thinking`` / ``chat_template_kwargs``."""
+    registry = getattr(request.app.state, "model_registry", None)
+    if registry is None:
         return False
     try:
-        for cfg in await sm.iter_configs():
-            if not isinstance(cfg, dict):
-                continue
-            model = cfg.get("model")
-            default_model = model.get("default") if isinstance(model, dict) else None
-            if default_model == model_id and cfg.get("enable_thinking") is not None:
-                return bool(cfg["enable_thinking"])
+        model = registry.get(model_id)
     except Exception:
         return False
-    return False
+    defaults = getattr(model, "defaults", None)
+    want = getattr(defaults, "enable_thinking", None) if defaults is not None else None
+    return bool(want) if want is not None else False
 
 
 async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
