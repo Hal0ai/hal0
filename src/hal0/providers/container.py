@@ -58,7 +58,12 @@ from typing import Any
 import httpx
 
 from hal0.config import store as model_store_module
-from hal0.config.paths import DEFAULT_MODEL_STORE, model_mount_roots, model_store_root
+from hal0.config.paths import (
+    DEFAULT_MODEL_STORE,
+    _covers,
+    model_mount_roots,
+    model_store_root,
+)
 from hal0.config.schema import (
     build_mtp_flag_bundle,
     family_flags,
@@ -906,6 +911,24 @@ def _llama_launch_plan(
     # appending ``:z``. `model_mount_roots()` dedups equal/nested roots so
     # store==pull_root renders exactly ONE Volume.
     model_stores = model_mount_roots()
+
+    # Defensive reachability (rework O25 follow-up): a slot's resolved model
+    # file can live OUTSIDE every *configured* model root (store/pull_root) —
+    # e.g. a registry path under /mnt/ai-models after [models].store was moved
+    # to /var/lib/hal0/models. `assert_under_store(severity="warn")` +
+    # `doctor models HAL0-MODEL-STORE-UNMOUNTED` DETECT this but don't heal it,
+    # so the container still can't read the file → llama exits at load → the
+    # slot crashes/flaps warming↔error (live-proven on Strix Halo 150: 6 models
+    # under /mnt/ai-models flagged, store pointed at /var/lib/hal0/models).
+    # Mount the model file's own directory (identical-path, read-only) whenever
+    # no configured root already covers it, so the slot loads regardless of the
+    # store-config drift (the guard still surfaces the misconfig to fix).
+    if model_path:
+        mp = os.path.normpath(model_path)
+        if not any(_covers(root, mp) for root in model_stores):
+            model_dir = os.path.dirname(mp)
+            if model_dir and not any(_covers(root, model_dir) for root in model_stores):
+                model_stores = [*model_stores, model_dir]
 
     return RuntimeLaunchPlan(
         image=image,
