@@ -1118,6 +1118,8 @@ async def _boot_slot_manager(app: FastAPI, ctx: BootState) -> None:
         upstreams_registry=ctx.upstreams,
         identity_store=ctx.identity_store,
         port_authority=ctx.port_authority,
+        preload_evict_enabled=ctx.hal0_config.slots.preload_evict_enabled,
+        preload_evict_headroom_mb=ctx.hal0_config.slots.preload_evict_headroom_mb,
     )
 
 
