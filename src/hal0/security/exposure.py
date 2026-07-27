@@ -130,6 +130,7 @@ class _Rule:
 _GET: frozenset[str] = frozenset({"GET", "HEAD"})
 _POST: frozenset[str] = frozenset({"POST"})
 _PUT: frozenset[str] = frozenset({"PUT"})
+_DELETE: frozenset[str] = frozenset({"DELETE"})
 
 # Ordered, first-match-wins. See the module docstring for the full design
 # rationale and hal0-rework-plan.md §23.5 for the architecture this
@@ -241,6 +242,22 @@ RULES: tuple[_Rule, ...] = (
     _Rule("services", _prefix("/api/services"), AuthClass.ADMIN, None),
     _Rule("settings", _prefix("/api/settings"), AuthClass.ADMIN, None),
     _Rule("secrets", _prefix("/api/secrets"), AuthClass.ADMIN, None),
+    # ── memory: the irreversible subset, pinned AHEAD of the generic rule ──
+    #
+    # Issues #1024 (a single unauthenticated `DELETE /api/memory/banks/{id}`
+    # cascade-deleted ~632 live records) and #1302 (delete surface hardening).
+    # The whole `/api/memory` prefix is ADMIN (rule immediately below), so
+    # these two rows change nothing today — that is the point. They exist so
+    # the classification of the *destructive* memory routes cannot be widened
+    # by accident: #1024's own follow-up comment proposes "keep reads open if
+    # desired", and the natural expression of that ("/api/memory reads are
+    # CLIENT") is a `_prefix("/api/memory")` rule which, written without a
+    # method filter or placed above the generic row, would silently take the
+    # bank wipe with it. First-match-wins means these resolve ADMIN before any
+    # such rule is consulted, and DESTRUCTIVE_MEMORY_ROUTES (below, next to
+    # OPEN_ALLOWLIST) is the CI ratchet that forces a conscious diff.
+    _Rule("memory destructive (any DELETE)", _prefix("/api/memory"), AuthClass.ADMIN, _DELETE),
+    _Rule("memory namespace bulk delete", _exact("/api/memory/delete"), AuthClass.ADMIN, _POST),
     _Rule("memory", _prefix("/api/memory"), AuthClass.ADMIN, None),
     _Rule("board", _prefix("/api/board"), AuthClass.ADMIN, None),
     # hal0-brain steward chat (R4 §G): primary /api/brain/chat surface, sibling
@@ -337,7 +354,34 @@ OPEN_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
 )
 
 
+# The memory routes that destroy stored data irreversibly (issues #1024,
+# #1302), as (method, FastAPI path template) pairs. Every one of these MUST
+# classify ADMIN and MUST NOT appear in OPEN_ALLOWLIST;
+# ``tests/security/test_memory_delete_auth.py`` asserts both against the
+# live route table AND asserts this set is exactly the destructive memory
+# surface the app actually serves — so adding a new memory delete route, or
+# reclassifying an existing one, has to touch this constant in the same diff.
+#
+# ``POST /api/memory/delete`` is here because it is a *bulk* id-scoped delete
+# (body ``{"ids": [...]}``), not a create — the verb hides the blast radius.
+DESTRUCTIVE_MEMORY_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        # The #1024 incident route: cascade-drops every memory, document and
+        # entity in the bank.
+        ("DELETE", "/api/memory/banks/{bank_id}"),
+        ("DELETE", "/api/memory/banks/{bank_id}/config"),
+        ("DELETE", "/api/memory/banks/{bank_id}/directives/{directive_id}"),
+        ("DELETE", "/api/memory/banks/{bank_id}/documents/{document_id}"),
+        ("DELETE", "/api/memory/banks/{bank_id}/memories"),
+        ("DELETE", "/api/memory/banks/{bank_id}/mental-models/{model_id}"),
+        ("DELETE", "/api/memory/banks/{bank_id}/operations/{operation_id}"),
+        ("POST", "/api/memory/delete"),
+    }
+)
+
+
 __all__ = [
+    "DESTRUCTIVE_MEMORY_ROUTES",
     "OPEN_ALLOWLIST",
     "RULES",
     "AuthClass",

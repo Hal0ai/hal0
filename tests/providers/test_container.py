@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -33,6 +34,7 @@ from hal0.providers._gpu import resolve_gpu_group_ids
 from hal0.providers.base import RuntimeLaunchPlan
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
+    _UNIT_STOP_TIMEOUT_S,
     ContainerProvider,
     _container_runtime,
     _image_mismatch,
@@ -893,9 +895,11 @@ class TestLoadSync:
         unit_file.write_text("[Unit]\n")
 
         calls_made: list[list[str]] = []
+        timeouts: list[float | None] = []
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             calls_made.append(list(args))
+            timeouts.append(timeout)
             m = MagicMock()
             m.returncode = 0
             return m
@@ -910,6 +914,39 @@ class TestLoadSync:
         assert any("stop" in c for c in cmds), f"stop not in {cmds}"
         # Unit file must be deleted
         assert not unit_file.exists()
+        # #1224: every teardown verb is bounded — an unbounded `systemctl stop`
+        # against an already-failed unit is what wedged slot restart.
+        assert timeouts and all(t == _UNIT_STOP_TIMEOUT_S for t in timeouts), timeouts
+
+    def test_unload_sync_survives_a_stop_that_times_out(self, tmp_path: Path) -> None:
+        """A wedged `systemctl stop` must not abort teardown (#1224).
+
+        Removing the Quadlet source + daemon-reload drops the generated
+        (possibly `failed`) `.service` and lets Quadlet reap the container, so
+        the subsequent load still converges — the stop is best-effort.
+        """
+        provider = ContainerProvider()
+        unit_file = tmp_path / "hal0-slot@test-container.container"
+        unit_file.write_text("[Container]\n")
+
+        calls_made: list[list[str]] = []
+
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
+            calls_made.append(list(args))
+            if "stop" in args:
+                raise subprocess.TimeoutExpired(cmd=list(args), timeout=timeout or 0)
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        with (
+            patch.object(provider, "_run", side_effect=fake_run),
+            patch.object(provider, "_unit_path", return_value=unit_file),
+        ):
+            provider.unload_sync({"name": "test-container"})
+
+        assert not unit_file.exists(), "quadlet source must still be removed"
+        assert any("daemon-reload" in c for c in calls_made), calls_made
 
     def test_running_argv_reads_podman_config_cmd(self) -> None:
         provider = ContainerProvider()

@@ -64,6 +64,30 @@ _SYSTEMCTL_MUTATING_VERBS = frozenset(
 )
 
 
+# The privilege seam (installer/wrappers/hal0-systemctl, reached as
+# `sudo -n /usr/lib/hal0/bin/hal0-systemctl <verb> <id>`) is the SUPPORTED way
+# to reach a mutating verb off root — so the production code the guard below
+# protects against now legitimately spells its argv as `sudo ...` rather than
+# `systemctl ...`. From a test that is still a real escalation attempt against
+# the real host, just one indirection further out, so it must be rejected on
+# exactly the same terms. Unwrap `sudo [-n|-u X|...] <bin> ...` and judge the
+# wrapped command instead of stopping at argv[0].
+_SUDO_NAMES = frozenset({"sudo", "doas", "pkexec"})
+_SEAM_BIN_NAMES = frozenset({"hal0-systemctl"})
+
+
+def _strip_sudo(parts: list[str]) -> list[str]:
+    """Drop a leading ``sudo``/``doas``/``pkexec`` and its option words."""
+    if not parts or Path(parts[0]).name not in _SUDO_NAMES:
+        return parts
+    rest = parts[1:]
+    while rest and rest[0].startswith("-"):
+        # -u/--user take a value; the flags hal0 actually uses (-n) do not.
+        takes_value = rest[0] in {"-u", "--user", "-g", "--group"}
+        rest = rest[2:] if takes_value and len(rest) > 1 else rest[1:]
+    return rest
+
+
 def _reject_privileged_systemctl(argv: object) -> None:
     """Raise if ``argv`` is a systemctl invocation that would need polkit.
 
@@ -71,6 +95,11 @@ def _reject_privileged_systemctl(argv: object) -> None:
     point. Anything that mutates units must go through an injected fake;
     reaching the real system bus from a test is always a bug in the test
     (a missing mock), never intended behavior.
+
+    Covers three shapes, all equivalent in effect:
+      * ``systemctl stop <unit>``                     — bare escalation.
+      * ``sudo -n .../hal0-systemctl stop-agent <id>`` — via the privilege seam.
+      * ``sudo systemctl stop <unit>``                 — sudo'd bare systemctl.
     """
     if isinstance(argv, str):
         parts = argv.split()
@@ -78,9 +107,31 @@ def _reject_privileged_systemctl(argv: object) -> None:
         parts = [str(a) for a in argv]
     else:
         return
-    if not parts or Path(parts[0]).name != "systemctl":
+    if not parts:
         return
-    verbs = [p for p in parts[1:] if not p.startswith("-")]
+
+    inner = _strip_sudo(parts)
+    if not inner:
+        return
+    program = Path(inner[0]).name
+
+    if program in _SEAM_BIN_NAMES:
+        # Seam verbs are `<systemctl-verb>` (slot family) or
+        # `<systemctl-verb>-agent` (agent family); both mutate. The
+        # non-systemctl file verbs (write-unit, write-quadlet, ...) mutate
+        # /etc as root, which a test must never do either.
+        seam_verb = next((p for p in inner[1:] if not p.startswith("-")), "")
+        if seam_verb and seam_verb not in {"help", ""}:
+            raise AssertionError(
+                f"test tried to run the hal0-systemctl privilege seam for real: {parts!r}. "
+                "Inject a fake runner (or patch hal0.system.seam.agent_unit_argv) instead — "
+                "this shells out to sudo on a developer machine."
+            )
+        return
+
+    if program != "systemctl":
+        return
+    verbs = [p for p in inner[1:] if not p.startswith("-")]
     if verbs and verbs[0] in _SYSTEMCTL_MUTATING_VERBS:
         raise AssertionError(
             f"test tried to run privileged systemctl against the real system bus: {parts!r}. "

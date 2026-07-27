@@ -55,6 +55,7 @@ from typing import Any
 import structlog
 
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
+from hal0.system import seam as _seam
 
 log = structlog.get_logger(__name__)
 
@@ -4309,16 +4310,17 @@ def cleanup_stale_agent_dropins(
 def _privileged_systemctl(verb: str, body: str | None = None) -> None:
     """Run one hal0-systemctl seam verb as root via ``sudo -n``.
 
+    Thin wrapper over :func:`hal0.system.seam.privileged_systemctl` — the ONE
+    place the ``sudo -n <seam-bin> <verb>`` invocation is spelled, now shared
+    with the agent-unit teardown path (``HermesDriver._stop_services``). Kept as
+    a module-local name so ``_HAL0_SYSTEMCTL`` stays the env-overridable knob
+    this module's tests monkeypatch.
+
     ``body`` (when given) is piped on stdin — used for ``write-gateway-dropin``.
     Raises ``subprocess.CalledProcessError`` on a non-zero seam exit so the
     caller surfaces the failure instead of masquerading a broken gateway as up.
     """
-    subprocess.run(  # nosec B603 — fixed argv; verb is a literal from our own code
-        ["sudo", "-n", _HAL0_SYSTEMCTL, verb],
-        input=body,
-        text=True,
-        check=True,
-    )
+    _seam.privileged_systemctl(verb, body=body, seam_bin=_HAL0_SYSTEMCTL, check=True)
 
 
 def _privileged_env_write(verb: str, body: str) -> None:

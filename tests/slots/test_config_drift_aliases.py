@@ -196,3 +196,106 @@ async def test_real_model_drift_still_flagged_after_resolution(
     assert drift is not None and drift["drifted"] is True
     keys = {d["key"] for d in drift["diffs"]}
     assert "--model" in keys
+
+
+async def test_no_false_drift_when_registry_key_is_the_slugified_id(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1226 (live CT105 shape): TOML keeps the catalog spelling, registry the slug.
+
+    The slot TOML stores ``Qwopus3.5-4B-Coder-MTP-Q6_K`` while the registry key
+    (and therefore the running container's ``--alias``) is the normalised
+    ``qwopus3-5-4b-coder-mtp-q6-k``. The id→path substitution compared the two
+    id spellings with ``==``, so it never fired and the operator saw a
+    permanent, entirely bogus::
+
+        WARN config drift: --model: running=/mnt/ai-models/....gguf
+                                    rendered=Qwopus3.5-4B-Coder-MTP-Q6_K
+    """
+    toml_id = "Qwopus3.5-4B-Coder-MTP-Q6_K"
+    registry_key = "qwopus3-5-4b-coder-mtp-q6-k"
+    model_path = "/mnt/ai-models/qwopus/Qwopus3.5-4B-Coder-MTP-Q6_K.gguf"
+
+    async def _fake_info(self: SlotManager, mid: str | None) -> dict[str, object]:
+        return {"_model_key": registry_key, "path": model_path}
+
+    monkeypatch.setattr(SlotManager, "_resolve_model_info", _fake_info)
+
+    container_stub.running_argv_by_slot["chat"] = [
+        "--model",
+        model_path,
+        "--alias",
+        registry_key,
+    ]
+    # The rendered preview surfaced the raw catalog id on both flags.
+    container_stub.expected_argv_by_slot["chat"] = ["--model", toml_id, "--alias", toml_id]
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    assert snap.metadata.get("config_drift") == {"drifted": False, "diffs": []}
+
+
+async def test_drift_resolves_the_servable_model_like_the_launch_path(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The drift check must resolve the model the way ``load()`` does (#1226).
+
+    ``load()`` runs the configured id through ``_resolve_servable_model``
+    (a catalog id that landed locally under a different id → the id that
+    actually has a file), so the container is launched with the SERVABLE
+    model's path. The drift check looked up the raw TOML id instead: the
+    registry missed, the renderer fell back to emitting the bare id, and the
+    comparison against the running container warned forever.
+    """
+    toml_id = "gemma-4-12b-it"
+    servable_id = "gemma-4-12b-it-ud-q4-k-xl"
+    model_path = "/mnt/ai-models/gemma/gemma-4-12b-it-UD-Q4_K_XL.gguf"
+    resolved_for: list[str] = []
+
+    def _fake_servable(self: SlotManager, model_id: str, cfg: object) -> str:
+        resolved_for.append(model_id)
+        return servable_id if model_id == toml_id else model_id
+
+    async def _fake_info(self: SlotManager, mid: str | None) -> dict[str, object]:
+        # Only the SERVABLE id has a file on disk — the raw catalog id misses,
+        # exactly as the live registry did.
+        if mid == servable_id:
+            return {"_model_key": servable_id, "path": model_path}
+        return {"_model_key": mid}
+
+    monkeypatch.setattr(SlotManager, "_resolve_servable_model", _fake_servable)
+    monkeypatch.setattr(SlotManager, "_resolve_model_info", _fake_info)
+
+    (slot_root / "chat.toml").write_text(
+        "\n".join(
+            [
+                'name = "chat"',
+                "port = 8081",
+                'backend = "vulkan"',
+                'provider = "llama-server"',
+                "enabled = true",
+                "[model]",
+                f'default = "{toml_id}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    # Running container: launched from the servable model's real path.
+    container_stub.running_argv_by_slot["chat"] = ["--model", model_path]
+    # Rendered preview when the lookup misses: the bare id falls through.
+    container_stub.expected_argv_by_slot["chat"] = ["--model", servable_id]
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    assert toml_id in resolved_for, "drift must go through the servable-model resolution"
+    assert snap.metadata.get("config_drift") == {"drifted": False, "diffs": []}

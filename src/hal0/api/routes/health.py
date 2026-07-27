@@ -55,8 +55,13 @@ def _disk_free_mb(path: Path) -> int:
 def _memory_degraded(request: Request) -> bool | None:
     """Return the memory degraded state for /api/status.
 
-    True  → memory enabled, running on the volatile in-memory fallback.
-    False → memory enabled, using a real durable provider.
+    True  → memory enabled but NOT healthy. Two shapes, deliberately reported
+            as one flag: the boot-degrade ladder swapped in the volatile
+            in-memory fallback (Hindsight was down at boot), OR the live
+            Hindsight daemon has stopped answering since boot (#1301 — the
+            provider tracks that itself, so this stays true after the boot
+            probe's answer goes stale).
+    False → memory enabled and the engine is answering.
     None  → memory is disabled (no provider wired).
     """
     provider = getattr(request.app.state, "memory_provider", None)

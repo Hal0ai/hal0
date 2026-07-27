@@ -132,6 +132,24 @@ case "$cmd" in
         mkdir -p "$ARTIFACTS_DIR"
         TELEMETRY_FILE="$ARTIFACTS_DIR/telemetry.jsonl"
         echo "[telemetry] starting 1 Hz sampler for $run_id → $TELEMETRY_FILE"
+        # Which DRM card to sample. Was hardcoded /sys/class/drm/card0 — wrong
+        # on any host whose target card is card1+ (the same #1303 class of bug
+        # as the /dev/dri/amdgpu device hardcode), and it silently logged 0.
+        # Prefer the card node the device resolver picked (exported by the
+        # harness as HAL0_BENCH_CARD_DEVICE); else the first readable card.
+        GPU_BUSY_SYSFS=""
+        if [[ -n "${HAL0_BENCH_CARD_DEVICE:-}" ]]; then
+          _card="/sys/class/drm/$(basename "$HAL0_BENCH_CARD_DEVICE")/gpu_busy_percent"
+          if [[ -r "$_card" ]]; then GPU_BUSY_SYSFS="$_card"; fi
+        fi
+        if [[ -z "$GPU_BUSY_SYSFS" ]]; then
+          for _card in /sys/class/drm/card*/gpu_busy_percent; do
+            if [[ -r "$_card" ]]; then GPU_BUSY_SYSFS="$_card"; break; fi
+          done
+        fi
+        if [[ -z "$GPU_BUSY_SYSFS" ]]; then
+          echo "[telemetry] no readable gpu_busy_percent under /sys/class/drm — busy pct will be 0" >&2
+        fi
         # Background process: sample amdgpu hwmon every second
         (
           while true; do
@@ -139,7 +157,7 @@ case "$cmd" in
             # Sample GPU metrics
             GPU_TEMP=$(cat /sys/class/hwmon/hwmon*/temp1_input 2>/dev/null || echo "0")
             GPU_POWER=$(cat /sys/class/hwmon/hwmon*/power1_average 2>/dev/null || echo "0")
-            GPU_FREQ=$(cat /sys/class/drm/card0/gpu_busy_percent 2>/dev/null || echo "0")
+            GPU_FREQ=$([[ -n "$GPU_BUSY_SYSFS" ]] && cat "$GPU_BUSY_SYSFS" 2>/dev/null || echo "0")
             echo "{\"ts\":\"$TIMESTAMP\",\"temp_c\":$GPU_TEMP,\"power_mw\":$GPU_POWER,\"gpu_busy_pct\":$GPU_FREQ}" >> "$TELEMETRY_FILE"
             sleep 1
           done

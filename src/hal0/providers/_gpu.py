@@ -114,8 +114,14 @@ def _probed_gpu_group_gids() -> dict[str, int]:
         return {}
 
 
-def resolve_gpu_group_ids() -> list[int]:
+def resolve_gpu_group_ids(node_paths: list[str] | None = None) -> list[int]:
     """Return numeric GIDs for the host's GPU access groups (render, video).
+
+    ``node_paths`` lets a caller that has ALREADY resolved its device nodes
+    (the benchmark harness — ``hal0.bench.devices``, which may be pointed at
+    an operator-overridden node set) reuse them instead of re-enumerating
+    ``/dev/dri``. Default ``None`` keeps the historical behaviour: resolve
+    the host's nodes here.
 
     Fallback chain, PER GROUP, most-authoritative source first:
 
@@ -143,7 +149,8 @@ def resolve_gpu_group_ids() -> list[int]:
     order preserved.
     """
     probed = _probed_gpu_group_gids()
-    node_paths = resolve_gpu_device_paths()
+    if node_paths is None:
+        node_paths = resolve_gpu_device_paths()
     gids: list[int] = []
     try:
         import grp

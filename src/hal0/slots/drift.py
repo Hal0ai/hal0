@@ -58,6 +58,7 @@ class DriftHost(Protocol):
     async def _is_active(self, slot_name: str) -> bool: ...
     async def _maybe_load_config(self, slot_name: str) -> dict[str, Any] | None: ...
     async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]: ...
+    def _resolve_servable_model(self, model_id: str, cfg: Any) -> str: ...
 
 
 def _argv_values(argv: list[str], keys: tuple[str, ...]) -> dict[str, str | None]:
@@ -113,7 +114,21 @@ def _resolve_drift_flags(
     model_val = out.get("--model")
     # Rendered/running may carry the bare registry id instead of the resolved
     # path; substitute the known on-disk path so the realpath compare matches.
-    if model_val is not None and model_path and model_key and model_val == model_key:
+    #
+    # Matched on the NORMALISED id, not the raw string (#1226). The slot TOML
+    # keeps the catalog spelling (``Qwopus3.5-4B-Coder-MTP-Q6_K``) while the
+    # registry key — and therefore the running container's ``--alias`` — is the
+    # slug (``qwopus3-5-4b-coder-mtp-q6-k``), so the ``==`` compare never fired
+    # and the substitution never happened. The operator saw a permanent, bogus
+    # ``config drift: --model: running=/mnt/ai-models/....gguf
+    # rendered=Qwopus3.5-4B-Coder-MTP-Q6_K``. A resolved path never normalises
+    # onto a bare id, so this cannot mask real path drift.
+    if (
+        model_val is not None
+        and model_path
+        and model_key
+        and _normalise_id(model_val) == _normalise_id(str(model_key))
+    ):
         out["--model"] = str(model_path)
     alias_val = out.get("--alias")
     if alias_val is not None:
@@ -151,7 +166,24 @@ async def compute_config_drift(
     if not cfg or is_npu_trio_shadow(cfg):
         return None
 
-    model_info = await host._resolve_model_info(_model_default(cfg))
+    # Resolve the model the SAME way the launch path does before asking the
+    # renderer what it would emit (#1226). ``load()`` runs the configured id
+    # through ``_resolve_servable_model`` (catalog id → the locally-registered
+    # id that actually has a file on disk) before spawning, so the container
+    # carries the SERVABLE model's path. The drift check used the raw TOML id:
+    # for exactly the slots this matters for — a catalog id that landed locally
+    # under a different id — the registry lookup missed, the renderer fell back
+    # to emitting the bare id, and the comparison against the running
+    # container's real ``--model`` warned forever.
+    model_default = _model_default(cfg)
+    if model_default:
+        try:
+            model_default = host._resolve_servable_model(model_default, cfg)
+        except Exception:
+            # Status must never fail because a fallback heuristic raised — fall
+            # back to the raw id and let the comparison proceed as before.
+            model_default = _model_default(cfg)
+    model_info = await host._resolve_model_info(model_default)
     from hal0.providers.container import container_provider
 
     provider = container_provider()
@@ -170,7 +202,7 @@ async def compute_config_drift(
     # id on either side must be run through the SAME resolution before
     # comparison, else a slot created with a registry id permanently
     # false-warns (running path/slug vs rendered id). Resolve both sides.
-    model_key = model_info.get("_model_key") or _model_default(cfg)
+    model_key = model_info.get("_model_key") or model_default
     model_path = model_info.get("path")
     running_flags = _resolve_drift_flags(running_flags, model_key, model_path)
     rendered_flags = _resolve_drift_flags(rendered_flags, model_key, model_path)

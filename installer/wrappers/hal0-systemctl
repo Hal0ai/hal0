@@ -12,6 +12,16 @@
 # match a strict identifier regex), no shell is ever evaluated, and no
 # wildcards are accepted.
 #
+# AGENT UNITS (#453 follow-up): the seam was originally slot-only, so
+# HermesDriver._stop_services() had nothing to call and shelled out to a BARE
+# `systemctl stop hal0-agent@hermes.service`. Unprivileged systemctl on a
+# system unit escalates through polkit — i.e. an interactive password dialog
+# in the middle of an uninstall (and, when cancelled, a unit that was never
+# actually stopped). stop-agent/disable-agent close that gap: same posture as
+# the slot verbs — a dedicated validator (validate_agent_id), the unit name is
+# built HERE from a validated id (the caller never supplies a unit string),
+# the systemctl verb is a literal, no shell, no wildcards.
+#
 # NOTE: the iptables FORWARD-chain repair the original P3-perms design doc
 # sketched for this seam is NOT needed — that repair already runs as its own
 # independent root oneshot unit (packaging/systemd/hal0-podman-forward.service,
@@ -22,6 +32,12 @@ set -euo pipefail
 UNIT_PREFIX="hal0-slot@"
 UNIT_DIR="/etc/systemd/system"
 SELF_UNIT="hal0-api.service"
+
+# Bundled-agent template unit (hal0-agent@<id>.service). Separate prefix +
+# separate validator from the slot family on purpose: the two id namespaces are
+# unrelated, and a single shared "id" concept would let a slot verb reach an
+# agent unit (or vice versa) if either regex is ever loosened.
+AGENT_UNIT_PREFIX="hal0-agent@"
 
 # P3-quadlet: per-slot Podman Quadlet source files live here, root-owned by
 # design; podman's systemd generator turns hal0-slot@<id>.container into
@@ -41,6 +57,17 @@ validate_slot_id() {   # arg: slot id (the "<id>" in hal0-slot@<id>.service)
   local id="$1"
   [[ -n "$id" ]] || die "missing slot id"
   [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || die "bad slot id: $id"
+}
+
+validate_agent_id() {  # arg: agent id (the "<id>" in hal0-agent@<id>.service)
+  # Deliberately as strict as validate_slot_id: a bounded identifier charset
+  # with NO '.', '/', '@' or whitespace, so a validated id can never carry a
+  # second unit name, a path traversal, an extra systemd instance spec, or an
+  # option-looking token ('-x' is a legal id but is only ever concatenated into
+  # ${AGENT_UNIT_PREFIX}${id}.service, never passed as a bare argv word).
+  local id="$1"
+  [[ -n "$id" ]] || die "missing agent id"
+  [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || die "bad agent id: $id"
 }
 
 cmd="${1:-help}"; shift || true
@@ -94,13 +121,26 @@ case "$cmd" in
     exec systemctl "$cmd" "${UNIT_PREFIX}${id}.service"
     ;;
 
+  stop-agent)                 # stop-agent <agent-id>   -> systemctl stop hal0-agent@<id>.service
+    # The systemctl verb is a LITERAL here (not "$cmd" as the slot family does)
+    # so the agent-unit surface can never grow a verb by accident: adding one
+    # means adding a new case arm, which is a reviewable diff.
+    id="${1:-}"; validate_agent_id "$id"
+    exec systemctl stop "${AGENT_UNIT_PREFIX}${id}.service"
+    ;;
+
+  disable-agent)              # disable-agent <agent-id> -> systemctl disable hal0-agent@<id>.service
+    id="${1:-}"; validate_agent_id "$id"
+    exec systemctl disable "${AGENT_UNIT_PREFIX}${id}.service"
+    ;;
+
   restart-self)                # literal-only: restart hal0-api.service, never a variable name
     exec systemctl restart "$SELF_UNIT"
     ;;
 
   help|"")
     cat <<EOF
-usage: hal0-systemctl <command> [slot-id]
+usage: hal0-systemctl <command> [slot-id|agent-id]
   write-unit <slot-id>             write ${UNIT_DIR}/${UNIT_PREFIX}<id>.service (body on stdin)
   remove-unit <slot-id>            rm -f ${UNIT_DIR}/${UNIT_PREFIX}<id>.service
   write-quadlet <slot-id>          write ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container (body on stdin)
@@ -110,6 +150,8 @@ usage: hal0-systemctl <command> [slot-id]
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
   enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service
   reset-failed <slot-id>           clear a crash-looped unit's failed sub-state
+  stop-agent <agent-id>            systemctl stop ${AGENT_UNIT_PREFIX}<id>.service
+  disable-agent <agent-id>         systemctl disable ${AGENT_UNIT_PREFIX}<id>.service
   restart-self                     systemctl restart ${SELF_UNIT}
 EOF
     ;;

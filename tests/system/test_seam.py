@@ -201,6 +201,44 @@ def test_systemctl_slot_unit_verbs_route_through_seam(verb: str) -> None:
     assert calls == [["sudo", "-n", SEAM_BIN, verb, "chat"]]
 
 
+@pytest.mark.parametrize("is_hal0", [False, True])
+def test_systemctl_forwards_the_timeout_on_both_routes(is_hal0: bool) -> None:
+    """#1224: the caller's bound must reach the child on the seamed route too.
+
+    Bounding only the direct path would leave a real (hal0-service-user)
+    install able to wedge on ``systemctl stop`` of an already-failed unit —
+    precisely the deployment where the bug was observed.
+    """
+    kwargs: list[object] = []
+
+    def _run(argv: object, **kw: object) -> MagicMock:
+        kwargs.append(kw.get("timeout"))
+        m = MagicMock()
+        m.returncode = 0
+        return m
+
+    seam = SystemCtlSeam(run=_run, is_hal0_user=lambda: is_hal0)
+
+    seam.systemctl("systemctl", "stop", "hal0-slot@chat.service", check=False, timeout=7.5)
+
+    assert kwargs == [7.5]
+
+
+def test_systemctl_timeout_defaults_to_unbounded() -> None:
+    """Unchanged default: callers that pass no bound still wait forever."""
+    kwargs: list[object] = []
+
+    def _run(argv: object, **kw: object) -> MagicMock:
+        kwargs.append(kw.get("timeout"))
+        m = MagicMock()
+        m.returncode = 0
+        return m
+
+    SystemCtlSeam(run=_run, is_hal0_user=lambda: False).systemctl("systemctl", "daemon-reload")
+
+    assert kwargs == [None]
+
+
 def test_systemctl_read_only_query_never_routed_even_as_hal0_user() -> None:
     """is-active is a read-only D-Bus query — never needs root, never seamed."""
     calls, run = _recorder()
