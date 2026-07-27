@@ -633,10 +633,23 @@ def _render_quadlet_from_plan(
         "[Container]",
         f"Image={plan.image}",
         f"ContainerName={container_name}",
-        # ``LogDriver=none`` keeps conmon→journal the single sink so
-        # ``journalctl -u`` isn't double-fed (podman's own journald driver
-        # would tag a second copy — the old B3 note).
-        "LogDriver=none",
+        # ``LogDriver=journald``, NOT ``none``.
+        #
+        # The old value carried the rationale "keeps conmon→journal the single
+        # sink so journalctl -u isn't double-fed". That premise does not hold:
+        # with LogDriver=none the runner's stdout/stderr goes NOWHERE. Measured
+        # on a live box — the entire journal for a slot unit was podman's own
+        # lifecycle lines plus the container id, and not one line of
+        # llama-server output. Every runner failure (model load error, failed
+        # bind, OOM, bad flag) was therefore undiagnosable: a slot stuck in
+        # ``warming`` looked like a hal0 state-machine bug with no way to see
+        # that the runner itself was the problem.
+        #
+        # Flipping to journald on the same box immediately surfaced the real
+        # log stream — "model loaded", "server is listening on
+        # http://0.0.0.0:8084", "all slots are idle". Worth far more than the
+        # duplicate-line concern, which was the only thing `none` bought.
+        "LogDriver=journald",
     ]
     # ── ONE quadlet render for every substrate (halo150/143 O8+O11) ──────
     # DELIBERATE: no native AutoRemove=/GroupAdd=/SecurityOpt= keys and no
