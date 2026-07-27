@@ -23,9 +23,11 @@ Body shape for /v1/audio/speech (OpenAI compatible):
       "speed":           1.0
     }
 """
+
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import logging
 import os
@@ -47,13 +49,14 @@ def _download(url: str, dest: str) -> None:
     import urllib.request
 
     tmp = dest + ".part"
-    with urllib.request.urlopen(url) as r, open(tmp, "wb") as f:  # noqa: S310 — known URL
+    with urllib.request.urlopen(url) as r, open(tmp, "wb") as f:
         while True:
             buf = r.read(1 << 20)
             if not buf:
                 break
             f.write(buf)
     os.replace(tmp, dest)
+
 
 log = logging.getLogger("kokoro-server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -88,9 +91,7 @@ def _load_model(model_path: str | None, default_voice: str) -> None:
     try:
         from kokoro_onnx import Kokoro  # type: ignore
     except ImportError as exc:  # pragma: no cover — image install is the contract
-        raise RuntimeError(
-            "kokoro-onnx not installed; this image is broken"
-        ) from exc
+        raise RuntimeError("kokoro-onnx not installed; this image is broken") from exc
 
     onnx_path, voices_path = _resolve_paths(model_path)
 
@@ -172,10 +173,8 @@ def _encode_audio(samples: np.ndarray, response_format: str) -> tuple[bytes, str
                 return f.read(), _FORMAT_MIME[fmt]
         finally:
             for p in (wav_path, out_path):
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(p)
-                except OSError:
-                    pass
     raise HTTPException(status_code=400, detail=f"unsupported response_format={fmt!r}")
 
 
@@ -230,7 +229,7 @@ async def speech(req: SpeechRequest) -> Response:
         samples, sample_rate = model.create(  # type: ignore[union-attr]
             req.input, voice=voice, speed=speed, lang="en-us"
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("synthesis failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -238,7 +237,7 @@ async def speech(req: SpeechRequest) -> Response:
     if sample_rate != SAMPLE_RATE:
         # Cheap linear-interp resample.
         ratio = SAMPLE_RATE / sample_rate
-        n_out = int(round(len(samples) * ratio))
+        n_out = round(len(samples) * ratio)
         samples = np.interp(
             np.linspace(0, len(samples) - 1, n_out, dtype=np.float64),
             np.arange(len(samples), dtype=np.float64),

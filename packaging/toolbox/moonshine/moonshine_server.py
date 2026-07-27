@@ -19,10 +19,12 @@ This file is baked into the hal0-toolbox-moonshine image. The runtime
 container is non-root (hal0:hal0, UID 1000); model dirs are bind-mounted
 read-only from the host's HAL0_HOME/models.
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import io
 import logging
 import os
@@ -96,14 +98,11 @@ def _load_model(model_arch: str, model_path: str | None) -> None:
     try:
         import moonshine_onnx  # type: ignore
     except ImportError as exc:  # pragma: no cover — image install is the contract
-        raise RuntimeError(
-            "useful-moonshine-onnx not installed; this image is broken"
-        ) from exc
+        raise RuntimeError("useful-moonshine-onnx not installed; this image is broken") from exc
 
     if model_arch not in _ARCH_TO_HF_NAME:
         raise ValueError(
-            f"unknown model_arch={model_arch!r}; "
-            f"expected one of {list(_ARCH_TO_HF_NAME)}"
+            f"unknown model_arch={model_arch!r}; expected one of {list(_ARCH_TO_HF_NAME)}"
         )
 
     local_dir: Path | None = None
@@ -211,7 +210,7 @@ def _decode_audio(raw: bytes, filename: str | None) -> np.ndarray:
             # use scipy or librosa, but moonshine is robust to mild
             # resampling artifacts and we keep deps small.
             ratio = SAMPLE_RATE / sr
-            n_out = int(round(len(data) * ratio))
+            n_out = round(len(data) * ratio)
             data = np.interp(
                 np.linspace(0, len(data) - 1, n_out, dtype=np.float64),
                 np.arange(len(data), dtype=np.float64),
@@ -230,8 +229,19 @@ def _decode_audio(raw: bytes, filename: str | None) -> np.ndarray:
         in_path = in_f.name
     out_path = in_path + ".wav"
     argv = [
-        "ffmpeg", "-y", "-loglevel", "error", "-i", in_path,
-        "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "wav", out_path,
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        in_path,
+        "-ac",
+        "1",
+        "-ar",
+        str(SAMPLE_RATE),
+        "-f",
+        "wav",
+        out_path,
     ]
     try:
         try:
@@ -261,10 +271,8 @@ def _decode_audio(raw: bytes, filename: str | None) -> np.ndarray:
         return data.astype(np.float32)
     finally:
         for p in (in_path, out_path):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(p)
-            except OSError:
-                pass
 
 
 def _transcribe(pcm: np.ndarray) -> str:
@@ -280,6 +288,7 @@ def _transcribe(pcm: np.ndarray) -> str:
     # tokenizer accessor.
     try:
         from moonshine_onnx import load_tokenizer  # type: ignore
+
         tok = load_tokenizer()
         text = tok.decode_batch(tokens)
         if isinstance(text, list):
@@ -324,9 +333,9 @@ async def transcriptions(
     file: UploadFile = File(...),
     model: str | None = Form(None),
     response_format: str = Form("json"),
-    language: str | None = Form(None),  # noqa: ARG001 — English-only model
-    prompt: str | None = Form(None),  # noqa: ARG001 — not used
-    temperature: float | None = Form(None),  # noqa: ARG001 — not used
+    language: str | None = Form(None),
+    prompt: str | None = Form(None),
+    temperature: float | None = Form(None),
 ) -> JSONResponse:
     if not _state["loaded"]:
         raise HTTPException(status_code=503, detail="model not loaded")
@@ -362,7 +371,7 @@ async def transcriptions(
         ) from None
     try:
         text = _transcribe(pcm)
-    except Exception as exc:  # noqa: BLE001 — return as 500
+    except Exception as exc:
         log.exception("transcription failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -406,23 +415,19 @@ async def stream(ws: WebSocket) -> None:
             if len(buf) >= chunk_samples * 2:
                 pcm = np.frombuffer(bytes(buf), dtype=np.int16).astype(np.float32) / 32768.0
                 try:
-                    text = await asyncio.get_running_loop().run_in_executor(
-                        None, _transcribe, pcm
-                    )
-                except Exception as exc:  # noqa: BLE001
+                    text = await asyncio.get_running_loop().run_in_executor(None, _transcribe, pcm)
+                except Exception as exc:
                     log.exception("stream transcribe failed")
                     await ws.send_json({"error": str(exc)})
                     continue
                 if text and text != last_emit:
                     last_emit = text
                     await ws.send_json({"text": text, "is_final": False})
-    except Exception as exc:  # noqa: BLE001 — connection drop is fine
+    except Exception as exc:
         log.info("ws closed: %s", exc)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             await ws.send_json({"text": last_emit, "is_final": True})
-        except Exception:
-            pass
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
