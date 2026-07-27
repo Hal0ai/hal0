@@ -34,7 +34,22 @@ from hal0.slots.npu.trio import is_npu_trio_shadow
 # renderer exactly: both sides of the comparison are canonicalized through
 # slots.argv.FLAG_ALIASES (so ``--batch-size`` in a running argv matches a
 # rendered ``-b`` instead of reporting false drift).
-_CONFIG_DRIFT_KEYS: tuple[str, ...] = ("--ctx-size", "--model", "--alias", "-b", "-ub")
+#
+# ``--port`` is here because it is the field #1224 was actually reported
+# against: ``PUT /config {"port": N}`` then ``slot load`` left the container on
+# the old port. It is rendered verbatim from the slot's port
+# (``providers.container`` builds ``["--host", "0.0.0.0", "--port",
+# str(port)]``), so a stale unit shows up as a plain value divergence — and
+# ``SlotManager._should_converge`` reads this same comparator to decide whether
+# an explicit load must re-render the unit.
+_CONFIG_DRIFT_KEYS: tuple[str, ...] = (
+    "--ctx-size",
+    "--model",
+    "--alias",
+    "--port",
+    "-b",
+    "-ub",
+)
 
 
 class DriftHost(Protocol):
