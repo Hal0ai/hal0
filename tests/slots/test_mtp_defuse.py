@@ -19,9 +19,9 @@ from __future__ import annotations
 import tomllib
 
 from hal0.config.paths import slots_config_dir
-from hal0.slot_config import write_slot_toml
 from hal0.registry.model import Model, ModelDefaults
 from hal0.registry.store import ModelRegistry
+from hal0.slot_config import write_slot_toml
 from hal0.slots.manager import SlotManager
 from hal0.updater.updater import clear_stale_mtp_overrides
 

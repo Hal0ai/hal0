@@ -58,9 +58,7 @@ class TestSeamRejectsWriteIntent:
 
     def test_all_offenders_are_reported_together(self) -> None:
         with pytest.raises(BadRequest) as ei:
-            reconcile_slot_updates(
-                _base(), {"vision": True, "mtp": False, "enable_thinking": True}
-            )
+            reconcile_slot_updates(_base(), {"vision": True, "mtp": False, "enable_thinking": True})
         assert ei.value.details["keys"] == ["enable_thinking", "mtp", "vision"]
 
     def test_legitimate_updates_still_pass(self) -> None:
