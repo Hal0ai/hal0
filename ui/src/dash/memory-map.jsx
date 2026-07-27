@@ -121,7 +121,7 @@ export function useMemoryMapModel() {
   const slots = slotsQ.data || []
 
   // Pool total = the real ceiling for GPU model loads. On UMA (Strix Halo)
-  // that is the GTT cap (amdgpu.gttsize, ~80 GiB — live as
+  // that is the GTT cap (ttm.pages_limit, ~80 GiB — live as
   // stats.gpu_vram_total_mb), NOT the full unified RAM (128 GiB): models can't
   // actually allocate past the GTT window, so headroom must be measured
   // against it. Prefer the live GTT cap; fall back to the static unified/ram

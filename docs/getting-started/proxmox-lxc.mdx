@@ -96,9 +96,13 @@ other tenants. Scale it down to reserve more host RAM. After rebooting,
 </Aside>
 
 <Aside type="caution">
-The old `amdgpu.gttsize` parameter is **deprecated** — it is ignored on
-Linux 6.10+ (the GTT window is now driven entirely by `ttm.pages_limit`).
-Set only `ttm.pages_limit`; drop `amdgpu.gttsize` from any older guide.
+The old `amdgpu.gttsize` parameter is **deprecated** and may emit kernel
+warnings on current amdgpu/TTM kernels — the GTT window is now driven
+solely by `ttm.pages_limit`. Some newer kernels expose the same knob as
+`amdttm.pages_limit` (the out-of-tree AMD TTM module) instead — check
+which one your kernel ships with `modinfo ttm` / `modinfo amdttm` and set
+whichever applies. Set only that knob; drop `amdgpu.gttsize` from any
+older guide.
 </Aside>
 
 ## 2. Create the container

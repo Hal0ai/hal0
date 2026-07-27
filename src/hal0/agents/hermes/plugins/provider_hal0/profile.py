@@ -8,8 +8,9 @@ Design notes:
   purely *declarative*: it advertises the endpoint, capabilities, and a live
   model inventory; it does not itself stream tokens.
 * ``base_url = "http://127.0.0.1:8080/v1"`` — loopback hal0-api (never a slot
-  port). No Bearer on the hal0 LAN (post-ADR-0012 identity model); identity is
-  carried by ``X-hal0-Agent`` when we make our own discovery call.
+  port). No Bearer on the hal0 LAN — hal0 ships with no built-in auth on the
+  trusted local network; identity is carried by ``X-hal0-Agent`` when we make
+  our own discovery call.
 * ``default_aux_model = "hal0/agent"`` — pins compression / vision /
   summarization / web_extract aux calls at the local agent slot. ``hal0/agent``
   is a *virtual* name hal0 resolves per-request via its LiveSlotResolver, so
