@@ -30,10 +30,9 @@ secret. Each tool call is written to the audit log.
 
 ## Memory MCP (`/mcp/memory`)
 
-Hindsight-backed long-term memory. The memory subsystem is gated by
-`[memory].enabled` in `hal0.toml` (**on by default**; toggle with `hal0
-memory enable`/`disable`) — these tools only function when it's on;
-otherwise calls degrade to a no-op / unavailable surface.
+Hindsight-backed long-term memory. The memory subsystem is **opt-in** — these tools
+only function when the server is started with `HAL0_MEMORY_ENABLED=1`; otherwise
+calls degrade to a no-op / unavailable surface.
 
 | Tool            | Tier              | Effect                                                                 |
 |-----------------|-------------------|------------------------------------------------------------------------|

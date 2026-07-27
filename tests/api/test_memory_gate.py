@@ -1,36 +1,41 @@
-"""Memory gate — ``[memory].enabled`` toggles the whole subsystem.
+"""0.4 memory gate — ``HAL0_MEMORY_ENABLED`` toggles the whole subsystem.
 
-The memory engine (Hindsight), its MCP server (``/mcp/memory``), the REST
-surface (``/api/memory/*``), and the dashboard's Agent → Memory tab are
-gated by ``[memory].enabled`` in ``hal0.toml`` (schema default ``True``).
-The gate lives in ``create_app`` (``src/hal0/api/__init__.py``);
-``/api/status`` reports the resulting state as ``memory_enabled`` so the
-SPA and backend cannot disagree. When off, ``app.state.memory_provider`` is
-``None`` and the REST routes degrade to ``503`` rather than ``500``.
+The memory engine (Cognee), its MCP server (``/mcp/memory``), the REST
+surface (``/api/memory/*``), and the dashboard's Agent → Memory tab ship
+DISABLED by default and return in a later release. The gate lives in
+``create_app`` (``src/hal0/api/__init__.py``); ``/api/status`` reports the
+resulting state as ``memory_enabled`` so the SPA and backend cannot
+disagree. When off, ``app.state.memory_wrapper`` is ``None`` and the REST
+routes degrade to ``503`` rather than ``500``.
 """
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
-from hal0.config.loader import save_hal0_config
-from hal0.config.schema import Hal0Config, MemoryConfig
 
 
-def _build(enabled: bool | None) -> tuple[FastAPI, TestClient]:
-    """Build a fresh app + client with ``[memory].enabled`` set (or left at
-    its schema default of True when ``enabled`` is ``None``)."""
-    if enabled is not None:
-        save_hal0_config(Hal0Config(memory=MemoryConfig(enabled=enabled)))
+def _build(monkeypatch: pytest.MonkeyPatch, value: str | None) -> tuple[FastAPI, TestClient]:
+    """Build a fresh app + client with HAL0_MEMORY_ENABLED set (or cleared)."""
+    if value is None:
+        monkeypatch.delenv("HAL0_MEMORY_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("HAL0_MEMORY_ENABLED", value)
     app = create_app()
     return app, TestClient(app)
 
 
-def test_memory_disabled_when_config_says_so(tmp_hal0_home: str) -> None:
-    app, client = _build(False)
-    # The provider is constructed at create_app time, before lifespan.
+# Anything other than the literal "1" leaves memory off — including unset,
+# empty, and stray truthy-looking strings. This pins the `!= "1"` contract.
+@pytest.mark.parametrize("flag", [None, "0", "", "no", "true", "2"])
+def test_memory_disabled_unless_flag_is_one(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, flag: str | None
+) -> None:
+    app, client = _build(monkeypatch, flag)
+    # The wrapper is constructed at create_app time, before lifespan.
     assert app.state.memory_provider is None
     with client:
         body = client.get("/api/status").json()
@@ -40,21 +45,15 @@ def test_memory_disabled_when_config_says_so(tmp_hal0_home: str) -> None:
         assert client.get("/api/memory/list").status_code == 503
 
 
-def test_memory_enabled_by_default(tmp_hal0_home: str) -> None:
-    """No hal0.toml at all → the schema default (`enabled=True`) applies."""
-    app, client = _build(None)
-    with client:
-        body = client.get("/api/status").json()
-    assert body["memory_enabled"] is (app.state.memory_provider is not None)
-
-
-def test_status_exposes_memory_enabled_as_bool(tmp_hal0_home: str) -> None:
+def test_status_exposes_memory_enabled_as_bool(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """/api/status always carries a boolean memory_enabled field."""
-    app, client = _build(True)
+    app, client = _build(monkeypatch, "1")
     with client:
         body = client.get("/api/status").json()
         assert "memory_enabled" in body
         assert isinstance(body["memory_enabled"], bool)
-        # The reported flag must mirror the real provider state so the field
-        # is trustworthy even if Hindsight fails to construct in this image.
+        # The reported flag must mirror the real wrapper state so the field
+        # is trustworthy even if Cognee fails to construct in this image.
         assert body["memory_enabled"] is (app.state.memory_provider is not None)

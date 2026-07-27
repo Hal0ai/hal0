@@ -1,43 +1,45 @@
 ---
 title: Enable memory
-description: hal0's memory subsystem is gated by [memory].enabled in hal0.toml (on by default). Toggle it with hal0 memory enable/disable, control graph extraction with hal0 memory graph --slot, and migrate any legacy store.
+description: hal0's memory subsystem is gated by HAL0_MEMORY_ENABLED (on by default on a fresh install). Control graph extraction with hal0 memory graph --slot, and migrate any legacy store.
 sidebar:
   order: 50
 ---
 
 import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
 
-hal0's memory subsystem is gated by a single config flag, `[memory].enabled`
-in `hal0.toml` — **on by default**. When it's on, hal0 gives agents a
-persistent recall store — **Hindsight** — plus an optional knowledge-graph
-extraction layer. Toggle it with `hal0 memory enable` / `hal0 memory
-disable` — no code change, no reinstall.
+hal0's memory subsystem is gated by a single environment flag,
+`HAL0_MEMORY_ENABLED`. When it's on, hal0 gives agents a persistent recall
+store — **Hindsight** — plus an optional knowledge-graph extraction layer.
+Flipping the flag is a single environment change — no code change, no
+reinstall.
 
 <Aside type="note">
-A fresh install ships with this on and stands up the local Hindsight daemon
-automatically (skip it at install time with `HAL0_SKIP_HINDSIGHT=1`). The
-steps below are for re-enabling memory after you turned it off, or checking
-its state. In every case, every downstream caller — the admin MCP tools, the
-`/api/memory/*` routes, the agent memory provider — degrades to a no-op or
-`503` when memory is off, so flipping the flag is the whole toggle either
-way.
+A fresh install turns this on for you: the one-line installer writes
+`HAL0_MEMORY_ENABLED=1` into `/etc/hal0/api.env` and stands up the local
+Hindsight daemon automatically (skip it at install time with
+`HAL0_SKIP_HINDSIGHT=1`). The steps below are for the cases the installer
+doesn't cover: a box that predates the default flip, a manual/source
+install, or re-enabling memory after you turned it off. In every case, every
+downstream caller — the admin MCP tools, the `/api/memory/*` routes, the
+agent memory provider — degrades to a no-op or `503` when memory is off, so
+flipping the flag is the whole toggle either way.
 </Aside>
 
 Hermes ships with its own durable-memory wiring already pointed at this
 subsystem (`memory.provider=hal0-memory`, two banks — `private:hermes` and
 `shared`) — see [What memory powers](/docs/concepts/memory#what-memory-powers)
 for how that fits together. Hermes's memory calls still need
-`[memory].enabled=true` on the hal0-api side to actually work; without it
-they degrade the same as every other caller.
+`HAL0_MEMORY_ENABLED=1` on the hal0-api side to actually work; without it they
+degrade the same as every other caller.
 
 ## Turn it on
 
 <Steps>
 
-1. **Set the flag.**
+1. **Set the flag.** Add `HAL0_MEMORY_ENABLED=1` to `/etc/hal0/api.env`:
 
    ```sh
-   hal0 memory enable
+   echo 'HAL0_MEMORY_ENABLED=1' | sudo tee -a /etc/hal0/api.env
    ```
 
 2. **Restart the API** so `create_app` constructs the memory provider:
@@ -46,17 +48,14 @@ they degrade the same as every other caller.
    sudo systemctl restart hal0-api
    ```
 
-3. **Confirm it's wired.**
+3. **Confirm it's wired.** The graph status endpoint now responds with
+   real state instead of degrading:
 
    ```sh
-   hal0 memory status
    hal0 memory graph status
    ```
 
 </Steps>
-
-Turning it back off is the mirror image: `hal0 memory disable && sudo
-systemctl restart hal0-api`.
 
 When the flag is set, hal0 builds the memory provider from your config.
 The engine is **Hindsight**; if the Hindsight daemon is unreachable at

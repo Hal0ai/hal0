@@ -31,7 +31,7 @@ import {
   useApplyPlan,
 } from '@/api/hooks/useSettings'
 import { useServiceRepair } from '@/api/hooks/useServicesHealth'
-import { useMemoryGraphStatus, useRetryFailedExtractions, useUpdateMemoryGraph } from '@/api/hooks/useMemory'
+import { useMemoryGraphStatus, useUpdateMemoryGraph } from '@/api/hooks/useMemory'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useQueryClient } from '@tanstack/react-query'
 
@@ -2168,24 +2168,7 @@ function AdvancedSection() {
 function MemoryGraphPanel() {
   const statusQuery = useMemoryGraphStatus();
   const updateGraph = useUpdateMemoryGraph();
-  const retryFailed = useRetryFailedExtractions();
   const st = statusQuery.data;
-
-  const doRetryFailed = async () => {
-    try {
-      const res = await retryFailed.mutateAsync();
-      const q = res?.queued ?? 0;
-      const s = res?.skipped ?? 0;
-      window.__hal0Toast && window.__hal0Toast(
-        q === 0 && s === 0
-          ? "No failed extractions to retry"
-          : `Requeued ${q} failed extraction${q === 1 ? "" : "s"}${s ? ` · ${s} skipped` : ""}`,
-        "ok",
-      );
-    } catch (e) {
-      window.__hal0Toast && window.__hal0Toast(`Retry failed — ${e?.message || "see logs"}`, "err");
-    }
-  };
 
   const [enabled, setEnabled] = useStateSet(false);
   const [slot, setSlot] = useStateSet("");
@@ -2299,18 +2282,6 @@ function MemoryGraphPanel() {
         />
       )}
       <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
-        {st && st.errors > 0 && (
-          <button
-            className="btn ghost sm"
-            style={{marginRight: "auto", color: "var(--warn)", borderColor: "var(--warn)"}}
-            disabled={retryFailed.isPending}
-            onClick={doRetryFailed}
-            data-testid="mem-btn-retry-failed"
-            title="Requeue every failed extraction/consolidation op — safe to run once the slot resolves"
-          >
-            {retryFailed.isPending ? "Retrying…" : `Retry ${st.errors} failed`}
-          </button>
-        )}
         {dirty && (
           <button className="btn ghost sm" onClick={() => {
             setEnabled(!!st?.enabled);

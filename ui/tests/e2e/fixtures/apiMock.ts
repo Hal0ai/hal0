@@ -92,13 +92,6 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   await page.route('**/api/slots', (route) => json(route, { slots: state.slots }))
   await page.route('**/api/slots/metrics', (route) => json(route, {}))
   await page.route('**/api/backends', (route) => json(route, { backends: state.backends }))
-  // GET /api/upstreams returns a bare UpstreamEntry[] (providers.py). Without
-  // this stub the `/api/` catch-all above answers `{}`, and Connections' pane
-  // does `(upstreamsQuery.data ?? []).filter(…)` — `{}` is truthy so the
-  // `?? []` misses and `{}.filter` throws, blanking the whole ConnectionsView
-  // (the #slots/endpoints "Local endpoints" pane then renders 0 rows). An empty
-  // list means no managed remotes, so the local-endpoint row count is unaffected.
-  await page.route('**/api/upstreams', (route) => json(route, []))
   await page.route('**/api/profiles', (route) => json(route, MOCK_DATA.profiles ?? []))
   await page.route('**/api/agent/approvals', (route) =>
     json(route, { approvals: state.approvals }),

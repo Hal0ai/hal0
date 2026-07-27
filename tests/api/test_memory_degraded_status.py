@@ -10,15 +10,17 @@ Verifies:
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
-from hal0.config.loader import save_hal0_config
-from hal0.config.schema import Hal0Config, MemoryConfig
 
 
-def _build(enabled: bool):
-    save_hal0_config(Hal0Config(memory=MemoryConfig(enabled=enabled)))
+def _build(monkeypatch: pytest.MonkeyPatch, value: str | None):
+    if value is None:
+        monkeypatch.delenv("HAL0_MEMORY_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("HAL0_MEMORY_ENABLED", value)
     app = create_app()
     return app, TestClient(app)
 
@@ -35,9 +37,11 @@ def test_status_exposes_memory_degraded_field(client: TestClient) -> None:
 # ── memory disabled → None ────────────────────────────────────────────────────
 
 
-def test_status_memory_degraded_none_when_disabled(tmp_hal0_home: str) -> None:
+def test_status_memory_degraded_none_when_disabled(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """memory_degraded=None when no memory provider is wired."""
-    _app, client = _build(False)
+    _app, client = _build(monkeypatch, None)
     with client:
         body = client.get("/api/status").json()
     assert body["memory_enabled"] is False
@@ -47,11 +51,13 @@ def test_status_memory_degraded_none_when_disabled(tmp_hal0_home: str) -> None:
 # ── in-memory fallback → True ─────────────────────────────────────────────────
 
 
-def test_status_memory_degraded_true_for_pgvector_fallback(tmp_hal0_home: str) -> None:
+def test_status_memory_degraded_true_for_pgvector_fallback(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """memory_degraded=True when PgVectorProvider (in-memory fallback) is wired."""
     from hal0.memory.pgvector_provider import PgVectorProvider
 
-    app, client = _build(True)
+    app, client = _build(monkeypatch, "1")
     # Replace whatever provider was built with the explicit in-memory fallback.
     app.state.memory_provider = PgVectorProvider()
 
@@ -65,11 +71,13 @@ def test_status_memory_degraded_true_for_pgvector_fallback(tmp_hal0_home: str) -
 # ── real provider → False ─────────────────────────────────────────────────────
 
 
-def test_status_memory_degraded_false_for_real_provider(tmp_hal0_home: str) -> None:
+def test_status_memory_degraded_false_for_real_provider(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """memory_degraded=False when a durable provider (no degraded attr) is wired."""
     from unittest.mock import MagicMock
 
-    app, client = _build(True)
+    app, client = _build(monkeypatch, "1")
     # Simulate a real provider: no 'degraded' attribute (getattr fallback → False).
     fake_real_provider = MagicMock(spec=[])  # no attributes
     app.state.memory_provider = fake_real_provider

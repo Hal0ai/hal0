@@ -295,17 +295,14 @@ function MemMentalModels({ bank }) {
   const useMentalModels = window.__hal0UseMentalModels;
   const useMentalModelRefresh = window.__hal0UseMentalModelRefresh;
   const useMentalModelCreate = window.__hal0UseMentalModelCreate;
-  const useMentalModelDelete = window.__hal0UseMentalModelDelete;
   const query = useMentalModels ? useMentalModels(bank) : { data: null };
   const refresh = useMentalModelRefresh ? useMentalModelRefresh() : null;
   const create = useMentalModelCreate ? useMentalModelCreate() : null;
-  const del = useMentalModelDelete ? useMentalModelDelete() : null;
   const items = query.data?.items || [];
   const [creating, setCreating] = useStateMTl(false);
   const [name, setName] = useStateMTl('');
   const [sourceQuery, setSourceQuery] = useStateMTl('');
   const [busy, setBusy] = useStateMTl(false);
-  const [confirmId, setConfirmId] = useStateMTl(null);
 
   async function doRefresh(id) {
     try {
@@ -313,18 +310,6 @@ function MemMentalModels({ bank }) {
       mtToast('Mental model refresh queued', 'ok');
     } catch (err) {
       mtToast(err?.message || 'Refresh failed', 'err');
-    }
-  }
-
-  async function doDelete(id) {
-    if (!del) return;
-    try {
-      await del.mutateAsync({ bank, id });
-      mtToast('Mental model deleted', 'ok');
-    } catch (err) {
-      mtToast(err?.message || 'Delete failed', 'err');
-    } finally {
-      setConfirmId(null);
     }
   }
 
@@ -405,15 +390,6 @@ function MemMentalModels({ bank }) {
               <button className="btn ghost xs" onClick={() => doRefresh(m.id)} data-testid="mem-mm-refresh" title="Refresh">
                 <Icon name="refresh" size={12} />
               </button>
-              {confirmId === m.id ? (
-                <button className="btn danger xs" onClick={() => doDelete(m.id)} data-testid="mem-mm-delete-confirm" title="Confirm delete">
-                  Delete?
-                </button>
-              ) : (
-                <button className="btn ghost xs danger" onClick={() => setConfirmId(m.id)} data-testid="mem-mm-delete" title="Delete">
-                  <Icon name="trash" size={12} />
-                </button>
-              )}
             </div>
             <div className="mt-mm-q mono">{m.source_query}</div>
             {m.content && <div className="mt-mm-content">{m.content.slice(0, 200)}</div>}

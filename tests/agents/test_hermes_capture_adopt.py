@@ -100,62 +100,6 @@ def test_claim_adopts_foreign_home_when_adopt(tmp_path: Path, monkeypatch) -> No
     assert (home / ".env").read_text() == "TELEGRAM_BOT_TOKEN=abc123\nUNRELATED=keep-me\n"
 
 
-# ── mark_home_managed_if_owned — fresh-install marker stamp (bug: unclaimed home) ──
-
-
-def test_mark_home_managed_stamps_absent_home(tmp_path: Path) -> None:
-    """A fresh box: HERMES_HOME doesn't exist yet → stamp + report owned."""
-    home = tmp_path / ".hermes"  # absent
-    assert hp.mark_home_managed_if_owned(home) is True
-    assert (home / hp._HAL0_MANAGED_MARKER).is_file()
-    # And the stamped home is NOT seen as foreign afterwards.
-    assert hp._home_is_foreign(home) is False
-
-
-def test_mark_home_managed_stamps_empty_home(tmp_path: Path) -> None:
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    assert hp.mark_home_managed_if_owned(home) is True
-    assert (home / hp._HAL0_MANAGED_MARKER).is_file()
-
-
-def test_mark_home_managed_idempotent_on_managed_home(tmp_path: Path) -> None:
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    (home / hp._HAL0_MANAGED_MARKER).write_text("x")
-    (home / "config.yaml").write_text("a: 1")
-    assert hp.mark_home_managed_if_owned(home) is True  # already marked → still owned
-
-
-def test_mark_home_managed_refuses_foreign_home(tmp_path: Path) -> None:
-    """A genuine operator tree (populated, unmarked) must NOT be silently
-    claimed — capture still routes through --adopt, so the marker stays absent."""
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    (home / "config.yaml").write_text("operator: cfg\n")
-    assert hp.mark_home_managed_if_owned(home) is False
-    assert not (home / hp._HAL0_MANAGED_MARKER).exists()
-
-
-def test_marker_before_seed_prevents_unclaimed_home_abort(tmp_path: Path) -> None:
-    """Regression for the fresh-install bug: hal0-api seeds personas into
-    HERMES_HOME BEFORE `hal0 agent install hermes` runs. When the marker is
-    stamped first (as the lifespan now does), the later install-phase claim
-    must see a managed home and proceed — not abort as 'unclaimed'."""
-    home = tmp_path / ".hermes"
-    # 1. hal0-api stamps the marker at startup, before seeding.
-    assert hp.mark_home_managed_if_owned(home) is True
-    # 2. hal0-api seeds personas — the home is now populated.
-    personas = home / "personas"
-    personas.mkdir(parents=True)
-    (personas / "hermes.toml").write_text("id = 'hermes'\n")
-    # 3. The bootstrap install-phase claim now proceeds (home is managed).
-    assert hp._home_is_foreign(home) is False
-    claimed, reason, _details = hp._claim_hermes_home(home, adopt=False)
-    assert claimed is True
-    assert reason is None
-
-
 # ── .env token import — prefix filter + vault preservation ───────────────────
 
 

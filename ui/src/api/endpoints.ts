@@ -223,8 +223,6 @@ export const ENDPOINTS = {
   // PUT body → { enabled?, extraction_slot? }
   memoryGraphStatus: '/api/memory/graph/status',
   memoryGraph: '/api/memory/graph',
-  // Bulk-requeue every failed extraction/consolidation op across banks.
-  memoryGraphRetry: '/api/memory/graph/retry',
 
   // ── Journal (HTTP backfill + SSE tail) ───────────────────────────
   // Per #322 Phase 1 (PR #330): the ``/api/journal`` surface

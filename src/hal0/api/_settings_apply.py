@@ -140,10 +140,8 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # created) on the next slot load, so a restart of the slot picks it up.
     "models.flm_store": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
     # [memory]
-    # enabled + engine are both consumed once at create_app when the memory
-    # provider is constructed (api/__init__.py) — a change only lands on
-    # restart. enabled replaced the old HAL0_MEMORY_ENABLED env var.
-    "memory.enabled": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    # engine is consumed once at create_app when the memory provider is
+    # constructed (api/__init__.py) — a change only lands on restart.
     "memory.engine": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     # [memory.embedding] — hindsight-era reranker knobs, all threaded into
     # Hal0Reranker at startup (memory/__init__.py), hence service-restart.

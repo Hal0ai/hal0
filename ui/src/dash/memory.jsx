@@ -108,7 +108,7 @@ function MemEngineCard({ engine, isLoading, graphEnabled, onOpenGraph }) {
 
 // ── Timeseries chart (stacked spark-bars, mo- house style) ────────────────────
 
-function MemTimeseries({ bank, period, setPeriod, onConsolidate, consolidating }) {
+function MemTimeseries({ bank, period, setPeriod, onConsolidate }) {
   const useBankTimeseries = window.__hal0UseBankTimeseries;
   const query = useBankTimeseries ? useBankTimeseries(bank, period) : { data: null };
   const buckets = query.data?.buckets || [];
@@ -182,10 +182,9 @@ function MemTimeseries({ bank, period, setPeriod, onConsolidate, consolidating }
           className="btn ghost xs"
           style={{ color: 'var(--yellow)', borderColor: 'var(--yellow-line, var(--line))' }}
           onClick={onConsolidate}
-          disabled={consolidating}
           data-testid="mem-btn-consolidate"
         >
-          {consolidating ? 'Consolidating…' : 'Consolidate'}
+          Consolidate
         </button>
       </div>
     </div>
@@ -565,15 +564,7 @@ function MemoryView({ param } = {}) {
   }
 
   const doConsolidate = async () => {
-    if (!selected) return;
-    // The consolidate hook is republished on `window` by memory-hook-bridge;
-    // if the bridge hasn't loaded, fail loudly instead of silently swallowing
-    // the click (the old `return` made the button look like it did nothing).
-    if (!consolidate) {
-      memToast('Consolidate unavailable — reload the page', 'err');
-      return;
-    }
-    if (consolidate.isPending) return; // guard double-fire
+    if (!selected || !consolidate) return;
     try {
       const res = await consolidate.mutateAsync(selected.bank_id);
       const opId = res?.operation_id ?? res?.id ?? res?.operation;
@@ -625,7 +616,7 @@ function MemoryView({ param } = {}) {
           />
           <MemoryGraphPanel />
           {selected && (
-            <MemTimeseries bank={selected.bank_id} period={period} setPeriod={setPeriod} onConsolidate={doConsolidate} consolidating={!!consolidate?.isPending} />
+            <MemTimeseries bank={selected.bank_id} period={period} setPeriod={setPeriod} onConsolidate={doConsolidate} />
           )}
         </div>
         <div className="mo-banks-col">

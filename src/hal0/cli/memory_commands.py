@@ -4,20 +4,10 @@ Mirrors the slot / model CLI shape: a thin HTTP client to the local
 hal0 API. The ``graph`` sub-sub-app maps 1:1 to the routes in
 :mod:`hal0.api.routes.memory`:
 
-    hal0 memory status                                  → GET  /api/status (memory_enabled)
-    hal0 memory enable                                  → PUT  /api/settings (memory.enabled=true)
-    hal0 memory disable                                 → PUT  /api/settings (memory.enabled=false)
     hal0 memory graph status                            → GET  /api/memory/graph/status
     hal0 memory graph enable [--route ...] [--provider …] [--model …]
                                                         → PUT  /api/memory/graph (enabled=true …)
     hal0 memory graph disable                           → PUT  /api/memory/graph (enabled=false)
-
-``hal0 memory enable``/``disable`` replace the old ``HAL0_MEMORY_ENABLED``
-env var (removed) — the whole subsystem (Hindsight engine, /mcp/memory,
-/api/memory/*, the dashboard's Agent → Memory tab) is gated by
-``[memory].enabled`` in hal0.toml, defaulting to True. The provider is
-built once at ``create_app()``, so flipping it needs a ``hal0-api``
-restart, same as ``hal0 memory graph`` needs one for ``memory.engine``.
 
 PLAN.md §13 ("CLI is a thin client") — every command hits 127.0.0.1:8080.
 """
@@ -49,106 +39,6 @@ console = Console()
 # alongside ``hal0 memory --help``. Same pattern as ``hal0 agent approvals``.
 graph_app = typer.Typer(help="Graph-extraction settings (ADR-0023).")
 app.add_typer(graph_app, name="graph")
-
-
-# ── ``hal0 memory status`` ─────────────────────────────────────────────────
-
-
-@app.command("status")
-def status_cmd(
-    json_out: bool = typer.Option(
-        False,
-        "--json",
-        help="Emit raw JSON instead of the human-readable panel.",
-    ),
-) -> None:
-    """Show whether the memory subsystem is enabled and live."""
-    url = _api_base()
-    if _api_unreachable(url):
-        raise typer.Exit(1)
-    try:
-        s = api_get("/api/status")
-    except CliApiError as exc:
-        die(str(exc))
-        return
-    if not isinstance(s, dict):
-        die(f"unexpected status payload: {s!r}")
-        return
-    if json_out:
-        typer.echo(
-            jsonlib.dumps(
-                {
-                    "memory_enabled": s.get("memory_enabled"),
-                    "memory_degraded": s.get("memory_degraded"),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
-        return
-
-    enabled = bool(s.get("memory_enabled"))
-    state = "[bold green]ON[/bold green]" if enabled else "[bold]OFF[/bold]"
-    degraded = s.get("memory_degraded")
-    t = Table.grid(padding=(0, 2))
-    t.add_column("k", style="dim")
-    t.add_column("v")
-    t.add_row("State", state)
-    if enabled and degraded is True:
-        t.add_row(
-            "Provider",
-            "[yellow]in-memory fallback (volatile — Hindsight unreachable)[/yellow]",
-        )
-    elif enabled:
-        t.add_row("Provider", "[green]durable[/green]")
-    console.print(Panel(t, title="memory · status", border_style="dim"))
-
-
-# ── ``hal0 memory enable`` / ``hal0 memory disable`` ───────────────────────
-
-
-def _set_enabled(enabled: bool, json_out: bool) -> None:
-    url = _api_base()
-    if _api_unreachable(url):
-        raise typer.Exit(1)
-    try:
-        result = api_put("/api/settings", json={"memory": {"enabled": enabled}})
-    except CliApiError as exc:
-        die(str(exc))
-        return
-    if json_out:
-        typer.echo(jsonlib.dumps(result, indent=2, sort_keys=True))
-        return
-    verb = "enabled" if enabled else "disabled"
-    color = "green" if enabled else "yellow"
-    console.print(
-        Panel(
-            f"[bold {color}]Memory subsystem {verb}[/bold {color}]\n"
-            "[dim]Takes effect on the next hal0-api restart: "
-            "systemctl restart hal0-api[/dim]",
-            border_style=color,
-        )
-    )
-
-
-@app.command("enable")
-def enable_cmd(
-    json_out: bool = typer.Option(
-        False, "--json", help="Emit the raw JSON response instead of a panel."
-    ),
-) -> None:
-    """Enable the memory subsystem (persists [memory].enabled=true)."""
-    _set_enabled(True, json_out)
-
-
-@app.command("disable")
-def disable_cmd(
-    json_out: bool = typer.Option(
-        False, "--json", help="Emit the raw JSON response instead of a panel."
-    ),
-) -> None:
-    """Disable the memory subsystem (persists [memory].enabled=false)."""
-    _set_enabled(False, json_out)
 
 
 # ── ``hal0 memory graph status`` ──────────────────────────────────────────────

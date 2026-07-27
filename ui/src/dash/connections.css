@@ -389,12 +389,12 @@
 .up-test.ok { color: var(--ok); border-color: var(--ok-line); background: var(--ok-soft); }
 .up-test.err { color: var(--err); border-color: var(--err-line); background: rgba(255,90,90,0.07); }
 
-.up-filter-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 12px; padding: 12px; }
+.up-filter-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 10px 0; }
 .up-filter-grid label, .up-add-grid label { display: flex; flex-direction: column; gap: 4px; }
 .up-filter-grid .k, .up-add-grid .k { font-family: var(--jbm); font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-5); }
 .up-input { height: 28px; padding: 4px 8px; font-size: 11.5px; background: var(--bg); color: var(--fg); border: 1px solid var(--line-strong); border-radius: var(--rad-sm); }
 .up-input:focus { outline: none; border-color: var(--accent); }
-.up-filter-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 12px 12px; }
+.up-filter-actions { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
 .up-filter-actions .meta { font-size: 10.5px; color: var(--fg-5); }
 
 .up-foot { display: flex; align-items: center; gap: 10px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }

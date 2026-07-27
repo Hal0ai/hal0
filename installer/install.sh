@@ -696,12 +696,11 @@ HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
 # upgrade. Regenerate with: hal0 doctor / rerun installer.
 ${NETWORK_ENV_LINES}
 # Memory subsystem (Hindsight engine + /mcp/memory + the Agent → Memory tab)
-# is ENABLED by default via [memory].enabled=true in hal0.toml — no env var
-# needed here (HAL0_MEMORY_ENABLED was removed; use 'hal0 memory enable' /
-# 'hal0 memory disable' to toggle it, or hand-edit hal0.toml). Needs the
-# shared hindsight-api daemon (installer/systemd/hindsight-api.service). If
-# the daemon is unreachable, hal0 degrades to the in-memory pgvector
-# provider (ADR-0023; the cognee engine was removed).
+# is ENABLED by default as of v0.5 (brain re-enablement). Comment out to ship
+# with memory dark. Needs the shared hindsight-api daemon (installer/systemd/
+# hindsight-api.service). If the daemon is unreachable, hal0 degrades to the
+# in-memory pgvector provider (ADR-0023; the cognee engine was removed).
+HAL0_MEMORY_ENABLED=1
 # HF_TOKEN — HuggingFace token for gated / large model pulls. Easiest path:
 # set it in the dashboard (Settings -> Secrets -> HuggingFace token) for a live,
 # no-restart update. If HF_TOKEN/HUGGING_FACE_HUB_TOKEN was present in the
@@ -1634,7 +1633,7 @@ else
     # Stand up the local hindsight-api daemon (the shared memory brain) and seed
     # the global shared bank + the hermes private bank. The unit ships in
     # installer/systemd/ but was never installed before, so a fresh box had
-    # [memory].enabled=true (hal0.toml default) pointing at a dead engine. The daemon
+    # HAL0_MEMORY_ENABLED=1 (api.env above) pointing at a dead engine. The daemon
     # runs in its own venv at ${VAR_DIR}/memory/hindsight/.venv (pinned to the
     # version CT105 runs) with an embedded postgres + local BGE/MiniLM models;
     # its extraction/reflection LLM is hal0/utility on :8080 (used lazily — the

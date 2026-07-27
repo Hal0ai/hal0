@@ -214,15 +214,6 @@ def _stub(name: str) -> Callable[[PhaseContext], PhaseResult]:
 # requirements.txt and the wrapper script. The constants are exposed
 # at module scope so tests can monkey-patch them onto a tmp path.
 PYTHON_MIN = (3, 11)
-# Exclusive cap for the hermes venv interpreter, mirroring hermes-agent's
-# wheel metadata: every release since 0.16.0 pins `requires-python
-# >=3.11,<3.14`. On a >=3.14 interpreter pip filters those wheels out and
-# falls back to 0.15.2 — whose wheel is broken (imports
-# hermes_cli.dashboard_auth, ships without the subpackage) — so 3.14 must be
-# rejected, not merely deprioritized (#1248). Single source of truth for the
-# resolver, the preflight message, and the stale-venv rebuild; relax it here
-# when upstream ships 3.14 support (#1249).
-PYTHON_MAX_EXCLUSIVE = (3, 14)
 MIN_FREE_GIB = 4
 DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/status"
 WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
@@ -483,12 +474,9 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
 
     Documented blockers (plan §4):
 
-    * A hermes-compatible Python (3.11-3.13) resolvable — the venv is
-      built with an explicit interpreter, and hermes-agent wheels cap
-      ``requires-python <3.14``, so \"≥ 3.11\" alone is not enough
-      (Ubuntu 26.04 ships 3.14 only, #1248). A host with uv passes even
-      without one — the install phase provisions a managed interpreter
-      (#1250).
+    * Python ≥ 3.11 available — bootstrap shells out to a venv with
+      explicit Python; we verify the running interpreter qualifies so
+      we can re-use ``sys.executable`` instead of hunting PATH.
     * ``hal0`` daemon reachable at ``/api/status`` — agents that can't
       reach hal0 are useless. Catch it now instead of during config_write.
     * venv tree + ``$HERMES_HOME`` write-probed — we create both in later
@@ -503,20 +491,11 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
 
     py_version = sys.version_info[:3]
     details["python_version"] = ".".join(str(p) for p in py_version)
-    # What matters is the VENV interpreter, not the running one — resolve it
-    # the same way the install phase will, so a 3.14-only host fails here
-    # with a real explanation instead of three phases later inside pip.
-    venv_python = _resolve_supported_python()
-    details["venv_python"] = venv_python
-    if venv_python is None:
-        # No system interpreter in range. uv can still provision one during
-        # the install phase (#1250) — we only check availability here, not
-        # download: preflight must stay fast and side-effect free. Fail only
-        # when that fallback is closed too.
-        uv = _uv_available()
-        details["uv_python_fallback"] = uv is not None
-        if uv is None:
-            failures.append(_python_range_error())
+    if py_version < PYTHON_MIN:
+        failures.append(
+            f"python {'.'.join(str(p) for p in PYTHON_MIN)}+ required, "
+            f"have {details['python_version']} — run `apt install python3.11`",
+        )
 
     rc = ctx.io.http_get(DAEMON_HEALTH_URL)
     details["daemon_http_status"] = rc
@@ -601,112 +580,18 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
 # ── Phase B: install ────────────────────────────────────────────────────────
 
 
-def _python_range_error() -> str:
-    """Actionable failure text for hosts with no hermes-compatible Python."""
-    lo = ".".join(str(p) for p in PYTHON_MIN)
-    hi = f"{PYTHON_MAX_EXCLUSIVE[0]}.{PYTHON_MAX_EXCLUSIVE[1] - 1}"
-    cap = ".".join(str(p) for p in PYTHON_MAX_EXCLUSIVE)
-    return (
-        f"no Python {lo}-{hi} interpreter found — hermes-agent wheels pin "
-        f"`requires-python <{cap}`, so the hermes venv needs {lo}-{hi}. "
-        f"Install one and re-run, e.g. `apt install python{hi} python{hi}-venv`; "
-        f"on distros that ship only {cap}+ (Ubuntu 26.04) use the deadsnakes "
-        f"PPA — or install uv (https://astral.sh/uv), and hal0 will provision "
-        f"Python {UV_PYTHON_FALLBACK} itself"
-    )
+def _resolve_python311(prober: Callable[[str], str | None] = shutil.which) -> str | None:
+    """Find a python3.11 interpreter; fall back to the running one when it qualifies.
 
-
-#: Minor version uv provisions when no system interpreter qualifies (#1250).
-#: Newest supported release — keep inside [PYTHON_MIN, PYTHON_MAX_EXCLUSIVE).
-UV_PYTHON_FALLBACK = "3.13"
-
-#: Where uv-managed interpreters land. uv's default (~/.local/share/uv) is
-#: under /root with mode 0700 when provisioning runs as root — but the hermes
-#: venv executes as the ``hal0`` user via a symlinked base interpreter, which
-#: would then be unreachable. A world-readable tree under /var/lib/hal0 keeps
-#: the interpreter usable by the service and survives root-homedir cleanups.
-UV_PYTHON_INSTALL_DIR = Path("/var/lib/hal0/python")
-
-
-def _uv_available(prober: Callable[[str], str | None] = shutil.which) -> str | None:
-    return prober("uv")
-
-
-def _provision_python_via_uv(
-    prober: Callable[[str], str | None] = shutil.which,
-    runner: Any = subprocess,
-) -> str | None:
-    """Fetch a uv-managed Python as the last resort (#1250).
-
-    ``uv python install`` is idempotent (a no-op when the version is already
-    present), and ``uv python find`` returns a stable path under
-    ``UV_PYTHON_INSTALL_DIR`` — so repeat runs and ``--repair`` deterministically
-    reuse the interpreter from the first provisioning instead of hunting anew.
-    Returns ``None`` when uv is absent or the fetch fails (offline) — callers
-    fall through to the actionable range error.
+    Prefers an explicit ``python3.11`` on PATH so the venv pins minor
+    version regardless of what ``sys.executable`` is. Falls back to
+    ``sys.executable`` only when the running interpreter is itself
+    3.11+ — keeps tests usable on Python 3.12+ CI shards.
     """
-    uv = _uv_available(prober)
-    if uv is None:
-        return None
-    env = {**os.environ, "UV_PYTHON_INSTALL_DIR": str(UV_PYTHON_INSTALL_DIR)}
-    try:
-        runner.run(  # nosec B603 — argv is a constant uv invocation
-            [uv, "python", "install", UV_PYTHON_FALLBACK],
-            check=True,
-            env=env,
-        )
-        found = runner.run(  # nosec B603
-            [uv, "python", "find", UV_PYTHON_FALLBACK],
-            check=True,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    path = (found.stdout or "").strip()
-    return path or None
-
-
-def _ensure_supported_python(
-    prober: Callable[[str], str | None] = shutil.which,
-    *,
-    runner: Any = subprocess,
-    running: tuple[int, int] | None = None,
-) -> str | None:
-    """Resolve a venv interpreter: system Python first, uv-managed as fallback.
-
-    A qualifying system interpreter always wins — the uv download only fires
-    when PATH and the running interpreter both fail the range check, so hosts
-    with a packaged 3.11-3.13 never pull a managed build (#1250).
-    """
-    found = _resolve_supported_python(prober, running=running)
-    if found is not None:
-        return found
-    return _provision_python_via_uv(prober, runner)
-
-
-def _resolve_supported_python(
-    prober: Callable[[str], str | None] = shutil.which,
-    *,
-    running: tuple[int, int] | None = None,
-) -> str | None:
-    """Find an interpreter in hermes-agent's supported range, newest first.
-
-    Probes explicit ``python3.13`` → ``python3.11`` binaries on PATH so the
-    venv pins its minor version regardless of what ``sys.executable`` is.
-    Falls back to the running interpreter only when it is itself inside the
-    range — NOT merely ``>= 3.11``: on a Python-3.14-only host (Ubuntu 26.04)
-    the old fallback built the venv on 3.14, where pip filters out every
-    hermes-agent 0.16+ wheel (``requires-python <3.14``) and resolution
-    lands on the broken 0.15.2 build (#1248).
-    """
-    for minor in range(PYTHON_MAX_EXCLUSIVE[1] - 1, PYTHON_MIN[1] - 1, -1):
-        explicit = prober(f"python3.{minor}")
-        if explicit:
-            return explicit
-    current = running if running is not None else sys.version_info[:2]
-    if PYTHON_MIN <= current < PYTHON_MAX_EXCLUSIVE:
+    explicit = prober("python3.11")
+    if explicit:
+        return explicit
+    if sys.version_info[:2] >= PYTHON_MIN:
         return sys.executable
     return None
 
@@ -715,47 +600,23 @@ def _venv_python(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
-def _venv_python_minor(venv: Path) -> tuple[int, int] | None:
-    """Minor version of an existing venv, read from its ``lib/pythonX.Y`` dir.
-
-    Filesystem-only on purpose — the venv may be too broken to execute
-    (that's exactly the case we're probing for). ``None`` when the layout
-    is unrecognizable; callers should treat that as \"leave it alone\".
-    """
-    for entry in sorted(venv.glob("lib/python3.*")):
-        try:
-            major, minor = entry.name.removeprefix("python").split(".", 1)
-            return (int(major), int(minor))
-        except ValueError:
-            continue
-    return None
-
-
 def _install_venv(
     venv: Path,
     requirements: Path,
     *,
     runner: Any = subprocess,
-    python_resolver: Callable[[], str | None] = _ensure_supported_python,
+    python_resolver: Callable[[], str | None] = _resolve_python311,
 ) -> None:
     """Create the venv at ``venv`` and install ``requirements`` into it.
 
-    Two-step: ``python3.x -m venv`` then ``pip install -r``. The venv itself
-    is stdlib-built — uv enters only inside the resolver, as the last-resort
-    interpreter fetch on hosts with no packaged 3.11-3.13 (#1250).
+    Two-step: ``python3.11 -m venv`` then ``pip install -r``. We don't
+    use ``uv`` here to keep the dependency footprint zero — the
+    runtime venv is small and pip is universally available.
     """
     py = python_resolver()
     if py is None:
-        raise RuntimeError(_python_range_error())
+        raise RuntimeError("no python 3.11 interpreter found on PATH")
     venv.parent.mkdir(parents=True, exist_ok=True)
-    existing_minor = _venv_python_minor(venv) if venv.exists() else None
-    if existing_minor is not None and not (PYTHON_MIN <= existing_minor < PYTHON_MAX_EXCLUSIVE):
-        # A previous run built this venv on an unsupported interpreter (the
-        # pre-guard fallback happily used 3.14). pip-installing into it can
-        # never converge — every supported hermes-agent wheel is filtered out
-        # by requires-python — so rebuild on the resolved interpreter. Venv
-        # holds packages only; $HERMES_HOME state is untouched.
-        shutil.rmtree(venv)
     if not venv.exists():
         runner.run([py, "-m", "venv", str(venv)], check=True)  # nosec B603
     pip = _venv_python(venv)
@@ -1210,31 +1071,6 @@ def _claim_hermes_home(
             encoding="utf-8",
         )
     return (True, None, adopt_details)
-
-
-def mark_home_managed_if_owned(hermes_home: Path) -> bool:
-    """Stamp ``.hal0-managed`` on a HERMES_HOME hal0 itself owns.
-
-    The hal0-api lifespan seeds default personas into HERMES_HOME on every
-    start (fresh install + post-update convergence). On a FRESH box that seed
-    populates ``/var/lib/hal0/.hermes`` BEFORE ``hal0 agent install hermes``
-    ever runs — so the bootstrap's home-claim guard (:func:`_home_is_foreign`)
-    would then mistake hal0's OWN seeded personas for a pre-existing foreign
-    tree and fatal-abort every phase with "unclaimed HERMES_HOME". Stamping the
-    marker at seed time (BEFORE the personas land) makes the home unambiguously
-    hal0-managed so provisioning proceeds without ``--adopt``.
-
-    A genuinely foreign tree (populated + unmarked already at call time — an
-    operator's hand-made install) is deliberately left untouched so capture
-    still routes through ``--adopt`` + its backup/token-import. Returns ``True``
-    when the marker is present afterwards (freshly stamped or already there),
-    ``False`` when the home was foreign and was intentionally not claimed.
-
-    MUST be called before any content is seeded into the home — once personas
-    land, a not-yet-marked home is indistinguishable from a foreign one.
-    """
-    claimed, _reason, _adopt_details = _claim_hermes_home(hermes_home, adopt=False)
-    return claimed
 
 
 def _phase_home_init(ctx: PhaseContext) -> PhaseResult:
@@ -3505,89 +3341,66 @@ def _gateway_dropin_body() -> str:
     )
 
 
-@dataclass
-class GatewayDropinResult:
-    """Outcome of :func:`write_gateway_secrets_dropin`.
-
-    ``outcome`` is one of ``"written"`` (drop-in (re)written), ``"unchanged"``
-    (hash-skip), ``"skipped"`` (non-root or pytest-sandbox guard), or
-    ``"failed"`` (filesystem write error). ``reason`` carries the human note for
-    skip/fail (and a non-fatal daemon-reload warning on ``"written"``).
-    """
-
-    outcome: str
-    dropin_path: str
-    reason: str | None = None
-    content_hash: str | None = None
-    daemon_reload: bool = False
-
-
-def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> GatewayDropinResult:
-    """Idempotently write the gateway secrets drop-in + ``daemon-reload`` (#437).
+def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
+    """Idempotently write the gateway secrets drop-in + daemon-reload (#437).
 
     Owns ONLY the drop-in ``10-hal0-secrets.conf`` under
     ``/etc/systemd/system/hermes-gateway.service.d/`` — NOT the main
-    ``hermes-gateway.service`` unit (generated separately by ``hermes gateway
-    install --system``). The drop-in survives every main-unit regeneration
-    because ``refresh_systemd_unit_if_needed`` rewrites the ``.service`` but
-    never the ``.d/`` tree.
-
-    Extracted from :func:`_phase_gateway_secrets_wire` so the CLI/installer
-    gateway path can lay the drop-in down BEFORE ``hermes gateway install
-    --system`` ``--now``-starts the unit. That ordering matters: hal0 flags a
-    system gateway "foreign" iff it is active with no drop-in present
-    (:func:`_detect_foreign_gateways`). If the vanilla unit starts before the
-    drop-in exists, hal0 mistakes its OWN just-started unit for a foreign
-    poller and refuses to manage it — blocking the Telegram/Discord bridge on
-    fresh installs. Writing the drop-in first closes that window.
+    ``hermes-gateway.service`` unit. The main unit is generated by
+    ``hermes gateway install --system --run-as-user hal0`` (run by the
+    orchestrator during cutover); keeping unit generation out of this
+    phase avoids the hermes_cli generator's custom-HERMES_HOME trap
+    (a root ``.bashrc`` pin would leak the old agents/hermes path into
+    the emitted unit). The drop-in survives every main-unit regeneration
+    because ``refresh_systemd_unit_if_needed`` rewrites the ``.service``
+    but never the ``.d/`` tree.
 
     Posture mirrors :func:`_merge_env_file` / config_write:
 
-    * Hash-skip — an on-disk drop-in matching the rendered body skips both the
-      write AND the ``systemctl daemon-reload`` (no needless systemd churn).
-    * Atomic write — tmpfile + ``os.replace``; mode 0644 (systemd unit
-      fragments must be world-readable; the *secrets* live in the 0600 vault
-      the drop-in references, not in the drop-in itself).
+    * Hash-skip — when the on-disk drop-in already matches the rendered
+      body, skip both the write AND the ``systemctl daemon-reload`` so a
+      bootstrap re-run doesn't churn systemd needlessly.
+    * Atomic write — tmpfile + ``os.replace``.
+    * Mode 0644 (NOT 0600): systemd unit fragments must be world-readable;
+      the *secrets* live in the 0600 vault the drop-in references, not in
+      the drop-in itself.
     * daemon-reload only fires when the file actually changed.
 
-    Guards (both yield ``outcome="skipped"``, never a crash): a non-root caller
-    can't write ``/etc/systemd/system``; and under pytest with an un-sandboxed
-    (real ``/etc``) drop-in path we refuse to touch the host tree. Best-effort
-    throughout — a filesystem/systemctl failure is reported in the result, never
-    raised, so a gateway hiccup never aborts the caller.
+    Non-root guard: writing under ``/etc/systemd/system`` and invoking
+    ``systemctl`` both require root, so a non-root provision SKIPs with a
+    clear reason rather than failing the whole bootstrap.
     """
-    run = run if run is not None else subprocess.run
-    path = str(GATEWAY_SYSTEMD_DROPIN_FILE)
-
-    # Defense-in-depth (regression: 2026-06-04 outage). The euid!=0 guard below
-    # normally keeps the test suite off the host's real systemd tree — but it is
-    # DEFEATED when pytest runs as root (or where /etc/systemd is ACL-writable).
-    # A fixture that monkeypatches HERMES_SECRETS_ENV but forgets
-    # GATEWAY_SYSTEMD_DROPIN_FILE would then write the live drop-in with a
-    # pytest-tmp EnvironmentFile path, restart-looping the gateway once the tmp
-    # dir is reaped. So: under pytest, refuse to touch the real /etc tree. A test
-    # that genuinely exercises the write monkeypatches the dir to tmp_path.
+    # Defense-in-depth (regression: 2026-06-04 outage). The euid!=0 guard
+    # below is the only thing that normally keeps the test suite off the
+    # host's real systemd tree — but it is DEFEATED when pytest runs as
+    # root (or, as on hal0-dev, where /etc/systemd is ACL-writable). A
+    # fixture that monkeypatches HERMES_SECRETS_ENV but forgets
+    # GATEWAY_SYSTEMD_DROPIN_FILE then writes the live drop-in with a
+    # pytest-tmp EnvironmentFile path, restart-looping the gateway once the
+    # tmp dir is reaped. So: under pytest, refuse to touch the real /etc
+    # tree. A test that genuinely exercises the write monkeypatches the
+    # drop-in dir to tmp_path, which moves it out from under /etc.
     if os.environ.get("PYTEST_CURRENT_TEST") and str(GATEWAY_SYSTEMD_DROPIN_DIR).startswith(
         "/etc/"
     ):
-        return GatewayDropinResult(
-            outcome="skipped",
-            dropin_path=path,
+        return PhaseResult(
+            status=PhaseStatus.SKIP,
             reason=(
                 "running under pytest with an un-sandboxed system drop-in path "
                 "— refusing to write the real /etc/systemd tree; monkeypatch "
                 "GATEWAY_SYSTEMD_DROPIN_DIR/FILE to tmp in the test fixture"
             ),
+            details={"dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE)},
         )
 
     if os.geteuid() != 0:
-        return GatewayDropinResult(
-            outcome="skipped",
-            dropin_path=path,
+        return PhaseResult(
+            status=PhaseStatus.SKIP,
             reason=(
                 "not root (euid != 0) — cannot write /etc/systemd/system "
                 "or run `systemctl daemon-reload`; re-run gateway wiring as root"
             ),
+            details={"dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE)},
         )
 
     body = _gateway_dropin_body()
@@ -3601,11 +3414,15 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
         except OSError:
             current = None
         if current is not None and content_hash(current) == content_sha:
-            return GatewayDropinResult(
-                outcome="unchanged",
-                dropin_path=path,
-                content_hash=content_sha,
-                daemon_reload=False,
+            return PhaseResult(
+                status=PhaseStatus.OK,
+                hash=content_sha,
+                details={
+                    "dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE),
+                    "content_hash": content_sha,
+                    "daemon_reload": False,
+                    "unchanged": True,
+                },
             )
 
     try:
@@ -3616,65 +3433,37 @@ def write_gateway_secrets_dropin(*, run: Callable[..., Any] | None = None) -> Ga
         os.replace(tmp, GATEWAY_SYSTEMD_DROPIN_FILE)
         GATEWAY_SYSTEMD_DROPIN_FILE.chmod(0o644)
     except OSError as exc:
-        return GatewayDropinResult(
-            outcome="failed",
-            dropin_path=path,
-            reason=f"gateway drop-in write to {path} failed: {exc}",
-            content_hash=content_sha,
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"gateway drop-in write to {GATEWAY_SYSTEMD_DROPIN_FILE} failed: {exc}",
+            details={"dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE)},
         )
 
     try:
-        run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
+        ctx.io.run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
     except (subprocess.SubprocessError, OSError) as exc:
         # The drop-in is on disk; the operator can daemon-reload by hand.
-        # Surface as a non-fatal warning rather than failing — the wiring lands
-        # on the next `systemctl daemon-reload`.
-        return GatewayDropinResult(
-            outcome="written",
-            dropin_path=path,
+        # Surface as a non-fatal warning rather than failing bootstrap —
+        # the wiring lands on the next `systemctl daemon-reload`.
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            hash=content_sha,
             reason=f"drop-in written but `systemctl daemon-reload` failed: {exc}",
-            content_hash=content_sha,
-            daemon_reload=False,
+            details={
+                "dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE),
+                "content_hash": content_sha,
+                "daemon_reload": False,
+            },
         )
 
-    return GatewayDropinResult(
-        outcome="written",
-        dropin_path=path,
-        content_hash=content_sha,
-        daemon_reload=True,
-    )
-
-
-def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
-    """Idempotently write the gateway secrets drop-in + daemon-reload (#437).
-
-    Thin phase adapter over :func:`write_gateway_secrets_dropin` (which owns
-    the write + guards + idempotency). Keeping unit generation out of this phase
-    avoids the hermes_cli generator's custom-HERMES_HOME trap; the orchestrator
-    runs ``hermes gateway install --system`` separately to lay the main unit.
-    A non-root or pytest-sandboxed caller SKIPs with a clear reason rather than
-    failing the whole bootstrap.
-    """
-    result = write_gateway_secrets_dropin(run=ctx.io.run)
-    details: dict[str, Any] = {"dropin_path": result.dropin_path}
-    if result.content_hash is not None:
-        details["content_hash"] = result.content_hash
-
-    if result.outcome == "skipped":
-        return PhaseResult(status=PhaseStatus.SKIP, reason=result.reason, details=details)
-    if result.outcome == "failed":
-        return PhaseResult(status=PhaseStatus.FAIL, reason=result.reason, details=details)
-
-    # "written" | "unchanged" → OK. Preserve the checkpoint's detail shape:
-    # daemon_reload flag always present; `unchanged` only on the hash-skip path.
-    details["daemon_reload"] = result.daemon_reload
-    if result.outcome == "unchanged":
-        details["unchanged"] = True
     return PhaseResult(
         status=PhaseStatus.OK,
-        hash=result.content_hash,
-        reason=result.reason,
-        details=details,
+        hash=content_sha,
+        details={
+            "dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE),
+            "content_hash": content_sha,
+            "daemon_reload": True,
+        },
     )
 
 

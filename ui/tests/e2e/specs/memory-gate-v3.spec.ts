@@ -1,11 +1,10 @@
 /**
  * memory-gate-v3 — 0.4 release gate for the memory subsystem.
  *
- * The memory engine (Hindsight), its MCP server, the REST surface, and the
- * dashboard's Agent ▸ Memory tab ship ENABLED by default. The backend gates
- * them behind [memory].enabled in hal0.toml and reports the resulting state
- * via /api/status `memory_enabled`. This spec pins the (still-supported) OFF
- * state.
+ * The memory engine (Cognee), its MCP server, the REST surface, and the
+ * dashboard's Agent ▸ Memory tab ship DISABLED by default and return in a
+ * later release. The backend gates them behind HAL0_MEMORY_ENABLED and
+ * reports the resulting state via /api/status `memory_enabled`.
  *
  * v0.5 nav: Memory is no longer a top-level page — it is a tab inside the
  * Agent page, alongside MCP. The Agent nav item itself ALWAYS renders (the
@@ -25,7 +24,7 @@ import { test, expect, json } from '../fixtures/apiMock'
 
 const FIVE_S = 5_500
 
-test.describe('memory gate OFF ([memory].enabled=false)', () => {
+test.describe('memory gate OFF (HAL0_MEMORY_ENABLED unset)', () => {
   test.beforeEach(async ({ page }) => {
     // The γ-suite runs under forced-mock (VITE_MOCK_HAL0), which
     // short-circuits page.route for allowlisted URLs like /api/status. The
