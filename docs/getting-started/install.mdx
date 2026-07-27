@@ -43,8 +43,16 @@ itself under `sudo` automatically. You can also run it explicitly:
 - **Python ≥ 3.12** — the package requires 3.12+; the installer is tested
   on 3.11–3.14 and builds a dedicated virtualenv.
 - **cosign** — required to authenticate the channel manifest and release
-  artifact against hal0's pinned GitHub Actions workflow identity. The
-  bootstrap fails closed when `cosign` or a signature bundle is missing.
+  artifact against hal0's pinned GitHub Actions workflow identity. You do
+  **not** have to install it yourself: the bootstrap uses your distro's
+  `cosign` when one is on `PATH` (Arch, Fedora, Alpine, openSUSE package it)
+  and otherwise downloads the official sigstore build for your architecture
+  into its throwaway work directory, verified against a SHA-256 pinned in
+  the script. This is what keeps the one-liner working on Debian/Ubuntu,
+  which do not package cosign. Nothing is installed persistently, and there
+  is no flag to skip verification — an unsupported CPU architecture, a
+  failed download, or a digest mismatch aborts the install with
+  instructions for installing cosign by hand.
 - **jq 1.6 or newer** — required for the authenticated manifest's strict,
   fail-closed schema and channel-policy validation.
 - **A container runtime** — every inference slot runs in a container. The
@@ -92,28 +100,38 @@ For a full production deployment, use the bootstrap script above.
 
 <Steps>
 
-1. **Fetch and authenticate the channel manifest** — by default from
+1. **Resolve a verifier** — a `cosign` already on `PATH` is used as-is.
+   Otherwise the pinned official sigstore build for the detected
+   architecture (`x86_64`/`amd64` → `cosign-linux-amd64`,
+   `aarch64`/`arm64` → `cosign-linux-arm64`) is downloaded into the
+   temporary work directory and its SHA-256 checked against the digest
+   pinned in the bootstrap script. This happens **before** any release
+   bytes are requested, so the installer never downloads something it
+   could not verify. Pinning the digest adds no new trust root — you
+   already trusted those bytes when you piped the script to `bash`.
+
+2. **Fetch and authenticate the channel manifest** — by default from
    `https://releases.hal0.dev/stable.json`, or the selected
    `HAL0_CHANNEL`. The bootstrap downloads the exact sibling
    `<channel>.json.bundle` and verifies the manifest bytes with cosign against
    the client-pinned release-workflow identity and issuer before parsing JSON
    or trusting artifact URLs. Then one jq-compatible policy pass requires the
    exact `hal0.releases.v1` schema, required strings and digest shape, and the
-   canonical requested-channel/kind/stage matrix. Missing jq or cosign, a
-   missing bundle, or failed validation/verification aborts the install.
+   canonical requested-channel/kind/stage matrix. Missing jq, a missing
+   bundle, or failed validation/verification aborts the install.
    `HAL0_RELEASES_URL` still overrides the full manifest URL; its sibling
    `.bundle` must satisfy the same contract.
 
-2. **Download and SHA-256-verify the tarball** against the authenticated
+3. **Download and SHA-256-verify the tarball** against the authenticated
    manifest digest. A mismatch aborts the install.
 
-3. **Cosign keyless verify the tarball** — the mandatory artifact Sigstore
+4. **Cosign keyless verify the tarball** — the mandatory artifact Sigstore
    bundle from `bundle_url` is checked against the workflow OIDC identity
    declared in the now-trusted manifest. Detached signature/certificate
    fallback is not accepted by the bootstrap. This second signature check is
    defense-in-depth.
 
-4. **Unpack and hand off** to `installer/install.sh`, which runs
+5. **Unpack and hand off** to `installer/install.sh`, which runs
    pre-flight checks, installs podman + the Python venv, builds the
    dashboard, writes config and systemd units, runs first-run setup
    (`hal0 setup --auto --no-pull --no-extensions`) to scaffold empty

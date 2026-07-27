@@ -529,16 +529,19 @@ def test_authenticated_option_like_artifact_urls_are_explicit_curl_urls(
 def test_bootstrap_missing_cosign_fails_closed_for_channel_manifest(
     tmp_path: Path,
 ) -> None:
+    # With no system cosign the bootstrap first tries to fetch its own
+    # digest-pinned copy (see tests/installer/test_bootstrap_cosign_fetch.py).
+    # This harness's curl only serves manifest URLs, so that fetch fails —
+    # and the install must abort right there, before requesting any release
+    # bytes it would have no way to verify.
     env, curl_log, _ = _bootstrap_env(tmp_path, b"{}", with_cosign=False)
 
     proc = _run_bootstrap(env)
 
     assert proc.returncode != 0
-    assert "cosign is required to verify the release manifest" in proc.stderr
-    assert curl_log.read_text(encoding="utf-8").splitlines() == [
-        "https://releases.hal0.dev/stable.json",
-        "https://releases.hal0.dev/stable.json.bundle",
-    ]
+    assert "could not download pinned cosign" in proc.stderr
+    assert "install cosign manually and re-run" in proc.stderr
+    assert "releases.hal0.dev" not in curl_log.read_text(encoding="utf-8")
 
 
 def test_bootstrap_cleanup_does_not_evaluate_hostile_tmpdir(

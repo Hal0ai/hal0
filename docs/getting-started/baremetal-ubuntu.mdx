@@ -75,7 +75,12 @@ Set only `ttm.pages_limit`; drop `amdgpu.gttsize` from any older guide.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-The bootstrap fetches the release manifest, SHA-256- and cosign-verifies
+Ubuntu does not package `cosign`, and signature verification is mandatory
+— so the bootstrap fetches a digest-pinned official cosign build into its
+own temporary directory first, verifies it, uses it, and throws it away.
+You do not need to install cosign yourself and nothing is left on the host.
+
+The bootstrap then fetches the release manifest, SHA-256- and cosign-verifies
 the tarball, then hands off to the installer, which installs podman, builds
 the venv, writes systemd units, runs first-run setup to scaffold empty
 capability slots (no model assigned to any of them), and starts `hal0-api`
