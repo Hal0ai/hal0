@@ -2442,7 +2442,7 @@ class MemoryConfig(BaseModel):
             "longer forks a private:<agent> bank — the write still lands in "
             "'shared' but is stamped with a 'visibility:private' tag (plus an "
             "'agent:<id>' tag), and recall is single-bank (no cross-bank "
-            "fan-out). Set false to restore the legacy multi-bank model "
+            "fan-out). Set false to restore the pre-unified multi-bank model "
             "(private:<agent> / project:<id> banks + fan-out recall)."
         ),
     )

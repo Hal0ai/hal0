@@ -23,10 +23,18 @@ from hal0.mcp import admin
 
 
 def _live_route_ids() -> set[str]:
-    """``"<METHOD>:<path-template>"`` ids the live app registers (normalized)."""
-    app = create_app()
+    """``"<METHOD>:<path-template>"`` ids the live app registers (normalized).
+
+    Enumerates via ``admin._iter_leaf_routes`` rather than a private flat loop
+    over ``app.routes``. A second, independent walk was a second owner of "how
+    do you find a route", and it rotted the same way the first one did: under
+    FastAPI 0.138 (``include_router`` leaves ``_IncludedRouter`` wrappers in
+    ``app.routes``) this function returned an empty set and both assertions
+    below failed with all ~85 classified routes reported missing — a false
+    alarm about the catalog when the walk was what broke.
+    """
     live: set[str] = set()
-    for route in app.routes:
+    for route in admin._iter_leaf_routes(create_app().routes):
         methods = getattr(route, "methods", None)
         path = getattr(route, "path", None)
         if not methods or not path:

@@ -120,6 +120,41 @@ approval that a human clears from the dashboard, the CLI, or via the approval
 API. See [Agents](/docs/concepts/agents) for how personas, tool gating, and the
 approval queue fit together.
 
+### What `X-hal0-Agent` is and is not
+
+`X-hal0-Agent` is **self-asserted**. hal0 validates its *shape* (bounded
+`[a-zA-Z0-9_-]`, at most 64 chars, no smuggled `private:` prefix) and refuses to
+let a caller override it from the request body — so the audit trail can never
+disagree with the namespace a write landed in. It does not validate that the
+caller *is* who the header claims, because there is no credential to check it
+against (see [Why no built-in auth?](#why-no-built-in-auth)).
+
+The practical consequence for memory: `private:<agent>` is an **isolation
+boundary between cooperating agents on one host**, not a security boundary
+against a hostile caller. Two agents that both behave get separate namespaces
+and cannot stumble into each other's facts. A caller who can already reach
+`/api/memory/*` can set the header to any agent id and read that agent's private
+namespace.
+
+That is the intended posture, and it only holds if the perimeter holds. If more
+than one trust level can reach hal0, the reverse proxy is where you separate
+them — terminate auth there and inject `X-hal0-Agent` yourself from the
+authenticated identity, overwriting any client-supplied value:
+
+```nginx
+location /api/memory/ {
+    auth_request /_authn;
+    proxy_set_header X-hal0-Agent $authenticated_agent;  # overwrite, never pass through
+    proxy_pass http://hal0;
+}
+```
+
+Destructive memory calls have a second layer that does not depend on the header
+at all: deleting more than one item in a single call is a **bulk delete**, and it
+enqueues for human approval on both `/mcp/admin` and `/mcp/memory` rather than
+executing. Bank deletes additionally require the caller to echo the bank id back
+via `?confirm=<bank_id>`.
+
 ## Practical checklist
 
 <CardGrid>

@@ -52,7 +52,13 @@ class _FakeRunner:
         *,
         env: dict[str, str] | None = None,
         check: bool = False,
+        capture_output: bool = False,
+        timeout: float | None = None,
     ) -> _FakeCompleted:
+        # ``capture_output``/``timeout`` are accepted (not asserted on) so
+        # the fake matches every call shape the driver uses — notably
+        # ``_stop_services``, whose systemctl argv MUST NOT reach the real
+        # system bus from a test.
         self.calls.append({"argv": list(argv), "env": dict(env or {}), "check": check})
         if self._fail:
             raise RuntimeError("fake subprocess failure")
@@ -77,16 +83,22 @@ def _prober_missing() -> bool:
 
 @pytest.fixture
 def driver(tmp_hal0_home: str) -> HermesDriver:
-    """Driver with default subprocess + an upstream-present prober.
+    """Driver with a FAKE runner + an upstream-present prober.
 
     ``tmp_hal0_home`` (autouse'd via the project conftest) routes
     ``/var/lib/hal0`` and ``/etc/hal0`` under tmp_path so the env file
     writes don't escape the sandbox.
 
+    The runner must be injected here: this fixture previously fell
+    through to the real ``subprocess``, so the twelve tests below that
+    call ``driver.uninstall()`` each ran a real ``systemctl stop`` +
+    ``systemctl disable hal0-agent@hermes.service`` against the host's
+    system bus — a polkit password prompt per call.
+
     Tests that need the upstream-missing branch override
     ``driver._prober`` per-test.
     """
-    return HermesDriver(prober=_prober_ok)
+    return HermesDriver(runner=_FakeRunner(), prober=_prober_ok)
 
 
 # ── install: not-provisioned short-circuit ───────────────────────────────────
