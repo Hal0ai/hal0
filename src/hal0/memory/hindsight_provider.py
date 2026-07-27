@@ -15,6 +15,11 @@ Maps hal0's engine-neutral MemoryProvider contract onto the shared
   client-orchestrated; we fan out to the caller's allowed banks and merge
   under one reranked token budget (recall returns NO numeric score, so the
   union is re-ranked via the :8086 reranker; §4b precedence is the tiebreak).
+* **Live ``degraded`` flag** (#1301): reports whether the daemon is answering
+  *right now*, driven by observed transport failures on every engine call —
+  not a boot-time constant. The boot probe in ``hal0.memory`` decides which
+  provider gets built; this decides whether the one that got built is still
+  working.
 """
 
 from __future__ import annotations
@@ -23,7 +28,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
+
 from hal0.memory.provider import MemoryProvider
+
+log = structlog.get_logger(__name__)
 
 _SHARED = "shared"
 _PRIVATE = "private:"
@@ -185,11 +194,84 @@ class HindsightProvider(MemoryProvider):
         self._graph_enabled = bool(graph_enabled)
         self._extraction_slot = extraction_slot
         self._rerank_enabled = reranker is not None
+        # Live engine reachability (#1301). The factory only builds this
+        # provider after a successful boot probe, so False is the correct
+        # starting point; every engine call updates it (see ``_call``).
+        self._degraded = False
 
     @property
     def hindsight_client(self) -> Any:
         """REST client handle for the engine admin surface (memory_admin routes)."""
         return self._client
+
+    # ── Live engine health (#1301) ─────────────────────────────────────
+
+    @property
+    def degraded(self) -> bool:
+        """True when the Hindsight daemon is NOT answering.
+
+        The BOOT-time degrade ladder (``hal0.memory.provider_from_config`` +
+        ``hindsight_client.probe_health``) swaps in :class:`PgVectorProvider`
+        — whose ``degraded`` is a constant ``True`` — when the daemon is down
+        at boot. But a daemon that dies *after* boot leaves this provider in
+        place, and the boot probe has no opinion about that: before this,
+        ``/api/status.memory_degraded`` and ``hal0 memory status`` kept
+        reporting healthy while every recall came back empty and every retain
+        raised. A boot-only probe starts lying the moment the daemon dies.
+
+        This flag tracks what the engine actually did on the last call, so the
+        reported state matches reality — and it clears itself when the daemon
+        comes back, which a boot probe cannot do either.
+        """
+        return self._degraded
+
+    @staticmethod
+    def _engine_answered(exc: Exception) -> bool:
+        """True when ``exc`` proves the daemon is up (it sent an HTTP response).
+
+        Duck-typed on ``exc.response.status_code`` (via the module's existing
+        :func:`_http_status`) so the fake clients in tests need no httpx. A 5xx
+        counts as NOT answering — it matches the boot probe's rule in
+        ``hindsight_client.probe_health``, and a daemon returning 500s is not
+        usable memory. 4xx passes: a 404 on one bank during a delete sweep, or
+        a 401 from a stale key, does not mean the engine is down.
+        """
+        code = _http_status(exc)
+        return code is not None and code < 500
+
+    def _mark_engine(self, *, reachable: bool, error: str | None = None) -> None:
+        """Record the outcome of one engine call; log only on a state change.
+
+        Edge-triggered on purpose: a down daemon is hit on every recall, and an
+        unconditional log would emit a line per call for as long as the outage
+        lasts.
+        """
+        if reachable == (not self._degraded):
+            return
+        self._degraded = not reachable
+        if reachable:
+            log.info("hal0.memory.hindsight_recovered")
+        else:
+            log.warning("hal0.memory.hindsight_unreachable_runtime", error=error)
+
+    async def _call(self, method: str, /, **kwargs: Any) -> Any:
+        """Invoke a client method, updating the live ``degraded`` flag.
+
+        Every engine round-trip funnels through here so reachability is
+        OBSERVED rather than assumed — that is the whole point, and it is why
+        this is a wrapper and not a periodic background poll: the signal is
+        already there in the calls the process is making anyway.
+
+        Exceptions propagate untouched, so callers keep their existing
+        fail-soft / 404-sweep handling exactly as before.
+        """
+        try:
+            out = await getattr(self._client, method)(**kwargs)
+        except Exception as exc:
+            self._mark_engine(reachable=self._engine_answered(exc), error=str(exc))
+            raise
+        self._mark_engine(reachable=True)
+        return out
 
     # ── ACL: the caller's allowed namespaces → banks ───────────────────
 
@@ -384,7 +466,8 @@ class HindsightProvider(MemoryProvider):
         context = meta.pop("context", None) or meta.get("source") or f"{agent} conversation turn"
         timestamp = meta.pop("timestamp", None) or _now()
 
-        resp = await self._client.retain(
+        resp = await self._call(
+            "retain",
             bank_id=bank,
             content=text,
             document_id=resolved_id,
@@ -438,7 +521,7 @@ class HindsightProvider(MemoryProvider):
             if len(items) >= limit:
                 break
             try:
-                resp = await self._client.list_memories(bank_id=bank, limit=limit, offset=0)
+                resp = await self._call("list_memories", bank_id=bank, limit=limit, offset=0)
             except Exception:
                 continue  # fail-soft per bank
             for fact in resp.get("items", []):
@@ -497,8 +580,8 @@ class HindsightProvider(MemoryProvider):
             offset = 0
             while wanted - out:
                 try:
-                    resp = await self._client.list_memories(
-                        bank_id=bank, limit=_DELETE_SCAN_PAGE, offset=offset
+                    resp = await self._call(
+                        "list_memories", bank_id=bank, limit=_DELETE_SCAN_PAGE, offset=offset
                     )
                 except Exception:
                     break  # fail-soft per bank; unresolved ids stay withheld
@@ -549,7 +632,7 @@ class HindsightProvider(MemoryProvider):
                 continue  # withheld: not visible to this caller (fail-closed)
             for bank in banks:
                 try:
-                    res = await self._client.delete_document(bank_id=bank, document_id=document_id)
+                    res = await self._call("delete_document", bank_id=bank, document_id=document_id)
                 except Exception as exc:
                     if _http_status(exc) == 404:
                         continue  # not in this bank — keep sweeping
@@ -601,7 +684,7 @@ class HindsightProvider(MemoryProvider):
             # that don't know the param stay compatible.
             if tags_match is not None:
                 kwargs["tags_match"] = tags_match
-            resp = await self._client.recall(**kwargs)
+            resp = await self._call("recall", **kwargs)
             return [self._fact_to_item(f, bank) for f in resp.get("results", [])]
 
         per_bank = await asyncio.gather(*[_one(b) for b in banks])
