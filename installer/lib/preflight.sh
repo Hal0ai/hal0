@@ -504,17 +504,46 @@ _container_runtime_gate() {
         return 0
     fi
     err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
+    # ALWAYS surface the runtime's own error first. Every remedy below is a
+    # guess derived from this text; hiding it meant an operator whose failure
+    # matched none of the known signatures got a remedy with no evidence, and
+    # the one shape we mis-classified (see the AppArmor branch) read as a
+    # confident diagnosis of the wrong thing. The keyring branch already
+    # printed it; the others silently didn't.
+    warn "  ${rt} run: ${_HAL0_CONTAINER_SMOKE_OUTPUT}"
     if printf '%s\n' "${_HAL0_CONTAINER_SMOKE_OUTPUT}" \
         | grep -qiE 'create keyring.*(disk quota exceeded|quota exceeded)|keyring.*edquot'; then
-        warn "  ${rt} run: ${_HAL0_CONTAINER_SMOKE_OUTPUT}"
         warn "  kernel keyring quota exhausted (crun could not create a session keyring) — this is NOT a missing"
         warn "  nesting/keyctl config. Check: cat /proc/key-users (look for a uid near its byte quota)"
         warn "  remedy: reboot this container to clear leaked session keyrings, or as root: keyctl clear @s /"
         warn "  find + kill the leaked keyring holders, or raise the quota: sysctl kernel.keys.maxbytes (and"
         warn "  kernel.keys.maxkeys) higher on the PROXMOX HOST, then re-run install.sh"
+    elif printf '%s\n' "${_HAL0_CONTAINER_SMOKE_OUTPUT}" \
+        | grep -qiE 'socket: permission denied|permission denied.*(socket|network|netns)|operation not permitted.*(socket|network|netns)|creating network namespace'; then
+        # Observed live on a FRESH unprivileged Proxmox CT that already had
+        # nesting=1,keyctl=1,fuse=1,mknod=1: podman pulled fine but every run
+        # died on `dial udp …: socket: permission denied`. The cause was the
+        # default LXC AppArmor profile confining podman's network setup — NOT
+        # a missing feature flag. Telling that operator to set nesting/keyctl
+        # sends them to re-check a config that was already correct.
+        warn "  the runtime could not set up container networking — a socket/namespace operation was denied"
+        if grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+            warn "  inside an LXC container this is usually the AppArmor profile or a missing tun device, NOT"
+            warn "  nesting/keyctl (check those first with: grep -E 'features|apparmor' /etc/pve/lxc/<CTID>.conf)"
+            warn "  on the PROXMOX HOST add to /etc/pve/lxc/<CTID>.conf:"
+            warn "      lxc.apparmor.profile: unconfined"
+            warn "      lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file"
+            warn "  then: pct stop <CTID> && pct start <CTID>"
+            warn "  note: setting lxc.apparmor.profile explicitly overrides the features: fuse/nesting keys —"
+            warn "  keep 'features: nesting=1,fuse=1,keyctl=1,mknod=1' in the config as well"
+        else
+            warn "  check AppArmor/SELinux confinement on the ${rt} process and that /dev/net/tun is present"
+        fi
     elif grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
         warn "  inside an unprivileged Proxmox/LXC container this needs 'features: nesting=1' (and often keyctl=1)"
         warn "  set it in /etc/pve/lxc/<CTID>.conf on the PROXMOX HOST, then: pct stop <CTID> && pct start <CTID>"
+        warn "  if those are ALREADY set, the next suspects are the LXC AppArmor profile"
+        warn "  (lxc.apparmor.profile: unconfined) and a missing /dev/net/tun bind mount"
     else
         warn "  inspect the error above (cgroup/mount-namespace setup, subuid/newuidmap, or a daemon issue)"
     fi
@@ -792,19 +821,63 @@ preflight_gpu() {
 # version-aware check with a better error message; duplicating a bare
 # `command -v python3` here would just produce a redundant, less useful
 # failure.
+#
+# Missing deps are AUTO-INSTALLED when we're root and the package manager is
+# recognised, exactly as this installer already does for python3-venv, podman
+# and Node. A stock Ubuntu/Debian LXC template ships without curl, so the
+# documented "download and run directly" path (bootstrap.sh's own docs) died
+# at step 1/13 on every fresh container with "install it and re-run" — a
+# dead end the one-liner path can never hit, because reaching it requires
+# curl. Install-then-recheck; only a genuinely unfixable host still fails.
+_bootstrap_dep_packages() {
+    # sha256sum lives in coreutils everywhere; curl and tar are their own
+    # packages in every family we support.
+    local want=("$@") pkgs=() d
+    for d in "${want[@]}"; do
+        case "${d}" in
+            sha256sum) pkgs+=("coreutils") ;;
+            *) pkgs+=("${d}") ;;
+        esac
+    done
+    printf '%s\n' "${pkgs[@]}"
+}
+
 preflight_bootstrap_prereqs() {
     local rc=0
     if [[ "$(uname -s)" != "Linux" ]]; then
         err "hal0 only supports Linux right now (got $(uname -s))"
-        rc=1
+        return 1
     fi
-    local dep
+
+    local dep missing=()
     for dep in curl tar sha256sum; do
-        if ! command -v "${dep}" >/dev/null 2>&1; then
-            err "missing dependency: ${dep} — install it and re-run"
-            rc=1
-        fi
+        command -v "${dep}" >/dev/null 2>&1 || missing+=("${dep}")
     done
+
+    if [[ "${#missing[@]}" -gt 0 ]] && [[ "${EUID:-$(id -u)}" -eq 0 ]] && pkg_mgr >/dev/null 2>&1; then
+        local pkgs cmd
+        mapfile -t pkgs < <(_bootstrap_dep_packages "${missing[@]}")
+        info "bootstrap prereqs: installing missing ${missing[*]} …"
+        if [[ "$(pkg_mgr)" == "apt-get" ]]; then
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+        fi
+        cmd="$(pkg_install_cmd "${pkgs[@]}")" || cmd=""
+        # pkg_install_cmd renders a `sudo …` one-liner for humans; we are
+        # already root, and a minimal container often has no sudo at all.
+        [[ -n "${cmd}" ]] && eval "${cmd#sudo }" >/dev/null 2>&1 || true
+        missing=()
+        for dep in curl tar sha256sum; do
+            command -v "${dep}" >/dev/null 2>&1 || missing+=("${dep}")
+        done
+    fi
+
+    for dep in "${missing[@]}"; do
+        err "missing dependency: ${dep} — install it and re-run"
+        local hint
+        hint="$(pkg_install_cmd "$(_bootstrap_dep_packages "${dep}")")" && warn "  try: ${hint}"
+        rc=1
+    done
+
     [[ "${rc}" -eq 0 ]] && info "bootstrap prereqs: curl, tar, sha256sum present (Linux)"
     return "${rc}"
 }

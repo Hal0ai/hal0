@@ -234,9 +234,11 @@ with wave.open(\"$TMP/t.wav\",\"wb\") as w:
     w.writeframes(b\"\".join(struct.pack(\"<h\", int(32000*math.sin(2*math.pi*440*i/16000))) for i in range(16000)))
 "
         curl -fsS -m 30 '"${REMOTE_HAL0_API}"'/v1/audio/transcriptions \
-            -F file=@$TMP/t.wav -F model=moonshine-base \
-            -o $TMP/out.json
-        rm -rf $TMP
+            -F file=@"$TMP/t.wav" -F model=moonshine-base \
+            -o "$TMP/out.json"
+        # Guard: refuse to rm empty or root path.
+        [ -n "$TMP" ] && [ "$TMP" != "/" ] || { echo "refuse rm: $TMP" >&2; exit 1; }
+        rm -rf -- "$TMP"
     '; then
         add_row "moonshine" "pass" "$(since_ms "${start}")" "transcription endpoint returned a JSON body for 1s sine WAV"
     else
@@ -257,11 +259,13 @@ else
         curl -fsS -m 30 '"${REMOTE_HAL0_API}"'/v1/audio/speech \
             -H "content-type: application/json" \
             -d "{\"model\":\"kokoro\",\"input\":\"hello hal0\",\"voice\":\"af\"}" \
-            -o $TMP/out.wav
+            -o "$TMP/out.wav"
         # Non-empty WAV check: RIFF header + > 1KB body.
         head -c 4 "$TMP/out.wav" | grep -q RIFF
         test "$(wc -c < "$TMP/out.wav")" -gt 1024
-        rm -rf $TMP
+        # Guard: refuse to rm empty or root path.
+        [ -n "$TMP" ] && [ "$TMP" != "/" ] || { echo "refuse rm: $TMP" >&2; exit 1; }
+        rm -rf -- "$TMP"
     '; then
         add_row "kokoro" "pass" "$(since_ms "${start}")" "audio/speech returned a non-empty RIFF WAV (>1KiB)"
     else
