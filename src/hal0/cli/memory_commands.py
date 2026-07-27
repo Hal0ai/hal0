@@ -115,9 +115,14 @@ def status_cmd(
     t.add_column("v")
     t.add_row("State", state)
     if enabled and degraded is True:
+        # #1301: ``degraded`` now covers BOTH shapes — the boot fallback (a
+        # volatile in-memory store) and a Hindsight daemon that died after
+        # boot (writes error, recalls come back empty). The old wording named
+        # only the first, so a post-boot outage printed a claim about the
+        # provider that was simply false. One line that is true of both.
         t.add_row(
             "Provider",
-            "[yellow]in-memory fallback (volatile — Hindsight unreachable)[/yellow]",
+            "[yellow]degraded — Hindsight unreachable (memory is volatile or failing)[/yellow]",
         )
     elif enabled:
         t.add_row("Provider", "[green]durable[/green]")
