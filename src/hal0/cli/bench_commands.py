@@ -8,7 +8,7 @@ to the argparse parser. `hal0 bench plan --suite roster` behaves exactly like
 the design's `hal0 bench plan [--suite ID|PATH]`.
 
 Verbs (see hal0.bench.cli): plan, run, worker, status, results, history,
-reindex, publish, eval, import-v1.
+reindex, devices, publish, eval, import-v1.
 """
 
 from __future__ import annotations
