@@ -538,6 +538,23 @@ _HEALTH_POLL_INTERVAL_S = 2.0
 _HEALTH_TIMEOUT_S = 180.0
 _HEALTH_REQUEST_TIMEOUT_S = 3.0
 
+#: Wall-clock bound on the teardown systemd verbs issued by
+#: :meth:`ContainerProvider.unload_sync` (#1224). systemd's OWN
+#: ``TimeoutStopSec`` does not help once a unit is already parked in
+#: ``failed`` — the client-side ``systemctl stop`` can block indefinitely — so
+#: the child process is bounded here instead.
+#:
+#: This is the WORKER-side bound and it complements, rather than duplicates,
+#: :meth:`hal0.slots.manager.SlotManager.terminate`'s caller-side one. That
+#: bound lets the *request* return; it cannot touch the executor thread, which
+#: keeps sitting on the child. Without this the thread leaks for the life of
+#: the process AND — the part that actually matters — ``unload_sync`` never
+#: reaches the Quadlet-source removal + ``daemon-reload`` below, so the
+#: generated ``.service`` stays on disk in ``failed`` and the "subsequent load
+#: still converges" promise does not hold. Deliberately under the caller's
+#: budget so the worker unwinds first.
+_UNIT_STOP_TIMEOUT_S = 20.0
+
 
 def _resolve_model_path(model_info: dict[str, Any]) -> str:
     """Return the absolute GGUF path for this model.
@@ -1376,7 +1393,9 @@ class ContainerProvider(Provider):
         """
         return _QUADLET_DIR / slot_quadlet_name(slot_name)
 
-    def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, *args: str, check: bool = True, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         """Run a subprocess synchronously (load/unload are blocking ops anyway).
 
         P3-perms: routes ``systemctl`` daemon-reload + hal0-slot@ unit verbs
@@ -1384,8 +1403,14 @@ class ContainerProvider(Provider):
         hal0 service user (see :mod:`hal0.system.seam`); a direct
         ``subprocess.run`` everywhere else — dev, CI, tests, and a
         pre-flip/root install all behave exactly as before.
+
+        ``timeout`` (default ``None`` = unbounded, as before) bounds the child
+        so a wedged systemd verb raises :class:`subprocess.TimeoutExpired`
+        instead of hanging the caller forever (#1224). The seam forwards it on
+        BOTH routes, so the bound holds on a real hal0-service-user install —
+        which is the deployment the wedge was observed on.
         """
-        return _SYSTEMCTL_SEAM.systemctl(*args, check=check)
+        return _SYSTEMCTL_SEAM.systemctl(*args, check=check, timeout=timeout)
 
     async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         """Probe GET /health on the container port.
@@ -1644,16 +1669,33 @@ class ContainerProvider(Provider):
         ``.service`` and Quadlet stops+removes the container by unit basename
         (no more ``reset-failed`` / ``disable``; those cleared ``.service``
         StartLimit + enable state the generated unit no longer carries).
+
+        The stop is BOUNDED and best-effort (#1224): ``systemctl stop`` on a
+        unit already parked in ``failed`` — or whose ExecStop is itself wedged
+        — used to block forever, which wedged ``SlotManager.restart()`` and
+        left the REST caller ReadTimeout'ing with the unit never relaunched.
+        ``SlotManager.terminate``'s bound releases the *caller*, but the
+        executor thread stays on the child, so without a bound here teardown
+        never got past this line. On timeout the stop is abandoned and teardown
+        CONTINUES: removing the Quadlet source + ``daemon-reload`` drops the
+        generated ``.service`` (clearing its failed sub-state) and Quadlet
+        reaps the container by basename, so the subsequent load converges.
         """
         token = slot_instance_token(slot_cfg)
         unit = self._unit_name(token)
         log.info("container.unit_stop", extra={"slot": token, "unit": unit})
-        self._run("systemctl", "stop", unit, check=False)
+        try:
+            self._run("systemctl", "stop", unit, check=False, timeout=_UNIT_STOP_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            log.warning(
+                "container.unit_stop_timeout",
+                extra={"slot": token, "unit": unit, "timeout_s": _UNIT_STOP_TIMEOUT_S},
+            )
         # Remove the Quadlet source so daemon-reload regenerates without it.
         unit_path = self._unit_path(token)
         if unit_path.exists():
             _SYSTEMCTL_SEAM.remove_quadlet(unit_path)
-            self._run("systemctl", "daemon-reload")
+            self._run("systemctl", "daemon-reload", timeout=_UNIT_STOP_TIMEOUT_S)
 
     def is_active(self, slot_name: str) -> bool:
         """Return True if the systemd unit is in an active state."""
