@@ -21,6 +21,7 @@ upstream binary, no real wrapper-on-PATH dependency.
 from __future__ import annotations
 
 import json
+import os as _os
 import subprocess as _subprocess
 from pathlib import Path
 from typing import Any
@@ -29,12 +30,19 @@ import pytest
 
 from hal0.agents.hermes import HermesDriver
 from hal0.agents.manager import HermesUpstreamMissingError
+from hal0.system.seam import SEAM_BIN
 
 # ── Fake subprocess ──────────────────────────────────────────────────────────
 
 
 class _FakeCompleted:
-    returncode = 0
+    def __init__(self, returncode: int = 0, stderr: bytes | str = b"") -> None:
+        self.returncode = returncode
+        # Production runs ``capture_output=True`` WITHOUT ``text=True``, so
+        # stderr really is bytes there; default to bytes so the driver's
+        # classifier is exercised on the shape it actually sees.
+        self.stderr = stderr
+        self.stdout = b""
 
 
 class _FakeRunner:
@@ -42,9 +50,22 @@ class _FakeRunner:
     call so tests can assert on argv + env without spawning a real
     shell."""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        returncode: int = 0,
+        stderr: bytes | str = b"",
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
         self._fail = fail
+        self._returncode = returncode
+        self._stderr = stderr
+
+    @property
+    def argvs(self) -> list[list[str]]:
+        """Every recorded argv — the assertion surface for the seam tests."""
+        return [c["argv"] for c in self.calls]
 
     def run(
         self,
@@ -62,7 +83,7 @@ class _FakeRunner:
         self.calls.append({"argv": list(argv), "env": dict(env or {}), "check": check})
         if self._fail:
             raise RuntimeError("fake subprocess failure")
-        return _FakeCompleted()
+        return _FakeCompleted(self._returncode, self._stderr)
 
 
 # ── Fake prober ──────────────────────────────────────────────────────────────
@@ -625,3 +646,226 @@ def test_hal0_hermes_wrapper_defaults_home_when_unset(tmp_path: Path) -> None:
     )
     assert "HERMES_HOME=/var/lib/hal0/.hermes" in out.stdout
     assert "HERMES_HOME=/var/lib/hal0/agents/hermes" not in out.stdout
+
+
+# ── uninstall teardown: privilege seam + failure surfacing (#453) ────────────
+#
+# `_stop_services` had two defects beyond the test-isolation one #1357 fixed:
+#
+#   1. It ran a BARE `systemctl stop/disable hal0-agent@hermes.service`. An
+#      unprivileged systemctl on a system unit escalates via polkit — an
+#      interactive password dialog mid-uninstall, and a unit still running if
+#      the operator cancels it.
+#   2. Both calls sat in `contextlib.suppress` with the output captured and the
+#      return code discarded, so a denied escalation was indistinguishable from
+#      a clean stop — exactly the condition #453 added the method to prevent.
+#
+# The driver now builds its argv via `hal0.system.seam.agent_unit_argv` and
+# classifies the result.
+
+
+def _stop_argvs(runner: _FakeRunner) -> list[list[str]]:
+    """Just the teardown argvs (install() records env-file writes too)."""
+    return [a for a in runner.argvs if a and a[0] in {"sudo", "systemctl"}]
+
+
+@pytest.fixture
+def _unprivileged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo tests/agents/conftest.py's suite-wide ``euid == 0`` default.
+
+    That autouse fixture patches the real ``os.geteuid`` (via ``hp.os``) so the
+    whole hermes-provision suite takes the historical root-direct write path.
+    It is also why a euid-gated seam looks like root here — these tests are
+    specifically about the NON-root branch, so pin it explicitly.
+    """
+    monkeypatch.setattr(_os, "geteuid", lambda: 1000)
+
+
+def test_stop_services_routes_through_privilege_seam(
+    driver: HermesDriver, _unprivileged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE regression: unprivileged teardown must go through ``sudo -n`` +
+    the hal0-systemctl seam, never a bare ``systemctl``.
+
+    Fails against the pre-fix driver, which emitted
+    ``["systemctl", "stop", "hal0-agent@hermes.service"]`` — the argv that
+    raises a polkit prompt on a developer's desktop.
+    """
+    monkeypatch.setattr("hal0.agents.hermes.driver.shutil.which", lambda _n: "/usr/bin/systemctl")
+    runner = _FakeRunner()
+    driver._runner = runner  # type: ignore[assignment]
+
+    driver.uninstall()
+
+    assert _stop_argvs(runner) == [
+        ["sudo", "-n", SEAM_BIN, "stop-agent", "hermes"],
+        ["sudo", "-n", SEAM_BIN, "disable-agent", "hermes"],
+    ]
+    # Nothing bare, and no caller-supplied unit string: the seam builds the
+    # unit name itself from the validated id.
+    for argv in _stop_argvs(runner):
+        assert argv[0] != "systemctl"
+        assert "hal0-agent@hermes.service" not in argv
+
+
+def test_stop_services_runs_systemctl_directly_as_root(
+    driver: HermesDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root needs no seam — and the uninstaller may run when the seam binary
+    and its sudoers grant are already gone."""
+    monkeypatch.setattr(_os, "geteuid", lambda: 0)
+    monkeypatch.setattr("hal0.agents.hermes.driver.shutil.which", lambda _n: "/usr/bin/systemctl")
+    runner = _FakeRunner()
+    driver._runner = runner  # type: ignore[assignment]
+
+    driver.uninstall()
+
+    assert _stop_argvs(runner) == [
+        ["systemctl", "stop", "hal0-agent@hermes.service"],
+        ["systemctl", "disable", "hal0-agent@hermes.service"],
+    ]
+
+
+def test_stop_services_stops_before_disabling(
+    driver: HermesDriver, _unprivileged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Order matters: disabling a running unit leaves it running, and #453 is
+    about the agent not being live while we delete its files."""
+    monkeypatch.setattr("hal0.agents.hermes.driver.shutil.which", lambda _n: "/usr/bin/systemctl")
+    runner = _FakeRunner()
+    driver._runner = runner  # type: ignore[assignment]
+
+    driver.uninstall()
+
+    verbs = [a[3] for a in _stop_argvs(runner)]
+    assert verbs == ["stop-agent", "disable-agent"]
+
+
+def test_stop_services_noop_without_systemctl(
+    driver: HermesDriver, _unprivileged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Documented best-effort semantics: no systemd on the box (container,
+    dev shell) is not an error and costs no sudo round-trip."""
+    monkeypatch.setattr("hal0.agents.hermes.driver.shutil.which", lambda _n: None)
+    runner = _FakeRunner()
+    driver._runner = runner  # type: ignore[assignment]
+
+    driver.uninstall()
+
+    assert _stop_argvs(runner) == []
+
+
+def test_stop_services_warns_when_escalation_is_denied(
+    driver: HermesDriver, _unprivileged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE silent-failure regression.
+
+    A missing sudoers grant makes ``sudo -n`` exit 1 with "a password is
+    required". The old code swallowed that inside ``contextlib.suppress`` with
+    ``capture_output=True``, so the uninstall reported success while the agent
+    kept running and recreating the files being deleted. It must be logged.
+    """
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr("hal0.agents.hermes.driver.shutil.which", lambda _n: "/usr/bin/systemctl")
+    runner = _FakeRunner(returncode=1, stderr=b"sudo: a password is required\n")
+    driver._runner = runner  # type: ignore[assignment]
+
+    with capture_logs() as logs:
+        driver.uninstall()
+
+    warnings = [e for e in logs if e["log_level"] == "warning"]
+    assert len(warnings) == 2, f"expected a warning per verb, got {logs!r}"
+    assert {w["verb"] for w in warnings} == {"stop", "disable"}
+    for w in warnings:
+        assert w["event"] == "hermes.stop_services_failed"
+        assert w["returncode"] == 1
+        assert "password is required" in w["stderr"]
+        assert "sudoers" in w["hint"]
+
+
+def test_stop_services_does_not_warn_when_unit_is_absent(
+    driver: HermesDriver, _unprivileged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """...but a MISSING unit stays a non-event. Best-effort must not become
+    alarm fatigue: an agent that was never started has no unit to stop, and
+    ``systemctl stop`` exits 5 for it."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr("hal0.agents.hermes.driver.shutil.which", lambda _n: "/usr/bin/systemctl")
+    runner = _FakeRunner(
+        returncode=5, stderr=b"Failed to stop hal0-agent@hermes.service: Unit not loaded.\n"
+    )
+    driver._runner = runner  # type: ignore[assignment]
+
+    with capture_logs() as logs:
+        driver.uninstall()
+
+    assert [e for e in logs if e["log_level"] == "warning"] == []
+
+
+def test_stop_services_does_not_warn_when_unit_not_found_rc1(
+    driver: HermesDriver, _unprivileged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``disable`` on a nonexistent unit exits 1, not 5 — so exit code alone is
+    ambiguous with a denied escalation. Classification falls back to stderr."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr("hal0.agents.hermes.driver.shutil.which", lambda _n: "/usr/bin/systemctl")
+    runner = _FakeRunner(
+        returncode=1, stderr=b"Unit file hal0-agent@hermes.service does not exist.\n"
+    )
+    driver._runner = runner  # type: ignore[assignment]
+
+    with capture_logs() as logs:
+        driver.uninstall()
+
+    assert [e for e in logs if e["log_level"] == "warning"] == []
+
+
+def test_stop_services_warns_but_does_not_raise_on_oserror(
+    driver: HermesDriver, _unprivileged: None, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout or a vanished sudo binary is surfaced, and the uninstall still
+    completes — teardown must never be blocked by systemd bookkeeping."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr("hal0.agents.hermes.driver.shutil.which", lambda _n: "/usr/bin/systemctl")
+
+    def _boom(argv: list[str], **_kw: Any) -> Any:
+        raise OSError("sudo vanished")
+
+    runner = _FakeRunner()
+    monkeypatch.setattr(runner, "run", _boom)
+    driver._runner = runner  # type: ignore[assignment]
+    env_file = Path(tmp_hal0_home) / "etc" / "hal0" / "agents" / "hermes.env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text("x=1", encoding="utf-8")
+
+    with capture_logs() as logs:
+        driver.uninstall()  # must not raise
+
+    warnings = [e for e in logs if e["log_level"] == "warning"]
+    assert len(warnings) == 2
+    assert all("sudo vanished" in w["error"] for w in warnings)
+    # Best-effort really is best-effort: the teardown still happened.
+    assert not env_file.exists()
+
+
+def test_stop_services_uses_the_drivers_injected_runner(
+    driver: HermesDriver, _unprivileged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1357's contract, kept: routing through the seam must not reintroduce a
+    module-global ``subprocess`` call that bypasses the injection point."""
+    monkeypatch.setattr("hal0.agents.hermes.driver.shutil.which", lambda _n: "/usr/bin/systemctl")
+
+    def _explode(*_a: Any, **_kw: Any) -> Any:  # pragma: no cover - must not run
+        raise AssertionError("_stop_services bypassed the injected runner")
+
+    monkeypatch.setattr("hal0.agents.hermes.driver.subprocess.run", _explode)
+    runner = _FakeRunner()
+    driver._runner = runner  # type: ignore[assignment]
+
+    driver.uninstall()
+
+    assert len(_stop_argvs(runner)) == 2

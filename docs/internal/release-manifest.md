@@ -98,7 +98,11 @@ identity from authenticated `release_kind` + `version`, require
 admissions with the exact escaped tag identity. Artifact verification uses
 that derived exact identity rather than a manifest-selected regex. Manifest
 verification pins `https://token.actions.githubusercontent.com`. A missing
-`jq`, bundle, or `cosign`, or failed validation or verification aborts closed.
+`jq` or bundle, or failed validation or verification, aborts closed. A missing
+`cosign` does not: `bootstrap.sh` resolves a verifier first (system `cosign`,
+else the digest-pinned sigstore build for the detected arch, fetched into its
+temp work dir) and aborts closed before any release byte is requested if it
+cannot get one. There is no flag to skip verification.
 The artifact `bundle_url` is mandatory; bootstrap has no detached `.sig`/`.crt`
 fallback. Tarball digest and bundle verification then remain defense-in-depth.
 

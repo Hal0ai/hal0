@@ -52,6 +52,28 @@ _UNIT_NAME_RE = re.compile(r"^hal0-slot@([A-Za-z0-9_-]{1,64})\.service$")
 #: Root-owned by design; written via ``hal0-systemctl write-quadlet <token>``.
 _QUADLET_NAME_RE = re.compile(r"^hal0-slot@([A-Za-z0-9_-]{1,64})\.container$")
 
+# ── Bundled-agent units (hal0-agent@<id>.service) ────────────────────────────
+#
+# #453 follow-up. The seam started slot-only, so ``HermesDriver._stop_services``
+# had nothing to call and shelled out to a BARE ``systemctl stop
+# hal0-agent@hermes.service``. Unprivileged systemctl on a system unit escalates
+# through polkit — an interactive password dialog in the middle of an uninstall,
+# and a unit that stays up when the operator cancels it. The wrapper grew
+# ``stop-agent``/``disable-agent`` (installer/wrappers/hal0-systemctl); these
+# constants are the Python side of that contract.
+
+#: systemd template unit for a bundled agent.
+AGENT_UNIT_PREFIX = "hal0-agent@"
+
+#: Mirrors ``validate_agent_id`` in installer/wrappers/hal0-systemctl EXACTLY.
+#: Client-side validation is a fail-fast convenience, never the security
+#: boundary — the seam re-validates every id server-side (as root).
+_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+#: The only agent-unit verbs the seam exposes, mapped bare-systemctl verb ->
+#: seam verb. Anything not in here is a programming error, not a runtime input.
+AGENT_UNIT_VERBS: dict[str, str] = {"stop": "stop-agent", "disable": "disable-agent"}
+
 
 class Hal0SeamMissing(RuntimeError):
     """Raised when the hal0-systemctl seam is required but not installed.
@@ -71,6 +93,93 @@ def is_hal0_service_user() -> bool:
     except KeyError:
         return False
     return os.geteuid() == hal0_uid
+
+
+def agent_unit_name(agent_id: str) -> str:
+    """Build ``hal0-agent@<id>.service`` from a validated ``agent_id``.
+
+    Raises :class:`ValueError` on anything the wrapper's ``validate_agent_id``
+    would reject. Callers never assemble a unit string themselves and never
+    hand one to the seam — the seam takes the bare id and builds the unit name
+    on the root side. This function exists so the unprivileged side fails
+    fast with a readable error instead of burning a sudo round-trip.
+    """
+    if not _AGENT_ID_RE.match(agent_id):
+        raise ValueError(f"bad agent id: {agent_id!r}")
+    return f"{AGENT_UNIT_PREFIX}{agent_id}.service"
+
+
+def privileged_systemctl(
+    verb: str,
+    *args: str,
+    body: str | None = None,
+    seam_bin: str = SEAM_BIN,
+    check: bool = True,
+    capture_output: bool = False,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one hal0-systemctl seam verb as root via ``sudo -n``.
+
+    THE single sudo helper for this seam:
+    :func:`hal0.agents.hermes_provision._privileged_systemctl` delegates here,
+    and :func:`agent_unit_argv` builds the identical ``sudo -n <bin> <verb>``
+    shape, so there is exactly one spelling of the sudo invocation.
+
+    ``-n`` is load-bearing: it makes sudo non-interactive, so a missing grant
+    fails immediately with a non-zero exit instead of prompting. That is the
+    whole point of routing a daemon/uninstall path through the seam rather
+    than letting bare ``systemctl`` escalate via polkit.
+
+    ``body`` (when given) is piped on stdin — used for ``write-gateway-dropin``.
+    With ``check=True`` a non-zero seam exit raises ``CalledProcessError`` so
+    the caller surfaces the failure instead of masquerading it as success.
+    """
+    return subprocess.run(  # nosec B603 — fixed argv; every arg re-validated by the seam
+        ["sudo", "-n", seam_bin, verb, *args],
+        input=body,
+        text=True,
+        check=check,
+        capture_output=capture_output,
+        timeout=timeout,
+    )
+
+
+def agent_unit_argv(
+    verb: str,
+    agent_id: str,
+    *,
+    seam_bin: str = SEAM_BIN,
+    euid: int | None = None,
+) -> list[str]:
+    """Build the argv for ``systemctl <verb> hal0-agent@<agent_id>.service``.
+
+    A **pure** function — it decides privilege routing and returns argv; it
+    never spawns anything. The caller executes it through its own injected
+    runner (``HermesDriver._runner``), which is what keeps that injection point
+    — and the test fakes hanging off it — intact.
+
+    Gating is on **euid**, deliberately NOT on :func:`is_hal0_service_user`
+    like :class:`SystemCtlSeam`. That gate's "pass through directly when not
+    the hal0 user" default is safe for the slot ops (file writes into a
+    test-owned tmp tree) but is precisely the polkit defect here: a human
+    admin running ``hal0 agent uninstall hermes`` is not the hal0 user
+    either, and a direct ``systemctl stop`` from their unprivileged euid
+    escalates into a password dialog. So:
+
+    * euid 0 — plain ``systemctl <verb> <unit>``. Root needs no seam, and the
+      installer/uninstaller runs before/after the seam binary exists.
+    * anything else — ``sudo -n <seam_bin> <verb>-agent <id>``. ``-n`` makes
+      sudo non-interactive, so this can fail but can never prompt.
+
+    Raises :class:`ValueError` for an invalid ``agent_id`` and :class:`KeyError`
+    for a verb outside :data:`AGENT_UNIT_VERBS` — both caller bugs, surfaced
+    before anything is executed.
+    """
+    seam_verb = AGENT_UNIT_VERBS[verb]
+    unit = agent_unit_name(agent_id)  # validates client-side; seam re-validates
+    if (os.geteuid() if euid is None else euid) == 0:
+        return ["systemctl", verb, unit]
+    return ["sudo", "-n", seam_bin, seam_verb, agent_id]
 
 
 def _slot_id_from_unit(unit_name: str) -> str | None:
@@ -212,4 +321,14 @@ class SystemCtlSeam:
         )
 
 
-__all__ = ["SEAM_BIN", "Hal0SeamMissing", "SystemCtlSeam", "is_hal0_service_user"]
+__all__ = [
+    "AGENT_UNIT_PREFIX",
+    "AGENT_UNIT_VERBS",
+    "SEAM_BIN",
+    "Hal0SeamMissing",
+    "SystemCtlSeam",
+    "agent_unit_argv",
+    "agent_unit_name",
+    "is_hal0_service_user",
+    "privileged_systemctl",
+]
