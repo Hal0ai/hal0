@@ -508,6 +508,11 @@ function ModelDrawer({ open, onClose, model }) {
 	const [mtp, setMtp] = useStateMD("auto");
 	const [thinking, setThinking] = useStateMD("auto");
 	const [jinja, setJinja] = useStateMD("auto");
+	// spec-hw-slot-ownership §1: vision moved off the (now-gone) per-slot
+	// toggle (#901) onto the model, alongside mtp/jinja/thinking — same
+	// tri-state Auto/On/Off pattern. Auto = mmproj loads whenever the model
+	// carries one; Off force-suppresses it even when present.
+	const [vision, setVision] = useStateMD("auto");
 	// Local UI state.
 	const [dupOpen, setDupOpen] = useStateMD(false);
 	const [confirm, setConfirm] = useStateMD(null); // {title,message,confirmLabel,onConfirm}
@@ -535,6 +540,7 @@ function ModelDrawer({ open, onClose, model }) {
 			setMtp(triFromDefault(init.mtp));
 			setThinking(triFromDefault(init.enable_thinking));
 			setJinja(triFromDefault(init.jinja));
+			setVision(triFromDefault(init.vision));
 			setDefaultOverride(null);
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
@@ -696,7 +702,8 @@ function ModelDrawer({ open, onClose, model }) {
 		chatTemplate !== (init.chat_template ?? "auto") ||
 		mtp !== triFromDefault(init.mtp) ||
 		thinking !== triFromDefault(init.enable_thinking) ||
-		jinja !== triFromDefault(init.jinja);
+		jinja !== triFromDefault(init.jinja) ||
+		vision !== triFromDefault(init.vision);
 
 	const onSave = async () => {
 		if (flagsError) return; // inline errors block; no PUT fires
@@ -727,6 +734,9 @@ function ModelDrawer({ open, onClose, model }) {
 		if (jinja === "on") defaults.jinja = true;
 		else if (jinja === "off") defaults.jinja = false;
 		else delete defaults.jinja;
+		if (vision === "on") defaults.vision = true;
+		else if (vision === "off") defaults.vision = false;
+		else delete defaults.vision;
 
 		const body = { defaults };
 		const trimmedName = name.trim();
@@ -1126,6 +1136,17 @@ function ModelDrawer({ open, onClose, model }) {
 					</div>
 					<div className="form-ctl">
 						<TypedCapSeg id="jinja" value={jinja} onChange={setJinja} />
+					</div>
+				</div>
+				<div className="form-row">
+					<div className="form-lbl">
+						<span>Vision</span>
+						<FieldInfoIcon description="Load the mmproj vision projector when the model ships one.
+							Auto = on whenever a sidecar is present. Off force-suppresses it
+							(saves ~0.9 GB VRAM) even on a vision-capable model." />
+					</div>
+					<div className="form-ctl">
+						<TypedCapSeg id="vision" value={vision} onChange={setVision} />
 					</div>
 				</div>
 				<div className="form-row">

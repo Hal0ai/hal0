@@ -64,6 +64,8 @@ from hal0.slots.drift import compute_config_drift as _compute_config_drift
 from hal0.slots.layout import is_id_stem
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
+from hal0.slots.preload_evict import _DEFAULT_HEADROOM_MB
+from hal0.slots.preload_evict import admit as _preload_admit
 from hal0.slots.profile_adopt import (
     apply_preferred_profile as _profile_adopt_apply_preferred_profile,
 )
@@ -101,6 +103,7 @@ from hal0.slots.state import (
     SlotPinned,
     SlotState,
     SlotStateRecord,
+    SlotTerminateTimeout,
     is_transition_legal,
     provider_requires_model,
     read_state,
@@ -268,6 +271,12 @@ class SlotManager:
     # present.
     BUILTIN_SLOTS: tuple[str, ...] = SEEDED_SLOTS
 
+    #: Wall-clock bound on a container stop (#1224). ``systemctl stop`` against
+    #: an already-``failed`` unit can block forever; past this we abandon the
+    #: wait so the caller can converge instead of hanging. Class-level so a
+    #: deployment (or a test) can retune it without touching every call site.
+    _terminate_timeout_s: float = 30.0
+
     def __init__(
         self,
         *,
@@ -277,6 +286,8 @@ class SlotManager:
         evict_after_s: float = _EVICT_AFTER_S,
         evict_pressure_mb: float = 8192.0,
         evict_pressure_pct: float | None = None,
+        preload_evict_enabled: bool = True,
+        preload_evict_headroom_mb: float = _DEFAULT_HEADROOM_MB,
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
         event_bus: Any | None = None,
         upstreams_registry: Any | None = None,
@@ -387,6 +398,22 @@ class SlotManager:
         # GTT pool grows/shrinks). None (default) keeps the absolute
         # ``evict_pressure_mb`` floor above — purely additive.
         self._evict_pressure_pct: float | None = evict_pressure_pct
+        # Pre-load eviction (synchronous, at admission time — see
+        # hal0.slots.preload_evict): before a load starts, free idle
+        # lru-eligible slots until the incoming model's estimated
+        # footprint + headroom fits in projected free memory, instead of
+        # waiting for the next pressure-sweep tick. `_preload_evict_enabled
+        # = False` disables the gate entirely (reactive TTL/pressure
+        # eviction still applies). `_admission_lock` serializes the
+        # fit-decision across concurrently loading slots; each admitted-
+        # but-not-yet-resident load reserves its estimated footprint in
+        # `_preload_reserved_mb` (keyed by slot name) so a second
+        # concurrent admission doesn't also conclude it fits against the
+        # same stale free-memory snapshot.
+        self._preload_evict_enabled: bool = preload_evict_enabled
+        self._preload_evict_headroom_mb: float = float(preload_evict_headroom_mb)
+        self._preload_reserved_mb: dict[str, float] = {}
+        self._admission_lock: asyncio.Lock = asyncio.Lock()
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         # Idle/eviction background loop (P3-slots §1b) — SlotReaper owns its
         # own task handle; see reaper.py.
@@ -1314,7 +1341,34 @@ class SlotManager:
                     port = _cfg_port(cfg)
                     if port:
                         self._register_container_upstream(slot_name, port)
-                return await self.status(slot_name)
+                # ...but a bare snapshot is wrong when the TOML has moved
+                # under the running unit (#1224). The unit file claims to be
+                # "regenerated on every slot load"; short-circuiting broke
+                # that promise, so `PUT /config {"port": N}` → `slot load`
+                # returned the stale snapshot with the container still on the
+                # old port, and the next implicit reload cycled
+                # warming → error with nothing listening on either port.
+                # Recovery needed `systemctl reset-failed` + a second load
+                # from the error state — the only path that regenerated.
+                #
+                # Reuse the drift comparator rather than a dirty flag: it
+                # already knows how to compare the live argv against what a
+                # restart would render, it cannot be lost across an api
+                # restart, and it self-heals a unit that drifted by any route
+                # (direct TOML edit, stacks apply, capabilities).
+                if not await self._should_converge(slot_name, cfg):
+                    return await self.status(slot_name)
+                log.info("slot.load_converging_drifted_config", extra={"slot": slot_name})
+                # Tear down in place — we hold the slot lock, so we cannot go
+                # through unload() (it takes the same lock). Best-effort: a
+                # stop that fails or wedges must not block the re-spawn, which
+                # is the whole point of the operation. terminate() is bounded
+                # (#1224) so this cannot hang.
+                with contextlib.suppress(Exception):
+                    await self.terminate(slot_name)
+                await self._transition(slot_name, SlotState.OFFLINE, force=True)
+                # Fall through into the normal load below, which re-renders
+                # the unit from the current TOML.
 
             # Configuration check: a slot with no resolvable model is
             # NOT an ERROR (which would render red and flag for operator
@@ -1377,33 +1431,50 @@ class SlotManager:
                     )
                     assert self._pull_runner is not None  # _needs_pull guards
                     await self._pull_runner(resolved_model)
-                await self._transition(
-                    slot_name,
-                    SlotState.STARTING,
-                    model_id=resolved_model,
-                    port=_cfg_port(cfg),
-                )
-                await self._spawn_locked(slot_name, cfg, resolved_model)
-                await self._transition(
-                    slot_name,
-                    SlotState.WARMING,
-                    model_id=resolved_model,
-                    port=_cfg_port(cfg),
-                )
-                # _await_ready returns READY when the upstream has a
-                # model loaded and serves inference, or IDLE when the
-                # process is up but ``/v1/models`` is empty (issue #31:
-                # llama-server --model "" lands here). Either is a
-                # successful load — callers downstream pick READY slots
-                # for routing and IDLE slots for "ready to accept a
-                # model" UX.
-                resolved_state = await self._await_ready(slot_name, _cfg_port(cfg))
-                await self._transition(
-                    slot_name,
-                    resolved_state,
-                    model_id=resolved_model,
-                    port=_cfg_port(cfg),
-                )
+                # Resolved once and threaded through both the pre-load
+                # eviction estimate and _spawn_locked below so a load never
+                # hits the model registry twice for the same model_id.
+                model_info = await self._resolve_model_info(resolved_model)
+                # Pre-load eviction (O26): estimate resolved_model's
+                # footprint and, if projected free memory is short, evict
+                # idle/LRU-eligible resident slots until it fits — BEFORE
+                # starting the container, not after the box is already
+                # tight. Raises PreloadEvictionFailed (caught by the
+                # except below, which stamps ERROR and re-raises) when it
+                # still won't fit after evicting everything eligible; the
+                # reservation this holds is released on any exit from the
+                # `async with`, success or failure. See
+                # hal0.slots.preload_evict for the policy.
+                async with _preload_admit(
+                    self, slot_name=slot_name, model_id=resolved_model, model_info=model_info
+                ):
+                    await self._transition(
+                        slot_name,
+                        SlotState.STARTING,
+                        model_id=resolved_model,
+                        port=_cfg_port(cfg),
+                    )
+                    await self._spawn_locked(slot_name, cfg, resolved_model, model_info=model_info)
+                    await self._transition(
+                        slot_name,
+                        SlotState.WARMING,
+                        model_id=resolved_model,
+                        port=_cfg_port(cfg),
+                    )
+                    # _await_ready returns READY when the upstream has a
+                    # model loaded and serves inference, or IDLE when the
+                    # process is up but ``/v1/models`` is empty (issue #31:
+                    # llama-server --model "" lands here). Either is a
+                    # successful load — callers downstream pick READY slots
+                    # for routing and IDLE slots for "ready to accept a
+                    # model" UX.
+                    resolved_state = await self._await_ready(slot_name, _cfg_port(cfg))
+                    await self._transition(
+                        slot_name,
+                        resolved_state,
+                        model_id=resolved_model,
+                        port=_cfg_port(cfg),
+                    )
                 # Persist explicit model_id to TOML so reconciliation
                 # after an api restart doesn't drift back to "no
                 # model.default" ERROR. Only fires when caller passed
@@ -1435,6 +1506,31 @@ class SlotManager:
                 )
                 raise
             return await self.status(slot_name)
+
+    async def _should_converge(self, slot_name: str, cfg: dict[str, Any]) -> bool:
+        """True when a live slot's running unit no longer matches its TOML.
+
+        Drives the re-converge branch in :meth:`load` (#1224). Deliberately
+        conservative in both failure directions:
+
+        * an NPU trio shadow has no unit of its own to converge — skip;
+        * a comparator that returns ``None`` (provider can't read the running
+          or the rendered argv) is *unknown*, not drifted — absence of
+          evidence must not bounce a healthy container on every load;
+        * a comparator that raises is likewise treated as "no drift". A
+          convergence check that cannot run is not grounds for a restart.
+        """
+        if is_npu_trio_shadow(cfg):
+            return False
+        try:
+            drift = await self.compute_config_drift(slot_name, cfg=cfg, active=True)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning(
+                "slot.converge_check_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+            return False
+        return bool(drift and drift.get("drifted"))
 
     async def unload(self, slot_name: str) -> Slot:
         """Gracefully unload a slot.  Transitions: → unloading → offline."""
@@ -1833,6 +1929,8 @@ class SlotManager:
         slot_name: str,
         slot_cfg: SlotConfig | dict[str, Any],
         model_id: str | None,
+        *,
+        model_info: dict[str, Any] | None = None,
     ) -> None:
         """Spawn body — caller already holds the per-slot lock.
 
@@ -1842,10 +1940,17 @@ class SlotManager:
         ``model_id`` (when set) overrides the slot config's
         ``model.default`` for swap semantics.
 
+        ``model_info``: pass the already-resolved registry lookup (see
+        :meth:`_resolve_model_info`) when the caller (``load()``) has one,
+        so a single load doesn't hit the model registry twice — once for
+        the pre-load eviction footprint estimate, once here. ``None``
+        (the default, used by every other caller) resolves it fresh.
+
         Any exception is let through as-is; the calling ``load()``
         ``except Exception -> ERROR`` branch records a stable error envelope.
         """
-        model_info = await self._resolve_model_info(model_id)
+        if model_info is None:
+            model_info = await self._resolve_model_info(model_id)
 
         cfg = _cfg_to_dict(slot_cfg)
         if model_id:
@@ -1863,15 +1968,26 @@ class SlotManager:
         # Register loopback upstream so the dispatcher can route to this slot.
         self._register_container_upstream(slot_name, port)
 
-    async def terminate(self, slot_name: str, *, timeout_s: float = 30.0) -> None:
+    async def terminate(self, slot_name: str, *, timeout_s: float | None = None) -> None:
         """Stop the slot's container unit and deregister its upstream.
 
         Idempotent — stopping an already-stopped unit is a no-op.
 
         Public because callers that need to release VRAM directly can
         do so without going through ``unload()``'s state-machine
-        ceremony. ``timeout_s`` is preserved in the signature for
-        caller compatibility; the systemd stop is synchronous.
+        ceremony.
+
+        ``timeout_s`` bounds the wait on the (synchronous, executor-run)
+        systemd stop; ``None`` uses :attr:`_terminate_timeout_s`. The bound
+        matters because ``systemctl stop`` against an already-``failed`` unit
+        can block indefinitely — unbounded, that wedged the whole restart and
+        left the CLI ReadTimeout'ing with the unit never relaunched (#1224).
+
+        We cannot kill the executor thread, so on expiry we abandon the wait
+        and raise :class:`SlotTerminateTimeout`. Callers that must make
+        progress regardless (``restart``'s best-effort cleanup, the drifted
+        re-converge in ``load``) suppress it and press on; the abandoned
+        thread retires on its own if the stop ever returns.
         """
         cfg = await self._maybe_load_config(slot_name)
         # Resilient to the slot config being missing — terminate should
@@ -1884,9 +2000,23 @@ class SlotManager:
         # Stop the systemd unit + deregister upstream.
         from hal0.providers.container import container_provider
 
-        await asyncio.get_event_loop().run_in_executor(
+        budget = self._terminate_timeout_s if timeout_s is None else timeout_s
+        stop = asyncio.get_event_loop().run_in_executor(
             None, container_provider().unload_sync, _cfg_to_dict(cfg)
         )
+        try:
+            await asyncio.wait_for(asyncio.shield(stop), timeout=budget)
+        except TimeoutError as exc:
+            # shield() keeps the executor future alive (wait_for would
+            # otherwise cancel it, which does nothing to the thread but does
+            # surface a spurious CancelledError when it finally completes).
+            log.warning(
+                "slot.terminate_timeout",
+                extra={"slot": slot_name, "timeout_s": budget},
+            )
+            raise SlotTerminateTimeout(
+                f"stopping slot {slot_name!r} did not return within {budget}s"
+            ) from exc
         self._deregister_container_upstream(slot_name)
 
     # ── slot CRUD ────────────────────────────────────────────────────────────

@@ -292,10 +292,17 @@ def mount_mcp_servers(
     if memory_provider is not None:
         from hal0.mcp.memory import build_server as build_memory_server
 
+        # The memory server is an outermost mount — no admin dispatcher
+        # sits in front of it to classify calls — so it carries the
+        # approval queue itself and gates bulk deletes exactly like
+        # ``/mcp/admin`` does (#1302). The ``memory_dispatcher`` handed to
+        # the admin server above deliberately does NOT carry the queue:
+        # admin gates first, then runs the approved call through it.
         memory_server = build_memory_server(
             wrapper=memory_provider,
             client_id_resolver=client_id_resolver,
             private_resolver=private_resolver,
+            approval_queue=approval_queue,
         )
         memory_server.settings.transport_security = transport_security
         memory_app: ASGIApp = memory_server.streamable_http_app()

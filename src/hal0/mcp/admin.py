@@ -136,7 +136,7 @@ import fnmatch
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -618,6 +618,64 @@ def _is_transport_excluded(route: object, path: str) -> bool:
     return "Stream" in cls_name or "EventSource" in cls_name
 
 
+# Recursion bound for :func:`_iter_leaf_routes`. Router nesting is a handful of
+# levels in practice; this only exists so a cyclic or pathological structure can
+# never hang the boot path (the walker runs inside ``create_app``).
+_MAX_ROUTE_DEPTH = 12
+
+
+def _iter_leaf_routes(routes: object, *, _depth: int = 0) -> Iterator[object]:
+    """Yield every route object that carries a concrete ``path`` + ``methods``.
+
+    A flat walk of ``app.routes`` is NOT enough. FastAPI 0.138 stopped
+    flattening ``include_router``: ``app.routes`` holds one
+    ``fastapi.routing._IncludedRouter`` per included router, and that wrapper
+    exposes neither attribute. The previous one-level loop skipped all of them,
+    the map came back empty, and ``install_admin_route_map`` failed the whole
+    MCP mount — silently, because ``create_app`` logs the failure and continues.
+    Found on halo (21 boots, 0 successful mounts) after the deployed venv
+    resolved a newer FastAPI than ``uv.lock`` pins for CI.
+
+    So: descend through anything that can enumerate its own children. We probe
+    for ``effective_candidates()`` — the accessor 0.138 provides, returning
+    ``_EffectiveRouteContext`` objects whose ``.path`` is ALREADY the fully
+    resolved path (router prefix included), so there is no prefix arithmetic to
+    get wrong here. Those contexts also carry ``response_class``, which keeps
+    :func:`_is_transport_excluded` working on wrapped routes.
+
+    Duck-typed rather than ``isinstance``-checked so this holds across FastAPI
+    versions that rename or move the private class. Anything we cannot expand
+    (and anything whose expansion raises) is skipped — an unknown wrapper
+    degrades to "not a tool", never to a crash on the boot path. Pair this
+    tolerance with the upper bound in ``pyproject.toml``: this keeps a surprise
+    from being catastrophic, the pin keeps it from being a surprise.
+
+    SECOND WALKER, DELIBERATE: ``tests/security/test_exposure.py::_iter_effective``
+    solves the same wrapper problem independently, and had solved it BEFORE this
+    one — the knowledge sat in a test while the production walker rotted. They
+    are not merged because the contracts differ: this iterator yields only
+    request/response routes (``.methods`` required, so WebSocket routes are
+    correctly excluded from the tool catalog), while the exposure ratchet must
+    see WebSocket routes too. Keep both duck-typed on the same accessor, and fix
+    both when FastAPI moves again.
+    """
+    if _depth > _MAX_ROUTE_DEPTH:
+        return
+    for route in routes:  # type: ignore[attr-defined]
+        if getattr(route, "path", None) and getattr(route, "methods", None):
+            yield route
+            continue
+        expand = getattr(route, "effective_candidates", None)
+        if not callable(expand):
+            # Mounts / WebSocket routes / opaque objects — never tools.
+            continue
+        try:
+            children = expand()
+        except Exception:  # pragma: no cover — defensive against private-API drift
+            continue
+        yield from _iter_leaf_routes(children, _depth=_depth + 1)
+
+
 def build_admin_route_map(
     app: object,
 ) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, ...]]]:
@@ -629,15 +687,18 @@ def build_admin_route_map(
     here (Gap 1) — that is the classification overlay's job. A route pinned in
     :data:`TOOL_NAME_ALIASES` is ALWAYS kept, so an over-broad exclude can
     never silently drop a live, classified tool.
+
+    Route discovery goes through :func:`_iter_leaf_routes`, which descends
+    through FastAPI's ``include_router`` wrappers — see its docstring for why a
+    flat walk silently cost us the entire MCP surface.
     """
     routes = getattr(app, "routes", app)
     route_map: dict[str, tuple[str, str]] = {}
     route_path_args: dict[str, tuple[str, ...]] = {}
-    for route in routes:
+    for route in _iter_leaf_routes(routes):
         raw_path = getattr(route, "path", None)
         methods = getattr(route, "methods", None)
-        if not raw_path or not methods:
-            # Mounts / WebSocket routes carry no ``methods`` — never tools.
+        if not raw_path or not methods:  # pragma: no cover — guaranteed by the iterator
             continue
         path = _normalize_path(raw_path)
         placeholders = _placeholders(path)

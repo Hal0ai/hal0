@@ -21,7 +21,7 @@ class _Upstreams:
         return self._ups
 
 
-def _make_request(*, cfgs=None, loaded=None, upstreams=None, upstream_models=None):
+def _make_request(*, cfgs=None, loaded=None, upstreams=None, upstream_models=None, registry=None):
     """Build a minimal request stand-in.
 
     ``loaded`` materialises as a container-backed remote upstream
@@ -38,6 +38,7 @@ def _make_request(*, cfgs=None, loaded=None, upstreams=None, upstream_models=Non
         slot_manager=_SlotManager(cfgs or []),
         upstreams=_Upstreams(ups),
         upstream_models=models,
+        model_registry=registry,
     )
     return SimpleNamespace(app=SimpleNamespace(state=state), _body=b"")
 
@@ -91,30 +92,28 @@ async def test_caller_top_level_thinking_translated_to_kwarg():
     assert "enable_thinking" not in out
 
 
-_PRIMARY_THINKING = [
-    {
-        "name": "agent",
-        "type": "llm",
-        "enabled": True,
-        "device": "gpu-rocm",
-        "role": None,
-        "enable_thinking": True,
-        "model": {"default": "big", "context_size": 4096},
-    }
-]
+class _ThinkingRegistry:
+    """Registry stub: model 'big' carries defaults.enable_thinking=True
+    (spec-hw-slot-ownership §1 — reasoning is MODEL-owned tuning; the former
+    per-slot enable_thinking override is gone from SlotConfig)."""
+
+    def get(self, model_id):
+        if model_id != "big":
+            raise KeyError(model_id)
+        return SimpleNamespace(defaults=SimpleNamespace(enable_thinking=True))
 
 
 @pytest.mark.asyncio
-async def test_per_slot_enable_thinking_default_applied():
-    # Slot configured enable_thinking=true → requests to its model default to ON.
-    req = _make_request(cfgs=_PRIMARY_THINKING, loaded={"big"})
+async def test_model_enable_thinking_default_applied():
+    # Model defaults enable_thinking=true → requests to it default to ON.
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"}, registry=_ThinkingRegistry())
     out = await v1._normalize_chat_body(req, {"model": "big", "messages": []})
     assert out["chat_template_kwargs"]["enable_thinking"] is True
 
 
 @pytest.mark.asyncio
-async def test_per_slot_default_overridden_by_request():
-    req = _make_request(cfgs=_PRIMARY_THINKING, loaded={"big"})
+async def test_model_default_overridden_by_request():
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"}, registry=_ThinkingRegistry())
     out = await v1._normalize_chat_body(req, {"model": "big", "enable_thinking": False})
     assert out["chat_template_kwargs"]["enable_thinking"] is False
 

@@ -988,7 +988,7 @@ Group=hal0
 # group-writable kludge needed, the setgid dirs already cover group access.
 WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
-# Shared Hermes interpreter policy, persisted by `hal0 agent install hermes`.
+# Shared Hermes interpreter policy, persisted by \`hal0 agent install hermes\`.
 # Optional so core hal0 services remain installable when Hermes is skipped/degraded.
 EnvironmentFile=-${ETC_DIR}/hermes-python.env
 # Optional (leading \`-\`): the HF_TOKEN secrets file (WS-D, #1106) — absent
@@ -1733,6 +1733,30 @@ else:
 PYEOF
 fi
 
+# ── hal0-api service start / restart ──────────────────────────────────────────
+# Deliberately NOT the same policy as the slot units below. A slot is a running
+# inference workload: bouncing it costs a model reload, so new argv is allowed
+# to apply on its next start. hal0-api is the thing we just replaced, and it
+# imports its code once at startup — leaving it running means the install did
+# not take effect at all.
+#
+# ``systemctl enable --now`` alone is NOT enough for that: ``--now`` starts a
+# stopped unit but is a no-op on an active one. So an upgrade over a live box
+# swapped the venv and ``current`` symlink, printed its success banner, exited
+# 0, and left the OLD process serving. Observed on halo 2026-07-27: ``hal0
+# --version`` said 1.0.0a2 while ``/api/health`` said 1.0.0 for 15 minutes,
+# until a manual restart. Enable for boot either way; restart only when
+# something is already running.
+start_or_restart_api() {
+    systemctl enable hal0-api >/dev/null 2>&1 || true
+    if systemctl is-active --quiet hal0-api 2>/dev/null; then
+        info "hal0-api is already running — restarting onto the newly installed code"
+        systemctl restart hal0-api
+    else
+        systemctl enable --now hal0-api
+    fi
+}
+
 # ── slot-unit re-render ───────────────────────────────────────────────────────
 # Slot units bake the launch argv at load time; without this, systemctl
 # restarts and reboots keep running PRE-update flags until an operator does a
@@ -1966,7 +1990,7 @@ if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "not starting services automatically (dev / --no-start)."
     warn "  start manually: ${HAL0_BIN} serve --host ${API_BIND_HOST} --port ${HAL0_PORT}"
 else
-    systemctl enable --now hal0-api
+    start_or_restart_api
     if wait_active hal0-api 15; then
         info "hal0-api is running"
     else

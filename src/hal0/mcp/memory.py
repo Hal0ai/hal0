@@ -39,6 +39,10 @@ schema-versioning tax in Phase 9::
 
     memory_delete(ids: list[str], dataset=null)
         → {deleted: int}
+        # Deleting >1 id is a BULK delete: it enqueues for operator
+        # approval and returns {status: "pending_approval", approval_id}
+        # instead of running. Same rule on /mcp/admin and /mcp/memory —
+        # classification is owned by hal0.mcp.admin.is_gated (#1302).
 
 Namespace rule: writes default to dataset ``shared``;
 clients opting into private mode at the transport layer promote to
@@ -325,9 +329,15 @@ async def _memory_delete(
     Returns the count of deleted rows. ``ids`` must be
     non-empty. ``dataset`` optionally directs the engine's bank sweep
     (e.g. ``project:<id>`` items live outside the default
-    shared + own-private sweep). Approval-gating for bulk deletes
-    (>1 id) lives in :mod:`hal0.mcp.admin`; by the time we get here it
-    has already been approved (or is a single-id autonomous call).
+    shared + own-private sweep).
+
+    Approval-gating for bulk deletes (>1 id) is classified by
+    :func:`hal0.mcp.admin.is_gated` and enforced one layer up — by
+    ``admin.dispatch`` when the call arrives on ``/mcp/admin``, and by
+    this module's dispatcher (when built with ``approval_queue=``) when
+    it arrives on the standalone ``/mcp/memory`` mount (#1302). By the
+    time execution reaches here the call is either approved or a
+    single-id autonomous delete.
     """
     ids_raw = args.get("ids")
     if not isinstance(ids_raw, list) or not ids_raw:
@@ -411,11 +421,39 @@ _MEMORY_HANDLERS = {
 }
 
 
+# ── Approval gating (#1302) ──────────────────────────────────────────────────
+#
+# The classification itself is owned by :func:`hal0.mcp.admin.is_gated` —
+# one owner per fact. We only decide *whether this layer enforces it*
+# (see ``make_dispatcher``'s ``approval_queue`` argument). The import is
+# function-local because ``hal0.mcp.admin`` is a heavy module and the
+# standalone memory mount must stay importable on its own.
+
+_PENDING_APPROVAL_DETAIL = (
+    "bulk memory delete queued for operator approval — the call runs only "
+    "after the operator approves it (top-bar bell / approvals inbox). "
+    "Nothing waits on this transport, so the outcome is NOT returned here; "
+    "re-check with memory_search or memory_list once approved."
+)
+
+
+def _needs_approval(tool: str, args: dict[str, Any]) -> bool:
+    """True when this memory call must gate through the approval queue.
+
+    Delegates to ``admin.is_gated`` so ``/mcp/memory`` and ``/mcp/admin``
+    can never drift on what counts as a bulk delete.
+    """
+    from hal0.mcp.admin import is_gated
+
+    return is_gated(tool, args)
+
+
 def make_dispatcher(
     wrapper: Any,
     *,
     client_id_resolver: Any = None,
     private_resolver: Any = None,
+    approval_queue: Any = None,
 ):
     """Return an async dispatcher closure bound to ``wrapper``.
 
@@ -431,6 +469,14 @@ def make_dispatcher(
 
     ``private_resolver`` returns the per-call ``--private`` toggle
     state (the transport layer reads this off the agent's session).
+
+    ``approval_queue`` arms this dispatcher's own destructive-call gate
+    (#1302). Pass it when the dispatcher is the OUTERMOST layer — i.e.
+    the standalone ``/mcp/memory`` mount, where no admin dispatcher sits
+    in front to classify the call. Leave it ``None`` when the dispatcher
+    is handed to ``admin.dispatch``: admin gates first and then invokes
+    the approved executor through this same callable, so a second gate
+    here would re-enqueue the approved call forever.
     """
 
     async def _dispatch(tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -446,9 +492,31 @@ def make_dispatcher(
         private = False
         if private_resolver is not None:
             private = bool(private_resolver())
-        try:
-            payload = await handler(wrapper, args, client_id=client_id, private=private)
+
+        async def _run(call_args: dict[str, Any]) -> dict[str, Any]:
+            payload = await handler(wrapper, call_args, client_id=client_id, private=private)
             return {"status": "ok", **payload}
+
+        try:
+            if approval_queue is not None and _needs_approval(tool, args):
+                approval_id = await approval_queue.enqueue(
+                    tool=tool,
+                    args=args,
+                    client_id=client_id or "anonymous",
+                    executor=_run,
+                )
+                audit_log.info(
+                    "mcp.memory.gated",
+                    tool=tool,
+                    client_id=client_id,
+                    approval_id=approval_id,
+                )
+                return {
+                    "status": "pending_approval",
+                    "approval_id": approval_id,
+                    "detail": _PENDING_APPROVAL_DETAIL,
+                }
+            return await _run(args)
         except MemorySchemaError as exc:
             return {
                 "status": "error",
@@ -514,6 +582,7 @@ def build_server(
     name: str = "hal0-memory",
     client_id_resolver: Any = None,
     private_resolver: Any = None,
+    approval_queue: Any = None,
 ) -> FastMCP:
     """Construct a focused memory-only FastMCP server.
 
@@ -526,12 +595,18 @@ def build_server(
     way as :func:`hal0.mcp.admin.build_server`'s ``bearer_resolver`` —
     transport-layer hooks the orchestrator stitches into the active
     MCP session's HTTP headers.
+
+    ``approval_queue`` is the process-wide :class:`ApprovalQueue`. This
+    server is an outermost mount (nothing gates in front of it), so pass
+    it — otherwise the narrow surface becomes a bypass around the admin
+    surface's bulk-delete gate (#1302).
     """
     server = FastMCP(name)
     dispatcher = make_dispatcher(
         wrapper,
         client_id_resolver=client_id_resolver,
         private_resolver=private_resolver,
+        approval_queue=approval_queue,
     )
 
     # Typed signatures so FastMCP publishes real parameter schemas —
@@ -620,8 +695,10 @@ def build_server(
     @server.tool(
         name="memory_delete",
         description=(
-            "Delete one or more memory items by id (bulk deletes gate at admin "
-            "layer). dataset optionally directs the sweep (e.g. project:<id>)."
+            "Delete one or more memory items by id. Deleting >1 id is a bulk "
+            "delete and returns {status: pending_approval} — it runs only "
+            "after the operator approves it. dataset optionally directs the "
+            "sweep (e.g. project:<id>)."
         ),
         annotations=_ANNOTATIONS["memory_delete"],
     )

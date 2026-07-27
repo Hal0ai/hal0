@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from hal0.slots._cfg_helpers import _cfg_port
@@ -92,6 +93,7 @@ class WatchdogHost(Protocol):
 
     def _current_state(self, name: str) -> SlotState: ...
     def _key(self, name: str) -> int: ...
+    def _lock(self, name: str) -> asyncio.Lock: ...
     async def _maybe_load_config(self, name: str) -> dict[str, Any] | None: ...
     async def _transition(self, name: str, to_state: SlotState, **kw: Any) -> SlotStateRecord: ...
     async def load(self, name: str) -> Slot: ...
@@ -145,6 +147,66 @@ class SlotWatchdog:
             # Watcher self-cancel via its own transition — let it finish.
             return
         existing.cancel()
+
+    async def _stamp_locked(
+        self,
+        slot_name: str,
+        to_state: SlotState,
+        *,
+        message: str,
+        still_faulted: Callable[[], Awaitable[bool]],
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Flip a confirmed-faulted slot to ``to_state`` under the per-slot lock.
+
+        ``load``/``unload``/``restart`` hold ``host._lock(name)`` for the whole
+        of their run, so taking it here serialises the watchdog against an
+        in-flight load: the watcher can never stamp ERROR/OFFLINE onto a slot
+        whose load is mid-flight — which used to race load's own final
+        ``WARMING → READY`` into an illegal transition (a warming unit that read
+        inactive for a beat during a big model's cold-load got flipped, and the
+        load then failed/409'd). Once we hold the lock the load has settled, so
+        we re-verify BOTH the live state AND the fault itself (``still_faulted``)
+        before stamping — a load that converged healthy while the watcher waited
+        for the lock is left untouched.
+        """
+        host = self._host
+        async with host._lock(slot_name):
+            if host._current_state(slot_name) not in _FAIL_WATCH_LIVE_STATES:
+                return
+            try:
+                faulted = await still_faulted()
+            except Exception as exc:
+                log.warning(
+                    "slot.fail_watch_recheck_failed",
+                    extra={"slot": slot_name, "error": str(exc)},
+                )
+                return
+            if not faulted:
+                # Fault cleared while we waited for the lock (a concurrent
+                # load/restart converged the slot) — leave it alone.
+                return
+            try:
+                await host._transition(
+                    slot_name,
+                    to_state,
+                    message=message,
+                    extra=extra or {},
+                    force=True,
+                )
+            except Exception as exc:
+                log.warning(
+                    "slot.fail_watch_transition_failed",
+                    extra={"slot": slot_name, "error": str(exc)},
+                )
+
+    async def _probe_unhealthy(self, slot_name: str) -> bool:
+        """True when the model server still fails its /health probe."""
+        return not await self.probe_health(slot_name)
+
+    async def _unit_inactive(self, slot_name: str) -> bool:
+        """True when the container unit still reads inactive to systemd."""
+        return not await self.is_active(slot_name)
 
     async def _fail_watch_loop(self, slot_name: str) -> None:
         """Poll the container unit's is-active and flip state when it dies.
@@ -234,27 +296,19 @@ class SlotWatchdog:
                     if health_failures < _HEALTH_FAIL_STRIKES:
                         # Tolerate a transient blip; a real crash fails again.
                         continue
-                    # Re-check state in case load/unload moved us mid-probe.
-                    current = host._current_state(slot_name)
-                    if current not in _FAIL_WATCH_LIVE_STATES:
-                        return
                     # Confirmed unhealthy → ERROR (red dot, operator cue). The
                     # health endpoint (#783 cr1) then reports degraded and
                     # hal0_slot_up reads health_ok=False (#791). Recoverable —
-                    # the dispatcher reloads on the next request.
-                    try:
-                        await host._transition(
-                            slot_name,
-                            SlotState.ERROR,
-                            message="model server failed /health probe",
-                            extra={"health_ok": False},
-                            force=True,
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "slot.fail_watch_transition_failed",
-                            extra={"slot": slot_name, "error": str(exc)},
-                        )
+                    # the dispatcher reloads on the next request. Stamped under
+                    # the per-slot lock + fault re-verification so it can never
+                    # clobber a concurrent load/reload (see _stamp_locked).
+                    await self._stamp_locked(
+                        slot_name,
+                        SlotState.ERROR,
+                        message="model server failed /health probe",
+                        still_faulted=lambda: self._probe_unhealthy(slot_name),
+                        extra={"health_ok": False},
+                    )
                     return
                 # The container unit went inactive while we believed it
                 # was live. Re-check state once more — load/unload may
@@ -271,19 +325,18 @@ class SlotWatchdog:
                     warming_inactive += 1
                     if warming_inactive < _WARMING_INACTIVE_STRIKES:
                         continue
-                    try:
-                        await host._transition(
-                            slot_name,
-                            SlotState.ERROR,
-                            message="container unit died while warming",
-                            extra={"health_ok": False},
-                            force=True,
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "slot.fail_watch_transition_failed",
-                            extra={"slot": slot_name, "error": str(exc)},
-                        )
+                    # Under the per-slot lock + re-verification: a big model whose
+                    # unit reads inactive for a beat mid-cold-load must not be
+                    # flipped to ERROR while its load holds the lock (that raced
+                    # load's WARMING→READY into an illegal error→ready). See
+                    # _stamp_locked.
+                    await self._stamp_locked(
+                        slot_name,
+                        SlotState.ERROR,
+                        message="container unit died while warming",
+                        still_faulted=lambda: self._unit_inactive(slot_name),
+                        extra={"health_ok": False},
+                    )
                     return
                 # A stopped unit (GPU arbiter handoff, systemd stop,
                 # OOM-kill with Restart= pending) is a clean not-loaded
@@ -292,18 +345,15 @@ class SlotWatchdog:
                 # (grey dot) rather than ERROR (red dot, operator-
                 # investigation cue), reserving ERROR for the real
                 # failures: spawn/health/load exceptions.
-                try:
-                    await host._transition(
-                        slot_name,
-                        SlotState.OFFLINE,
-                        message="container stopped (auto-reloads on next request)",
-                        force=True,
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "slot.fail_watch_transition_failed",
-                        extra={"slot": slot_name, "error": str(exc)},
-                    )
+                # Under the per-slot lock + re-verification (still inactive): a
+                # concurrent load that just brought the unit up must not be
+                # clobbered to OFFLINE mid-flight (OFFLINE→READY is illegal too).
+                await self._stamp_locked(
+                    slot_name,
+                    SlotState.OFFLINE,
+                    message="container stopped (auto-reloads on next request)",
+                    still_faulted=lambda: self._unit_inactive(slot_name),
+                )
                 return
         except asyncio.CancelledError:
             # Normal shutdown path — slot left live-state cleanly.

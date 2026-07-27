@@ -119,6 +119,33 @@ class ModelDefaults(BaseModel):
             "providers.container._resolve_llama_scalars."
         ),
     )
+    enable_thinking: bool | None = Field(
+        default=None,
+        description=(
+            "spec-hw-slot-ownership §1: tri-state reasoning default — the MODEL "
+            "is the single owner (a slot-level ``enable_thinking`` override no "
+            "longer exists; SlotConfig rejects the key). True → requests routed "
+            "to a slot bound to this model default to thinking ON; False → OFF; "
+            "None → global suppression. Always overridable per request via the "
+            "top-level ``enable_thinking`` / ``chat_template_kwargs`` — see "
+            "normalize/thinking.py and api.routes.v1._slot_thinking_default."
+        ),
+    )
+    vision: bool | None = Field(
+        default=None,
+        description=(
+            "spec-hw-slot-ownership §1: tri-state vision-projector override — "
+            "the MODEL is the single owner now (the former per-slot ``vision`` "
+            "toggle (#901) is gone; SlotConfig rejects the key). None (default) "
+            "= AUTO: the mmproj sidecar loads whenever the model carries one "
+            "(registry ``Model.mmproj`` presence). False force-suppresses it "
+            "(no --mmproj) even when the model ships a sidecar, e.g. to save "
+            "the ~0.9 GB resident projector on a memory-tight host. True is an "
+            "explicit no-op affirmation (mmproj already loads under AUTO when "
+            "present) kept for symmetry with mtp/jinja/enable_thinking. See "
+            "providers.container._resolve_llama_scalars."
+        ),
+    )
 
 
 class Model(BaseModel):

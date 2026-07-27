@@ -72,9 +72,9 @@ export interface Slot {
    *  the end of the grid, and hide their lifecycle buttons. Defaults to true
    *  when absent (a slot is enabled unless explicitly off). */
   enabled?: boolean
-  /** Per-slot reasoning default (llm slots). true → thinking on; false/null →
-   *  off (suppressed). Seeds the drawer's Thinking toggle. */
-  enable_thinking?: boolean | null
+  // (former enable_thinking / mtp / vision fields removed — spec-hw-slot-
+  // ownership §1: those are model-owned tri-state caps now, read from
+  // /api/models' `defaults` instead of the slot payload.)
   // ── Hardware grid (spec-hw-slot-ownership §2) ───────────────────────
   /** NGL — GPU offload layer count owned by the SLOT (-1 = all, 0 = CPU only).
    *  Reversed from model.defaults.n_gpu_layers by the §6 migration; seeds the
