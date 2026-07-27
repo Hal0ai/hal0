@@ -147,6 +147,47 @@ installer and the platform come up; it cannot satisfy the release ritual. Cuttin
 `v1.0.0-alpha.3` therefore needs a provisioned `hal0-test` box, and that dependency
 is not currently written down anywhere in the release docs.
 
+## Real inference on the fixed build (CT163, seeded)
+
+Nothing in the install-level validation above proves hal0 actually *serves*. So
+CT163 was seeded and driven end to end:
+
+```
+hal0 model pull qwen3.5-0.8b     → 532.9MB, sha256 3177ebd67afe… verified, registered
+hal0 slot load agent --model …   → slot `ready`, container ghcr.io/hal0ai/hal0-rocmfpx:c077206
+POST /v1/chat/completions        → {"content":"hal0 works"}  (4 completion tokens)
+```
+
+**Install → model pull → slot bind → container launch → inference, verified on a
+brand-new container with the fixed tree.** First load pays the multi-GB toolbox
+image pull (~4 min cold, seconds warm); `hal0 slot load` returns a client-side
+`ReadTimeout` while that proceeds asynchronously, which is worth knowing before
+reading it as a failure.
+
+### The tier-γ harness itself was broken
+
+Running the gate against this seeded box found the harness — not hal0 — at fault.
+Three bugs fixed in `388253bd`:
+
+1. **Stale CLI flags** — `remote_slot_create` passed `--backend` (renamed
+   `--hardware`) and `--no-start` (removed), so every slot-creating row died on
+   argv parsing before hal0 was contacted. The gate could not pass on any box.
+2. **Swallowed stderr** — create ran under `2>/dev/null || true`, so the argv error
+   was invisible and surfaced as a misleading "slot load failed" verdict pointing at
+   an empty journal. That symptom is what hid bug 1.
+3. **Captured stdout** — the function's stdout *is* the slot name, so once create
+   started succeeding its `Created slot …` chatter was swallowed into the name.
+
+Plus `HAL0_TEST_MODEL`, so the gate isn't pinned to one hardcoded model id.
+
+After those, **`slot create` succeeds and both the vulkan and rocm test slots reach
+`ready` with a real model** — but the rows are still recorded `fail`, because the
+harness never waits for ready. Tracked as `release-gate-ready-poll`. Row score went
+0 pass → 1 pass (openwebui) along the way.
+
+**Net: the platform works; the gate does not.** Two board rows now stand between
+this branch and a green `release-check`.
+
 ## Notes
 
 - `HAL0_INSTALL_SKIP_VERIFY=1` is required to install an unsigned local tree; the
