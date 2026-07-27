@@ -55,7 +55,7 @@ There is no bearer-token or basic-auth flag to enable.
 
 <Aside type="note">
 podman (rootless, no daemon) is the runtime. `docker` is only a fallback when
-podman is not installed. The GPU llama-server profiles (`rocm`, `rocm-dnse`,
+podman is not installed. The GPU llama-server profiles (`rocm`, `rocm-dense`,
 `rocm-moe`, `vulkan`, `cuda`, `embed`, `rerank`, `cpu-llm`) have no
 per-backend `HAL0_TOOLBOX_IMAGE_*` override — their container image is baked
 into the [profile](/docs/reference/providers-profiles-devices) itself. Only

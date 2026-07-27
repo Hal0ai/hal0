@@ -51,7 +51,7 @@ over an always-on context pane (detected RAM, GPU, NPU) on the right. It walks:
    short list of curated suggestions ranked to fit your detected RAM (see
    below).
 
-4. **Agent model** — the model backing the `coder` slot used by agent/coding
+4. **Agent model** — the model backing the `agent` slot (the capable default inference anchor)
    extensions (Hermes' coding tools, Pi), from the same kind of ranked list,
    biased toward coder-tagged picks.
 
@@ -61,7 +61,7 @@ over an always-on context pane (detected RAM, GPU, NPU) on the right. It walks:
 </Steps>
 
 <Aside type="note">
-The Main and Agent model steps provision dedicated `chat` and `coder` slots
+The Main and Agent model steps provision dedicated `agent` and `utility` slots
 (distinct from the `agent`/`utility` anchor roles the dispatcher and eviction
 logic pin by default — see [Slots](/docs/concepts/slots)). hal0's live-resolve
 virtuals still route correctly on a freshly-set-up box: `hal0/agent` falls
@@ -86,10 +86,10 @@ against the registry; nothing is invented on the fly):
 | **Model** | Display name of the curated pick |
 | **Size** | On-disk size in GB |
 | **Ctx** | Native context length |
-| **Backend** | The runtime profile it launches with (e.g. `rocm-dnse`, `vulkan`, `cpu-llm`) |
+| **Backend** | The runtime profile it launches with (e.g. `rocm-dense`, `vulkan`, `cpu-llm`) |
 
 The Agent model step ranks coder-tagged models first, falling back to
-general chat picks if none fit — the `coder` slot should never come up
+general chat picks if none fit — the `agent` slot should never come up
 empty just because no dedicated coding model fits your RAM.
 
 The NPU step (step 5) is offered independently of these suggestions,

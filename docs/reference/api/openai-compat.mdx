@@ -120,7 +120,7 @@ FLM child's `/v1/embeddings`; otherwise it dispatches normally.
 A `multipart/form-data` upload. The `model` form field is **required** —
 omitting it returns a 400 (`request.missing_model`) rather than a confusing
 404. The raw multipart bytes are forwarded verbatim so the upstream's own
-parser reads the audio. NPU `stt-npu` slots route directly to the FLM child.
+parser reads the audio. NPU `flm-stt` slots route directly to the FLM child.
 
 ## `POST /v1/audio/speech`
 

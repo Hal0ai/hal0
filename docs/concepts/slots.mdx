@@ -220,7 +220,7 @@ have a home before you create anything:
 `utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`, and `agent`.
 
 When the NPU runtime (FLM) is present, two more shadow slots are seeded:
-`stt-npu` and `embed-npu` (riding the NPU chat anchor's own `npu` slot).
+`flm-stt` and `flm-embed` (riding the NPU chat anchor's own `npu` slot).
 Seeded slots are reserved — you can't create a conflicting name or delete them.
 
 The two canonical LLM roles are **`agent`** (the capable default — the

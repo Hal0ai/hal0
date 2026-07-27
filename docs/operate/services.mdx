@@ -30,6 +30,7 @@ The current catalog:
 | **OpenWebUI** | `hal0-openwebui.service` | `:3001` (LAN) | start/stop/restart/enable/disable | Podman container; HTTP-probed at `/health`. |
 | **ComfyUI** | `hal0-slot@img.service` | `:8188` (LAN) | restart only | Start/stop is GPU-arbiter managed — the img slot unit owns the switchover logic, so only `restart` is exposed (the same verb the FirstRun repair button uses). |
 | **Hermes** | `hal0-agent@hermes.service` | `:9119` (loopback only) | start/stop/restart/enable/disable | Bundled agent + dashboard. No LAN URL fallback — a link is shown only when `HAL0_HERMES_PUBLIC_URL` is set. |
+| **Turnstone** | `hal0-agent@turnstone.service` | `:9129` (loopback only) | start/stop/restart/enable/disable | Self-hosted orchestration platform — coexists alongside Hermes (relaxed single-pick). Routes all inference through hal0-api's gateway and grades each tool call with an LLM judge. No LAN URL fallback — a link is shown only when `HAL0_TURNSTONE_PUBLIC_URL` is set. |
 | **Hindsight** | `hindsight-api.service` | `:9177` (loopback only) | start/stop/restart/enable/disable | Native memory-engine daemon. Same no-fallback-URL rule as Hermes. |
 | **n8n** | *(none — external)* | — | read-only | Workflow automation the operator runs themselves; hal0 does not deploy it. Listed with URL/probe env hooks but carries no lifecycle actions until a unit exists. |
 

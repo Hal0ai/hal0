@@ -137,12 +137,12 @@ you clone it under a new name.
 </Aside>
 
 <Aside type="caution" title="The old `rocm-mtp` slug">
-An earlier single `rocm-mtp` profile was split into `rocm-dnse` and `rocm-moe`,
+An earlier single `rocm-mtp` profile was split into `rocm-dense` and `rocm-moe`,
 then in v0.9.5 the ROCmFPX slugs were consolidated again into today's 2×2 grid
 (`rocm-dense`/`rocm-moe`/`vulkan-dense`/`vulkan-moe`, all on the canonical
 `vulkan-minicpm5` runner). `rocm` itself is **not** retired — it's a live seed
 profile and the default for `gpu-rocm`. There is no loader remap, so a slot
-TOML pointing at a slug that no longer exists (`rocm-mtp`, `rocm-dnse`,
+TOML pointing at a slug that no longer exists (`rocm-mtp`, `rocm-dense`,
 `rocmfpx-rocm`, `vkfpx-dense`, `vkfpx-moe`) should be repointed to one of the
 current profiles.
 </Aside>

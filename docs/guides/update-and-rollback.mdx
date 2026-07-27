@@ -115,6 +115,7 @@ testing, not production.
 1. **Fetch** the release manifest for the channel.
 
 2. **Download** the release tarball plus its detached cosign signature and
+   As of v0.9.7, releases dual-emit a **Sigstore bundle** (embedding the cert, signature, and a Rekor Signed Entry Timestamp) alongside the legacy detached signature + certificate pair. The updater prefers `cosign verify-blob --bundle`, which survives Fulcio's short-lived cert expiry — the legacy pair alone used to fail verification 100% of the time on already-deployed clients.
    Fulcio certificate into a per-version cache under `/var/lib/hal0`.
 
 3. **Verify** the SHA-256 digest against the manifest, then the signature

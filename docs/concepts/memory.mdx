@@ -96,6 +96,9 @@ When enabled, memory becomes the shared brain that ties the platform together:
     writes land in the right per-agent namespace rather than a shared pool.
   </Card>
   <Card title="Destructive ops are audited" icon="approve-check">
+  <Card title="Private visibility is enforced on delete" icon="lock">
+    In unified-bank mode, the `delete` path applies the same fail-closed ACL as read/search/list: an agent cannot delete another agent's `visibility:private` memories, even by document id. Unresolvable ids are withheld rather than leaked.
+  </Card>
     Bank deletes and every memories / config / document / directive /
     operation / mental-model delete record a durable audit row — actor,
     target, and outcome — so a wipe is attributable after the fact. Deleting

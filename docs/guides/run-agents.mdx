@@ -82,6 +82,38 @@ MCP (loopback-only by default), LAN-expose `hindsight-api` and add an
 `mcp.hindsight` entry pointing at `http://<hal0-lan-ip>:9177/mcp`.
 </Aside>
 
+
+## Install Turnstone
+
+[Turnstone](https://github.com/nousresearch/turnstone) is a self-hosted
+orchestration platform that hal0 bundles alongside Hermes (it coexists —
+relaxed single-pick). It runs its own server on loopback `:9129`, routes
+all inference through hal0-api's OpenAI-compatible gateway, mounts hal0's
+memory and admin tools over MCP, and grades each tool call with an LLM judge
+before it runs.
+
+```sh
+hal0 agent install turnstone
+```
+
+This runs `installer/agents/turnstone.sh`, which provisions a managed PyPI
+venv, generates a JWT secret, auto-maps a model, and wires the hal0 provider
+and memory plugins. Turnstone appears in the dashboard Services pane and
+Overview health card with full start/stop/restart controls.
+
+```sh
+hal0 agent bootstrap turnstone --dry-run   # preview without installing
+hal0 agent bootstrap turnstone --repair    # force every phase
+```
+
+To uninstall:
+
+```sh
+hal0 agent uninstall turnstone
+hal0 agent uninstall turnstone --keep-memory
+```
+
+
 ## Manage the lifecycle
 
 <Tabs>

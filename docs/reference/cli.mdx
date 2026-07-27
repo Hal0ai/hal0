@@ -69,9 +69,7 @@ hal0 podman images (prompts for a `DELETE` confirmation unless `--force` or
 `hal0 setup` has no further subcommands — it's a flags-only entry point.
 Without `--auto` it runs an interactive Rich TUI stepping through
 storage → extensions → main slot → agent → NPU → review → install. With
-`--auto` it always provisions a `chat` slot (port 8081) unless one already
-exists, adds a `coder` slot (port 8082) only if an agent-kind extension is
-enabled, and seeds capability defaults from the hardware probe — no model
+`--auto` it always seeds the `agent` and `utility` slots (plus the NPU-trio slots when FLM is present) and seeds capability defaults from the hardware probe — no model
 pull at install time if `--no-pull` is set.
 
 It runs in-process when the daemon isn't up yet (fresh install), or posts to
@@ -215,7 +213,7 @@ script around) a CLI verb that doesn't exist.
 </Aside>
 
 **Profiles** are the bench-tuned llama-server flag bundles behind
-`--hardware`/`--type` (`rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, `cuda`,
+`--hardware`/`--type` (`rocm`, `rocm-dense`, `rocm-moe`, `vulkan`, `cuda`,
 `embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui`, plus any
 custom clones). `slot create`/`slot edit` never take a `--profile` flag;
 picking or editing one by name is done from the dashboard's **Profiles** tab
