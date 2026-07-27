@@ -29,7 +29,9 @@
 # client-pinned release-workflow identity. Only then does it parse artifact
 # URLs. The tarball's sha256 and publisher signature are both checked again as
 # defense-in-depth before anything is executed. cosign is therefore a required
-# bootstrap dependency. See docs/internal/release-manifest.md.
+# bootstrap dependency — see ensure_cosign() below, which uses a system cosign
+# when one exists and otherwise fetches a digest-pinned official build into the
+# throwaway work directory. See docs/internal/release-manifest.md.
 #
 # Schema reference: docs/internal/release-manifest.md (hal0.releases.v1).
 
@@ -46,6 +48,58 @@ _STABLE_MANIFEST_ADMISSION_IDENTITY="${_MANIFEST_IDENTITY_PREFIX}refs/tags/v\\d+
 _PREVIEW_MANIFEST_ADMISSION_IDENTITY="${_MANIFEST_IDENTITY_PREFIX}refs/tags/v\\d+\\.\\d+\\.\\d+(-(alpha|beta|rc)\\.(0|[1-9]\\d*))?$"
 _NIGHTLY_MANIFEST_IDENTITY="${_MANIFEST_IDENTITY_PREFIX}refs/heads/main$"
 _MANIFEST_SIGNER_ISSUER='https://token.actions.githubusercontent.com'
+
+# ── pinned cosign (see ensure_cosign) ──────────────────────────────────────
+#
+# cosign is what turns "some bytes off a CDN" into "bytes signed by the hal0
+# release workflow", so it is a hard requirement. Distros that package it
+# (Arch, Fedora, Alpine, openSUSE, nixpkgs) are used as-is. Debian/Ubuntu do
+# NOT package cosign — and rather than degrade to an unverified install on
+# the single most common hal0 host, this script fetches the official sigstore
+# release binary itself and checks it against a digest pinned right here.
+#
+# Pinning the digest in this file introduces NO new trust root. The user
+# already trusted these exact bytes the moment they piped this script to
+# bash; a constant inside a script you have already decided to execute
+# cannot be less trustworthy than the script executing it. The resulting
+# chain is:
+#
+#   trusted script -> digest-pinned cosign -> OIDC-pinned release manifest
+#                  -> digest-pinned + signature-verified release tarball
+#
+# There is deliberately NO opt-out environment variable. A flag such as
+# HAL0_INSTALL_REQUIRE_COSIGN=0 becomes the copy-pasted default in forum
+# answers and CI snippets within a week, and silently un-does the signature
+# hardening this file exists to provide. Unsupported platform, failed
+# download, or digest mismatch all fail closed with manual-install guidance.
+#
+# ── MAINTENANCE: this pin must be bumped by hand ──────────────────────────
+# There is no automated bump path in this repo: there is no
+# .github/dependabot.yml and no renovate config, and
+# scripts/update-toolbox-digests.sh only refreshes ghcr.io *image* digests in
+# the repo-root manifest.json — it never touches this file. Bump manually
+# when sigstore cuts a release (aim to stay within a release or two):
+#
+#   V=v3.1.2
+#   curl -fsSL "https://github.com/sigstore/cosign/releases/download/${V}/cosign_checksums.txt" \
+#       | grep -E 'cosign-linux-(amd64|arm64)$'
+#
+# then paste both digests below and update _COSIGN_VERSION. That checksums
+# file is itself keyless-signed (cosign_checksums.txt.sigstore.json on the
+# same release) — verify it with an existing cosign before trusting it.
+# tests/installer/test_bootstrap_cosign_fetch.py pins the shape of these
+# constants so a malformed or half-finished bump fails CI.
+_COSIGN_VERSION='v3.1.2'
+_COSIGN_BASE_URL='https://github.com/sigstore/cosign/releases/download'
+# Digests below are the published sha256 of the official release assets for
+# _COSIGN_VERSION, taken from that release's cosign_checksums.txt.
+_COSIGN_SHA256_LINUX_AMD64='f7622ed3cf22e55e1ae6377c080979ff77a22da9981c11df222a2e444991e7cf'
+_COSIGN_SHA256_LINUX_ARM64='90e7ae0b5dfd60f20816b52c012addf7fc055ebcc7bea4ce81c428ca8518c302'
+
+# Resolved exactly once by ensure_cosign(); every cosign invocation goes
+# through it so a fetched binary and a system one are indistinguishable to
+# the verification code below.
+_COSIGN_BIN=""
 
 # ── tiny output helpers ────────────────────────────────────────────────────
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -91,6 +145,90 @@ validate_channel() {
         stable|preview|nightly) ;;
         *) die "HAL0_CHANNEL must be one of: stable, preview, nightly (got ${HAL0_CHANNEL})" ;;
     esac
+}
+
+# ── cosign acquisition ─────────────────────────────────────────────────────
+# Map `uname -m` onto the sigstore release asset name. Fails closed: an
+# architecture we hold no pinned digest for is an unsupported platform, not a
+# reason to skip verification.
+cosign_asset_for_machine() {
+    case "$1" in
+        x86_64|amd64)  printf 'cosign-linux-amd64\n' ;;
+        aarch64|arm64) printf 'cosign-linux-arm64\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+cosign_pinned_sha256() {
+    case "$1" in
+        cosign-linux-amd64) printf '%s\n' "${_COSIGN_SHA256_LINUX_AMD64}" ;;
+        cosign-linux-arm64) printf '%s\n' "${_COSIGN_SHA256_LINUX_ARM64}" ;;
+        *) return 1 ;;
+    esac
+}
+
+cosign_manual_install_hint() {
+    printf '%s' "\
+   install cosign manually and re-run:
+     Arch:    sudo pacman -S cosign
+     Fedora:  sudo dnf install cosign
+     Alpine:  sudo apk add cosign
+     other:   https://docs.sigstore.dev/cosign/system_config/installation/"
+}
+
+# Resolve _COSIGN_BIN. Prefers a distro-packaged cosign (it rides the
+# distro's own update track and needs no pin from us); otherwise downloads
+# the pinned official build into the trap-guarded work dir, verifies its
+# sha256 against the constant above, and uses it from there. Nothing is
+# installed anywhere persistent.
+ensure_cosign() {
+    local work="$1"
+
+    if command -v cosign >/dev/null 2>&1; then
+        _COSIGN_BIN="cosign"
+        info "using system cosign ($(command -v cosign))"
+        return 0
+    fi
+
+    local machine asset expected out actual
+    machine="$(uname -m)"
+    if ! asset="$(cosign_asset_for_machine "${machine}")"; then
+        die "cosign is required to verify the release, and hal0 pins no cosign
+   build for this architecture (uname -m: ${machine}).
+$(cosign_manual_install_hint)"
+    fi
+    expected="$(cosign_pinned_sha256 "${asset}")" \
+        || die "internal error: no pinned cosign sha256 for ${asset}"
+
+    out="${work}/cosign"
+    info "cosign not found — fetching pinned ${_COSIGN_VERSION} (${asset})"
+    info "  ${_C_DIM}${_COSIGN_BASE_URL}/${_COSIGN_VERSION}/${asset}${_C_RST}"
+    if ! curl -fsSL --retry 3 --retry-delay 2 -o "${out}" \
+            --url "${_COSIGN_BASE_URL}/${_COSIGN_VERSION}/${asset}"; then
+        rm -f -- "${out}"
+        die "could not download pinned cosign ${_COSIGN_VERSION} (${asset}).
+$(cosign_manual_install_hint)"
+    fi
+
+    actual="$(sha256sum "${out}" | awk '{print $1}')"
+    if [[ "${actual}" != "${expected}" ]]; then
+        rm -f -- "${out}"
+        die "pinned cosign sha256 mismatch — expected ${expected}, got ${actual}
+   refusing to run an unverified cosign binary.
+$(cosign_manual_install_hint)"
+    fi
+
+    chmod +x "${out}"
+    # A hardened host may mount the temp filesystem noexec, which would
+    # otherwise surface as an inscrutable verification failure later.
+    if ! "${out}" version >/dev/null 2>&1; then
+        rm -f -- "${out}"
+        die "fetched cosign could not be executed from ${work}
+   (is that filesystem mounted noexec? retry with TMPDIR=/var/tmp)
+$(cosign_manual_install_hint)"
+    fi
+    _COSIGN_BIN="${out}"
+    ok "pinned cosign ${_COSIGN_VERSION} sha256 OK (${actual:0:12}…)"
 }
 
 manifest_admission_identity() {
@@ -152,12 +290,12 @@ fetch_manifest() {
 
 verify_release_manifest() {
     local manifest="$1" bundle="$2" identity="$3"
-    command -v cosign >/dev/null 2>&1 \
-        || die "cosign is required to verify the release manifest but is not installed.
-   install it from https://docs.sigstore.dev/cosign/installation/"
+    [[ -n "${_COSIGN_BIN}" ]] \
+        || die "cosign is required to verify the release manifest but is not available.
+$(cosign_manual_install_hint)"
 
     info "verifying release manifest with pinned workflow identity"
-    if ! cosign verify-blob \
+    if ! "${_COSIGN_BIN}" verify-blob \
             --bundle "${bundle}" \
             --certificate-identity-regexp "${identity}" \
             --certificate-oidc-issuer "${_MANIFEST_SIGNER_ISSUER}" \
@@ -261,7 +399,7 @@ fetch_sidecar() {
 cosign_verify() {
     local tarball="$1" bundle="$2" identity="$3"
 
-    command -v cosign >/dev/null 2>&1 \
+    [[ -n "${_COSIGN_BIN}" ]] \
         || die "cosign disappeared after release manifest verification — refusing to install"
 
     info "verifying signature with cosign keyless OIDC"
@@ -271,7 +409,7 @@ cosign_verify() {
     # The authenticated manifest must provide a Sigstore bundle. Detached
     # signature/certificate sidecars are not an accepted bootstrap scheme.
     local -a verify_args=(--bundle "${bundle}")
-    if ! cosign verify-blob \
+    if ! "${_COSIGN_BIN}" verify-blob \
             "${verify_args[@]}" \
             --certificate-identity-regexp "${identity}" \
             --certificate-oidc-issuer "${_MANIFEST_SIGNER_ISSUER}" \
@@ -299,6 +437,10 @@ main() {
     else
         warn "HAL0_BOOTSTRAP_KEEP_TMP=1 — leaving work dir ${work}"
     fi
+
+    # Resolve cosign before any release bytes are fetched: if we cannot get a
+    # verifier we must not go on to download things we cannot verify.
+    ensure_cosign "${work}"
 
     local manifest="${work}/manifest.json"
     local manifest_bundle="${work}/manifest.json.bundle"
