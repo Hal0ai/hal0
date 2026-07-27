@@ -231,6 +231,12 @@ HERMES · API · UI · OBS · DOCS · DEPLOY
 | P2-updater-b | one cosign+swap+rollback path | ☐ | INSTALL | — | Model B part 2 |
 | P3-runtime-db | state.json/pull-jobs/events → SQLite (one table at a time) | ☐ | MODEL | SQLite | — |
 
+### Code-debt lanes (not migration windows — no live-box step)
+| id | lane | status | class | deps | notes |
+|----|------|:--:|--|--|--|
+| typed-bodies-rest | replace raw `request.json()` with typed pydantic bodies across the routers PR #1322 did not cover | ☐ | API | inc-3 ✔ | **Row opened 2026-07-26 — its ABSENCE was the defect.** The R5 summary called this "typed-bodies (audit banked)" and the Phase-4 handoff sized it at 24 sites / 12 files; the real count on `main` is **51 `request.json()` sites across 15 files** (`api/routes/`: models 9, memory 6, slots 6, memory_admin 5, updater 5, settings 4, installer 3, backends 2, services 2, proxmox 2, capabilities/profiles/stacks/config/dashboard_layout 1 each). Discipline from inc-2 applies: **byte-preserve status codes** (422 was kept over the spec's proposed 400 where they diverged) — a dashboard-key status-code audit comes first. Not a v1.0.0-alpha.3 item; deliberately not built in the hardening drive. |
+| mcp-dep-floor | decide whether `fastapi`/`starlette` need an upper bound | ☐ | API | F0 fix `66a78cb7` | `pyproject.toml` pins `fastapi>=0.115` unbounded; a fresh install resolved 0.140.0 / starlette 1.3.1, whose route-table layout silently unmounted the whole MCP admin surface. The walker is now version-agnostic (`admin._iter_live_routes`), so this is no longer urgent — but nothing pins the assumption, and the failure mode was a swallowed warning. Consider a regression test asserting the built route map is non-empty at boot, and/or a tested upper bound. |
+
 ---
 
 ## Next checkpoint base
