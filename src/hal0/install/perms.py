@@ -389,16 +389,25 @@ def ownership_table(
         # secrets/ stays root:root even under the flip: systemd reads the
         # EnvironmentFile here AS ROOT before dropping to the service user, so it
         # must not be service-writable (hardened-model decision).
-        PermRow(var_lib / "secrets", "root", "root", 0o755, role="secrets/"),
+        #
+        # 0700, not 0755. Only root ever traverses this tree — systemd reads the
+        # EnvironmentFile as root, and the hal0-agentenv seam runs under sudo —
+        # so the world/group bits bought nothing and let any local account LIST
+        # the secret filenames. It was also drift the tool would "fix" the wrong
+        # way: the installer creates these 0700, and `doctor perms --fix` (which
+        # the installer itself runs) would chmod them to 0755, WIDENING the
+        # directory that holds the token EnvironmentFiles on every install.
+        # Observed on a fresh 24.04 box: `is root:root 0700, want root:root 0755`.
+        PermRow(var_lib / "secrets", "root", "root", 0o700, role="secrets/"),
         # secrets/agents/ — per-agent secret .env files (written by the
         # hal0-agentenv seam, never by the service directly). Pinned root:root
-        # like secrets/ itself; the dir mode is 0755 (traverse + list), the
-        # per-agent .env files are 0600 (owner-read-only tokens).
+        # like secrets/ itself; the per-agent .env files are 0600
+        # (owner-read-only tokens) and the dir is 0700 for the same reason.
         PermRow(
             var_lib / "secrets" / "agents",
             "root",
             "root",
-            0o755,
+            0o700,
             glob="*.env",
             child_mode=0o600,
             role="secrets/agents/ (+ <id>.env)",
