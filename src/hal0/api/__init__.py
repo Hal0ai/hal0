@@ -2308,7 +2308,15 @@ def create_app() -> FastAPI:
             memory_provider=memory_provider,
             memory_dispatcher=memory_dispatcher,
         )
+        app.state.mcp_mount_error = None
     except Exception as exc:  # pragma: no cover — defensive
+        # Keeping the API up when MCP can't mount is the right call, but a lone
+        # warning line is not enough signal for a total surface outage: a
+        # Starlette route-table change silently unmounted ALL ~82 admin tools
+        # on every fresh install and nothing but journald knew (see
+        # admin._iter_live_routes). Record it so callers — doctor, health, a
+        # test — can assert on it instead of grepping logs.
+        app.state.mcp_mount_error = str(exc)
         log.warning("hal0.mcp.mount_failed", error=str(exc))
 
     _mount_dashboard(app)
