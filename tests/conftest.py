@@ -38,6 +38,88 @@ if _collection_hal0_home is not None:
 pytest_plugins = ()
 
 
+# Verbs that mutate system-daemon state. Each one trips polkit on a real
+# host: the test hangs on an "Authentication is required to manage system
+# service or unit files" dialog until its subprocess timeout expires, and
+# on a headless/CI box it silently fails instead. Read-only verbs
+# (is-active, show, list-units, ...) are left alone — they need no
+# authorization and several probes legitimately shell out to them.
+_SYSTEMCTL_MUTATING_VERBS = frozenset(
+    {
+        "start",
+        "stop",
+        "restart",
+        "try-restart",
+        "reload",
+        "reload-or-restart",
+        "enable",
+        "disable",
+        "mask",
+        "unmask",
+        "daemon-reload",
+        "daemon-reexec",
+        "set-property",
+        "kill",
+    }
+)
+
+
+def _reject_privileged_systemctl(argv: object) -> None:
+    """Raise if ``argv`` is a systemctl invocation that would need polkit.
+
+    Called from the autouse guard below on every ``subprocess`` entry
+    point. Anything that mutates units must go through an injected fake;
+    reaching the real system bus from a test is always a bug in the test
+    (a missing mock), never intended behavior.
+    """
+    if isinstance(argv, str):
+        parts = argv.split()
+    elif isinstance(argv, (list, tuple)):
+        parts = [str(a) for a in argv]
+    else:
+        return
+    if not parts or Path(parts[0]).name != "systemctl":
+        return
+    verbs = [p for p in parts[1:] if not p.startswith("-")]
+    if verbs and verbs[0] in _SYSTEMCTL_MUTATING_VERBS:
+        raise AssertionError(
+            f"test tried to run privileged systemctl against the real system bus: {parts!r}. "
+            "Inject a fake runner (or monkeypatch the probe) instead — this raises a polkit "
+            "password prompt on a developer machine and hangs the suite."
+        )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_systemctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hard-fail any test that shells out to a mutating ``systemctl``.
+
+    Regression guard: ``HermesDriver._stop_services`` was a staticmethod
+    calling the module-global ``subprocess``, bypassing the driver's own
+    ``runner`` injection point, so all twelve ``uninstall()`` tests ran
+    ``systemctl stop`` + ``systemctl disable hal0-agent@hermes.service``
+    on the host. That's invisible in the test output — it shows up as a
+    slow suite and a stack of polkit dialogs. Fail loudly at the call
+    site instead so the next such leak is a one-line traceback.
+
+    Only ``Popen`` is patched: ``run``/``call``/``check_call``/
+    ``check_output`` all resolve ``Popen`` from module globals at call
+    time, so one choke point covers them — including callers that
+    captured ``subprocess.run`` by reference at import time. Rebinding
+    the functions themselves would also break identity assertions like
+    ``InstallIO.run is subprocess.run``.
+    """
+    import subprocess as _sp
+
+    real_popen = _sp.Popen
+
+    class _GuardedPopen(real_popen):  # type: ignore[misc,valid-type]
+        def __init__(self, args: object, *pargs: object, **kwargs: object) -> None:
+            _reject_privileged_systemctl(args)
+            super().__init__(args, *pargs, **kwargs)
+
+    monkeypatch.setattr(_sp, "Popen", _GuardedPopen)
+
+
 @pytest.fixture(autouse=True)
 def _no_static_slot_seed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence the lifespan's static slot-TOML seeding (flm/tts/rerank/

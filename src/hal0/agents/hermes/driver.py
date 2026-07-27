@@ -161,7 +161,7 @@ class HermesDriver(AgentDriver):
         # ``runner`` parallels :class:`PiCoderDriver` — tests inject a
         # fake subprocess. ``prober`` lets tests force the upstream
         # pre-install gate without needing a real ``hermes`` on PATH.
-        self._runner = runner if runner is not None else subprocess
+        self._runner: Any = runner if runner is not None else subprocess
         self._prober = prober if prober is not None else _probe_hermes_provisioned
 
     # ── AgentDriver protocol ────────────────────────────────────────────
@@ -263,29 +263,29 @@ class HermesDriver(AgentDriver):
 
     # ── Internals ───────────────────────────────────────────────────────
 
-    @staticmethod
-    def _stop_services() -> None:
+    def _stop_services(self) -> None:
         """Stop + disable the hermes-agent systemd service so it doesn't
         recreate files during uninstall (#453). Best-effort — missing
         systemctl or a missing unit is not an error; the uninstall proceeds
-        regardless."""
+        regardless.
+
+        Goes through ``self._runner`` rather than the module-global
+        ``subprocess``. As a ``@staticmethod`` on the global it bypassed
+        the injection point entirely, so every test that called
+        ``uninstall()`` shelled out to the real system bus — two polkit
+        auth prompts per test, each blocking for its full timeout.
+        """
         unit = "hal0-agent@hermes.service"
         if shutil.which("systemctl") is None:
             return
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(  # nosec B603 — known-safe argv
-                ["systemctl", "stop", unit],
-                check=False,
-                capture_output=True,
-                timeout=10,
-            )
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(  # nosec B603 — known-safe argv
-                ["systemctl", "disable", unit],
-                check=False,
-                capture_output=True,
-                timeout=5,
-            )
+        for argv, timeout in ((["systemctl", "stop", unit], 10), (["systemctl", "disable", unit], 5)):
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                self._runner.run(  # nosec B603 — known-safe argv
+                    argv,
+                    check=False,
+                    capture_output=True,
+                    timeout=timeout,
+                )
 
     def _data_dir(self) -> Path:
         return _paths.var_lib() / "agents" / self.name
