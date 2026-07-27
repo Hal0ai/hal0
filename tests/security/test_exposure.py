@@ -30,6 +30,23 @@ from starlette.routing import BaseRoute, Mount
 from hal0.api import _mount_dashboard, create_app
 from hal0.security.exposure import OPEN_ALLOWLIST, AuthClass, classify, match_rule
 
+# SPA static routes are mounted by _mount_dashboard only when a built
+# ``ui/dist`` is present. They are correctly OPEN (see
+# ``test_dashboard_route_templates_are_open_when_mounted`` below) but are
+# not part of ``OPEN_ALLOWLIST`` because their presence in the route table
+# is environment-dependent. The ratchet comparison in
+# ``test_open_allowlist_is_exact`` excludes exactly this set; any *other*
+# newly-OPEN route -- SPA-static or otherwise -- still trips the
+# ``OPEN_ALLOWLIST`` comparison.
+SPA_STATIC_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/assets"),
+        ("GET", "/brand"),
+        ("GET", "/favicon.svg"),
+        ("GET", "/{full_path:path}"),
+    }
+)
+
 
 def _iter_effective(route: BaseRoute) -> Iterator[BaseRoute]:
     """Recursively resolve FastAPI's lazy included-router wrappers.
@@ -114,9 +131,22 @@ def _classify_method(method: str) -> str:
 @pytest.fixture(scope="module")
 def app_routes(tmp_path_factory: pytest.TempPathFactory) -> set[tuple[str, str]]:
     hal0_home = tmp_path_factory.mktemp("exposure-hal0-home")
+    # Synthesize a temp ``ui/dist`` so the SPA static routes (mounted by
+    # ``_mount_dashboard`` only when a built dist is on disk) are always
+    # present in the route table. Without this, the verdict of
+    # ``test_open_allowlist_is_exact`` depends on whether the host machine
+    # has a built ``ui/dist`` -- which is the determinism defect.
+    dist = hal0_home / "ui-dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "brand").mkdir()
+    (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+    (dist / "favicon.svg").write_text("<svg></svg>", encoding="utf-8")
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setenv("HAL0_HOME", str(hal0_home))
-        monkeypatch.setattr("hal0.api._mount_dashboard", lambda _app: None)
+        monkeypatch.setenv("HAL0_UI_DIST", str(dist))
+        # NOTE: ``_mount_dashboard`` is intentionally NOT stubbed out here.
+        # The whole point of synthesizing a dist is to let it actually run,
+        # so the SPA-static routes end up in the route table under test.
         app = create_app()
 
     routes = _enumerate_routes(app)
@@ -158,16 +188,35 @@ def test_open_allowlist_is_exact(app_routes: set[tuple[str, str]]) -> None:
     exactly the class of regression this ratchet exists to catch.
     Narrowing is also asserted so the allowlist constant doesn't silently
     drift out of sync with the rule table.
+
+    Approach (a): the ``app_routes`` fixture always synthesizes a temp
+    ``ui/dist`` so the SPA static routes are physically mounted and present
+    in the route set under test. Those routes are correctly OPEN but
+    environment-dependent (mounted only when a built dist exists), so they
+    are excluded from the ``OPEN_ALLOWLIST`` comparison via the
+    ``SPA_STATIC_ROUTES`` set above. The exclusion is asserted to be
+    *exact* -- no more, no less -- so a genuinely new open endpoint
+    (whether SPA-static or elsewhere) is still caught: it will show up
+    either in ``excluded - SPA_STATIC_ROUTES`` (a brand-new SPA-static
+    route nobody declared) or in the ``non_spa_open`` comparison below.
     """
     actual_open = {
         (method, path)
         for method, path in app_routes
         if classify(_classify_method(method), path) is AuthClass.OPEN
     }
-    assert actual_open == OPEN_ALLOWLIST, (
+    excluded = actual_open & SPA_STATIC_ROUTES
+    assert excluded == SPA_STATIC_ROUTES, (
+        f"SPA-static routes must all be present and classified as OPEN "
+        f"when the synthesized dist is mounted. "
+        f"Missing: {sorted(SPA_STATIC_ROUTES - excluded)}; "
+        f"unexpected extra SPA-static OPEN routes: {sorted(excluded - SPA_STATIC_ROUTES)}"
+    )
+    non_spa_open = actual_open - SPA_STATIC_ROUTES
+    assert non_spa_open == OPEN_ALLOWLIST, (
         f"OPEN set drifted from the expected allowlist.\n"
-        f"Newly OPEN (not expected): {sorted(actual_open - OPEN_ALLOWLIST)}\n"
-        f"Missing (expected but not OPEN): {sorted(OPEN_ALLOWLIST - actual_open)}"
+        f"Newly OPEN (not expected): {sorted(non_spa_open - OPEN_ALLOWLIST)}\n"
+        f"Missing (expected but not OPEN): {sorted(OPEN_ALLOWLIST - non_spa_open)}"
     )
 
 
