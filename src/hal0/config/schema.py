@@ -2440,16 +2440,22 @@ class MemoryConfig(BaseModel):
             "(private:<agent> / project:<id> banks + fan-out recall)."
         ),
     )
-    # HAL0-SUNSET: v1.0.0 — 'cognee' engine value resolves to hindsight at runtime; drop the alias.
+    # HAL0-SUNSET: v1.0.0 — 'cognee' engine literal retired here. It is no
+    # longer an accepted config value (was previously a back-compat alias
+    # that resolved to hindsight at runtime). provider_from_config's runtime
+    # resolution still treats any *unrecognized* engine as Hindsight as a
+    # defense-in-depth fallback for callers that bypass this validator
+    # (e.g. duck-typed namespaces), but a hal0.toml with engine = "cognee"
+    # now fails config validation outright — the Cognee store has been dark
+    # since v0.4.
     engine: str = Field(
         default="hindsight",
         description=(
             "Active memory engine. 'hindsight' (default) is the platform "
-            "engine; 'mem0' and 'pgvector' are alternates. 'cognee' is "
-            "DEPRECATED — the legacy Cognee store has been dark since v0.4 and "
-            "its wrapper was removed; the value is still accepted for "
-            "back-compat but resolves to 'hindsight' at runtime. Use "
-            "'hindsight'."
+            "engine; 'mem0' and 'pgvector' are alternates. The legacy "
+            "'cognee' value was retired in v1.0.0 (the Cognee store has been "
+            "dark since v0.4 and its wrapper was removed) — a hal0.toml "
+            "still carrying it must be updated to 'hindsight'."
         ),
     )
     agent_providers: dict[str, str] = Field(
@@ -2476,8 +2482,8 @@ class MemoryConfig(BaseModel):
     @field_validator("engine")
     @classmethod
     def _engine_is_known(cls, v: str) -> str:
-        known = {"cognee", "hindsight", "mem0", "pgvector"}
-        s = str(v or "cognee").strip().lower()
+        known = {"hindsight", "mem0", "pgvector"}
+        s = str(v or "hindsight").strip().lower()
         if s not in known:
             raise ValueError(f"memory.engine {v!r} must be one of {sorted(known)}")
         return s

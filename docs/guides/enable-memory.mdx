@@ -1,6 +1,6 @@
 ---
 title: Enable memory
-description: hal0's memory subsystem is gated by [memory].enabled in hal0.toml (on by default). Toggle it with hal0 memory enable/disable, control graph extraction with hal0 memory graph --slot, and migrate any legacy store.
+description: hal0's memory subsystem is gated by [memory].enabled in hal0.toml (on by default). Toggle it with hal0 memory enable/disable and control graph extraction with hal0 memory graph --slot.
 sidebar:
   order: 50
 ---
@@ -132,23 +132,6 @@ unaffected either way — this gate only controls the graph layer.
 </TabItem>
 </Tabs>
 
-## Migrate a legacy store
-
-If you previously ran the Cognee-backed memory store, preview a migration
-into Hindsight banks:
-
-```sh
-hal0 memory migrate --dry-run
-hal0 memory migrate --dry-run --cognee-dir /var/lib/hal0/memory/cognee
-```
-
-The report shows rows total / mapped / unmapped and whether it's a no-op.
-
-<Aside type="caution">
-Migration is **dry-run only** today — it reports the plan without writing.
-Passing `--no-dry-run` exits with a "not yet implemented" error.
-</Aside>
-
 ## Destructive ops are audited
 
 Every destructive call under `/api/memory/*` — bank delete, and the
@@ -167,3 +150,6 @@ confirmation is rejected with `memory.confirm_required`.
   the memory store.
 - [MCP tools](/docs/reference/mcp-tools) — the `memory_*` tool tiers and
   the `/mcp/memory` server this guide's flag gates.
+- [Honcho memory](/docs/guides/honcho-memory) — `hal0 memory migrate --from
+  <engine> --to <engine>` moves an agent's memories between Hindsight and
+  Honcho.

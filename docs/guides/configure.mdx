@@ -120,8 +120,8 @@ Advanced, About.
   `[memory]`, and `[activity]` key that previously required `hal0 config
   edit` (including `slots.evict_pressure_mb`, the pressure-eviction floor;
   the `memory.engine` picker only offers `hindsight`/`pgvector` even though
-  the schema also accepts `cognee`/`mem0`, since those two are silently
-  remapped to hindsight), plus a dedicated **memory graph** panel for
+  the schema also accepts `mem0`, since it's silently remapped to
+  hindsight), plus a dedicated **memory graph** panel for
   `[memory.graph]` (`extraction_slot`, `llm_timeout_s`) and a **Restart
   hal0-api** button — a one-click restart-and-health-poll for
   `hal0-api.service`, handy after any change flagged "restart required".

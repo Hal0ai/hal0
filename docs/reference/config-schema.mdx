@@ -116,14 +116,16 @@ NPU weights off the root filesystem too.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `engine` | str | `"hindsight"` | Active memory engine: `hindsight` (default) \| `mem0` \| `pgvector`. `cognee` is **deprecated** — accepted for back-compat but resolves to `hindsight`. |
+| `engine` | str | `"hindsight"` | Active memory engine: `hindsight` (default) \| `mem0` \| `pgvector`. `cognee` was **retired in v1.0.0** — the schema now rejects it (the Cognee store has been dark since v0.4). |
 
 <Aside type="note">
-The validator also accepts `cognee`/`mem0`, but the Advanced Settings dropdown
-only offers `hindsight`/`pgvector` — the factory silently remaps `cognee`/`mem0`
-selections to `hindsight`, so the dashboard doesn't offer a choice that would
-lie about what actually runs. Hand-editing `hal0.toml` to `cognee`/`mem0` is
-still accepted at the schema level, but resolves to `hindsight` in practice.
+The validator accepts `mem0`, but the Advanced Settings dropdown only offers
+`hindsight`/`pgvector` — the factory silently remaps `mem0` selections to
+`hindsight`, so the dashboard doesn't offer a choice that would lie about
+what actually runs. Hand-editing `hal0.toml` to `mem0` is still accepted at
+the schema level, but resolves to `hindsight` in practice. `cognee` is no
+longer a valid value at all — a `hal0.toml` still carrying it fails config
+validation and must be updated to `hindsight`.
 </Aside>
 
 ### `[memory.embedding]` — reranker knobs (Hindsight era)

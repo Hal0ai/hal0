@@ -25,8 +25,14 @@ shows up in a few places:
 - The **Models** view has an empty registry (the Inference tab reads "the
   catalog is empty"), and the Downloads panel prompts you to add a model
   from the catalog or via **Add by HF coords**.
-- The **Slots** view shows a **no slots configured** hint if no capability
-  slots exist yet.
+- **OpenWebUI** (`:3001`) is reachable, but its model selector is empty — it
+  reads the same empty `/v1/models` list below.
+- The **Slots** view, `hal0 status`, and `hal0 slot list` show the
+  capability slots the installer scaffolded (structure only — device,
+  profile, port) with no model assigned, rather than an empty list: the
+  installer creates slot *shape*, never model picks. The one case where
+  these are truly empty is an install that skipped slot scaffolding
+  entirely with `hal0 setup --no-slots`.
 - `GET /v1/models` returns an empty list, and a chat request against an
   unconfigured slot has nothing to dispatch to.
 
@@ -50,6 +56,17 @@ hal0 model run  qwen3-4b      # assign to a slot, load, wait until serving
 `model run` picks the first compatible slot (or takes `--slot`), loads it,
 polls until the server answers, and prints a copy-paste `curl` smoke test
 against the slot port. That's a working chat endpoint.
+
+<Aside type="tip" title="Where the pull lands">
+Downloads write to `[models].store` in `hal0.toml` — the single directory
+the pull engine writes to and slot containers bind-mount. It's empty by
+default and falls back to the legacy `pull_root` (`/var/lib/hal0/models`)
+until you set it explicitly with `hal0 setup --storage-dir <path>`
+(first-run setup) or `hal0 model store <path>` (any time — see
+[Already have the files on disk?](#already-have-the-files-on-disk) below).
+See [Paths and files](/docs/reference/paths-and-files/) for the full
+resolution order.
+</Aside>
 
 ## Already have the files on disk?
 

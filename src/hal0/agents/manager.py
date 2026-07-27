@@ -315,9 +315,9 @@ class AgentManager:
             # Already installed — return the existing record. Idempotent.
             return self._read_record(name)
 
-        # Single-pick (ADR-0004 §2): only one bundled agent may be installed
-        # at a time. ``blocking`` == ``current`` — anything already
-        # installed conflicts with a fresh install.
+        # Single-pick: only one bundled agent may be installed at a time.
+        # ``blocking`` == ``current`` — anything already installed conflicts
+        # with a fresh install.
         blocking = current
 
         if not blocking:
