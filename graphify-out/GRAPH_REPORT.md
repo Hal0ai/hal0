@@ -1,16 +1,16 @@
 # Graph Report - hal0  (2026-07-26)
 
 ## Corpus Check
-- 1579 files · ~1,980,355 words
+- 1579 files · ~1,980,800 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 28403 nodes · 53696 edges · 1311 communities (1169 shown, 142 thin omitted)
+- 28404 nodes · 53697 edges · 1301 communities (1156 shown, 145 thin omitted)
 - Extraction: 88% EXTRACTED · 12% INFERRED · 0% AMBIGUOUS · INFERRED: 6500 edges (avg confidence: 0.74)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `fb6fdc5c`
+- Built from commit: `ba2e4695`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -814,7 +814,6 @@
 - Community 797
 - Community 798
 - Community 799
-- Community 800
 - Community 801
 - Community 802
 - Diagnosis
@@ -927,7 +926,6 @@
 - Community 910
 - test_slot_create_conflict.py
 - Community 912
-- screen_extra_args_json
 - _flm_shadow_role_args
 - Community 915
 - Community 916
@@ -949,13 +947,11 @@
 - Community 932
 - _key_from_api_env
 - Community 934
-- test_folded_tune_equality_drives_divergence
 - [v0.8.2b2] — 2026-06-24
 - Community 939
 - Community 940
 - Community 941
 - Community 942
-- isolated_client
 - Community 944
 - Community 945
 - Community 946
@@ -966,7 +962,6 @@
 - Community 951
 - Community 952
 - Community 953
-- test_split_thinking_closing_tag_only
 - Community 956
 - Community 957
 - agent-chat.jsx
@@ -986,7 +981,6 @@
 - Community 972
 - Community 973
 - Community 974
-- test_is_newer_falls_back_to_tuple_for_nightly
 - list_capabilities
 - Community 977
 - Community 978
@@ -996,7 +990,6 @@
 - Community 982
 - Community 983
 - Community 984
-- ModelFold
 - Community 986
 - _OtherEngineProvider
 - Community 988
@@ -1023,8 +1016,6 @@
 - TempPathFactory
 - TempPathFactory
 - Community 1011
-- test_folded_tune_equality_drives_divergence
-- test_chat_template_auto_folds_to_nothing
 - Community 1014
 - Community 1015
 - Any
@@ -1284,29 +1275,29 @@
 10. `die()` - 106 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `test_parse_llama_bench_pp()` --calls--> `parse_llama_bench()`  [INFERRED]
-  tests/bench/test_parsers.py → src/hal0/bench/parsers.py
-- `test_parse_llama_bench_resolves_argv()` --calls--> `parse_llama_bench()`  [INFERRED]
-  tests/bench/test_parsers.py → src/hal0/bench/parsers.py
-- `test_parse_llama_bench_single_rep_falls_back_to_avg()` --calls--> `parse_llama_bench()`  [INFERRED]
-  tests/bench/test_parsers.py → src/hal0/bench/parsers.py
-- `test_parse_llama_bench_tg()` --calls--> `parse_llama_bench()`  [INFERRED]
-  tests/bench/test_parsers.py → src/hal0/bench/parsers.py
-- `test_parse_server_ab_drafts_without_accepted_does_not_crash()` --calls--> `parse_server_ab()`  [INFERRED]
-  tests/bench/test_parsers.py → src/hal0/bench/parsers.py
+- `store()` --calls--> `Store`  [INFERRED]
+  tests/bench/test_planner.py → src/hal0/bench/store.py
+- `test_attempt_handle_with_status_is_immutable()` --calls--> `AttemptHandle`  [INFERRED]
+  tests/board/test_board_dispatch.py → src/hal0/board/dispatch.py
+- `test_kokoro_row_offers_cpu_backend()` --calls--> `models_for_capability()`  [INFERRED]
+  tests/capabilities/test_tts_capability_switch.py → src/hal0/capabilities/catalog.py
+- `test_qwen3_row_offers_gpu_rocm_backend()` --calls--> `models_for_capability()`  [INFERRED]
+  tests/capabilities/test_tts_capability_switch.py → src/hal0/capabilities/catalog.py
+- `test_voice_tts_catalog_enumerates_both_engines()` --calls--> `models_for_capability()`  [INFERRED]
+  tests/capabilities/test_tts_capability_switch.py → src/hal0/capabilities/catalog.py
 
 ## Import Cycles
 - None detected.
 
-## Communities (1311 total, 142 thin omitted)
+## Communities (1301 total, 145 thin omitted)
 
 ### Community 0 - "UI API Client"
 Cohesion: 0.06
 Nodes (76): apiPost(), normaliseActor(), normaliseAssignee, normaliseProfile, pickName(), BoardAssignee, BoardConfig, BoardEvent (+68 more)
 
 ### Community 1 - "Slot Container Runtime"
-Cohesion: 0.03
-Nodes (76): container_provider(), Return the process-wide ContainerProvider singleton., flm_id_to_tag(), Resolve a hal0 ``<tag>-FLM`` id back to FLM's native ``family:size`` tag.      I, _cfg_port(), _cfg_provider(), _cfg_to_dict(), _model_default() (+68 more)
+Cohesion: 0.04
+Nodes (72): container_provider(), Return the process-wide ContainerProvider singleton., flm_id_to_tag(), Resolve a hal0 ``<tag>-FLM`` id back to FLM's native ``family:size`` tag.      I, Atomically write a slot TOML.      THE byte-level write path for ``/etc/hal0/slo, write_slot_toml(), _cfg_port(), _cfg_provider() (+64 more)
 
 ### Community 2 - "Upstream Registry"
 Cohesion: 0.06
@@ -1314,75 +1305,75 @@ Nodes (32): CompletedProcess, Path, The systemd **service** name for a slot (``s
 
 ### Community 3 - "Slot Manager & Watchdog"
 Cohesion: 0.03
-Nodes (113): Return ``True`` when *name* is in the dispatchable ready-set.          Ready set, See :meth:`hal0.slots.watchdog.SlotWatchdog._fail_watch_loop`., See :meth:`hal0.slots.watchdog.SlotWatchdog.probe_health`., See :meth:`hal0.slots.watchdog.SlotWatchdog.readiness_check`., See :func:`hal0.slots.routing.default_slot_for`., See :func:`hal0.slots.routing.route_for_request`., See :func:`hal0.slots.routing.add_slot`., See :func:`hal0.slots.routing.remove_slot`. (+105 more)
+Nodes (112): See :meth:`hal0.slots.watchdog.SlotWatchdog._fail_watch_loop`., See :meth:`hal0.slots.watchdog.SlotWatchdog.probe_health`., See :meth:`hal0.slots.watchdog.SlotWatchdog.readiness_check`., See :func:`hal0.slots.routing.default_slot_for`., See :func:`hal0.slots.routing.route_for_request`., See :func:`hal0.slots.routing.add_slot`., See :func:`hal0.slots.routing.remove_slot`., See :func:`hal0.slots.npu.trio.reconcile_trio_slots`. (+104 more)
 
 ### Community 4 - "CLI Commands"
-Cohesion: 0.03
-Nodes (149): agent_install(), agent_list(), agent_peers(), approvals_approve(), approvals_deny(), approvals_list(), _install_hermes(), List pending agent approval requests. (+141 more)
+Cohesion: 0.04
+Nodes (122): agent_install(), agent_list(), agent_peers(), approvals_approve(), approvals_deny(), _install_hermes(), Approve a pending agent action., Deny a pending agent action. (+114 more)
 
 ### Community 5 - "Slot Config Loader"
-Cohesion: 0.04
-Nodes (52): useComfyui(), bundleNameOr(), InstallState, InstallStateBundle, useInstallState(), DEMO_MIGRATION_REPORT, EMPTY_MIGRATION_REPORT, MigrationFlagConflict (+44 more)
+Cohesion: 0.08
+Nodes (29): bundleNameOr(), useInstallState(), RestartSlotsResult, SlotDrift, SlotDriftEntry, UPDATE_CHANNEL_NAMES, UpdateChannel, UpdateChannelName (+21 more)
 
 ### Community 6 - "Dashboard Slot Hooks"
 Cohesion: 0.03
-Nodes (116): ADR-0022, CapabilitiesBag, CapabilityRow, useCapabilities(), useCapabilityApply(), useNpuOccupancy(), deviceBackend(), parseImageRef() (+108 more)
+Nodes (134): ADR-0022, useModels(), useNpuOccupancy(), deviceBackend(), parseImageRef(), RunnerState, RuntimeRow, SystemInfo (+126 more)
 
 ### Community 7 - "API Boot Sequence"
-Cohesion: 0.08
-Nodes (52): AbstractEventLoop, FastAPI, _auto_resume_interrupted_pulls(), _boot_audit_store(), _boot_background_tasks(), _boot_brain_lane(), _boot_capabilities(), _boot_dispatcher() (+44 more)
+Cohesion: 0.09
+Nodes (39): AbstractEventLoop, EventBus, FastAPI, _auto_resume_interrupted_pulls(), _boot_audit_store(), _boot_background_tasks(), _boot_brain_lane(), _boot_capabilities() (+31 more)
 
 ### Community 8 - "Dispatcher Routing"
-Cohesion: 0.09
-Nodes (56): Dispatcher, NoRouteFound, No upstream could be found for the requested model id., Routes incoming OpenAI-compatible requests to an upstream or slot.      Instanti, Close the shared httpx client.  Safe to call multiple times., FakeModelRegistry, FakeUpstreamRegistry, make_remote() (+48 more)
+Cohesion: 0.06
+Nodes (74): LegacyResolutionFailed, Raised when the capability/path heuristics find no slot to serve a request., Dispatcher, DispatchError, NoRouteFound, Request, Look up a registry binding for a model id.          Returns (upstream_name, upst, Forward client headers minus hop-by-hop, plus upstream auth slot.          # NOT (+66 more)
 
 ### Community 9 - "Slot Routes Tests"
-Cohesion: 0.05
-Nodes (115): SSE stream of state transitions for ``name`` (and only ``name``).      The SlotM, slot_state_stream(), container_stub(), isolated_app(), isolated_client(), npu_trio_slot_root(), Any, FastAPI (+107 more)
+Cohesion: 0.08
+Nodes (25): npu_trio_slot_root(), A disabled sibling slot doesn't claim coresident membership., Lay down the NPU FLM trio (agent + stt-npu + embed-npu) on disk., A slot's [model].n_gpu_layers rides along in the payload., Slot with no [server] table → payload's llamacpp_args is null.      Mirror the e, rope_freq_base set on disk → exposed in /api/slots payload., rope_freq_base absent on disk → payload carries null (not 0.0)., PR-18: ``labels`` is lifted from ``[model] labels = [...]``.      The dashboard' (+17 more)
 
 ### Community 10 - "Config Loader & Boot Report"
-Cohesion: 0.04
-Nodes (72): The model registry could not be consulted (outage, not a miss).      Raised by t, RegistryUnavailableError, admit(), CandidateSlot, _estimate_incoming_footprint_mb(), EvictionStep, _gather_candidates(), PreloadEvictHost (+64 more)
+Cohesion: 0.02
+Nodes (113): ModelCacheCheck, PullRunner, ``POST /{name}/rename`` body — either key names the new label., ``POST /{name}/load`` body — both keys accepted for the same field., ``POST /{name}/swap`` body — model_id is required (checked after parse)., _RenameSlotBody, _SlotLoadBody, _SlotSwapBody (+105 more)
 
 ### Community 11 - "Slot State Hooks (UI)"
 Cohesion: 0.03
-Nodes (108): useDenyApproval(), ConfigUrls, useConfigUrls(), useMemoryEnabled(), AddFromPathRequest, fmtBytes(), fmtEta(), fmtSpeed() (+100 more)
+Nodes (107): useApprovalList(), useConfigUrls(), useLogsStream(), useMemoryEnabled(), AddFromPathRequest, fmtBytes(), fmtEta(), fmtSpeed() (+99 more)
 
 ### Community 12 - "Config Schema Models"
-Cohesion: 0.05
-Nodes (16): ModelConfig, ProviderEntry, [model] section in a slot TOML.      Specifies which model the slot loads by def, One [[provider]] entry in providers.toml.      ``extra="forbid"`` (P3-schema Par, _declared_provider(), Path, Unit tests for hal0.config.schema pydantic models.  Each validator gets exercise, Pull the provider a seeded slot TOML declares, if any.      Container slots (e.g (+8 more)
+Cohesion: 0.08
+Nodes (9): _declared_provider(), Path, Unit tests for hal0.config.schema pydantic models.  Each validator gets exercise, Pull the provider a seeded slot TOML declares, if any.      Container slots (e.g, Regression guard for #650.      Every provider a seeded slot TOML declares must, Every shipped seed slot's `profile` must resolve to a live SEED_PROFILES key., TestSeededSlotTomls, TestUpstreamEntry (+1 more)
 
 ### Community 13 - "Slot TOML Capabilities"
-Cohesion: 0.05
-Nodes (40): ModelRegistry, Path, SlotManager, ChangeSet, FileState, fold_ctx_size_alias(), _known_field_names(), Any (+32 more)
+Cohesion: 0.06
+Nodes (34): ModelRegistry, Path, SlotManager, ChangeSet, FileState, fold_ctx_size_alias(), _known_field_names(), Any (+26 more)
 
 ### Community 14 - "Model Catalog UI Hooks"
 Cohesion: 0.05
 Nodes (39): 10. Release notes contract, 11. Security and repository controls, 12.1 Release-policy unit tests, 12.2 Manifest and updater tests, 12.3 Editable-install tests, 12.4 Workflow and publication tests, 12. Testing strategy, 13. Expected files and repositories (+31 more)
 
 ### Community 15 - "Slot REST Endpoints"
-Cohesion: 0.04
-Nodes (102): get_status(), Overall liveness + dashboard summary.      The Vue dashboard polls this every fe, _cache_slot_enrichment(), _config_field_enrichment(), _container_state_enrichment(), create_slot(), delete_slot(), _device_backend() (+94 more)
+Cohesion: 0.06
+Nodes (69): _cache_slot_enrichment(), delete_slot(), get_slot_by_id(), get_slot_by_name(), get_slot_config(), _get_slot_manager(), get_slot_resolved(), get_slot_voices() (+61 more)
 
 ### Community 16 - "Self-Updater"
 Cohesion: 0.04
-Nodes (95): Tag-based release-policy derivation — the single source of truth for classifying, Raised when a tag does not match any supported release pattern., Immutable policy derived from a parsed release tag., ReleasePolicy, ReleaseTagError, _atomic_symlink_swap(), _cache_dir(), clear_stale_mtp_overrides() (+87 more)
+Nodes (93): ConfigParseError, A config file is present but contains invalid TOML or fails validation., Tag-based release-policy derivation — the single source of truth for classifying, Raised when a tag does not match any supported release pattern., Immutable policy derived from a parsed release tag., ReleasePolicy, ReleaseTagError, _atomic_symlink_swap() (+85 more)
 
 ### Community 17 - "Model Pull Pipeline"
-Cohesion: 0.07
-Nodes (62): InstallIO, Injectable IO seams :func:`install_hermes` touches.      Defaults bind the real, fake_hermes_run(), A stand-in for ``subprocess.run`` that applies hermes config verbs., _patch_dropin_to_tmp(), MonkeyPatch, Path, First-run posture: no ready slot + no mcp_wire checkpoint → both     fallback si (+54 more)
+Cohesion: 0.08
+Nodes (38): admit(), CandidateSlot, _estimate_incoming_footprint_mb(), _gather_candidates(), PreloadEvictHost, Any, Pre-load eviction: free memory synchronously BEFORE a load, until it fits.  Toda, One resident slot considered for pre-load eviction.      ``eligible=False`` cand (+30 more)
 
 ### Community 18 - "Kanban Board Store"
-Cohesion: 0.04
-Nodes (43): _coerce_board_list(), _coerce_card_list(), _new_card_id(), _now(), Any, Connection, Row, hal0-owned Operator Board repository — the store behind ``/api/board/*``.  hal0 (+35 more)
+Cohesion: 0.03
+Nodes (87): BoardStore, _coerce_board_list(), _coerce_card_list(), _new_card_id(), _now(), Any, Connection, Row (+79 more)
 
 ### Community 19 - "Hardware Probe Tests"
 Cohesion: 0.05
-Nodes (88): GPUInfo, HardwareProbe, Detects hardware and produces a HardwareInfo snapshot.      The probe is intenti, _mk_run(), MonkeyPatch, Path, Unit tests for hal0.hardware.probe.  Covers:   - CPU parsing from /proc/cpuinfo, Build a fake _run() that dispatches by the first arg of cmd. (+80 more)
+Nodes (77): _mk_run(), MonkeyPatch, Path, Unit tests for hal0.hardware.probe.  Covers:   - CPU parsing from /proc/cpuinfo, Build a fake _run() that dispatches by the first arg of cmd., No nvidia / no amd / no vulkan / no lspci → vendor=unknown empty info., If nvidia returns a value, amd/vulkan/lspci are never called., Walks up to the first existing parent. (+69 more)
 
 ### Community 20 - "Updater Release Tests"
 Cohesion: 0.05
-Nodes (97): _current_symlink(), Return ``<usr_lib>/hal0-<version>/`` — where this release's tree lives., Return ``<usr_lib>/current`` — the atomic-swap target., Atomic self-update with cosign-verified releases and one-step rollback.      All, Initialise the updater.          Args:             channel: Release channel — "s, Updater, _versioned_install_dir(), _build_release_tarball() (+89 more)
+Nodes (93): _current_symlink(), Return ``<usr_lib>/hal0-<version>/`` — where this release's tree lives., Return ``<usr_lib>/current`` — the atomic-swap target., Atomic self-update with cosign-verified releases and one-step rollback.      All, Initialise the updater.          Args:             channel: Release channel — "s, Updater, _versioned_install_dir(), _build_release_tarball() (+85 more)
 
 ### Community 21 - "Model Layout Migration"
 Cohesion: 0.06
@@ -1390,7 +1381,7 @@ Nodes (83): _atomic_symlink(), _classify_registry_entry(), _ensure_canonical_dir
 
 ### Community 22 - "ComfyUI API Client"
 Cohesion: 0.06
-Nodes (43): _best_effort_model_info(), _binary_runner(), _effective_backend_and_device_class(), _effective_parallel(), _effective_runner(), _llama_argv_segments(), _native_ctx(), _profile_runtime_family() (+35 more)
+Nodes (44): _best_effort_model_info(), _binary_runner(), _effective_backend_and_device_class(), _effective_parallel(), _effective_runner(), _llama_argv_segments(), _native_ctx(), _profile_runtime_family() (+36 more)
 
 ### Community 23 - "GPU Arbiter Tests"
 Cohesion: 0.06
@@ -1402,27 +1393,27 @@ Nodes (82): _agent_id(), _build_client(), _error_response(), _expected_integrity
 
 ### Community 25 - "ComfyUI API Routes"
 Cohesion: 0.03
-Nodes (81): _parse_manifest(), Release manifest is missing required fields or has the wrong shape., Return an exact supported updater version or raise ``ValueError``.      ReleaseP, Schema-validated release-manifest payload.      Mirrors the on-disk JSON shape d, Cross-field validation for preview/release-kind consistency.          Rules:, Validate ``raw`` against ReleaseManifest, raising UpdateManifestInvalid., ReleaseManifest, UpdateManifestInvalid (+73 more)
+Nodes (81): _parse_manifest(), Release manifest is missing required fields or has the wrong shape., Schema-validated release-manifest payload.      Mirrors the on-disk JSON shape d, Cross-field validation for preview/release-kind consistency.          Rules:, Validate ``raw`` against ReleaseManifest, raising UpdateManifestInvalid., ReleaseManifest, UpdateManifestInvalid, cosign_skip() (+73 more)
 
 ### Community 26 - "Container Provider Tests"
-Cohesion: 0.04
-Nodes (68): _container_runtime(), ContainerProvider, Podman-container-per-slot inference backend.      One instance is shared across, Not applicable — systemd starts the container., Probe GET /health on the container port.          For llama-server slots /health, Poll /health until 200 or HEALTH_TIMEOUT_S exceeded.          Raises:, Return True if ``image`` is in the local container image store.          Uses ``, Return the image ref of the running container for *slot_name* (#663).          D (+60 more)
+Cohesion: 0.03
+Nodes (70): _container_runtime(), ContainerProvider, Podman-container-per-slot inference backend.      One instance is shared across, Not applicable — systemd starts the container., Direct inference passthrough (used by tests; dispatcher is primary path)., Probe GET /health on the container port.          For llama-server slots /health, Poll /health until 200 or HEALTH_TIMEOUT_S exceeded.          Raises:, Return True if ``image`` is in the local container image store.          Uses `` (+62 more)
 
 ### Community 27 - "Board Actor Normalization"
 Cohesion: 0.03
-Nodes (139): apiDelete(), apiGet(), ApiOptions, apiPatch(), apiPut(), Hal0Error, serialiseBody(), ENDPOINTS (+131 more)
+Nodes (141): apiDelete(), apiGet(), ApiOptions, apiPatch(), apiPut(), Hal0Error, ENDPOINTS, ADR-0004 (+133 more)
 
 ### Community 28 - "Profile Flag Resolution"
-Cohesion: 0.04
-Nodes (56): ProfileConfig, One ``[profile.<name>]`` entry in profiles.toml.      A profile is a reusable ba, Return the full flag string for *profile*, expanding MTP when set.      When the, resolve_profile_flags(), test_vulkan_profile_drafts_on_vulkan_device(), §7.1a / ML-5: profile.mtp is informational only — resolve_profile_flags, profile.mtp=True alone (no explicit mtp_override) no longer         expands the, A profile that pins its own --spec-draft-* values keeps them; the MTP         bu (+48 more)
+Cohesion: 0.05
+Nodes (46): Return the full flag string for *profile*, expanding MTP when set.      When the, resolve_profile_flags(), Return the canonical llama-server argv for a container slot.      Used by the AP, resolved_command_for_slot(), §7.1a / ML-5: profile.mtp is informational only — resolve_profile_flags, profile.mtp=True alone (no explicit mtp_override) no longer         expands the, A profile that pins its own --spec-draft-* values keeps them; the MTP         bu, MTP_FLAG_BUNDLE constant is verbatim in the resolved string. (+38 more)
 
 ### Community 29 - "SQLite Model Registry"
-Cohesion: 0.05
-Nodes (44): COMFYUI_FALLBACK, ComfyuiArbiter, ComfyuiEngineState, ComfyuiMemory, ComfyuiMode, ComfyuiStatus, ComfyuiSwitchover, ComfyuiV2PaneData (+36 more)
+Cohesion: 0.04
+Nodes (64): COMFYUI_FALLBACK, ComfyuiArbiter, ComfyuiEngineState, ComfyuiMemory, ComfyuiMode, ComfyuiStatus, ComfyuiSwitchover, ComfyuiV2PaneData (+56 more)
 
 ### Community 30 - "Benchmark CLI"
-Cohesion: 0.05
-Nodes (75): build_parser(), cmd_eval(), cmd_history(), cmd_import_v1(), cmd_plan(), cmd_publish(), cmd_reindex(), cmd_results() (+67 more)
+Cohesion: 0.06
+Nodes (66): build_parser(), cmd_eval(), cmd_history(), cmd_import_v1(), cmd_plan(), cmd_publish(), cmd_reindex(), cmd_results() (+58 more)
 
 ### Community 31 - "Version & Sunset Scripts"
 Cohesion: 0.06
@@ -1438,23 +1429,23 @@ Nodes (34): _backend_for(), nvidia_container_toolkit_present(), _pick_chat_model
 
 ### Community 34 - "Slot State Machine"
 Cohesion: 0.08
-Nodes (53): The chosen upstream couldn't be reached (timeout, connection refused, etc.)., UpstreamUnavailable, _container_slot_call(), _make_dispatcher(), Any, MockTransport, Tests for Dispatcher.forward wiring SlotManager.serving().  Covers the dispatche, A connect error must still release the serving counter. (+45 more)
+Nodes (58): The chosen upstream couldn't be reached (timeout, connection refused, etc.)., The target slot is mid-swap — model is starting/loading/unloading.      Raised b, The target slot encountered a hard load failure (``SlotState.ERROR``).      Rais, SlotLoadFailed, SlotLoading, UpstreamUnavailable, _container_slot_call(), _make_dispatcher() (+50 more)
 
 ### Community 35 - "Model Pull Tests"
 Cohesion: 0.07
-Nodes (78): hf_download_url(), make_job(), Build the canonical HuggingFace download URL.      ``resolve/main`` (not ``raw/m, Create a fresh job record for ``model_id``., Background-task body: stream the file(s), hash, install, register.      ML-2/ML-, run_pull(), A pull without comfyui_subdir keeps the legacy models/<id>/ layout., test_run_pull_default_subdir_unchanged() (+70 more)
+Nodes (76): hf_download_url(), make_job(), Build the canonical HuggingFace download URL.      ``resolve/main`` (not ``raw/m, Create a fresh job record for ``model_id``., Background-task body: stream the file(s), hash, install, register.      ML-2/ML-, run_pull(), _fail_midstream(), _ok_handler() (+68 more)
 
 ### Community 36 - "Agent Dashboard Cards"
-Cohesion: 0.03
-Nodes (36): react, AGENT_TAB_DEFS, _agentRoute(), _agentTabs(), AgentView(), ADR-0023, Markdown(), mdInline() (+28 more)
+Cohesion: 0.04
+Nodes (21): AGENT_TAB_DEFS, _agentRoute(), _agentTabs(), AgentView(), ADR-0023, Markdown(), mdInline(), BOARD_LANES (+13 more)
 
 ### Community 37 - "Hardware Detection Probe"
 Cohesion: 0.04
-Nodes (83): _amd_drm_device(), _amd_drm_devices(), _amd_gpu_info(), _derive_unified_memory_mb(), _detect_aie_columns(), _detect_amd(), _detect_amd_gpus(), _detect_gpu() (+75 more)
+Nodes (91): GPUInfo, _amd_drm_device(), _amd_drm_devices(), _amd_gpu_info(), _derive_unified_memory_mb(), _detect_aie_columns(), _detect_amd(), _detect_amd_gpus() (+83 more)
 
 ### Community 38 - "Model Fileset Enumeration"
 Cohesion: 0.06
-Nodes (40): _dirname(), _entry_bytes(), enumerate_repo(), FilesetEmpty, FilesetError, FilesetVariantNotFound, _hf_headers(), HFUpstreamError (+32 more)
+Nodes (42): quant_from_filename(), Quant label from a filename token, or ``None`` when nothing matches.      Matche, _dirname(), _entry_bytes(), enumerate_repo(), FilesetEmpty, FilesetError, FilesetVariantNotFound (+34 more)
 
 ### Community 39 - "Omni Router Dispatch"
 Cohesion: 0.07
@@ -1465,32 +1456,32 @@ Cohesion: 0.05
 Nodes (26): _cfg(), _fake_pw(), _make_parser_allowing_only_status(), AgentConfig, Any, MonkeyPatch, Path, Tests for ``hal0-agent`` — the systemd-unit shim.  Most coverage is at the unit (+18 more)
 
 ### Community 41 - "Community 41"
-Cohesion: 0.04
-Nodes (56): Provider for a slot, or None for the GPU/llama-server default.      The runtime, _spec_provider_for(), KokoroHealthError, KokoroInferError, KokoroProvider, Any, ContainerSpec, KokoroProvider — CPU TTS inference backend (kokoro-onnx).  Image API surface: (+48 more)
+Cohesion: 0.03
+Nodes (69): Provider, Any, ContainerSpec, Abstract base for a hal0 inference backend.      Concrete implementations: Conta, Compute the EnvironmentFile contents for a slot.          Returns a mapping of H, Return the argv list for spawning this backend outside systemd.          Mirrors, Run a health check against the backend on *port*.          Returns {"ok": bool,, Passthrough inference against the provider's OpenAI-compatible API.          Thi (+61 more)
 
 ### Community 42 - "Community 42"
 Cohesion: 0.07
 Nodes (69): AgentManager, Orchestrates install/uninstall/list/switch for bundled agents.      Stateless w., manager(), MonkeyPatch, Path, Unit tests for hal0.agents.manager.AgentManager.  Covers ADR-0004 §2 (single-pic, Helper: simulate a hermes_provision.py write into the manager's     state root., Helper: simulate the agent provisioner claiming a converged home.      For agent (+61 more)
 
 ### Community 43 - "Community 43"
-Cohesion: 0.06
-Nodes (61): Any, Resolve a request to a slot Upstream using path+name heuristics.      The last-r, resolve_by_capability(), _container_remote_img(), _FakeModelRegistry, Routing rules for image-gen requests in capability/path routing (Step 4).  These, Path pin selects 'img', missing 'img' upstream → typed legacy error., /v1/images/* path pin must accept a container-backed kind='remote' img     upstr (+53 more)
+Cohesion: 0.05
+Nodes (64): Any, Capability/path routing heuristics — dispatcher resolution Step 4.  Extracted fr, Resolve a request to a slot Upstream using path+name heuristics.      The last-r, resolve_by_capability(), A chat request that reaches the legacy fallback selects the ``chat``     default, test_resolve_by_capability_chat_default_raises_typed_legacy_error(), _container_remote_img(), _FakeModelRegistry (+56 more)
 
 ### Community 44 - "Community 44"
 Cohesion: 0.06
 Nodes (71): apply_update(), _body_version(), check_updates(), _collect_slot_drift(), commit_update(), _current_channel(), _flm_toolbox_image(), get_channel() (+63 more)
 
 ### Community 45 - "Community 45"
-Cohesion: 0.10
-Nodes (20): OSError, load_manifest(), manifest_image_ref(), Any, Inverse of _flatten_slot_toml — produce the on-disk shape.      Writes only ``de, Write a TOML file atomically.      Mirrors hal0.config.env.write_env_atomic but, Load the release manifest.      `scripts/update-toolbox-digests.sh` patches `too, Return the pinned image reference for a toolbox image, if any.      Resolution: (+12 more)
+Cohesion: 0.11
+Nodes (18): OSError, load_manifest(), manifest_image_ref(), Any, Write a TOML file atomically.      Mirrors hal0.config.env.write_env_atomic but, Load the release manifest.      `scripts/update-toolbox-digests.sh` patches `too, Return the pinned image reference for a toolbox image, if any.      Resolution:, write_toml_atomic() (+10 more)
 
 ### Community 46 - "Community 46"
-Cohesion: 0.06
-Nodes (48): _comfyui_models_dir(), _final_path(), _final_path_for_entry(), pull_job_file(), _pull_jobs_dir(), _pull_root(), Path, Strip path-unsafe characters from a model id.      The id is used as a directory (+40 more)
+Cohesion: 0.15
+Nodes (16): list_persisted_jobs(), _pull_jobs_dir(), Return ``<var_lib>/model-pull-jobs`` (HAL0_HOME-aware via config paths)., Garbage-collect stale terminal pull-job snapshots (#MR-8).      Reap on-disk sna, Read all ``.json`` files from the pull-jobs directory and return a list of dicts, sweep_pull_jobs(), Test that ``_pull_root`` honours [models].store with pull_root fallback., Backward compat — PR-#313 installs without `store` keep working. (+8 more)
 
 ### Community 47 - "Community 47"
 Cohesion: 0.03
-Nodes (56): _Runner, _build_overlay_keys(), Unit tests for :mod:`hal0.agents.hermes_provision`.  Pins the linear ``install_h, display.show_reasoning: true is required for thinking-model TUI visibility     (, display.streaming: true is required alongside show_reasoning — without it     th, model.max_tokens must be a positive int — Qwen3 thinking models silently     dra, model.base_url is always set. Hermes's bare ``provider: custom`` requires     it, Delegation → `agent` MoE slot (thinking-off); chat stays on main model.      Thi (+48 more)
+Nodes (126): InstallIO, Injectable IO seams :func:`install_hermes` touches.      Defaults bind the real, _Runner, fake_hermes_run(), A stand-in for ``subprocess.run`` that applies hermes config verbs., _brain_profile_state(), _build_overlay_keys(), install_fake_io() (+118 more)
 
 ### Community 48 - "Community 48"
 Cohesion: 0.15
@@ -1498,15 +1489,15 @@ Nodes (13): Any, Path, Active-stack pointer + content hashing for drift detectio
 
 ### Community 49 - "Community 49"
 Cohesion: 0.07
-Nodes (69): ExceptionInfo, Exit, doctor(), Context, Re-run pre-flight checks (systemd, python, docker, disk, ports).      ``hal0 doc, _exit_code(), _fake_ctx(), _FakeCtx (+61 more)
+Nodes (71): ExceptionInfo, Exit, doctor(), _locate_preflight(), Context, Re-run pre-flight checks (systemd, python, docker, disk, ports).      ``hal0 doc, Find ``installer/lib/preflight.sh`` for the current install.      Returns ``None, _exit_code() (+63 more)
 
 ### Community 50 - "Community 50"
-Cohesion: 0.04
-Nodes (78): CapabilityApplyFailed, CapabilityOrchestrator, legal_children(), Any, CapabilityOrchestrator — bridge between capability children and slots.  The dash, Return the child names valid for ``slot``., 503 — the underlying SlotManager call failed.      Surfaced to the dashboard as, Thin overlay that maps capability selections onto slot lifecycle.      Held as a (+70 more)
+Cohesion: 0.06
+Nodes (57): _anchor_npu_writes(), drifted_state(), FakeSlotManager, npu_orchestrator(), orchestrator(), Any, MonkeyPatch, Path (+49 more)
 
 ### Community 51 - "Community 51"
-Cohesion: 0.05
-Nodes (66): FileSetEntry, FileSetPlan, One file of a planned file-set, ready for ``model_file`` insertion., The full set of files one model pull should download + register., Model, A model entry in the hal0 registry.      All fields are optional at construction, _dir_size(), _discard_partial() (+58 more)
+Cohesion: 0.04
+Nodes (87): FileSetEntry, FileSetPlan, One file of a planned file-set, ready for ``model_file`` insertion., The full set of files one model pull should download + register., _comfyui_models_dir(), _dir_size(), _discard_partial(), _download_one() (+79 more)
 
 ### Community 52 - "Community 52"
 Cohesion: 0.06
@@ -1514,15 +1505,15 @@ Nodes (63): _build_app(), client(), Any, FastAPI, TestClient, Integration tests 
 
 ### Community 53 - "Community 53"
 Cohesion: 0.07
-Nodes (59): ChatTemplate, useChatTemplates(), useMeta(), useMetaEnums(), useAddModelFromPath(), useModelDuplicate(), useModelInspect(), useModelSetDefault() (+51 more)
+Nodes (60): ChatTemplate, useChatTemplates(), useMeta(), useMetaEnums(), useAddModelFromPath(), useModelDuplicate(), useModelInspect(), useModelSetDefault() (+52 more)
 
 ### Community 54 - "Community 54"
 Cohesion: 0.05
-Nodes (84): _atomic_copy(), _do_import_backup(), export_registry(), _find_registry_in_dir(), import_backup(), import_sqlite(), _is_within(), Path (+76 more)
+Nodes (87): model_import_backup(), Path, Restore ``registry.toml`` from a v0.1.x disaster-recovery backup.      v0.1.x →, _atomic_copy(), _do_import_backup(), export_registry(), _find_registry_in_dir(), import_backup() (+79 more)
 
 ### Community 55 - "Community 55"
 Cohesion: 0.05
-Nodes (59): URL-safe lowercase identifier used by the REST surface., api(), ProfileBody, ProfileEnvelope, ProfileImportDryResult, useProfileCreate(), useProfileDelete(), useProfileExport() (+51 more)
+Nodes (61): URL-safe lowercase identifier used by the REST surface., api(), serialiseBody(), ProfileBody, ProfileEnvelope, ProfileImportDryResult, useProfileCreate(), useProfileDelete() (+53 more)
 
 ### Community 56 - "Community 56"
 Cohesion: 0.05
@@ -1542,15 +1533,15 @@ Nodes (52): ProgressFn, _create_conclusions(), _ensure_peer(), _ensure_session()
 
 ### Community 60 - "Community 60"
 Cohesion: 0.04
-Nodes (64): Path, connect(), db_path(), Connection, Path, SQLite connection + transaction helpers — the hal0 ``db/`` foundation.  One conn, Wrap a write in an explicit ``BEGIN IMMEDIATE`` … ``COMMIT``/``ROLLBACK``., Return the default hal0 SQLite database path.      Thin wrapper over :func:`hal0 (+56 more)
+Nodes (61): Path, connect(), db_path(), Connection, Path, SQLite connection + transaction helpers — the hal0 ``db/`` foundation.  One conn, Wrap a write in an explicit ``BEGIN IMMEDIATE`` … ``COMMIT``/``ROLLBACK``., Return the default hal0 SQLite database path.      Thin wrapper over :func:`hal0 (+53 more)
 
 ### Community 61 - "Community 61"
 Cohesion: 0.09
-Nodes (38): NextStep, _diagnose_audit_rows(), _diagnose_migration(), _diagnose_models(), _diagnose_profiles(), _models_outside_mount_roots(), Diagnosis, Registry entries whose file path is NOT under any mounted model root.      O25 g (+30 more)
+Nodes (37): _diagnose_audit_rows(), _diagnose_migration(), _diagnose_models(), _diagnose_profiles(), _models_outside_mount_roots(), Diagnosis, Registry entries whose file path is NOT under any mounted model root.      O25 g, Assemble the §21.4 ``HAL0-MODEL-*`` Diagnosis rows from the evidence     ``docto (+29 more)
 
 ### Community 62 - "Community 62"
 Cohesion: 0.06
-Nodes (32): ModelAlreadyExists, Base error for registry operations., add() called but the model id is already present., RegistryError, test_duplicate_conflicting_new_id_raises(), _model(), ModelRegistry, Path (+24 more)
+Nodes (31): ModelDefaults, Per-model default knobs surfaced as launcher defaults.      All fields optional., Base error for registry operations., RegistryError, _model(), ModelRegistry, Path, Unit tests for hal0.registry.sqlite_store.SqliteModelRegistry (ML-1).  Mirrors t (+23 more)
 
 ### Community 63 - "Community 63"
 Cohesion: 0.06
@@ -1558,7 +1549,7 @@ Nodes (58): app(), _build_app(), client(), _FakeAnn, _FakeMcpServer, _FakeTool, 
 
 ### Community 64 - "Community 64"
 Cohesion: 0.07
-Nodes (50): CatalogEntry, isManagedRemote(), UpstreamCreateBody, UpstreamEntry, UpstreamModelFilters, UpstreamPatchBody, UpstreamTestResult, useProviderCredentialSet() (+42 more)
+Nodes (52): _fetchServers(), useMcpServers(), CatalogEntry, isManagedRemote(), UpstreamCreateBody, UpstreamEntry, UpstreamModelFilters, UpstreamPatchBody (+44 more)
 
 ### Community 65 - "Community 65"
 Cohesion: 0.13
@@ -1570,11 +1561,11 @@ Nodes (63): Hal0Error, _agent_id(), _augment_build_counters(), _bank_failed_op_i
 
 ### Community 67 - "Community 67"
 Cohesion: 0.05
-Nodes (37): CachedModelsFn, FetchModelsFn, IsOnlineFn, _filter_response_headers(), _join_url(), Any, AsyncClient, ModelRegistry (+29 more)
+Nodes (38): _default_fetch_models(), _default_is_online(), _filter_response_headers(), _join_url(), Any, AsyncClient, Response, StreamingResponse (+30 more)
 
 ### Community 68 - "Community 68"
-Cohesion: 0.02
-Nodes (135): useActivityRecent(), CELL_DEFS, CELL_MAP, CellDef, CellId, DashLayout, DEFAULT_LAYOUT, LAYOUT_QUERY_KEY (+127 more)
+Cohesion: 0.03
+Nodes (109): useActivityRecent(), CELL_DEFS, CELL_MAP, CellDef, CellId, DashLayout, DEFAULT_LAYOUT, LAYOUT_QUERY_KEY (+101 more)
 
 ### Community 69 - "Community 69"
 Cohesion: 0.06
@@ -1582,19 +1573,19 @@ Nodes (21): BIG_HUBS, BIG_LINK_TYPES, BIG_TOPICS, buildBackends(), buildCapabili
 
 ### Community 70 - "Community 70"
 Cohesion: 0.06
-Nodes (29): ModelNotFound, The requested model id is not in the registry., _model(), LogCaptureFixture, ModelRegistry, MonkeyPatch, Path, Unit tests for hal0.registry.store.ModelRegistry.  Covers:   * CRUD round-trips (+21 more)
+Nodes (33): Model, Model — registry entry pydantic model.  The Model class is the typed representat, A model entry in the hal0 registry.      All fields are optional at construction, # NOTE: revisit in Phase 1 — extend as providers surface new capabilities., ModelNotFound, The requested model id is not in the registry., _model(), LogCaptureFixture (+25 more)
 
 ### Community 71 - "Community 71"
 Cohesion: 0.12
 Nodes (30): _ctx(), Any, Per-tool dispatch handler tests — plan §7.  Each handler validates args, routes, Image slot without ``edit`` label is rejected by route_for_request., Build a DispatchContext wired against a single-response mock., httpx ConnectError → tool_result error, not raise., A truly unexpected exception inside a handler is caught at the     dispatch_tool, test_analyze_image_happy_path() (+22 more)
 
 ### Community 72 - "Community 72"
-Cohesion: 0.07
-Nodes (64): _admin_tool_names(), _admin_tool_schemas(), _brain_chat_config(), _brain_tool_policy(), _chat_stream(), _compact_board(), _context_exceeded_error(), _dispatch_admin_tool() (+56 more)
+Cohesion: 0.05
+Nodes (73): brain_chat(), Request, hal0-brain chat surface — ``POST /api/brain/chat`` (SSE).  The PRIMARY route for, hal0-brain platform steward. SSE stream. SPEC §G / R4.      Delegates to :func:`, _admin_tool_names(), _admin_tool_schemas(), _brain_chat_config(), _brain_tool_policy() (+65 more)
 
 ### Community 73 - "Community 73"
 Cohesion: 0.05
-Nodes (60): config_validate(), Validate all config files against the current schema., ConfigError, ConfigNotFound, ConfigParseError, _find_manifest_path(), _flatten_slot_toml(), list_agent_configs() (+52 more)
+Nodes (50): config_validate(), Validate all config files against the current schema., ConfigError, ConfigNotFound, _find_manifest_path(), _flatten_slot_toml(), list_agent_configs(), load_agent_config() (+42 more)
 
 ### Community 74 - "Community 74"
 Cohesion: 0.08
@@ -1609,12 +1600,12 @@ Cohesion: 0.09
 Nodes (22): [0.9.2] — 2026-07-05, [0.9.4] — 2026-07-08, [0.9.5.2] — 2026-07-09, Added, Added, Breaking, Changed, Changelog (+14 more)
 
 ### Community 77 - "Community 77"
-Cohesion: 0.06
-Nodes (46): _apply_config_set(), _copy_plugin_tree(), _copy_wrapper(), _dirs_identical(), _ensure_hermes_config(), _ensure_honcho_sdk(), _fmt_config_value(), _hal0_service_home() (+38 more)
+Cohesion: 0.03
+Nodes (167): _active_persona_render(), _apply_config_set(), _atomic_write(), _atomic_write_if_changed(), bootstrap_cli(), BootstrapState, _brain_profile_config_path(), cleanup_stale_agent_dropins() (+159 more)
 
 ### Community 78 - "Community 78"
-Cohesion: 0.03
-Nodes (104): _fields_for_dataclass(), _fields_for_entry(), _filters_to_config(), _filters_to_runtime(), Any, AsyncClient, Lock, Path (+96 more)
+Cohesion: 0.04
+Nodes (46): _fields_for_dataclass(), _fields_for_entry(), _filters_to_config(), _filters_to_runtime(), Any, AsyncClient, Lock, Path (+38 more)
 
 ### Community 79 - "Community 79"
 Cohesion: 0.05
@@ -1622,7 +1613,7 @@ Nodes (47): create_app(), _hermetic_port_listeners(), isolated_app_client(), iso
 
 ### Community 80 - "Community 80"
 Cohesion: 0.06
-Nodes (44): HardwareStats, _port_in_use(), Path, Return current GPU compute utilisation as a fraction [0.0, 1.0].          AMD: r, Return current GPU VRAM usage in MiB.          On AMD UMA (Strix Halo) returns m, Return total GPU VRAM in MiB (or GTT pool on UMA)., Return current system RAM used in GiB (MemTotal - MemAvailable)., Return current system RAM available in GiB (MemAvailable). (+36 more)
+Nodes (47): HardwareStats, _port_in_use(), Any, Path, Take a typed GPU memory + utilization sample (issue #703).          Delegates to, Return current GPU compute utilisation as a fraction [0.0, 1.0].          AMD: r, Return current GPU VRAM usage in MiB.          On AMD UMA (Strix Halo) returns m, Return total GPU VRAM in MiB (or GTT pool on UMA). (+39 more)
 
 ### Community 81 - "Community 81"
 Cohesion: 0.06
@@ -1641,68 +1632,68 @@ Cohesion: 0.08
 Nodes (57): container_stub(), models_app(), models_client(), preview_client(), Any, FastAPI, MonkeyPatch, Path (+49 more)
 
 ### Community 85 - "Community 85"
-Cohesion: 0.18
-Nodes (6): AgentMCPClient, Load by canonical agent name (``/etc/hal0/agents/<name>.toml``)., Return the outbound bearer token for ``server`` or None.          Tokens load at, Per-agent policy layer over the MCP wire client.      One instance per agent pro, ``enabled=false`` removes the server from enabled_servers()., TestClassify
+Cohesion: 0.14
+Nodes (9): AgentMCPClient, Load by canonical agent name (``/etc/hal0/agents/<name>.toml``)., Return the outbound bearer token for ``server`` or None.          Tokens load at, Raised when filesystem-style MCP args try to escape the workspace.      Tool arg, Per-agent policy layer over the MCP wire client.      One instance per agent pro, WorkspaceEscapeError, ``enabled=false`` removes the server from enabled_servers()., TestClassify (+1 more)
 
 ### Community 86 - "Community 86"
 Cohesion: 0.06
 Nodes (36): AgentAlreadyInstalledError, AgentDriver, AgentError, AgentNotFoundError, AgentRecord, AgentUninstallIncompleteError, _driver_for(), installer_script_path() (+28 more)
 
 ### Community 87 - "Community 87"
-Cohesion: 0.06
-Nodes (56): add_model_from_path(), check_model_updates(), create_model(), delete_model(), delete_pull(), duplicate_model(), _DuplicateModelBody, get_model() (+48 more)
+Cohesion: 0.05
+Nodes (64): add_model_from_path(), check_model_updates(), create_model(), delete_model(), delete_pull(), duplicate_model(), _DuplicateModelBody, get_model() (+56 more)
 
 ### Community 88 - "Community 88"
 Cohesion: 0.10
 Nodes (35): _profile_image_and_flags(), Resolve the container image ref for a slot launch.      Resolution (spec-hw-slot, Extract ``(image, resolved_flags)`` for a slot launch.      Image resolution wal, _resolve_image_ref(), test_profile_image_and_flags_honors_override(), _profile(), SimpleNamespace, Unit tests for the slot image-resolution chain (spec-hw-slot-ownership §3).  The (+27 more)
 
 ### Community 89 - "Community 89"
-Cohesion: 0.05
-Nodes (62): Model ids referenced by any configured slot or any stack.      Union of: each sl, referenced_model_ids(), add_from_path(), auto_scan_and_register(), cascade_delete_model(), clear_slot_default(), comfyui_category(), commit_scan_rows() (+54 more)
+Cohesion: 0.07
+Nodes (50): Model ids referenced by any configured slot or any stack.      Union of: each sl, referenced_model_ids(), add_from_path(), auto_scan_and_register(), cascade_delete_model(), clear_slot_default(), comfyui_category(), commit_scan_rows() (+42 more)
 
 ### Community 90 - "Community 90"
 Cohesion: 0.06
 Nodes (47): authorised_client(), fake_hermes(), FakeWsServer, _free_port(), harness_client(), FastAPI, MonkeyPatch, Path (+39 more)
 
 ### Community 91 - "Community 91"
-Cohesion: 0.09
-Nodes (32): _flatten_for_ui(), Project HardwareInfo into the fields the Vue Hardware view expects.      The das, HardwareInfo, NPUInfo, One detected NPU (AMD XDNA / future vendors)., Pydantic model for /etc/hal0/hardware.json.      Written by `hal0 probe` (hal0.h, Async wrapper that runs probe() in a threadpool executor., _FakeProbe (+24 more)
+Cohesion: 0.04
+Nodes (62): _flatten_for_ui(), _platform_label(), Project HardwareInfo into the fields the Vue Hardware view expects.      The das, Pretty label for the probed platform string.      Promotes the GPU model into th, HardwareInfo, NPUInfo, One detected NPU (AMD XDNA / future vendors)., Pydantic model for /etc/hal0/hardware.json.      Written by `hal0 probe` (hal0.h (+54 more)
 
 ### Community 92 - "Community 92"
-Cohesion: 0.08
-Nodes (45): build_stream_response(), cancel(), delete(), emit_terminal_pull_event(), enqueue(), enqueue_update(), eta_s(), list_all() (+37 more)
+Cohesion: 0.07
+Nodes (54): build_stream_response(), cancel(), delete(), emit_terminal_pull_event(), enqueue(), enqueue_update(), eta_s(), list_all() (+46 more)
 
 ### Community 93 - "Community 93"
-Cohesion: 0.04
-Nodes (73): RuntimeFamily, SlotType, create_profile(), delete_profile(), export_profile(), get_profile(), import_profile_route(), list_profiles() (+65 more)
+Cohesion: 0.03
+Nodes (90): RuntimeFamily, SlotType, create_profile(), delete_profile(), export_profile(), get_profile(), import_profile_route(), list_profiles() (+82 more)
 
 ### Community 94 - "Community 94"
-Cohesion: 0.10
-Nodes (24): ModelRegistry, SlotManager, _coerce_ctx(), hal0_apply_registry_detail(), hal0_chat_slot_alias_map(), hal0_chat_slot_model_ids(), hal0_llm_slot_views(), hal0_slot_alias_models() (+16 more)
+Cohesion: 0.08
+Nodes (39): ModelRegistry, SlotManager, _boot_memory_dispatch(), _boot_model_priming(), _boot_registries(), _coerce_ctx(), _fetch_hal0_composite_models(), hal0_apply_registry_detail() (+31 more)
 
 ### Community 95 - "Community 95"
-Cohesion: 0.15
-Nodes (17): EventBus, Re-fetch ``model_cache[slot]`` whenever a slot transitions to ready.      The ca, _refresh_model_cache_on_ready(), FakeSlotManager, FakeUpstreamRegistry, _make_slot(), Regression test for the stale-model_cache slot-routing bug.  A slot's GGUF can c, Only the ready edge should trigger a re-fetch — starting/idle/error must not. (+9 more)
+Cohesion: 0.16
+Nodes (16): Re-fetch ``model_cache[slot]`` whenever a slot transitions to ready.      The ca, _refresh_model_cache_on_ready(), FakeSlotManager, FakeUpstreamRegistry, _make_slot(), Regression test for the stale-model_cache slot-routing bug.  A slot's GGUF can c, Only the ready edge should trigger a re-fetch — starting/idle/error must not., A slot.state for a slot with no upstream entry must not crash the task. (+8 more)
 
 ### Community 96 - "Community 96"
 Cohesion: 0.08
-Nodes (40): _assemble(), _classify(), _clear_stale_sweep(), describe_worklist(), fetch_host(), _friendly_gpu(), _get_json(), _gpu_slot_serving() (+32 more)
+Nodes (48): _assemble(), _classify(), _clear_stale_sweep(), describe_worklist(), fetch_host(), _friendly_gpu(), _get_json(), _gpu_slot_serving() (+40 more)
 
 ### Community 97 - "Community 97"
 Cohesion: 0.07
 Nodes (41): BoardUnreachable, BoardUpstreamError, _default_agent_id(), _default_session_token(), HermesKanbanClient, Any, AsyncClient, Hermes kanban REST client — the Operator Board's upstream front door.  hal0-api (+33 more)
 
 ### Community 98 - "Community 98"
-Cohesion: 0.07
-Nodes (54): _hf_handler(), inspect_app(), inspect_client(), _patch_httpx_transport(), Any, Exception, FastAPI, MonkeyPatch (+46 more)
+Cohesion: 0.12
+Nodes (28): _hf_handler(), _patch_httpx_transport(), Any, Exception, MonkeyPatch, Build an httpx MockTransport handler for the inspect tests., Patch ``httpx.AsyncClient`` so the inspect route uses our mock transport.      T, The route surfaces .gguf entries with LFS size + sorts ascending. (+20 more)
 
 ### Community 99 - "Community 99"
 Cohesion: 0.06
 Nodes (54): app(), client(), CaptureFixture, FastAPI, LogCaptureFixture, Path, TestClient, Tests for Profile CRUD API — POST/PUT/DELETE /api/profiles.  Run targeted:     ~ (+46 more)
 
 ### Community 100 - "Community 100"
-Cohesion: 0.06
-Nodes (50): Unified-bank memory model — [memory] unified_bank.  Pins the unified routing con, The ``agents`` federated registry is NOT chat memory — unified mode must     lea, An explicit multi-scope read (agents + a chat namespace) keeps agents as     its, Captures the full retain/recall payload for assertions., Directly-constructed providers default to legacy multi-bank so existing     call, A ``visibility:private`` doc in the shared bank is recall-visible to its     own, Two agents' private docs coexist in the shared bank; each recalls only     its o, Non-private (shared) docs remain unified-readable by every caller,     including (+42 more)
+Cohesion: 0.10
+Nodes (35): Unified-bank memory model — [memory] unified_bank.  Pins the unified routing con, The ``agents`` federated registry is NOT chat memory — unified mode must     lea, An explicit multi-scope read (agents + a chat namespace) keeps agents as     its, A ``visibility:private`` doc in the shared bank is recall-visible to its     own, Two agents' private docs coexist in the shared bank; each recalls only     its o, Non-private (shared) docs remain unified-readable by every caller,     including, list_items applies the same visibility:private enforcement as recall., A caller must NOT be able to delete another agent's visibility:private     doc b (+27 more)
 
 ### Community 101 - "Community 101"
 Cohesion: 0.13
@@ -1721,16 +1712,16 @@ Cohesion: 0.08
 Nodes (53): app_isolated(), client_isolated(), fake_run_pull(), Any, FastAPI, MonkeyPatch, Path, TestClient (+45 more)
 
 ### Community 105 - "Community 105"
-Cohesion: 0.05
-Nodes (45): _euid_nonroot_by_default(), _fake_bundled_agent_manager(), _FakeAgentManager, MonkeyPatch, `hal0 agent install hermes` foreground-provision flow.  Regression for the clean, A non-zero bootstrap rc must stop the flow before the API register —     we don', Records calls in order so the test can assert sequencing., Root writes anywhere — the guard must not even probe the filesystem. (+37 more)
+Cohesion: 0.06
+Nodes (37): _euid_nonroot_by_default(), _fake_bundled_agent_manager(), _FakeAgentManager, MonkeyPatch, `hal0 agent install hermes` foreground-provision flow.  Regression for the clean, Root writes anywhere — the guard must not even probe the filesystem., Dev / rootless install already owns the trees — proceed silently., Stand-in for :class:`hal0.agents.manager.AgentManager` — records     ``uninstall (+29 more)
 
 ### Community 106 - "Community 106"
-Cohesion: 0.14
-Nodes (51): actor_of(), Any, Request, Request-scoped helper for recording user actions to the audit store.  Thin wrapp, Derive the audit actor string from the request.      ``mcp:<agent>`` when an age, Record a mutation with a truthful outcome, or no-op if audit is off., record_action(), add_link() (+43 more)
+Cohesion: 0.16
+Nodes (47): Any, Record a mutation with a truthful outcome, or no-op if audit is off., record_action(), add_link(), _board(), board_chat(), board_diagnostics(), board_stats() (+39 more)
 
 ### Community 107 - "Community 107"
-Cohesion: 0.06
-Nodes (47): auto_migrate_capabilities_file(), capabilities_toml_path(), capabilities_toml_payload(), capabilities_v1_backup_path(), CapabilityConfig, CapabilitySelection, load_capabilities_config(), Path (+39 more)
+Cohesion: 0.08
+Nodes (39): auto_migrate_capabilities_file(), capabilities_toml_path(), capabilities_toml_payload(), capabilities_v1_backup_path(), CapabilityConfig, load_capabilities_config(), Path, Pydantic models + atomic read/write for ``/etc/hal0/capabilities.toml``.  The ov (+31 more)
 
 ### Community 108 - "Community 108"
 Cohesion: 0.12
@@ -1742,7 +1733,7 @@ Nodes (45): _apply_in_process(), _apply_via_api(), choose_apply_mode(), _conflic
 
 ### Community 110 - "Community 110"
 Cohesion: 0.06
-Nodes (58): activity_db(), agent_workspace_dir(), agents_config_dir(), bundle_chosen_marker(), _covers(), db_path(), default_flm_models_dir(), etc() (+50 more)
+Nodes (59): activity_db(), agent_workspace_dir(), agents_config_dir(), bundle_chosen_marker(), _covers(), db_path(), default_flm_models_dir(), etc() (+51 more)
 
 ### Community 111 - "Community 111"
 Cohesion: 0.07
@@ -1753,8 +1744,8 @@ Cohesion: 0.06
 Nodes (38): client_factory(), fake_container(), FakeContainerProvider, _hermetic_port_listeners(), make_create_body(), AbstractContextManager, Any, MonkeyPatch (+30 more)
 
 ### Community 113 - "Community 113"
-Cohesion: 0.06
-Nodes (46): _build_brain_profile_mcp_servers(), _default_mcp_servers(), _live_resolve_enabled(), _load_agent_allowlist(), path_is_writable(), _phase_brain_profile_mcp_wire(), _phase_brain_profile_seed(), _phase_config_write() (+38 more)
+Cohesion: 0.10
+Nodes (28): Hal0Reranker, Async reranker over hal0-api's OpenAI surface (Cohere-style ``/v1/rerankings``)., Fake404HindsightClient, FakeHindsightClient, FakeReranker, HindsightProvider unit tests — bank mapping + fan-out (P1)., Reverses input order so we can prove the merge re-ranked the union., Records calls; returns canned recall/retain/delete results. (+20 more)
 
 ### Community 114 - "Community 114"
 Cohesion: 0.07
@@ -1765,16 +1756,16 @@ Cohesion: 0.07
 Nodes (32): isolated_config(), _make_fetch_counter(), Any, MonkeyPatch, Path, Unit tests for hal0.hardware.pve.  Minimum-scope coverage (per the 2026-05-21 de, Redirect pve_config_path() to tmp_path and clear the cache., Token is sensitive — file must not be world- or group-readable. (+24 more)
 
 ### Community 116 - "Community 116"
-Cohesion: 0.06
-Nodes (55): _build_brain_identity_card(), _build_identity_card(), _collect_capability_rollup(), _collect_chat_slots(), _fetch_slots(), _find_named_ready_slot(), _find_slot(), _hal0_version_string() (+47 more)
+Cohesion: 0.04
+Nodes (71): _build_brain_identity_card(), _build_brain_profile_mcp_servers(), _build_identity_card(), _collect_capability_rollup(), _collect_chat_slots(), _fetch_slots(), _find_named_ready_slot(), _find_slot() (+63 more)
 
 ### Community 117 - "Community 117"
 Cohesion: 0.09
 Nodes (26): _classify_flm_model(), _extract_json_object(), flm_host_async_spawn(), flm_host_spawn_kwargs(), flm_served_models(), flm_validate(), is_installed_flm_id(), _probe_flm_catalog() (+18 more)
 
 ### Community 118 - "Community 118"
-Cohesion: 0.08
-Nodes (51): build_all_checks(), check_auth_posture(), check_hal0_target(), check_migrations(), check_model_store(), check_ports(), doctor_all_cmd(), _exit_code() (+43 more)
+Cohesion: 0.06
+Nodes (59): build_all_checks(), check_auth_posture(), check_hal0_target(), check_migrations(), check_model_store(), check_ports(), doctor_all_cmd(), _exit_code() (+51 more)
 
 ### Community 119 - "Community 119"
 Cohesion: 0.06
@@ -1785,12 +1776,12 @@ Cohesion: 0.07
 Nodes (48): driver(), _FakeCompleted, _FakeRunner, _prober_ok(), MonkeyPatch, Path, Unit tests for hal0.agents.hermes.HermesDriver (wrapper pivot).  The driver no l, When the managed venv is present, the API install path only     registers the ag (+40 more)
 
 ### Community 121 - "Community 121"
-Cohesion: 0.11
-Nodes (63): _final_response(), _make_app(), _multi_tool_response(), _PlatformRecorder, Any, Tests for the board chat orchestrator — src/hal0/api/routes/board_chat.py.  The, Like _Recorder but for hal0-api's OWN routes (no kanban prefix)., Attach a Hal0Config carrying a [brain_chat] override to app.state. (+55 more)
+Cohesion: 0.12
+Nodes (59): _final_response(), _make_app(), _multi_tool_response(), _PlatformRecorder, Any, Tests for the board chat orchestrator — src/hal0/api/routes/board_chat.py.  The, Like _Recorder but for hal0-api's OWN routes (no kanban prefix)., Attach a Hal0Config carrying a [brain_chat] override to app.state. (+51 more)
 
 ### Community 122 - "Community 122"
-Cohesion: 0.06
-Nodes (31): load_profiles_config(), Load and validate /etc/hal0/profiles.toml.      Returns a :class:`ProfilesConfig, Atomically write the operator (non-seed) profile catalog to profiles.toml., save_profiles_config(), ProfilesConfig, Parsed profiles.toml — top-level ``[profile]`` table.      Each key under ``[pro, Path, Tests for save_profiles_config — round-trip + atomicity.  Targeted file run: (+23 more)
+Cohesion: 0.07
+Nodes (18): react, CI(), Ic(), MemDocuments(), MemRecallConsole(), mtDocTitle(), mtDocWhen(), mtFactColor() (+10 more)
 
 ### Community 123 - "Community 123"
 Cohesion: 0.08
@@ -1801,8 +1792,8 @@ Cohesion: 0.07
 Nodes (42): auth_client(), isolate_secret(), MonkeyPatch, Path, Unit tests for hal0.api.auth (KB-1 / §1): principal resolution + posture.  Cover, Priority is cookie -> bearer -> api_key; a valid cookie wins outright., ``resolve_principal_from_scope`` unwraps a Request/WebSocket-like object., Configuring a key no longer arms enforcement — explicit-enable only. (+34 more)
 
 ### Community 125 - "Community 125"
-Cohesion: 0.13
-Nodes (27): _install_mock_transport(), _pin_slot_ready(), MockTransport, TestClient, Wiring tests for ``/v1/audio/*`` envelope semantics.  Covers two harness finding, Swap the dispatcher's httpx client for one backed by ``handler``.      The dispa, A non-audio multipart body must surface as 415 audio.unsupported_format.      Si, An upstream 5xx body that doesn't mention ffmpeg passes through verbatim.      R (+19 more)
+Cohesion: 0.07
+Nodes (48): _api_env_path(), client(), FastAPI, MonkeyPatch, Path, TestClient, Tests for the /api/providers credential write route (Phase 8 closeout).  Covers, Upstream declares auth_value_env=OPENROUTER_API_KEY; the writer     refuses to l (+40 more)
 
 ### Community 126 - "Community 126"
 Cohesion: 0.11
@@ -1837,8 +1828,8 @@ Cohesion: 0.05
 Nodes (60): _apply_selections_core(), _bundle_to_selections(), _container_active(), curated_models(), CuratedModelNotFound, _first_run_sentinel(), _has_default_slot(), install_apply() (+52 more)
 
 ### Community 134 - "Community 134"
-Cohesion: 0.08
-Nodes (48): MigrationPlan, _apply_store_change(), _config_to_dict(), ConfigInvalidError, _deep_merge(), get_apply_plan(), get_model_store(), get_settings() (+40 more)
+Cohesion: 0.07
+Nodes (50): MigrationPlan, Persist the ``[security].require_auth`` enforcement toggle. ADMIN-gated.      Wr, set_require_auth(), _apply_store_change(), _config_to_dict(), ConfigInvalidError, _deep_merge(), get_apply_plan() (+42 more)
 
 ### Community 135 - "Community 135"
 Cohesion: 0.15
@@ -1849,20 +1840,20 @@ Cohesion: 0.12
 Nodes (47): Path, TestClient, Tests for /api/upstreams and /api/providers routes., Write a minimal upstreams.toml containing only the 'openrouter' entry.      The, PATCH with no fields returns the current state and does not write., Toggling OFF punches app.state.upstream_models so /api/upstreams sees []., Toggling ON drops the cached list so the next fetch refetches., PATCH must leave sibling rows in upstreams.toml untouched. (+39 more)
 
 ### Community 137 - "Community 137"
-Cohesion: 0.13
-Nodes (42): _collect(), _collect_with_payload(), _fake_request(), _fast_approval_wait(), _final(), _parse(), _persona_root(), Any (+34 more)
+Cohesion: 0.14
+Nodes (40): _collect(), _collect_with_payload(), _fake_request(), _fast_approval_wait(), _final(), _parse(), Any, E2E tests for the sidebar Brain's tool-use loop (2026-07-11 hardening).  Pins th (+32 more)
 
 ### Community 138 - "Community 138"
 Cohesion: 0.04
-Nodes (65): One normalised row of an HF repo tree listing., RawTreeEntry, Any, Connection, Model, Path, Row, SqliteModelRegistry — SQLite-backed model catalog (ML-1 pilot).  Drop-in replace (+57 more)
+Nodes (68): One normalised row of an HF repo tree listing., RawTreeEntry, Any, Connection, Model, Path, Row, SqliteModelRegistry — SQLite-backed model catalog (ML-1 pilot).  Drop-in replace (+60 more)
 
 ### Community 139 - "Community 139"
 Cohesion: 0.05
-Nodes (75): useBackends(), useServiceRepair(), APPLY_PLAN_KEY, ApplyPlanEntry, ApplyPlanRegistry, Hal0Settings, MigrationOutcome, MigrationPlan (+67 more)
+Nodes (83): useBackends(), CapabilitiesBag, CapabilityRow, useCapabilities(), useCapabilityApply(), useServiceRepair(), APPLY_PLAN_KEY, ApplyPlanEntry (+75 more)
 
 ### Community 140 - "Community 140"
-Cohesion: 0.04
-Nodes (54): LegacyResolutionFailed, Capability/path routing heuristics — dispatcher resolution Step 4.  Extracted fr, Raised when the capability/path heuristics find no slot to serve a request., _default_fetch_models(), _default_is_online(), DispatchError, Dispatcher — registry-aware request router.  The :class:`Dispatcher` reads the m, # NOTE: treated as "no binding" rather than fatal so the dispatcher (+46 more)
+Cohesion: 0.08
+Nodes (23): CachedModelsFn, FetchModelsFn, IsOnlineFn, ModelRegistry, SlotManager, Any, T, Request coalescing / single-flight for cold-cache prefetch.  When multiple concu (+15 more)
 
 ### Community 141 - "Community 141"
 Cohesion: 0.04
@@ -1874,19 +1865,19 @@ Nodes (46): _activity_rpm(), _annotation_hint(), _args_signature(), _client_disp
 
 ### Community 143 - "Community 143"
 Cohesion: 0.07
-Nodes (41): _checksum(), embed_references(), export_envelope(), import_stack(), ModelResolution, parse_envelope(), Any, ModelRegistry (+33 more)
+Nodes (38): _checksum(), export_envelope(), import_stack(), ModelResolution, parse_envelope(), Any, ModelRegistry, Path (+30 more)
 
 ### Community 144 - "Community 144"
-Cohesion: 0.05
-Nodes (58): _empty(), GPUMemorySample, _max_pool(), _nvidia_query_mb(), _parse_pct(), Path, GPU memory view — one typed sample owning the live GPU memory surface.  Issue #7, Take a point-in-time GPU memory + utilization sample.      With no arguments, de (+50 more)
+Cohesion: 0.09
+Nodes (44): _empty(), GPUMemorySample, _max_pool(), _nvidia_query_mb(), _parse_pct(), Path, GPU memory view — one typed sample owning the live GPU memory surface.  Issue #7, Take a point-in-time GPU memory + utilization sample.      With no arguments, de (+36 more)
 
 ### Community 145 - "Community 145"
 Cohesion: 0.15
 Nodes (15): _agg(), FakeSlotManager, FakeUpstreams, no_mem(), MonkeyPatch, SimpleNamespace, Slot, Unit tests for hal0.slot_view — SlotViewAggregator + per-concern functions.  Iss (+7 more)
 
 ### Community 146 - "Community 146"
-Cohesion: 0.09
-Nodes (36): BENCH_OPTIONS, Benchmarks(), BenchOption, CAP_ALIAS, CAP_COLOR, CAP_SVG, CellRow, cellTd (+28 more)
+Cohesion: 0.08
+Nodes (37): BENCH_OPTIONS, Benchmarks(), BenchOption, CAP_ALIAS, CAP_COLOR, CAP_SVG, CellRow, cellTd (+29 more)
 
 ### Community 147 - "Community 147"
 Cohesion: 0.04
@@ -1906,7 +1897,7 @@ Nodes (42): append_eval(), _browser_combine_answer(), _cipher_answer(), _collect
 
 ### Community 151 - "Community 151"
 Cohesion: 0.06
-Nodes (16): AgentAuthConfig, AgentMCPConfig, AgentMetadataConfig, MCPServerConfig, ``[mcp.servers.<name>.auth]`` block.      Indirection via env var keeps tokens o, One ``[mcp.servers.<name>]`` entry in an agent TOML.      Server-axis default-de, External (non-builtin) servers must declare a URL., ``[agent]`` block — name + display + filesystem sandbox root. (+8 more)
+Nodes (18): AgentAuthConfig, AgentMCPConfig, AgentMetadataConfig, MCPServerConfig, ``[mcp.servers.<name>.auth]`` block.      Indirection via env var keeps tokens o, One ``[mcp.servers.<name>]`` entry in an agent TOML.      Server-axis default-de, External (non-builtin) servers must declare a URL., ``[agent]`` block — name + display + filesystem sandbox root. (+10 more)
 
 ### Community 152 - "Community 152"
 Cohesion: 0.05
@@ -1921,16 +1912,16 @@ Cohesion: 0.08
 Nodes (12): hal0-memory — Hermes ``MemoryProvider`` plugin (canonical, shipped source).  Imp, Plugin entry point — register the provider with the loader., register(), Hal0MemoryProvider, _hindsight_config_path(), MemoryProvider, Any, Hal0MemoryClient (+4 more)
 
 ### Community 155 - "Community 155"
-Cohesion: 0.08
-Nodes (13): hal0-memory — Hermes ``MemoryProvider`` plugin (canonical, shipped source).  Imp, Plugin entry point — register the provider with the loader., register(), Hal0MemoryProvider, _hindsight_config_path(), MemoryProvider, Any, Hal0MemoryClient (+5 more)
+Cohesion: 0.10
+Nodes (11): hal0-memory — Hermes ``MemoryProvider`` plugin (canonical, shipped source).  Imp, Plugin entry point — register the provider with the loader., register(), Hal0MemoryProvider, _hindsight_config_path(), Any, Hal0MemoryClient, Resolve ``<hermes_home>/hindsight/config.json`` (upstream layout).      ``hermes (+3 more)
 
 ### Community 156 - "Community 156"
-Cohesion: 0.05
-Nodes (67): _background_revalidate(), _cached_snapshot(), _clear_in_flight(), get_hardware(), _gpu_sample(), _local_image_repos(), _local_live_stats(), models_health_endpoint() (+59 more)
+Cohesion: 0.07
+Nodes (54): _backend_state(), _background_revalidate(), _cached_snapshot(), _clear_in_flight(), get_hardware(), _gpu_sample(), _image_repo(), _local_image_repos() (+46 more)
 
 ### Community 157 - "Community 157"
-Cohesion: 0.10
-Nodes (42): Resolve every llama-server launch scalar for a slot+model+profile.      SINGLE S, _resolve_llama_scalars(), _FakeProfile, Golden path #5 (pull→assign→infer) — launch-time profile-read invariant.  spec-f, FLAGS-own: even handed the (now-inert) profile/slot flag params, the argv     bu, spec §8: assert the profile flag resolver is NOT called on the launch     path —, Minimal stand-in for a resolved profile (image/device axis only)., test_launch_builder_emits_no_profile_or_slot_flag_segment() (+34 more)
+Cohesion: 0.08
+Nodes (48): family_flags(), model_family(), Best-effort model family, preferring the registry's ``architecture``.      §7.1a, The :data:`FAMILY_DEFAULTS` flag string for the model's family, else ''., Resolve every llama-server launch scalar for a slot+model+profile.      SINGLE S, _resolve_llama_scalars(), _FakeProfile, Golden path #5 (pull→assign→infer) — launch-time profile-read invariant.  spec-f (+40 more)
 
 ### Community 158 - "Community 158"
 Cohesion: 0.06
@@ -1938,7 +1929,7 @@ Nodes (49): apply_setup(), _build_slot_cfg(), _clamp_context_size(), _colocated_
 
 ### Community 159 - "Community 159"
 Cohesion: 0.05
-Nodes (51): _agent_of(), bank_to_namespace(), Hal0Reranker, HindsightProvider, _http_status(), namespace_to_bank(), _now(), Any (+43 more)
+Nodes (38): _agent_of(), bank_to_namespace(), HindsightProvider, _http_status(), namespace_to_bank(), _now(), Any, Exception (+30 more)
 
 ### Community 160 - "Community 160"
 Cohesion: 0.06
@@ -1949,16 +1940,16 @@ Cohesion: 0.06
 Nodes (53): _CtxToken, _make_request(), Any, Request, Regression test for issue #413 — MCP ``--private`` namespace promotion.  The bug, ``private_resolver`` honours X-hal0-Private off the live request.      Fails on, A Bearer token on the live request yields the raw bearer (for auth)     plus a H, End-to-end: the dispatcher wired with the production resolvers honors     ``X-ha (+45 more)
 
 ### Community 162 - "Community 162"
-Cohesion: 0.12
-Nodes (14): Hal0MemoryClient, Hal0MemoryClientError, Any, Client, Thin synchronous REST client for the hal0-memory REST surface.  Design notes: (1, POST /api/memory/add. ``private=True`` → hermes-private, else shared., POST /api/memory/search — semantic retrieval (union of both banks)., POST /api/memory/recall — token-budgeted consolidated recall (union). (+6 more)
+Cohesion: 0.09
+Nodes (16): Hal0MemoryClient, Hal0MemoryClientError, Any, Client, Thin synchronous REST client for the hal0-memory REST surface.  Design notes: (1, POST /api/memory/add. ``private=True`` → hermes-private, else shared., POST /api/memory/search — semantic retrieval (union of both banks)., POST /api/memory/recall — token-budgeted consolidated recall (union). (+8 more)
 
 ### Community 163 - "Community 163"
 Cohesion: 0.10
 Nodes (29): _dev_mode(), _fetch_slot_drift(), _interactive(), _poll_job(), _print_check(), _print_drift_banner(), Context, Path (+21 more)
 
 ### Community 164 - "Community 164"
-Cohesion: 0.07
-Nodes (43): check_hermes_ownership(), check_tree_group_share(), _dangling_registry_entries(), _deepest_mountpoint(), detect_editable_root(), _ghcr_anon_token(), _ghcr_manifest_digest(), has_ownership_drift() (+35 more)
+Cohesion: 0.05
+Nodes (66): NextStep, check_hermes_ownership(), check_tree_group_share(), _dangling_registry_entries(), _deepest_mountpoint(), detect_editable_root(), flm_mount_guard(), flm_store_divergence() (+58 more)
 
 ### Community 165 - "Community 165"
 Cohesion: 0.07
@@ -1969,12 +1960,12 @@ Cohesion: 0.09
 Nodes (42): apply_stack(), _config_of(), _create_missing_slots(), create_stack(), delete_stack(), _diff_rows(), export_stack(), get_stack() (+34 more)
 
 ### Community 167 - "Community 167"
-Cohesion: 0.04
-Nodes (51): list_slot_layout(), load_slot_config(), Load and validate /etc/hal0/slots/<slot_name>.toml.      The on-disk shape (per, Atomically write a slot config TOML.      The pydantic SlotConfig is flat; we re, Classify every slots/*.toml stem as ``"id"`` or ``"name"``.      The bilingual e, save_slot_config(), ImageGenConfig, [image] table in a slot TOML — persisted image-gen settings (#599).      Carried (+43 more)
+Cohesion: 0.05
+Nodes (43): load_slot_config(), Load and validate /etc/hal0/slots/<slot_name>.toml.      The on-disk shape (per, Atomically write a slot config TOML.      The pydantic SlotConfig is flat; we re, Inverse of _flatten_slot_toml — produce the on-disk shape.      Writes only ``de, save_slot_config(), _unflatten_slot_toml(), ImageGenConfig, [image] table in a slot TOML — persisted image-gen settings (#599).      Carried (+35 more)
 
 ### Community 168 - "Community 168"
-Cohesion: 0.18
-Nodes (9): load_metrics_settings(), MetricsSettings, Metrics configuration -- a standalone reader, not part of ``Hal0Config``.  ``con, Operator-tunable knobs for the OBS-1 metrics core.      Every field has a shippe, Best-effort read of ``[metrics]`` from hal0.toml. Never raises., Resolve :class:`MetricsSettings` from TOML (best-effort) + env overrides.      P, _read_toml_metrics_table(), Path (+1 more)
+Cohesion: 0.13
+Nodes (14): _model_info(), Any, Test shim: render a plan to Quadlet ``.container`` text (was ``_render_unit_from, Loopback publish is derived from port + empty network_mode by the         render, Absent a publish_host override the renderer keeps the safe default., [slots].publish_host=0.0.0.0 → the slot publishes on all interfaces., network_mode must be empty (not 'host') so loopback publish is used., #863: drift's rendered side must match the real load-path derive. (+6 more)
 
 ### Community 169 - "Community 169"
 Cohesion: 0.09
@@ -2005,32 +1996,32 @@ Cohesion: 0.06
 Nodes (18): installDefaultMocks(), BOARD_ASSIGNEES, BOARD_BOARDS, BOARD_CONFIG, BOARD_ORCH_DEFAULT, BOARD_PROFILES, BOARD_STATS, BOARD_TASKS (+10 more)
 
 ### Community 176 - "Community 176"
-Cohesion: 0.03
-Nodes (42): ActivityConfig, AgentConfig, DispatcherConfig, MetaConfig, NpuConfig, Pydantic v2 schema models for hal0 configuration.  All TOML files under /etc/hal, # NOTE: ``map_backend_to_device`` now lives in ``hal0.model_meta`` (imported, One (slot, child) capability selection carried by a stack slot entry.      Mirro (+34 more)
+Cohesion: 0.04
+Nodes (35): ActivityConfig, AgentConfig, DispatcherConfig, MetaConfig, ProviderEntry, Pydantic v2 schema models for hal0 configuration.  All TOML files under /etc/hal, # NOTE: ``map_backend_to_device`` now lives in ``hal0.model_meta`` (imported, One (slot, child) capability selection carried by a stack slot entry.      Mirro (+27 more)
 
 ### Community 177 - "Community 177"
-Cohesion: 0.10
-Nodes (29): _fetch_hal0_composite_models(), _hal0_model_cache_clear(), Punch the composite catalogue's cached model list.      Exposed so slot-swap / s, Aggregate every ready chat-capable slot's model id into one catalogue.      Dire, _FakeSlotManager, Any, R4 H2 regression + P2-composite rebuild — direct-read model catalogue.  The bug:, If ``hal0`` is already registered (operator override via     upstreams.toml) pri (+21 more)
+Cohesion: 0.11
+Nodes (24): _FakeSlotManager, Any, R4 H2 regression + P2-composite rebuild — direct-read model catalogue.  The bug:, If ``hal0`` is already registered (operator override via     upstreams.toml) pri, ``_fetch_hal0_composite_models`` returns the deduped union of     every chat-cap, Within the TTL window, ``_fetch_hal0_composite_models`` returns     the cached l, No catastrophic failure when ``iter_configs`` returns nothing     (cold start be, The cache-punch helper is exposed so slot swap/restart paths can     invalidate (+16 more)
 
 ### Community 178 - "Community 178"
-Cohesion: 0.11
-Nodes (27): _kind(), _docker_present(), Extension, get_extension(), install_extension(), install_openwebui(), list_extensions(), _podman_usable() (+19 more)
+Cohesion: 0.08
+Nodes (36): _kind(), _docker_present(), Extension, get_extension(), install_extension(), install_openwebui(), list_extensions(), _podman_usable() (+28 more)
 
 ### Community 179 - "Community 179"
-Cohesion: 0.14
-Nodes (11): MonkeyPatch, Tests for ``hal0 memory provider {list,status,set}``, the --from/--to Hindsight<, Fake ``hal0.toml [honcho]`` config so migrate/sync-graph never touch disk., stub_api(), stub_honcho_cfg(), test_honcho_render_env_missing_module_dies(), test_honcho_render_env_reports_status(), test_migrate_defaults_engine_dry_run_false() (+3 more)
+Cohesion: 0.15
+Nodes (9): MonkeyPatch, Tests for ``hal0 memory provider {list,status,set}``, the --from/--to Hindsight<, stub_api(), test_honcho_render_env_missing_module_dies(), test_honcho_render_env_reports_status(), test_migrate_defaults_engine_dry_run_false(), test_migrate_dry_run_hindsight_to_honcho_invokes_engine(), test_migrate_honcho_to_hindsight_passes_since() (+1 more)
 
 ### Community 180 - "Community 180"
-Cohesion: 0.08
-Nodes (36): assert_under_store(), by_id_dir(), entry_pointer(), file_dest(), finalize_perms(), _fstype_from_proc_mounts(), is_nfs_path(), model_dir() (+28 more)
+Cohesion: 0.06
+Nodes (50): assert_under_store(), by_id_dir(), entry_pointer(), file_dest(), finalize_perms(), _fstype_from_proc_mounts(), is_nfs_path(), model_dir() (+42 more)
 
 ### Community 181 - "Community 181"
-Cohesion: 0.11
-Nodes (23): model_import_backup(), Path, Restore ``registry.toml`` from a v0.1.x disaster-recovery backup.      v0.1.x →, _import_into(), import_toml_to_sqlite(), ImportReport, _load_toml_models(), Connection (+15 more)
+Cohesion: 0.12
+Nodes (20): _import_into(), import_toml_to_sqlite(), ImportReport, _load_toml_models(), Connection, Model, Path, One-shot, idempotent import: ``registry.toml`` → the SQLite ``model`` table.  Tw (+12 more)
 
 ### Community 182 - "Community 182"
 Cohesion: 0.06
-Nodes (32): HealthCheck, Provider abstract base class.  A Provider encapsulates the logic for a single in, A podman ``--health-*`` override for a slot container.      The toolbox images b, Return the ``--health-*`` podman-run flags in a stable order., Return the Podman Quadlet ``Health*=`` keys in a stable order.          The decl, Typed launch plan for a container-per-slot Quadlet unit.      Carries everything, # NOTE: unit rendering is owned by the single Quadlet adapter, RuntimeLaunchPlan (+24 more)
+Nodes (36): HealthCheck, Mount, Provider abstract base class.  A Provider encapsulates the logic for a single in, Normalise a ``Mount`` or a legacy ``(src, dst)`` tuple to ``Mount``.          A, A podman ``--health-*`` override for a slot container.      The toolbox images b, Return the ``--health-*`` podman-run flags in a stable order., Return the Podman Quadlet ``Health*=`` keys in a stable order.          The decl, Typed launch plan for a container-per-slot Quadlet unit.      Carries everything (+28 more)
 
 ### Community 183 - "Community 183"
 Cohesion: 0.07
@@ -2049,8 +2040,8 @@ Cohesion: 0.17
 Nodes (25): _model_info(), Any, FLM container_spec: [npu] toggles + model-cache default (Phase A)., Isolated via ``tmp_hal0_home`` (tests/conftest.py): without it this     reads th, [models].flm_store must reach the container mount without the env var.      Regr, Spec build must mkdir the bind source so podman never sees ENOENT., [model].context_size (SlotConfig shape) must reach --ctx-len.      Regression: b, [npu].chat=false must stop the container serving chat.      Regression: containe (+17 more)
 
 ### Community 187 - "Community 187"
-Cohesion: 0.12
-Nodes (35): activate(), build_prompt_addendum(), get_active(), hermes_reload(), list_personas(), load_persona(), Persona, PersonaApproval (+27 more)
+Cohesion: 0.10
+Nodes (40): activate(), build_prompt_addendum(), get_active(), hermes_reload(), list_personas(), load_persona(), Persona, PersonaApproval (+32 more)
 
 ### Community 188 - "Community 188"
 Cohesion: 0.08
@@ -2062,19 +2053,19 @@ Nodes (40): _api_get_or_unavailable(), build_bundle(), _default_out(), doctor_bu
 
 ### Community 190 - "Community 190"
 Cohesion: 0.09
-Nodes (36): build_mtp_flag_bundle(), Bench-tuned MTP draft-speculation flag bundle, with the draft device     derived, model_is_mtp_eligible(), True when a model should speculate with MTP / NextN draft heads.      §7.1a / ML, _effective_mtp(), Resolve whether MTP speculative decoding is on for this slot launch.      spec-h, _mtp_model(), _plain_model() (+28 more)
+Nodes (37): build_mtp_flag_bundle(), Bench-tuned MTP draft-speculation flag bundle, with the draft device     derived, model_is_mtp_eligible(), True when a model should speculate with MTP / NextN draft heads.      §7.1a / ML, _effective_mtp(), Resolve whether MTP speculative decoding is on for this slot launch.      spec-h, _mtp_model(), _plain_model() (+29 more)
 
 ### Community 191 - "Community 191"
 Cohesion: 0.16
 Nodes (8): MemoryConfig, [memory] section of hal0.toml.      Container for the per-subsystem memory tunab, TestMemoryAgentProviders, [memory] engine selector field (brain-redesign P1)., test_engine_accepts_known_engines(), test_engine_defaults_to_hindsight(), test_engine_rejects_unknown(), test_config_default_unified_bank_true()
 
 ### Community 192 - "Community 192"
-Cohesion: 0.07
-Nodes (25): Build the GPU/llama-server :class:`RuntimeLaunchPlan` for a slot.          This, Return the freshly-rendered runtime command for drift checks.          This is t, _device_node_for_group(), gpu_visibility_env(), is_nvidia_gpu_device(), nvidia_cdi_devices(), _probed_gpu_group_gids(), Shared helpers for GPU device + group exposure to provider containers.  Lives he (+17 more)
+Cohesion: 0.08
+Nodes (23): _device_node_for_group(), gpu_visibility_env(), is_nvidia_gpu_device(), nvidia_cdi_devices(), _probed_gpu_group_gids(), Shared helpers for GPU device + group exposure to provider containers.  Lives he, Return numeric GIDs for the host's GPU access groups (render, video).      Fallb, True when a slot's declared device/profile selects the NVIDIA path.      Decided (+15 more)
 
 ### Community 193 - "Community 193"
 Cohesion: 0.08
-Nodes (29): base_matches(), base_version(), channel_for_tag(), nightlies_to_prune(), nightly_tag(), nightly_version(), Release-channel helpers shared by the release + nightly workflows.  Pure functio, Return the release channel implied by a git tag.      Delegates to :class:`hal0. (+21 more)
+Nodes (31): base_matches(), base_version(), channel_for_tag(), nightlies_to_prune(), nightly_tag(), nightly_version(), Release-channel helpers shared by the release + nightly workflows.  Pure functio, Return the release channel implied by a git tag.      Delegates to :class:`hal0. (+23 more)
 
 ### Community 194 - "Community 194"
 Cohesion: 0.22
@@ -2089,12 +2080,12 @@ Cohesion: 0.09
 Nodes (40): container_app(), container_client(), _fake_profile_catalog(), FastAPI, Path, TestClient, Tests for container image-pull progress (Issue #659).  Verifies:   - ``image_sta, image_status=missing when image_present() returns False. (+32 more)
 
 ### Community 197 - "Community 197"
-Cohesion: 0.05
-Nodes (56): Push a record onto every active SSE subscriber queue., Async generator yielding every slot state transition as it happens.          Use, is_transition_legal(), Any, Path, Slot lifecycle state machine.  Defines the canonical SlotState enum used by Slot, Return True if the transition from_state → to_state is allowed., Slot exists but is not in READY/SERVING/IDLE state. (+48 more)
+Cohesion: 0.16
+Nodes (16): _manager(), SlotManager, Tests for SlotManager.state() and is_ready_for_dispatch() — issue #696.  Locked, Unknown slot → OFFLINE → not ready., Fresh SlotManager filesystem-isolated under tmp_hal0_home., Write a minimal state.json for *slot_name* under tmp_hal0_home.      HAL0_HOME l, state() returns from in-memory cache when present., state() reads state.json when the slot is not in the in-memory cache. (+8 more)
 
 ### Community 198 - "Community 198"
-Cohesion: 0.06
-Nodes (28): mock_slot_manager(), Path, Tests for the slot back-compat alias system (issue #654 / #633, ADR-0023).  ADR-, _resolve_alias("agent-hermes") == "agent" and the agent TOML exists., list() enumerates TOMLs from disk — no alias appears in the result., iter_configs() is driven by disk TOMLs — aliases never appear., No alias map; hal0/primary is not a known virtual., hal0/chat is no longer a canonical virtual. It only resolves at all if a     lef (+20 more)
+Cohesion: 0.05
+Nodes (33): mock_slot_manager(), Path, Tests for the slot back-compat alias system (issue #654 / #633, ADR-0023).  ADR-, _resolve_alias("agent-hermes") == "agent" and the agent TOML exists., list() enumerates TOMLs from disk — no alias appears in the result., iter_configs() is driven by disk TOMLs — aliases never appear., No alias map; hal0/primary is not a known virtual., hal0/chat is no longer a canonical virtual. It only resolves at all if a     lef (+25 more)
 
 ### Community 199 - "Community 199"
 Cohesion: 0.05
@@ -2113,8 +2104,8 @@ Cohesion: 0.14
 Nodes (18): cancel_job(), fetch_model(), Start a background fetch for *variant* and return its job_id immediately.      P, Terminate the in-flight step.  Returns True if cancelled, False otherwise., _make_proc(), _PopenRecorder, #872: fetch_model TDD — recording shim captures every Popen call argv.  Replaces, fetch_model must return BEFORE a slow step finishes; status=='running' then. (+10 more)
 
 ### Community 203 - "Community 203"
-Cohesion: 0.10
-Nodes (16): _FakeRegistry, Any, LogCaptureFixture, MonkeyPatch, Table-driven tests for :mod:`hal0.model_meta` (issue #695).  One parametrized ta, config.schema's public names are thin re-exports of model_meta., hal0.profiles' Literals mirror the canonical tuples (a Literal can't     be buil, Direction 1: unknown legacy backend → warn + safe 'cpu' default. (+8 more)
+Cohesion: 0.06
+Nodes (30): capability_from_filename(), classify(), DeviceMeta, labels_of(), model_capabilities_of(), Any, model_meta — the one home for model classification + device→backend resolution., Return the primary modality bucket for a model.      Reads the model's ``capabil (+22 more)
 
 ### Community 204 - "Community 204"
 Cohesion: 0.10
@@ -2126,7 +2117,7 @@ Nodes (20): Connection, Path, Row, Slot identity store — the id ⇄ name bridg
 
 ### Community 206 - "Community 206"
 Cohesion: 0.06
-Nodes (50): apply_hermes_config_cli(), apply_kanban_db_init_cli(), _coerce(), default_fake_slots(), install_io(), Any, Shared test fakes for the hermes_provision config-set redesign.  ``apply_hermes_, Redirect every host path constant under ``tmp_path``; return (home, venv). (+42 more)
+Nodes (50): apply_hermes_config_cli(), apply_kanban_db_init_cli(), _coerce(), _Completed, default_fake_slots(), install_io(), Any, Shared test fakes for the hermes_provision config-set redesign.  ``apply_hermes_ (+42 more)
 
 ### Community 207 - "Community 207"
 Cohesion: 0.10
@@ -2137,8 +2128,8 @@ Cohesion: 0.07
 Nodes (38): client(), _get_cookie_value(), isolate_secret(), MonkeyPatch, Path, TestClient, Auth tests for the chat-proxy WS surface.  DA-sec-ops MUST-FIX #2: the WS routes, An empty override falls back to the default allowlist (dev convenience). (+30 more)
 
 ### Community 209 - "Community 209"
-Cohesion: 0.09
-Nodes (38): BaseModel, The supplied credential was rejected., Unauthorized, PersonaApprovalUpdate, Partial ``[persona.approval]`` patch. Omitted fields are unchanged., _client_ip(), exposure(), ExposureAllowlistEntry (+30 more)
+Cohesion: 0.10
+Nodes (34): BaseModel, The supplied credential was rejected., Unauthorized, PersonaApprovalUpdate, Partial ``[persona.approval]`` patch. Omitted fields are unchanged., _client_ip(), exposure(), ExposureAllowlistEntry (+26 more)
 
 ### Community 210 - "Community 210"
 Cohesion: 0.08
@@ -2146,11 +2137,11 @@ Nodes (25): FleetMetrics, Pure logic for per-slot TTFT samples + fleet-wide aggr
 
 ### Community 211 - "Community 211"
 Cohesion: 0.07
-Nodes (38): RuntimeError, list_slots(), Return all configured slot *stems* of /etc/hal0/slots/*.toml, sorted.      NAME-, apply_fold_plan(), _canon(), _chat_template_or_none(), collect_inputs(), compute_folded_tune() (+30 more)
+Nodes (42): RuntimeError, list_slots(), Return all configured slot *stems* of /etc/hal0/slots/*.toml, sorted.      NAME-, apply_fold_plan(), _canon(), _chat_template_or_none(), collect_inputs(), compute_folded_tune() (+34 more)
 
 ### Community 212 - "Community 212"
-Cohesion: 0.11
-Nodes (31): plan_slot_flags_fold(), Compute the fold plan without touching disk or the registry.      Args:, _FakeRegistry, Tests for the FLAGS-own one-shot migrator (spec-flags-ownership §5).  Covers: so, Two slots sharing one model with conflicting templates → refuse, don't     silen, One slot with chat_template='auto' and one absent both normalize to None     → c, Re-running with the model already carrying the folded template → no-op., Multiple slots that fold to the IDENTICAL tune auto-fold (not divergent). (+23 more)
+Cohesion: 0.10
+Nodes (33): plan_slot_flags_fold(), Compute the fold plan without touching disk or the registry.      Args:, _FakeRegistry, Tests for the FLAGS-own one-shot migrator (spec-flags-ownership §5).  Covers: so, Slot override > existing model default (the old resolve precedence,     now mate, Two slots sharing one model with conflicting templates → refuse, don't     silen, One slot with chat_template='auto' and one absent both normalize to None     → c, Re-running with the model already carrying the folded template → no-op. (+25 more)
 
 ### Community 213 - "Community 213"
 Cohesion: 0.10
@@ -2174,7 +2165,7 @@ Nodes (24): Path, _apply_one(), audit_rows(), _child_mode_for(), commit(), _expa
 
 ### Community 218 - "Community 218"
 Cohesion: 0.04
-Nodes (23): Fixtures, HONCHO_STATS_ENABLED, HONCHO_SYNC_DEFAULT, MEMORY_PROVIDER_DEFAULT, MemoryProviderMockOptions, MockState, test, LIVE_BOARD (+15 more)
+Nodes (24): Fixtures, HONCHO_STATS_ENABLED, HONCHO_SYNC_DEFAULT, MEMORY_PROVIDER_DEFAULT, MemoryProviderMockOptions, MockState, test, HERMES_ACTORS (+16 more)
 
 ### Community 219 - "Community 219"
 Cohesion: 0.08
@@ -2189,8 +2180,8 @@ Cohesion: 0.09
 Nodes (35): is_loopback_host(), Request, Loopback-only guard helpers for the OpenRouter OAuth callback.  The callback is, Return ``True`` only for loopback client hosts.      Accepts the IPv4 loopback (, Raise ``HTTPException(403)`` for non-loopback callers.      Designed to be calle, require_loopback(), callback_client(), gated_app() (+27 more)
 
 ### Community 222 - "Community 222"
-Cohesion: 0.13
-Nodes (16): _deep_copy_dict(), latest_version(), MigrationError, Any, hal0.config.migrations — versioned config migration transforms.  # TIER3: config, # NOTE: downgrade migrations are explicitly unsupported in v1., Read ``meta.schema_version`` from a raw config dict, defaulting to 1., Cheap deepcopy for the TOML-shaped dicts we deal with.      TOML decodes to str (+8 more)
+Cohesion: 0.08
+Nodes (27): _deep_copy_dict(), latest_version(), MigrationError, Any, hal0.config.migrations — versioned config migration transforms.  # TIER3: config, # NOTE: downgrade migrations are explicitly unsupported in v1., Read ``meta.schema_version`` from a raw config dict, defaulting to 1., Cheap deepcopy for the TOML-shaped dicts we deal with.      TOML decodes to str (+19 more)
 
 ### Community 223 - "Community 223"
 Cohesion: 0.14
@@ -2233,20 +2224,20 @@ Cohesion: 0.10
 Nodes (35): _admin_key(), AuthEnforcementMiddleware, AuthPrincipal, _client_key(), _config_require_auth(), _consteq(), _cookie_value(), _decide() (+27 more)
 
 ### Community 233 - "Community 233"
-Cohesion: 0.12
-Nodes (33): MemoryUninstallOutcome, Structured result from ``_uninstall_hermes_memory``.      Attributes     -------, fake_urlopen(), MonkeyPatch, Tests for ``_uninstall_hermes_memory`` outcome reporting (#350).  Pre-fix the he, Pre-search has rows → delete OK → verify-search empty → outcome=deleted., The 2026-05-26 incident: delete returns OK but rows survive., Search raises URLError → outcome=unreachable, leftover_count=None. (+25 more)
+Cohesion: 0.09
+Nodes (36): MemoryUninstallOutcome, Structured result from ``_uninstall_hermes_memory``.      Attributes     -------, fake_urlopen(), _FakeResponse, Any, MonkeyPatch, Tests for ``_uninstall_hermes_memory`` outcome reporting (#350).  Pre-fix the he, Pre-search has rows → delete OK → verify-search empty → outcome=deleted. (+28 more)
 
 ### Community 234 - "Community 234"
 Cohesion: 0.12
 Nodes (30): HttpFetcher, IPv4Address, IPv6Address, _coerce_int(), _default_fetcher(), _enforce_safe_url(), _ip_is_safe(), _is_safe_url() (+22 more)
 
 ### Community 235 - "Community 235"
-Cohesion: 0.15
-Nodes (13): CapacityProbeError, CapacitySnapshot, Point-in-time view of system and slot capacity.      All memory values are in me, Return True if the requested memory would fit within current headroom., Read current system state and return a fresh snapshot.          Args:, /proc/meminfo unreadable, or DRM sysfs not enumerable., Return (total_mib, available_mib) from /proc/meminfo.      Raises CapacityProbeE, _read_meminfo() (+5 more)
+Cohesion: 0.11
+Nodes (26): inspect_app(), inspect_client(), FastAPI, TestClient, Tests for the /api/models surface added in the v3 wireup.  Covers two pieces:, GET /api/models/{id} carries the same ``ns`` derivation., Local registry rows expose ``type`` in the DISPATCHER vocabulary     (llm/embedd, Either ``hf_repo`` or ``hf_url`` must be present + non-empty. (+18 more)
 
 ### Community 236 - "Community 236"
-Cohesion: 0.10
-Nodes (33): delete_pve_config(), detect_proxmox_host(), _fetch_pve_resources(), _has_pve_kernel(), invalidate_pve_cache(), _is_lxc_init(), _load_pve_config(), _lxc_via_cgroup_v1() (+25 more)
+Cohesion: 0.09
+Nodes (35): delete_pve_config(), detect_proxmox_host(), _fetch_pve_resources(), _has_pve_kernel(), invalidate_pve_cache(), _is_lxc_init(), _load_pve_config(), _lxc_via_cgroup_v1() (+27 more)
 
 ### Community 237 - "Community 237"
 Cohesion: 0.09
@@ -2261,8 +2252,8 @@ Cohesion: 0.09
 Nodes (33): evaluate_model_update(), fetch_remote_lfs_shas(), Any, AsyncClient, HF update detection for pulled models.  A registry row pulled from HuggingFace r, Pure per-model update verdict against pre-fetched repo trees.      Returns ``Non, Fetch the current LFS sha256 per file for each repo.      Returns ``{repo: {path, _model() (+25 more)
 
 ### Community 240 - "Community 240"
-Cohesion: 0.09
-Nodes (35): merge_flags(), Combine model-default and slot-override CLI flag strings (last-wins).      Args:, LogCaptureFixture, Unit tests for hal0.slots.argv.merge_flags.  (The ``hal0.slots.flag_merge`` modu, Malformed input on only the model side still warns + returns concat., A quoted value (with internal spaces) keeps its grouping in the output.      Not, A bare ``--metrics`` (no value) merges cleanly., Slot's bare --threads (no value) wins; model's value pair disappears. (+27 more)
+Cohesion: 0.06
+Nodes (45): error_event(), event(), new_id(), Any, Realtime event vocabulary + typed error/event builders (spec §4b).  The wire is, Short, stable-prefixed id for events/items/responses (``evt_``, ``resp_``…)., Build a server->client event dict with a fresh ``event_id`` + ``type``., Build a Realtime ``error`` event (OpenAI shape: ``{type:error, error:{…}}``). (+37 more)
 
 ### Community 241 - "Community 241"
 Cohesion: 0.15
@@ -2274,7 +2265,7 @@ Nodes (35): isolated_client(), _no_chat_template_seed(), MonkeyPatch, Path, Test
 
 ### Community 243 - "Community 243"
 Cohesion: 0.10
-Nodes (36): app(), app_with_slot(), client(), FastAPI, Hal0Error, MonkeyPatch, TestClient, Tests for the typed 4xx ``Hal0Error`` subclasses and the ``RequestValidationErro (+28 more)
+Nodes (37): app(), app_with_slot(), client(), _Color, FastAPI, Hal0Error, MonkeyPatch, TestClient (+29 more)
 
 ### Community 244 - "Community 244"
 Cohesion: 0.07
@@ -2289,8 +2280,8 @@ Cohesion: 0.06
 Nodes (17): gather_block(), Assert install.sh gathers + persists HF_TOKEN to a secrets/ EnvironmentFile.  WS, Root:root 0600 secrets/ EnvironmentFile — never api.env., hal0-api.service must load the secrets file as an EnvironmentFile., api.env keeps its (commented, non-secret) HF_TOKEN placeholder only., No NEW shellcheck findings from this change (baseline stays flat)., `bash -n` must pass — the DoD's cheapest, fastest correctness gate., The HF_TOKEN gather+persist block, isolated from the rest of the file.      Scop (+9 more)
 
 ### Community 247 - "Community 247"
-Cohesion: 0.06
-Nodes (44): Kind, ActionRecorder, audit_action(), AuditStore, _dump(), _now_iso(), Any, Connection (+36 more)
+Cohesion: 0.10
+Nodes (28): audit_action(), AuditStore, Connection, Path, Row, Durable SQLite-backed audit trail. The single source of truth surfaced     by ``, Create the table + indexes if absent. Idempotent; first-boot safe., Return rows newest-first matching the filters. ``action`` accepts a         glob (+20 more)
 
 ### Community 248 - "Community 248"
 Cohesion: 0.17
@@ -2302,27 +2293,27 @@ Nodes (30): Translate a chat-slot ALIAS in ``body["model"]`` to its model id.   
 
 ### Community 250 - "Community 250"
 Cohesion: 0.07
-Nodes (43): build_auto_selections(), _confirm(), _existing_slot_names(), _prompt(), Console, `hal0 setup` — first-run configuration TUI (spec §6).  Hybrid execution: in-proc, Apply the auto-selected config. Routes hybrid (in-process at install     time wh, Text prompt: `rich.prompt.Prompt` on a real terminal, `input()` (or the     defa (+35 more)
+Nodes (45): build_auto_selections(), _build_offline_deps(), _confirm(), _existing_slot_names(), _prompt(), Console, `hal0 setup` — first-run configuration TUI (spec §6).  Hybrid execution: in-proc, Apply the auto-selected config. Routes hybrid (in-process at install     time wh (+37 more)
 
 ### Community 251 - "Community 251"
 Cohesion: 0.10
-Nodes (33): _apply_slot_fold(), apply_unfold_plan(), collect_inputs(), DeployWindowRequired, _ngl_set(), _null_model_hw_columns(), plan_unfold(), ProfileAction (+25 more)
+Nodes (32): _apply_slot_fold(), apply_unfold_plan(), collect_inputs(), DeployWindowRequired, _ngl_set(), _null_model_hw_columns(), plan_unfold(), ProfileAction (+24 more)
 
 ### Community 252 - "Community 252"
-Cohesion: 0.10
-Nodes (15): Path, StacksCatalog — read and mutate the stack catalog through one interface.  A stac, A stack plus derived fields (slug + seed flag) for API/UI consumption., Read and mutate the stack catalog through one interface., Replace the stack body wholesale (PUT semantics)., ResolvedStack, StacksCatalog, MonkeyPatch (+7 more)
+Cohesion: 0.07
+Nodes (25): load_stacks_config(), Load and validate /etc/hal0/stacks.toml.      Returns the built-in seed stacks (, Atomically write the full stack catalog to stacks.toml.      The written file is, save_stacks_config(), Parsed stacks.toml — top-level ``[stack]`` table, keyed by slug., StacksConfig, Path, StacksCatalog — read and mutate the stack catalog through one interface.  A stac (+17 more)
 
 ### Community 253 - "Community 253"
 Cohesion: 0.06
 Nodes (7): Compatibility freeze for the supported official Hermes release.  Every assertion, test_memory_loader_layout_and_registration_collector(), test_sdk_diff_pin_matches_frozen_commit(), test_sdk_diff_tracks_full_adapter_contract_surface(), _upstream_pin(), _ProviderCollector, Loader context that captures ``register_memory_provider`` calls.
 
 ### Community 254 - "Community 254"
-Cohesion: 0.09
-Nodes (34): app_with_container_slot(), client_with_container_slot(), _fake_vulkan_catalog(), FastAPI, Path, TestClient, Tests for container-slot state fields on /api/slots (Issue #656, Phase E #687)., Container slot with inactive unit returns container_status=stopped, container_he (+26 more)
+Cohesion: 0.07
+Nodes (44): app_with_container_slot(), client_with_container_slot(), _fake_vulkan_catalog(), FastAPI, Path, TestClient, Tests for container-slot state fields on /api/slots (Issue #656, Phase E #687)., Container slot with inactive unit returns container_status=stopped, container_he (+36 more)
 
 ### Community 255 - "Community 255"
-Cohesion: 0.07
-Nodes (28): BrainChatConfig, ``[brain_chat]`` — the dashboard's agent-chat steward (hal0-brain).      Guardra, No ApprovalQueue wired -> a gated admin call returns a typed error and     NOTHI, test_gated_call_fails_closed_without_queue(), _fake_request(), Any, Path, Read-only-default posture for the hal0-brain steward chat (KB-2/3 §4).  The ``[b (+20 more)
+Cohesion: 0.12
+Nodes (18): _fake_request(), Any, Path, Read-only-default posture for the hal0-brain steward chat (KB-2/3 §4).  The ``[b, A gated tool is refused by read-only BEFORE it can enqueue — the     approval qu, An unrecognised tool is NOT a read — read-only refuses it., A hermes_kanban stand-in: records every request_json call, returns {}., A Request stand-in carrying exactly what ``_dispatch_tool`` reads. (+10 more)
 
 ### Community 256 - "Community 256"
 Cohesion: 0.09
@@ -2338,7 +2329,7 @@ Nodes (31): bank_document_transfer_export(), bank_document_transfer_import(), ba
 
 ### Community 259 - "Community 259"
 Cohesion: 0.06
-Nodes (29): child_to_slot(), Resolve a (slot, child) tuple to its underlying slot name.      Raises :class:`B, BadRequest, 400 — the request was syntactically or semantically invalid.      Use this for c, 400 when a slot-config write body carries a MODEL-owned key.      ``mtp`` / ``en, reject_model_owned_slot_keys(), MonkeyPatch, Unit tests for :mod:`hal0.mcp.manifest` — #224 install-from-URL resolver. (+21 more)
+Nodes (27): BadRequest, 400 — the request was syntactically or semantically invalid.      Use this for c, 400 when a slot-config write body carries a MODEL-owned key.      ``mtp`` / ``en, reject_model_owned_slot_keys(), MonkeyPatch, Unit tests for :mod:`hal0.mcp.manifest` — #224 install-from-URL resolver., Loopback hostnames + 127.0.0.1 literals must short-circuit pre-fetch., RFC 1918 ranges (10/8, 172.16/12, 192.168/16) must reject pre-fetch. (+19 more)
 
 ### Community 260 - "Community 260"
 Cohesion: 0.08
@@ -2417,8 +2408,8 @@ Cohesion: 0.06
 Nodes (48): get_provider(), hal0.providers — Inference backend abstraction layer.  Each Provider is a statel, Return the singleton Provider for ``name``.      Raises:         KeyError: If no, LlamaServerProvider, ProviderHealthError, ProviderInferError, Any, llama.cpp HTTP-client surface — NOT a launcher.  This module used to own the lla (+40 more)
 
 ### Community 279 - "Community 279"
-Cohesion: 0.20
-Nodes (26): Direct systemd/file ops when not the hal0 service user; the     ``hal0-systemctl, SystemCtlSeam, Path, Unit tests for :mod:`hal0.system.seam` — the hal0-systemctl privileged seam adop, is-active is a read-only D-Bus query — never needs root, never seamed., A non-hal0-slot@ unit (e.g. hindsight-api.service) isn't covered by the     seam, _recorder(), test_remove_quadlet_direct_when_not_hal0_user() (+18 more)
+Cohesion: 0.15
+Nodes (31): Direct systemd/file ops when not the hal0 service user; the     ``hal0-systemctl, SystemCtlSeam, MonkeyPatch, Path, Unit tests for :mod:`hal0.system.seam` — the hal0-systemctl privileged seam adop, is-active is a read-only D-Bus query — never needs root, never seamed., A non-hal0-slot@ unit (e.g. hindsight-api.service) isn't covered by the     seam, No 'hal0' system user on this box (dev/CI/unit tests) -> never seam,     regardl (+23 more)
 
 ### Community 280 - "Community 280"
 Cohesion: 0.17
@@ -2426,19 +2417,19 @@ Nodes (26): _collect(), _fake_request(), _FakeKanban, _final(), _parse(), Any, I
 
 ### Community 281 - "Community 281"
 Cohesion: 0.08
-Nodes (12): HONCHO_STATS_DISABLED, installMemoryProviderMocks(), json(), AuthOpts, installAuth(), routeHistory(), comfyV2Empty(), comfyV2Status() (+4 more)
+Nodes (13): HONCHO_STATS_DISABLED, installMemoryProviderMocks(), json(), AuthOpts, installAuth(), LIVE_BOARD, routeHistory(), comfyV2Empty() (+5 more)
 
 ### Community 282 - "Community 282"
-Cohesion: 0.15
-Nodes (21): is_known_namespace(), MemoryNamespaceError, Namespace resolution — shared by the MCP + REST surfaces.  The MCP server (:mod:, Translate a read request into the effective dataset filter.      Mirrors the rea, Raised when namespace resolution can't be satisfied (e.g. private     requested, Spec §3 table membership: ``shared`` | ``agents`` | ``project:<id>``     | the c, Translate a write request into the effective dataset name.      Mirrors :func:`h, resolve_read_datasets() (+13 more)
+Cohesion: 0.16
+Nodes (20): is_known_namespace(), MemoryNamespaceError, Namespace resolution — shared by the MCP + REST surfaces.  The MCP server (:mod:, Translate a read request into the effective dataset filter.      Mirrors the rea, Raised when namespace resolution can't be satisfied (e.g. private     requested, Spec §3 table membership: ``shared`` | ``agents`` | ``project:<id>``     | the c, Translate a write request into the effective dataset name.      Mirrors :func:`h, resolve_read_datasets() (+12 more)
 
 ### Community 283 - "Community 283"
-Cohesion: 0.31
-Nodes (4): [server] section in a slot TOML.      Currently carries only ``extra_args`` — a, Reject non-env-var-name keys and multi-line values.          A stray newline in, ServerConfig, TestServerConfigEnv
+Cohesion: 0.09
+Nodes (15): ModelConfig, NpuConfig, [model] section in a slot TOML.      Specifies which model the slot loads by def, [npu] table in a slot TOML — FLM trio modality toggles.      Maps to ``flm serve, [server] section in a slot TOML.      Currently carries only ``extra_args`` — a, Reject non-env-var-name keys and multi-line values.          A stray newline in, ServerConfig, Dotted paths of payload keys the slot-config schema does not know.      ``SlotCo (+7 more)
 
 ### Community 284 - "Community 284"
-Cohesion: 0.14
-Nodes (21): _api_env_path(), client(), FastAPI, MonkeyPatch, Path, TestClient, Tests for the /api/providers credential write route (Phase 8 closeout).  Covers, Upstream declares auth_value_env=OPENROUTER_API_KEY; the writer     refuses to l (+13 more)
+Cohesion: 0.13
+Nodes (20): evaluate_model_fit(), ModelFit, Any, ModelFit — contextual model/slot/device/profile compatibility.  ``model_meta`` o, Compatibility verdict for one model candidate., Return whether a model can run in a slot/device/profile context.      The result, FakeSlotManager, _orch() (+12 more)
 
 ### Community 285 - "Community 285"
 Cohesion: 0.07
@@ -2505,8 +2496,8 @@ Cohesion: 0.09
 Nodes (16): _QueueItem, _insert_sql(), MetricsWriter, Any, Path, Async, batched, off-hot-path SQLite writer for the metrics tables.  One bounded, Diagnostic counters -- surfaced by ``hal0 metrics status``., Bounded-queue async writer shared by every metrics producer.      Construction n (+8 more)
 
 ### Community 301 - "Community 301"
-Cohesion: 0.13
-Nodes (21): collect_orphans(), delete_model_files(), GCReport, _norm_path(), prune_orphans(), Real GC for the model store — orphan blob prune + guarded delete (ML-3).  Histor, Decrement/GC every ``model_file`` row's blob ref, then unlink its     ``dest`` h, Best-effort equality of two on-disk paths (resolve, fall back to raw). (+13 more)
+Cohesion: 0.15
+Nodes (22): activate_agent_persona(), get_agent_persona(), list_agent_personas(), _persona_detail(), _persona_summary(), PersonaUpdateBody, Any, Exception (+14 more)
 
 ### Community 302 - "Community 302"
 Cohesion: 0.12
@@ -2521,20 +2512,20 @@ Cohesion: 0.10
 Nodes (30): Path, Contract tests for ``preflight_gpu``'s install-time gate (WS-B, #1104).  ``prefl, Device present + gid maps to the (expected) render group → proceed (0).      HAL, M3 regression: gid resolves to a REAL group that is NOT the render     group (a, Mirrors test_gate_broken_gid_on_bare_metal_does_not_block: the wrong-     group, Correct group + hal0-equivalent user IS a member → proceed (0)., Correct group but the target user is NOT a member: advisory only — the     gate, A user that doesn't exist yet (fresh install: preflight_gpu runs     BEFORE inst (+22 more)
 
 ### Community 305 - "Community 305"
-Cohesion: 0.08
-Nodes (24): bootstrap_cli(), _detect_foreign_gateways(), _gateway_dropin_body(), GatewayDropinResult, _privileged_systemctl(), Render the gateway secrets drop-in body.      Mirrors the live drop-in: a why-co, Outcome of :func:`write_gateway_secrets_dropin`.      ``outcome`` is one of ``"w, Idempotently write the gateway secrets drop-in + ``daemon-reload`` (#437). (+16 more)
+Cohesion: 0.17
+Nodes (12): _detect_foreign_gateways(), _gateway_dropin_body(), GatewayDropinResult, _privileged_systemctl(), Render the gateway secrets drop-in body.      Mirrors the live drop-in: a why-co, Outcome of :func:`write_gateway_secrets_dropin`.      ``outcome`` is one of ``"w, Idempotently write the gateway secrets drop-in + ``daemon-reload`` (#437)., Run one hal0-systemctl seam verb as root via ``sudo -n``.      ``body`` (when gi (+4 more)
 
 ### Community 306 - "Community 306"
-Cohesion: 0.24
-Nodes (4): _registry_with_openrouter(), TestApplyPersistentPatch, TestCreateRemovePersistent, _write_upstreams_toml()
+Cohesion: 0.07
+Nodes (55): Registry of all routing targets (slots + remote upstreams).      Loaded at start, UpstreamAlreadyExists, UpstreamRegistry, _async_false(), _async_true(), Any, LogCaptureFixture, MonkeyPatch (+47 more)
 
 ### Community 307 - "Community 307"
 Cohesion: 0.14
 Nodes (26): DispatchFn, OnEvent, assistant_message(), assistant_text(), assistant_thinking(), build_tool_message(), _coerce_args(), extract_tool_calls() (+18 more)
 
 ### Community 308 - "Community 308"
-Cohesion: 0.10
-Nodes (22): KeyError, Look up a named profile in the profiles.toml catalog.      Shared by every provi, resolve_profile(), ApprovalEntry, _Event, _hash_args(), _primary_target(), Any (+14 more)
+Cohesion: 0.12
+Nodes (20): KeyError, ApprovalEntry, _Event, _hash_args(), _primary_target(), Any, Queue, In-memory approval queue for gated MCP tool calls.  Phase 8 (Agents v0.2) MCP se (+12 more)
 
 ### Community 309 - "Community 309"
 Cohesion: 0.18
@@ -2542,23 +2533,23 @@ Nodes (16): _bearer_label(), bearer_resolver(), client_id_resolver(), _current_m
 
 ### Community 310 - "Community 310"
 Cohesion: 0.14
-Nodes (29): build_server(), _iso_now(), make_dispatcher(), _memory_add(), _memory_delete(), _memory_list(), _memory_recall(), _memory_search() (+21 more)
+Nodes (30): build_server(), _iso_now(), make_dispatcher(), _memory_add(), _memory_delete(), _memory_list(), _memory_recall(), _memory_search() (+22 more)
 
 ### Community 311 - "Community 311"
 Cohesion: 0.19
 Nodes (30): dispatch_tool(), DispatchContext, handle_analyze_image(), handle_edit_image(), handle_embed_text(), handle_generate_image(), handle_rerank_documents(), handle_route_to_chat() (+22 more)
 
 ### Community 312 - "Community 312"
-Cohesion: 0.03
-Nodes (79): Provider, Any, ContainerSpec, Abstract base for a hal0 inference backend.      Concrete implementations: Conta, Compute the EnvironmentFile contents for a slot.          Returns a mapping of H, Return the argv list for spawning this backend outside systemd.          Mirrors, Run a health check against the backend on *port*.          Returns {"ok": bool,, Passthrough inference against the provider's OpenAI-compatible API.          Thi (+71 more)
+Cohesion: 0.05
+Nodes (65): ComfyUIInferError, ComfyUIProvider, Any, AsyncClient, ContainerSpec, ComfyUIProvider — Stable-Diffusion-family image generation backend.  ComfyUI is, ComfyUI inference call failed., Provider for ComfyUI (Stable Diffusion family) image generation.      Health pro (+57 more)
 
 ### Community 313 - "Community 313"
 Cohesion: 0.10
 Nodes (17): Hal0SeamMissing, is_hal0_service_user(), CompletedProcess, Path, SystemCtlSeam — the one narrow privileged seam hal0-api needs post-flip.  P3-per, Write a ``hal0-slot@<id>.service`` unit file., Delete a ``hal0-slot@<id>.service`` unit file (no-op if absent)., Write a ``hal0-slot@<token>.container`` Quadlet source file (P3-quadlet). (+9 more)
 
 ### Community 314 - "Community 314"
-Cohesion: 0.09
-Nodes (23): doctor_migrations(), Surface a pending v0.1→v0.2 model-layout migration (read-only).      The canonic, exit_code_for(), Diagnosis, ``hal0 doctor``'s CLI-side ``Diagnosis`` re-export + adapters (§21.4).  The data, The stable ``--json`` shape every doctor subcommand prints.      ``json.dumps(.., The §4.2 generic ``--json`` exit-code translation: critical->2,     fail/warn->1, render_json() (+15 more)
+Cohesion: 0.11
+Nodes (15): doctor_migrations(), Surface a pending v0.1→v0.2 model-layout migration (read-only).      The canonic, exit_code_for(), Diagnosis, ``hal0 doctor``'s CLI-side ``Diagnosis`` re-export + adapters (§21.4).  The data, The stable ``--json`` shape every doctor subcommand prints.      ``json.dumps(.., The §4.2 generic ``--json`` exit-code translation: critical->2,     fail/warn->1, render_json() (+7 more)
 
 ### Community 315 - "Community 315"
 Cohesion: 0.15
@@ -2594,7 +2585,7 @@ Nodes (16): _fake_uname(), full_bin_dir(), CompletedProcess, Path, Bootstrap-pre
 
 ### Community 323 - "Community 323"
 Cohesion: 0.03
-Nodes (117): ApprovalQueue, Async-safe pending-approval queue with dedup + SSE fan-out.      One instance pe, list_transport(), mock_transport(), _policy(), Any, MonkeyPatch, queue() (+109 more)
+Nodes (97): ApprovalQueue, Async-safe pending-approval queue with dedup + SSE fan-out.      One instance pe, list_transport(), mock_transport(), _policy(), Any, MonkeyPatch, queue() (+89 more)
 
 ### Community 324 - "Community 324"
 Cohesion: 0.15
@@ -2602,7 +2593,7 @@ Nodes (28): _await_state(), fast_fail_watch(), _load_into_warming(), Any, FakeCo
 
 ### Community 325 - "Community 325"
 Cohesion: 0.10
-Nodes (21): appendEntry(), entryKey(), parseRawLevel(), buildJournalQuery(), JournalEntry, JournalLevel, JournalSource, LogEntry (+13 more)
+Nodes (19): appendEntry(), entryKey(), parseRawLevel(), buildJournalQuery(), JournalEntry, JournalLevel, JournalSource, LogEntry (+11 more)
 
 ### Community 326 - "Community 326"
 Cohesion: 0.07
@@ -2613,20 +2604,20 @@ Cohesion: 0.11
 Nodes (28): _api_port(), _behind_proxy(), _comfyui_link(), ConfigInvalidError, get_models_config(), get_urls(), _host_without_port(), _openwebui_is_active() (+20 more)
 
 ### Community 328 - "Community 328"
-Cohesion: 0.11
-Nodes (13): migrate_capabilities_v1_to_v2(), Any, Pure-dict v1 → v2 migration. Idempotent on v2 inputs.      Transforms applied:, Read-only promotion shim: derive ``device`` from a legacy         on-disk ``back, canonical_device(), map_backend_to_device(), Map a legacy ``backend`` value to the v0.2 ``device`` enum.      Unknown values, Normalise a backend/device string to the canonical ``device`` enum.      Both th (+5 more)
+Cohesion: 0.13
+Nodes (10): migrate_capabilities_v1_to_v2(), Any, Pure-dict v1 → v2 migration. Idempotent on v2 inputs.      Transforms applied:, Read-only promotion shim: derive ``device`` from a legacy         on-disk ``back, map_backend_to_device(), Map a legacy ``backend`` value to the v0.2 ``device`` enum.      Unknown values, LogCaptureFixture, Idempotence: a v2 file should round-trip unchanged in shape. (+2 more)
 
 ### Community 329 - "Community 329"
 Cohesion: 0.09
 Nodes (29): orchestrate_models_cmd(), hal0 comfyui subcommands — ComfyUI model provisioning helpers.  Currently expose, Pull the curated ComfyUI model set end-to-end, logging each step.      Runs the, curated_set(), _default_log_path(), _default_runner(), FamilyResult, orchestrate_models() (+21 more)
 
 ### Community 330 - "Community 330"
-Cohesion: 0.10
-Nodes (30): _build_offline_deps(), Construct a SlotManager + model registry WITHOUT a running API, mirroring     ho, EventBus, Fan-out event bus with a bounded ring buffer.      Thread-safety: all methods ar, app(), client(), _parse_sse_frames(), Any (+22 more)
+Cohesion: 0.11
+Nodes (28): EventBus, Fan-out event bus with a bounded ring buffer.      Thread-safety: all methods ar, app(), client(), _parse_sse_frames(), Any, FastAPI, TestClient (+20 more)
 
 ### Community 331 - "Community 331"
-Cohesion: 0.11
-Nodes (25): backfill_coordless(), CandidateModel, _maybe_register_shard_files(), Model, ModelRegistry, One discovered file ready for registry registration., Build a :class:`Model` from ``candidate`` and add it to ``registry``., Best-effort ``model_file`` rows for a discovered shard group.      Only applies (+17 more)
+Cohesion: 0.18
+Nodes (13): embed_references(), Every profile name a stack's slots reference., Return a copy of ``stack`` with ``models``/``profiles`` populated.      Model me, _referenced_profile_names(), ModelRegistry, Path, Tests for stack export: reference embedding + envelope + checksum.  Targeted fil, A model that IS in the registry but with EMPTY coords, yet present in         th (+5 more)
 
 ### Community 332 - "Community 332"
 Cohesion: 0.13
@@ -2637,16 +2628,16 @@ Cohesion: 0.12
 Nodes (18): loaded_model_names_from_slots(), _metrics_view(), Any, slot_view — stateless read-model aggregation for the slots dashboard (issue #698, Model ids currently served by dispatchable slots.      Derives the loaded set fr, Injected provider or the process-wide real one (lazy import)., Build virtual slot entries from configured upstreams.      Until every upstream, Eagerly compose the full ``/api/slots`` read model.      Constructor deps mirror (+10 more)
 
 ### Community 334 - "Community 334"
-Cohesion: 0.17
-Nodes (16): _anchor(), _gpu_slot(), patched_spawn(), MonkeyPatch, Path, NPU FLM trio *shadow* handling in SlotManager (shape-consolidation Unit 0).  The, Record _spawn_locked calls and stub _await_ready so load() needs no I/O.      Th, Loading an stt/embed shadow must NOT spawn a child (would 500 on NPU). (+8 more)
+Cohesion: 0.08
+Nodes (27): Protocol, The non-filesystem side effects of the migration.      Split behind a protocol s, SlotArtifactOps, is_npu_trio_shadow(), NpuTrioHost, Any, NPU FLM-trio shadow reconciler (P3-slots §1d).  The NPU runs a single ``flm serv, True if *cfg* is an NPU FLM trio **shadow** (stt/embed), not the anchor.      Th (+19 more)
 
 ### Community 335 - "Community 335"
 Cohesion: 0.10
 Nodes (21): _client_class(), _FakeHttpClient, _FakeResponse, hal0_memory_module(), hal0-memory Hermes plugin — REST client contract.  The shipped plugin (``install, Records the last request the client issued; never hits the network., #317: ``add`` sends no ``dataset`` key; the private bank uses     ``X-hal0-Priva, ``private=False`` routes the write to the shared bank. (+13 more)
 
 ### Community 336 - "Community 336"
-Cohesion: 0.10
-Nodes (30): _make_request(), Build a minimal request stand-in.      ``loaded`` materialises as a container-ba, The loaded set is read from the cached upstream catalogs only —     no live /v1/, The loaded set derives from container-backed upstreams (``slot_name``     set):, O21 regression: SlotManager registers LOCAL container slots as     kind="slot" (, End-to-end O21 repro: [brain_chat] model="hal0/brain" with the brain     slot lo, Container slots register as kind='remote' (with slot_name) but are LOCAL —     t, The dashboard bug repro: a system message mid-array used to leave     `_normaliz (+22 more)
+Cohesion: 0.07
+Nodes (36): _make_request(), _OmniRequest, Request that flows through chat_completions -> _read_json_body -> omni branch., The omni branch returns before _dispatch_and_forward, so chat_completions     mu, Build a minimal request stand-in.      ``loaded`` materialises as a container-ba, The loaded set is read from the cached upstream catalogs only —     no live /v1/, The loaded set derives from container-backed upstreams (``slot_name``     set):, O21 regression: SlotManager registers LOCAL container slots as     kind="slot" ( (+28 more)
 
 ### Community 337 - "Community 337"
 Cohesion: 0.10
@@ -2661,8 +2652,8 @@ Cohesion: 0.08
 Nodes (23): Return the TTS slot profile a device selection implies.      The engine switch:, tts_profile_for_device(), profile_name_for_fit(), Shared picker/apply profile-fit inference (device → runtime profile name).  Sing, Infer the runtime profile name implied by a picker/apply selection.      Keeps i, test_tts_profile_for_device_mapping(), Parity/regression lock for the device→profile derivations (finding PS-4).  The p, Guards the 1.0 canonical device→profile table (spec-hw-slot-ownership §10). (+15 more)
 
 ### Community 340 - "Community 340"
-Cohesion: 0.13
-Nodes (18): fetchServices(), ManagedService, MdnsStatus, ServiceActionResult, ServicesPayload, ServiceUnitState, UnitLogs, useMdnsAdvertise() (+10 more)
+Cohesion: 0.09
+Nodes (23): Path, v0.1.x clients consuming /api/slots see every legacy key unchanged., PR-18: each entry carries ``type`` + ``model_default`` + ``enabled``.      The d, A failing container health probe doesn't break /api/slots.      The enrichment s, device=npu slots surface declared_backend='flm' (the FLM recipe)., The enriched body must be valid JSON (no exotic types leaked)., POST /api/slots/chat/load goes through ContainerProvider.load_sync., PUT /config {enabled: false} on a RUNNING slot persists the flag AND stops it. (+15 more)
 
 ### Community 341 - "Community 341"
 Cohesion: 0.20
@@ -2681,16 +2672,16 @@ Cohesion: 0.13
 Nodes (12): ChatCompletionFn, AsyncClient, chat_slot_has_tool_calling(), Any, Dynamic per-request tool filtering — plan §7.3.  Given the active chat slot and, The narrow SlotManager surface filter.py + dispatch.py need.      Stated as a Pr, Return True iff the chat slot's model is allowed to see tools.      Per plan §7., SlotManagerLike (+4 more)
 
 ### Community 345 - "Community 345"
-Cohesion: 0.10
-Nodes (25): device_to_backend(), Map hal0's ``device`` enum onto the recipe+backend pair.      Args:         devi, Atomically write a slot TOML.      THE byte-level write path for ``/etc/hal0/slo, write_slot_toml(), NpuTrioHost, Any, NPU FLM-trio shadow reconciler (P3-slots §1d).  The NPU runs a single ``flm serv, Narrow seam :func:`reconcile_trio_slots` needs from ``SlotManager``. (+17 more)
+Cohesion: 0.12
+Nodes (21): device_to_backend(), Map hal0's ``device`` enum onto the recipe+backend pair.      Args:         devi, Hold the coarse cross-process lock for ALL slots/*.toml writes.      Historicall, slot_write_lock(), apply_preferred_profile(), defuse_stale_mtp_on_swap(), preferred_profile_for(), profile_fits_slot() (+13 more)
 
 ### Community 346 - "Community 346"
 Cohesion: 0.19
 Nodes (15): Captures one ``request_metric`` row per request through the v1 seam., RequestSeam, _FakeCall, _FakeClient, _FakeRequest, _FakeWriter, Any, StreamingResponse (+7 more)
 
 ### Community 347 - "Community 347"
-Cohesion: 0.06
-Nodes (47): Default container image for a slot lane with no explicit image pin.      Precede, resolve_default_image(), Return the FLM toolbox image reference.          Resolution (§7.1b / ML-4): ``sl, Return the Kokoro toolbox image reference.          Resolution (§7.1b / ML-4): `, Return the Qwen3-TTS toolbox image reference.          Resolution (§7.1b / ML-4), get_runner(), RUNNER_IMAGES — the runner-image registry (plan §7.1b / ML-4).  Before this modu, Look up a runner by key, or raise :class:`~hal0.errors.NotFound`. (+39 more)
+Cohesion: 0.05
+Nodes (48): Default container image for a slot lane with no explicit image pin.      Precede, resolve_default_image(), Resolve the ComfyUI toolbox image.          Resolution order (§7.1b / ML-4 — now, Return the FLM toolbox image reference.          Resolution (§7.1b / ML-4): ``sl, Return the Kokoro toolbox image reference.          Resolution (§7.1b / ML-4): `, Return the Qwen3-TTS toolbox image reference.          Resolution (§7.1b / ML-4), get_runner(), RUNNER_IMAGES — the runner-image registry (plan §7.1b / ML-4).  Before this modu (+40 more)
 
 ### Community 348 - "Community 348"
 Cohesion: 0.10
@@ -2702,15 +2693,15 @@ Nodes (28): applied_versions(), _discover_migrations(), _ensure_migrations_table
 
 ### Community 350 - "Community 350"
 Cohesion: 0.14
-Nodes (17): _ensure_supported_python(), _persist_hermes_python(), _provision_python_via_uv(), Execute *path* and require the exact Hermes Python policy version., Read the persisted single-variable Hermes interpreter contract., Atomically persist a validated Hermes interpreter path., Resolve exact Python 3.12 using the documented precedence order., Fetch a uv-managed Python as the last resort (#1250).      ``uv python install`` (+9 more)
+Nodes (9): _FakeSlot, Path, hal0.metrics.read -- system_stats / stats_summary / models_health contracts.  Ev, GET /api/stats/requests payload -- see hal0.metrics.read.requests_rollup., TestModelsHealth, TestRequestsRollup, TestStatsSummary, TestSystemStatsDegradesGracefully (+1 more)
 
 ### Community 351 - "Community 351"
 Cohesion: 0.20
 Nodes (27): _patch_free_mb(), FakeContainerProvider, MonkeyPatch, Path, SlotManager, Tests for host-memory-pressure LRU eviction (#903).  Covers _pressure_evict_once, A slot without lru=true in its TOML is never evicted under pressure., The canonical ``agent`` slot is never evicted under pressure (#903). (+19 more)
 
 ### Community 352 - "Community 352"
-Cohesion: 0.23
-Nodes (22): ModelHw, The two old physical facts a §5-migrated model row still carries.      Read RAW, _plan(), Tests for the HW-slot-ownership one-shot migrator (spec-hw-slot-ownership §6)., Raw slot-TOML dict. ``nested_ngl``/``binary``/``image_pin``/``image``/     ``top, _slot(), test_already_set_binary_is_not_clobbered(), test_already_set_slot_ngl_is_not_clobbered() (+14 more)
+Cohesion: 0.22
+Nodes (23): ModelHw, The two old physical facts a §5-migrated model row still carries.      Read RAW, _plan(), Tests for the HW-slot-ownership one-shot migrator (spec-hw-slot-ownership §6)., Raw slot-TOML dict. ``nested_ngl``/``binary``/``image_pin``/``image``/     ``top, _slot(), test_already_set_binary_is_not_clobbered(), test_already_set_slot_ngl_is_not_clobbered() (+15 more)
 
 ### Community 353 - "Community 353"
 Cohesion: 0.08
@@ -2721,8 +2712,8 @@ Cohesion: 0.08
 Nodes (23): 10. Out of scope (explicit), 11. Companion specs to cite (not redo), 1. Decisions locked (this session), 2. Layered shape (cite, don't restate), 3.1 Fields to POPULATE in seeded slot TOMLs (per `spec-hw-slot-ownership.md` §2), 3.2 Fields to STRIP from seeded slot TOMLs, 3.3 Field semantics to encode in each seeded slot TOML, 3. Slot schema changes (+15 more)
 
 ### Community 355 - "Community 355"
-Cohesion: 0.20
-Nodes (10): One background task; one tick = one ``slot_sample``/``slot_event`` write set., SlotSampler, _FakeSlot, _FakeSlotManager, _FakeState, _FakeWriter, Any, SlotSampler.tick() -- fleet row + per-slot rows + missing-sensor grace. (+2 more)
+Cohesion: 0.17
+Nodes (12): One background task; one tick = one ``slot_sample``/``slot_event`` write set., SlotSampler, Fake ``hal0.toml [honcho]`` config so migrate/sync-graph never touch disk., stub_honcho_cfg(), _FakeSlot, _FakeSlotManager, _FakeState, _FakeWriter (+4 more)
 
 ### Community 356 - "Community 356"
 Cohesion: 0.07
@@ -2737,12 +2728,12 @@ Cohesion: 0.09
 Nodes (18): Hal0MemoryClient, Hal0MemoryClientError, Any, Client, Thin synchronous REST client for the hal0-memory REST surface.  Design notes: (1, POST /api/memory/add. ``private=True`` → hermes-private, else shared., POST /api/memory/search — semantic retrieval (union of both banks)., POST /api/memory/recall — token-budgeted consolidated recall (union). (+10 more)
 
 ### Community 359 - "Community 359"
-Cohesion: 0.09
-Nodes (35): Discover candidates under ``cfg.roots`` and register the new ones.      Returns, scan_and_register(), model_root(), Path, Tests for hal0.registry.discover — filesystem scan + auto-register., End-to-end: a NON-curated reranker gguf under a scan root registers with     cap, A discovered file whose name matches a curated entry's hf_file     must surface, Files already in known_paths must not appear in the candidate list. (+27 more)
+Cohesion: 0.06
+Nodes (59): model_root(), ModelRegistry, Path, Tests for hal0.registry.discover — filesystem scan + auto-register., End-to-end: a NON-curated reranker gguf under a scan root registers with     cap, A discovered file whose name matches a curated entry's hf_file     must surface, Files already in known_paths must not appear in the candidate list., A Model with no sidecar carries mmproj=None (the registry contract     the llama (+51 more)
 
 ### Community 360 - "Community 360"
-Cohesion: 0.11
-Nodes (24): flm_mount_guard(), flm_store_divergence(), flm_store_writability(), pending_layout_migration(), Warn when the env var and the TOML field name *different* FLM stores.      ``HAL, Warn when the store lives under an external mount prefix that isn't mounted., Classify FLM-store writability for the container uid; ``None`` when fine.      T, Dry-run the v0.1→v0.2 model-layout migration; return ``(create, overwrite)``. (+16 more)
+Cohesion: 0.13
+Nodes (16): Kind, ActionRecorder, _dump(), _now_iso(), Any, Durable activity / audit store — hal0's source of truth for change.  The footer, ISO-8601 UTC timestamp with microsecond precision (matches EventBus)., Recursively replace secret-looking values so they never hit disk. (+8 more)
 
 ### Community 361 - "Community 361"
 Cohesion: 0.09
@@ -2750,11 +2741,11 @@ Nodes (21): 1.1 Explicitly out of scope, 1. Why this document exists, 2.1 Sympto
 
 ### Community 362 - "Community 362"
 Cohesion: 0.15
-Nodes (16): ModelDefaults, Per-model default knobs surfaced as launcher defaults.      All fields optional., _model(), ModelRegistry, Path, Schema-migration tests for the Phase-1 Model additions.  Covers:   * New optiona, An entry with no backends/defaults keys parses fine., Update on a legacy entry can add backends + defaults without losing data. (+8 more)
+Nodes (14): _model(), ModelRegistry, Path, Schema-migration tests for the Phase-1 Model additions.  Covers:   * New optiona, An entry with no backends/defaults keys parses fine., Update on a legacy entry can add backends + defaults without losing data., Only some ModelDefaults fields set — others stay None., defaults=None must not appear in the on-disk TOML at all. (+6 more)
 
 ### Community 363 - "Community 363"
-Cohesion: 0.12
-Nodes (22): _depths(), file_lock(), lock_path_for(), Path, Cross-process advisory file locking for config read-modify-write (SC-10).  Sever, Return the sibling ``.lock`` path :func:`file_lock` locks for ``target``., Hold an exclusive advisory lock serializing an RMW on ``target``.      Locks the, Hold the coarse cross-process lock for ALL slots/*.toml writes.      Historicall (+14 more)
+Cohesion: 0.11
+Nodes (24): _classify_pair(), migrate(), ModelRegistry, ``hal0 capabilities`` subcommands.  Operator tooling for the capability-slot sur, Return ``(verdict, legal_backends)`` for one (capability, model, backend) tuple., Rewrite persisted selections that are illegal against the live catalog.      Wal, _depths(), file_lock() (+16 more)
 
 ### Community 364 - "Community 364"
 Cohesion: 0.14
@@ -2769,8 +2760,8 @@ Cohesion: 0.18
 Nodes (23): _FakeProc, _patch_subprocess(), patched_systemctl_ok(), MonkeyPatch, TestClient, HTTP tests for ``POST /api/agents/{agent_id}/restart`` (v0.3 PR-11).  Pins the r, Audit row goes to the ``hal0.agents.audit`` logger.      We patch the logger's `, No X-hal0-Agent header → actor recorded as ``hal0-dashboard``. (+15 more)
 
 ### Community 367 - "Community 367"
-Cohesion: 0.17
-Nodes (11): MonkeyPatch, Path, TestClient, Happy path: workflow file found, POSTed to /prompt, 202 returned., If primary dir has no match, fall back to user/default/workflows/., Ensure /status fields needed by the pane are present and well-formed., gpu_busy_percent is forced-high artifact — util must be 0/None when idle., it/s, eta, step require a future ComfyUI websocket subscription. (+3 more)
+Cohesion: 0.19
+Nodes (10): MonkeyPatch, Path, TestClient, Happy path: workflow file found, POSTed to /prompt, 202 returned., If primary dir has no match, fall back to user/default/workflows/., When history has output, the image bytes are proxied back., History entry with empty outputs → 404., TestPreview (+2 more)
 
 ### Community 368 - "Community 368"
 Cohesion: 0.26
@@ -2794,7 +2785,7 @@ Nodes (21): app(), _build_app(), client(), _FakeDispatcher, _FakeMetricsService,
 
 ### Community 373 - "Community 373"
 Cohesion: 0.11
-Nodes (25): Conflict, 409 — the request conflicts with current resource state.      Use for duplicate-, Unit tests for :mod:`hal0.mcp.installed` — #305 registry layer., Registry TOMLs hold env blocks (API keys); they must be 0o600 + dir 0o700., Calling ``installed.uninstall("hal0-admin")`` rejects before disk lookup.      B, ``id="../evil"`` must reject at the registry validator, not after stat.      Eve, #382: patch_config wraps its read-modify-write in an advisory lock.      Functio, _record() (+17 more)
+Nodes (23): Unit tests for :mod:`hal0.mcp.installed` — #305 registry layer., Registry TOMLs hold env blocks (API keys); they must be 0o600 + dir 0o700., Calling ``installed.uninstall("hal0-admin")`` rejects before disk lookup.      B, ``id="../evil"`` must reject at the registry validator, not after stat.      Eve, #382: patch_config wraps its read-modify-write in an advisory lock.      Functio, _record(), test_get_installed_missing_raises_not_found(), test_install_and_list_round_trip() (+15 more)
 
 ### Community 374 - "Community 374"
 Cohesion: 0.19
@@ -2809,16 +2800,16 @@ Cohesion: 0.15
 Nodes (20): hub(), _make_snapshot(), Path, Tests for scripts/migrate-haloai.py.  Hermetic — builds a synthetic HF cache lay, Build a snapshot dir with files of given byte sizes; returns the snapshot path., Return an empty HF cache hub root., test_build_model_validates_via_pydantic(), test_dry_run_writes_nothing() (+12 more)
 
 ### Community 377 - "Community 377"
-Cohesion: 0.17
-Nodes (29): fallback_local_model(), Model, Pick a locally-registered model (file on disk) to stand in for a     non-servabl, _add_model(), _llm_cfg(), _mgr(), SlotManager, Load-time capability fallback for a non-servable slot ``model.default``.  A seed (+21 more)
+Cohesion: 0.10
+Nodes (41): default_model_cache_check(), fallback_local_model(), id_tokens(), leading_token_overlap(), looks_diffusion_or_nontext(), Any, Model, Model-fallback heuristics — moved out of ``slots/manager.py`` (ML-2/ML-3, the P3 (+33 more)
 
 ### Community 378 - "Community 378"
 Cohesion: 0.08
 Nodes (23): Acceptance Criteria, Architecture, Documentation, Error Handling, Existing Python 3.11, 3.13, or 3.14 venv, Existing Python 3.12 venv, Fresh installation, Goals (+15 more)
 
 ### Community 379 - "Community 379"
-Cohesion: 0.67
-Nodes (3): _find_server(), Any, Case-insensitive server-id lookup in the servers list.
+Cohesion: 0.19
+Nodes (12): catalog_refresh_cmd(), _find_server(), list_cmd(), Any, hal0 mcp subcommands — thin HTTP client to /api/mcp/*.  Issue #504: ``hal0 mcp {, Show detail for one MCP server., Refresh the installable-MCP catalog (re-fetches from upstream).      Currently a, Case-insensitive server-id lookup in the servers list. (+4 more)
 
 ### Community 380 - "Community 380"
 Cohesion: 0.08
@@ -2837,20 +2828,20 @@ Cohesion: 0.14
 Nodes (22): dump_answers(), Serialize a resolved :class:`~hal0.install.orchestrate.Selections` back     into, Write ``dump_answers(sel)`` to *path* as ``hal0-setup.yaml``.      Prefixes a he, write_answers(), _forbid_apply(), _hw(), _manual_selections(), _no_real_hardware_probe() (+14 more)
 
 ### Community 384 - "Community 384"
-Cohesion: 0.16
-Nodes (16): llama_bench_row_kind(), Classify a llama-bench row: a pp test has n_gen==0 (n_prompt>0), a tg test     h, lb_meta(), lb_rows(), _load(), test_parsers.py — the two P2 engine-output parsers against REAL captured fixture, test_parse_llama_bench_missing_kind_is_empty(), test_parse_llama_bench_pp() (+8 more)
+Cohesion: 0.17
+Nodes (18): canonical_json(), cell_key(), Any, What was driven at the engine: kind (pp/tg/chat/batch/embed/rerank/reuse),     t, Plain-dict JSON shape for the store. ``outcome`` is flattened to its         str, Deterministic JSON: sorted keys, no insignificant whitespace. This is the     ca, The dedup/staleness key: ``sha256:`` + hex of the canonical-JSON identity     bl, Workload (+10 more)
 
 ### Community 385 - "Community 385"
 Cohesion: 0.10
 Nodes (22): _decode_audio(), _detect_local_format(), _load_model(), main(), JSONResponse, ndarray, Path, WebSocket (+14 more)
 
 ### Community 386 - "Community 386"
-Cohesion: 0.12
-Nodes (20): Unit tests for hal0.registry.detect.detect()., MR-3: routing detect's filename heuristic through the shared token     table mus, ROCmFPX-family quant detection (ciru-ai/ROCmFPX custom GGUF formats).      These, TestGgufChat, TestGgufEmbed, TestMr3ConsolidationPreservesDetectContract, TestRocmfpxQuant, _build_gguf() (+12 more)
+Cohesion: 0.11
+Nodes (21): detect(), Inspect ``path`` and return a :class:`DetectionResult`.      Never raises for an, Path, Unit tests for hal0.registry.detect.detect()., MR-3: routing detect's filename heuristic through the shared token     table mus, detect deliberately does NOT emit 'rerank' yet — a reranker gguf         with no, ROCmFPX-family quant detection (ciru-ai/ROCmFPX custom GGUF formats).      These, TestFilenameHeuristic (+13 more)
 
 ### Community 387 - "Community 387"
-Cohesion: 0.13
-Nodes (21): Protocol, migrate_slot_id_keying(), _migrate_state(), MigrationReport, Any, Collection, Path, One-shot M5 migration: name-keyed slot artefacts → id-keyed (rework §3.1).  Incr (+13 more)
+Cohesion: 0.17
+Nodes (18): migrate_slot_id_keying(), _migrate_state(), MigrationReport, Any, Collection, Path, One-shot M5 migration: name-keyed slot artefacts → id-keyed (rework §3.1).  Incr, One slot that was migrated name → id in this run. (+10 more)
 
 ### Community 388 - "Community 388"
 Cohesion: 0.16
@@ -2869,20 +2860,20 @@ Cohesion: 0.15
 Nodes (19): AttemptHandle, One immutable dispatch attempt + its cross-system correlation.      hal0 owns ``, _err(), HermesBoardExecutor, _is_configured(), _map_state(), Any, Concrete Hermes :class:`~hal0.board.dispatch.BoardExecutor` (HP-executor, KB-5). (+11 more)
 
 ### Community 392 - "Community 392"
-Cohesion: 0.10
-Nodes (16): family_flags(), model_family(), Best-effort model family, preferring the registry's ``architecture``.      §7.1a, The :data:`FAMILY_DEFAULTS` flag string for the model's family, else ''., Return the canonical llama-server argv for a container slot.      Used by the AP, resolved_command_for_slot(), §7.1a / ML-5: family_flags/model_family re-keyed off Model.architecture     firs, test_family_flags_prefers_architecture_over_filename_scan() (+8 more)
+Cohesion: 0.13
+Nodes (21): isolated_client(), FastAPI, TestClient, Real SlotManager entries appear alongside synthetic upstream-backed ones., When a real slot and a synthetic share a name, the real one wins., P2-composite rebuild: no ``hal0`` Upstream is registered at startup.      Chat d, An explicit upstreams.toml entry for ``hal0`` survives startup unchanged.      O, Driving a state change through the manager pushes a frame to the stream.      Su (+13 more)
 
 ### Community 393 - "Community 393"
-Cohesion: 0.06
-Nodes (52): activate_agent_persona(), get_agent_persona(), list_agent_personas(), _persona_detail(), _persona_summary(), PersonaUpdateBody, Any, Exception (+44 more)
+Cohesion: 0.04
+Nodes (64): RequestValidationError, Request, Restart endpoint for bundled agents (v0.3 PR-11).  ``POST /api/agents/{agent_id}, Restart the systemd unit backing ``agent_id``.      Returns ``{status, detail}``, Resolve ``systemctl`` on PATH.      Returns ``None`` on hosts that don't have sy, Compose the unit name for an agent id.      Matches ``installer/systemd/hal0-age, Identify the caller for the audit log.      There is no Bearer token store (auth, _resolve_actor() (+56 more)
 
 ### Community 394 - "Community 394"
 Cohesion: 0.13
 Nodes (29): PermObservation, PermRow, A path's current ownership snapshot — the analogue of ``FileState``.      ``exis, One path's declared ownership + mode.      ``mode`` is the permission bits only, _diff(), _me(), _obs(), Path (+21 more)
 
 ### Community 395 - "Community 395"
-Cohesion: 0.14
-Nodes (17): _disk_free_mb(), health(), health_system(), list_features(), _memory_degraded(), metrics_prometheus(), Any, Path (+9 more)
+Cohesion: 0.12
+Nodes (21): _disk_free_mb(), get_status(), health(), health_system(), list_features(), _memory_degraded(), metrics_prometheus(), Any (+13 more)
 
 ### Community 396 - "Community 396"
 Cohesion: 0.16
@@ -2897,8 +2888,8 @@ Cohesion: 0.18
 Nodes (25): _executor(), _json(), Path, Response, HP-executor — concrete Hermes :class:`BoardExecutor` at the KB-5 seam.  Recorded, Structural invariant: the executor has no board-store handle at all., Build an executor whose gateway is backed by a recorded MockTransport., _running_handle() (+17 more)
 
 ### Community 399 - "Community 399"
-Cohesion: 0.09
-Nodes (24): MonkeyPatch, Tests for ``hal0 agent approvals list`` table projection.  Regression coverage f, Epoch float → short ISO with ``Z`` suffix (UTC), no microseconds., If the API ever migrates to a pre-formatted ISO string, don't mangle it., A pending ``model_delete`` row renders the model id in Summary,     the agent's, Agent column degrades to "—" when ``client_id`` is absent / empty., Empty pending set renders the dim "No pending approvals." line., Stub the API layer so the CLI runs offline and we drive its input. (+16 more)
+Cohesion: 0.06
+Nodes (39): MonkeyPatch, Tests for ``hal0 agent approvals list`` table projection.  Regression coverage f, Epoch float → short ISO with ``Z`` suffix (UTC), no microseconds., If the API ever migrates to a pre-formatted ISO string, don't mangle it., A pending ``model_delete`` row renders the model id in Summary,     the agent's, Agent column degrades to "—" when ``client_id`` is absent / empty., Empty pending set renders the dim "No pending approvals." line., Stub the API layer so the CLI runs offline and we drive its input. (+31 more)
 
 ### Community 400 - "Community 400"
 Cohesion: 0.11
@@ -2929,8 +2920,8 @@ Cohesion: 0.08
 Nodes (25): compilerOptions, allowImportingTsExtensions, allowJs, baseUrl, checkJs, isolatedModules, jsx, lib (+17 more)
 
 ### Community 407 - "Community 407"
-Cohesion: 0.17
-Nodes (19): delete_proxmox_config(), get_proxmox_config(), _load_for_get(), ProxmoxConfigBody, ProxmoxTestBody, put_proxmox_config(), Any, Request (+11 more)
+Cohesion: 0.13
+Nodes (20): _noop_executor(), Any, Unit tests for :class:`hal0.mcp.approval_queue.ApprovalQueue`.  Covers:  * Enque, A genuine retry of an unmapped gated tool (identical args) should     still coll, After the collapse fix, approving the second-target entry must run     the execu, Approving an entry should free the dedup slot so a new enqueue for     the same, Regression: gated tools with no registered primary-target arg     (``profile_del, test_approve_failure_lands_failed_state() (+12 more)
 
 ### Community 408 - "Community 408"
 Cohesion: 0.30
@@ -2957,16 +2948,16 @@ Cohesion: 0.08
 Nodes (24): `hal0 agent approvals`, `hal0 agent bootstrap`, `hal0 agent` — bundled agents, `hal0 agent personas`, `hal0 app` — optional apps, `hal0 auth` — API authentication, `hal0 board` — operator board, `hal0 capabilities` — capability-slot list/set + repair (+16 more)
 
 ### Community 414 - "Community 414"
-Cohesion: 0.12
-Nodes (7): Transport-safe metadata subset of a registry ``Model``.      Embedded in a stack, StackModelMeta, Unit tests for the Stack schema models.  Targeted file run:     ~/dev/hal0/.venv, TestSeedStacks, TestStackCapabilityRow, TestStackModelMeta, TestStackSlotEntry
+Cohesion: 0.17
+Nodes (4): Unit tests for the Stack schema models.  Targeted file run:     ~/dev/hal0/.venv, TestSeedStacks, TestStackCapabilityRow, TestStackSlotEntry
 
 ### Community 415 - "Community 415"
-Cohesion: 0.18
-Nodes (16): mmap, GGUFParseError, Any, Path, GGUF header parser — read-only metadata extraction.  Parses the GGUF v1-v3 magic, Raised on a truncated / malformed GGUF header.      Callers usually convert this, Cursor over a bytes-like blob with bounds-checked reads., Read and return a GGUF value of ``vtype``. Used for keys we want. (+8 more)
+Cohesion: 0.17
+Nodes (13): mmap, GGUFParseError, Any, GGUF header parser — read-only metadata extraction.  Parses the GGUF v1-v3 magic, Raised on a truncated / malformed GGUF header.      Callers usually convert this, Cursor over a bytes-like blob with bounds-checked reads., Read and return a GGUF value of ``vtype``. Used for keys we want., Skip a GGUF value of ``vtype`` without materialising it. (+5 more)
 
 ### Community 416 - "Community 416"
-Cohesion: 0.07
-Nodes (41): _RunFn, _backend_state(), _image_repo(), Strip the tag/digest → the bare ``registry/repo`` of an image ref.      Mirrors, ``"installed"`` / ``"installable"`` / ``"unavailable"`` for one runner.      Loc, images(), _parse_repos(), PodmanImagesResult (+33 more)
+Cohesion: 0.08
+Nodes (35): _RunFn, images(), _parse_repos(), PodmanImagesResult, CompletedProcess, podman_introspect — read-only podman introspection through the ROOTFUL context s, The local ``registry/repo`` set, from root's store when reachable.      Only ATT, ``podman images`` output + which store it actually came from. (+27 more)
 
 ### Community 417 - "Community 417"
 Cohesion: 0.16
@@ -2977,8 +2968,8 @@ Cohesion: 0.20
 Nodes (24): dispatch_probe(), env_report(), EnvReport, gpu_target_version(), model_store_probe(), npu_status(), _probe_container(), _probe_cpu() (+16 more)
 
 ### Community 419 - "Community 419"
-Cohesion: 0.16
-Nodes (18): find_candidates(), _is_mmproj_sidecar(), _is_skippable(), _normalise_id(), Path, Model discovery — scan filesystem roots and auto-register found models.  The sca, Turn a basename stem into a registry-friendly id., True for a multimodal-projector (mmproj) sidecar file.      Matched by filename (+10 more)
+Cohesion: 0.08
+Nodes (40): CuratedModel, Every curated model must have a deployable source: either HF pull         coordi, One curated entry surfaced by the FirstRun wizard.      The wizard renders these, backfill_coordless(), CandidateModel, find_candidates(), _guess_capability(), _is_mmproj_sidecar() (+32 more)
 
 ### Community 420 - "Community 420"
 Cohesion: 0.14
@@ -2993,8 +2984,8 @@ Cohesion: 0.15
 Nodes (18): Path, NPU exclusivity validation in SlotManager (PR-11, plan §5.3, ADR-0008 §5).  The, A disabled second NPU LLM slot may coexist with an enabled one., device=gpu-rocm slots are unaffected by NPU exclusivity., Only ``type=llm`` slots claim the AMDXDNA chat context.      The FLM trio (stt-n, Updating the lone NPU LLM slot's own fields does NOT trip the guard.      The gu, Write a minimal slot TOML under HAL0_HOME without going through SlotManager., The very first NPU LLM slot must succeed. (+10 more)
 
 ### Community 423 - "Community 423"
-Cohesion: 0.15
-Nodes (14): capability_from_filename(), classify(), DeviceMeta, labels_of(), model_capabilities_of(), Any, model_meta — the one home for model classification + device→backend resolution., Return the primary modality bucket for a model.      Reads the model's ``capabil (+6 more)
+Cohesion: 0.25
+Nodes (9): Path, Parse the GGUF header and return a dict of interesting KV pairs.      Returns ``, read_gguf_header(), Path, Header claims 5 KVs but file ends before any are present., TestArchitectureAndContextLength, TestMagicAndShape, TestSkipping (+1 more)
 
 ### Community 424 - "Community 424"
 Cohesion: 0.11
@@ -3005,16 +2996,16 @@ Cohesion: 0.20
 Nodes (8): MapContainerProvider, _npu_anchor_cfg(), Any, Per-slot ``is_active`` — the trio anchor runs, shadows have no unit., #733: embed/stt shadow slots have no unit/container of their own —     the npu a, container_enrichment's stopped-vs-crashed escalation shells out         to a rea, _shadow_cfg(), TestShadowSlotStatusInheritance
 
 ### Community 426 - "Community 426"
-Cohesion: 0.19
-Nodes (22): _client_class(), _collect_frames(), _ExplodingClient, _parse(), Any, Exception, MonkeyPatch, Response (+14 more)
+Cohesion: 0.09
+Nodes (30): BrainChatConfig, ``[brain_chat]`` — the dashboard's agent-chat steward (hal0-brain).      Guardra, No ApprovalQueue wired -> a gated admin call returns a typed error and     NOTHI, test_gated_call_fails_closed_without_queue(), _client_class(), _collect_frames(), _ExplodingClient, _parse() (+22 more)
 
 ### Community 427 - "Community 427"
 Cohesion: 0.15
 Nodes (24): api(), Any, MonkeyPatch, Tests for ``hal0 upstream`` command request shapes.  The API's create/update bod, `upstream credentials set` — the noun-subgroup rename — behaves     identically, Stub the API client surface and capture calls., test_advertise_off_patches_false_and_echoes_state(), test_advertise_on_patches_true_and_echoes_state() (+16 more)
 
 ### Community 428 - "Community 428"
-Cohesion: 0.08
-Nodes (35): Enum, auth_require(), auth_rotate(), KeyTier, hal0 auth subcommands — thin HTTP client to /api/auth/*.  §5.2 of the R5 sync as, Persist the [security].require_auth posture (PUT /api/auth/require)., Rotate the admin or client box key (POST /api/auth/rotate).      Mints a fresh k, RequireToggle (+27 more)
+Cohesion: 0.10
+Nodes (28): Enum, PhaseStatus, Per-step outcome.      ``ok``   — step completed.     ``skip`` — step didn't app, auth_rotate(), auth_status(), KeyTier, hal0 auth subcommands — thin HTTP client to /api/auth/*.  §5.2 of the R5 sync as, Show the current auth posture (GET /api/auth/status). (+20 more)
 
 ### Community 429 - "Community 429"
 Cohesion: 0.17
@@ -3033,8 +3024,8 @@ Cohesion: 0.08
 Nodes (23): 21.10 Multi-model memory manager (fold into P3-slots reaper) — SHOULD (D-elevate one item), 21.11 Config contracts (network-exposure-policy CI + ports + golden paths) — MUST/SHOULD, 21.12 Client onboarding + docs — MUST/SHOULD, 21.13 Persona schema hardening (new §10.x) — SHOULD, 21.14 `hal0 chat` terminal REPL — SHOULD, 21.15 Release-engineering hardening (new §11.x) — MUST/SHOULD, 21.1 Host/hypervisor Strix-Halo kernel tuning (Proxmox layer — outside hal0's own install) — MUST, highest concrete ROI, 21.2 gfx1151 arch-guard + ROCm cold-start/kernel-cache + --parallel tiers — MUST (+15 more)
 
 ### Community 433 - "Community 433"
-Cohesion: 0.16
-Nodes (9): ModelCapabilities, Model — registry entry pydantic model.  The Model class is the typed representat, # NOTE: revisit in Phase 1 — extend as providers surface new capabilities., Launch/runtime typed flags — §7.1d / ML-6.      Distinct from :attr:`Model.capab, Tests for ``ModelCapabilities`` + the ``Model`` §7.1d field additions.  Covers:, test_model_capabilities_defaults_all_none(), test_model_capabilities_forbids_extra_fields(), test_model_capabilities_tri_state() (+1 more)
+Cohesion: 0.21
+Nodes (7): ModelCapabilities, Launch/runtime typed flags — §7.1d / ML-6.      Distinct from :attr:`Model.capab, Tests for ``ModelCapabilities`` + the ``Model`` §7.1d field additions.  Covers:, test_model_capabilities_defaults_all_none(), test_model_capabilities_forbids_extra_fields(), test_model_capabilities_tri_state(), test_model_capability_flags_round_trips_through_model_dump()
 
 ### Community 434 - "Community 434"
 Cohesion: 0.18
@@ -3045,16 +3036,16 @@ Cohesion: 0.12
 Nodes (18): Shared types for the hal0 Hermes transport., _resolve_pull_capability — capability + comfyui_subdir for a pull (P3).  The hel, _Reg, _req(), test_body_capability_wins(), test_curated_capability_and_subdir_fallback(), test_registry_capability_used_when_no_body(), test_unknown_model_returns_none() (+10 more)
 
 ### Community 436 - "Community 436"
-Cohesion: 0.09
-Nodes (18): cleanup_stale_agent_dropins(), install_hermes(), InstallReport, InstallStep, OwnershipReconcileResult, Outcome of :func:`cleanup_stale_agent_dropins`., Remove stale hal0-agent@ drop-in fragments the template doesn't ship.      Scans, Outcome of :func:`reconcile_ownership_on_repair`. (+10 more)
+Cohesion: 0.18
+Nodes (6): InstallReport, InstallStep, One step's outcome in an :class:`InstallReport`.      ``changed`` is the converg, Aggregate outcome of one :func:`install_hermes` pass., Names of the host-mutating steps that changed state this run.          The brain, True when no host-mutating step changed anything (a no-op re-run).
 
 ### Community 437 - "Community 437"
-Cohesion: 0.17
-Nodes (22): bank_consolidate_cmd(), bank_delete_cmd(), bank_export_cmd(), bank_import_cmd(), bank_list_cmd(), bank_stats_cmd(), _emit(), profile_get_cmd() (+14 more)
+Cohesion: 0.12
+Nodes (29): doctor_models(), Audit the model pipeline: registry paths, store/roots agreement, FLM dir.      C, bank_consolidate_cmd(), bank_delete_cmd(), bank_export_cmd(), bank_import_cmd(), bank_list_cmd(), bank_stats_cmd() (+21 more)
 
 ### Community 438 - "Community 438"
-Cohesion: 0.12
-Nodes (19): Any, voice.tts capability switch — Kokoro (CPU) vs Qwen3-TTS (GPU/ROCm).  The deferre, Write the canonical single ``tts`` slot in a known engine state., Picking qwen3 / gpu-rocm rewrites the ``tts`` slot's profile to qwen3-tts., Picking kokoro / cpu reverts the ``tts`` slot to the Kokoro profile.      Starti, A disabled selection flips ``enabled`` but never rewrites the engine.      Post-, Regression: a non-tts child's slot reconciliation never injects a profile., _read_tts_slot() (+11 more)
+Cohesion: 0.05
+Nodes (51): Fire-and-forget trigger to refresh the Hermes live-context files.  Called from t, Spawn a detached ``hal0-agent <agent_id> render-context``. Never raises., spawn_context_refresh(), CapabilitySelection, One operator-facing selection for a (slot, child) tuple.      Mirrors the dashbo, CapabilityApplyFailed, CapabilityOrchestrator, child_to_slot() (+43 more)
 
 ### Community 439 - "Community 439"
 Cohesion: 0.17
@@ -3069,8 +3060,8 @@ Cohesion: 0.20
 Nodes (14): app_with_npu_slots(), client_with_npu_slots(), FastAPI, Path, TestClient, Tests for [npu] asr/embed toggle fields on /api/slots (A8).  Verifies:   - ``npu, Slot without a [npu] section must NOT have a 'npu' key in the response., PUT /api/slots/npu/config {npu: {asr: true}} -> GET shows asr=true. (+6 more)
 
 ### Community 442 - "Community 442"
-Cohesion: 0.13
-Nodes (15): _container_cgroup_mem_bytes(), Cgroup-wide ``memory.current`` for the podman/docker container backing *slot_nam, _make_proc(), Tests for podman cgroup mem probe in hal0.slots.capacity.  Covers :func:`hal0.sl, cgroupv1 line lacks '::' → probe cannot walk path → 0., memory.current read fails (OSError) → 0., Falls back to docker when podman is not found., Return a fake asyncio.subprocess.Process mock. (+7 more)
+Cohesion: 0.05
+Nodes (44): build_per_slot(), CapacityProbeError, CapacitySnapshot, _container_cgroup_mem_bytes(), _ctx_tokens_for(), estimate_file_size_kv_mb(), _kv_estimate_mb(), Any (+36 more)
 
 ### Community 443 - "Community 443"
 Cohesion: 0.24
@@ -3133,12 +3124,12 @@ Cohesion: 0.17
 Nodes (13): Matcher, classify(), _exact(), match_rule(), _outside_api_v1_mcp(), _prefix(), Route -> :class:`AuthClass` classification table (KB-1 / §1, seam S9).  Single s, Return the first :class:`_Rule` matching ``(method, path)``, or ``None``.      ` (+5 more)
 
 ### Community 458 - "Community 458"
-Cohesion: 0.19
-Nodes (20): dequeue(), enqueue(), _path(), pop_next(), Any, control.py — web-driven run queue + worker control state.  The dashboard lets an, Return (and remove) the head of the queue, or None if empty., True iff the worker may drive a session right now (Start pressed). (+12 more)
+Cohesion: 0.17
+Nodes (21): dequeue(), enqueue(), _path(), pop_next(), Any, control.py — web-driven run queue + worker control state.  The dashboard lets an, Return (and remove) the head of the queue, or None if empty., True iff the worker may drive a session right now (Start pressed). (+13 more)
 
 ### Community 459 - "Community 459"
-Cohesion: 0.10
-Nodes (30): _active_hal0_units(), _backup_slot_state(), _migrate_id_keying_dry_run_plan(), Any, CompletedProcess, Path, One-shot: unwind the flags-fold — hardware sticks to SLOTS (spec-hw-slot-ownersh, Every hal0-owned systemd unit currently active: ``hal0-api.service``     plus an (+22 more)
+Cohesion: 0.13
+Nodes (22): _active_hal0_units(), _backup_slot_state(), _migrate_id_keying_dry_run_plan(), Any, CompletedProcess, Path, Every hal0-owned systemd unit currently active: ``hal0-api.service``     plus an, Pre-flight tar backup of everything the migration touches.      The migrator has (+14 more)
 
 ### Community 460 - "Community 460"
 Cohesion: 0.08
@@ -3189,8 +3180,8 @@ Cohesion: 0.15
 Nodes (11): _honcho_cfg(), Path, Unit tests for the Honcho compose env renderer.  ``render_env`` turns ``Hal0Conf, Honcho is opt-in — before it's provisioned, ``hal0-honcho.service``         does, test_deriver_flush_enabled_by_default(), test_deriver_json_object_mode_local_only(), TestApplyHonchoEnv, TestAuthEnabled (+3 more)
 
 ### Community 472 - "Community 472"
-Cohesion: 0.11
-Nodes (24): detect(), DetectionResult, _filename_capability(), _heuristic_only(), _hf_repo_name_from_path(), Any, Path, quant_from_file_type() (+16 more)
+Cohesion: 0.17
+Nodes (15): DetectionResult, _filename_capability(), _heuristic_only(), _hf_repo_name_from_path(), Any, Path, quant_from_file_type(), quant_from_rocmfpx_filename() (+7 more)
 
 ### Community 473 - "Community 473"
 Cohesion: 0.08
@@ -3205,8 +3196,8 @@ Cohesion: 0.38
 Nodes (10): Match, current_version(), _fmt(), main(), overdue_markers(), ProjectVersion, _py_files(), Path (+2 more)
 
 ### Community 476 - "Community 476"
-Cohesion: 0.11
-Nodes (19): MonkeyPatch, Tests for the curated image-gen entries + ComfyUI-subdir pull routing.  Two surf, A malicious comfyui_subdir can't escape the comfyui/models tree., An empty/whitespace subdir lands in checkpoints/ as the safe default., End-to-end: a pull with comfyui_subdir lands under the right tree., The named v1 image-gen picks must always be present., Every image-gen entry needs model_class + comfyui_subdir + capability., The chat picks must still default capability='chat' (no model_class). (+11 more)
+Cohesion: 0.10
+Nodes (21): MonkeyPatch, Tests for the curated image-gen entries + ComfyUI-subdir pull routing.  Two surf, A malicious comfyui_subdir can't escape the comfyui/models tree., An empty/whitespace subdir lands in checkpoints/ as the safe default., End-to-end: a pull with comfyui_subdir lands under the right tree., A pull without comfyui_subdir keeps the legacy models/<id>/ layout., The named v1 image-gen picks must always be present., Every image-gen entry needs model_class + comfyui_subdir + capability. (+13 more)
 
 ### Community 477 - "Community 477"
 Cohesion: 0.09
@@ -3245,20 +3236,20 @@ Cohesion: 0.13
 Nodes (16): clear_executors(), dispatch(), DispatchResult, get_executor(), Any, Board executor dispatch seam (KB-5) — interface + registry, no-op default.  hal0, Drop all registered executors (test isolation / teardown)., Dispatch one attempt for ``card_id`` to ``target``'s executor.      Returns a :c (+8 more)
 
 ### Community 486 - "Community 486"
-Cohesion: 0.07
-Nodes (48): _active_persona_render(), ApiServerKeyResult, BootstrapState, _brain_profile_config_path(), ensure_gateway_api_server_key(), _fetch_model_contexts(), _generate_api_server_key(), _http_get() (+40 more)
+Cohesion: 0.33
+Nodes (6): ApiServerKeyResult, ensure_gateway_api_server_key(), _is_strong_api_server_key(), True iff ``value`` is a real, cryptographically-strong gateway key., Outcome of :func:`ensure_gateway_api_server_key`.      ``outcome`` is ``"generat, Idempotently ensure a strong ``API_SERVER_KEY`` in the gateway vault.      Reads
 
 ### Community 487 - "Community 487"
-Cohesion: 0.20
-Nodes (10): _envelope(), ModelRegistry, Path, Tests for stack import: parse/validate + resolve matrix + create.  Targeted file, reg(), _stack(), TestImportStack, TestParseEnvelope (+2 more)
+Cohesion: 0.11
+Nodes (18): #863: single-slot status includes argv drift without burdening list()., Labels list is omitted (not empty) when the slot config has no     ``model.label, The slot HW grid (NGL / THREADS / BINARY / image_pin) is top-level slot     conf, ADR-0023: POST /api/slots/agent-hermes/load resolves via the surviving     hidde, Loading a slot with no TOML returns the typed slot.not_found envelope., GET /api/slots/doesntexist/config → 404 slot.not_found.      Pre-issue-#35 the r, An EXISTING slot with malformed TOML still surfaces 400 slot.config_error., Verifies the /unload lifecycle route reaches the SlotManager. (+10 more)
 
 ### Community 488 - "Community 488"
 Cohesion: 0.19
 Nodes (20): claimed_by_other(), collect_claims(), _config_claims(), conflicts(), _listener_claims(), next_free(), _owners(), port_report() (+12 more)
 
 ### Community 489 - "Community 489"
-Cohesion: 0.19
-Nodes (12): default_model_cache_check(), id_tokens(), leading_token_overlap(), looks_diffusion_or_nontext(), Any, Model-fallback heuristics — moved out of ``slots/manager.py`` (ML-2/ML-3, the P3, Split a model id / name / path into lower-case alphanumeric tokens.      ``gemma, Count of shared leading tokens between two token lists.      Used to rank fallba (+4 more)
+Cohesion: 0.13
+Nodes (18): create_slot(), _device_backend(), _fit_check_warning(), Update a slot's config. Body: partial SlotConfig (shallow merge)., Update slot defaults (ctx_size / context_size, n_gpu_layers, …).      Convenienc, 400 when a slot-config write body carries keys the schema doesn't know.      ``S, 400 when a slot-config write body carries a MODEL-owned key.      Thin route-lay, Bare backend token for a slot ``device`` enum (mirrors the UI helper).      gpu- (+10 more)
 
 ### Community 490 - "Community 490"
 Cohesion: 0.29
@@ -3269,8 +3260,8 @@ Cohesion: 0.16
 Nodes (19): doctor_verify_cmd(), Render the post-setup report card (checks + live URLs + doc links).      First-c, gather_payloads(), _lan_ip(), Any, Console, ``hal0 doctor --verify`` — the post-setup report card (WS-K, issue #1114).  A si, Live URLs block — computed dashboard/chat + mDNS + LAN IP. (+11 more)
 
 ### Community 492 - "Community 492"
-Cohesion: 0.50
-Nodes (5): _engine(), RecordingSlotManager, StackSlotEntry, _stack(), TestPrimaryConverge
+Cohesion: 0.11
+Nodes (17): container_stub(), Any, coresident_group must key off device==npu, not the legacy slot names.      Deplo, idle_timeout_s / workers / llamacpp_args ride along on /api/slots.      The on-d, PUT /api/slots/{name}/config with model.rope_freq_base persists the value     an, GET /api/slots/{name} is enriched same shape as the list endpoint., Patch ``container_provider()`` with a stateful fake; yield its state.      The f, DELETE ?force=true binds + forwards to the manager and echoes ``forced``.      ' (+9 more)
 
 ### Community 493 - "Community 493"
 Cohesion: 0.15
@@ -3305,16 +3296,16 @@ Cohesion: 0.12
 Nodes (11): _FakeCtx, MonkeyPatch, Tests for ``hal0 doctor --verify`` — the WS-K report card (issue #1114).  The cl, _render_to_str(), test_check_dns_local_resolves_and_fails(), test_doctor_verify_flag_invokes_report(), test_gather_payloads_tolerates_api_errors(), test_render_report_includes_urls_and_links() (+3 more)
 
 ### Community 501 - "Community 501"
-Cohesion: 0.31
-Nodes (7): _client_host(), _current_request_id(), BaseException, Request, StreamingResponse, RequestSeam -- the ONE T1 measurement point (plan §7.6 / S12).  Wraps ``api/rout, Best-effort read of the id ``request_id.install()`` bound this request to.
+Cohesion: 0.20
+Nodes (9): truncate_client(), _client_host(), _current_request_id(), BaseException, Request, StreamingResponse, RequestSeam -- the ONE T1 measurement point (plan §7.6 / S12).  Wraps ``api/rout, Best-effort read of the id ``request_id.install()`` bound this request to. (+1 more)
 
 ### Community 502 - "Community 502"
 Cohesion: 0.29
 Nodes (21): Path, PortAuthority (rework §11.2) — the single writer of port ownership.  Pins: alloc, N threads each acquire for a distinct slot at once. The partial     unique index, _slot(), _stores(), test_acquire_grants_and_binds(), test_acquire_honours_preferred_when_free(), test_acquire_lowest_free() (+13 more)
 
 ### Community 503 - "Community 503"
-Cohesion: 0.06
-Nodes (36): agent_log(), _agent_provision_state_file(), agent_reprovision(), agent_status(), agent_uninstall(), agent_upgrade(), _approval_summary(), _bundled_agent_manager() (+28 more)
+Cohesion: 0.05
+Nodes (48): agent_log(), _agent_provision_state_file(), agent_reprovision(), agent_status(), agent_uninstall(), agent_upgrade(), _approval_summary(), approvals_list() (+40 more)
 
 ### Community 504 - "Community 504"
 Cohesion: 0.10
@@ -3361,8 +3352,8 @@ Cohesion: 0.18
 Nodes (19): list_ports(), Request, GET /api/ports — the global port-claim map (hal0.ports registry).  One place to, Return the slot config directory (/etc/hal0/slots/)., slots_config_dir(), Retag slot ``image`` pins that are stale FORMER DEFAULTS (upgrade migration)., retag_stale_slot_images(), _image_of() (+11 more)
 
 ### Community 515 - "Community 515"
-Cohesion: 0.06
-Nodes (65): _compact_ts_to_iso(), _import_v1_index(), _norm_v1_model_id(), _now_stamp(), Convert generate_results_json.py's index.json records to schema-2., Canonicalise a v1 model id so the same model measured under inconsistent     nam, One server_ab timed run → a schema-2 Rep. Returns None for an errored run     (n, server-ab stamps are compact UTC (``20260704T212506Z``); normalise to the     IS (+57 more)
+Cohesion: 0.07
+Nodes (53): _compact_ts_to_iso(), _median(), One server_ab timed run → a schema-2 Rep. Returns None for an errored run     (n, server-ab stamps are compact UTC (``20260704T212506Z``); normalise to the     IS, Normalize a v1 timestamp to a run_id (UTC stamp + suffix). Keeps chrono     sort, _sa_generative_record(), _sa_latency_record(), _sa_run_to_rep() (+45 more)
 
 ### Community 516 - "Community 516"
 Cohesion: 0.13
@@ -3373,20 +3364,20 @@ Cohesion: 0.14
 Nodes (18): _fetch_env(), Build the subprocess env for a fetch step, forwarding HF credentials.      Inher, _make_proc(), _PopenRecorder, #1110 (WS-G): ComfyUI fetch fixes.  Covers the three ways the fetch was feature-, No get_*.sh may pin the download tool to the container venv path alone., Each hf-using script resolves `hf` from PATH, keeping the venv fallback., _registry_workflow_names() (+10 more)
 
 ### Community 518 - "Community 518"
-Cohesion: 0.21
-Nodes (9): ExtensionOutcome, `hal0 app install openwebui` — deferred install verb (issue #1102 / Q9).  Pins t, installed=True but the active-confirmation lagged — success, not error., test_app_install_openwebui_hard_failure_dies(), test_app_install_openwebui_no_runtime_exits_nonzero(), test_app_install_openwebui_slow_start_is_not_fatal(), test_app_install_openwebui_success_does_not_exit(), test_install_agent_runs_hal0_agent_install() (+1 more)
+Cohesion: 0.17
+Nodes (13): _config_field_enrichment(), _container_state_enrichment(), get_slot(), overlay_cached_enrichment(), Any, Build per-slot config-derived fields for slot snapshots.      Request-bound adap, Build per-slot container state for container-backed slots.      Request-bound ad, ``.list()``-only view of ``upstreams`` plus a stand-in ``hal0`` entry.      The (+5 more)
 
 ### Community 519 - "Community 519"
-Cohesion: 0.14
-Nodes (20): _extract_readme_excerpt(), fetch_repo(), _format_size(), _hf_headers(), HFUpstreamError, _looks_like_flm_repo(), normalise_repo_slug(), _normalise_search_row() (+12 more)
+Cohesion: 0.13
+Nodes (22): inspect_hf_repo(), Inspect a HuggingFace repo and return pullable variants + metadata.      Accepts, _extract_readme_excerpt(), fetch_repo(), _format_size(), _hf_headers(), HFUpstreamError, _looks_like_flm_repo() (+14 more)
 
 ### Community 520 - "Community 520"
 Cohesion: 0.18
 Nodes (12): bankFrom(), buildBankOperations(), buildBankStats(), buildBigMemFactGraph(), buildDenseFactGraph(), buildMemEntityGraph(), buildMemEntityGraphRoute(), buildMemFactGraph() (+4 more)
 
 ### Community 521 - "Community 521"
-Cohesion: 0.11
-Nodes (21): FakeSnap, _no_seed_stacks(), MonkeyPatch, Shared recording fakes for the Stacks convergence tests.  Mirrors the FakeSlotMa, Isolate the engine unit tests from the shipped seed catalog (PR-6).      These t, A minimal Slot snapshot: just the fields converge() reads., Records load/swap/unload/list calls; serves a configurable pre-state., RecordingSlotManager (+13 more)
+Cohesion: 0.13
+Nodes (18): FakeSnap, _no_seed_stacks(), MonkeyPatch, Shared recording fakes for the Stacks convergence tests.  Mirrors the FakeSlotMa, Isolate the engine unit tests from the shipped seed catalog (PR-6).      These t, A minimal Slot snapshot: just the fields converge() reads., Records load/swap/unload/list calls; serves a configurable pre-state., RecordingSlotManager (+10 more)
 
 ### Community 522 - "Community 522"
 Cohesion: 0.20
@@ -3429,16 +3420,16 @@ Cohesion: 0.20
 Nodes (20): _make_container_provider_mock(), Path, SlotManager: npu container slot spawns through ContainerProvider with the FLM ta, A plain registry-style id (no ``:``) falls through to registry lookup.      _res, A /health wait timeout resolves to WARMING (non-dispatchable), not READY.      D, Write a minimal npu container slot TOML., The warm→ready gate runs the real-inference sentinel EXACTLY ONCE and,     on su, Regression (#1171): the warm→ready gate must tell verify_inference which     mod (+12 more)
 
 ### Community 533 - "Community 533"
-Cohesion: 0.13
-Nodes (14): CuratedModel, Every curated model must have a deployable source: either HF pull         coordi, One curated entry surfaced by the FirstRun wizard.      The wizard renders these, _match_curated(), Return the curated entry whose ``hf_file`` equals ``filename``., Tests for the custom-GGUF curated coords added in fix/stack-model-pull-coords., The new ids do not collide with any existing curated id., Each new id resolves via get_curated() to the EXACT hf_repo/hf_file.      This i (+6 more)
+Cohesion: 0.20
+Nodes (9): Tests for the custom-GGUF curated coords added in fix/stack-model-pull-coords., The new ids do not collide with any existing curated id., Each new id resolves via get_curated() to the EXACT hf_repo/hf_file.      This i, The on-disk filename resolves back to the curated entry (scan-backfill)., The three seed-stack files match their curated entries by filename., test_get_curated_resolves_exact_coords(), test_match_curated_by_filename(), test_match_curated_seed_stack_files() (+1 more)
 
 ### Community 534 - "Community 534"
-Cohesion: 0.14
-Nodes (19): Map ``cfg.memory.agent_providers[agent_id]`` to hermes's ``memory.provider``., _resolve_memory_provider(), _fake_cfg(), _overlay_keys(), Path, Unit tests for the honcho memory-provider wiring (feat/honcho-memory) in :mod:`h, provision.json state predating #1056 says 'hermes-agent' — must still     hit th, Mirrors test_hermes_provision.py's ``_build_overlay_keys`` helper. (+11 more)
+Cohesion: 0.16
+Nodes (17): _fake_cfg(), _overlay_keys(), Path, Unit tests for the honcho memory-provider wiring (feat/honcho-memory) in :mod:`h, provision.json state predating #1056 says 'hermes-agent' — must still     hit th, Mirrors test_hermes_provision.py's ``_build_overlay_keys`` helper., test_disable_honcho_hermes_host_already_disabled_no_change(), test_disable_honcho_hermes_host_flips_enabled_preserves_rest() (+9 more)
 
 ### Community 535 - "Community 535"
-Cohesion: 0.25
-Nodes (10): Request, Restart endpoint for bundled agents (v0.3 PR-11).  ``POST /api/agents/{agent_id}, Restart the systemd unit backing ``agent_id``.      Returns ``{status, detail}``, Resolve ``systemctl`` on PATH.      Returns ``None`` on hosts that don't have sy, Compose the unit name for an agent id.      Matches ``installer/systemd/hal0-age, Identify the caller for the audit log.      There is no Bearer token store (auth, _resolve_actor(), restart_agent() (+2 more)
+Cohesion: 0.17
+Nodes (14): _fmt_size(), model_assign(), model_list(), model_pull(), model_register(), model_update(), _poll_pull_progress(), hal0 model subcommands — thin HTTP client to the hal0 API. (+6 more)
 
 ### Community 536 - "Community 536"
 Cohesion: 0.10
@@ -3461,12 +3452,12 @@ Cohesion: 0.24
 Nodes (14): adjacency(), _edge_ends(), ego_bfs(), GraphCache, induce_subgraph(), _neg_ts(), _nid(), Any (+6 more)
 
 ### Community 541 - "Community 541"
-Cohesion: 0.24
-Nodes (10): error_event(), event(), new_id(), Any, Realtime event vocabulary + typed error/event builders (spec §4b).  The wire is, Short, stable-prefixed id for events/items/responses (``evt_``, ``resp_``…)., Build a server->client event dict with a fresh ``event_id`` + ``type``., Build a Realtime ``error`` event (OpenAI shape: ``{type:error, error:{…}}``). (+2 more)
+Cohesion: 0.34
+Nodes (13): _ok_record_for(), test_planner.py — the staleness set-difference against a temp store (DESIGN §6)., _registry(), store(), _suite(), test_aged_record_is_stale_again(), test_config_matrix_expands_to_distinct_cells(), test_config_non_whitelisted_flag_dropped() (+5 more)
 
 ### Community 542 - "Community 542"
-Cohesion: 0.20
-Nodes (10): build_per_slot(), Build the ``per_slot`` memory map for loaded slots.      For every slot in a res, Verify build_per_slot uses cgroup bytes for container slots     and falls back t, When cgroup exceeds the (zero) estimate, build_per_slot uses the cgroup value., #672 regression: Strix Halo GTT weights not charged to cgroup.          When the, When the cgroup DOES account for weights it exceeds the estimate and wins., When cgroup probe returns 0, build_per_slot uses registry file size., NPU/FLM slots use the FLM footprint path and never call the cgroup probe. (+2 more)
+Cohesion: 0.31
+Nodes (8): Path, Unit tests for the active-stack pointer + drift detection.  Targeted file run:, PS-5 part 2 — a converge whose per-slot loads failed must not read clean.      T, _saber(), _slots_dir(), TestConvergeDegraded, TestDriftStatus, _write_slot()
 
 ### Community 543 - "Community 543"
 Cohesion: 0.13
@@ -3489,8 +3480,8 @@ Cohesion: 0.13
 Nodes (14): 1. What's wrong, 2. Why both units spawn, 3. Fix plan, 3a. Halt agent unit generation for brain, 3b. Fix brain slot config, 3c. Disable embed slot, 3d. Backfill model_file registration (if needed), 4. Slot → unit generation code (+6 more)
 
 ### Community 548 - "Community 548"
-Cohesion: 0.31
-Nodes (9): Path, Tests for ``hal0 config migrate`` honesty (#503).  The command used to be a no-o, With no hal0.toml present, migrate must not claim a successful check., A config already at the latest schema version is reported honestly., A config behind the latest schema is migrated forward and stamped.      Only v1, _set_home(), test_migrate_already_latest_does_not_rewrite(), test_migrate_no_config_is_honest() (+1 more)
+Cohesion: 0.27
+Nodes (10): check(), Flag, _median(), _metric(), _provenance_key(), Any, regress.py — regression detection (DESIGN §11).  Cheap and dumb on purpose (no M, One flagged cell (DESIGN §11 output → ``bench.regression`` journal event     + b (+2 more)
 
 ### Community 549 - "Community 549"
 Cohesion: 0.14
@@ -3501,8 +3492,8 @@ Cohesion: 0.16
 Nodes (12): make_event(), _now_iso(), Any, Queue, In-process event bus + ring buffer for the dashboard footer.  The footer status, Append an event to the ring and fan it out to every subscriber.          Never b, Push to a subscriber queue, dropping oldest on overflow.          A slow consume, Yield an asyncio.Queue receiving every event emitted after entry.          Use a (+4 more)
 
 ### Community 551 - "Community 551"
-Cohesion: 0.16
-Nodes (18): classify_layout(), is_id_stem(), Path, Slot on-disk layout primitives — the bilingual (name-or-id) key seam.  A slot's, True when *stem* is an id-key (all ASCII digits), else a name-key.      ``"143"`, The ``<key>.toml`` config path under *config_dir* for a name-or-id key., The ``<key>/state.json`` state path under *data_dir* for a name-or-id key., Map every slot-TOML stem under *config_dir* to ``"id"`` or ``"name"``.      Dotf (+10 more)
+Cohesion: 0.14
+Nodes (20): list_slot_layout(), Classify every slots/*.toml stem as ``"id"`` or ``"name"``.      The bilingual e, classify_layout(), is_id_stem(), Path, Slot on-disk layout primitives — the bilingual (name-or-id) key seam.  A slot's, True when *stem* is an id-key (all ASCII digits), else a name-key.      ``"143"`, The ``<key>.toml`` config path under *config_dir* for a name-or-id key. (+12 more)
 
 ### Community 552 - "Community 552"
 Cohesion: 0.10
@@ -3561,8 +3552,8 @@ Cohesion: 0.14
 Nodes (11): Any, Connection, Rebuild ``bench.db`` from records.jsonl from scratch and return the         numb, Map cell_key -> the full current (newest ok) record, read straight         from, Current-value rows for `benchlab results`, from the current_cells view., Time-ordered ok records for a cell (trend line) or a whole model, for         `b, Best-effort ISO timestamp for a record. run_id is a UTC stamp + suffix     (``20, Create the state root + artifacts dir. Idempotent; called before any         wri (+3 more)
 
 ### Community 567 - "Community 567"
-Cohesion: 0.07
-Nodes (53): BoardStore, SQLite repository for the Operator Board.      The documented interface is exact, client(), _make(), TestClient, ETag / If-Match optimistic concurrency on board task routes (KB-6).  hal0 uses 4, store(), test_delete_matching_if_match_ok() (+45 more)
+Cohesion: 0.32
+Nodes (13): client(), _make(), TestClient, ETag / If-Match optimistic concurrency on board task routes (KB-6).  hal0 uses 4, store(), test_delete_matching_if_match_ok(), test_delete_stale_if_match_conflicts(), test_get_task_emits_etag() (+5 more)
 
 ### Community 568 - "Community 568"
 Cohesion: 0.18
@@ -3570,7 +3561,7 @@ Nodes (10): OmniRouter, Any, OmniRouter — the public surface.  Wires :mod:`hal
 
 ### Community 569 - "Community 569"
 Cohesion: 0.06
-Nodes (53): _canon(), _dedup(), _deny_managed_flags(), _deny_slot_hardware_flags(), FlagProvenance, _is_flag(), normalize_argv(), NormalizedArgv (+45 more)
+Nodes (55): Validate the launch-affecting fields of a model create/update/validate body., screen_model_write(), _canon(), _dedup(), _deny_managed_flags(), _deny_slot_hardware_flags(), FlagProvenance, _is_flag() (+47 more)
 
 ### Community 570 - "Community 570"
 Cohesion: 0.20
@@ -3597,8 +3588,8 @@ Cohesion: 0.18
 Nodes (7): FakeSlotManager, _no_spawn_context_refresh(), Any, MonkeyPatch, NPU Phase 2 — end-to-end smoke for the trio-driven embed path.  Drives ``Capabil, _StubSlot, test_npu_phase2_embed_enable_end_to_end()
 
 ### Community 576 - "Community 576"
-Cohesion: 0.19
-Nodes (15): _illegal_selection(), _NullLock, MonkeyPatch, Tests for ``hal0 capabilities`` — list/set (live API) + migrate (footgun fix)., Stub load/save so migrate never touches a real capabilities.toml., The old ``--dry-run`` flag is hidden but harmless — still previews., stub_config(), test_list_empty_selections() (+7 more)
+Cohesion: 0.29
+Nodes (4): Ensure /status fields needed by the pane are present and well-formed., gpu_busy_percent is forced-high artifact — util must be 0/None when idle., it/s, eta, step require a future ComfyUI websocket subscription., TestStatusTelemetry
 
 ### Community 577 - "Community 577"
 Cohesion: 0.11
@@ -3617,8 +3608,8 @@ Cohesion: 0.19
 Nodes (18): Path, Write-time "one default per type" validation in SlotManager (SC-4).  ARCHITECTUR, The first default of a type is legal even with a non-default peer., A default of a DIFFERENT type does not conflict with an llm default., A non-default peer may coexist alongside an existing default., Updating the sole default without touching the default flag is legal.      The p, Seed a minimal slot TOML without going through SlotManager., Creating a second ``type=llm, default=true`` slot must be rejected. (+10 more)
 
 ### Community 581 - "Community 581"
-Cohesion: 0.08
-Nodes (32): KeyTier, RequireAuthResponse, RotateKeyResponse, useLogout(), useRotateKey(), useSetRequireAuth(), useAuthExposure(), AuthStatus (+24 more)
+Cohesion: 0.05
+Nodes (46): KeyTier, RequireAuthResponse, RotateKeyResponse, useLogout(), useRotateKey(), useSetRequireAuth(), useAuthExposure(), useAuthStatus() (+38 more)
 
 ### Community 582 - "Community 582"
 Cohesion: 0.19
@@ -3629,8 +3620,8 @@ Cohesion: 0.24
 Nodes (9): mock_transport(), Any, MonkeyPatch, queue(), MCP admin coverage for the Stacks tools (PR-4).  The stack tools are REST passth, test_approved_stack_apply_posts_to_apply_url(), test_stack_apply_gates_for_approval(), test_stack_list_dispatches_get() (+1 more)
 
 ### Community 584 - "Community 584"
-Cohesion: 0.40
-Nodes (4): _iso(), Path, prune() -- bounded storage: raw tables age out, rollup survives longer., TestPrune
+Cohesion: 0.39
+Nodes (8): One-shot: unwind the flags-fold — hardware sticks to SLOTS (spec-hw-slot-ownersh, slot_migrate_hw(), MonkeyPatch, Path, ``hal0 slot migrate-hw`` — the operator-run deploy-window HW-ownership fold (spe, test_apply_folds_slot_image_to_image_pin_and_backs_up(), test_dry_run_by_default_does_not_write(), _write_slot()
 
 ### Community 585 - "Community 585"
 Cohesion: 0.29
@@ -3749,8 +3740,8 @@ Cohesion: 0.21
 Nodes (17): app(), _build_app(), client(), _noop_executor(), Any, FastAPI, TestClient, queue() (+9 more)
 
 ### Community 614 - "Community 614"
-Cohesion: 0.12
-Nodes (10): _FakeDispatcher, _Headers, _NonChatRequest, _OmniRequest, Request that flows through chat_completions -> _read_json_body -> omni branch., The omni branch returns before _dispatch_and_forward, so chat_completions     mu, _dispatch_and_forward must NOT invoke _normalize_chat_body — that would     rewr, test_dispatch_and_forward_does_not_normalize_non_chat() (+2 more)
+Cohesion: 0.22
+Nodes (5): _FakeDispatcher, _Headers, _NonChatRequest, _dispatch_and_forward must NOT invoke _normalize_chat_body — that would     rewr, test_dispatch_and_forward_does_not_normalize_non_chat()
 
 ### Community 615 - "Community 615"
 Cohesion: 0.13
@@ -3842,11 +3833,11 @@ Nodes (14): Path, Tests for hal0.bundles.schema — dataclass round-trip + seria
 
 ### Community 637 - "Community 637"
 Cohesion: 0.10
-Nodes (32): board_move(), Move a task to a different lane (PATCH /api/board/tasks/{id})., Uninstall a user-installed MCP server. Bundled servers reject 409., uninstall_cmd(), graph_disable_cmd(), Turn graph extraction OFF; cancels any in-flight build., _api_reachable(), api_delete() (+24 more)
+Nodes (31): board_move(), Move a task to a different lane (PATCH /api/board/tasks/{id})., doctor_logs(), Print or follow hal0-api's own systemd journal.      ``hal0 slot logs`` covers p, Uninstall a user-installed MCP server. Bundled servers reject 409., uninstall_cmd(), _api_reachable(), api_delete() (+23 more)
 
 ### Community 638 - "Community 638"
 Cohesion: 0.05
-Nodes (24): Any, Pydantic model for a single slot's TOML config (slots/<name>.toml).      Fields, Pull a `[server]` TOML table out of the loader's `extra` catch-all.          ``h, Pull a `[npu]` TOML table out of the loader's `extra` catch-all.          Mirror, Pull an `[image]` TOML table out of the loader's `extra` catch-all.          Mir, Read-only promotion shim: derive ``device`` from a legacy         on-disk ``back, Inverse of `_hoist_server_from_extra` for round-trip dumps.          ``hal0.conf, SlotConfig (+16 more)
+Nodes (26): Any, Pydantic model for a single slot's TOML config (slots/<name>.toml).      Fields, Pull a `[server]` TOML table out of the loader's `extra` catch-all.          ``h, Pull a `[npu]` TOML table out of the loader's `extra` catch-all.          Mirror, Pull an `[image]` TOML table out of the loader's `extra` catch-all.          Mir, Read-only promotion shim: derive ``device`` from a legacy         on-disk ``back, Inverse of `_hoist_server_from_extra` for round-trip dumps.          ``hal0.conf, SlotConfig (+18 more)
 
 ### Community 639 - "Community 639"
 Cohesion: 0.17
@@ -3893,8 +3884,8 @@ Cohesion: 0.14
 Nodes (13): Context: why halo143 specifically, Fixes landed (on `rework/descar`, queued for this deploy), Known residual risks (not fixed in this wave), Phase 0 — Preflight + snapshot (5 min), Phase 1 — Deploy (10 min), Phase 2 — Doctor baseline (5 min), Phase 3 — Slot lifecycle validation (LOAD-BEARING — 15 min), Phase 4 — Context-size migration rehearsal (M5 — 10 min) (+5 more)
 
 ### Community 650 - "Community 650"
-Cohesion: 0.31
-Nodes (17): _on_disk_mtp(), SlotManager, MTP force-on defuse — swap path + updater migration.  A slot's explicit ``mtp =, An explicit ModelDefaults.mtp=True is eligible even with NO registry     tag — t, An explicit ModelDefaults.mtp=False makes the model ineligible even     though i, Create a slot carrying a slot-owned ``mtp`` the way a pre-split box has one., _register(), _seed_pre_split_slot() (+9 more)
+Cohesion: 0.27
+Nodes (19): clear_stale_mtp_overrides(), Clear crash-only ``mtp = true`` slot overrides (upgrade migration).      An expl, _on_disk_mtp(), SlotManager, MTP force-on defuse — swap path + updater migration.  A slot's explicit ``mtp =, An explicit ModelDefaults.mtp=True is eligible even with NO registry     tag — t, An explicit ModelDefaults.mtp=False makes the model ineligible even     though i, Create a slot carrying a slot-owned ``mtp`` the way a pre-split box has one. (+11 more)
 
 ### Community 651 - "Community 651"
 Cohesion: 0.12
@@ -3974,7 +3965,7 @@ Nodes (14): _fetch_status(), _install(), _is_prompt_submit(), _post_switchover()
 
 ### Community 670 - "Community 670"
 Cohesion: 0.05
-Nodes (81): aclose_client(), _arbiter_api_mode(), _arbiter_unavailable(), _as_pct(), _build_client(), _bytes_to_gb(), _comfyui_base_url(), _comfyui_container() (+73 more)
+Nodes (82): aclose_client(), _arbiter_api_mode(), _arbiter_unavailable(), _as_pct(), _build_client(), _bytes_to_gb(), _comfyui_base_url(), _comfyui_container() (+74 more)
 
 ### Community 671 - "Community 671"
 Cohesion: 0.22
@@ -4016,16 +4007,12 @@ Nodes (16): models_health(), _percentile(), Any, Connection, Path, Row, Read API
 Cohesion: 0.40
 Nodes (5): Breaking, Features, Internal, Known limitations, [v0.2.0] — 2026-05-23
 
-### Community 681 - "Community 681"
-Cohesion: 0.16
-Nodes (14): _atomic_write(), _atomic_write_if_changed(), content_hash(), _deep_merge(), _disable_honcho_hermes_host(), _merge_config_yaml_layers(), Stable content hash steps use to detect "inputs unchanged".      Steps that prod, Deep-merge the irreducible list keys + operator overrides onto config.yaml. (+6 more)
-
 ### Community 682 - "Community 682"
 Cohesion: 0.14
 Nodes (12): is_container_npu_cfg(), Any, Shared NPU-slot helpers for dispatcher modules (Phase A container cutover)., True when this slot config describes a containerized NPU slot.      Detection: d, Any, AsyncClient, Response, Forward an STT request to the npu container's ``/v1/audio/transcriptions``. (+4 more)
 
 ### Community 683 - "Community 683"
-Cohesion: 0.22
+Cohesion: 0.21
 Nodes (7): MemoryDispatcher, Any, In-process memory dispatcher for the MCP admin server.  By design, the admin MCP, The underlying memory provider. Exposed so tests can introspect         which in, In-process bridge from MCP admin to a memory provider.      Parameters     -----, Run one ``memory_*`` tool. Returns the JSON envelope shape the         MCP admin, Callable sugar — same as :meth:`dispatch`.
 
 ### Community 684 - "Community 684"
@@ -4049,8 +4036,8 @@ Cohesion: 0.24
 Nodes (7): queryClient, installToastGlobal(), timers, Toast, ToastKind, ToastState, useToastStore
 
 ### Community 689 - "Community 689"
-Cohesion: 0.28
-Nodes (8): RequestValidationError, _envelope(), install(), Any, FastAPI, Structured error envelope.  All non-2xx responses follow:      {"error": {"code", Reshape pydantic's per-field error dicts into a stable envelope-friendly form., _shape_validation_errors()
+Cohesion: 0.22
+Nodes (8): A non-zero bootstrap rc must stop the flow before the API register —     we don', Records calls in order so the test can assert sequencing., `hal0 agent install hermes` (no flags) enables the gateway — parity     with ins, _Rec, test_install_hermes_aborts_when_provisioning_fails(), test_install_hermes_no_gateway_flag_skips_it(), test_install_hermes_runs_gateway_by_default(), test_install_hermes_runs_prereqs_then_bootstrap_then_register()
 
 ### Community 690 - "Community 690"
 Cohesion: 0.50
@@ -4089,8 +4076,8 @@ Cohesion: 0.13
 Nodes (14): 10. Progress tracking, 12. Deployment / rollout constraint, 16.1 Brain engine fork — Hermes API server reopens it (revises §16), 17. Installer / setup overhaul (Lane E), 18. Hermes plugin suite — corrected + EXPANDED (supersedes §15.5/15.6/15.9 packaging), 1. Diagnosis: it's iteration scars, and it's systemic, 20.1 Bench = auto-tuner (model-config-driven + tuning matrix), 20. Bench system rework (BENCH) (+6 more)
 
 ### Community 699 - "Community 699"
-Cohesion: 0.31
-Nodes (8): _build_curated(), HaloaiModel, _load_haloai_seed(), Curated model catalogue — the FirstRun wizard's pick list.  The catalogue is a s, One upstream-routed model imported from the haloai catalogue.      Unlike :class, Read the frozen haloai snapshot from disk. Cached after first call., Merge the hand-rolled curated list with the haloai seed.      Local :data:`CURAT, # NOTE: the catalogue lives in code (not a TOML file on disk) on purpose:
+Cohesion: 0.25
+Nodes (8): Path, Round-trip regression for the shipped installer config after P3-schema's seed-da, Every shipped slot TOML must still validate through the loader., load -> save -> load must be a fixed point for the fields     ``_unflatten_slot_, The shipped installer profiles.toml is documentation + a home for     operator c, test_installer_profiles_toml_loads_and_carries_no_seeds(), test_installer_slot_load_save_load_is_stable(), test_installer_slot_loads_unchanged()
 
 ### Community 700 - "Community 700"
 Cohesion: 0.15
@@ -4129,8 +4116,8 @@ Cohesion: 0.19
 Nodes (14): Pattern, _find_shadows(), _flatten(), _path_to_regex(), Route-shadow guard for the hal0 FastAPI app (P3-routers review §J).  FastAPI/Sta, Regression for the api/__init__ ordering leak the spec calls out.      ``GET /ap, Positive control: the detector flags a param-before-literal ordering.      Witho, Return effective ``(full_path, methods)`` pairs in match-evaluation order. (+6 more)
 
 ### Community 709 - "Community 709"
-Cohesion: 0.20
-Nodes (8): _Completed, _brain_profile_state(), _FakeSystemctl, Any, Capture subprocess.run argv so tests can assert daemon-reload calls., test_brain_profile_mcp_wire_is_idempotent(), test_brain_profile_mcp_wire_merges_and_preserves_upstream_keys(), test_brain_profile_mcp_wire_skips_when_profile_absent()
+Cohesion: 0.36
+Nodes (3): Transport-safe metadata subset of a registry ``Model``.      Embedded in a stack, StackModelMeta, TestStackModelMeta
 
 ### Community 710 - "Community 710"
 Cohesion: 0.32
@@ -4165,8 +4152,8 @@ Cohesion: 0.29
 Nodes (14): profiles_toml(), Return the profile catalog path (/etc/hal0/profiles.toml).      The file is opti, ensure_seed_profiles(), Prune materialised seed profiles from /etc/hal0/profiles.toml.      Seeds are **, ensure_seed_profiles — the virtual-seed prune/rescue migration.  Seeds are virtu, Render a seed profile as TOML, byte-identical to SEED_PROFILES., An operator profile that collides with a (possibly newer) seed name is     renam, _seed_table() (+6 more)
 
 ### Community 718 - "Community 718"
-Cohesion: 0.18
-Nodes (9): main_callback(), probe(), hal0 CLI entry point.  Entry point declared in pyproject.toml:     [project.scri, hal0 — open-source home AI inference platform., [DEPRECATED] alias for `hal0 config hardware --refresh`; use that instead., Start the hal0 API server (used by hal0-api.service)., Uninstall hal0 from this system.      Thin wrapper around ``installer/uninstall., serve() (+1 more)
+Cohesion: 0.15
+Nodes (11): main_callback(), probe(), hal0 CLI entry point.  Entry point declared in pyproject.toml:     [project.scri, hal0 — open-source home AI inference platform., Show system and slot summary., [DEPRECATED] alias for `hal0 config hardware --refresh`; use that instead., Start the hal0 API server (used by hal0-api.service)., Uninstall hal0 from this system.      Thin wrapper around ``installer/uninstall. (+3 more)
 
 ### Community 719 - "Community 719"
 Cohesion: 0.19
@@ -4209,8 +4196,8 @@ Cohesion: 0.15
 Nodes (14): _call(), Regression tests for dispatcher HTTP client pool bounds (#415).  Without the fix, A PoolTimeout from a saturated pool surfaces as UpstreamUnavailable.      We inj, A PoolTimeout on stream-open also surfaces as UpstreamUnavailable., The module constants must reflect the bounded values from the fix., Non-streaming read timeout must be <= 60 s (was 300 s before the fix)., The lazily-constructed client must carry the connection limits., The lazily-constructed client's read timeout must use the constant. (+6 more)
 
 ### Community 729 - "Community 729"
-Cohesion: 0.21
-Nodes (10): _ctx_tokens_for(), estimate_file_size_kv_mb(), _kv_estimate_mb(), Any, Slot capacity snapshot.  CapacitySnapshot is the single-source view of available, Best-effort KV-cache size in MiB for a given context window., Model-file-size + KV-cache footprint estimate, in MiB.      This is the same bas, Resolve the effective context window (tokens) for a model.      Reads, in priori (+2 more)
+Cohesion: 0.25
+Nodes (8): Reject ``raw`` when a bare double-quoted JSON value was eaten by the shell., screen_extra_args_json(), Bare double-quoted JSON whose quotes shlex strips is rejected with the     singl, Correctly single-quoted JSON survives shlex-splitting and passes., A tune with no JSON object is untouched by the guard., test_screen_extra_args_json_accepts_single_quoted_json(), test_screen_extra_args_json_ignores_non_json_flags(), test_screen_extra_args_json_rejects_shell_stripped_json()
 
 ### Community 730 - "Community 730"
 Cohesion: 0.17
@@ -4301,8 +4288,8 @@ Cohesion: 0.21
 Nodes (13): cache_dir(), _evict_if_over_budget(), _png_path(), Path, On-disk PNG cache for ``/v1/images/generations`` URL responses.  When the OpenAI, Write ``png_bytes`` to the cache, return the bare uuid stem.      Caller assembl, Read a cached PNG by name (with or without .png suffix).      Returns None if th, # NOTE: The cache directory is intentionally NOT cleared at install or (+5 more)
 
 ### Community 753 - "Community 753"
-Cohesion: 0.09
-Nodes (18): ModelCacheCheck, PullRunner, Lock, Any, Lock, Slot, Push-driven failure detector (P3-slots §1b-watchdog).  ``SlotWatchdog`` polls a, Push-driven failure detector, against a narrow host seam. (+10 more)
+Cohesion: 0.38
+Nodes (4): _FakeSlotManager, NPU/FLM slot model_id is projected as FLM's native colon tag.      The resolver, test_llm_slot_views_filters_and_projects(), test_llm_slot_views_translates_flm_id_to_colon_tag()
 
 ### Community 754 - "Community 754"
 Cohesion: 0.22
@@ -4345,12 +4332,12 @@ Cohesion: 0.27
 Nodes (13): TestClient, Tests for GET /api/services/health.  The router is not yet wired into the main a, Minimal app with only the services router mounted., Patch comfyui/hermes/openwebui to neutral down states so a test can     isolate, _services_by_id(), _stub_other_probes(), svc_client(), test_comfyui_probe_raises_degrades_gracefully() (+5 more)
 
 ### Community 765 - "Community 765"
-Cohesion: 0.23
-Nodes (13): _patch_httpx(), MonkeyPatch, Minimal httpx.Response stand-in for the scrape tests.      Implements just the s, Patch httpx.AsyncClient used inside slots._scrape_llama_metrics.      Routes the, Newer llama-server (b9279+) drops kv_cache_usage_ratio from     /metrics but sti, If a future llama.cpp reintroduces ``llamacpp:kv_cache_usage_ratio``     we use, Idle /slots payload (no n_prompt_tokens on any sub-slot) leaves     ``kv_cache_u, n_prompt_tokens can briefly exceed n_ctx during shift; clamp the     synthesised (+5 more)
+Cohesion: 0.21
+Nodes (16): isolated_app(), _patch_httpx(), MonkeyPatch, Tests for the /api/slots route surface (container runtime).  Covers:   - list-me, A FastAPI app whose lifespan resolves paths under tmp_hal0_home.      The shared, Minimal httpx.Response stand-in for the scrape tests.      Implements just the s, Patch httpx.AsyncClient used inside slots._scrape_llama_metrics.      Routes the, Newer llama-server (b9279+) drops kv_cache_usage_ratio from     /metrics but sti (+8 more)
 
 ### Community 766 - "Community 766"
-Cohesion: 0.10
-Nodes (36): _load_suite(), Resolve a --suite argument: a filesystem path to a .toml, else an id     looked, Build the suite for one queued item: a named suite id, or a single model     (an, _worklist_suite(), Cells, _default_configs(), load_suite_file(), load_suites() (+28 more)
+Cohesion: 0.14
+Nodes (23): Build the suite for one queued item: a named suite id, or a single model     (an, _worklist_suite(), Cells, _default_configs(), load_suite_file(), load_suites(), Matrix, _normalize_configs() (+15 more)
 
 ### Community 767 - "Community 767"
 Cohesion: 0.23
@@ -4381,8 +4368,8 @@ Cohesion: 0.14
 Nodes (3): MonkeyPatch, Unit tests for the pure OpenWebUI image-pin helpers.  These never touch the netw, test_installed_unit_path_honours_hal0_home()
 
 ### Community 774 - "Community 774"
-Cohesion: 0.28
-Nodes (10): _build_spec(), _model_info(), _moe_profile(), Any, Model-owned `vision` tri-state gates the --mmproj emit (#901, spec-hw-slot-owner, No explicit defaults.vision opinion + sidecar present → --mmproj emitted., defaults.vision=false → text-only, no --mmproj even though a sidecar exists., A stray legacy ``vision`` key still on a slot TOML (pre-migration,         toler (+2 more)
+Cohesion: 0.40
+Nodes (4): actor_of(), Request, Request-scoped helper for recording user actions to the audit store.  Thin wrapp, Derive the audit actor string from the request.      ``mcp:<agent>`` when an age
 
 ### Community 775 - "Community 775"
 Cohesion: 0.26
@@ -4409,12 +4396,8 @@ Cohesion: 0.30
 Nodes (10): MonkeyPatch, Path, StackSlotEntry, Unit tests for StackApplyEngine.apply_config() — atomic commit + rollback.  Targ, _read(), _slots_dir(), _stack(), TestCommit (+2 more)
 
 ### Community 781 - "Community 781"
-Cohesion: 0.21
-Nodes (12): emitSse(), installSseHarness(), waitForSse(), emitAndAwait(), ERR_REC, frame(), OK_REC, rec() (+4 more)
-
-### Community 782 - "test_async_spawn_demotes_via_setpriv_not_kwargs"
-Cohesion: 0.30
-Nodes (4): _FakeRequest, R1-style chat templates prefill the opening <think>, so the completion     can c, test_config_accessor_defaults_when_absent(), test_split_thinking_closing_tag_only()
+Cohesion: 0.23
+Nodes (11): emitSse(), installSseHarness(), waitForSse(), emitAndAwait(), ERR_REC, frame(), OK_REC, WARN_REC (+3 more)
 
 ### Community 783 - "test_is_installed_flm_id_matches_installed_tag"
 Cohesion: 0.20
@@ -4423,10 +4406,6 @@ Nodes (9): File Map, Final handoff gates, Global Constraints, Prerelease Preview
 ### Community 784 - "Community 784"
 Cohesion: 0.67
 Nodes (3): Added, Fixed, [v0.8.5b2] — 2026-07-04
-
-### Community 785 - "Community 785"
-Cohesion: 0.33
-Nodes (3): _FakeResponse, Any, Minimal stand-in for the object urlopen's context manager yields.
 
 ### Community 786 - "Connection"
 Cohesion: 0.20
@@ -4479,10 +4458,6 @@ Nodes (6): Path, test_loaded_slot_returns_typed_slot(), test_resolve_for_request
 ### Community 799 - "Community 799"
 Cohesion: 0.18
 Nodes (11): install(), FastAPI, LogRecord, QueryStringScrubber, uvicorn access-log query-string scrubber.  DA-sec-ops MUST-FIX #3 (re-iterated b, Logging filter that strips ``?...`` from uvicorn access lines.      Applied to t, Attach :class:`QueryStringScrubber` to the scrubbed uvicorn loggers.      The fi, The QueryStringScrubber filter rewrites the request line.      Direct unit test (+3 more)
-
-### Community 800 - "Community 800"
-Cohesion: 0.20
-Nodes (10): prune_missing(), Remove registry rows whose backing path no longer exists on disk.      A row is, A row whose backing file no longer exists and is NOT referenced by any     slot/, A row whose file is missing but whose id is in protected_ids is NOT     removed, A row whose backing file still exists is untouched and counts as kept —     even, dry_run reports what would be pruned without mutating the registry., test_prune_missing_dry_run_does_not_remove(), test_prune_missing_leaves_present_rows() (+2 more)
 
 ### Community 802 - "Community 802"
 Cohesion: 0.38
@@ -4601,20 +4576,16 @@ Cohesion: 0.21
 Nodes (10): BundleManifest, The full on-disk bundle JSON shape.      The ``omni`` block is the ``collection., list_bundle_summaries(), load_all_bundles(), load_bundle(), _load_cached(), Load every bundle in :data:`BUNDLES` order.      Tests that need to assert again, Project the manifests onto the lightweight :class:`Bundle` shape.      Used by ` (+2 more)
 
 ### Community 831 - "isolated_client"
-Cohesion: 0.22
-Nodes (8): Boxes, Container prerequisites — corrected, CT162 acceptance (fixed tree, no manual prep), CT163 — perms convergence (fourth container), Defect verification, Fresh-LXC install validation — 2026-07-26 (stamp `a3v1`), New defects found (all fixed on `hardening/alpha3`), Notes
-
-### Community 832 - "Community 832"
-Cohesion: 0.25
-Nodes (8): hermes_pinned_ref(), hermes_requirement_floor(), hermes_requirement_is_vetted(), _hermes_requirement_line(), The single active ``hermes-agent`` requirement line (comments skipped)., The ``>=X.Y.Z`` version floor of a requirement line, or ``None``.      ``None``, The git commit/tag a requirement pins to, or ``None`` for a version spec., Whether the shipped requirement forecloses the broken 0.15.2 build.      Accepta
+Cohesion: 0.20
+Nodes (9): Boxes, Container prerequisites — corrected, CT162 acceptance (fixed tree, no manual prep), CT163 — perms convergence (fourth container), Defect verification, Fresh-LXC install validation — 2026-07-26 (stamp `a3v1`), New defects found (all fixed on `hardening/alpha3`), Notes (+1 more)
 
 ### Community 833 - "Community 833"
 Cohesion: 0.25
 Nodes (10): _build(), FastAPI, TestClient, Memory gate — ``[memory].enabled`` toggles the whole subsystem.  The memory engi, Build a fresh app + client with ``[memory].enabled`` set (or left at     its sch, No hal0.toml at all → the schema default (`enabled=True`) applies., /api/status always carries a boolean memory_enabled field., test_memory_disabled_when_config_says_so() (+2 more)
 
 ### Community 834 - "test_load_success_path_dispatches_via_container"
-Cohesion: 0.36
-Nodes (3): Raised by :meth:`AgentMCPClient.guard` for hard-blocked tools.      Maps to the, ToolNotPermittedError, TestGuard
+Cohesion: 0.24
+Nodes (6): Exception, Raised by :meth:`AgentMCPClient.guard` for hard-blocked tools.      Maps to the, ToolNotPermittedError, PortAuthorityError, Base class for port-authority errors., TestGuard
 
 ### Community 835 - "Community 835"
 Cohesion: 0.17
@@ -4631,10 +4602,6 @@ Nodes (11): provision_state(), MonkeyPatch, Path, Tests for ``hal0 agent status 
 ### Community 838 - "Community 838"
 Cohesion: 0.38
 Nodes (11): Any, MonkeyPatch, Tests for ``--json`` machine-readable output on the list/show commands (#502)., _stub_reachable(), test_agent_list_json_emits_raw_response(), test_model_list_json_emits_raw_response(), test_model_show_json_emits_raw_metadata(), test_slot_list_json_emits_raw_list() (+3 more)
-
-### Community 839 - "ensure_gateway_api_server_key"
-Cohesion: 0.32
-Nodes (6): Exception, Raised when filesystem-style MCP args try to escape the workspace.      Tool arg, WorkspaceEscapeError, PortAuthorityError, Base class for port-authority errors., TestRewritePath
 
 ### Community 840 - "_FakeCtx"
 Cohesion: 0.36
@@ -4665,8 +4632,8 @@ Cohesion: 0.47
 Nodes (5): AgentSkill, PersonaTone, PersonaTool, Persona + skill enums consumed by the dashboard's Agent surface.  The dashboard', TypedDict
 
 ### Community 847 - "_OtherEngineProvider"
-Cohesion: 0.18
-Nodes (11): client(), AgentConfig, MonkeyPatch, Path, ADR-0013 MCP client tests.  Cover:   - schema-validation envelope (overlap, miss, Write a TOML the way installer/agents/hermes.sh would, load it., Hermes-like config with one builtin + one user-added MCP., sample_config() (+3 more)
+Cohesion: 0.23
+Nodes (9): client(), AgentConfig, MonkeyPatch, Path, ADR-0013 MCP client tests.  Cover:   - schema-validation envelope (overlap, miss, Write a TOML the way installer/agents/hermes.sh would, load it., test_from_config_file_round_trip(), TestTokenFor (+1 more)
 
 ### Community 848 - ".handler"
 Cohesion: 0.20
@@ -4765,8 +4732,8 @@ Cohesion: 0.22
 Nodes (10): eligible_tiers(), host_ram_gb(), Path, Hardware-anchored tier eligibility.  Reads ``/proc/meminfo`` once per process an, Parse MemTotal out of /proc/meminfo and return whole GB.      Returns ``0`` if t, Detected unified RAM in whole GB. Process-lifetime cached., Return bundle names whose ``min_ram_gb`` <= host RAM.      The returned list pre, Drop the cached probe + eligibility lists. Test-only. (+2 more)
 
 ### Community 872 - "Community 872"
-Cohesion: 0.10
-Nodes (29): disable_cmd(), enable_cmd(), honcho_render_env_cmd(), Any, hal0 memory subcommands — graph-extraction gate.  Mirrors the slot / model CLI s, Enable the memory subsystem (persists [memory].enabled=true)., Disable the memory subsystem (persists [memory].enabled=false)., Sync Honcho conclusions → Hindsight (resumes from the saved watermark).      Equ (+21 more)
+Cohesion: 0.09
+Nodes (31): disable_cmd(), enable_cmd(), honcho_render_env_cmd(), provider_list_cmd(), Any, hal0 memory subcommands — graph-extraction gate.  Mirrors the slot / model CLI s, Enable the memory subsystem (persists [memory].enabled=true)., Disable the memory subsystem (persists [memory].enabled=false). (+23 more)
 
 ### Community 873 - "Community 873"
 Cohesion: 0.25
@@ -4844,22 +4811,6 @@ Nodes (10): _anchor(), Path, Tests for SlotManager.reconcile_npu_trio_slots (FLM
 Cohesion: 0.18
 Nodes (10): compilerOptions, allowSyntheticDefaultImports, lib, module, moduleResolution, noEmit, skipLibCheck, strict (+2 more)
 
-### Community 892 - "parse_json_object"
-Cohesion: 0.33
-Nodes (6): _guess_capability(), Best-effort capability inference from the filename.      Delegates to the single, Clearly-diffusion media files classify as image/video, not the chat     default, MR-3: a reranker filename must classify as 'rerank', not the old 'chat'     defa, test_capability_guess_classifies_diffusion_media(), test_capability_guess_classifies_rerankers()
-
-### Community 893 - "Path"
-Cohesion: 0.33
-Nodes (3): When history has output, the image bytes are proxied back., History entry with empty outputs → 404., TestPreview
-
-### Community 894 - "fake_run_pull"
-Cohesion: 0.40
-Nodes (4): brain_chat(), Request, hal0-brain chat surface — ``POST /api/brain/chat`` (SSE).  The PRIMARY route for, hal0-brain platform steward. SSE stream. SPEC §G / R4.      Delegates to :func:`
-
-### Community 895 - "graphForBank"
-Cohesion: 0.50
-Nodes (3): Fire-and-forget trigger to refresh the Hermes live-context files.  Called from t, Spawn a detached ``hal0-agent <agent_id> render-context``. Never raises., spawn_context_refresh()
-
 ### Community 896 - "Community 896"
 Cohesion: 0.18
 Nodes (10): Deliberately deferred (follow-up features, not this PR), Findings → fixes, by tier, Install / Setup / Update — Fix Plan (2026-07-10), Tier 1 — functional bug: toolbox manifest pins unreachable on prod installs, Tier 2 — setup honesty + port typo, Tier 3 — orphaned `npu.toml` seed, Tier 4 — docs catch-up, Tier 5 — installer test harness rot (+2 more)
@@ -4909,8 +4860,8 @@ Cohesion: 0.51
 Nodes (9): die(), error(), info(), rm_path(), uninstall.sh script, soft_fail(), step(), uninstall_agents() (+1 more)
 
 ### Community 908 - "_mirror_bundled_skills"
-Cohesion: 0.15
-Nodes (7): MetricsAggregator, Path, Background task: aggregate the most recently completed hour, on interval., Aggregate the last fully-elapsed hour. Returns rows written., MetricsService, MetricsService -- the single object the app lifespan constructs + wires.  One in, Apply pending migrations + launch every background task.          Never raises:
+Cohesion: 0.08
+Nodes (16): MetricsAggregator, Path, Background task: aggregate the most recently completed hour, on interval., Aggregate the last fully-elapsed hour. Returns rows written., load_metrics_settings(), MetricsSettings, Metrics configuration -- a standalone reader, not part of ``Hal0Config``.  ``con, Operator-tunable knobs for the OBS-1 metrics core.      Every field has a shippe (+8 more)
 
 ### Community 909 - "test_family_defaults_empty.py"
 Cohesion: 0.33
@@ -5100,10 +5051,6 @@ Nodes (7): PullJob, MonkeyPatch, Path, Regression test for FLM pull progress rec
 Cohesion: 0.22
 Nodes (8): BANNER_CATALOG, BannerAction, BannerEntry, BannerKind, BannerScope, BannerState, CATALOG_BY_ID, useBannerStore
 
-### Community 975 - "test_is_newer_falls_back_to_tuple_for_nightly"
-Cohesion: 0.40
-Nodes (5): MonkeyPatch, No 'hal0' system user on this box (dev/CI/unit tests) -> never seam,     regardl, test_is_hal0_service_user_false_when_euid_differs(), test_is_hal0_service_user_false_when_hal0_user_absent(), test_is_hal0_service_user_true_when_euid_matches()
-
 ### Community 977 - "Community 977"
 Cohesion: 0.25
 Nodes (7): Local-session prompt: run the profile re-tune bench matrix and apply the results, Phase 0 — Preflight (10 min), Phase 1 — Tier A: llama-bench cells (1–2 h GPU time), Phase 2 — Tier B: server-level A/Bs (1–2 h), Phase 3 — Apply the winners (code changes), Phase 4 — Verify serving still works (30 min), Phase 5 — Ship
@@ -5207,10 +5154,6 @@ Nodes (7): ApplyPlanEntry, ApplyPlanResult, get_registry(), Typed apply-plan reg
 ### Community 1014 - "Community 1014"
 Cohesion: 0.32
 Nodes (6): TestClient, Tests for GET /api/auth/exposure -- serializes RULES + OPEN_ALLOWLIST.  Backs th, The route can't classify itself OPEN — it would defeat the point., test_open_allowlist_matches_the_live_table(), test_shape_and_class_completeness(), test_this_route_itself_is_admin_and_present_in_the_table()
-
-### Community 1015 - "Community 1015"
-Cohesion: 0.29
-Nodes (3): _SlotManager, restart must use the slot-owned img runtime, not /opt/comfyui scripts., TestRestart
 
 ### Community 1017 - "Community 1017"
 Cohesion: 0.36
@@ -5753,19 +5696,19 @@ Cohesion: 0.50
 Nodes (3): Smoke-import tests for every top-level hal0 submodule.  Catches circular-import, Module can be imported without error and is not None., test_module_imports()
 
 ## Knowledge Gaps
-- **3289 isolated node(s):** `Legend`, `Checkpoint status (the finish-line view)`, `R1 — Secure + installable  (land to main first)`, `R2 — Model layer`, `R3 — Slot runtime` (+3284 more)
+- **3290 isolated node(s):** `Legend`, `Checkpoint status (the finish-line view)`, `R1 — Secure + installable  (land to main first)`, `R2 — Model layer`, `R3 — Slot runtime` (+3285 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **142 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **145 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `SlotManager` connect `Slot Manager & Watchdog` to `Slot Container Runtime`, `Community 647`, `Community 777`, `Config Loader & Boot Report`, `Community 140`, `test_slot_create_conflict.py`, `Community 657`, `Community 531`, `Community 659`, `TestMr3ConsolidationPreservesDetectContract`, `GPU Arbiter Tests`, `Community 798`, `Community 802`, `Community 421`, `Community 422`, `Community 174`, `Community 50`, `Community 56`, `Community 195`, `Community 580`, `Community 197`, `Community 198`, `Community 713`, `Community 330`, `Community 715`, `Community 205`, `Community 334`, `Community 725`, `Community 473`, `Community 733`, `Community 226`, `Community 753`, `write_env_atomic`, `Community 760`, `Community 377`, `Community 890`?**
-  _High betweenness centrality (0.065) - this node is a cross-community bridge._
-- **Why does `SlotState` connect `Community 140` to `Slot Container Runtime`, `Slot Manager & Watchdog`, `Community 262`, `Community 646`, `Dispatcher Routing`, `Community 521`, `Config Loader & Boot Report`, `Slot REST Endpoints`, `Community 145`, `_FakeSM`, `Slot State Machine`, `Community 420`, `Community 421`, `Community 425`, `Community 428`, `Community 557`, `Community 174`, `Community 48`, `Community 563`, `_fit_check_warning`, `Community 448`, `Community 194`, `Community 67`, `Community 451`, `Community 197`, `Community 454`, `Community 324`, `Community 75`, `Community 333`, `Community 209`, `Community 465`, `Community 610`, `Community 492`, `Community 753`, `Community 371`?**
-  _High betweenness centrality (0.052) - this node is a cross-community bridge._
-- **Why does `create_app()` connect `Community 79` to `Community 512`, `API Boot Sequence`, `Community 263`, `Community 264`, `Slot Routes Tests`, `Community 265`, `Community 396`, `Community 652`, `Community 397`, `Community 653`, `Community 776`, `Community 290`, `Community 420`, `Community 808`, `Community 183`, `Community 57`, `Community 570`, `Community 185`, `Community 316`, `Community 441`, `Community 574`, `Community 58`, `Community 833`, `Community 708`, `Community 196`, `Community 582`, `Community 966`, `Community 330`, `Community 208`, `Community 467`, `Community 84`, `Community 214`, `Community 215`, `Community 90`, `Community 375`, `Community 98`, `Community 99`, `Community 739`, `Community 483`, `Community 102`, `Community 616`, `Community 104`, `Community 365`, `Community 877`, `Community 623`, `Community 242`, `Community 370`, `Community 243`, `Community 759`, `Community 249`, `Community 124`, `Community 254`, `Community 511`?**
-  _High betweenness centrality (0.052) - this node is a cross-community bridge._
+- **Why does `SlotManager` connect `Slot Manager & Watchdog` to `Slot Container Runtime`, `Community 647`, `Community 777`, `Config Loader & Boot Report`, `test_slot_create_conflict.py`, `Community 657`, `Model Pull Pipeline`, `Community 531`, `Community 659`, `TestMr3ConsolidationPreservesDetectContract`, `GPU Arbiter Tests`, `Community 798`, `Community 802`, `Community 421`, `Community 422`, `Community 174`, `Community 50`, `Community 56`, `Community 195`, `Community 580`, `Community 198`, `Community 713`, `Community 715`, `Community 205`, `Community 334`, `Community 725`, `Community 473`, `Community 733`, `Community 226`, `write_env_atomic`, `Community 760`, `Community 377`, `Community 250`, `Community 890`?**
+  _High betweenness centrality (0.067) - this node is a cross-community bridge._
+- **Why does `create_app()` connect `Community 79` to `Community 512`, `API Boot Sequence`, `Community 263`, `Community 264`, `Community 392`, `Community 265`, `Community 396`, `Community 652`, `Community 397`, `Community 653`, `Community 776`, `Community 290`, `Community 420`, `Community 808`, `Community 183`, `Community 57`, `Community 570`, `Community 185`, `Community 316`, `Community 441`, `Community 574`, `Community 58`, `Community 833`, `Community 708`, `Community 196`, `Community 582`, `Community 966`, `Community 330`, `Community 208`, `Community 467`, `Community 84`, `Community 214`, `Community 215`, `Community 90`, `Community 94`, `Community 375`, `Community 99`, `Community 739`, `Community 483`, `Community 102`, `Community 616`, `Community 104`, `Community 235`, `Community 365`, `Community 877`, `Community 623`, `Community 242`, `Community 370`, `Community 243`, `Community 759`, `Community 249`, `Community 124`, `Community 765`, `Community 254`, `Community 511`?**
+  _High betweenness centrality (0.051) - this node is a cross-community bridge._
+- **Why does `SlotState` connect `Config Loader & Boot Report` to `Slot Container Runtime`, `Slot Manager & Watchdog`, `Community 518`, `Community 262`, `Dispatcher Routing`, `Community 646`, `Community 521`, `Slot REST Endpoints`, `Model Pull Pipeline`, `Community 145`, `_FakeSM`, `Community 542`, `Slot State Machine`, `Community 420`, `Community 421`, `Community 425`, `Community 428`, `Community 557`, `Community 174`, `Community 48`, `Community 563`, `_fit_check_warning`, `Community 448`, `Community 194`, `Community 451`, `Community 67`, `Community 324`, `Community 454`, `Community 197`, `Community 75`, `Community 333`, `Community 465`, `Community 610`, `Community 371`?**
+  _High betweenness centrality (0.049) - this node is a cross-community bridge._
 - **Are the 167 inferred relationships involving `SlotManager` (e.g. with `_build_offline_deps()` and `FLMProvider`) actually correct?**
   _`SlotManager` has 167 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 117 inferred relationships involving `connect()` (e.g. with `.__init__()` and `._read()`) actually correct?**

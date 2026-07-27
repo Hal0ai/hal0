@@ -7905,8 +7905,8 @@
     "semantic_hash": ""
   },
   "docs/rework/REWORK_BOARD.md": {
-    "mtime": 1785115518.1084008,
-    "ast_hash": "62540720351c2b7866875752795e71b6",
+    "mtime": 1785117873.2081487,
+    "ast_hash": "44fbf2ffd1ffe0d5a44879f92e84702a",
     "semantic_hash": ""
   },
   "docs/rework/REWORK_BOARD_PROTOCOL.md": {
@@ -8680,8 +8680,8 @@
     "semantic_hash": ""
   },
   "docs/rework/deploy-validation/2026-07-26-fresh-lxc-validation.md": {
-    "mtime": 1785115532.3846521,
-    "ast_hash": "d6e6e44f545c45bf1392a3b20d1ad3e8",
+    "mtime": 1785117861.2739367,
+    "ast_hash": "cc6aa77d91062e4181255a84508772e1",
     "semantic_hash": ""
   },
   "tests/mcp/test_mount_not_silently_degraded.py": {
