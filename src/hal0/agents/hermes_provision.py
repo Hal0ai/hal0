@@ -43,6 +43,7 @@ import pwd
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
 import tempfile
@@ -2384,11 +2385,36 @@ def _render_template(name: str, **vars_: Any) -> str:
     return env.get_template(name).render(**vars_)
 
 
+#: Mode for a NEWLY created rendered-context file. RUNTIME_SNAPSHOT_DIR is
+#: hal0-owned and setgid, and these snapshots are group-shared (the session
+#: hook reads STATE.md), so 0664 — matching the OwnershipStore row in
+#: src/hal0/install/perms.py — not the umask's 0644.
+_SNAPSHOT_FILE_MODE = 0o664
+
+
 def _atomic_write(path: Path, content: str) -> str:
-    """Tmp-write + rename for atomicity. Returns the sha256 of content."""
+    """Tmp-write + rename for atomicity, preserving the target's mode.
+
+    ``os.replace`` swaps in the TEMP file's inode, so the renamed file carries
+    the tmp's umask-derived mode (0644 under the usual 022) and silently
+    discards whatever mode the destination had. That made every fresh install
+    end with ``hal0 doctor perms`` reporting drift on STATE.md
+    ("is hal0:hal0 0644, want hal0:hal0 0664"): the installer's
+    ``doctor perms --fix`` backstop runs at step 14, then Hermes provisioning
+    re-renders STATE.md immediately after and reverted the mode the backstop
+    had just set. A fresh box that always reports drift teaches operators to
+    ignore the check.
+
+    Returns the sha256 of content.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
+    mode: int | None = None
+    with contextlib.suppress(OSError):
+        mode = stat.S_IMODE(path.stat().st_mode)
+    with contextlib.suppress(OSError):
+        os.chmod(tmp, mode if mode is not None else _SNAPSHOT_FILE_MODE)
     os.replace(tmp, path)
     return content_hash(content)
 
