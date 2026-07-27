@@ -239,16 +239,20 @@ class StackApplyEngine:
             updates["provider"] = entry.provider
         if entry.profile is not None:
             updates["profile"] = entry.profile
-        # ``vision`` is a plain bool (no inherit) → declaratively written.
-        updates["vision"] = entry.vision
-        # ``mtp`` is declaratively written INCLUDING None: a stack row set to
-        # Auto (null) must clear any forced true/false already on the slot, or
-        # the stack UI's "Auto" hint disagrees with what actually launches.
-        # merge_slot_config treats None as delete-key, so Auto rows reset the
-        # slot to the derived decision (model eligibility x profile opt-in).
-        updates["mtp"] = entry.mtp
-        if entry.enable_thinking is not None:
-            updates["enable_thinking"] = entry.enable_thinking
+        # spec-hw-slot-ownership §1: ``vision`` / ``mtp`` / ``enable_thinking``
+        # are MODEL-owned typed capabilities. They stay on the stack schema for
+        # back-compat (and for portable export round-trips) but MUST NOT project
+        # onto the slot — the same partition ``_create_missing_slots`` applies to
+        # stack-CREATED slots (#1356). This reconcile path is where that fix was
+        # incomplete: it kept writing all three, so applying a stack to an
+        # EXISTING slot re-introduced exactly the debris the create path had just
+        # stopped producing. ``reconcile_slot_updates`` now refuses these keys at
+        # the seam, so leaving them here would turn every stack apply into a hard
+        # error rather than a silent leak.
+        #
+        # A slot that still carries a pre-migration ``mtp``/``vision`` on disk is
+        # cleaned by ``hal0 slot migrate-caps`` (one-shot fold to the model) and
+        # by ``updater._strip_ineligible_slot_mtp`` — not by a stack write.
         if entry.server_extra_args is not None:
             updates["server"] = {"extra_args": entry.server_extra_args}
 

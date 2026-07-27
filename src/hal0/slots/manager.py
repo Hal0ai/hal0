@@ -40,6 +40,7 @@ from hal0.errors import Hal0Error
 from hal0.registry import fallback as _registry_fallback
 from hal0.slot_config import (
     fold_ctx_size_alias,
+    reject_model_owned_slot_keys,
     slot_write_lock,
     write_slot_toml,
 )
@@ -1962,6 +1963,14 @@ class SlotManager:
         slots/*.toml write path (issue #697).
         """
         cfg_dict = _cfg_to_dict(slot_cfg)
+        # spec-hw-slot-ownership §1: refuse a MODEL-owned capability key on the
+        # create body. ``update_config`` and the stacks apply engine get this
+        # from the shared ``reconcile_slot_updates`` seam, but create builds its
+        # config directly (it has no ``base`` to merge onto), so the guard is
+        # called explicitly here. Without it an in-process caller could still
+        # give BIRTH to a slot carrying mtp/enable_thinking/vision — the leak
+        # #1356 closed for the stacks create path only, one caller at a time.
+        reject_model_owned_slot_keys(cfg_dict)
         # #585: canonicalize a ctx_size alias from the create modal too —
         # same single fold (:func:`hal0.slot_config.fold_ctx_size_alias`)
         # the merge/update path uses.

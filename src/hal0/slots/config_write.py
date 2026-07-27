@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from hal0.config import paths
-from hal0.slot_config import merge_slot_config
+from hal0.slot_config import merge_slot_config, reject_model_owned_slot_keys
 from hal0.slots._cfg_helpers import _cfg_to_dict
 from hal0.slots.state import NpuExclusivityViolation, SlotConfigError
 
@@ -273,7 +273,27 @@ def reconcile_slot_updates(base: dict[str, Any], updates: dict[str, Any]) -> dic
     (:func:`hal0.slot_config.merge_slot_config`) followed by
     :func:`_reconcile_device_profile` driven by exactly the keys the caller
     changed. Returns a fresh dict; ``base`` is never mutated.
+
+    spec-hw-slot-ownership §1: the MODEL-owned capability keys are refused
+    HERE, at the shared seam, rather than only at the HTTP boundary. The guard
+    used to live solely in ``api/routes/slots._reject_model_owned_config_keys``,
+    so every in-process writer — the stacks apply engine,
+    ``SlotManager.update_config``, the capabilities orchestrator — walked around
+    it and could persist ``mtp``/``enable_thinking``/``vision`` onto a slot.
+    That produced the same defect three times (drawer, stack-create #1356,
+    stack-reconcile). The route guard stays as defense-in-depth (it fails
+    earlier and shapes a better HTTP error); this one makes the invariant
+    structural — a new write path cannot reintroduce the bug without
+    deliberately bypassing the seam.
+
+    Only ``updates`` is checked, never the merged result: the guard governs
+    write INTENT. A pre-migration slot whose on-disk TOML still carries a
+    folded-away ``mtp`` must stay readable/updatable until
+    ``hal0 slot migrate-caps`` runs (and ``updater._strip_ineligible_slot_mtp``
+    sweeps it) — refusing on the merged dict would brick every update to a slot
+    that has not yet been folded.
     """
+    reject_model_owned_slot_keys(updates)
     merged = merge_slot_config(base, updates)
     _reconcile_device_profile(merged, set(updates.keys()))
     return merged

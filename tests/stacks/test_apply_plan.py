@@ -91,7 +91,15 @@ class TestReconciliation:
         # ``backend`` mirror is no longer written.
         assert after["device"] == "gpu-rocm"
         assert "backend" not in after
-        assert after["vision"] is True
+        # spec-hw-slot-ownership §1: ``vision`` is MODEL-owned. The stack entry
+        # still carries it (schema back-compat / portable export) but the
+        # reconcile MUST NOT project it onto the slot — same partition
+        # ``_create_missing_slots`` applies to stack-CREATED slots (#1356).
+        # The fixture seeds ``vision = false`` on disk and the stack row says
+        # ``True``; the on-disk value surviving is what proves the stack no
+        # longer writes this key. (It is not deleted either — that is
+        # ``hal0 slot migrate-caps``' job, not a stack write's.)
+        assert after["vision"] is False, "stack must not overwrite a model-owned slot key"
 
     def test_changed_true_when_model_differs(self, tmp_hal0_home: str) -> None:
         _write_agent_slot(tmp_hal0_home)
@@ -109,7 +117,21 @@ class TestReconciliation:
         plan = StackApplyEngine().plan("saber", _stack())
         assert any("agent" in line for line in plan.summary)
 
-    def test_vision_false_overwrites_on_disk_true(self, tmp_hal0_home: str) -> None:
+    def test_stack_apply_leaves_legacy_on_disk_vision_untouched(self, tmp_hal0_home: str) -> None:
+        """A pre-migration slot's ``vision`` survives a stack apply unchanged.
+
+        Was ``test_vision_false_overwrites_on_disk_true``, which asserted the
+        opposite: that a stack row's ``vision`` overwrote the slot's. That
+        encoded the defect this lane fixes — stack apply was the last writer
+        still projecting a MODEL-owned key onto a slot after #1356 closed the
+        create path.
+
+        The stack is not the cleanup mechanism for legacy slot caps. A slot
+        whose TOML still carries a folded-away ``vision``/``mtp`` is cleaned by
+        the one-shot ``hal0 slot migrate-caps`` fold and by
+        ``updater._strip_ineligible_slot_mtp`` — so the value is left exactly as
+        found here, neither overwritten nor deleted.
+        """
         slot_path = _slots_dir(tmp_hal0_home) / "agent.toml"
         slot_path.write_text(
             "\n".join(
@@ -120,7 +142,8 @@ class TestReconciliation:
         stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="m", vision=False)])
         plan = StackApplyEngine().plan("s", stack)
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
-        assert after["vision"] is False
+        assert after["vision"] is True, "stack apply must not rewrite a model-owned slot key"
+        assert after["model"]["default"] == "m", "the model binding still applies"
 
 
 class TestGuardedReconcile:
