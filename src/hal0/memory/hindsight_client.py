@@ -17,6 +17,73 @@ import httpx
 DEFAULT_BASE_URL = "http://127.0.0.1:9177"  # dynamic port — pinned by the unit (P1-6)
 DEFAULT_API_KEY = "hal0-local-noauth"
 
+#: Boot-probe budget. This runs inside ``create_app`` on the synchronous
+#: boot path, so it is a latency floor for every hal0-api start — keep it
+#: well under a second of typical cost and bounded on the worst case. A
+#: refused connection to loopback returns in microseconds; this ceiling
+#: only matters for a hung or firewalled daemon.
+DEFAULT_PROBE_TIMEOUT_S = 2.0
+PROBE_TIMEOUT_ENV = "HAL0_HINDSIGHT_PROBE_TIMEOUT_S"
+
+
+class HindsightUnreachable(RuntimeError):
+    """The Hindsight daemon did not answer a health probe.
+
+    Raised by :func:`probe_health` and caught by
+    ``hal0.memory.provider_from_config``, which degrades to the in-memory
+    ``PgVectorProvider`` rather than handing back a live-but-broken
+    Hindsight client (#1301).
+    """
+
+
+def _probe_timeout() -> float:
+    raw = os.environ.get(PROBE_TIMEOUT_ENV)
+    if not raw:
+        return DEFAULT_PROBE_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_PROBE_TIMEOUT_S
+    return value if value > 0 else DEFAULT_PROBE_TIMEOUT_S
+
+
+def probe_health(
+    *,
+    base_url: str | None = None,
+    api_key: str = DEFAULT_API_KEY,
+    timeout_s: float | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> None:
+    """Synchronously confirm the daemon answers, or raise.
+
+    Deliberately synchronous: the one caller is ``provider_from_config``,
+    which runs on the sync boot path before an event loop exists. Hits
+    ``/health`` — the same endpoint ``installer/install.sh`` waits on, so
+    install-time and boot-time agree on what "up" means.
+
+    Reachability and authorization are separate questions. A ``401``/``403``
+    proves the daemon is up and answering, so it PASSES the probe; a wrong
+    API key is a config error to surface at first use, not a reason to
+    silently drop the durable engine. ``5xx`` fails — a daemon that is
+    still starting cannot serve recalls either.
+
+    Raises:
+        HindsightUnreachable: on connect error, timeout, or a 5xx response.
+    """
+    url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    budget = _probe_timeout() if timeout_s is None else timeout_s
+    try:
+        with httpx.Client(
+            base_url=url,
+            timeout=httpx.Timeout(budget, connect=budget),
+            transport=transport,
+        ) as http:
+            resp = http.get("/health", headers={"Authorization": f"Bearer {api_key}"})
+    except httpx.HTTPError as exc:
+        raise HindsightUnreachable(f"{url}/health: {type(exc).__name__}: {exc}") from exc
+    if resp.status_code >= 500:
+        raise HindsightUnreachable(f"{url}/health returned HTTP {resp.status_code}")
+
 
 class HindsightRestClient:
     def __init__(
@@ -38,6 +105,17 @@ class HindsightRestClient:
         base = os.environ.get("HAL0_HINDSIGHT_URL", DEFAULT_BASE_URL)
         key = os.environ.get("HINDSIGHT_API_TENANT_API_KEY", DEFAULT_API_KEY) or DEFAULT_API_KEY
         return cls(base_url=base, api_key=key)
+
+    @property
+    def base_url(self) -> str:
+        """The resolved daemon root — read-only; callers must not retarget
+        a live client. Exposed so the boot probe reaches the same daemon
+        this client will actually talk to."""
+        return self._base_url
+
+    @property
+    def api_key(self) -> str:
+        return self._api_key
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}

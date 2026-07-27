@@ -103,6 +103,7 @@ from hal0.slots.state import (
     SlotPinned,
     SlotState,
     SlotStateRecord,
+    SlotTerminateTimeout,
     is_transition_legal,
     provider_requires_model,
     read_state,
@@ -269,6 +270,12 @@ class SlotManager:
     # SEEDED_SLOTS with NPU_SEEDED_SLOTS when an FLM runtime is
     # present.
     BUILTIN_SLOTS: tuple[str, ...] = SEEDED_SLOTS
+
+    #: Wall-clock bound on a container stop (#1224). ``systemctl stop`` against
+    #: an already-``failed`` unit can block forever; past this we abandon the
+    #: wait so the caller can converge instead of hanging. Class-level so a
+    #: deployment (or a test) can retune it without touching every call site.
+    _terminate_timeout_s: float = 30.0
 
     def __init__(
         self,
@@ -1334,7 +1341,34 @@ class SlotManager:
                     port = _cfg_port(cfg)
                     if port:
                         self._register_container_upstream(slot_name, port)
-                return await self.status(slot_name)
+                # ...but a bare snapshot is wrong when the TOML has moved
+                # under the running unit (#1224). The unit file claims to be
+                # "regenerated on every slot load"; short-circuiting broke
+                # that promise, so `PUT /config {"port": N}` → `slot load`
+                # returned the stale snapshot with the container still on the
+                # old port, and the next implicit reload cycled
+                # warming → error with nothing listening on either port.
+                # Recovery needed `systemctl reset-failed` + a second load
+                # from the error state — the only path that regenerated.
+                #
+                # Reuse the drift comparator rather than a dirty flag: it
+                # already knows how to compare the live argv against what a
+                # restart would render, it cannot be lost across an api
+                # restart, and it self-heals a unit that drifted by any route
+                # (direct TOML edit, stacks apply, capabilities).
+                if not await self._should_converge(slot_name, cfg):
+                    return await self.status(slot_name)
+                log.info("slot.load_converging_drifted_config", extra={"slot": slot_name})
+                # Tear down in place — we hold the slot lock, so we cannot go
+                # through unload() (it takes the same lock). Best-effort: a
+                # stop that fails or wedges must not block the re-spawn, which
+                # is the whole point of the operation. terminate() is bounded
+                # (#1224) so this cannot hang.
+                with contextlib.suppress(Exception):
+                    await self.terminate(slot_name)
+                await self._transition(slot_name, SlotState.OFFLINE, force=True)
+                # Fall through into the normal load below, which re-renders
+                # the unit from the current TOML.
 
             # Configuration check: a slot with no resolvable model is
             # NOT an ERROR (which would render red and flag for operator
@@ -1472,6 +1506,31 @@ class SlotManager:
                 )
                 raise
             return await self.status(slot_name)
+
+    async def _should_converge(self, slot_name: str, cfg: dict[str, Any]) -> bool:
+        """True when a live slot's running unit no longer matches its TOML.
+
+        Drives the re-converge branch in :meth:`load` (#1224). Deliberately
+        conservative in both failure directions:
+
+        * an NPU trio shadow has no unit of its own to converge — skip;
+        * a comparator that returns ``None`` (provider can't read the running
+          or the rendered argv) is *unknown*, not drifted — absence of
+          evidence must not bounce a healthy container on every load;
+        * a comparator that raises is likewise treated as "no drift". A
+          convergence check that cannot run is not grounds for a restart.
+        """
+        if is_npu_trio_shadow(cfg):
+            return False
+        try:
+            drift = await self.compute_config_drift(slot_name, cfg=cfg, active=True)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning(
+                "slot.converge_check_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+            return False
+        return bool(drift and drift.get("drifted"))
 
     async def unload(self, slot_name: str) -> Slot:
         """Gracefully unload a slot.  Transitions: → unloading → offline."""
@@ -1909,15 +1968,26 @@ class SlotManager:
         # Register loopback upstream so the dispatcher can route to this slot.
         self._register_container_upstream(slot_name, port)
 
-    async def terminate(self, slot_name: str, *, timeout_s: float = 30.0) -> None:
+    async def terminate(self, slot_name: str, *, timeout_s: float | None = None) -> None:
         """Stop the slot's container unit and deregister its upstream.
 
         Idempotent — stopping an already-stopped unit is a no-op.
 
         Public because callers that need to release VRAM directly can
         do so without going through ``unload()``'s state-machine
-        ceremony. ``timeout_s`` is preserved in the signature for
-        caller compatibility; the systemd stop is synchronous.
+        ceremony.
+
+        ``timeout_s`` bounds the wait on the (synchronous, executor-run)
+        systemd stop; ``None`` uses :attr:`_terminate_timeout_s`. The bound
+        matters because ``systemctl stop`` against an already-``failed`` unit
+        can block indefinitely — unbounded, that wedged the whole restart and
+        left the CLI ReadTimeout'ing with the unit never relaunched (#1224).
+
+        We cannot kill the executor thread, so on expiry we abandon the wait
+        and raise :class:`SlotTerminateTimeout`. Callers that must make
+        progress regardless (``restart``'s best-effort cleanup, the drifted
+        re-converge in ``load``) suppress it and press on; the abandoned
+        thread retires on its own if the stop ever returns.
         """
         cfg = await self._maybe_load_config(slot_name)
         # Resilient to the slot config being missing — terminate should
@@ -1930,9 +2000,23 @@ class SlotManager:
         # Stop the systemd unit + deregister upstream.
         from hal0.providers.container import container_provider
 
-        await asyncio.get_event_loop().run_in_executor(
+        budget = self._terminate_timeout_s if timeout_s is None else timeout_s
+        stop = asyncio.get_event_loop().run_in_executor(
             None, container_provider().unload_sync, _cfg_to_dict(cfg)
         )
+        try:
+            await asyncio.wait_for(asyncio.shield(stop), timeout=budget)
+        except TimeoutError as exc:
+            # shield() keeps the executor future alive (wait_for would
+            # otherwise cancel it, which does nothing to the thread but does
+            # surface a spurious CancelledError when it finally completes).
+            log.warning(
+                "slot.terminate_timeout",
+                extra={"slot": slot_name, "timeout_s": budget},
+            )
+            raise SlotTerminateTimeout(
+                f"stopping slot {slot_name!r} did not return within {budget}s"
+            ) from exc
         self._deregister_container_upstream(slot_name)
 
     # ── slot CRUD ────────────────────────────────────────────────────────────

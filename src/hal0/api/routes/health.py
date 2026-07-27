@@ -221,6 +221,22 @@ async def health_system(request: Request) -> dict[str, Any]:
     checks["event_bus"] = {"ok": event_bus is not None}
     degraded = degraded or event_bus is None
 
+    # ── MCP servers mounted ─────────────────────────────────────────────
+    # ``create_app`` deliberately survives a mount failure so the API still
+    # serves, which means nothing else would ever tell an operator that the
+    # agent control surface is gone. A fastapi minor bump once silently emptied
+    # the admin route map and unmounted /mcp/admin + /mcp/memory for 21 boots
+    # while every health endpoint reported ``ok``. Surface it here.
+    mount_error = getattr(request.app.state, "mcp_mount_error", None)
+    servers = sorted(getattr(request.app.state, "mcp_servers", None) or {})
+    mcp_ok = not mount_error and bool(servers)
+    checks["mcp_mount"] = {"ok": mcp_ok, "servers": servers}
+    if mount_error:
+        checks["mcp_mount"]["detail"] = str(mount_error)
+    elif not servers:
+        checks["mcp_mount"]["detail"] = "no MCP servers mounted"
+    degraded = degraded or not mcp_ok
+
     return {
         "status": "degraded" if degraded else "ok",
         "checks": checks,

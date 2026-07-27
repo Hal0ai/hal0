@@ -53,6 +53,24 @@ log = logging.getLogger(__name__)
 # Private-mode opt-in flows on ``X-hal0-Private`` to match the MCP mount
 # (:mod:`hal0.api.mcp_mount`); the same toggle gates the same namespace
 # promotion rule across both surfaces (issue #317).
+#
+# AUTH POSTURE (#1302, ratified — perimeter-only). The agent header is
+# self-asserted and hal0 does not authenticate it: there is no credential
+# to check it against, by design (ADR-0012 removed auth and TLS platform
+# wide, not just here). We validate its *shape* and refuse a body-supplied
+# ``source`` so audit can never disagree with the namespace a write landed
+# in — but a caller who can already reach these routes can claim any agent
+# id. Therefore ``private:<agent>`` is an ISOLATION boundary between
+# cooperating agents on one host, NOT a security boundary against a hostile
+# LAN caller; the reverse proxy is the auth boundary, and a multi-tenant
+# deployment must inject ``X-hal0-Agent`` there from an authenticated
+# identity (overwriting any client value). Documented for operators in
+# ``docs/concepts/security.mdx`` §"What X-hal0-Agent is and is not".
+#
+# Independent of the header, destructive calls carry their own layer:
+# bulk delete (>1 id) gates through the approval queue on BOTH MCP mounts
+# (:func:`hal0.mcp.admin.is_gated` owns the classification), and bank
+# delete requires ``?confirm=<bank_id>``.
 
 
 _AGENT_HEADER = "x-hal0-agent"
