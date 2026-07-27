@@ -81,7 +81,24 @@ Patching `apply.py` alone would produce a third symptom fix and a fourth recurre
   deliberately bypassing the seam. That is the deletion-test justification for the change:
   the guard's new home concentrates the invariant instead of scattering it.
 
-### 2.4 Design: stack caps route to the model
+### 2.4 Design: stack caps are DROPPED, not routed  *(revised during implementation)*
+
+> **This section was reversed once the code was read.** The original text
+> (kept below as §2.4-superseded) proposed routing the stack's caps to the bound
+> model. Reading `api/routes/stacks.py:191-193` showed #1356 had already
+> established the opposite convention for the *create* path: the fields stay on
+> the stack schema for back-compat and simply **do not project** onto the slot.
+> Routing in the reconcile path would have made apply diverge from create and
+> invented a shared-model write-conflict problem for no user-visible gain.
+> Dropping is smaller, consistent with what shipped, and makes #1356's own
+> comment true. **Implemented as: drop.**
+
+`_reconciled_stack_slot` stops writing `vision`/`mtp`/`enable_thinking`
+entirely. A pre-migration slot whose TOML still carries one keeps it — cleanup
+belongs to `hal0 slot migrate-caps` and `updater._strip_ineligible_slot_mtp`,
+not to a stack write.
+
+### 2.4-superseded: stack caps route to the model
 
 Under the ownership pivot the model is sole authority for `vision`/`mtp`/`enable_thinking`.
 A stack row expressing a capability is therefore a statement about the **bound model**, not
@@ -236,6 +253,25 @@ cover the compatibility surface the GA drive must remove.
 `preview`; CHANGELOG covers every commit since alpha.2.
 
 ---
+
+## 3.6 Defects found by actually running the installer (added 2026-07-26)
+
+None of these were predictable from the tree; all four came from building fresh
+CTs and watching real output. Recorded here because the spec above predates them.
+
+| id | defect | status |
+|---|---|---|
+| **F0** | **MCP admin surface silently does not mount.** A fresh install resolves fastapi 0.140.0 / starlette 1.3.1 (`pyproject.toml` pins only `fastapi>=0.115`, no upper bound). Starlette 1.x hides `include_router`'d routes behind a wrapper, so `build_admin_route_map`'s flat walk returned an empty map, `_apply_route_map` raised, and `mount_mcp_servers` swallowed it as `hal0.mcp.mount_failed`. All ~82 admin tools gone. **Release blocker.** | fixed `66a78cb7`, verified live on CT160 |
+| **F1** | Stock Ubuntu 24.04/26.04 LXC templates have no `curl`, so `preflight_bootstrap_prereqs` killed the documented direct-`install.sh` path at step 1/13. Unreachable via the `curl \| bash` one-liner, hit by every fresh container. | fixed `93c410f9` |
+| **F2** | The container-runtime gate swallowed podman's own error and guessed. On a CT that already had `nesting=1,keyctl=1,fuse=1,mknod=1`, podman failed with `socket: permission denied` (LXC AppArmor confining its network setup) and the gate told the operator to set the flags that were already set. | fixed `93c410f9` |
+| **F3** | Every fresh install ended with `hal0 doctor perms` reporting STATE.md drift. `_atomic_write`'s `os.replace` swaps in the tmp inode, so the file inherited the umask's 0644 and discarded the 0664 the installer's `doctor perms --fix` backstop had just set — Hermes provisioning re-renders STATE.md *after* that backstop. A box that always reports drift teaches operators to ignore the check. | fixed, this drive |
+
+**Fresh-LXC prerequisites confirmed empirically** (beyond what the docs stated):
+`features: nesting=1,fuse=1,keyctl=1,mknod=1` **plus** `lxc.apparmor.profile: unconfined`
+**plus** a `/dev/net/tun` bind mount. The in-container `render` gid differs by
+release — 993 on 24.04, **991 on 26.04** — so the `dev0` gid must match the
+container's, not the host's. The M3 gate catches exactly this and prints the
+correct remedy.
 
 ## 4. Execution model
 
