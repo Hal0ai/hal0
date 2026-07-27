@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 # that resolves this project by distribution name must use "hal0ai".
 [project]
 name = "hal0ai"
-version = "1.0.0-alpha.2"
+version = "1.0.0"
 description = "Open-source home AI inference platform"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,7 +27,17 @@ classifiers = [
 ]
 
 dependencies = [
-  "fastapi>=0.115",
+  # Upper bound is deliberate. hal0 introspects ``app.routes`` to autogenerate
+  # the MCP admin tool catalog, and FastAPI has already changed that structure
+  # once inside a minor release: 0.138 stopped flattening ``include_router`` and
+  # left ``_IncludedRouter`` wrappers in ``app.routes``. The walker
+  # (``hal0.mcp.admin._iter_leaf_routes``) now descends through them, but the
+  # installer resolves this file — not ``uv.lock`` — so without a ceiling a
+  # fresh install silently picks up whatever FastAPI ships next and can lose the
+  # entire MCP surface with the API still reporting healthy. Raise this
+  # deliberately, after running tests/mcp/test_admin_route_map_nested.py against
+  # the new version.
+  "fastapi>=0.115,<0.140",
   "uvicorn[standard]>=0.32",
   "httpx>=0.28",
   "pydantic>=2.10",

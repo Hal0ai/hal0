@@ -2299,6 +2299,14 @@ def create_app() -> FastAPI:
             log.warning("hal0.memory.dispatcher_init_failed", error=str(exc))
     app.state.memory_dispatcher = memory_dispatcher
 
+    # A mount failure is NOT cosmetic: it removes /mcp/admin and /mcp/memory
+    # entirely, which is the whole agent control surface. We still don't let it
+    # abort boot (a serving API with no MCP beats no API), but it must be
+    # LOUD and OBSERVABLE — the fastapi-0.138 route-walker regression hid here
+    # for 21 boots on a live box behind a single warning line, with every
+    # health endpoint still reporting "ok". Log at error level and record the
+    # reason on app.state so /api/health/system can degrade and name it.
+    app.state.mcp_mount_error = None
     try:
         from hal0.api.mcp_mount import mount_mcp_servers
 
@@ -2309,7 +2317,8 @@ def create_app() -> FastAPI:
             memory_dispatcher=memory_dispatcher,
         )
     except Exception as exc:  # pragma: no cover — defensive
-        log.warning("hal0.mcp.mount_failed", error=str(exc))
+        app.state.mcp_mount_error = str(exc)
+        log.error("hal0.mcp.mount_failed", error=str(exc))
 
     _mount_dashboard(app)
 
