@@ -43,18 +43,27 @@ __all__ = [
 
 
 def _build_hindsight_client(cfg: Any) -> Any:
-    """Construct the Hindsight REST client from config + env.
+    """Construct the Hindsight REST client from config + env, or raise.
 
-    NOTE (P1): ``from_env()`` only builds the httpx client — it does NO I/O,
-    so it does not yet raise when the daemon is down. The boot-degrade ladder
-    (hindsight -> pgvector) only fires once P1-6 adds a connectivity probe
-    here (e.g. a ``/health`` call) so an unreachable daemon raises at boot
-    rather than at first recall. This indirection exists so that degrade path
-    is unit-testable (tests patch this function).
+    ``from_env()`` only builds the httpx client — it does NO I/O, so on its
+    own it cannot tell a live daemon from a dead one. We therefore probe
+    ``/health`` before handing the client back (#1301, closing the P1-6
+    TODO): an unreachable daemon raises HERE, at boot, where
+    ``provider_from_config``'s degrade ladder can catch it and swap in
+    ``PgVectorProvider`` with ``degraded=True``. Without the probe the
+    ladder was inert — callers got a live-but-broken HindsightProvider that
+    reported healthy and returned empty recalls.
+
+    The probe is timeout-bounded (``HAL0_HINDSIGHT_PROBE_TIMEOUT_S``, default
+    2s) so a hung daemon delays boot by that much and no more. This
+    indirection also keeps the degrade path unit-testable (tests patch this
+    function or ``probe_health``).
     """
-    from hal0.memory.hindsight_client import HindsightRestClient
+    from hal0.memory import hindsight_client as _hc
 
-    return HindsightRestClient.from_env()
+    client = _hc.HindsightRestClient.from_env()
+    _hc.probe_health(base_url=client.base_url, api_key=client.api_key)
+    return client
 
 
 def provider_from_config(cfg: Any) -> MemoryProvider:

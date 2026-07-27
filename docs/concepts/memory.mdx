@@ -93,14 +93,19 @@ When enabled, memory becomes the shared brain that ties the platform together:
   </Card>
   <Card title="Namespaced writes" icon="setting">
     Callers identify themselves (via the `X-hal0-Agent` header), so private
-    writes land in the right per-agent namespace rather than a shared pool.
+    writes land in the right per-agent namespace rather than a shared pool. The
+    header is self-asserted — `private:` isolates cooperating agents from each
+    other, it does not defend against a hostile caller. See
+    [Security](/docs/concepts/security#what-x-hal0-agent-is-and-is-not).
   </Card>
-  <Card title="Destructive ops are audited" icon="approve-check">
+  <Card title="Destructive ops are audited and gated" icon="approve-check">
     Bank deletes and every memories / config / document / directive /
     operation / mental-model delete record a durable audit row — actor,
     target, and outcome — so a wipe is attributable after the fact. Deleting
-    an entire bank additionally requires the caller to echo the bank id back
-    via `?confirm=<bank_id>`.
+    more than one item in a single call is a **bulk delete**: it enqueues for
+    human approval on both `/mcp/admin` and `/mcp/memory` instead of running.
+    Deleting an entire bank additionally requires the caller to echo the bank id
+    back via `?confirm=<bank_id>`.
   </Card>
 </CardGrid>
 

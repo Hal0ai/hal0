@@ -293,6 +293,48 @@ class TestModelDefaultsRoundTrip:
         assert got.defaults is not None
         assert got.defaults.context_size == 2048
 
+    def test_enable_thinking_and_vision_round_trip_via_extra_blob(self, reg: ModelRegistry) -> None:
+        """spec-hw-slot-ownership §1: enable_thinking/vision are model-owned
+        tri-state caps with no dedicated SQL column — they ride the catch-all
+        ``extra`` JSON blob (mirrors capability_flags/modalities_override),
+        alongside the column-backed mtp/jinja on the same row."""
+        reg.add(
+            _model(
+                "a",
+                defaults=ModelDefaults(mtp=True, jinja=False, enable_thinking=True, vision=False),
+            )
+        )
+        got = reg.get("a")
+        assert got.defaults is not None
+        assert got.defaults.mtp is True
+        assert got.defaults.jinja is False
+        assert got.defaults.enable_thinking is True
+        assert got.defaults.vision is False
+
+    def test_enable_thinking_and_vision_absent_read_back_as_none(self, reg: ModelRegistry) -> None:
+        """Tri-state AUTO (None) costs nothing on disk — never stamped into
+        the extra blob, and reads back as None (not False)."""
+        reg.add(_model("a", defaults=ModelDefaults(context_size=4096)))
+        got = reg.get("a")
+        assert got.defaults is not None
+        assert got.defaults.enable_thinking is None
+        assert got.defaults.vision is None
+
+    def test_enable_thinking_and_vision_do_not_leak_into_metadata(self, reg: ModelRegistry) -> None:
+        """The reserved extra-blob keys are popped on read — they must never
+        surface on Model.metadata (same contract as capability_flags/default)."""
+        reg.add(
+            _model(
+                "a",
+                defaults=ModelDefaults(enable_thinking=True, vision=True),
+                metadata={"discovered": True},
+            )
+        )
+        got = reg.get("a")
+        assert "_enable_thinking" not in got.metadata
+        assert "_vision" not in got.metadata
+        assert got.metadata.get("discovered") is True
+
 
 # ── concurrency (adversarial per the ML-1 spec's explicit call-out) ─────────
 

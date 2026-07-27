@@ -347,3 +347,114 @@ async def test_standalone_server_legacy_args_envelope_still_works(
     structured = result[1] if isinstance(result, tuple) else result
     assert structured["status"] == "ok"
     assert wrapper.add_calls[0]["text"] == "legacy shape"
+
+
+# ── #1302: standalone /mcp/memory bulk-delete approval gate ──────────────────
+#
+# ``mcp__hal0-admin__memory_delete`` gates ``len(ids) > 1`` through the
+# approval queue, but the standalone dispatcher used to execute bulk
+# deletes directly — an agent that could reach ``/mcp/memory`` bypassed
+# the gate entirely by using the narrow server instead of the admin one.
+
+
+@pytest.mark.asyncio
+async def test_standalone_bulk_delete_enqueues_for_approval(wrapper: _FakeWrapper) -> None:
+    """>1 id must gate through the approval queue, not execute."""
+    from hal0.mcp.approval_queue import ApprovalQueue
+
+    queue = ApprovalQueue()
+    disp = memory.make_dispatcher(
+        wrapper,
+        client_id_resolver=lambda: "pi-coder",
+        private_resolver=lambda: False,
+        approval_queue=queue,
+    )
+    out = await disp("memory_delete", {"ids": ["a", "b", "c"]})
+
+    assert out["status"] == "pending_approval"
+    assert out["approval_id"]
+    assert wrapper.delete_calls == []  # nothing ran
+    pending = queue.list_pending()
+    assert len(pending) == 1
+    assert pending[0]["tool"] == "memory_delete"
+    assert pending[0]["client_id"] == "pi-coder"
+
+
+@pytest.mark.asyncio
+async def test_standalone_bulk_delete_runs_on_approval(wrapper: _FakeWrapper) -> None:
+    """Approving the queued entry executes the real delete."""
+    from hal0.mcp.approval_queue import ApprovalQueue
+
+    queue = ApprovalQueue()
+    disp = memory.make_dispatcher(
+        wrapper,
+        client_id_resolver=lambda: "pi-coder",
+        private_resolver=lambda: False,
+        approval_queue=queue,
+    )
+    out = await disp("memory_delete", {"ids": ["a", "b"]})
+    result = await queue.approve(out["approval_id"])
+
+    assert wrapper.delete_calls[0]["ids"] == ["a", "b"]
+    assert wrapper.delete_calls[0]["client_id"] == "pi-coder"
+    assert result["result"]["deleted"] == 2
+
+
+@pytest.mark.asyncio
+async def test_standalone_single_delete_stays_autonomous(wrapper: _FakeWrapper) -> None:
+    """One id is not a bulk delete — it still runs inline."""
+    from hal0.mcp.approval_queue import ApprovalQueue
+
+    queue = ApprovalQueue()
+    disp = memory.make_dispatcher(
+        wrapper,
+        client_id_resolver=lambda: "pi-coder",
+        private_resolver=lambda: False,
+        approval_queue=queue,
+    )
+    out = await disp("memory_delete", {"ids": ["only-one"]})
+
+    assert out["status"] == "ok"
+    assert out["deleted"] == 1
+    assert queue.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_standalone_non_delete_tools_never_gate(wrapper: _FakeWrapper) -> None:
+    """The gate is delete-specific; reads and writes stay autonomous."""
+    from hal0.mcp.approval_queue import ApprovalQueue
+
+    queue = ApprovalQueue()
+    disp = memory.make_dispatcher(
+        wrapper,
+        client_id_resolver=lambda: "pi-coder",
+        private_resolver=lambda: False,
+        approval_queue=queue,
+    )
+    assert (await disp("memory_add", {"text": "x"}))["status"] == "ok"
+    assert (await disp("memory_search", {"query": "x"}))["status"] == "ok"
+    assert queue.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_standalone_bulk_delete_ungated_without_queue(wrapper: _FakeWrapper) -> None:
+    """No queue wired (admin's in-process path, tests) → gating is the
+    caller's job and the dispatcher executes as before."""
+    disp = memory.make_dispatcher(
+        wrapper,
+        client_id_resolver=lambda: "pi-coder",
+        private_resolver=lambda: False,
+    )
+    out = await disp("memory_delete", {"ids": ["a", "b"]})
+    assert out["status"] == "ok"
+    assert wrapper.delete_calls[0]["ids"] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_gate_matches_admin_classification() -> None:
+    """One owner per fact: the standalone gate must reuse admin's
+    ``is_gated`` rather than re-deriving the >1 threshold."""
+    from hal0.mcp.admin import is_gated
+
+    assert is_gated("memory_delete", {"ids": ["a", "b"]}) is True
+    assert is_gated("memory_delete", {"ids": ["a"]}) is False

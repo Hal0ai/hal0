@@ -45,6 +45,14 @@ _AGENT_TAG_PREFIX = "agent:"
 _ANONYMOUS = "anonymous"
 _UNKNOWN_AGENT = "unknown"
 
+# Unified-bank project tagging (#1300). The same compensator pattern as
+# ``visibility:private``: pre-unified multi-bank mode isolates ``project:<id>`` by
+# giving it its own bank, so when unified mode collapses it onto ``shared`` the
+# scope has to survive as a tag or it ceases to exist. The tag is written
+# verbatim as the namespace name (``project:apollo``) so there is exactly one
+# spelling of a project scope across banks, tags, and the wire.
+_PROJECT = "project:"
+
 # Page size for the pre-delete visibility scan (unified mode). delete() lists
 # the caller's banks to resolve each target doc's owner before removing it; a
 # page big enough that a normal delete resolves in one round-trip.
@@ -57,6 +65,16 @@ def _agent_of(tags: list[str] | tuple[str, ...] | None) -> str | None:
         if isinstance(t, str) and t.startswith(_AGENT_TAG_PREFIX):
             return t[len(_AGENT_TAG_PREFIX) :]
     return None
+
+
+def _projects_of(tags: list[str] | tuple[str, ...] | None) -> set[str]:
+    """Every ``project:<id>`` tag on a doc. A doc with none is unscoped.
+
+    Plural because a caller may legitimately file one document under more
+    than one project by passing extra ``project:`` tags; the read filter
+    treats them as an OR (visible from any of its projects).
+    """
+    return {t for t in tags or () if isinstance(t, str) and t.startswith(_PROJECT)}
 
 
 def namespace_to_bank(namespace: str) -> str:
@@ -157,7 +175,7 @@ class HindsightProvider(MemoryProvider):
         # are stamped ``visibility:private`` (see ``add``), and recall stops
         # fanning out (``_allowed_namespaces`` returns just ``[shared]``). The
         # constructor default is False so directly-constructed providers keep
-        # the legacy multi-bank behavior; the live default (True) is carried by
+        # the pre-unified multi-bank behavior; the live default (True) is carried by
         # config -> ``provider_from_config``.
         self._unified_bank = bool(unified_bank)
         # ADR-0023: reporting-only on this engine (Hindsight builds its graph
@@ -240,17 +258,66 @@ class HindsightProvider(MemoryProvider):
         owner = _agent_of(tags)
         return owner is not None and owner == caller_agent
 
-    def _filter_private(
-        self, items: list[dict[str, Any]], client_id: str | None
+    # ── ACL: project:<id> read scoping (unified mode) ───────────────────
+
+    @staticmethod
+    def _requested_scope(requested: str | list[str] | None) -> tuple[set[str], bool]:
+        """Split a read request into ``(project namespaces, wants unscoped)``.
+
+        ``wants_unscoped`` is True when the caller asked for at least one
+        non-project namespace (``shared``, ``agents``, ``private:<id>``) —
+        those are the reads that should see docs carrying no project tag.
+        """
+        reqs = [requested] if isinstance(requested, str) else list(requested or [_SHARED])
+        projects = {ds for ds in reqs if isinstance(ds, str) and ds.startswith(_PROJECT)}
+        return projects, len(projects) < len([r for r in reqs if r])
+
+    @staticmethod
+    def _is_in_scope(item: dict[str, Any], projects: set[str], wants_unscoped: bool) -> bool:
+        """Read-side enforcement of the ``project:<id>`` tag (#1300).
+
+        A doc carrying project tags is visible only from a read that asked
+        for one of those projects; an unscoped doc is visible only from a
+        read that asked for a non-project namespace. Together these
+        reproduce the bank isolation pre-unified multi-bank mode gets for free.
+
+        NOTE (pre-fix data): documents written to ``project:<id>`` before
+        this landed carry no project tag, so they read as unscoped —
+        i.e. as the ordinary ``shared`` writes they had silently become.
+        That is the only honest reading; there is nothing on the doc that
+        records which project it was meant for.
+        """
+        doc_projects = _projects_of(item.get("tags"))
+        if doc_projects:
+            return bool(doc_projects & projects)
+        return wants_unscoped
+
+    def _filter_visible(
+        self,
+        items: list[dict[str, Any]],
+        client_id: str | None,
+        requested: str | list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Drop other agents' ``visibility:private`` docs from a unified-bank
-        read. No-op in legacy multi-bank mode, where per-bank ACL
-        (``_allowed_namespaces`` never returns a foreign private bank) already
-        isolates private memory and the tag is a harmless marker."""
+        """Apply unified-bank read ACL: private visibility AND project scope.
+
+        The two filters compose — a doc must pass both. Neither shadows the
+        other: an agent's private doc filed under a project stays invisible to
+        other agents reading that project, and a project doc stays invisible
+        to a shared read even though its owner could see it.
+
+        No-op in pre-unified multi-bank mode, where per-bank ACL
+        (``_allowed_namespaces`` never returns a foreign private bank, and
+        ``project:<id>`` has its own bank) already isolates both and the tags
+        are harmless markers."""
         if not self._unified_bank:
             return items
         caller = self._caller_agent(client_id)
-        return [it for it in items if self._is_visible_to(it, caller)]
+        projects, wants_unscoped = self._requested_scope(requested)
+        return [
+            it
+            for it in items
+            if self._is_visible_to(it, caller) and self._is_in_scope(it, projects, wants_unscoped)
+        ]
 
     # ── Core five ──────────────────────────────────────────────────────
 
@@ -264,9 +331,13 @@ class HindsightProvider(MemoryProvider):
         client_id: str | None = None,
         document_id: str | None = None,
     ) -> dict[str, str]:
-        # ``private:<agent>`` still arrives from the front door even in unified
-        # mode; capture the private intent before the bank collapses to shared.
+        # ``private:<agent>`` / ``project:<id>`` still arrive from the front
+        # door even in unified mode; capture that intent before the bank
+        # collapses to shared, so it can survive as a tag.
         requested_private = isinstance(dataset, str) and dataset.startswith(_PRIVATE)
+        requested_project = (
+            dataset if isinstance(dataset, str) and dataset.startswith(_PROJECT) else None
+        )
         ns = self._write_namespace(dataset, client_id)
         bank = namespace_to_bank(ns)
 
@@ -302,6 +373,11 @@ class HindsightProvider(MemoryProvider):
             out_tags.append(f"{_AGENT_TAG_PREFIX}{agent}")
         if requested_private and _VISIBILITY_PRIVATE not in out_tags:
             out_tags.append(_VISIBILITY_PRIVATE)
+        # #1300: only in unified mode — pre-unified multi-bank mode isolates the
+        # project by bank, so tagging there would be a second owner of the
+        # same fact (and would change existing deployments' tag sets).
+        if self._unified_bank and requested_project and requested_project not in out_tags:
+            out_tags.append(requested_project)
 
         # Extraction quality suffers without a ``context`` line and a
         # timestamp; always supply both unless the caller already did.
@@ -367,10 +443,11 @@ class HindsightProvider(MemoryProvider):
                 continue  # fail-soft per bank
             for fact in resp.get("items", []):
                 items.append(self._list_fact_to_item(fact, bank))
-        # Same visibility:private enforcement as recall: in unified mode the
-        # shared bank holds every agent's private docs, so list must not surface
-        # other agents' private items. No-op in legacy multi-bank mode.
-        items = self._filter_private(items, client_id)
+        # Same read ACL as recall: in unified mode the shared bank holds every
+        # agent's private docs AND every project's docs, so list must not
+        # surface other agents' private items or out-of-scope project items.
+        # No-op in pre-unified multi-bank mode.
+        items = self._filter_visible(items, client_id, dataset)
         return {"items": items[:limit], "next_cursor": None}
 
     @staticmethod
@@ -389,23 +466,29 @@ class HindsightProvider(MemoryProvider):
         }
 
     async def _deletable_ids(
-        self, ids: set[str], banks: list[str], client_id: str | None
+        self,
+        ids: set[str],
+        banks: list[str],
+        client_id: str | None,
+        requested: str | list[str] | None = None,
     ) -> set[str]:
         """Return the subset of ``ids`` the caller is allowed to delete under
         unified-bank visibility.
 
         In unified mode the single ``shared`` bank holds every agent's
-        ``visibility:private`` docs, so a blind delete-by-id would let any
-        caller remove another agent's private memory (read/search/list all
-        enforce visibility; delete must too). A doc is deletable when it is
-        non-private, or private and owned by the caller — the exact predicate
-        the read paths use (:meth:`_is_visible_to`). An id we cannot resolve to
-        a doc in the caller's banks is **withheld** (fail-closed), matching the
-        fail-closed posture of the read filter.
+        ``visibility:private`` docs and every project's docs, so a blind
+        delete-by-id would let any caller remove another agent's private memory
+        — or reach out of the project scope they addressed — by guessing an id.
+        Read/search/list all enforce visibility and scope; delete must too. A
+        doc is deletable when the caller could have read it in this same call:
+        the exact predicates the read paths use (:meth:`_is_visible_to` and
+        :meth:`_is_in_scope`). An id we cannot resolve to a doc in the caller's
+        banks is **withheld** (fail-closed), matching the read filter's posture.
         """
         if not ids:
             return set()
         caller = self._caller_agent(client_id)
+        projects, wants_unscoped = self._requested_scope(requested)
         wanted = set(ids)
         out: set[str] = set()
         for bank in banks:
@@ -422,7 +505,11 @@ class HindsightProvider(MemoryProvider):
                 items = resp.get("items", [])
                 for fact in items:
                     fid = fact.get("id") or fact.get("document_id")
-                    if fid in wanted and fid not in out and self._is_visible_to(fact, caller):
+                    if fid not in wanted or fid in out:
+                        continue
+                    if self._is_visible_to(fact, caller) and self._is_in_scope(
+                        fact, projects, wants_unscoped
+                    ):
                         out.add(fid)
                 if len(items) < _DELETE_SCAN_PAGE:
                     break  # last page
@@ -446,12 +533,16 @@ class HindsightProvider(MemoryProvider):
         banks = [
             namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset or _SHARED, client_id)
         ]
-        # Unified mode: gate deletes on the same visibility:private ACL the read
-        # paths enforce, so one agent can't delete another's private doc by id.
+        # Unified mode: gate deletes on the same visibility + project ACL the
+        # read paths enforce, so one agent can't delete another's private doc
+        # by id, and a project-scoped delete can't reach outside its project.
         # Legacy multi-bank mode needs no gate — _allowed_namespaces never
-        # yields a foreign private bank, so bank isolation already protects it.
+        # yields a foreign private bank and each project has its own bank, so
+        # bank isolation already protects both.
         deletable = (
-            await self._deletable_ids(set(ids), banks, client_id) if self._unified_bank else None
+            await self._deletable_ids(set(ids), banks, client_id, dataset)
+            if self._unified_bank
+            else None
         )
         for document_id in ids:
             if deletable is not None and document_id not in deletable:
@@ -515,11 +606,11 @@ class HindsightProvider(MemoryProvider):
 
         per_bank = await asyncio.gather(*[_one(b) for b in banks])
         union: list[dict[str, Any]] = [item for bank_items in per_bank for item in bank_items]
-        # Enforce visibility:private BEFORE the rerank + token budget so that
-        # another agent's private docs never consume the caller's budget (and
-        # never leak). No-op in legacy multi-bank mode. Done pre-budget so the
-        # returned count reflects only docs the caller may actually see.
-        union = self._filter_private(union, client_id)
+        # Enforce visibility:private + project scope BEFORE the rerank + token
+        # budget so that docs the caller may not see never consume the caller's
+        # budget (and never leak). No-op in pre-unified multi-bank mode. Done
+        # pre-budget so the returned count reflects only visible docs.
+        union = self._filter_visible(union, client_id, dataset)
         if not union:
             return []
 

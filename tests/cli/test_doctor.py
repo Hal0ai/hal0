@@ -563,3 +563,43 @@ def test_toolbox_pull_invoked_subcommand_skips_preflight(
     result = doctor(ctx=_CtxWithSubcommand(), verify=False, plain=False, ports=None)  # type: ignore[arg-type]
     assert result is None
     assert "should-not-run" not in capfd.readouterr().out
+
+
+def test_toolbox_pull_json_output_is_plain_not_ansi_colorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--json must emit plain, parseable JSON — no ANSI escapes.
+
+    Regression: rich's ``console.print_json`` re-highlights the payload with
+    ANSI escape sequences whenever its terminal heuristics fire (which they do
+    even when stdout is piped, e.g. ``hal0 doctor toolbox-pull --json | jq``),
+    corrupting the bytes a machine consumer parses.
+    """
+    pinned = "sha256:" + "a" * 64
+    manifest_path = _write_manifest(
+        tmp_path,
+        {
+            "_schema": "hal0.manifest.v1",
+            "toolbox_images": {
+                "vulkan": {
+                    "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
+                    "digest": pinned,
+                },
+            },
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"token": "anon"})
+        return httpx.Response(200, headers={"Docker-Content-Digest": pinned})
+
+    _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(typer.Exit):
+        toolbox_pull(json_output=True, manifest_path=manifest_path)
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out, "JSON output must not contain ANSI escape sequences"
+    assert jsonlib.loads(out)[0]["ok"] is True
