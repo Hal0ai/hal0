@@ -278,7 +278,10 @@ class HermesDriver(AgentDriver):
         unit = "hal0-agent@hermes.service"
         if shutil.which("systemctl") is None:
             return
-        for argv, timeout in ((["systemctl", "stop", unit], 10), (["systemctl", "disable", unit], 5)):
+        for argv, timeout in (
+            (["systemctl", "stop", unit], 10),
+            (["systemctl", "disable", unit], 5),
+        ):
             with contextlib.suppress(OSError, subprocess.SubprocessError):
                 self._runner.run(  # nosec B603 — known-safe argv
                     argv,

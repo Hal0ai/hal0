@@ -23,7 +23,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 _Nothing yet._
 
-## [1.0.0] — 2026-07-27 (R5 · the rework release)
+## [1.0.0-rc.1] — 2026-07-27 (R5 · the rework release)
 
 The R5 rework puts the platform back together as a genuine 1.0: memory and
 Hermes finished, dead surface swept, launch flags re-homed onto **models**, the

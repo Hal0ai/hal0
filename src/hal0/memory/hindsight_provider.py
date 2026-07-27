@@ -46,7 +46,7 @@ _ANONYMOUS = "anonymous"
 _UNKNOWN_AGENT = "unknown"
 
 # Unified-bank project tagging (#1300). The same compensator pattern as
-# ``visibility:private``: legacy multi-bank mode isolates ``project:<id>`` by
+# ``visibility:private``: pre-unified multi-bank mode isolates ``project:<id>`` by
 # giving it its own bank, so when unified mode collapses it onto ``shared`` the
 # scope has to survive as a tag or it ceases to exist. The tag is written
 # verbatim as the namespace name (``project:apollo``) so there is exactly one
@@ -175,7 +175,7 @@ class HindsightProvider(MemoryProvider):
         # are stamped ``visibility:private`` (see ``add``), and recall stops
         # fanning out (``_allowed_namespaces`` returns just ``[shared]``). The
         # constructor default is False so directly-constructed providers keep
-        # the legacy multi-bank behavior; the live default (True) is carried by
+        # the pre-unified multi-bank behavior; the live default (True) is carried by
         # config -> ``provider_from_config``.
         self._unified_bank = bool(unified_bank)
         # ADR-0023: reporting-only on this engine (Hindsight builds its graph
@@ -279,7 +279,7 @@ class HindsightProvider(MemoryProvider):
         A doc carrying project tags is visible only from a read that asked
         for one of those projects; an unscoped doc is visible only from a
         read that asked for a non-project namespace. Together these
-        reproduce the bank isolation legacy multi-bank mode gets for free.
+        reproduce the bank isolation pre-unified multi-bank mode gets for free.
 
         NOTE (pre-fix data): documents written to ``project:<id>`` before
         this landed carry no project tag, so they read as unscoped —
@@ -305,7 +305,7 @@ class HindsightProvider(MemoryProvider):
         other agents reading that project, and a project doc stays invisible
         to a shared read even though its owner could see it.
 
-        No-op in legacy multi-bank mode, where per-bank ACL
+        No-op in pre-unified multi-bank mode, where per-bank ACL
         (``_allowed_namespaces`` never returns a foreign private bank, and
         ``project:<id>`` has its own bank) already isolates both and the tags
         are harmless markers."""
@@ -373,7 +373,7 @@ class HindsightProvider(MemoryProvider):
             out_tags.append(f"{_AGENT_TAG_PREFIX}{agent}")
         if requested_private and _VISIBILITY_PRIVATE not in out_tags:
             out_tags.append(_VISIBILITY_PRIVATE)
-        # #1300: only in unified mode — legacy multi-bank mode isolates the
+        # #1300: only in unified mode — pre-unified multi-bank mode isolates the
         # project by bank, so tagging there would be a second owner of the
         # same fact (and would change existing deployments' tag sets).
         if self._unified_bank and requested_project and requested_project not in out_tags:
@@ -446,7 +446,7 @@ class HindsightProvider(MemoryProvider):
         # Same read ACL as recall: in unified mode the shared bank holds every
         # agent's private docs AND every project's docs, so list must not
         # surface other agents' private items or out-of-scope project items.
-        # No-op in legacy multi-bank mode.
+        # No-op in pre-unified multi-bank mode.
         items = self._filter_visible(items, client_id, dataset)
         return {"items": items[:limit], "next_cursor": None}
 
@@ -608,7 +608,7 @@ class HindsightProvider(MemoryProvider):
         union: list[dict[str, Any]] = [item for bank_items in per_bank for item in bank_items]
         # Enforce visibility:private + project scope BEFORE the rerank + token
         # budget so that docs the caller may not see never consume the caller's
-        # budget (and never leak). No-op in legacy multi-bank mode. Done
+        # budget (and never leak). No-op in pre-unified multi-bank mode. Done
         # pre-budget so the returned count reflects only visible docs.
         union = self._filter_visible(union, client_id, dataset)
         if not union:
