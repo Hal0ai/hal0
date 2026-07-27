@@ -127,9 +127,7 @@ def test_nightly_gate_pins_entrypoint_and_never_tests_for_workflow_call_event() 
     distinguishes reusable invocation from a direct tag push.
     """
     run = _step("resolve", "Verify requested tag and export policy")["run"]
-    executable = "\n".join(
-        line for line in run.splitlines() if not line.lstrip().startswith("#")
-    )
+    executable = "\n".join(line for line in run.splitlines() if not line.lstrip().startswith("#"))
     assert '"workflow_call"' not in executable
     assert "GITHUB_WORKFLOW_REF" in executable
     assert (
