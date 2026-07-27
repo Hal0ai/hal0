@@ -1003,6 +1003,14 @@ def mark_home_managed_if_owned(hermes_home: Path) -> bool:
     the hal0-api lifespan, which calls it before seeding default personas.
     """
     hermes_home.mkdir(parents=True, exist_ok=True)
+    # 0700 — matches the HERMES_HOME row in install/perms.py. A bare mkdir()
+    # lands 0755 under the usual umask AND inherits the setgid bit from the
+    # setgid state root, so the home came out 2755: world-traversable. It holds
+    # hindsight/config.json (tenant API key) and mcp-tokens/, so that is a real
+    # if minor exposure, and it made every fresh box report
+    # "HERMES_HOME is hal0:hal0 2755, want hal0:hal0 0700" drift.
+    with contextlib.suppress(OSError):
+        hermes_home.chmod(0o700)
     marker = hermes_home / _HAL0_MANAGED_MARKER
     if not marker.exists():
         marker.touch()

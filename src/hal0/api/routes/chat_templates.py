@@ -16,6 +16,7 @@ as a slot cold-start crash.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,14 @@ async def create_chat_template(body: _TemplateBody) -> dict[str, Any]:
     store = _templates_dir()
     try:
         store.mkdir(parents=True, exist_ok=True)
+        # 2775 — matches the models/ chat-templates row in install/perms.py.
+        # A bare mkdir lands 2755 (umask 022, setgid inherited from the model
+        # store root), which drops GROUP write: fine while hal0 owns the dir,
+        # but a root-created one then locks the hal0-run API out of its own
+        # template store. Same root/hal0 seam the *.lock row exists for.
+        # Best-effort: a non-owner caller cannot chmod, and need not.
+        with contextlib.suppress(OSError):
+            store.chmod(0o2775)
         (store / f"{body.id}.jinja").write_text(body.content)
     except OSError as exc:
         raise Hal0Error(

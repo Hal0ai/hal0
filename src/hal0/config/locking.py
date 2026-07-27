@@ -59,6 +59,12 @@ def _depths() -> dict[str, int]:
     return depths
 
 
+#: Mode for a newly created ``.lock``. Must match the ``*.lock`` row in
+#: :mod:`hal0.install.perms` — group-writable so both sides of the
+#: root/hal0 seam can take the flock.
+_LOCK_FILE_MODE = 0o664
+
+
 def lock_path_for(target: Path | str) -> Path:
     """Return the sibling ``.lock`` path :func:`file_lock` locks for ``target``."""
     return Path(f"{os.fspath(target)}.lock")
@@ -97,7 +103,24 @@ def file_lock(target: Path | str) -> Iterator[None]:
             depths.pop(key, None)
         return
 
+    existed = lock_path.exists()
     with open(lock_path, "w") as fh:
+        if not existed:
+            # 0664, not the ambient umask's 0644. These advisory locks are held
+            # from BOTH sides of the privilege seam — a root-run installer/CLI
+            # and the hal0-run API — so whichever side creates one first, the
+            # other still has to open it for WRITING to take the flock. A
+            # root-created 0644 lock is precisely the halo150 "POST /api/slots
+            # 500 on a fresh box" failure that put the *.lock row in
+            # install/perms.py's OwnershipStore in the first place.
+            #
+            # That row alone was not enough: `doctor perms --fix` reconciles
+            # existing files, but the next lock this function created came back
+            # 0644 under the umask, so a fresh box drifted again immediately
+            # (observed 2026-07-26: capabilities.toml.lock "is 0644, want
+            # 0664"). Set it at creation so the table has nothing to correct.
+            with contextlib.suppress(OSError):
+                os.fchmod(fh.fileno(), _LOCK_FILE_MODE)
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         depths[key] = 1
         try:
