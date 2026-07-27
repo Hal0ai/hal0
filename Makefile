@@ -16,6 +16,8 @@ HAL0_TEST_REPORT  ?= tests/release-gate-report.json
 # Chat model the slot rows bind + smoke-test. Must already be pulled on the test
 # box — the release gate needs a SEEDED LXC, not a bare fresh install.
 HAL0_TEST_MODEL   ?= qwen2.5-0.5b-q4_k_m
+# Seconds to wait for a slot to reach ready (cold first load pulls the image).
+HAL0_TEST_READY_TIMEOUT ?= 420
 
 help:
 	@echo "hal0 — common dev tasks"
@@ -89,6 +91,7 @@ release-test:
 	HAL0_TEST_PREFIX="$(HAL0_TEST_PREFIX)" \
 	HAL0_TEST_REPORT="$(HAL0_TEST_REPORT)" \
 	HAL0_TEST_MODEL="$(HAL0_TEST_MODEL)" \
+	HAL0_TEST_READY_TIMEOUT="$(HAL0_TEST_READY_TIMEOUT)" \
 	bash scripts/release-test.sh
 
 release-test-report:

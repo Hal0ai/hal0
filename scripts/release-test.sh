@@ -41,6 +41,9 @@ HAL0_TEST_REPORT="${HAL0_TEST_REPORT:-tests/release-gate-report.json}"
 # bare fresh install. Overridable so the gate is runnable against whatever model
 # a given test box carries.
 HAL0_TEST_MODEL="${HAL0_TEST_MODEL:-qwen2.5-0.5b-q4_k_m}"
+# How long to wait for a slot to reach ready. A COLD first load also pulls the
+# multi-GB toolbox image; warm loads are seconds.
+HAL0_TEST_READY_TIMEOUT="${HAL0_TEST_READY_TIMEOUT:-420}"
 
 # Expand ~ in SSH key path.
 HAL0_TEST_SSH_KEY="${HAL0_TEST_SSH_KEY/#\~/$HOME}"
@@ -186,6 +189,34 @@ remote_slot_create() {
     echo "${slot}"
 }
 
+# Wait for a slot to finish loading.
+#
+# `hal0 slot load` returns as soon as its own client-side HTTP read times out,
+# which is SHORTER than a cold container start — the first load on a box also
+# pays a multi-GB toolbox image pull (~4 min cold, seconds warm). Treating that
+# return as the verdict is why every slot row reported FAIL while the slot went
+# ready moments later. Poll the API instead.
+#
+# `ready` and `idle` both mean the slot loaded successfully (the idle monitor
+# may have parked it between the load and this check); `error` is terminal.
+wait_slot_ready() {
+    # wait_slot_ready <slot> [timeout_s] → 0 when loaded, 1 on error/timeout
+    local slot="$1" timeout_s="${2:-${HAL0_TEST_READY_TIMEOUT}}"
+    local waited=0 state
+    while (( waited < timeout_s )); do
+        state="$(ssh_exec "curl -fsS -m 10 ${REMOTE_HAL0_API}/api/slots/${slot}" 2>/dev/null \
+            | sed -n 's/.*\"state\":\"\([a-z_]*\)\".*/\1/p' | head -1 || true)"
+        case "${state}" in
+            ready|idle) return 0 ;;
+            error|failed) log_warn "${slot} entered state '${state}'"; return 1 ;;
+        esac
+        sleep 5
+        waited=$(( waited + 5 ))
+    done
+    log_warn "${slot} did not reach ready within ${timeout_s}s (last state: ${state:-unknown})"
+    return 1
+}
+
 # ── ROW: Vulkan baseline ─────────────────────────────────────────────────────
 log_step "Row: vulkan baseline"
 start=$(date +%s%N)
@@ -194,7 +225,8 @@ if [[ -z "${DIGEST}" ]]; then
     add_row "vulkan" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.vulkan.digest] is null — Team A pending)"
 else
     SLOT="$(remote_slot_create vulkan vulkan llama-server ${HAL0_TEST_MODEL})"
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT} --model ${HAL0_TEST_MODEL}" >/dev/null 2>&1 \
+    ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT} --model ${HAL0_TEST_MODEL}" >/dev/null 2>&1 || true
+    if wait_slot_ready "${SLOT}" \
         && ssh_exec "curl -fsS -m 30 ${REMOTE_HAL0_API}/v1/chat/completions \
             -H 'content-type: application/json' \
             -d '{\"model\":\"${HAL0_TEST_MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}' \
@@ -213,7 +245,8 @@ if [[ -z "${DIGEST}" ]]; then
     add_row "rocm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.rocm.digest] is null — Team A pending)"
 else
     SLOT="$(remote_slot_create rocm rocm llama-server ${HAL0_TEST_MODEL})"
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT} --model ${HAL0_TEST_MODEL}" >/dev/null 2>&1; then
+    ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT} --model ${HAL0_TEST_MODEL}" >/dev/null 2>&1 || true
+    if wait_slot_ready "${SLOT}"; then
         add_row "rocm" "pass" "$(since_ms "${start}")" "slot reached ready state on ROCm backend"
     else
         add_row "rocm" "fail" "$(since_ms "${start}")" "rocm slot failed to reach ready"
@@ -228,7 +261,8 @@ if [[ -z "${DIGEST}" ]]; then
     add_row "flm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.flm.digest] is null — Team A marked FLM as a stretch)"
 else
     SLOT="$(remote_slot_create flm flm flm llama3.2-3b-q4)"
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT} --model ${HAL0_TEST_MODEL}" >/dev/null 2>&1; then
+    ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT} --model ${HAL0_TEST_MODEL}" >/dev/null 2>&1 || true
+    if wait_slot_ready "${SLOT}"; then
         add_row "flm" "pass" "$(since_ms "${start}")" "FLM/NPU slot reached ready"
     else
         add_row "flm" "fail" "$(since_ms "${start}")" "FLM slot failed; check /sys/class/accel and xdna driver"
