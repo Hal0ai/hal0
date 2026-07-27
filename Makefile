@@ -13,6 +13,9 @@ HAL0_TEST_SSH_KEY ?= ~/.ssh/id_ed25519
 # shared LXC. Falls back to "local-$$" when not run from CI.
 HAL0_TEST_PREFIX  ?= ci-h-$(if $(GITHUB_RUN_ID),$(GITHUB_RUN_ID),local-$$$$)
 HAL0_TEST_REPORT  ?= tests/release-gate-report.json
+# Chat model the slot rows bind + smoke-test. Must already be pulled on the test
+# box — the release gate needs a SEEDED LXC, not a bare fresh install.
+HAL0_TEST_MODEL   ?= qwen2.5-0.5b-q4_k_m
 
 help:
 	@echo "hal0 — common dev tasks"
@@ -85,6 +88,7 @@ release-test:
 	HAL0_TEST_SSH_KEY="$(HAL0_TEST_SSH_KEY)" \
 	HAL0_TEST_PREFIX="$(HAL0_TEST_PREFIX)" \
 	HAL0_TEST_REPORT="$(HAL0_TEST_REPORT)" \
+	HAL0_TEST_MODEL="$(HAL0_TEST_MODEL)" \
 	bash scripts/release-test.sh
 
 release-test-report:

@@ -36,6 +36,11 @@ HAL0_TEST_USER="${HAL0_TEST_USER:-root}"
 HAL0_TEST_SSH_KEY="${HAL0_TEST_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
 HAL0_TEST_PREFIX="${HAL0_TEST_PREFIX:-ci-h-local-$$}"
 HAL0_TEST_REPORT="${HAL0_TEST_REPORT:-tests/release-gate-report.json}"
+# Chat model the slot rows bind and smoke-test. Must already be pulled on the
+# test box (`hal0 model pull <id>`): the release gate needs a SEEDED LXC, not a
+# bare fresh install. Overridable so the gate is runnable against whatever model
+# a given test box carries.
+HAL0_TEST_MODEL="${HAL0_TEST_MODEL:-qwen2.5-0.5b-q4_k_m}"
 
 # Expand ~ in SSH key path.
 HAL0_TEST_SSH_KEY="${HAL0_TEST_SSH_KEY/#\~/$HOME}"
@@ -159,11 +164,25 @@ trap cleanup EXIT
 
 # Track + create a unique slot on the LXC.
 remote_slot_create() {
-    # remote_slot_create <suffix> <backend> <provider> <model_id>
-    local slot="${HAL0_TEST_PREFIX}-$1" backend="$2" provider="$3" model="$4"
+    # remote_slot_create <suffix> <hardware> <provider> <model_id>
+    #
+    # `hal0 slot create` takes --model (REQUIRED) / --type / --provider /
+    # --hardware / --ctx-size / --port. It does NOT take --backend (renamed
+    # --hardware) or --no-start (removed; create never starts a slot). This
+    # helper passed both for long enough that every slot-creating row of the
+    # release gate died on argv parsing before hal0 was even contacted — the
+    # gate could not pass on ANY box, seeded or not — and stderr was discarded
+    # here, so the failure surfaced as a misleading downstream "slot load ...
+    # failed" verdict pointing at an empty journal.
+    local slot="${HAL0_TEST_PREFIX}-$1" hardware="$2" provider="$3" model="$4"
     CREATED_SLOTS+=("${slot}")
-    ssh_exec "${REMOTE_HAL0_BIN} slot create ${slot} --backend ${backend} --provider ${provider} --model ${model} --no-start" \
-        2>/dev/null || true
+    # stdout MUST go to stderr: this function's stdout is captured by
+    # `SLOT="$(remote_slot_create ...)"`, so a chatty `Created slot … on port
+    # 8084` would be swallowed into the slot NAME and every later reference
+    # (load, journal hint, cleanup) would address a slot that does not exist.
+    if ! ssh_exec "${REMOTE_HAL0_BIN} slot create ${slot} --model ${model} --hardware ${hardware} --provider ${provider}" >&2; then
+        log_warn "slot create failed for ${slot} (model ${model}) — the row below will fail"
+    fi
     echo "${slot}"
 }
 
@@ -174,11 +193,11 @@ DIGEST="$(manifest_digest vulkan || true)"
 if [[ -z "${DIGEST}" ]]; then
     add_row "vulkan" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.vulkan.digest] is null — Team A pending)"
 else
-    SLOT="$(remote_slot_create vulkan vulkan llama-server qwen2.5-0.5b-q4_k_m)"
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1 \
+    SLOT="$(remote_slot_create vulkan vulkan llama-server ${HAL0_TEST_MODEL})"
+    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT} --model ${HAL0_TEST_MODEL}" >/dev/null 2>&1 \
         && ssh_exec "curl -fsS -m 30 ${REMOTE_HAL0_API}/v1/chat/completions \
             -H 'content-type: application/json' \
-            -d '{\"model\":\"qwen2.5-0.5b-q4_k_m\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}' \
+            -d '{\"model\":\"${HAL0_TEST_MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}' \
             >/dev/null"; then
         add_row "vulkan" "pass" "$(since_ms "${start}")" "chat/completions returned non-empty body"
     else
@@ -193,8 +212,8 @@ DIGEST="$(manifest_digest rocm || true)"
 if [[ -z "${DIGEST}" ]]; then
     add_row "rocm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.rocm.digest] is null — Team A pending)"
 else
-    SLOT="$(remote_slot_create rocm rocm llama-server qwen2.5-0.5b-q4_k_m)"
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1; then
+    SLOT="$(remote_slot_create rocm rocm llama-server ${HAL0_TEST_MODEL})"
+    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT} --model ${HAL0_TEST_MODEL}" >/dev/null 2>&1; then
         add_row "rocm" "pass" "$(since_ms "${start}")" "slot reached ready state on ROCm backend"
     else
         add_row "rocm" "fail" "$(since_ms "${start}")" "rocm slot failed to reach ready"
@@ -209,7 +228,7 @@ if [[ -z "${DIGEST}" ]]; then
     add_row "flm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.flm.digest] is null — Team A marked FLM as a stretch)"
 else
     SLOT="$(remote_slot_create flm flm flm llama3.2-3b-q4)"
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1; then
+    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT} --model ${HAL0_TEST_MODEL}" >/dev/null 2>&1; then
         add_row "flm" "pass" "$(since_ms "${start}")" "FLM/NPU slot reached ready"
     else
         add_row "flm" "fail" "$(since_ms "${start}")" "FLM slot failed; check /sys/class/accel and xdna driver"
