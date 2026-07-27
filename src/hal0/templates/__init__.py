@@ -8,6 +8,7 @@ model-store directory (``<model_store_root>/chat-templates/``).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 
@@ -31,6 +32,16 @@ def seed_chat_templates() -> None:
     try:
         dst = Path(model_store_root()) / "chat-templates"
         dst.mkdir(parents=True, exist_ok=True)
+        # 2775 — matches the models/ chat-templates row in install/perms.py.
+        # THIS is the creator that runs on a real install (the POST route's
+        # mkdir only fires if an operator writes a template), so a bare mkdir
+        # here is what left every fresh box reporting
+        # "chat-templates is hal0:hal0 2755, want 2775": umask 022 drops group
+        # write and the setgid bit is inherited from the model store root.
+        # Group write matters at the root/hal0 seam — a root-run seed would
+        # otherwise lock the hal0-run API out of its own template store.
+        with contextlib.suppress(OSError):
+            dst.chmod(0o2775)
         for src in bundled_templates_dir().glob("*.jinja"):
             target = dst / src.name
             if not target.exists():
