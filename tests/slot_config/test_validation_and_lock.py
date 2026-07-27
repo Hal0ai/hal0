@@ -8,9 +8,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hal0.config.locking import lock_path_for
+from hal0.errors import BadRequest
 from hal0.slot_config import (
+    MODEL_OWNED_SLOT_KEYS,
     fold_ctx_size_alias,
+    reject_model_owned_slot_keys,
     slot_write_lock,
     unknown_slot_config_keys,
 )
@@ -72,6 +77,58 @@ class TestUnknownKeys:
 
         payload = {"server": dict.fromkeys(ServerConfig.model_fields, None)}
         assert unknown_slot_config_keys(payload) == []
+
+    def test_model_owned_keys_are_unknown_at_the_generic_boundary(self) -> None:
+        """mtp/enable_thinking/vision are no longer declared SlotConfig
+        fields (spec-hw-slot-ownership §1) — the generic boundary alone
+        would just flag them as typos. The specific
+        ``reject_model_owned_slot_keys`` check (below) runs first at the
+        route layer so the operator gets the actionable message instead."""
+        assert unknown_slot_config_keys({"mtp": True}) == ["mtp"]
+        assert unknown_slot_config_keys({"enable_thinking": False}) == ["enable_thinking"]
+        assert unknown_slot_config_keys({"vision": False}) == ["vision"]
+
+
+# ── reject_model_owned_slot_keys (spec-hw-slot-ownership §1) ────────────────
+
+
+class TestRejectModelOwnedSlotKeys:
+    def test_clean_payload_passes(self) -> None:
+        reject_model_owned_slot_keys({"name": "chat", "port": 8081, "device": "gpu-rocm"})
+
+    def test_every_declared_key_is_covered(self) -> None:
+        assert frozenset({"mtp", "enable_thinking", "vision"}) == MODEL_OWNED_SLOT_KEYS
+
+    def test_mtp_rejected(self) -> None:
+        with pytest.raises(BadRequest) as exc:
+            reject_model_owned_slot_keys({"mtp": True})
+        assert exc.value.code == "slot.model_owned_key_denied"
+        assert exc.value.details["keys"] == ["mtp"]
+
+    def test_enable_thinking_rejected(self) -> None:
+        with pytest.raises(BadRequest) as exc:
+            reject_model_owned_slot_keys({"enable_thinking": False})
+        assert exc.value.details["keys"] == ["enable_thinking"]
+
+    def test_vision_rejected(self) -> None:
+        with pytest.raises(BadRequest) as exc:
+            reject_model_owned_slot_keys({"vision": False})
+        assert exc.value.details["keys"] == ["vision"]
+
+    def test_multiple_offenders_all_listed_sorted(self) -> None:
+        with pytest.raises(BadRequest) as exc:
+            reject_model_owned_slot_keys({"vision": True, "mtp": None, "enable_thinking": True})
+        assert exc.value.details["keys"] == ["enable_thinking", "mtp", "vision"]
+
+    def test_null_value_still_rejected(self) -> None:
+        """Even an explicit null (the tri-state 'reset to Auto' shape used
+        when the field DID live on the slot) is rejected — the key itself
+        is the violation, not its value."""
+        with pytest.raises(BadRequest):
+            reject_model_owned_slot_keys({"mtp": None})
+
+    def test_unrelated_keys_untouched(self) -> None:
+        reject_model_owned_slot_keys({"model": {"default": "m"}, "server": {"extra_args": ""}})
 
 
 # ── fold_ctx_size_alias ──────────────────────────────────────────────────────

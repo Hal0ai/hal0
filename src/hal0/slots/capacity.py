@@ -124,6 +124,22 @@ def _kv_estimate_mb(ctx_tokens: int) -> float:
     return (ctx_tokens / 1000.0) * _KV_MIB_PER_1K_TOKENS
 
 
+def estimate_file_size_kv_mb(model_mb: float, ctx_meta: dict[str, Any] | None) -> float:
+    """Model-file-size + KV-cache footprint estimate, in MiB.
+
+    This is the same baseline/fallback formula :func:`build_per_slot` uses
+    (its path 3, and the floor under path 2's cgroup probe): model file
+    size plus a coarse per-context-token KV estimate (:func:`_kv_estimate_mb`
+    / :func:`_ctx_tokens_for`). Factored out so other callers that must size
+    a model BEFORE it is resident — and therefore have no cgroup/FLM figure
+    to read yet, e.g. pre-load eviction (:mod:`hal0.slots.preload_evict`)
+    deciding whether an incoming load will fit — reuse exactly this
+    estimator instead of a second, divergent one.
+    """
+    kv_mb = _kv_estimate_mb(_ctx_tokens_for(ctx_meta))
+    return round(model_mb + kv_mb, 1)
+
+
 def _ctx_tokens_for(model_meta: dict[str, Any] | None) -> int:
     """Resolve the effective context window (tokens) for a model.
 
@@ -309,8 +325,7 @@ async def build_per_slot(
                 ctx_meta = m.model_dump() if hasattr(m, "model_dump") else None
             except Exception:
                 model_mb = 0.0
-        kv_mb = _kv_estimate_mb(_ctx_tokens_for(ctx_meta))
-        estimate_mb = round(model_mb + kv_mb, 1)
+        estimate_mb = estimate_file_size_kv_mb(model_mb, ctx_meta)
 
         # ── Container cgroup probe (path 2) ────────────────────────────────
         # Probe the live podman/docker cgroup.  Returns 0 when no container
@@ -479,4 +494,5 @@ __all__ = [
     "CapacitySnapshot",
     "_container_cgroup_mem_bytes",
     "build_per_slot",
+    "estimate_file_size_kv_mb",
 ]

@@ -58,6 +58,10 @@ def test_preview_equals_launch_full_slot() -> None:
         # spec-hw-slot-ownership §2: NGL + threads are slot-top-level fields.
         "n_gpu_layers": 88,
         "threads": 8,
+        # mtp/vision here are inert legacy keys (spec-hw-slot-ownership §1:
+        # both are model-owned now, SlotConfig declares neither) — kept in
+        # the fixture to prove preview/launch parity is unaffected by their
+        # presence, not because they do anything.
         "mtp": True,
         "chat_template": "chatml",
         "vision": True,
@@ -72,7 +76,7 @@ def test_preview_equals_launch_full_slot() -> None:
         "metadata": {"context_length": 262144},
     }
 
-    profile = _gpu_profile(mtp=False)  # slot mtp=True must force the bundle on
+    profile = _gpu_profile(mtp=False)
 
     with (
         patch("hal0.providers.container._resolve_profile", return_value=profile),

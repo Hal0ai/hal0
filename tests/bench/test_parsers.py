@@ -133,3 +133,32 @@ def test_parse_server_ab_embed():
     assert len(p.reps) == len(doc["results"]["latency_s"])
     assert all(r.t_s is not None and r.decode_ts is None for r in p.reps)
     assert p.summary.decode_ts_med is None  # never guessed for embed
+
+
+def test_parse_server_ab_drafts_without_accepted_does_not_crash():
+    # A speculative run can report a draft count (`draft_n` > 0) without a paired
+    # `draft_n_accepted` (partial/older llama.cpp timings, or a null field). The
+    # acceptance ratio is then unknowable — it must stay null, NOT crash the whole
+    # cell parse with `None / draft_n` (regression: TypeError killed the session).
+    doc = {
+        "mode": "ab",
+        "results": {
+            "spec": {
+                "extra_args": "",
+                "runs": [
+                    {
+                        "predicted_per_second": 40.0,
+                        "prompt_per_second": 300.0,
+                        "draft_n": 12,
+                        "draft_n_accepted": None,
+                        "wall_s": 2.0,
+                    }
+                ],
+            }
+        },
+    }
+    p = parse_server_ab(doc, "chat")
+    assert len(p.reps) == 1  # the run is still a valid throughput measurement
+    assert p.reps[0].decode_ts == 40.0
+    assert p.reps[0].accept_rate is None  # unknowable, never invented, never crash
+    assert p.reps[0].drafted == 12

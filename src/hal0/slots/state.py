@@ -203,6 +203,21 @@ class SlotHealthFailed(SlotError):
     status = 503
 
 
+class SlotTerminateTimeout(SlotError):
+    """The container stop did not return inside its timeout (#1224).
+
+    ``systemctl stop`` against an already-failed unit can block indefinitely.
+    The stop runs in an executor thread that we cannot kill, so this does NOT
+    mean the stop was cancelled — it means we stopped *waiting* on it, so the
+    caller (and the HTTP request behind it) can make forward progress instead
+    of hanging. The abandoned thread retires on its own if the stop ever
+    completes.
+    """
+
+    code = "slot.terminate_timeout"
+    status = 504
+
+
 class SlotConfigError(SlotError):
     """Slot TOML missing or invalid for the requested operation."""
 

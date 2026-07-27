@@ -58,7 +58,12 @@ from typing import Any
 import httpx
 
 from hal0.config import store as model_store_module
-from hal0.config.paths import DEFAULT_MODEL_STORE, model_mount_roots, model_store_root
+from hal0.config.paths import (
+    DEFAULT_MODEL_STORE,
+    _covers,
+    model_mount_roots,
+    model_store_root,
+)
 from hal0.config.schema import (
     build_mtp_flag_bundle,
     family_flags,
@@ -312,7 +317,6 @@ def _profile_image_and_flags(
 
 
 def _effective_mtp(
-    slot_mtp: bool | None,
     model_info: Mapping[str, Any],
     runner: Any,
     *,
@@ -320,19 +324,19 @@ def _effective_mtp(
 ) -> bool:
     """Resolve whether MTP speculative decoding is on for this slot launch.
 
-    §7.1a / ML-5: MTP is a MODEL property, not a profile-template one —
-    ``profile.mtp`` is no longer consulted at all. Precedence:
+    spec-hw-slot-ownership §1: MTP is a MODEL property — the MODEL is the
+    single authority; there is no slot-level override anymore (SlotConfig
+    carries no ``mtp`` field; a write to that key is hard-rejected at the API
+    boundary). ``profile.mtp`` is also not consulted (§7.1a / ML-5).
+    Precedence:
 
-    * **slot** decides first — an explicit :attr:`SlotConfig.mtp` (``True`` /
-      ``False``) always wins, an unconditional operator escape hatch (even
-      for a runner that can't actually draft — the operator asked for it).
-    * **model** decides next — an explicit ``ModelDefaults.mtp`` tri-state
+    * **model** decides first — an explicit ``ModelDefaults.mtp`` tri-state
       (``True``/``False``) wins in EITHER direction over the registry
-      ``mtp`` tag, same unconditional-escape-hatch contract as slot.mtp (a
-      curator who explicitly tagged the model's launcher defaults knows
-      what they're doing).
-    * **AUTO** (both above are ``None``) enables MTP only when the model
-      carries the registry ``mtp`` tag (:func:`hal0.model_meta.
+      ``mtp`` tag (a curator who explicitly tagged the model's launcher
+      defaults knows what they're doing) — the unconditional operator
+      escape hatch.
+    * **AUTO** (``ModelDefaults.mtp`` is ``None``) enables MTP only when the
+      model carries the registry ``mtp`` tag (:func:`hal0.model_meta.
       model_is_mtp_eligible` — no filename/GGUF-name sniffing anymore)
       AND the resolved :class:`~hal0.runners.Runner` actually supports MTP
       drafting (``runner.supports.mtp`` — off for the cuda/cpu llama-server
@@ -349,8 +353,6 @@ def _effective_mtp(
     once-per-launch hint into a ~0.4/s stream per polling client for every
     AUTO slot on an untagged model.
     """
-    if slot_mtp is not None:
-        return bool(slot_mtp)
     defaults = model_info.get("defaults")
     model_mtp = defaults.get("mtp") if isinstance(defaults, Mapping) else None
     if model_mtp is not None:
@@ -907,6 +909,24 @@ def _llama_launch_plan(
     # store==pull_root renders exactly ONE Volume.
     model_stores = model_mount_roots()
 
+    # Defensive reachability (rework O25 follow-up): a slot's resolved model
+    # file can live OUTSIDE every *configured* model root (store/pull_root) —
+    # e.g. a registry path under /mnt/ai-models after [models].store was moved
+    # to /var/lib/hal0/models. `assert_under_store(severity="warn")` +
+    # `doctor models HAL0-MODEL-STORE-UNMOUNTED` DETECT this but don't heal it,
+    # so the container still can't read the file → llama exits at load → the
+    # slot crashes/flaps warming↔error (live-proven on Strix Halo 150: 6 models
+    # under /mnt/ai-models flagged, store pointed at /var/lib/hal0/models).
+    # Mount the model file's own directory (identical-path, read-only) whenever
+    # no configured root already covers it, so the slot loads regardless of the
+    # store-config drift (the guard still surfaces the misconfig to fix).
+    if model_path:
+        mp = os.path.normpath(model_path)
+        if not any(_covers(root, mp) for root in model_stores):
+            model_dir = os.path.dirname(mp)
+            if model_dir and not any(_covers(root, model_dir) for root in model_stores):
+                model_stores = [*model_stores, model_dir]
+
     return RuntimeLaunchPlan(
         image=image,
         command=command,
@@ -1052,9 +1072,7 @@ def _resolve_llama_scalars(
     # the mtp/jinja capability gates below, so they can never drift onto two
     # different runners (§7.1a / ML-5).
     runner = _effective_runner(slot_cfg, profile, model_info)
-    effective_mtp = _effective_mtp(
-        slot_cfg.get("mtp"), model_info, runner, log_ineligible=for_launch
-    )
+    effective_mtp = _effective_mtp(model_info, runner, log_ineligible=for_launch)
     # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
     # resolving the profile's flags — the profile flag resolver
     # (:func:`resolve_profile_flags`) is NOT consulted at launch. The model's
@@ -1102,13 +1120,20 @@ def _resolve_llama_scalars(
         str(Path(model_store_root()) / "chat-templates" / f"{tmpl_id}.jinja") if tmpl_id else None
     )
 
-    # Vision projector sidecar, gated by the per-slot ``vision`` toggle (#901).
-    mmproj = model_info.get("mmproj")
-    if not slot_cfg.get("vision", True):
-        mmproj = None
-
     defaults = model_info.get("defaults")
     model_defaults = dict(defaults) if isinstance(defaults, dict) else None
+
+    # Vision projector sidecar (spec-hw-slot-ownership §1): the MODEL is the
+    # single authority now via the tri-state ``ModelDefaults.vision`` (the
+    # former per-slot ``vision`` toggle (#901) is gone — SlotConfig carries
+    # no such field; a write to that key is hard-rejected at the API
+    # boundary). None/True = AUTO/affirm — mmproj loads whenever the model
+    # carries one; False force-suppresses it even when present (e.g. to save
+    # the ~0.9 GB resident projector on a memory-tight host).
+    mmproj = model_info.get("mmproj")
+    model_vision = defaults.get("vision") if isinstance(defaults, dict) else None
+    if model_vision is False:
+        mmproj = None
 
     # Family-architecture overrides (e.g. gemma → f16 KV): the middle layer
     # between the profile's generic flags and the slot's own [model].defaults.
