@@ -543,6 +543,25 @@ def _enable_and_start_hermes_unit() -> None:
     No-op when systemd isn't present (containers / dev). A non-zero rc is
     surfaced as a hint rather than failing the install — the agent is
     provisioned either way and can be started manually.
+
+    DELIBERATELY BARE — not routed through the hal0-systemctl privilege seam,
+    unlike ``HermesDriver._stop_services``. Three reasons, judged for this site
+    specifically:
+
+    1. *Interactive by construction.* This runs only from
+       ``hal0 agent install hermes``, a foreground command a human admin runs
+       on the host (it has already shelled out to ``hermes-prereqs.sh`` to
+       install OS packages). A polkit prompt here is legitimate and
+       answerable — someone is at the terminal. The uninstall/daemon path is
+       the opposite: nobody is there to answer, so it must never prompt.
+    2. *Already loud.* A cancelled prompt or a denied escalation returns
+       non-zero and prints a remedy below. The seam fix was about a path that
+       SWALLOWED the failure; this one does not.
+    3. *Keeping the grant asymmetric on purpose.* The seam exposes only
+       ``stop-agent``/``disable-agent``. Adding ``enable``/``start`` would let
+       the unprivileged ``hal0`` service user bring agent units up at boot —
+       a persistence primitive — in exchange for convenience on a path that
+       does not need it. Stop/disable only ever reduces what is running.
     """
     import shutil as _shutil
     import subprocess as _subprocess
@@ -689,6 +708,19 @@ def _install_hermes_gateway() -> None:
             console.print(f"[dim]  {f['detail']}\n  stop: {f['stop_cmd']}[/dim]")
         return
 
+    # Also deliberately bare — same interactive-CLI reasoning as
+    # _enable_and_start_hermes_unit (see its docstring), plus one specific to
+    # this unit: hermes-gateway.service is neither a hal0-agent@ nor a
+    # hal0-slot@ instance, so the seam has no verb that could reach it. The
+    # seam's posture is "build the unit name here from a validated id"; a fixed
+    # foreign unit would need a new literal-only verb (like restart-self),
+    # which this path does not need — it runs from `hal0 agent install hermes`
+    # in the foreground, where a prompt is answerable, and it surfaces a
+    # non-zero rc below instead of swallowing it.
+    #
+    # (The gateway's secrets DROP-IN write does route through the seam —
+    # `write-gateway-dropin` — because that one is reached by the provisioner
+    # running as the unprivileged hal0 user. Different caller, different rule.)
     _subprocess.run(["systemctl", "daemon-reload"], check=False)  # nosec B603 B607
     rc = _subprocess.run(  # nosec B603 B607
         ["systemctl", "enable", "--now", "hermes-gateway.service"], check=False
