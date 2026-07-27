@@ -910,8 +910,8 @@
     "semantic_hash": ""
   },
   "scripts/release-test.sh": {
-    "mtime": 1785119196.3585777,
-    "ast_hash": "bba8b2ca370a2d5efba3f59d4b0885da",
+    "mtime": 1785119658.7347953,
+    "ast_hash": "b87f1577744cefe53eca3286266343a2",
     "semantic_hash": ""
   },
   "scripts/set-version.py": {
@@ -7905,8 +7905,8 @@
     "semantic_hash": ""
   },
   "docs/rework/REWORK_BOARD.md": {
-    "mtime": 1785119486.7359824,
-    "ast_hash": "4489ec4af52a4aba44cd36455720a19f",
+    "mtime": 1785120436.8146596,
+    "ast_hash": "3b0783b8f85e563af5fb780525333a5f",
     "semantic_hash": ""
   },
   "docs/rework/REWORK_BOARD_PROTOCOL.md": {
