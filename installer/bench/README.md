@@ -43,6 +43,39 @@ Direct (root shell, e.g. operator on hal0) — the engine under the seam:
 `run_benchmarks.sh` also accepts `--force` (run on a busy GPU; contended numbers) and
 `--dry-run`; the seam deliberately does **not** expose `--force`.
 
+## GPU device passthrough (issue #1303)
+
+`config.sh` hardcodes **no** device node. It calls `hal0.bench.devices`, which reuses the
+same helpers the production slot containers use (`hal0.providers._gpu`) plus the
+`hal0 probe` snapshot in `hardware.json`, so bench and slot containers derive their GPU
+nodes and render/video GIDs from one source of truth:
+
+| Tier | podman flags |
+|------|--------------|
+| AMD | `--device=/dev/kfd` + every real `/dev/dri` char device + the real render/video GIDs |
+| NVIDIA | `--device=nvidia.com/gpu=all` (CDI — no paths, no `--group-add`) |
+| CPU | none — a CPU-tier run never requires a DRI node |
+
+Inspect what a run will get (no GPU touched, no writes):
+
+```bash
+hal0 bench devices              # human summary
+hal0 bench devices --format json
+```
+
+Overrides, for unusual passthrough layouts and recovery (each is validated: allowed
+device-node shape + must be a character device, otherwise the sweep aborts **before** any
+container starts, naming the paths it checked):
+
+| Variable | Meaning |
+|----------|---------|
+| `HAL0_BENCH_GPU_DEVICES` | full node list, comma/colon separated |
+| `HAL0_BENCH_KFD_DEVICE` / `_CARD_DEVICE` / `_RENDER_DEVICE` | individual nodes |
+| `HAL0_BENCH_GPU_GROUPS` | numeric GIDs for `--group-add` |
+| `HAL0_BENCH_TIER` | pin `amd` / `nvidia` / `cpu` |
+| `HAL0_BENCH_KFD_PATH` / `HAL0_BENCH_DRI_DIR` | relocate the discovery roots |
+| `HAL0_BENCH_PYTHON` | interpreter used to run the resolver |
+
 ## ⚠️ GPU contention
 
 One iGPU, shared with the live inference slots. The harness refuses to run while a GPU slot
