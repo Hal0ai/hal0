@@ -280,7 +280,12 @@ class SystemCtlSeam:
             raise ValueError(f"not a hal0-slot@ quadlet file: {quadlet_path.name!r}")
         self._run(self._seam_argv("remove-quadlet", token), check=False)
 
-    def systemctl(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def systemctl(
+        self,
+        *args: str,
+        check: bool = True,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         """Run ``systemctl <args...>``, routing daemon-reload + hal0-slot@
         unit verbs through the seam when running as the hal0 service user.
 
@@ -288,24 +293,40 @@ class SystemCtlSeam:
         touching a NON-``hal0-slot@`` unit (e.g. ``hal0-api.service`` itself —
         use :meth:`restart_self` for that) always pass straight through:
         neither needs the seam, and the seam wrapper doesn't accept them.
+
+        ``timeout`` (seconds, ``None`` = wait forever, the historical
+        behaviour) bounds the child process. Callers that must not be able to
+        wedge — notably the slot ``systemctl stop`` on a unit systemd has
+        already parked in ``failed`` (#1224) — pass an explicit bound and
+        handle :class:`subprocess.TimeoutExpired`.
         """
         if not self._is_hal0_user() or not args or args[0] != "systemctl":
-            return self._run(list(args), capture_output=True, text=True, check=check)
+            return self._run(
+                list(args), capture_output=True, text=True, check=check, timeout=timeout
+            )
 
         verb = args[1] if len(args) > 1 else ""
         if verb == "daemon-reload":
             return self._run(
-                self._seam_argv("daemon-reload"), capture_output=True, text=True, check=check
+                self._seam_argv("daemon-reload"),
+                capture_output=True,
+                text=True,
+                check=check,
+                timeout=timeout,
             )
         if verb in _UNIT_VERBS and len(args) > 2:
             slot_id = _slot_id_from_unit(args[2])
             if slot_id is not None:
                 return self._run(
-                    self._seam_argv(verb, slot_id), capture_output=True, text=True, check=check
+                    self._seam_argv(verb, slot_id),
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                    timeout=timeout,
                 )
         # Not a routable hal0-slot@ op (e.g. is-active, or a non-slot unit) —
         # pass through unprivileged; systemctl read-only queries never need root.
-        return self._run(list(args), capture_output=True, text=True, check=check)
+        return self._run(list(args), capture_output=True, text=True, check=check, timeout=timeout)
 
     def restart_self(self) -> subprocess.CompletedProcess[str]:
         """``systemctl restart hal0-api.service`` — the self-update path."""
