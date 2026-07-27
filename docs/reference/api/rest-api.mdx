@@ -95,6 +95,14 @@ See [Services](/docs/operate/services) for the operator-facing guide (registry, 
 
 ### `/api/memory` — hardening
 
+- The whole `/api/memory` surface — reads included — is **ADMIN**-classed in
+  the route exposure table, so once auth is enabled every call needs an admin
+  credential (session cookie or admin bearer); a client/inference key gets
+  `403`. The irreversible subset (every `DELETE` under `/api/memory`, plus the
+  namespace `POST /api/memory/delete`) is additionally pinned by name in
+  `DESTRUCTIVE_MEMORY_ROUTES` and matched by rules that sit *above* the generic
+  prefix rule, so a later decision to open memory reads cannot take the bank
+  wipe with it.
 - Every destructive `/api/memory/*` operation — bank delete, and the
   memories/config/document/directive/operation/mental-model deletes, plus the
   namespace `POST /api/memory/delete` — records a durable audit row (actor +

@@ -21,7 +21,9 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+
+- **Pin the destructive `/api/memory` routes as ADMIN, above the generic prefix rule** (closes the last open slice of #1024). #1024's incident was a single unauthenticated `DELETE /api/memory/banks/{bank_id}` that cascade-deleted ~632 live records; its echoed-`?confirm=` guard (#1028) and audit row (#1030) landed, but the classification itself was only ever ADMIN *by generic prefix* and nothing asserted it. That matters because #1024's own follow-up proposes "keep reads open if desired", and the natural expression of that — a `_prefix("/api/memory")` CLIENT rule — silently takes the bank wipe with it under first-match-wins. Two narrow rules (`any DELETE under /api/memory`, `POST /api/memory/delete`) now sit *above* the generic memory row, and `exposure.DESTRUCTIVE_MEMORY_ROUTES` enumerates the irreversible surface so a new memory delete route, or a reclassification, has to touch the constant in the same diff. `tests/security/test_memory_delete_auth.py` asserts the constant tracks the live route table, that each route resolves via a pinned rule (not the ADMIN fallback), that all of them survive a simulated reads-are-CLIENT widening, and — against the real `AuthEnforcementMiddleware`, armed — that an anonymous call gets `401`, a client/inference key gets `403`, and the operator's admin key clears the gate.
 
 ## [1.0.0-rc.1] — 2026-07-27 (R5 · the rework release)
 
