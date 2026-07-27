@@ -112,6 +112,41 @@ models/chat-templates   2775 hal0:hal0
 **A fresh install now reports clean.** That is the point: a box that always shows drift
 is how the `secrets/` widening stayed invisible in the first place.
 
+## Pre-tag gate status (`scripts/release-check.sh --dry-run --channel preview --tag v1.0.0-alpha.3`)
+
+Run against this tree. **FAILED — 2 gates.** Neither is a code defect; both are
+recorded here because they are what actually stands between this branch and a tag.
+
+1. **Working tree dirty** — only the tracked `graphify-out/` artifacts the post-edit
+   hook regenerates. Committed; gate now satisfied.
+2. **Tier-γ release-gate report** — `tests/release-gate-report.json` absent.
+
+Gate 5 itself is sound: it validates `_schema`, rejects a future-skewed or >24h-stale
+timestamp, cross-checks every row against the summary counts, requires at least one
+passed row, and exits on `fail != 0`. It cannot be satisfied by a stale or failing
+report.
+
+**`make release-test` against CT163 produced a report with 7/7 rows FAILED**, and the
+gate correctly rejected it. Every failure is "nothing installed to test", not a
+regression:
+
+| row | why it failed on a fresh box |
+|-----|------------------------------|
+| vulkan, rocm | no model pulled, so no slot can reach ready |
+| flm (NPU) | needs the XDNA driver + `/sys/class/accel` |
+| moonshine, kokoro | toolbox images never pulled → `/v1/audio/*` 404 |
+| openwebui | `/v1/models` empty (no models) |
+| updater | `POST /api/updates/rollback` → 400, correct on a box that has never updated |
+
+Preflight passed cleanly (ssh, `/usr/local/bin/hal0`, API reachable), so the harness
+itself works against a fresh install.
+
+**Conclusion: the tier-γ gate requires a SEEDED test LXC — models pulled, toolbox
+images present — not a bare fresh container.** A freshly-built box can prove the
+installer and the platform come up; it cannot satisfy the release ritual. Cutting
+`v1.0.0-alpha.3` therefore needs a provisioned `hal0-test` box, and that dependency
+is not currently written down anywhere in the release docs.
+
 ## Notes
 
 - `HAL0_INSTALL_SKIP_VERIFY=1` is required to install an unsigned local tree; the
