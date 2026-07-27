@@ -81,11 +81,36 @@ MCP                   hal0.mcp.mounted
 /root/.hermes         absent
 ```
 
-**Residual:** `hal0 doctor perms` still reports 3 drift rows on a clean box —
-`capabilities.toml.lock` (0644 want 0664), `HERMES_HOME` (2755 want 0700),
-`models/chat-templates` (2755 want 2775). None is a security widening. Tracked as
-board row `perms-table-converge`. A fresh install that never reports clean is
-precisely how the F4 widening stayed invisible, so this is worth closing.
+## CT163 — perms convergence (fourth container)
+
+CT162 still reported 5 `doctor perms` drift rows after F3/F4. Every one had the same
+shape: the *creator* ran under the ambient umask (and directories under the setgid
+state root also inherited the setgid bit), so `doctor perms --fix` reconciled a file
+once and the next create drifted straight back. Fixing the table alone could never
+converge; the creators had to set their modes explicitly.
+
+CT163 = fresh 24.04, fixed tree, `INSTALL_EXIT=0`, 0 `XX`:
+
+```
+hal0 doctor perms       0 DRIFT          (CT162 was 5)
+/api/health             200
+MCP                     hal0.mcp.mounted
+/etc/hal0/api.env       640  hal0:hal0
+/var/lib/hal0/.hermes   700  hal0:hal0   (was 2755, world-traversable)
+/var/lib/hal0/secrets   700  root:root
+models/chat-templates   2775 hal0:hal0
+```
+
+| fix | commit |
+|-----|--------|
+| STATE.md — preserve mode across the rendered-context atomic write | `24c6c91a` |
+| `secrets/` + `secrets/agents/` — table 0755 → **0700**; `--fix` had been *widening* the token-EnvironmentFile dirs on every install | `5708aed0` |
+| `.lock` files created 0664 — both sides of the root/hal0 seam must open them for writing to take the flock (the halo150 `POST /api/slots 500` class) | `4fef8a3f` |
+| `HERMES_HOME` chmod 0700 — holds `hindsight/config.json` (tenant API key), was 2755 | `4fef8a3f` |
+| chat-template store seeded 2775 at `seed_chat_templates()`, the creator that actually runs on install | `f90d525f` |
+
+**A fresh install now reports clean.** That is the point: a box that always shows drift
+is how the `secrets/` widening stayed invisible in the first place.
 
 ## Notes
 
