@@ -231,7 +231,13 @@ def test_flip_makes_etc_hal0_service_owned_and_setgid(tmp_hal0_home: str) -> Non
         assert rows[target].group == "hal0", target
     # mode warts are NOT touched by the flip (ownership only).
     assert rows[paths.hal0_toml()].mode == 0o600
-    assert rows[etc / "api.env"].mode == 0o644
+    # api.env is 0640, NOT world-readable: it carries HAL0_ADMIN_KEY /
+    # HAL0_CLIENT_KEY (service_identity._KEY_ENV). It used to be seeded 0644,
+    # which handed the admin key to every local account AND let
+    # `doctor perms --fix` re-widen a file that key rotation had deliberately
+    # tightened to 0640 (service_identity._API_ENV_MODE).
+    assert rows[etc / "api.env"].mode == 0o640
+    assert not rows[etc / "api.env"].mode & 0o007, "api.env must never be world-readable"
 
 
 def test_flip_keeps_agents_and_secrets_root_owned(tmp_hal0_home: str) -> None:

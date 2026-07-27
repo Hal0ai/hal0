@@ -172,9 +172,28 @@ def ownership_table(
         ),
         PermRow(paths.hal0_toml(), etc_owner, etc_group, 0o600, role="hal0.toml"),
         PermRow(etc / "profiles.toml", etc_owner, etc_group, 0o600, role="profiles.toml"),
-        # FIXME(phase4): api.env is 0644 (world-readable) but may carry tokens —
-        # candidate for 0640 root:hal0 under the hardened model.
-        PermRow(etc / "api.env", etc_owner, etc_group, 0o644, role="api.env"),
+        # api.env carries the box API keys (HAL0_ADMIN_KEY / HAL0_CLIENT_KEY —
+        # see service_identity._KEY_ENV), so 0644 handed the ADMIN key to every
+        # local account. Worse, this table is what `hal0 doctor perms --fix`
+        # enforces and the installer runs that on every install
+        # (install.sh step 14): a box whose key had been rotated — which
+        # deliberately tightens to 0640, see service_identity._API_ENV_MODE
+        # ("Never world-readable once it carries a rotated key") — got
+        # re-widened to 0644 by the next doctor run.
+        #
+        # 0640 matches _API_ENV_MODE and stays readable by every real consumer:
+        # systemd reads EnvironmentFile= as root BEFORE dropping to the service
+        # user, and under the perms flip the owner IS the service user. The
+        # atomic writer in api/_env_store.py is stricter still (0600); doctor
+        # converges both writers on 0640.
+        #
+        # The GROUP is pinned to service_group even on the root-era table
+        # (where every other /etc/hal0 row is root:root). Dropping world-read
+        # without that would leave 0640 root:root, and the hal0-run API reads
+        # this file in-process via service_identity.keys_from_api_env() — it is
+        # not only a systemd EnvironmentFile. 0644 was silently covering that;
+        # 0640 root:hal0 keeps the real reader working while closing the hole.
+        PermRow(etc / "api.env", etc_owner, service_group, 0o640, role="api.env"),
         PermRow(etc / "capabilities.toml", etc_owner, etc_group, 0o600, role="capabilities.toml"),
         PermRow(etc / "upstreams.toml", etc_owner, etc_group, 0o644, role="upstreams.toml"),
         PermRow(paths.hardware_json(), etc_owner, etc_group, 0o644, role="hardware.json"),

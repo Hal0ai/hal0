@@ -26,9 +26,13 @@ def _live_route_ids() -> set[str]:
     """``"<METHOD>:<path-template>"`` ids the live app registers (normalized)."""
     app = create_app()
     live: set[str] = set()
-    for route in app.routes:
+    # Walk via admin._iter_live_routes, not a flat loop over app.routes:
+    # Starlette 1.x keeps include_router'd routes behind a wrapper entry, so a
+    # flat loop sees the wrapper and none of hal0's ~82 real /api endpoints.
+    # Reusing the production walker also means this guard can never disagree
+    # with the autogen it is checking.
+    for route, path in admin._iter_live_routes(app.routes):
         methods = getattr(route, "methods", None)
-        path = getattr(route, "path", None)
         if not methods or not path:
             continue
         norm = admin._normalize_path(path)

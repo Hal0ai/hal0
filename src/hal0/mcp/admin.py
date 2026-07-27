@@ -618,6 +618,40 @@ def _is_transport_excluded(route: object, path: str) -> bool:
     return "Stream" in cls_name or "EventSource" in cls_name
 
 
+def _iter_live_routes(routes: object, prefix: str = "") -> list[tuple[object, str]]:
+    """Yield ``(route, full_path)`` for every route, flattening included routers.
+
+    Starlette <1.0 spliced ``include_router``'d routes directly into
+    ``app.routes`` with their prefix already baked into ``route.path``, so a
+    flat loop saw everything. Starlette 1.x instead keeps a WRAPPER entry whose
+    children hang off ``route.include_context.included_router.routes`` with the
+    prefix carried separately — a flat loop over ``app.routes`` then sees the
+    wrapper (no ``methods``) and NONE of the real endpoints.
+
+    hal0 mounts essentially every ``/api`` endpoint through ``include_router``,
+    so on Starlette 1.x the autogen route map came back empty, ``_apply_route_map``
+    raised "classified route_id with no live route" for all ~82 admin tools, and
+    ``mount_mcp_servers`` swallowed it as ``hal0.mcp.mount_failed`` — the whole
+    MCP admin surface silently did not mount. That is not hypothetical: it was
+    observed on a fresh Ubuntu 24.04 install resolving fastapi 0.140.0 /
+    starlette 1.3.1, because ``pyproject.toml`` pins only ``fastapi>=0.115``.
+
+    Recursing handles both layouts: on the old one there is nothing to recurse
+    into, so behavior is byte-identical.
+    """
+    flattened: list[tuple[object, str]] = []
+    for route in routes:  # type: ignore[union-attr]
+        context = getattr(route, "include_context", None)
+        included = getattr(context, "included_router", None) if context is not None else None
+        if included is not None:
+            child_prefix = prefix + (getattr(context, "prefix", "") or "")
+            flattened.extend(_iter_live_routes(included.routes, child_prefix))
+            continue
+        raw_path = getattr(route, "path", None)
+        flattened.append((route, prefix + raw_path if raw_path is not None else raw_path))
+    return flattened
+
+
 def build_admin_route_map(
     app: object,
 ) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, ...]]]:
@@ -633,8 +667,7 @@ def build_admin_route_map(
     routes = getattr(app, "routes", app)
     route_map: dict[str, tuple[str, str]] = {}
     route_path_args: dict[str, tuple[str, ...]] = {}
-    for route in routes:
-        raw_path = getattr(route, "path", None)
+    for route, raw_path in _iter_live_routes(routes):
         methods = getattr(route, "methods", None)
         if not raw_path or not methods:
             # Mounts / WebSocket routes carry no ``methods`` — never tools.

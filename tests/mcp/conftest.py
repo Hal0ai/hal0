@@ -80,8 +80,33 @@ if not _has_real_mcp():
 import pytest  # noqa: E402
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _mcp_session_hal0_home(tmp_path_factory: pytest.TempPathFactory):
+    """Session-scoped filesystem isolation for the session-scoped app build.
+
+    ``tests/conftest.py``'s ``tmp_hal0_home`` gives every other suite an empty
+    config tree, but it is FUNCTION-scoped and ``_admin_route_map_source``
+    below is SESSION-scoped — so the app it builds fell through to the host's
+    real ``/etc/hal0``. On a box with hal0 installed that file is 0600/0660
+    hal0-owned, so all 184 tests under tests/mcp/ ERRORed at fixture setup with
+    ``PermissionError: /etc/hal0/hal0.toml`` for any developer who is not root
+    and not in the hal0 group. CI runs as root, so CI was green and the suite
+    was simply unrunnable locally.
+
+    Same two env vars ``tmp_hal0_home`` sets, applied once per session.
+    """
+    home = tmp_path_factory.mktemp("hal0-mcp-home")
+    mp = pytest.MonkeyPatch()
+    mp.setenv("HAL0_HOME", str(home))
+    mp.setenv("HAL0_OVERRIDE_DIR", "hal0_home")
+    try:
+        yield str(home)
+    finally:
+        mp.undo()
+
+
 @pytest.fixture(scope="session")
-def _admin_route_map_source() -> tuple[dict, dict]:
+def _admin_route_map_source(_mcp_session_hal0_home: str) -> tuple[dict, dict]:
     """Build the admin route map once from the live app (route-id keyed).
 
     ``_REST_MAP`` / ``_PATH_ARGS`` are lazy now (spec §4.4): they are empty at
