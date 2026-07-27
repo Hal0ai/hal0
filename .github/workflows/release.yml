@@ -143,9 +143,28 @@ jobs:
           # from which release.yml itself executes. Nightly is called from main;
           # stable/preview execute directly at their immutable tag ref.
           IDENT_PREFIX='^https://github\.com/(Hal0ai|hal0ai)/hal0/\.github/workflows/release\.yml@'
+          # Under workflow_call the `github` context belongs to the CALLER, so
+          # GITHUB_EVENT_NAME is the caller's event (`schedule` for the nightly
+          # cron, `workflow_dispatch` for a forced re-cut) and is NEVER the
+          # literal string "workflow_call" — testing for it fails closed on
+          # every nightly. The entry-point workflow ref is the value that does
+          # distinguish the two modes (see #832 / 8cba6dd5, where the same
+          # caller-vs-callee context split was established against real runs):
+          # under workflow_call GITHUB_WORKFLOW_REF is nightly.yml@<caller ref>,
+          # and on a direct tag push it is release.yml@refs/tags/<tag>.
+          # Pinning it to the canonical nightly.yml on refs/heads/main is
+          # strictly narrower than "some reusable call happened": it also names
+          # the repository, the entry-point workflow, and the branch.
+          NIGHTLY_ENTRYPOINT='^(Hal0ai|hal0ai)/hal0/\.github/workflows/nightly\.yml@refs/heads/main$'
           if [[ "${KIND}" == "nightly" ]]; then
-            if [[ "${GITHUB_EVENT_NAME}" != "workflow_call" ]]; then
-              echo "::error::nightly releases require workflow_call"
+            if [[ ! "${GITHUB_WORKFLOW_REF}" =~ ${NIGHTLY_ENTRYPOINT} ]]; then
+              echo "::error::nightly releases require workflow_call from nightly.yml@refs/heads/main (entry point: ${GITHUB_WORKFLOW_REF:-<unset>})"
+              exit 1
+            fi
+            # nightly.yml declares exactly these two triggers; anything else
+            # reaching this branch means the caller's trigger surface changed.
+            if [[ "${GITHUB_EVENT_NAME}" != "schedule" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+              echo "::error::nightly releases require the nightly scheduler (schedule or workflow_dispatch), got ${GITHUB_EVENT_NAME}"
               exit 1
             fi
             if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then

@@ -4,12 +4,18 @@
 # installer/install.sh). It delegates the genuinely-root slot-lifecycle ops —
 # writing a per-slot unit under /etc/systemd/system, writing the fixed
 # hermes-gateway secrets drop-in, daemon-reload,
-# start/stop/restart/enable/disable/reset-failed of a slot unit, and
-# restarting itself on self-update — to
+# start/stop/restart/enable/disable/reset-failed of a slot unit,
+# stop/disable of a bundled-agent unit (hal0-agent@<id>.service, the #453
+# uninstall teardown), and restarting itself on self-update — to
 # /usr/lib/hal0/bin/hal0-systemctl, which is the entire privileged surface:
-# the helper validates every slot id (strict identifier regex), builds every
-# target path itself (the gateway drop-in path is a literal), never evaluates a
-# shell, and accepts no wildcards.
+# the helper validates every slot id AND every agent id (strict identifier
+# regexes), builds every unit name and target path itself (the gateway drop-in
+# path is a literal), never evaluates a shell, and accepts no wildcards.
+#
+# NOTE: the grant is pinned to the helper BINARY, not to an argv list, so
+# adding stop-agent/disable-agent needs no sudoers change — the helper's own
+# case statement is the allow-list. Widening that allow-list is therefore a
+# reviewable diff in installer/wrappers/hal0-systemctl.
 #
 # Install (as root):
 #   install -m 0755 -o root -g root hal0-systemctl /usr/lib/hal0/bin/hal0-systemctl

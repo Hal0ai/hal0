@@ -28,7 +28,6 @@ keys off the concrete managed-venv artifacts instead.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import shutil
@@ -37,11 +36,25 @@ import subprocess  # nosec B404 — required for shim
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from hal0.agents.manager import (
     AgentDriver,
     HermesUpstreamMissingError,
 )
 from hal0.config import paths as _paths
+
+# The hal0-systemctl privilege seam. `hal0.system.seam` imports nothing from
+# hal0 (stdlib only), so this cannot cycle — which is why the shared sudo
+# helper lives there rather than in `hal0.agents.hermes_provision`, whose
+# `_privileged_systemctl` it was factored out of: that module is a 5k-line
+# provisioner in this driver's own package, so importing it here would invert
+# the driver -> provisioner layering and cost a heavy import on every driver
+# load (the same reason the venv-layout constants above are mirrored, not
+# imported).
+from hal0.system import seam as _seam
+
+log = structlog.get_logger(__name__)
 
 # NOTE: provisioning (venv create + pip install hermes-agent + wrapper
 # shim) moved wholesale into the bootstrap pipeline
@@ -141,6 +154,44 @@ def _probe_systemd_unit_active(unit: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
+
+
+# systemd's "no such unit" family. `systemctl stop` on a unit that was never
+# installed exits 5 (EXIT_NOTINSTALLED); `disable` on the same exits 1 with a
+# "does not exist" message. Both mean "nothing to tear down", which the
+# documented best-effort contract says is NOT an error — so they are classified
+# out of the warning path rather than suppressing every failure indiscriminately
+# (the #453 defect). Matched on stderr too, because exit 1 alone is ambiguous:
+# it is also what a DENIED escalation returns, and that one must warn.
+_UNIT_ABSENT_RC = 5
+_UNIT_ABSENT_MARKERS = (
+    "not loaded",
+    "not found",
+    "does not exist",
+    "no such file or directory",
+)
+
+
+def _as_text(raw: object) -> str:
+    """Coerce captured stderr to str.
+
+    ``capture_output=True`` without ``text=True`` yields bytes in production;
+    an injected test fake may yield str or nothing at all. Both are handled
+    here so the classifier below sees one type.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace").strip()
+    return str(raw).strip()
+
+
+def _unit_absent(returncode: int, stderr: str) -> bool:
+    """True when a non-zero systemctl exit only means "there is no such unit"."""
+    if returncode == _UNIT_ABSENT_RC:
+        return True
+    low = stderr.lower()
+    return any(marker in low for marker in _UNIT_ABSENT_MARKERS)
 
 
 def _probe_tcp_port(host: str, port: int, *, timeout: float = 1.0) -> bool:
@@ -265,30 +316,98 @@ class HermesDriver(AgentDriver):
 
     def _stop_services(self) -> None:
         """Stop + disable the hermes-agent systemd service so it doesn't
-        recreate files during uninstall (#453). Best-effort — missing
-        systemctl or a missing unit is not an error; the uninstall proceeds
-        regardless.
+        recreate files during uninstall (#453).
 
-        Goes through ``self._runner`` rather than the module-global
-        ``subprocess``. As a ``@staticmethod`` on the global it bypassed
-        the injection point entirely, so every test that called
-        ``uninstall()`` shelled out to the real system bus — two polkit
-        auth prompts per test, each blocking for its full timeout.
+        Two things this must get right, both of which it previously got wrong.
+
+        **Privilege.** The argv comes from
+        :func:`hal0.system.seam.agent_unit_argv`, not from a literal
+        ``["systemctl", "stop", ...]``. A bare unprivileged ``systemctl stop``
+        on a *system* unit escalates via polkit — an interactive password
+        dialog mid-uninstall, and a unit still running when the operator
+        cancels it. Off root, the seam builds
+        ``sudo -n /usr/lib/hal0/bin/hal0-systemctl stop-agent hermes``
+        (installer/wrappers/hal0-systemctl); ``sudo -n`` can fail but can
+        never prompt. As root it stays a direct ``systemctl``.
+
+        **Silence.** The calls used to sit inside ``contextlib.suppress`` with
+        ``capture_output=True`` and the return code discarded, so a denied
+        escalation was indistinguishable from a clean stop — precisely the
+        condition #453 added this method to prevent (agent still live,
+        recreating the files we are about to delete). Failures are now
+        classified and logged:
+
+        * no systemctl on PATH — return, no log. No systemd, no unit.
+        * unit absent / not loaded — debug. Not an error.
+        * any other non-zero (no sudo grant, seam not installed, stop
+          failed) — **warning**, with exit code, stderr, and a remedy.
+        * ``OSError`` / timeout — warning.
+
+        Still best-effort in the sense that matters: it never raises, and the
+        uninstall always proceeds. Best-effort is not the same as silent.
+
+        Execution goes through ``self._runner`` (upstream #1357): as a
+        ``@staticmethod`` on the module-global ``subprocess`` this bypassed
+        the driver's injection point, so every ``uninstall()`` test shelled
+        out to the real system bus.
         """
-        unit = "hal0-agent@hermes.service"
         if shutil.which("systemctl") is None:
             return
-        for argv, timeout in (
-            (["systemctl", "stop", unit], 10),
-            (["systemctl", "disable", unit], 5),
-        ):
-            with contextlib.suppress(OSError, subprocess.SubprocessError):
-                self._runner.run(  # nosec B603 — known-safe argv
-                    argv,
-                    check=False,
-                    capture_output=True,
-                    timeout=timeout,
-                )
+        # stop before disable: disabling a running unit leaves it running.
+        for verb, timeout in (("stop", 10), ("disable", 5)):
+            self._systemctl_agent_verb(verb, timeout=timeout)
+
+    def _systemctl_agent_verb(self, verb: str, *, timeout: int) -> None:
+        """One seam-routed agent-unit verb + failure classification.
+
+        Split out of :meth:`_stop_services` so the "what counts as a real
+        failure" policy is stated once rather than per-verb.
+        """
+        argv = _seam.agent_unit_argv(verb, self.name)
+        try:
+            proc = self._runner.run(  # nosec B603 — argv built by the seam from a validated id
+                argv,
+                check=False,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            # TimeoutExpired, or sudo/systemctl vanished mid-uninstall.
+            log.warning(
+                "hermes.stop_services_failed",
+                verb=verb,
+                agent=self.name,
+                argv=argv,
+                error=str(exc),
+            )
+            return
+
+        returncode = getattr(proc, "returncode", 0)
+        if returncode == 0:
+            return
+        stderr = _as_text(getattr(proc, "stderr", None))
+        if _unit_absent(returncode, stderr):
+            log.debug(
+                "hermes.stop_services_unit_absent",
+                verb=verb,
+                agent=self.name,
+                returncode=returncode,
+            )
+            return
+        log.warning(
+            "hermes.stop_services_failed",
+            verb=verb,
+            agent=self.name,
+            argv=argv,
+            returncode=returncode,
+            stderr=stderr,
+            hint=(
+                f"could not {verb} {_seam.agent_unit_name(self.name)} — the agent "
+                "may still be running and recreating files during uninstall (#453). "
+                "Re-run as root, or check the /etc/sudoers.d/hal0-systemctl grant "
+                "and that /usr/lib/hal0/bin/hal0-systemctl is installed."
+            ),
+        )
 
     def _data_dir(self) -> Path:
         return _paths.var_lib() / "agents" / self.name

@@ -10,6 +10,7 @@ modules — the CLI holds no logic of its own beyond wiring + output formatting:
     results    query current values (store.results)
     history    trend for a cell/model (store.history)
     reindex    rebuild bench.db from records.jsonl (store.reindex)
+    devices    GPU device nodes benchmark containers use (devices.resolve_bench_devices)
     publish    regenerate roster.json (+ --check diff) (publish.*)
     import-v1  one-time: hal0 v1 index.json + server-ab/*.json → v2 records
 
@@ -528,6 +529,20 @@ def cmd_reindex(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_devices(args: argparse.Namespace) -> int:
+    """Show the GPU device nodes benchmark containers will be launched with.
+
+    The same resolution the installed harness uses (issue #1303): probe /
+    live discovery through the production slot helpers, never a hardcoded
+    node name. Exit 2 with an actionable message when an explicit operator
+    override cannot be honoured, so a bad setting is caught BEFORE a queued
+    run reaches the GPU.
+    """
+    from .devices import main as devices_main
+
+    return devices_main(["--format", args.format])
+
+
 def cmd_publish(args: argparse.Namespace) -> int:
     store = Store()
     roster = build_roster(store)
@@ -996,6 +1011,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("reindex", help="rebuild bench.db from records.jsonl")
     p.set_defaults(func=cmd_reindex)
+
+    p = sub.add_parser("devices", help="GPU device nodes benchmark containers will use")
+    p.add_argument(
+        "--format",
+        default="text",
+        choices=("text", "env", "json", "flags"),
+        help="output shape (default: text; the harness consumes env)",
+    )
+    p.set_defaults(func=cmd_devices)
 
     p = sub.add_parser("publish", help="regenerate roster.json")
     p.add_argument("--check", action="store_true", help="diff without writing")

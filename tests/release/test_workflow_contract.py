@@ -117,6 +117,43 @@ def test_resolve_first_rejects_every_noncanonical_repository() -> None:
     assert "refusing noncanonical repository" in run
 
 
+def test_nightly_gate_pins_entrypoint_and_never_tests_for_workflow_call_event() -> None:
+    """The nightly trigger-shape gate must be satisfiable by nightly.yml.
+
+    Under ``workflow_call`` the ``github`` context — and therefore
+    ``GITHUB_EVENT_NAME`` — belongs to the caller, so it can never equal
+    ``workflow_call``. Comparing against that literal fails closed on every
+    nightly (run 30254411300). The entry-point ref is what actually
+    distinguishes reusable invocation from a direct tag push.
+    """
+    run = _step("resolve", "Verify requested tag and export policy")["run"]
+    executable = "\n".join(line for line in run.splitlines() if not line.lstrip().startswith("#"))
+    assert '"workflow_call"' not in executable
+    assert "GITHUB_WORKFLOW_REF" in executable
+    assert (
+        r"NIGHTLY_ENTRYPOINT='^(Hal0ai|hal0ai)/hal0/\.github/workflows/nightly\.yml"
+        r"@refs/heads/main$'"
+    ) in executable
+    assert '[[ ! "${GITHUB_WORKFLOW_REF}" =~ ${NIGHTLY_ENTRYPOINT} ]]' in executable
+    # The surviving event-shape rule must match nightly.yml's declared triggers.
+    nightly_on = yaml.safe_load(Path(".github/workflows/nightly.yml").read_text())[True]
+    assert set(nightly_on) == {"schedule", "workflow_dispatch"}
+    for event in nightly_on:
+        assert f'"${{GITHUB_EVENT_NAME}}" != "{event}"' in executable
+    # Ref and signer-identity binding are unchanged.
+    assert '[[ "${GITHUB_REF}" != "refs/heads/main" ]]' in executable
+    assert "signer_identity=${IDENT_PREFIX}refs/heads/main$" in executable
+
+
+def test_nightly_caller_invokes_release_workflow_from_main() -> None:
+    nightly = yaml.safe_load(Path(".github/workflows/nightly.yml").read_text())
+    release_job = nightly["jobs"]["release"]
+    assert release_job["uses"] == "./.github/workflows/release.yml"
+    assert release_job["with"]["channel"] == "nightly"
+    checkout = nightly["jobs"]["tag"]["steps"][0]
+    assert checkout["with"]["ref"] == "main"
+
+
 def test_resolve_uses_only_tag_namespace_and_exports_target_sha() -> None:
     text = _workflow_text()
     assert "ref: refs/tags/${{ steps.requested.outputs.tag }}" in text

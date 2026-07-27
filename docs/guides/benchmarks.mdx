@@ -20,7 +20,29 @@ hal0 bench status          # recent records / session state
 hal0 bench results         # current values from bench.db
 hal0 bench history         # trend for a cell/model over time
 hal0 bench eval            # agentic task eval: score a model as a real agent
+hal0 bench devices         # GPU device nodes benchmark containers will use
 ```
+
+## GPU device nodes are probed, never assumed
+
+Benchmark containers get their GPU passthrough from the same resolution the
+production slot containers use — hal0's hardware probe plus live enumeration
+of the real device nodes — so a benchmark runs wherever a slot runs:
+
+| Hardware tier | What the container is given |
+| --- | --- |
+| AMD (Strix Halo iGPU, AMD dGPU) | `/dev/kfd` plus the actual `/dev/dri` nodes (`card1`, `renderD128`, … — whatever the kernel named them) and the real render/video group IDs |
+| NVIDIA dGPU | the CDI device `nvidia.com/gpu=all` (no device paths, no group IDs — CDI injects them) |
+| CPU | nothing: a CPU-tier run does not require a DRI device |
+
+`hal0 bench devices` prints what a run on this host would get. If a device
+setting cannot be honoured, the sweep fails **before** any container starts and
+names the paths it checked, rather than falling back to a guess.
+
+For unusual passthrough layouts, `HAL0_BENCH_GPU_DEVICES` (or the per-node
+`HAL0_BENCH_KFD_DEVICE` / `HAL0_BENCH_CARD_DEVICE` /
+`HAL0_BENCH_RENDER_DEVICE`), `HAL0_BENCH_GPU_GROUPS`, and `HAL0_BENCH_TIER`
+override the probe. Each override is validated as a real character device.
 
 ## What the installer sets up
 
