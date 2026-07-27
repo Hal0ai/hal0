@@ -1,20 +1,12 @@
 // hal0 dashboard — Agents Overview (the #agent landing tab).
 //
-// The library of agents as collectible cards. Hermes and Pi are the live
-// bundled-agent foils (ADR-0004 §2 single-pick — exactly one of the two is
-// actually installed on a given box, but both light up here so an operator
-// can see the card either way, with status reflecting reality):
+// The library of agents as collectible cards. Hermes is the live `serving`
+// foil, wired to real data:
 //   - agent liveness   ← window.__hal0UseAgents()  (GET /api/agents, 5s)
-//   - throughput + ctx ← window.__hal0UseSlots()    (primary slot metrics,
-//                          2.5s) — Hermes only; Pi is a CLI tool invoked
-//                          against whichever hal0 slot the operator picks,
-//                          not one dedicated backing slot, so its health
-//                          block shows install status without throughput.
+//   - throughput + ctx ← window.__hal0UseSlots()    (primary slot metrics, 2.5s)
 //   - Restart          → window.__hal0UseAgentRestart("hermes")
-//                          (POST /api/agents/hermes/restart → systemctl).
-//                          Pi has no systemd unit and no persona store, so
-//                          its card has no Restart/Persona actions.
-// The rest of the library (Qwen · OpenCode) are roadmap entries shown
+//                          (POST /api/agents/hermes/restart → systemctl)
+// The rest of the library (Pi · Qwen · OpenCode) are roadmap entries shown
 // behind a grey "coming soon" mask with curated dummy content.
 //
 // Window-globals shim — register on window, read React + hooks + cards from
@@ -28,7 +20,6 @@ const { useState, useRef, useEffect } = React;
 // is actually serving (falls back to a dash when no slot is resolved).
 function _hermesIdentity(liveModel) {
   return {
-    id: "hermes",
     name: "Hermes",
     model: liveModel || "—",
     role: "remote control · self-improving · orchestration",
@@ -49,40 +40,15 @@ function _hermesIdentity(liveModel) {
   };
 }
 
-// ── static (curated) identity for the live Pi card ───────────────────
-// Pi is a CLI tool, not a backing slot — `model` is the default model
-// hal0's pi-coder driver wires it to (hal0-provider extension), not a
-// live slot reading.
-function _piCoderIdentity() {
-  return {
-    id: "pi-coder",
-    name: "Pi",
-    model: "hal0/agent",
-    role: "autonomous coding · repo-aware engineering",
-    rarity: 2,
-    el: "#6f7785",
-    elGlow: "rgba(143,160,179,0.16)",
-    logo: (window.__hal0AgentArt && window.__hal0AgentArt.pi) || "",
-    logoScale: 0.5,
-    abilities: [
-      { name: "Slot Sync", cost: 1, desc: "Auto-discovers every hal0 slot as a model provider — no config, no restart.", pow: "70" },
-      { name: "Dual Memory", cost: 2, desc: "Reads and writes hal0's shared memory bank alongside every other agent.", pow: "65" },
-      { name: "Delegate", cost: 2, desc: "Spins up scout, planner, worker, and reviewer subagents for parallel work.", pow: "75" },
-    ],
-    skills: [
-      { l: "repo-aware", key: true },
-      { l: "shared memory", key: true },
-      { l: "delegation", key: true },
-      { l: "cli-native" },
-      { l: "theme" },
-    ],
-  };
-}
-
 // ── roadmap (coming-soon) cards — curated dummy content ─────────────
 function _lockedRoster() {
   const art = window.__hal0AgentArt || {};
   return [
+    {
+      id: "pi", name: "Pi", caps: true, el: "#6f7785", elGlow: "rgba(143,160,179,0.16)",
+      logo: art.pi, logoScale: 0.5, model: "qwen2.5-coder-32b",
+      role: "autonomous coding · repo-aware engineering", eta: "soon",
+    },
     {
       id: "qwen", name: "Qwen", caps: true, el: "#8b86f9", elGlow: "rgba(123,116,247,0.22)",
       logo: art.qwen, logoScale: 0.9, model: "qwen-agent runtime",
@@ -176,14 +142,6 @@ function AgentsOverview() {
   const { cls: statusCls, label: statusLabel } = _derive(hermesRec, primary);
   const health = _health(primary);
 
-  // Pi is a CLI tool, not a backing service — no slot of its own to read
-  // throughput/ctx from (_derive/_health both tolerate a null slot: status
-  // falls back to "ready"/"not installed"/"down" off the AgentRecord alone,
-  // health renders "—" placeholders).
-  const piRec = agents.find((a) => a.name === "pi-coder" || a.id === "pi-coder") || null;
-  const { cls: piStatusCls, label: piStatusLabel } = _derive(piRec, null);
-  const piHealth = _health(null);
-
   const onRestart = () => {
     if (!restart || restartState === "busy") return;
     setRestartState("busy");
@@ -209,9 +167,9 @@ function AgentsOverview() {
       <div className="ao-head">
         <div className="ao-eye">hal0 · agent library</div>
         <p className="ao-sub">
-          Every agent in the runtime as a collectible card. <b>Hermes</b> and <b>Pi</b> are
-          live — their cards stream real install/endpoint status and flip to abilities,
-          skills, and quick actions. The rest are on the roadmap.
+          Every agent in the runtime as a collectible card. <b>Hermes</b> is live — the card
+          streams its real endpoint health and flips to its abilities, skills, and quick
+          actions. The rest are on the roadmap.
         </p>
         <div className="ao-legend">
           <span className="ao-lz"><span className="d serving" />Serving <span className="k">· live, wired</span></span>
@@ -229,14 +187,6 @@ function AgentsOverview() {
             restart={{ state: restartState, onClick: onRestart }}
             onLogs={onLogs}
             onPersona={onPersona}
-          />
-        )}
-        {LiveAgentCard && (
-          <LiveAgentCard
-            agent={_piCoderIdentity()}
-            health={piHealth}
-            statusCls={piStatusCls}
-            statusLabel={piStatusLabel}
           />
         )}
         {LockedAgentCard && _lockedRoster().map((a) => <LockedAgentCard key={a.id} agent={a} />)}

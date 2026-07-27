@@ -6,9 +6,9 @@
  * provider. Re-fetches on session start so newly-loaded slots appear without
  * a restart.
  *
- * Vendored into the hal0 repo at src/hal0/agents/pi_coder/plugins/hal0-provider/
- * and deployed to ~/.pi/agent/extensions/hal0-provider/ by the pi-coder
- * driver at install time.
+ * Vendored into the hal0 repo at src/hal0/agents/pi/plugins/hal0-provider/
+ * and deployed to ~/.pi/agent/extensions/hal0-provider/ by the pi-agent
+ * driver at provision time.
  *
  * Env vars:
  *   HAL0_API_URL   — default http://127.0.0.1:8080

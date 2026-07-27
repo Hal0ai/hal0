@@ -407,25 +407,16 @@ def post_queue(body: dict[str, Any]) -> dict[str, Any]:
     same GPU gate as `hal0 bench run`."""
     suite = body.get("suite")
     model = body.get("model")
-    kind = body.get("kind")
     if not suite and not model:
         raise HTTPException(status_code=400, detail="body.suite or body.model is required")
-    if kind not in (None, "eval"):
-        raise HTTPException(status_code=400, detail=f"unknown queue kind {kind!r} (only 'eval')")
-    if kind == "eval" and not model:
-        raise HTTPException(status_code=400, detail="kind='eval' requires body.model")
     if suite:
         suites = load_suites(SUITE_DIR)
         if suite not in suites:
             raise HTTPException(status_code=404, detail=f"unknown suite {suite!r}")
-    # Optional per-model run shape: lanes (compare backends) + configs (flag grid)
-    # + kind ("eval" routes the item to the agentic tool-calling eval instead of
-    # a lane sweep — the dashboard's Tool Bench).
+    # Optional per-model run shape: lanes (compare backends) + configs (flag grid).
     lanes = body.get("lanes")
     configs = body.get("configs")
     label = suite or model
-    if kind == "eval":
-        label += " [tools]"
     if lanes and len(lanes) > 1:
         label += f" [{'+'.join(lanes)}]"
     if configs and len(configs) > 1:
@@ -435,7 +426,6 @@ def post_queue(body: dict[str, Any]) -> dict[str, Any]:
         "label": label,
         "suite": suite,
         "model": model,
-        "kind": kind,
         "lanes": lanes,
         "configs": configs,
         "enqueued": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
