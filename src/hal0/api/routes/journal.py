@@ -10,7 +10,7 @@ Both serve **hal0 events** read from :class:`hal0.events.EventBus` via
 :attr:`app.state.events`, flattened into the uniform
 :class:`JournalEntry` the dashboard journal panel renders. Slot
 containers log to journald via their ``hal0-slot@*`` units; per-slot
-logs are read from journald (``/api/logs``), not through this surface.
+logs are read from journald (``/api/slots/{name}/logs/stream``), not through this surface.
 
 The journal route is purposely separate from ``/api/events``: that
 exposes the raw event shape for callers wanting native fidelity, while
