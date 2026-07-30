@@ -10,8 +10,8 @@ async function seedSlots(page: Page, slots: any[]) {
   }, slots)
 }
 
-const A = { name: 'primary', type: 'llm', device: 'gpu-rocm', state: 'serving', port: 8092, isDefault: true,  enabled: true }
-const B = { name: 'backup',  type: 'llm', device: 'gpu-rocm', state: 'ready',   port: 8093, isDefault: false, enabled: true }
+const A = { name: 'primary', type: 'llm', device: 'gpu-rocm', state: 'serving', port: 8092, isDefault: true }
+const B = { name: 'backup',  type: 'llm', device: 'gpu-rocm', state: 'ready',   port: 8093, isDefault: false }
 
 test('Default slots pane sets the chosen slot default and clears the prior one', async ({ page }) => {
   const puts: Record<string, any[]> = { primary: [], backup: [] }

@@ -77,7 +77,8 @@ def _anchor_cfg(**over: Any) -> dict[str, Any]:
         "type": "llm",
         "device": "npu",
         "profile": "flm",
-        "enabled": True,
+        # A bound model is what makes this a live anchor (#1369).
+        "model": {"default": "gemma3:1b"},
     }
     cfg.update(over)
     return cfg

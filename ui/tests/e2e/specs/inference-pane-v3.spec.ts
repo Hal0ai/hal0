@@ -130,7 +130,6 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
       container_status: 'starting',
       container_health: false,
       mem_mb: 0,
-      enabled: true,
       isDefault: false,
       metrics: { toks: 0, ttft: null, ctx: 0, kv: null },
     }

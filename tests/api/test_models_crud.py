@@ -628,7 +628,6 @@ def slot_referencing_model(
                 "port = 8081",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
-                "enabled = true",
                 "[model]",
                 'default = "cascade-target"',
                 "",

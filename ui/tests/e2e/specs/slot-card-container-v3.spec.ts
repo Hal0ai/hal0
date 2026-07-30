@@ -30,7 +30,6 @@ const CONTAINER_SLOT_RUNNING = {
   container_health: true,
   mem_mb: 22_400,
   bench_toks_per_sec: 52.8,
-  enabled: true,
   isDefault: false,
   metrics: { toks: 48, ttft: 240, ctx: 32768, kv: null },
 }
@@ -53,7 +52,6 @@ const CONTAINER_SLOT_STARTING = {
   container_status: 'starting',
   container_health: false,
   mem_mb: 0,
-  enabled: true,
   isDefault: false,
   metrics: { toks: 0, ttft: null, ctx: 0, kv: null },
 }
@@ -74,7 +72,6 @@ test.describe('SlotCard container variant (#657)', () => {
         container_health: true,
         state: 'ready',
         model: 'qwen3.6-35b',
-        enabled: true,
       })
     })
     expect(ind.cls).toBe('stale')
@@ -92,7 +89,6 @@ test.describe('SlotCard container variant (#657)', () => {
         state: 'serving',
         last_used_at: (now - 10_000) / 1000,
         model: 'qwen3.6-35b',
-        enabled: true,
       }, now)
     })
     expect(ind.cls).toBe('serving')
@@ -107,7 +103,6 @@ test.describe('SlotCard container variant (#657)', () => {
         container_health: false,
         state: 'starting',
         model: 'qwen3-coder',
-        enabled: true,
       })
     })
     expect(ind.cls).toBe('warming')
@@ -122,7 +117,6 @@ test.describe('SlotCard container variant (#657)', () => {
         container_status: 'pulling',
         container_health: false,
         state: 'offline',
-        enabled: true,
       })
     })
     expect(ind.cls).toBe('warming')
@@ -137,7 +131,6 @@ test.describe('SlotCard container variant (#657)', () => {
         container_status: 'crashed',
         container_health: false,
         state: 'error',
-        enabled: true,
       })
     })
     expect(ind.cls).toBe('error')
@@ -151,42 +144,37 @@ test.describe('SlotCard container variant (#657)', () => {
         container_status: 'stopped',
         container_health: false,
         state: 'offline',
-        enabled: true,
       })
     })
     expect(ind.cls).toBe('offline')
     expect(ind.label).toBe('stopped')
   })
 
-  test('container slot !enabled + stopped → offline (grey "off")', async ({ page }) => {
-    const ind = await page.evaluate(() => {
-      return (window as any).slotIndicator({
-        runtime: 'container',
-        container_status: 'stopped',
-        container_health: false,
-        state: 'ready',
-        enabled: false,
-      })
-    })
-    expect(ind.cls).toBe('offline')
-    expect(ind.label).toBe('off')
-  })
+  // #1369: `enabled` no longer exists on the payload, so the pair of tests
+  // that pinned its short-circuit (and the "disabled but still running"
+  // escape hatch it forced) collapse into one: the key is inert and container
+  // residency is the whole story.
 
-  test('container slot !enabled but still running + healthy → stale (yellow "running")', async ({ page }) => {
-    // A disabled slot whose container is genuinely up + healthy is holding GPU
-    // and may be serving — it must NOT look identical to a disabled+stopped
-    // slot, or an orphaned / manually-started container is invisible.
-    const ind = await page.evaluate(() => {
-      return (window as any).slotIndicator({
-        runtime: 'container',
-        container_status: 'running',
-        container_health: true,
-        state: 'ready',
-        enabled: false,
-      })
+  test('container slot with a stale enabled:false classifies on the container', async ({ page }) => {
+    const [stopped, running] = await page.evaluate(() => {
+      const base = { runtime: 'container', state: 'ready', enabled: false }
+      return [
+        (window as any).slotIndicator({
+          ...base,
+          container_status: 'stopped',
+          container_health: false,
+        }),
+        (window as any).slotIndicator({
+          ...base,
+          container_status: 'running',
+          container_health: true,
+        }),
+      ]
     })
-    expect(ind.cls).toBe('stale')
-    expect(ind.label).toBe('running')
+    expect(stopped.cls).toBe('offline')
+    expect(stopped.label).toBe('stopped')
+    expect(running.cls).toBe('stale')
+    expect(running.label).toBe('ready')
   })
 
   // ── un-enriched slots fall back to the state string (regression guard) ──
@@ -196,7 +184,6 @@ test.describe('SlotCard container variant (#657)', () => {
       return (window as any).slotIndicator({
         state: 'ready',
         model: 'qwen3.5-4b',
-        enabled: true,
       })
     })
     // Fallback path: state=ready → stale/yellow with "ready" label
@@ -282,7 +269,6 @@ test.describe('SlotCard container variant (#657)', () => {
       state: 'serving',
       last_used_at: (Date.now() - 5_000) / 1000,
       model: 'qwen3.5-4b',
-      enabled: true,
       // container_status absent → state-string fallback in slot-status.js
     }
     const ind = await page.evaluate((slot) => {

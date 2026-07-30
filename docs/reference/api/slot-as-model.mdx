@@ -21,8 +21,8 @@ is stable across model swaps.
 
 | `model` value | Resolution |
 |---|---|
-| A chat-slot **alias** — any enabled `type=llm` slot, addressed by its own name (canonically `agent`, the default anchor, and `utility`, the helper role; legacy `agent-hermes` still redirects to `agent`) | Rewritten to the slot's configured model id. |
-| A virtual `hal0/*` role name (`hal0/agent`, `hal0/utility`, `hal0/npu`, or the generalized `hal0/<any-enabled-llm-slot>`) | Live-resolved to whichever model the role currently maps to. Chat-completions only. |
+| A chat-slot **alias** — any `type=llm` slot with a model bound, addressed by its own name (canonically `agent`, the default anchor, and `utility`, the helper role; legacy `agent-hermes` still redirects to `agent`) | Rewritten to the slot's configured model id. |
+| A virtual `hal0/*` role name (`hal0/agent`, `hal0/utility`, `hal0/npu`, or the generalized `hal0/<any-model-bound-llm-slot>`) | Live-resolved to whichever model the role currently maps to. Chat-completions only. |
 | A raw **registry model id** | Used directly; routed to whichever upstream serves it. |
 
 <Aside type="note">
@@ -40,7 +40,7 @@ Three steps run before dispatch, all in `routes/v1.py`:
 Runs for every `/v1` request that reaches `_dispatch_and_forward` (chat,
 completions, embeddings, rerankings, audio). The request's `model` is checked
 against the chat-slot alias map (slot name → configured model id, one entry
-per enabled `type=llm` slot, plus the `agent-hermes` back-compat redirect). On
+per model-bound `type=llm` slot, plus the `agent-hermes` back-compat redirect). On
 a match, hal0:
 
 - replaces `body["model"]` with the slot's model id, and
@@ -59,7 +59,7 @@ the currently-*loaded* slots (`LiveSlotResolver`), before the thinking-policy
 injection. Each virtual name carries an ordered fallback chain — `hal0/agent`
 tries the `agent` role; `hal0/utility` tries `utility` then falls back to
 `agent`; `hal0/npu` tries `npu`, then `utility`, then `agent` — and `hal0/<any
-enabled llm slot>` resolves to `(<slot>, agent)`. If nothing in the chain is
+model-bound llm slot>` resolves to `(<slot>, agent)`. If nothing in the chain is
 loaded yet, resolution falls back to the configured anchor slot so the caller
 can still ensure-load it. This step doesn't run for `/v1/completions`,
 `/v1/embeddings`, or the other non-chat endpoints.

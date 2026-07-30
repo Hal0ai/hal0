@@ -19,7 +19,7 @@
 // Colour rule:
 //   GREEN  = processing (serving) — actively doing work RIGHT NOW
 //   YELLOW = resident / ready     — container healthy, awaiting prompt
-//   GREY   = not loaded           — disabled, stopped, idle, offline
+//   GREY   = not loaded           — stopped, idle, offline, no model bound
 //   RED    = error / crashed
 //   AMBER  = transitional         — pulling / starting / unloading
 //
@@ -36,25 +36,17 @@ const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h stuck-SERVING threshold
  * @param {number} [now] - epoch ms (injectable for tests)
  * @returns {{ phase: string, isLive: boolean, isCold: boolean }}
  *   phase   — one of: missing|pulling|starting|serving|ready|idle|stopped|crashed
- *   isLive  — heuristic "holds memory" flag for the dot vocabulary. NOTE:
- *             this folds in `enabled`, so it can diverge from the memory-map
- *             attribution test — memory-map MUST use isSlotLive() (below).
+ *   isLive  — "holds memory" flag for the dot vocabulary. Agrees with the
+ *             memory-map attribution test (isSlotLive(), below) — #1369
+ *             removed the `enabled` fold that used to make them diverge.
  *   isCold  — always true (model swap = container restart, not hot-swap)
  */
 export function slotPhase(slot, now = Date.now()) {
-  const enabled = slot?.enabled !== false;
-
-  // Disabled normally means stopped — UNLESS the container is genuinely still
-  // up and healthy (started manually to test, or a disable that hasn't yet
-  // reconciled the container). In that case fall through to classify on the
-  // real container state so a live, GPU-holding slot isn't masked as stopped.
-  if (!enabled) {
-    const cs = String(slot?.container_status || "");
-    const liveContainer = cs === "running" && !!slot?.container_health;
-    if (!liveContainer) {
-      return { phase: "stopped", isLive: false, isCold: true };
-    }
-  }
+  // #1369: no `enabled` short-circuit. The field is gone — activation is
+  // having a model bound, and a slot with a live container necessarily has
+  // one, so "disabled but running" (which needed a special escape hatch to
+  // avoid rendering a GPU-holding container as plain "off") cannot happen.
+  // Phase is purely container/lifecycle state.
   return _containerPhase(slot, now);
 }
 
@@ -156,9 +148,6 @@ export function slotIndicatorFromPhase(slot, now = Date.now()) {
  *   dot offline / error (stopped/crashed)  → off        (offer Start)
  */
 export function slotButtonPhase(slot, now = Date.now()) {
-  // Disabled slots never offer lifecycle actions (the card renders a
-  // "disabled" note instead); return a non-running phase defensively.
-  if (slot?.enabled === false) return "off";
   const { cls } = _containerIndicator(slot, now);
   if (cls === "serving" || cls === "stale") return "running";
   if (cls === "warming") return "transitional";
@@ -171,32 +160,16 @@ function _containerIndicator(slot, now) {
   const hasContainerStatus = slot?.container_status != null;
   const health = !!slot?.container_health;
   const state = String(slot?.state || "offline");
-  const enabled = slot?.enabled !== false;
   const model = slot?.model || slot?.model_id || slot?.model_default || "";
   const errorMsg = slot?.metadata?.message || slot?.message || "";
   const lastUsedMs = typeof slot?.last_used_at === "number"
     ? slot.last_used_at * 1000 : null;
   const deltaMs = lastUsedMs != null ? now - lastUsedMs : null;
 
-  if (!enabled) {
-    // A disabled slot whose container is still up + healthy is NOT the same as
-    // a disabled, stopped slot — it's holding GPU and may be serving requests.
-    // Surface it distinctly (yellow "running") instead of a plain grey "off",
-    // otherwise an orphaned / manually-started container is invisible on the
-    // dashboard. Disabled + stopped keeps the plain offline/off.
-    if (cs === "running" && health) {
-      const recentlyServing =
-        state === "serving" && (deltaMs == null || deltaMs <= RECENTLY_LIVE_MS);
-      return {
-        cls: "stale",
-        label: "running",
-        tooltip: recentlyServing
-          ? (model ? `Disabled — still serving ${model}` : "Disabled — container still serving")
-          : (model ? `Disabled — container still running (${model})` : "Disabled — container still running"),
-      };
-    }
-    return { cls: "offline", label: "off", tooltip: "Disabled" };
-  }
+  // #1369: no `enabled` branch. It used to short-circuit here and needed an
+  // "orphaned container is still up" escape hatch so a live, GPU-consuming
+  // slot wasn't reported byte-identically to a stopped one. Classifying purely
+  // on container state makes that contradiction unrepresentable.
   if (state === "error" || cs === "crashed") {
     return {
       cls: "error",

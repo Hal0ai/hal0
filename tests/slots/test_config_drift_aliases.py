@@ -279,7 +279,6 @@ async def test_drift_resolves_the_servable_model_like_the_launch_path(
                 "port = 8081",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
-                "enabled = true",
                 "[model]",
                 f'default = "{toml_id}"',
                 "",

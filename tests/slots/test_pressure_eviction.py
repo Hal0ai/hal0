@@ -40,7 +40,6 @@ def _write_slot(
         f"port = {port}",
         'backend = "vulkan"',
         'provider = "llama-server"',
-        "enabled = true",
     ]
     if lru:
         lines.append("lru = true")

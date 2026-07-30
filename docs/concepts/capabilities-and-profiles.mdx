@@ -277,7 +277,7 @@ chat, speech-to-text, and embeddings. hal0 calls this the **NPU trio**.
 There is one containerized NPU slot. Its chat role routes through the slot's
 upstream like any other slot. The other two modalities ride as **shadow slots**
 — `stt` and `embed` — whose requests are posted straight to the same
-container's port when their slot records are enabled. There's no second process
+container's port when the anchor's `[npu]` modality toggle is on. There's no second process
 and no separate model server: the three endpoints are the same FLM process
 answering on one static port.
 

@@ -38,12 +38,14 @@ export interface RuntimeRollup {
 export function useRuntimeRollup(): RuntimeRollup {
   const slots = useSlots()
   const list = slots.data ?? []
-  const enabled = list.filter((s) => s.enabled !== false)
-  const ready = enabled.filter(isSlotReady).length
+  // #1369: the denominator is the CONFIGURED slots (a model bound), which is
+  // what "runtime" means here — a model-less slot has nothing to be ready.
+  const configured = list.filter((s) => !!(s.model || s.model_default))
+  const ready = configured.filter(isSlotReady).length
   return {
     status: slots.isSuccess ? 'up' : slots.isError ? 'down' : 'connecting',
     ready,
-    total: enabled.length,
+    total: configured.length,
     loaded: ready,
   }
 }

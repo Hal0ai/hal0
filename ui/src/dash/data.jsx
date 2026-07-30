@@ -93,8 +93,10 @@ const HAL0_DATA = {
       spark: [3, 5, 7, 6, 8, 9, 10, 8, 9, 11, 12, 9, 10, 11, 13, 10],
     },
     {
-      // Disabled slot — demonstrates the offline/faded card and C6 enabled-first
-      // sort (declared early here, but renders at the end of the Chat section).
+      // Unconfigured slot (#1369) — no model bound, which is what makes a slot
+      // inactive now. Demonstrates the offline/faded card and the C6
+      // configured-first sort (declared early here, but renders at the end of
+      // the Chat section).
       name: "legacy",
       type: "llm",
       device: "gpu-vulkan",
@@ -104,12 +106,9 @@ const HAL0_DATA = {
       profile: "vulkan",
       container_status: "stopped",
       container_health: false,
-      model: "qwen2.5-7b-instruct",
-      model_id: "qwen2.5-7b",
-      modelLong: "Qwen/Qwen2.5-7B-Instruct-GGUF",
+      model: "",
       group: "chat",
       state: "offline",
-      enabled: false,
       port: 8099,
       metrics: { toks: 0, ttft: null, ctx: 4096, kv: null, mem: 7.2 },
     },

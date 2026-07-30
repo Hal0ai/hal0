@@ -214,11 +214,12 @@ def test_apply_selecting_kokoro_cpu_swaps_tts_slot_back_to_kokoro_profile(
 
 
 def test_apply_disabled_tts_selection_does_not_rewrite_profile(tmp_hal0_home: str) -> None:
-    """A disabled selection flips ``enabled`` but never rewrites the engine.
+    """A disabled selection clears the model but never rewrites the engine.
 
-    Post-SC-1 the store owns ``enabled`` on both transitions, so a disable
-    writes ``enabled = false`` — but the profile/device/provider engine fields
-    (which only reconcile on an ENABLE) must survive untouched.
+    Post-SC-1 the store owns activation on both transitions; since #1369 that
+    means a disable writes ``[model].default = ""`` — but the profile/device/
+    provider engine fields (which only reconcile on an ENABLE) must survive
+    untouched.
     """
     from hal0.capabilities.config import CapabilitySelection
     from hal0.slot_config import SlotConfigStore, SlotSelection
@@ -232,10 +233,10 @@ def test_apply_disabled_tts_selection_does_not_rewrite_profile(tmp_hal0_home: st
     cs = store.apply(SlotSelection(slot="voice", child="tts", slot_name="tts", selection=selection))
     store.commit(cs)
     after = _read_tts_slot(tmp_hal0_home)
-    assert after["enabled"] is False, "disable must flip enabled=false"
-    # The engine fields never move on a disable — only ``enabled`` may differ.
-    assert {k: v for k, v in after.items() if k != "enabled"} == {
-        k: v for k, v in before.items() if k != "enabled"
+    assert after["model"]["default"] == "", "disable must clear [model].default"
+    # The engine fields never move on a disable — only the model may differ.
+    assert {k: v for k, v in after.items() if k != "model"} == {
+        k: v for k, v in before.items() if k != "model"
     }, "disabled selection rewrote an engine field"
 
 

@@ -127,7 +127,6 @@ def slot_root(tmp_hal0_home: str) -> Path:
                 "port = 8081",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
-                "enabled = true",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "",

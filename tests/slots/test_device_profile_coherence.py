@@ -29,7 +29,6 @@ def _gpu_cfg(name: str, *, device: str, profile: str, model: str = "m") -> dict:
         "device": device,
         "profile": profile,
         "provider": "llama-server",
-        "enabled": True,
         "group": "custom",
         "model": {"default": model},
     }
@@ -127,7 +126,6 @@ async def test_non_gpu_profile_untouched(tmp_hal0_home: str) -> None:
             "device": "cpu",
             "profile": "kokoro",
             "provider": "llama-server",
-            "enabled": True,
             "group": "custom",
             "model": {"default": "kokoro"},
         },

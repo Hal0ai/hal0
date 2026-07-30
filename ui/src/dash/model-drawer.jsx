@@ -618,7 +618,29 @@ function ModelDrawer({ open, onClose, model }) {
 		caps.includes("vision") && !mmproj.trim()
 			? "vision capability requires an mmproj sidecar path"
 			: null;
-	const saveBlocked = !!flagsError || !!mmprojError;
+
+	// Context size validation (#1378). PUT /api/models/{id} merges `defaults`
+	// WHOLESALE (registry/store.py merge_update), so an absent context_size is a
+	// DELETE, not "unchanged" — a lenient parseInt therefore destroyed data twice
+	// over: "32k" landed as 32 (a 1000x context collapse) and "abc" dropped the
+	// key entirely, both behind a green "Updated" toast. Demand a clean integer
+	// and mirror the slot drawer's ≥ 128 floor. Empty stays an explicit clear —
+	// that intent is legitimate — but malformed text is an error, never a silent
+	// truncation or clear. Derived like flagsError so correcting the field
+	// releases the gate on the next keystroke.
+	const ctxError = useMemoMD(() => {
+		const raw = ctx.trim();
+		if (!raw) return null; // empty = clear the override
+		if (!/^\d+$/.test(raw)) return "Must be a whole number of tokens";
+		if (Number(raw) < 128) return "Must be an integer ≥ 128";
+		return null;
+	}, [ctx]);
+
+	// One gate for every inline error: flags (#1379), the vision↔mmproj
+	// invariant (#1380) and the context-size rules (#1378). Both `onSave` and
+	// the Save button consult this, so a new validation can never be enforced
+	// in one place and forgotten in the other.
+	const saveBlocked = !!flagsError || !!mmprojError || !!ctxError;
 
 	// Return null when closed — matching the Modal contract the old
 	// RecipeEditorModal honoured (Modal returns null when !open). The <Drawer>
@@ -719,11 +741,10 @@ function ModelDrawer({ open, onClose, model }) {
 		if (saveBlocked) return; // inline errors block; no PUT fires
 		// Start from stored defaults; override only surfaced keys (empty = delete).
 		const defaults = { ...init };
-		if (ctx.trim()) {
-			const n = parseInt(ctx, 10);
-			if (Number.isFinite(n)) defaults.context_size = n;
-			else delete defaults.context_size;
-		} else delete defaults.context_size;
+		// ctxError already guarantees a clean /^\d+$/ integer here, so the only two
+		// outcomes are "write the number" and "empty = clear the override".
+		if (ctx.trim()) defaults.context_size = Number(ctx.trim());
+		else delete defaults.context_size;
 		// n_gpu_layers is no longer a model default (spec-hw-slot-ownership §2): drop
 		// any stored value so a save unsets the sunset key rather than round-tripping it.
 		delete defaults.n_gpu_layers;
@@ -1218,13 +1239,22 @@ function ModelDrawer({ open, onClose, model }) {
 					</div>
 					<div className="form-ctl">
 						<input
-							className="input mono"
+							className={"input mono" + (ctxError ? " input-err" : "")}
 							data-testid="model-ctx-input"
 							inputMode="numeric"
 							placeholder="e.g. 8192"
 							value={ctx}
 							onChange={(e) => setCtx(e.target.value)}
 						/>
+						{ctxError && (
+							<div
+								className="hint"
+								data-testid="model-ctx-error"
+								style={{ color: "var(--err)" }}
+							>
+								{ctxError}
+							</div>
+						)}
 					</div>
 				</div>
 				{/* n_gpu_layers input removed (spec-hw-slot-ownership §2/§6): NGL is

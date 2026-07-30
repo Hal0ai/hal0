@@ -15,7 +15,7 @@ def _write_slot(
     model: str = "qwen3-4b",
     labels: tuple[str, ...] = (),
     default: bool = False,
-    enabled: bool = True,
+    stale_enabled: bool | None = None,
     device: str = "gpu-rocm",
     profile: str | None = None,
     system_prompt: str | None = None,
@@ -26,8 +26,11 @@ def _write_slot(
         f'type = "{slot_type}"',
         f'device = "{device}"',
         'provider = "llama-server"',
-        f"enabled = {str(enabled).lower()}",
     ]
+    # ``stale_enabled`` writes the removed pre-#1369 key so we can prove it is
+    # inert; production TOMLs never carry it after the migration.
+    if stale_enabled is not None:
+        lines.append(f"enabled = {str(stale_enabled).lower()}")
     if default:
         lines.append("default = true")
     if profile is not None:
@@ -64,7 +67,6 @@ async def test_loaded_slot_returns_typed_slot(slot_root: Path) -> None:
         model_id="qwen3-4b",
         slot_type="llm",
         device="gpu-rocm",
-        enabled=True,
         labels=frozenset({"tool-calling", "vision"}),
         system_prompt="You are Chat.",
         profile="rocm",
@@ -108,3 +110,31 @@ async def test_route_for_request_keeps_name_compatibility(slot_root: Path) -> No
     name = await SlotManager().route_for_request("llm")
 
     assert name == "chat"
+
+
+@pytest.mark.asyncio
+async def test_model_less_slot_is_not_routable(slot_root: Path) -> None:
+    """An empty ``[model].default`` is the sole "not activated" signal (#1369)."""
+    _write_slot(slot_root, "grey", slot_type="embedding", model="")
+
+    assert await SlotManager().loaded_slot("grey") is None
+    assert await SlotManager().resolve_for_request("embedding") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_enabled_false_no_longer_hides_a_configured_slot(
+    slot_root: Path,
+) -> None:
+    """A pre-#1369 ``enabled = false`` must not suppress a slot that has a model.
+
+    The key is inert leftover config, so routing sees a normal live slot.
+    Before the migration sweeps it off disk this is the operator-visible
+    behaviour change: bound model wins.
+    """
+    _write_slot(slot_root, "chat", model="qwen3-4b", stale_enabled=False)
+
+    slot = await SlotManager().loaded_slot("chat")
+
+    assert slot is not None
+    assert slot.model_id == "qwen3-4b"
+    assert not hasattr(slot, "enabled")

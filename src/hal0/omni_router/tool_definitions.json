@@ -188,7 +188,7 @@
         "properties": {
           "target": {
             "type": "string",
-            "description": "Slot name to delegate to. Must be an enabled chat slot."
+            "description": "Slot name to delegate to. Must be a chat slot with a model configured."
           },
           "prompt": {
             "type": "string",

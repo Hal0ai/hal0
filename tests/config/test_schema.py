@@ -109,8 +109,10 @@ class TestSlotConfig:
         assert s.device == "gpu-rocm"
         # provider is a deprecated round-trip label; default "llama-server".
         assert s.provider == "llama-server"
-        assert s.enabled is True
+        # No ``enabled`` field (#1369) — a default SlotConfig is inactive
+        # because ModelConfig.default is "", which IS the activation signal.
         assert isinstance(s.model, ModelConfig)
+        assert s.model.default == ""
 
     def test_hardware_grid_defaults(self) -> None:
         """spec-hw-slot-ownership §2: the slot-owned HW grid fields exist with

@@ -2,7 +2,12 @@
  * slot-edit-controls-v3 — Spec 1 (slot edit panel controls).
  *
  * Covers the operator controls added to the slots page:
- *   C3. enabled toggle on the slot CARD → PUT /config { enabled } + fade.
+ *   C3. (RETIRED — #1369) the enabled toggle on the slot CARD is GONE:
+ *       `SlotConfig.enabled` no longer exists, so a slot is activated by
+ *       binding `[model].default` and the card fades on "no model" instead.
+ *       A write of `enabled` through PUT /config is hard-rejected server-side
+ *       (slot.removed_key_denied). The drawer's header toggle is Pinned/
+ *       Unpinned now (#1367, slot-pin-toggle-v3.spec.ts).
  *   C4. (RETIRED — spec-hw-slot-ownership §1) the Reasoning/MTP/Vision pills
  *       that used to live in the drawer's "Inference" FieldGroup are GONE:
  *       enable_thinking/mtp/vision are model-owned tri-state caps now, edited
@@ -16,7 +21,7 @@
  *       layers" default; an untouched field never rides the PUT. ctx_size keeps
  *       its own PATCH /defaults path. The grid also carries device / THREADS /
  *       BINARY / image_pin, with a non-blocking fit-check warning (§4).
- *   C6. enabled slots sort before disabled ones in the grid.
+ *   C6. configured slots (a model bound) sort before unconfigured ones.
  *
  * The dashboard renders the slot LIST from in-bundle HAL0_DATA
  * (VITE_MOCK_HAL0=1 short-circuits GET /api/slots before page.route
@@ -31,14 +36,14 @@ const PRIMARY = {
   name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
   model: 'qwen3.6-27b', model_id: 'qwen3.6-27b', modelLong: 'qwen3.6-27b',
   group: 'chat', state: 'serving', port: 8092, isDefault: true,
-  enabled: true, enable_thinking: false, n_gpu_layers: -1,
+  enable_thinking: false, n_gpu_layers: -1,
   metrics: { ctx: 8192, toks: 42, ttft: 180, kv: 35 },
 }
 const EMBED = {
   name: 'embed', type: 'embedding', device: 'gpu-rocm',
   model: 'nomic-embed', model_id: 'nomic-embed', modelLong: 'nomic-embed',
   group: 'embed', state: 'ready', port: 8095, isDefault: true,
-  enabled: true, enable_thinking: null, n_gpu_layers: -1,
+  enable_thinking: null, n_gpu_layers: -1,
   metrics: {},
 }
 
@@ -64,10 +69,11 @@ async function seedSlots(page: Page, slots: any[]) {
   }, slots)
 }
 
-// NOTE: the per-card enabled-toggle, the disabled-fade modifier, and the
-// enabled-first sort were SlotCard-grid features. Both grids (Chat +
+// NOTE: the per-card enable toggle, the fade modifier, and the
+// configured-first sort were SlotCard-grid features. Both grids (Chat +
 // Capabilities) were retired in favour of the InferencePane, so those tests
-// were removed with the surface they covered. The remaining tests exercise the
+// were removed with the surface they covered. (#1369 then removed the
+// `enabled` field the toggle wrote; the fade and sort key off model-presence.) The remaining tests exercise the
 // slot *edit drawer* (opened via the #slots/:name route), which is unchanged.
 
 test.describe('Slot edit controls (/slots)', () => {

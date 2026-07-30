@@ -37,7 +37,6 @@ function servingSlot() {
     port: 8100,
     type: 'llm',
     group: 'chat',
-    enabled: true,
     isDefault: true,
     container_status: 'running',
     container_health: true,
@@ -57,7 +56,6 @@ function readySlot() {
     model: 'bge-m3',
     type: 'embedding',
     group: 'embed',
-    enabled: true,
     container_status: 'running',
     container_health: true,
     last_used_at: null,
@@ -134,9 +132,9 @@ test.describe('dashboard redesign — status dot acceptance gate', () => {
     const slots = [
       { ...servingSlot(), name: 'sv' }, // serving → .sdot.serving
       { ...readySlot(), name: 'rd' }, //  ready   → .sdot.stale
-      { name: 'wm', state: 'warming', device: 'gpu-rocm', model: 'm', type: 'llm', group: 'chat', enabled: true, metrics: { toks: 0 } }, // → .sdot.warming
-      { name: 'er', state: 'error', device: 'gpu-rocm', model: 'm', type: 'llm', group: 'chat', enabled: true, container_status: 'crashed', metrics: { toks: 0 } }, // → .sdot.error
-      { name: 'of', state: 'stopped', device: 'cpu', model: 'm', type: 'llm', group: 'chat', enabled: false, metrics: { toks: 0 } }, // → .sdot.offline
+      { name: 'wm', state: 'warming', device: 'gpu-rocm', model: 'm', type: 'llm', group: 'chat', metrics: { toks: 0 } }, // → .sdot.warming
+      { name: 'er', state: 'error', device: 'gpu-rocm', model: 'm', type: 'llm', group: 'chat', container_status: 'crashed', metrics: { toks: 0 } }, // → .sdot.error
+      { name: 'of', state: 'stopped', device: 'cpu', model: 'm', type: 'llm', group: 'chat', metrics: { toks: 0 } }, // → .sdot.offline
     ]
     await gotoDashboard(page, slots)
     await expect(page.locator('.rd-slot-row .sdot.serving').first()).toBeVisible({ timeout: 10_000 })
@@ -252,7 +250,7 @@ test.describe('dashboard redesign — needs attention', () => {
     await suppressAmbientUpdate(page)
     const slots = [
       { ...servingSlot(), name: 'ok' },
-      { name: 'broke', state: 'error', device: 'gpu-rocm', model: 'm', type: 'llm', group: 'chat', enabled: true, container_status: 'crashed', metrics: { toks: 0 } },
+      { name: 'broke', state: 'error', device: 'gpu-rocm', model: 'm', type: 'llm', group: 'chat', container_status: 'crashed', metrics: { toks: 0 } },
     ]
     await gotoDashboard(page, slots)
     const attn = page.locator('.rd-card', { has: page.locator('.rd-card-title', { hasText: /needs attention/i }) })

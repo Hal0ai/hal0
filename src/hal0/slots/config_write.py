@@ -23,6 +23,7 @@ from typing import Any
 from hal0.config import paths
 from hal0.slot_config import merge_slot_config
 from hal0.slots._cfg_helpers import _cfg_to_dict
+from hal0.slots.activation import claims_npu_anchor as _claims_npu_anchor
 from hal0.slots.state import NpuExclusivityViolation, SlotConfigError
 
 # ── device/profile coherence ────────────────────────────────────────────────
@@ -201,32 +202,31 @@ def check_npu_exclusivity(
     *,
     slots_dir: Path | None = None,
 ) -> None:
-    """Reject a write that would land a second enabled NPU LLM anchor.
+    """Reject a write that would land a second model-bound NPU LLM anchor.
 
     Sync core of :meth:`SlotManager._check_npu_exclusivity` (see its
     docstring for the full contract), shared with the stacks apply engine.
     ``slots_dir`` overrides the default config dir for engines constructed
     against a custom directory (tests).
+
+    A slot claims the AMDXDNA chat context when it is ``device=npu,
+    type=llm`` AND has a non-empty ``[model].default`` — model-presence is
+    the activation signal since #1369, so a model-less NPU LLM slot is inert
+    config that may coexist and the model write is what gets refused.
     """
-    if cfg_dict.get("device") != "npu" or cfg_dict.get("type") != "llm":
-        return
-    if cfg_dict.get("enabled") is False:
+    if not _claims_npu_anchor(cfg_dict):
         return
     offenders = [
-        name
-        for name, peer in _iter_peer_configs(slot_name, slots_dir)
-        if peer.get("device") == "npu"
-        and peer.get("type") == "llm"
-        and peer.get("enabled") is not False
+        name for name, peer in _iter_peer_configs(slot_name, slots_dir) if _claims_npu_anchor(peer)
     ]
     if offenders:
         raise NpuExclusivityViolation(
-            "only one NPU LLM slot may be enabled at a time "
+            "only one NPU LLM slot may have a model configured at a time "
             f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
             details={
                 "slot": slot_name,
                 "conflicting_slots": sorted(offenders),
-                "hint": "disable the existing NPU LLM slot before enabling another",
+                "hint": "clear the existing NPU LLM slot's model before configuring another",
             },
         )
 
@@ -290,7 +290,7 @@ def reconcile_and_guard_slot_config(
 
     Raises :class:`SlotConfigError` / :class:`NpuExclusivityViolation` when the
     projected config is incoherent (conflicting device+profile backends) or
-    violates a cross-slot invariant (second enabled NPU anchor, second
+    violates a cross-slot invariant (second model-bound NPU anchor, second
     default=true of a type). Used by the stacks apply engine so a stack can no
     longer persist what ``update_config`` would have refused.
     """

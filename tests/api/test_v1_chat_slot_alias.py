@@ -35,21 +35,18 @@ def _three_chat_slots() -> list[dict[str, Any]]:
         {
             "name": "primary",
             "type": "llm",
-            "enabled": True,
             "port": 8001,
             "model": {"default": "qwen3-coder-next-reap-40b-a3b-q4kxl"},
         },
         {
             "name": "agent-hermes",
             "type": "llm",
-            "enabled": True,
             "port": 8001,
             "model": {"default": "hermes-4-14b-q5km", "ctx_size": 65536},
         },
         {
             "name": "utility",
             "type": "llm",
-            "enabled": True,
             "port": 8081,
             "model": {"default": "qwen3-zero-coder-v2-0.8b-f16", "context_size": 32768},
         },
@@ -57,17 +54,15 @@ def _three_chat_slots() -> list[dict[str, Any]]:
         {
             "name": "embed",
             "type": "embedding",
-            "enabled": True,
             "port": 0,
             "model": {"default": "Qwen3-Embedding-0.6B-GGUF"},
         },
-        # Disabled chat slot — excluded.
+        # Model-less chat slot — excluded (#1369: no model, not addressable).
         {
             "name": "spare",
             "type": "llm",
-            "enabled": False,
             "port": 8082,
-            "model": {"default": "some-spare-model"},
+            "model": {"default": ""},
         },
     ]
 
@@ -76,7 +71,7 @@ def _three_chat_slots() -> list[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
-async def test_alias_map_covers_enabled_chat_slots_only() -> None:
+async def test_alias_map_covers_model_bound_chat_slots_only() -> None:
     alias = await hal0_chat_slot_alias_map(_FakeSlotManager(_three_chat_slots()))
     assert alias == {
         "primary": "qwen3-coder-next-reap-40b-a3b-q4kxl",
@@ -177,7 +172,6 @@ def _npu_flm_slot() -> list[dict[str, Any]]:
         {
             "name": "npu",
             "type": "llm",
-            "enabled": True,
             "port": 8088,
             "model": {"default": "gemma4-it-e2b-FLM", "context_size": 75000},
         },
