@@ -70,6 +70,39 @@ def _memory_degraded(request: Request) -> bool | None:
     return bool(getattr(provider, "degraded", False))
 
 
+async def _memory_write_health(request: Request) -> dict[str, Any] | None:
+    """Retain-pipeline health for /api/status, or None when unavailable.
+
+    Deliberately a SECOND signal rather than a widening of
+    :func:`_memory_degraded` (#1420). That flag means "the daemon is
+    answering", and on the box that produced the issue it was correct: the
+    daemon accepted every retain with a ``200`` + ``operation_id`` and served
+    recalls fine, while fact extraction failed asynchronously and nothing
+    durable had landed in 8 days. Conflating the two would break #1301's
+    contract and report the read path — which genuinely worked — as broken.
+
+    None when memory is off, or when the wired provider has no retain pipeline
+    to report on (the volatile PgVector fallback, a third-party provider). A
+    missing signal must never read as a green one.
+
+    Fail-soft: the probe behind this is TTL-cached inside the provider and
+    swallows engine errors, and any unexpected raise degrades to None rather
+    than 500ing the dashboard's poll.
+    """
+    provider = getattr(request.app.state, "memory_provider", None)
+    if provider is None:
+        return None
+    probe = getattr(provider, "write_health", None)
+    if probe is None:
+        return None
+    try:
+        health = await probe()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("hal0.memory.write_health_failed", error=str(exc))
+        return None
+    return health if isinstance(health, dict) else None
+
+
 @router.get("/status")
 async def get_status(request: Request) -> dict[str, Any]:
     """Overall liveness + dashboard summary.
@@ -128,6 +161,7 @@ async def get_status(request: Request) -> dict[str, Any]:
             slot_list.append(entry)
 
     upstream_summary = [{"name": u.name, "kind": u.kind, "url": u.url} for u in upstreams.list()]
+    memory_write_health = await _memory_write_health(request)
 
     return {
         "name": "hal0",
@@ -147,6 +181,21 @@ async def get_status(request: Request) -> dict[str, Any]:
         # False → memory is enabled and using a real durable provider.
         # None  → memory is disabled ([memory].enabled=false or init failed).
         "memory_degraded": _memory_degraded(request),
+        # #1420: a SECOND, independent signal for the retain pipeline. The
+        # flag above tracks daemon reachability only, and a reachable daemon
+        # accepts a retain into a queue whose LLM extraction step can be dead
+        # — reads keep working while every write is silently dropped.
+        # True  → writes were recently observed to fail (raised retain, or the
+        #         engine's failed-operation counter climbing).
+        # False → the retain pipeline looks healthy.
+        # None  → memory disabled, or the provider has no retain pipeline.
+        "memory_write_degraded": (
+            None if memory_write_health is None else bool(memory_write_health.get("degraded"))
+        ),
+        # Operator detail for `hal0 memory status`: the reason plus the
+        # engine's own failed/pending/processing operation counts — the only
+        # thing on this surface that can tell a backlogged box from a clean one.
+        "memory_write_health": memory_write_health,
     }
 
 

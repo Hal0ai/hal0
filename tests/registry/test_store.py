@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hal0.registry.model import Model
+from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
 
 # ML-1: `ModelRegistry` now names the SQLite-backed store. This file tests
 # the TOML-specific implementation itself (atomic write, mtime cache,
@@ -159,6 +159,68 @@ class TestUpdate:
         # empty path is rejected by the Model.path_nonempty validator.
         with pytest.raises(RegistryError):
             reg.update("a", {"path": ""})
+
+
+# ── nested-table merge semantics (#1413) ─────────────────────────────────────
+#
+# `defaults` / `capability_flags` merge ONE level deep: an absent sub-key keeps
+# the stored value, an explicit ``None`` clears it, and ``{"defaults": None}``
+# still drops the whole table. Every other field stays a flat overwrite.
+
+
+class TestNestedTableMerge:
+    def test_partial_defaults_patch_preserves_siblings(self, reg: ModelRegistry) -> None:
+        reg.add(
+            _model(
+                "a",
+                defaults=ModelDefaults(
+                    context_size=8192,
+                    chat_template="minicpm5-1b",
+                    mtp=True,
+                    jinja=False,
+                ),
+            )
+        )
+        new = reg.update("a", {"defaults": {"extra_args": "--temp 0.5"}})
+        assert new.defaults is not None
+        assert new.defaults.extra_args == "--temp 0.5"
+        assert new.defaults.context_size == 8192
+        assert new.defaults.chat_template == "minicpm5-1b"
+        assert new.defaults.mtp is True
+        assert new.defaults.jinja is False
+
+    def test_explicit_none_sub_key_clears_only_that_key(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a", defaults=ModelDefaults(context_size=8192, extra_args="-b 512")))
+        new = reg.update("a", {"defaults": {"context_size": None}})
+        assert new.defaults is not None
+        assert new.defaults.context_size is None
+        assert new.defaults.extra_args == "-b 512"
+
+    def test_defaults_none_drops_the_whole_table(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a", defaults=ModelDefaults(context_size=8192, extra_args="-b 512")))
+        new = reg.update("a", {"defaults": None})
+        assert new.defaults is None
+
+    def test_empty_defaults_patch_is_a_no_op(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a", defaults=ModelDefaults(context_size=8192)))
+        new = reg.update("a", {"defaults": {}})
+        assert new.defaults is not None
+        assert new.defaults.context_size == 8192
+
+    def test_capability_flags_merge_one_level(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a", capability_flags=ModelCapabilities(tool_calling=True)))
+        new = reg.update("a", {"capability_flags": {}})
+        assert new.capability_flags.tool_calling is True
+        cleared = reg.update("a", {"capability_flags": {"tool_calling": None}})
+        assert cleared.capability_flags.tool_calling is None
+
+    def test_defaults_patch_does_not_disturb_top_level_fields(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a", name="A", defaults=ModelDefaults(context_size=4096)))
+        new = reg.update("a", {"defaults": {"jinja": True}})
+        assert new.name == "A"
+        assert new.defaults is not None
+        assert new.defaults.context_size == 4096
+        assert new.defaults.jinja is True
 
 
 # ── list ─────────────────────────────────────────────────────────────────────

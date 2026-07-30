@@ -26,25 +26,19 @@ import { SRow } from '../../shared/SRow.jsx'
 import { _advInputStyle } from '../../shared/SchemaRow.jsx'
 
 // Build the next `defaults` object, preserving any ModelDefaults key this page
-// doesn't surface (mtp/jinja/profile/extra_args/…). The registry PUT flat-
-// merges `defaults` WHOLESALE, so we must start from the stored defaults and
-// only override the keys we render — mirrors the recipe editor exactly.
-// Emptying an input clears just that one key (delete → "launcher default").
+// doesn't surface (mtp/jinja/profile/extra_args/…) by starting from the stored
+// defaults, then writing every key we DO render explicitly — mirrors the recipe
+// editor exactly. Since #1413 the registry merges `defaults` one level deep, so
+// absent means "keep the stored value" and only `null` deletes: an emptied input
+// sends `null` ("launcher default"), never an omitted key.
 function buildDefaultsPatch(init, { ctx, ngl, chatTemplate }) {
   const defaults = { ...init }
-  if (ctx.trim()) {
-    const n = parseInt(ctx, 10)
-    if (Number.isFinite(n)) defaults.context_size = n
-    else delete defaults.context_size
-  } else delete defaults.context_size
-  if (ngl.trim()) {
-    const n = parseInt(ngl, 10)
-    if (Number.isFinite(n)) defaults.n_gpu_layers = n
-    else delete defaults.n_gpu_layers
-  } else delete defaults.n_gpu_layers
+  const ctxNum = ctx.trim() ? parseInt(ctx, 10) : NaN
+  defaults.context_size = Number.isFinite(ctxNum) ? ctxNum : null
+  const nglNum = ngl.trim() ? parseInt(ngl, 10) : NaN
+  defaults.n_gpu_layers = Number.isFinite(nglNum) ? nglNum : null
   // 'auto' = GGUF-embedded template = absence of an override.
-  if (chatTemplate && chatTemplate !== 'auto') defaults.chat_template = chatTemplate
-  else delete defaults.chat_template
+  defaults.chat_template = chatTemplate && chatTemplate !== 'auto' ? chatTemplate : null
   return defaults
 }
 
@@ -66,7 +60,11 @@ function ModelDefaultsRow({ model, templates }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model?.id])
 
-  const ctxValid = ctx.trim() === '' || /^\d+$/.test(ctx.trim())
+  // Mirror the model drawer's ≥ 128 floor (#1378/#1386) and the server's own
+  // range screen (#1414 → 400 model.context_size_out_of_range) so a 0 fails
+  // inline here rather than round-tripping to a red toast.
+  const ctxValid =
+    ctx.trim() === '' || (/^\d+$/.test(ctx.trim()) && Number(ctx.trim()) >= 128)
   const nglValid = ngl.trim() === '' || /^-?\d+$/.test(ngl.trim())
   const dirty = ctx !== origCtx || ngl !== origNgl || chatTemplate !== origTpl
   const canSave = dirty && ctxValid && nglValid && !update.isPending
@@ -104,7 +102,7 @@ function ModelDefaultsRow({ model, templates }) {
       </div>
       <SRow
         k="Context size"
-        sub="ctx tokens · empty = model/launcher default"
+        sub="ctx tokens · ≥ 128 · empty = model/launcher default"
         v={<input className="mono" value={ctx} onChange={e => setCtx(e.target.value)} placeholder="auto" style={numStyle(ctxValid)} />}
       />
       <SRow

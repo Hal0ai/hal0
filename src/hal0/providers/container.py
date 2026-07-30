@@ -94,6 +94,27 @@ from hal0.system.seam import SystemCtlSeam
 ContainerSpec = RuntimeLaunchPlan
 
 
+def _artefact_token(slot: Mapping[str, Any] | str) -> str:
+    """The runtime-artefact instance token for a probe/query call (#1417).
+
+    The lifecycle half (``load_sync`` / ``unload_sync`` / ``rerender_unit_sync``)
+    resolves ``slot_instance_token(slot_cfg)`` before touching a name, so on an
+    id-keyed box every artefact is ``hal0-slot@<id>``. The query half
+    (:meth:`ContainerProvider.is_active` / ``running_image`` / ``running_argv``)
+    used to pass the mutable slot NAME straight into the pure formatters and so
+    asked systemd/podman about a pre-migration artefact that does not exist —
+    every healthy container slot then read back as offline/stopped. Both halves
+    now derive their token here.
+
+    Accepts a slot config mapping (the correct, id-aware input) or an
+    already-resolved token string (back-compat for callers that resolved it
+    themselves).
+    """
+    if isinstance(slot, Mapping):
+        return slot_instance_token(slot)
+    return str(slot)
+
+
 def _resolve_profile(name: str) -> Any:
     """Resolve a profile name to a :class:`~hal0.profiles.ResolvedProfile`.
 
@@ -1697,9 +1718,21 @@ class ContainerProvider(Provider):
             _SYSTEMCTL_SEAM.remove_quadlet(unit_path)
             self._run("systemctl", "daemon-reload", timeout=_UNIT_STOP_TIMEOUT_S)
 
-    def is_active(self, slot_name: str) -> bool:
-        """Return True if the systemd unit is in an active state."""
-        result = self._run("systemctl", "is-active", self._unit_name(slot_name), check=False)
+    def is_active(self, slot: Mapping[str, Any] | str) -> bool:
+        """Return True if the slot's systemd unit is in an active state.
+
+        Takes the slot **config** (#1417): the unit to probe is
+        ``hal0-slot@<instance-token>.service``, and on an id-keyed
+        (post-migration) box that token is the durable ``id`` — the same token
+        ``load_sync`` used to create the unit. Passing the mutable slot *name*
+        here asked systemd about a pre-migration artefact that does not exist,
+        so ``is-active`` returned non-zero and the drift reconciler force-
+        transitioned every healthy container slot to OFFLINE. A bare string is
+        still accepted as an already-resolved token.
+        """
+        result = self._run(
+            "systemctl", "is-active", self._unit_name(_artefact_token(slot)), check=False
+        )
         return result.returncode == 0
 
     def image_present(self, image: str) -> bool:
@@ -1720,21 +1753,25 @@ class ContainerProvider(Provider):
         )
         return result.returncode == 0
 
-    def running_image(self, slot_name: str) -> str | None:
-        """Return the image ref of the running container for *slot_name* (#663).
+    def running_image(self, slot: Mapping[str, Any] | str) -> str | None:
+        """Return the image ref of the running container for a slot (#663).
 
         Deterministic backend-of-record for a container slot: the running
-        backend IS the image tag. Uses ``<runtime> inspect hal0-slot-<name>
-        --format {{.ImageName}}``. Returns None when the container is not
-        running or inspect fails. Reads stdout only - podman emits benign
-        device warnings to stderr under LXC. Never raises; callers dispatch to
-        a thread executor from the async status path.
+        backend IS the image tag. Uses ``<runtime> inspect
+        hal0-slot-<instance-token> --format {{.ImageName}}``. Takes the slot
+        **config** so the token matches what Quadlet actually named the
+        container (#1417: a name on an id-keyed box inspected
+        ``hal0-slot-brain``, which never existed, so this returned None for
+        every slot and the image backend-of-record was inert). Returns None
+        when the container is not running or inspect fails. Reads stdout only —
+        podman emits benign device warnings to stderr under LXC. Never raises;
+        callers dispatch to a thread executor from the async status path.
         """
         try:
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = slot_container_name(slot_name)
+        container_name = slot_container_name(_artefact_token(slot))
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{.ImageName}}"],
@@ -1750,19 +1787,20 @@ class ContainerProvider(Provider):
         ref = result.stdout.strip()
         return ref or None
 
-    def running_argv(self, slot_name: str) -> list[str] | None:
-        """Return the live container command argv for *slot_name*.
+    def running_argv(self, slot: Mapping[str, Any] | str) -> list[str] | None:
+        """Return the live container command argv for a slot.
 
-        Uses ``<runtime> inspect hal0-slot-<name> --format {{json .Config.Cmd}}``.
-        Returns None when the container is not running, inspect fails, or the
-        runtime returns an unexpected shape. Never raises; status callers treat
-        missing data as "unknown", not drift.
+        Uses ``<runtime> inspect hal0-slot-<instance-token> --format
+        {{json .Config.Cmd}}``. Takes the slot **config** for the same reason
+        as :meth:`running_image` (#1417). Returns None when the container is
+        not running, inspect fails, or the runtime returns an unexpected shape.
+        Never raises; status callers treat missing data as "unknown", not drift.
         """
         try:
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = slot_container_name(slot_name)
+        container_name = slot_container_name(_artefact_token(slot))
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{json .Config.Cmd}}"],

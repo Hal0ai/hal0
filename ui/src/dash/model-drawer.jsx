@@ -619,15 +619,17 @@ function ModelDrawer({ open, onClose, model }) {
 			? "vision capability requires an mmproj sidecar path"
 			: null;
 
-	// Context size validation (#1378). PUT /api/models/{id} merges `defaults`
-	// WHOLESALE (registry/store.py merge_update), so an absent context_size is a
-	// DELETE, not "unchanged" — a lenient parseInt therefore destroyed data twice
+	// Context size validation (#1378). A lenient parseInt destroyed data twice
 	// over: "32k" landed as 32 (a 1000x context collapse) and "abc" dropped the
 	// key entirely, both behind a green "Updated" toast. Demand a clean integer
-	// and mirror the slot drawer's ≥ 128 floor. Empty stays an explicit clear —
-	// that intent is legitimate — but malformed text is an error, never a silent
-	// truncation or clear. Derived like flagsError so correcting the field
-	// releases the gate on the next keystroke.
+	// and mirror the slot drawer's ≥ 128 floor. Empty stays an explicit clear
+	// (`onSave` sends `null`) — that intent is legitimate — but malformed text is
+	// an error, never a silent truncation or clear. Derived like flagsError so
+	// correcting the field releases the gate on the next keystroke.
+	//
+	// The server enforces the SAME floor since #1414 (400
+	// model.context_size_out_of_range), so this is now a fast inline mirror of a
+	// real backend rule rather than the only guard.
 	const ctxError = useMemoMD(() => {
 		const raw = ctx.trim();
 		if (!raw) return null; // empty = clear the override
@@ -739,35 +741,29 @@ function ModelDrawer({ open, onClose, model }) {
 
 	const onSave = async () => {
 		if (saveBlocked) return; // inline errors block; no PUT fires
-		// Start from stored defaults; override only surfaced keys (empty = delete).
+		// Every surfaced key is sent EXPLICITLY — a value to set, or `null` to
+		// clear. The server merges `defaults` one level deep now (#1413), so
+		// absent means "keep the stored value" and only `null` deletes; omitting
+		// an emptied field would silently keep the old one. We still start from
+		// `init` so the keys this drawer doesn't render (rope_freq_base …) ride
+		// along unchanged rather than depending on the merge for survival.
 		const defaults = { ...init };
 		// ctxError already guarantees a clean /^\d+$/ integer here, so the only two
 		// outcomes are "write the number" and "empty = clear the override".
-		if (ctx.trim()) defaults.context_size = Number(ctx.trim());
-		else delete defaults.context_size;
-		// n_gpu_layers is no longer a model default (spec-hw-slot-ownership §2): drop
+		defaults.context_size = ctx.trim() ? Number(ctx.trim()) : null;
+		// n_gpu_layers is no longer a model default (spec-hw-slot-ownership §2): clear
 		// any stored value so a save unsets the sunset key rather than round-tripping it.
-		delete defaults.n_gpu_layers;
-		if (extra.trim()) defaults.extra_args = extra;
-		else delete defaults.extra_args;
-		if (chatTemplate && chatTemplate !== "auto")
-			defaults.chat_template = chatTemplate;
-		else delete defaults.chat_template;
-		if (profile.trim()) defaults.profile = profile.trim();
-		else delete defaults.profile;
-		// Typed caps: auto = absent (delete the key), on/off = boolean.
-		if (mtp === "on") defaults.mtp = true;
-		else if (mtp === "off") defaults.mtp = false;
-		else delete defaults.mtp;
-		if (thinking === "on") defaults.enable_thinking = true;
-		else if (thinking === "off") defaults.enable_thinking = false;
-		else delete defaults.enable_thinking;
-		if (jinja === "on") defaults.jinja = true;
-		else if (jinja === "off") defaults.jinja = false;
-		else delete defaults.jinja;
-		if (vision === "on") defaults.vision = true;
-		else if (vision === "off") defaults.vision = false;
-		else delete defaults.vision;
+		defaults.n_gpu_layers = null;
+		defaults.extra_args = extra.trim() ? extra : null;
+		defaults.chat_template =
+			chatTemplate && chatTemplate !== "auto" ? chatTemplate : null;
+		defaults.profile = profile.trim() || null;
+		// Typed caps: auto = null (no opinion), on/off = boolean.
+		defaults.mtp = mtp === "on" ? true : mtp === "off" ? false : null;
+		defaults.enable_thinking =
+			thinking === "on" ? true : thinking === "off" ? false : null;
+		defaults.jinja = jinja === "on" ? true : jinja === "off" ? false : null;
+		defaults.vision = vision === "on" ? true : vision === "off" ? false : null;
 
 		const body = { defaults };
 		// Diff on the value alone (#1381): a truthiness guard here collapsed

@@ -177,3 +177,46 @@ per-worktree port; `HAL0_E2E_PORT` still wins.
 4. **`enabled` removal** — staged on `feat/remove-slot-enabled`, no PR yet.
 5. **Doctor/preflight warning** for slots still carrying an unfolded flag surface
    — noted as a stretch goal in #1396, deliberately not bundled into #1397.
+
+---
+
+## Addendum — final state + lxc105 deploy (2026-07-30, session close)
+
+Everything queued in this handoff has landed. Final merge set beyond the tables
+above: **#1408** (`SlotConfig.enabled` removed — model-presence is the
+activation signal, one-shot boot migration, 400 `slot.removed_key_denied` on
+the retired key), **#1406** (#1389 NPU dead-Save fix), **#1373** (field-wiring
++ rejected-write spec set, #1372 CHANGELOG), **#1400** (per-worktree e2e
+ports), **#1402/#1403** (docs), plus the parallel session's **#1386/#1392**
+(ctx validation, vision/mmproj gate + Display-name clear — the predicted
+`saveBlocked` collision resolved as the unified three-term gate),
+**#1385/#1387/#1374/#1375/#1384/#1404/#1405/#1407/#1409**.
+
+Queue mechanics worth remembering: branch protection is `strict: true`, and
+GitHub auto-merge never self-updates a branch — a 13-PR armed queue sat
+indefinitely until update-branch rounds drained it (CHANGELOG unions were the
+recurring conflict; every one resolved by keeping both sides).
+
+**lxc105 (10.0.1.142) deployed from git main @ `a0487038`.** The installed
+1.0.0 CLI predates `hal0 update --source git`, so the deploy replicated the
+updater by hand: UI built locally (`ui/dist` is served from the `current`
+source tree, not the wheel), tree rsynced to
+`/usr/lib/hal0/hal0-git-a0487038/`, `pip install` into the shared venv,
+`hal0.previous` recorded, atomic `current` symlink swap, `hal0-api` restart.
+
+Live verification on the box:
+- `/api/health` → `{"status":"ok","version":"1.0.0rc1"}`
+- boot migration ran: **zero** `/etc/hal0/slots/*.toml` carry an `enabled` key
+- `GET /api/slots` lifts effective `pinned`; `agent` + `utility` report
+  `pinned: true` from the anchor set with no authored key
+- `POST /api/slots/utility/unload` → 409 `slot.pinned`,
+  `"slot 'utility' is pinned — pass ?force=true to unload it anyway"` — the
+  exact contract this effort was asked to surface in the UI
+
+Still open, unchanged priorities: #1379 (inert drawer controls removal — now
+unblocked), #1383 (identity-table `enabled` column), #1390/#1391/#1398
+(dirty-baseline family), #1393/#1394 (vision↔mmproj backstop).
+
+Note for future sessions: the working repo moved to `/mnt/mintdev/repos/hal0`;
+the `hal0` git remote (`hal0:/opt/hal0-dev`) is the live box's git source —
+fetch-sync it on the box, never push to it.
