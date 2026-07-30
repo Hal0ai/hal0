@@ -1,0 +1,221 @@
+name: Cosign pin drift (weekly)
+
+# Weekly check of the digest-pinned cosign in installer/bootstrap.sh
+# (_COSIGN_VERSION + _COSIGN_SHA256_LINUX_{AMD64,ARM64}) against the
+# sigstore release those constants claim to describe.
+#
+# Why this exists:
+#   PR #1363 made bootstrap.sh self-acquire a digest-pinned cosign when the
+#   host has none. Nothing in this repo bumped that pin: there is no
+#   dependabot/renovate config (neither has a manager for sha256 constants
+#   inside a shell script, and neither would verify the digest against
+#   sigstore's signed checksums file), and scripts/update-toolbox-digests.sh
+#   only refreshes ghcr.io image digests in manifest.json. A hand-maintained
+#   security pin with no watcher rots silently.
+#
+# The script is the contract (scripts/update-cosign-pin.sh):
+#   exit 0 — pins are current AND re-verified against the signed checksums.
+#   exit 1 — drift; the verified replacement values are in the report.
+#   exit 2 — operational error (unreachable asset, bad signature, missing or
+#            malformed digest) — NEVER read as drift, and never written.
+#
+# Chain of trust (full detail in the script header): a system cosign — or,
+# failing that, a cosign bootstrapped from the pin already reviewed into the
+# file — verifies the release's cosign_checksums.txt.sigstore.json bundle
+# against identity keyless@projectsigstore.iam.gserviceaccount.com / issuer
+# https://accounts.google.com before a single digest is read. Each pinned
+# binary is then downloaded and sha256sum-ed against that signed manifest.
+#
+# This job opens a PULL REQUEST and stops. It never merges, and it never
+# pushes to main: a security pin does not change without a human approving
+# the diff. If a PR for the same target release is already open it is left
+# alone rather than re-opened every Monday.
+#
+# ⚠️  A bump edits installer/bootstrap.sh, which is mirrored byte-for-byte by
+# Hal0ai/hal0-web:public/install.sh. bootstrap-parity.yml will report drift
+# until hal0-web is synced — the PR body says so in the checklist.
+
+on:
+  schedule:
+    # Mondays 13:00 UTC — an hour after hermes-sdk-diff so the two weekly
+    # upstream watchers do not land in the same notification burst.
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Pin this exact sigstore release tag (blank = latest)"
+        required: false
+        default: ""
+
+concurrency:
+  group: cosign-pin
+  # Latest run wins. An operator dispatch supersedes a scheduled run in
+  # flight; neither publishes anything, so cancelling is safe.
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Verify pinned cosign and open a bump PR on drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write        # push the bump branch
+      pull-requests: write   # open the review PR
+    steps:
+      - name: Reject noncanonical repository
+        # Mirrors release.yml's resolve job: a fork must not push branches
+        # or open PRs claiming to carry a verified security pin.
+        run: |
+          if [[ "${GITHUB_REPOSITORY,,}" != "hal0ai/hal0" ]]; then
+            echo "::error::refusing noncanonical repository ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+
+      - name: Checkout hal0
+        uses: actions/checkout@v6
+
+      - name: Install cosign
+        # The runner has no cosign. The script would otherwise bootstrap one
+        # from the in-tree pin (its documented fallback, and what an operator
+        # gets locally); installing the current release here means the
+        # verifier is not itself the artifact under review.
+        uses: sigstore/cosign-installer@v4
+
+      - name: Check the pin against the signed sigstore checksums
+        id: check
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        # Exit 0 = current, 1 = drift, 2 = operational error. Only exit 1
+        # proceeds; anything else either finishes clean or fails the job.
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            args+=(--version "${INPUT_VERSION}")
+          fi
+          set +e
+          bash scripts/update-cosign-pin.sh "${args[@]}" > cosign-pin.md
+          rc=$?
+          set -e
+          {
+            echo "## Cosign pin check"
+            echo ""
+            cat cosign-pin.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$rc" in
+            0)
+              echo "drift=false" >> "$GITHUB_OUTPUT"
+              ;;
+            1)
+              echo "drift=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::update-cosign-pin.sh exited with operational error ($rc)"
+              cat cosign-pin.md || true
+              exit "$rc"
+              ;;
+          esac
+
+      - name: Apply the verified bump
+        if: steps.check.outputs.drift == 'true'
+        id: bump
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        # Re-runs the whole verification chain and only then rewrites the
+        # three constants, atomically. A non-zero exit here fails the job
+        # with installer/bootstrap.sh byte-identical to how it was found.
+        run: |
+          set -euo pipefail
+          args=(--bump)
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            args+=(--version "${INPUT_VERSION}")
+          fi
+          bash scripts/update-cosign-pin.sh "${args[@]}" > cosign-pin.md
+          if git diff --quiet -- installer/bootstrap.sh; then
+            echo "::error::--bump reported success but installer/bootstrap.sh is unchanged"
+            exit 1
+          fi
+          VERSION="$(sed -n "s/^_COSIGN_VERSION='\(.*\)'$/\1/p" installer/bootstrap.sh)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "branch=chore/cosign-pin-${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Run the pin's contract tests
+        if: steps.check.outputs.drift == 'true'
+        # tests/installer/test_bootstrap_cosign_fetch.py asserts the shape of
+        # the constants and drives ensure_cosign() end to end under a
+        # hermetic PATH. A bump that cannot pass its own contract must never
+        # reach a reviewer.
+        #
+        # --noconftest: tests/conftest.py imports the hal0 package, which this
+        # job deliberately does not install. The cosign contract test is pure
+        # stdlib + subprocess and needs no fixtures from it.
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pytest
+          python3 -m pytest tests/installer/test_bootstrap_cosign_fetch.py -q --noconftest
+
+      - name: Open the review pull request
+        if: steps.check.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # One PR per target release — never re-open the same bump weekly.
+          existing="$(gh pr list --state open --head "${BRANCH}" --json number \
+                        --jq '.[0].number' 2>/dev/null || true)"
+          if [[ -n "${existing}" ]]; then
+            echo "PR #${existing} for ${BRANCH} is already open — leaving it alone."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add installer/bootstrap.sh
+          git commit -m "chore(installer): bump pinned cosign to ${VERSION}"
+          git push --set-upstream origin "${BRANCH}"
+
+          {
+            cat cosign-pin.md
+            echo ""
+            echo "### Reviewer checklist"
+            echo ""
+            echo "- [ ] Re-derive the digests yourself; do not take this job's word for it:"
+            echo "      \`scripts/update-cosign-pin.sh --version ${VERSION}\` must exit 0."
+            echo "- [ ] **Sync \`Hal0ai/hal0-web:public/install.sh\`.** \`installer/bootstrap.sh\`"
+            echo "      is mirrored byte-for-byte; \`bootstrap-parity.yml\` will report drift"
+            echo "      daily until that repo carries the same bytes."
+            echo "- [ ] Skim the sigstore release notes for \`${VERSION}\` for behaviour"
+            echo "      changes in \`verify-blob\` (bootstrap.sh depends on it)."
+            echo ""
+            echo "Opened by ${RUN_URL}. **Do not auto-merge** — this changes the bytes"
+            echo "that vouch for every hal0 install."
+          } > pr-body.md
+
+          gh pr create \
+            --title "chore(installer): bump pinned cosign to ${VERSION}" \
+            --body-file pr-body.md \
+            --base "${GITHUB_REF_NAME}" \
+            --head "${BRANCH}" \
+            --label "installer" \
+            --label "security" || \
+          gh pr create \
+            --title "chore(installer): bump pinned cosign to ${VERSION}" \
+            --body-file pr-body.md \
+            --base "${GITHUB_REF_NAME}" \
+            --head "${BRANCH}"
+
+      - name: Upload the verification report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cosign-pin-report
+          path: cosign-pin.md
+          if-no-files-found: ignore
