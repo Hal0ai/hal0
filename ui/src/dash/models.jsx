@@ -69,7 +69,13 @@ function ModelsView() {
   const [addOpen, setAddOpen] = useStateM(false);
   const [addByPathOpen, setAddByPathOpen] = useStateM(false);
   const [scanOpen, setScanOpen] = useStateM(false);
-  const [recipeOpen, setRecipeOpen] = useStateM(false);
+  // Model whose edit drawer is open — deliberately decoupled from the row
+  // list's `selId`/`selected` so the row-menu kebab's "Edit model settings"
+  // can target ANY row (selected or not) without first mutating catalog
+  // selection, and so re-selecting a different row while the drawer is open
+  // never silently swaps the drawer's target out from under an in-progress
+  // edit (issue: the old `model={selected}` binding was reactive to selId).
+  const [recipeModel, setRecipeModel] = useStateM(null);
   const [delModel, setDelModel] = useStateM(null);
   // HF search
   const [searchOpen, setSearchOpen] = useStateM(false);
@@ -365,16 +371,16 @@ function ModelsView() {
             sectionedInference.map(item =>
               item.type === "label"
                 ? <div key={item.key} className="mdl-section-label">{item.text}</div>
-                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} />
+                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} onEditModel={setRecipeModel} />
             )
           ) : tab === "image" ? (
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} />
             ))
           ) : (
             /* upstream tab — flat paginated rows */
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} />
             ))
           )}
 
@@ -413,7 +419,7 @@ function ModelsView() {
           <ModelDetail
             model={selected}
             onDelete={() => setDelModel(selected)}
-            onEdit={() => setRecipeOpen(true)}
+            onEdit={() => setRecipeModel(selected)}
           />
           <DownloadsPane />
         </div>
@@ -422,7 +428,7 @@ function ModelsView() {
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} initialRepo={searchPick} />
       <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />
       <ScanDirectoryModal open={scanOpen} onClose={() => setScanOpen(false)} />
-      <ModelDrawer open={recipeOpen} onClose={() => setRecipeOpen(false)} model={selected} />
+      <ModelDrawer open={!!recipeModel} onClose={() => setRecipeModel(null)} model={recipeModel} />
       <DeleteModelDialog open={!!delModel} onClose={() => setDelModel(null)} model={delModel} />
 
       {searchOpen && (
@@ -497,8 +503,11 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 }
 
 // ── ModelRow ──────────────────────────────────────────────────────────
-function ModelRow({ model, selected, onSelect }) {
+// `onEditModel` (new — Stream E kebab menu) opens the model edit drawer
+// directly for THIS row's model, independent of catalog selection.
+function ModelRow({ model, selected, onSelect, onEditModel }) {
   const backends = Array.isArray(model.backends) ? model.backends : [];
+  const [menuOpen, setMenuOpen] = useStateM(false);
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
       <span className="mdl-row-icon" data-testid={model.installed ? "mdl-row-installed" : "mdl-row-not-installed"}>
@@ -537,6 +546,35 @@ function ModelRow({ model, selected, onSelect }) {
               ? <span className="chip amber" data-testid="mdl-row-update" role="status" aria-label="Update available on Hugging Face" title="A newer version of this file is available on Hugging Face">update ↑</span>
               : null}
       </span>
+      <span className="mdl-row-kebab">
+        <button
+          type="button"
+          className="btn ghost sm"
+          data-testid="mdl-row-menu-btn"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-label={`Actions for ${model.longName || model.name || model.id}`}
+          onClick={(e) => { e.stopPropagation(); setMenuOpen(o => !o); }}
+        >{Icons.more}</button>
+      </span>
+      {menuOpen && (
+        <>
+          {/* Full-viewport click-outside dismiss — same idiom as the
+              board-selector/orchestration dropdowns in board-view.jsx. */}
+          <div className="mdl-row-menu-backdrop" onClick={(e) => { e.stopPropagation(); setMenuOpen(false); }} />
+          <Menu
+            anchor="right"
+            items={[
+              {
+                icon: Icons.edit,
+                label: "Edit model settings",
+                onClick: () => onEditModel && onEditModel(model),
+              },
+            ]}
+            onClose={() => setMenuOpen(false)}
+          />
+        </>
+      )}
     </div>
   );
 }
