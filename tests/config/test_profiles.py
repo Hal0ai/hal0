@@ -323,6 +323,42 @@ class TestLoadProfilesConfig:
         # Seeds are also present.
         assert set(SEED_PROFILES.keys()) <= set(cfg.profile.keys())
 
+    # ── managed-flag sanitization of persisted custom profiles (§21.7) ────────
+
+    def test_custom_profile_managed_flags_stripped_and_persisted(self, tmp_path: Path) -> None:
+        """A custom profile carrying managed flags (a pre-guard clone of a
+        -c-carrying seed, or a hand-edit) is healed at load: the denylisted
+        tokens (+ values) are stripped in-memory AND written back to disk."""
+        toml_content = (
+            "[profile.old-clone]\n"
+            'flags = "--jinja -fa on -b 2048 -c 131072 --no-context-shift"\n'
+            "mtp = false\n"
+        )
+        p = tmp_path / "profiles.toml"
+        p.write_bytes(toml_content.encode())
+
+        cfg = load_profiles_config(path=p)
+
+        assert cfg.profile["old-clone"].flags == "--jinja -fa on -b 2048 --no-context-shift"
+        # Disk self-healed: a re-load finds nothing left to strip.
+        raw = tomllib.loads(p.read_text(encoding="utf-8"))
+        assert raw["profile"]["old-clone"]["flags"] == "--jinja -fa on -b 2048 --no-context-shift"
+
+    def test_custom_profile_lookalike_flags_survive_sanitize(self, tmp_path: Path) -> None:
+        """Token-exact stripping: --model_path / --threads-batch are NOT the
+        managed --model / slot --threads — they must survive untouched."""
+        toml_content = (
+            "[profile.tts-clone]\n"
+            'flags = "--model_path /models/kokoro --threads-batch 8"\n'
+            "mtp = false\n"
+        )
+        p = tmp_path / "profiles.toml"
+        p.write_bytes(toml_content.encode())
+
+        cfg = load_profiles_config(path=p)
+
+        assert cfg.profile["tts-clone"].flags == "--model_path /models/kokoro --threads-batch 8"
+
     def test_complete_seed_file_no_extras_added(self, tmp_path: Path) -> None:
         """A file that already contains all seeds gets no duplicates."""
         import tomli_w
