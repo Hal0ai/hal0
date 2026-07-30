@@ -304,3 +304,57 @@ def test_fold_omits_context_size_from_defaults():
     assert len(reg.updates) == 1
     _model_id, updates = reg.updates[0]
     assert "context_size" not in updates["defaults"]
+
+
+def test_fold_reads_extra_args_reparked_under_extra_by_the_serializer():
+    """#1396 regression: the live input shape parks `[server]` under `extra`.
+
+    ``collect_inputs`` feeds the planner ``SlotConfig.model_dump(by_alias=True)``,
+    and SlotConfig's ``_tuck_server_into_extra`` model_serializer re-parks the
+    server sub-table under ``extra["server"]`` (so the loader round-trips a
+    proper ``[server]`` TOML table). The planner previously read only a
+    TOP-LEVEL ``server`` key, so against real input it silently dropped every
+    slot's freeform extra_args — the single value this migrator exists to
+    preserve.
+    """
+    reparked = {
+        "name": "s",
+        "type": "llm",
+        "profile": "rocm",
+        "model": {"default": "m"},
+        "extra": {"server": {"extra_args": "-b 2048 -fa on"}},
+    }
+    plan = plan_slot_flags_fold([reparked], {"rocm": ""}, {"m": None})
+
+    assert len(plan.folds) == 1
+    tune = plan.folds[0].new_defaults["extra_args"]
+    assert "-b 2048" in tune
+    assert "-fa on" in tune
+
+
+def test_divergent_share_is_detected_through_the_reparked_shape():
+    """The dropped-extra_args bug also defeated the divergence guard.
+
+    Two slots whose ONLY difference lived in the re-parked extra_args folded to
+    an identical tune, so the planner saw no conflict and would have silently
+    picked a winner instead of refusing.
+    """
+    a = {
+        "name": "a",
+        "type": "llm",
+        "profile": "rocm",
+        "model": {"default": "shared"},
+        "extra": {"server": {"extra_args": "-b 2048"}},
+    }
+    b = {
+        "name": "b",
+        "type": "llm",
+        "profile": "rocm",
+        "model": {"default": "shared"},
+        "extra": {"server": {"extra_args": "-b 512"}},
+    }
+    plan = plan_slot_flags_fold([a, b], {"rocm": ""}, {"shared": None})
+
+    assert not plan.ok
+    assert [r.model_id for r in plan.refusals] == ["shared"]
+    assert plan.folds == []
