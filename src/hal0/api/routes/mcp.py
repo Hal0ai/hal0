@@ -71,125 +71,133 @@ class McpNotImplemented(Hal0Error):
 
 # ── Static catalog ──────────────────────────────────────────────────────────
 #
-# Mirrors the prototype's ``MCP_CATALOG`` in ``ui/src/dash/mcp-data.jsx``
-# so the v3 page renders the same set of installable servers it did
-# while wired to the mock. This will eventually be replaced with a
-# real registry probe; for v0.3-alpha the static list is enough to let
-# operators browse + reason about what they could install.
+# A small, hand-checked list of MCP servers an operator can install. It is
+# STATIC on purpose — hal0 does not proxy a live registry, so there is no
+# upstream to drift from — but every entry's ``spec`` is verified to resolve
+# on the registry it names, and the list carries no metric hal0 cannot source.
+#
+# History (#1468): this shipped as a mirror of the v0.3-alpha dashboard mock
+# and still carried its invented ``stars``/``tools`` counts at GA, plus five
+# ``verified: true`` entries whose npm packages the modelcontextprotocol
+# project had archived (server-puppeteer/-gdrive/-slack) or never published
+# under that name (server-sqlite, @linear/mcp-server). Since
+# ``hal0 mcp catalog install`` feeds ``spec`` straight to the npm resolver
+# (hal0.mcp.manifest), each was a guaranteed failed-or-unsupported install
+# wearing a curated badge. The fabricated numbers are gone rather than
+# re-sourced: a popularity figure an operator might weigh a trust decision on
+# has to come from somewhere real, and nothing here can supply one.
+#
+# ``verified`` now means exactly one thing, enforced by
+# ``tests/api/test_mcp_routes.py``: published by the MCP project itself or by
+# the named upstream vendor. Everything else is a community package listed for
+# convenience and flagged by ``advisory`` as unaudited.
+
+#: Operator-facing caveat returned with the catalog so no consumer has to
+#: invent it. These servers are third-party code that will run with whatever
+#: credentials the operator wires in; hal0 does not audit them.
+CATALOG_ADVISORY = (
+    "Community catalog — these servers are third-party code that hal0 does not "
+    "audit or sandbox. 'verified' means first-party publisher (the MCP project "
+    "or the named vendor), not a security review. Read a server's source and "
+    "scope its credentials before installing."
+)
 
 _CATALOG: list[dict[str, Any]] = [
     {
-        "id": "puppeteer",
-        "name": "puppeteer",
+        "id": "filesystem",
+        "name": "filesystem",
         "author": "modelcontextprotocol",
         "verified": True,
-        "description": "Headless-browser automation. Navigate, scrape, screenshot.",
-        "tools": 9,
-        "stars": 2840,
-        "category": "browser",
-        "spec": "npm:@modelcontextprotocol/server-puppeteer",
-    },
-    {
-        "id": "sqlite",
-        "name": "sqlite",
-        "author": "modelcontextprotocol",
-        "verified": True,
-        "description": "Read-only SQL over a single sqlite database file.",
-        "tools": 4,
-        "stars": 1820,
-        "category": "data",
-        "spec": "npm:@modelcontextprotocol/server-sqlite",
-    },
-    {
-        "id": "gdrive",
-        "name": "google-drive",
-        "author": "modelcontextprotocol",
-        "verified": True,
-        "description": "Browse and read documents from a Google Drive account.",
-        "tools": 6,
-        "stars": 1410,
+        "description": "Read/write files under explicitly allowed directories.",
         "category": "files",
-        "spec": "npm:@modelcontextprotocol/server-gdrive",
+        "spec": "npm:@modelcontextprotocol/server-filesystem",
+        "homepage": "https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem",
     },
     {
-        "id": "slack",
-        "name": "slack",
+        "id": "memory",
+        "name": "memory",
         "author": "modelcontextprotocol",
         "verified": True,
-        "description": "Channel + DM read, message send, thread fetch.",
-        "tools": 8,
-        "stars": 990,
-        "category": "comms",
-        "spec": "npm:@modelcontextprotocol/server-slack",
+        "description": "Knowledge-graph scratch memory persisted to a local file.",
+        "category": "data",
+        "spec": "npm:@modelcontextprotocol/server-memory",
+        "homepage": "https://www.npmjs.com/package/@modelcontextprotocol/server-memory",
     },
     {
-        "id": "linear",
-        "name": "linear",
-        "author": "linear-app",
+        "id": "sequential-thinking",
+        "name": "sequential-thinking",
+        "author": "modelcontextprotocol",
         "verified": True,
-        "description": "Issue + project ops backed by the Linear GraphQL API.",
-        "tools": 14,
-        "stars": 720,
-        "category": "issues",
-        "spec": "npm:@linear/mcp-server",
+        "description": "Structured step-by-step reasoning scratchpad tool.",
+        "category": "productivity",
+        "spec": "npm:@modelcontextprotocol/server-sequential-thinking",
+        "homepage": (
+            "https://www.npmjs.com/package/@modelcontextprotocol/server-sequential-thinking"
+        ),
+    },
+    {
+        "id": "playwright",
+        "name": "playwright",
+        "author": "microsoft",
+        "verified": True,
+        "description": (
+            "Browser automation — navigate, click, scrape, screenshot. "
+            "The maintained successor to the archived puppeteer server."
+        ),
+        "category": "browser",
+        "spec": "npm:@playwright/mcp",
+        "homepage": "https://www.npmjs.com/package/@playwright/mcp",
+    },
+    {
+        "id": "everything",
+        "name": "everything",
+        "author": "modelcontextprotocol",
+        "verified": True,
+        "description": (
+            "Reference server exercising every MCP feature — useful for "
+            "verifying a client wiring end to end."
+        ),
+        "category": "ops",
+        "spec": "npm:@modelcontextprotocol/server-everything",
+        "homepage": "https://www.npmjs.com/package/@modelcontextprotocol/server-everything",
     },
     {
         "id": "exa-search",
         "name": "exa-search",
         "author": "exa-labs",
         "verified": False,
-        "description": "Neural web search and similarity-based document retrieval.",
-        "tools": 3,
-        "stars": 540,
+        "description": "Neural web search via the Exa API (API key required).",
         "category": "search",
         "spec": "npm:exa-mcp-server",
-    },
-    {
-        "id": "homeassistant",
-        "name": "home-assistant",
-        "author": "community",
-        "verified": False,
-        "description": "Control Home Assistant entities — lights, sensors, scenes, automations.",
-        "tools": 11,
-        "stars": 480,
-        "category": "iot",
-        "spec": "npm:homeassistant-mcp",
+        "homepage": "https://www.npmjs.com/package/exa-mcp-server",
     },
     {
         "id": "kubernetes",
         "name": "kubernetes",
-        "author": "manusa",
+        "author": "flux159",
         "verified": False,
-        "description": "kubectl-flavoured read access to a cluster. Logs, describe, get.",
-        "tools": 16,
-        "stars": 920,
+        "description": "Inspect and operate a Kubernetes cluster through kubectl.",
         "category": "ops",
         "spec": "npm:mcp-server-kubernetes",
+        "homepage": "https://www.npmjs.com/package/mcp-server-kubernetes",
     },
     {
         "id": "todoist",
         "name": "todoist",
-        "author": "abhiz123",
+        "author": "stanislavlysenko0912",
         "verified": False,
-        "description": "Create, update, complete tasks in Todoist.",
-        "tools": 6,
-        "stars": 240,
+        "description": "Create, query and complete Todoist tasks (API token required).",
         "category": "productivity",
         "spec": "npm:todoist-mcp",
+        "homepage": "https://www.npmjs.com/package/todoist-mcp",
     },
 ]
 
-_CATEGORIES: list[str] = [
-    "Files",
-    "Data",
-    "Search",
-    "Browser",
-    "Comms",
-    "Issues",
-    "Ops",
-    "IoT",
-    "Productivity",
-]
+#: Derived from the items rather than hand-maintained — the hardcoded list was
+#: Title-case while every item's ``category`` is lowercase, so any exact-match
+#: filter built against it matched nothing (#1468). Deriving makes that class
+#: of drift unrepresentable.
+_CATEGORIES: list[str] = sorted({item["category"] for item in _CATALOG})
 
 
 # ── Audit-log helpers ───────────────────────────────────────────────────────
@@ -345,14 +353,45 @@ def _gated_tool_names() -> frozenset[str]:
         return frozenset()
 
 
+def _unwrap_args_envelope(schema: dict[str, Any]) -> dict[str, Any]:
+    """Descend through the hal0-admin ``{args: {…}}`` wrapper, if present.
+
+    ``hal0.mcp.admin.build_server`` advertises every admin tool as a single
+    object-typed ``args`` property wrapping the real per-tool schema — the
+    wrapper is deliberate (a flat signature would make FastMCP drop undeclared
+    body fields), but it left this renderer showing ``args: object`` for all
+    ~92 admin tools, i.e. the whole point of the tool-detail manifest (#1468).
+
+    Only unwraps the exact shape that wrapper produces: a lone ``args``
+    property that is itself an object WITH its own properties. A tool that
+    genuinely takes one opaque object-typed ``args`` field has nothing inside
+    to show, so it is returned untouched rather than rendered as "no args".
+    """
+    props = schema.get("properties")
+    if not isinstance(props, dict) or set(props) != {"args"}:
+        return schema
+    inner = props.get("args")
+    if not isinstance(inner, dict) or inner.get("type") != "object":
+        return schema
+    inner_props = inner.get("properties")
+    if not isinstance(inner_props, dict) or not inner_props:
+        return schema
+    return inner
+
+
 def _args_signature(input_schema: Any) -> str:
     """Render a one-line ``name?: type, …`` signature from a JSON Schema.
 
     Returns ``"—"`` when the tool takes no structured properties (the
     dashboard renders that as "no args"). ``?`` marks optional params.
+
+    The hal0-admin server nests its real schema one level down under ``args``;
+    :func:`_unwrap_args_envelope` descends into it first so those tools render
+    their actual fields instead of an opaque ``args: object`` (#1468).
     """
     if not isinstance(input_schema, dict):
         return "—"
+    input_schema = _unwrap_args_envelope(input_schema)
     props = input_schema.get("properties")
     if not isinstance(props, dict) or not props:
         return "—"
@@ -628,12 +667,20 @@ def _client_role(client_id: str) -> str:
 async def list_catalog() -> dict[str, Any]:
     """Return the installable-MCPs catalog.
 
-    Static module-level constant for v0.3-alpha — future
-    ``mcp_client.py`` work will eventually swap in a live registry
-    probe. The shape matches the prototype's ``MCP_CATALOG`` so the
-    dashboard's InstallDrawer renders unchanged.
+    A curated static list, not a registry proxy — hal0 does not mirror an
+    upstream index, so what ships here is what was hand-checked at release
+    time (see the ``_CATALOG`` comment for the trust rules and for the #1468
+    audit that removed the invented popularity metrics and the dead specs).
+
+    ``categories`` is derived from the items, so a filter built against it
+    always matches. ``advisory`` carries the unaudited-third-party caveat so
+    the CLI and any future UI render one wording instead of inventing their own.
     """
-    return {"items": _CATALOG, "categories": _CATEGORIES}
+    return {
+        "items": _CATALOG,
+        "categories": _CATEGORIES,
+        "advisory": CATALOG_ADVISORY,
+    }
 
 
 @router.get("/stream")

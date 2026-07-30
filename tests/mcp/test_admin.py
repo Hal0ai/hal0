@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json as json_module
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -1055,3 +1056,138 @@ def test_validate_catalog_catches_excluded_tools_collision(
     monkeypatch.setitem(admin.EXCLUDED_TOOLS, "slot_list", "bogus collision")
     with pytest.raises(RuntimeError, match="slot_list"):
         admin._validate_catalog()
+
+
+# ── #1468: the MCP tool error envelope is one shape on every path ─────────────
+#
+# REST-forwarded failures used to return the hal0 REST envelope VERBATIM inside
+# the `error` key — i.e. {"error": {"error": {"code": ...}}} — while every
+# in-process path (unknown_tool, missing_arg, the memory dispatcher) returns a
+# flat {"error": {"code": ...}}. A client branching on result["error"]["code"]
+# saw None for every REST-forwarded 4xx/5xx.
+
+
+@pytest.fixture
+def error_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Patch httpx so the REST call returns a configurable failure body."""
+
+    captured: dict[str, Any] = {"status": 400, "payload": {}, "text": ""}
+
+    class _MockResponse:
+        def __init__(self) -> None:
+            self.status_code = captured["status"]
+            self.text = captured["text"]
+
+        def json(self) -> Any:
+            payload = captured["payload"]
+            if payload is None:
+                raise json_module.JSONDecodeError("no json", "", 0)
+            return payload
+
+    class _MockClient:
+        def __init__(self, *, base_url: str, timeout: float) -> None:
+            pass
+
+        async def __aenter__(self) -> _MockClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def get(self, url: str, params: Any = None, headers: Any = None) -> _MockResponse:
+            return _MockResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+    return captured
+
+
+async def _dispatch_error(queue: ApprovalQueue) -> dict[str, Any]:
+    return await admin.dispatch(
+        tool="slot_status",
+        args={"name": "brain"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rest_failure_lifts_hal0_envelope_to_flat_error_code(
+    queue: ApprovalQueue, error_transport: dict[str, Any]
+) -> None:
+    """A hal0 REST envelope is unwrapped so ``error.code`` is reachable at the
+    same depth every other MCP error path uses (#1468)."""
+    error_transport["status"] = 404
+    error_transport["payload"] = {
+        "error": {"code": "slot.not_found", "message": "no such slot", "details": {"name": "brain"}}
+    }
+    result = await _dispatch_error(queue)
+
+    assert result["status"] == "error"
+    assert result["http_status"] == 404
+    # The whole point: flat, not result["error"]["error"]["code"].
+    assert result["error"]["code"] == "slot.not_found"
+    assert result["error"]["message"] == "no such slot"
+    assert result["error"]["details"] == {"name": "brain"}
+    assert "error" not in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_rest_failure_error_shape_matches_in_process_errors(
+    queue: ApprovalQueue, error_transport: dict[str, Any]
+) -> None:
+    """The REST path and the in-process path agree on where ``code`` lives —
+    that agreement IS the contract this item is about."""
+    error_transport["status"] = 500
+    error_transport["payload"] = {"error": {"code": "slot.boom", "message": "x", "details": {}}}
+    rest = await _dispatch_error(queue)
+
+    in_process = await admin.dispatch(
+        tool="definitely_not_a_tool",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+
+    assert in_process["error"]["code"] == "mcp.unknown_tool"
+    assert isinstance(rest["error"].get("code"), str)
+    # Same depth, same key — a client needs exactly one accessor.
+    assert set(["code"]).issubset(rest["error"].keys())
+    assert set(["code"]).issubset(in_process["error"].keys())
+
+
+@pytest.mark.asyncio
+async def test_rest_failure_without_hal0_envelope_still_gets_a_code(
+    queue: ApprovalQueue, error_transport: dict[str, Any]
+) -> None:
+    """A non-hal0 body (a bare FastAPI ``{"detail": …}``, a proxy's HTML) must
+    still produce a branchable code rather than a shapeless passthrough."""
+    error_transport["status"] = 502
+    error_transport["payload"] = {"detail": "Bad Gateway"}
+    result = await _dispatch_error(queue)
+
+    assert result["status"] == "error"
+    assert result["http_status"] == 502
+    assert isinstance(result["error"]["code"], str)
+    assert result["error"]["code"]  # non-empty
+    # The original body must not be lost — it's the only diagnostic there is.
+    assert "Bad Gateway" in str(result["error"])
+
+
+@pytest.mark.asyncio
+async def test_rest_failure_with_unparseable_body_still_gets_a_code(
+    queue: ApprovalQueue, error_transport: dict[str, Any]
+) -> None:
+    """A body that isn't JSON at all (nginx 502 HTML) keeps the same shape."""
+    error_transport["status"] = 502
+    error_transport["payload"] = None  # forces JSONDecodeError
+    error_transport["text"] = "<html>502 Bad Gateway</html>"
+    result = await _dispatch_error(queue)
+
+    assert result["status"] == "error"
+    assert result["http_status"] == 502
+    assert isinstance(result["error"]["code"], str)
+    assert "502 Bad Gateway" in str(result["error"])

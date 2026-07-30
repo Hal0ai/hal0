@@ -309,30 +309,33 @@ def catalog_list_cmd(
 
     items = result.get("items", [])
     categories = result.get("categories", [])
+    advisory = result.get("advisory")
 
+    # The Tools/Stars columns are gone (#1468): both were invented numbers
+    # carried over from the v0.3-alpha dashboard mock, and a popularity figure
+    # an operator might weigh a trust decision on cannot be fabricated. What
+    # replaces them is the one fact hal0 can stand behind — the install spec.
     table = Table(title="MCP Catalog")
     table.add_column("ID", style="bold")
-    table.add_column("Name")
     table.add_column("Author")
-    table.add_column("Tools", justify="right")
-    table.add_column("Stars", justify="right")
     table.add_column("Category")
-    table.add_column("Verified", justify="center")
+    table.add_column("Spec")
+    table.add_column("Publisher", justify="center")
 
     for item in items:
         table.add_row(
             item.get("id", "—"),
-            item.get("name", "—"),
             item.get("author", "—"),
-            str(item.get("tools", "—")),
-            str(item.get("stars", "—")),
             item.get("category", "—"),
-            "✓" if item.get("verified") else "",
+            item.get("spec", "—"),
+            "first-party" if item.get("verified") else "community",
         )
 
     console.print(table)
     if categories:
         console.print(f"[dim]categories:[/dim] {', '.join(categories)}")
+    if advisory:
+        console.print(f"[yellow]![/yellow] [dim]{advisory}[/dim]")
 
 
 # ── `hal0 mcp catalog refresh` ───────────────────────────────────────────────
