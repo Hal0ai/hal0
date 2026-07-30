@@ -16,6 +16,7 @@ See PLAN.md §3 and §5 Tier 1.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import tempfile
 import tomllib
@@ -40,6 +41,8 @@ from hal0.config.schema import (
     UpstreamsConfig,
 )
 from hal0.errors import Hal0Error
+
+log = logging.getLogger(__name__)
 
 # ── Typed errors ──────────────────────────────────────────────────────────────
 
@@ -556,7 +559,53 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     # loses nothing.  Non-seed (operator) profiles are left exactly as written.
     for key, seed_raw in SEED_PROFILES.items():
         cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
+    _sanitize_custom_profile_flags(cfg, Path(target))
     return cfg
+
+
+def _sanitize_custom_profile_flags(cfg: ProfilesConfig, target: Path) -> None:
+    """Strip hal0-managed flags (§21.7) from non-seed profiles, healing disk.
+
+    Older releases let custom profiles persist managed flags — clones of the
+    ``-c``-carrying seeds, hand-edited TOML, pre-guard POST/PUT bodies. Such a
+    profile only explodes later, when its flags are stamped onto a model
+    (``slot.managed_arg_denied`` at save and launch). Strip exactly the
+    denylisted tokens (+ their values) from every non-seed profile so the
+    catalog never serves an unstampable template, and best-effort persist the
+    cleaned text so the on-disk TOML self-heals too (a read-only /etc still
+    gets the sanitized in-memory catalog). Seed keys are code-owned (overlaid
+    above) and never touched.
+    """
+    import shlex
+
+    # Lazy import: hal0.slots pulls in the manager stack, which imports config.
+    from hal0.slots.argv import strip_managed_flags
+
+    sanitized: dict[str, list[str]] = {}
+    for key, profile in cfg.profile.items():
+        if key in SEED_PROFILES or not profile.flags.strip():
+            continue
+        try:
+            tokens = shlex.split(profile.flags)
+        except ValueError:
+            continue  # malformed quoting — leave for the write-path screens
+        clean, removed = strip_managed_flags(tokens)
+        if removed:
+            profile.flags = " ".join(shlex.quote(tok) for tok in clean)
+            sanitized[key] = removed
+    if not sanitized:
+        return
+    log.warning(
+        "custom profile flags carried hal0-managed flag(s); stripped",
+        extra={"event": "profile.flags_sanitized", "profiles": sanitized},
+    )
+    try:
+        save_profiles_config(cfg, path=target)
+    except OSError as exc:
+        log.warning(
+            "could not persist sanitized profiles.toml; serving cleaned catalog in-memory",
+            extra={"event": "profile.flags_sanitize_write_failed", "error": str(exc)},
+        )
 
 
 def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
