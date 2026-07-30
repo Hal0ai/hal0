@@ -198,17 +198,21 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
     # The secret-mode row (#1466) stats real paths; pin it to nothing so this
     # composition test asserts the row list, not the host's /etc/hal0 modes.
     monkeypatch.setattr(da, "_SECRET_FILES", ())
+    # Privileged seams (#1465): probed against the real filesystem otherwise,
+    # which is neither present nor relevant in CI — pretend all installed.
+    monkeypatch.setattr(da, "probe_seams", lambda: [])
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 6 extras.
-    assert keys[-6:] == [
+    # 7 verify rows + 7 extras.
+    assert keys[-7:] == [
         "auth",
         "models",
         "migrations",
         "ports",
         "hal0_target",
         "secret-modes",
+        "seams",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
