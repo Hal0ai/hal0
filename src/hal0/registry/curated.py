@@ -317,6 +317,94 @@ CURATED_MODELS: list[CuratedModel] = [
         tags=["chat", "tiny", "lite-bundle", "smoke-test"],
         notes="Sub-second cold start. Lite-bundle primary; also verifies the slot lifecycle before downloading a 20+ GB pick.",
     ),
+    # ── hal0 brain (the platform steward) ─────────────────────────────────
+    # ~1.08B Llama-arch GGUF, SFT'd for the dashboard sidebar steward. All
+    # three variants live in ONE public repo: Hal0ai/hal0-brain-sft-ROCmFPX-GGUF
+    # (anonymous read; the `Hal0ai/hal0-brain-sft` BASE repo is private and
+    # safetensors-only — never pull that one, no chat runner consumes
+    # safetensors).
+    #
+    # RUNNER CONSTRAINT — read before changing which variant is the default.
+    # The Q8/Q4 files carry CUSTOM GGML tensor type ids (100 / 103) that
+    # STOCK llama.cpp REJECTS at load. They only run on the ROCmFPX runner
+    # (``DEFAULT_ROCMFPX_IMAGE``, config/schema.py), which is what the
+    # ``rocmfpx``/``vulkanfpx`` runner rows resolve to and which carries the
+    # MiniCPM5 pre-tokenizer this model needs. The F16 file is plain GGUF and
+    # is therefore the portable fallback for a box with no ROCm/Vulkan device
+    # (the ``cpu`` runner row uses a stock llama.cpp image).
+    # ``hal0.install.brain_model`` picks between them from hardware.json;
+    # don't hardcode a variant in a slot seed.
+    #
+    # Tool calling is `hal0-function-xml`, and a 1B leaks on native tool-call
+    # parsing on this runtime — the steward routes TOOL turns to a capable
+    # model via ``[brain_chat] tool_model`` (default ``hal0/agent``). See
+    # installer/etc-hal0/slots/brain.toml.
+    CuratedModel(
+        id="hal0-brain-sft-q8-rocmfpx",
+        display_name="hal0 brain (Q8_0 ROCmFPX, agent preset)",
+        description="The hal0 platform steward. Tool-use preset — the default brain pick on a ROCm/Vulkan box.",
+        family="hal0-brain",
+        size_gb=1.1,
+        vram_gb_min=3.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+        hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+        context_length=131072,
+        recommended_slot="chat",
+        tags=["chat", "brain", "steward", "tool-use", "tiny", "rocmfpx"],
+        notes=(
+            "REQUIRES the ROCmFPX runner — custom GGML tensor type 103, which stock "
+            "llama.cpp rejects. Use hal0-brain-sft-f16 on a box with no ROCm/Vulkan device."
+        ),
+        capability="chat",
+        architecture="llama",
+        backend="llamacpp",
+    ),
+    CuratedModel(
+        id="hal0-brain-sft-q4-rocmfp4",
+        display_name="hal0 brain (Q4_0 ROCmFP4, coherent)",
+        description="Smallest hal0 steward build — for a tight memory budget on a ROCm/Vulkan box.",
+        family="hal0-brain",
+        size_gb=0.65,
+        vram_gb_min=2.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+        hf_file="hal0-brain-sft-Q4_0_ROCMFP4_COHERENT.gguf",
+        context_length=131072,
+        recommended_slot="chat",
+        tags=["chat", "brain", "steward", "tool-use", "tiny", "rocmfp4"],
+        notes=(
+            "REQUIRES the ROCmFPX runner — custom GGML tensor type 100, which stock "
+            "llama.cpp rejects. Not auto-selected; switch to it by hand when memory is tight."
+        ),
+        capability="chat",
+        architecture="llama",
+        backend="llamacpp",
+    ),
+    CuratedModel(
+        id="hal0-brain-sft-f16",
+        display_name="hal0 brain (F16, portable)",
+        description="The hal0 platform steward, plain F16 GGUF — runs on stock llama.cpp, CPU included.",
+        family="hal0-brain",
+        size_gb=2.0,
+        vram_gb_min=4.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+        hf_file="hal0-brain-sft-F16.gguf",
+        context_length=131072,
+        recommended_slot="chat",
+        tags=["chat", "brain", "steward", "tool-use", "tiny", "portable"],
+        notes=(
+            "No custom tensor types — the only brain variant a stock llama.cpp image can "
+            "load, so it is the pick on a box with no ROCm/Vulkan device. Biggest of the three."
+        ),
+        capability="chat",
+        architecture="llama",
+        backend="llamacpp",
+    ),
     # ── Kept-in-featured legacy picks (explicit user ask): qwen3-4b for
     # mid-tier Vulkan hosts, phi3-mini for the MIT-licensed pick.  Slot
     # below the 2026-05 refresh — wizard still surfaces them in the main

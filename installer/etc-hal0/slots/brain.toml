@@ -4,20 +4,37 @@
 # targets the virtual model `hal0/brain`, which resolves here once a model
 # is bound and falls back to the `agent` slot meanwhile. Seeding the slot
 # makes that intent visible as a grey tile instead of the chat's model
-# routing failing opaquely on fresh boxes. `hal0 setup` scaffolds the same
-# slot when this seed is absent (setup_command._BRAIN_SLOT — chat
-# capability, same name + port), and never overwrites an existing file.
+# routing failing opaquely on fresh boxes.
 #
-# Clean seed (GH #1475), like every other capability seed: no
-# `[model].default` pin, so a model-less box boots a GREY tile — the
-# operator assigns a model later; filling in `[model].default` is what
-# activates the slot (#1369). Previously shipped a hardcoded
-# `MiniCPM5-1B-Agentic-Tooluse` pin, which is in neither shipped catalog
-# (`registry/seeds/haloai_models.json`, `registry/curated.py`) — an
-# unresolvable id the operator could not pull from any dashboard surface,
-# on a slot that (post-#1408) is "activated" purely by having a model
-# bound. It only ever worked on the box it was hand-pulled to. Port 8089:
-# 8088 belongs to the flm seed.
+# install.sh copies this file into /etc/hal0/slots/ BEFORE the first-run
+# scaffold pass, so these curated values win over the generic derived
+# scaffold the seeding step would otherwise write (it skips any slot whose
+# config already exists). Never overwrites an existing file.
+#
+# WHO SETS [model].default — read before adding one back here.
+# The brain is the platform steward: unlike a normal user slot it must WORK
+# out of the box. So install.sh PULLS its weights during the install
+# ("Brain model" step → `python -m hal0.install.brain_model`) and stamps
+# `[model].default` only once the bytes have landed. That is why no
+# `[model].default` is hardcoded below:
+#
+#   * The right variant is hardware-dependent. All three live in the public
+#     repo Hal0ai/hal0-brain-sft-ROCmFPX-GGUF, but the Q8/Q4 builds carry
+#     CUSTOM GGML tensor type ids (103 / 100) that STOCK llama.cpp REJECTS —
+#     they need the ROCmFPX runner. A GPU box gets the small, fast
+#     `hal0-brain-sft-q8-rocmfpx` (agent/tool-use preset); a box with no
+#     ROCm/Vulkan device gets the portable `hal0-brain-sft-f16`. Pinning
+#     either one here would crash-loop the other kind of box.
+#   * Model-presence IS the activation signal (#1369), so an id written
+#     before the file exists on disk is precisely the start-before-model
+#     race (#1108). If the pull cannot happen (no network, no space) the
+#     slot stays model-less and the install still succeeds — a grey tile,
+#     not a crash loop.
+#
+# The previous seed pinned `MiniCPM5-1B-Agentic-Tooluse`, an id no registry
+# or curated entry ever defined, so it could only 404 at first use.
+#
+# Port 8089: 8088 belongs to the flm seed.
 #
 # If you point this slot at a small (~1B) model, note the tool-calling
 # caveat: on the FPX brain runtime a 1B can't emit tool calls the native
