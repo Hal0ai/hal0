@@ -93,6 +93,8 @@ def status_cmd(
                 {
                     "memory_enabled": s.get("memory_enabled"),
                     "memory_degraded": s.get("memory_degraded"),
+                    "memory_write_degraded": s.get("memory_write_degraded"),
+                    "memory_write_health": s.get("memory_write_health"),
                 },
                 indent=2,
                 sort_keys=True,
@@ -119,7 +121,37 @@ def status_cmd(
         )
     elif enabled:
         t.add_row("Provider", "[green]durable[/green]")
+    if enabled:
+        # #1420: the two rows above cannot distinguish a box where every retain
+        # is being accepted and then dying in extraction from a healthy one —
+        # both print ON / durable. This row is that distinction, plus the
+        # engine's own operation counters so the size of the backlog is visible
+        # without shelling into the daemon.
+        _add_write_rows(t, s)
     console.print(Panel(t, title="memory · status", border_style="dim"))
+
+
+def _add_write_rows(t: Table, s: dict) -> None:
+    """Render the retain-pipeline rows for ``hal0 memory status`` (#1420)."""
+    health = s.get("memory_write_health")
+    write_degraded = s.get("memory_write_degraded")
+    if write_degraded is None:
+        # No retain pipeline to report on (volatile fallback / other provider).
+        return
+    reason = (health or {}).get("reason")
+    if write_degraded is True:
+        detail = (health or {}).get("last_error") or reason or "unknown"
+        t.add_row("Writes", f"[red]FAILING[/red] — {reason}: {detail}")
+    elif reason == "unknown":
+        t.add_row("Writes", "[yellow]unknown — the engine did not report operation counts[/yellow]")
+    else:
+        t.add_row("Writes", "[green]landing[/green]")
+    ops = (health or {}).get("operations")
+    if isinstance(ops, dict):
+        t.add_row(
+            "Operations",
+            "  ".join(f"{k}={ops.get(k, 0)}" for k in ("failed", "pending", "processing")),
+        )
 
 
 # ── ``hal0 memory enable`` / ``hal0 memory disable`` ───────────────────────

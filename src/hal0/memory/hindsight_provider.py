@@ -20,10 +20,16 @@ Maps hal0's engine-neutral MemoryProvider contract onto the shared
   not a boot-time constant. The boot probe in ``hal0.memory`` decides which
   provider gets built; this decides whether the one that got built is still
   working.
+* **Separate ``write_degraded`` flag** (#1420): reports whether *retains are
+  landing*. A reachable daemon accepts a retain, returns ``200`` with an
+  ``operation_id``, and extracts the facts asynchronously — so the whole
+  write path can be dead while ``degraded`` is correctly ``False`` and
+  recalls keep working. See :meth:`HindsightProvider.write_health`.
 """
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -163,6 +169,24 @@ def _http_status(exc: Exception) -> int | None:
 # callers can still narrow with an explicit ``types``.
 _DEFAULT_RECALL_TYPES = ("world", "experience", "observation")
 
+# ── retain-pipeline health (#1420) ────────────────────────────────────────
+#
+#: How long an observed write failure keeps ``write_degraded`` true. A single
+#: later retain that the daemon ACCEPTS is not evidence of recovery — accepting
+#: a retain into a queue whose extraction step is failing is exactly the
+#: behaviour that made the old surface green while nothing landed for 8 days.
+#: The window is what clears the flag, so recovery is timed rather than
+#: claimed, and no restart is needed once the pipeline is genuinely healthy.
+_WRITE_FAILURE_HOLD_S = 600.0
+
+#: Minimum age of the cached :meth:`HindsightProvider.write_health` verdict
+#: before a fresh probe is issued. ``/api/status`` is polled every few seconds
+#: by the dashboard; the engine's operations counters are not.
+_WRITE_HEALTH_TTL_S = 30.0
+
+#: Operation statuses sampled from the engine's operations endpoint.
+_WRITE_OP_STATUSES = ("failed", "pending", "processing")
+
 
 class HindsightProvider(MemoryProvider):
     def __init__(
@@ -198,6 +222,19 @@ class HindsightProvider(MemoryProvider):
         # provider after a successful boot probe, so False is the correct
         # starting point; every engine call updates it (see ``_call``).
         self._degraded = False
+        # Retain-pipeline health (#1420) — deliberately NOT the same field.
+        # ``_last_write_failure_at`` is a monotonic stamp set by either
+        # observation (a retain that raised, or the engine's failed-operation
+        # counter increasing); ``write_degraded`` is that stamp inside the
+        # hold window. ``_ops_sample`` is the previous operations snapshot the
+        # delta is taken against — an absolute failed count is useless because
+        # the counter is cumulative and never returns to zero.
+        self._last_write_failure_at: float | None = None
+        self._last_write_error: str | None = None
+        self._last_write_reason: str | None = None
+        self._ops_sample: dict[str, int] | None = None
+        self._write_health: dict[str, Any] | None = None
+        self._write_health_at: float | None = None
 
     @property
     def hindsight_client(self) -> Any:
@@ -253,6 +290,124 @@ class HindsightProvider(MemoryProvider):
             log.info("hal0.memory.hindsight_recovered")
         else:
             log.warning("hal0.memory.hindsight_unreachable_runtime", error=error)
+
+    # ── Live retain-pipeline health (#1420) ─────────────────────────────
+
+    @property
+    def write_degraded(self) -> bool:
+        """True when a memory WRITE was recently observed to fail.
+
+        Distinct from :attr:`degraded` on purpose. That flag answers "is the
+        daemon answering?" and on the box that produced #1420 the honest
+        answer was *yes*: it accepted every retain with a ``200`` and an
+        ``operation_id``, served recalls in 11s, and passed ``/health`` — while
+        fact extraction 503'd against an offline slot, 170 operations sat
+        failed, and the newest durable fact was 8 days old. Widening
+        ``degraded`` to cover that would both break #1301's contract and
+        misreport the read path, which genuinely worked.
+
+        Two observations feed this, both of the write path itself: a retain
+        that raises, and the engine's own failed-operation counter increasing
+        between two samples (see :meth:`write_health`). The second is the one
+        that catches the reported failure — in that mode no retain ever raises.
+        """
+        if self._last_write_failure_at is None:
+            return False
+        return (time.monotonic() - self._last_write_failure_at) < _WRITE_FAILURE_HOLD_S
+
+    def _mark_write_failure(self, error: str, *, reason: str) -> None:
+        """Record an observed write-path failure; log only on a state change."""
+        was = self.write_degraded
+        self._last_write_failure_at = time.monotonic()
+        self._last_write_error = error
+        self._last_write_reason = reason
+        if not was:
+            log.warning("hal0.memory.retain_pipeline_failing", reason=reason, error=error)
+
+    async def _sample_operations(self, bank: str) -> dict[str, int] | None:
+        """Current ``{status: total}`` counts for ``bank``, or None if the
+        engine can't answer (older build, outage, permission).
+
+        Fail-soft by contract: this runs behind ``/api/status``, which must
+        never 500 because a health probe did.
+        """
+        counts: dict[str, int] = {}
+        for status in _WRITE_OP_STATUSES:
+            try:
+                resp = await self._client.request_json(
+                    "GET",
+                    f"/v1/default/banks/{bank}/operations",
+                    params={"status": status, "limit": 1},
+                )
+            except Exception as exc:
+                log.debug("hal0.memory.operations_probe_failed", error=str(exc))
+                return None
+            total = (resp or {}).get("total") if isinstance(resp, dict) else None
+            counts[status] = int(total) if isinstance(total, int) else 0
+        return counts
+
+    async def write_health(self, *, max_age_s: float | None = None) -> dict[str, Any]:
+        """Retain-pipeline health for ``/api/status`` and ``hal0 memory status``.
+
+        Returns ``{degraded, reason, last_error, operations, bank}``.
+        ``reason`` is one of:
+
+        ``retain_failed``
+            A retain call itself raised inside the hold window.
+        ``retain_operations_failing``
+            The engine's ``failed`` operation counter grew between two samples
+            — retains are being accepted and then dying in extraction. This is
+            the #1420 shape.
+        ``ok``
+            Two clean samples, nothing failing.
+        ``unknown``
+            The engine could not be sampled (no operations endpoint, or an
+            outage) and no retain has raised. Reported as NOT degraded but
+            explicitly unknown, so a caller can tell "healthy" from "no data".
+
+        The verdict is TTL-cached (``_WRITE_HEALTH_TTL_S``) because the
+        dashboard polls ``/api/status`` every few seconds. Pass ``max_age_s=0``
+        to force a fresh sample.
+        """
+        ttl = _WRITE_HEALTH_TTL_S if max_age_s is None else max_age_s
+        now = time.monotonic()
+        if (
+            self._write_health is not None
+            and self._write_health_at is not None
+            and (now - self._write_health_at) < ttl
+        ):
+            return dict(self._write_health)
+
+        bank = namespace_to_bank(self._write_namespace(_SHARED, None))
+        counts = await self._sample_operations(bank)
+        if counts is not None:
+            previous = self._ops_sample
+            self._ops_sample = counts
+            if previous is not None and counts["failed"] > previous["failed"]:
+                delta = counts["failed"] - previous["failed"]
+                self._mark_write_failure(
+                    f"{delta} retain operation(s) failed on bank {bank} since the last check",
+                    reason="retain_operations_failing",
+                )
+
+        degraded = self.write_degraded
+        if degraded:
+            reason = self._last_write_reason or "retain_failed"
+        elif counts is None:
+            reason = "unknown"
+        else:
+            reason = "ok"
+
+        out: dict[str, Any] = {
+            "degraded": degraded,
+            "reason": reason,
+            "last_error": self._last_write_error if degraded else None,
+            "operations": dict(counts) if counts is not None else None,
+            "bank": bank,
+        }
+        self._write_health = out
+        self._write_health_at = now
+        return dict(out)
 
     async def _call(self, method: str, /, **kwargs: Any) -> Any:
         """Invoke a client method, updating the live ``degraded`` flag.
@@ -466,16 +621,23 @@ class HindsightProvider(MemoryProvider):
         context = meta.pop("context", None) or meta.get("source") or f"{agent} conversation turn"
         timestamp = meta.pop("timestamp", None) or _now()
 
-        resp = await self._call(
-            "retain",
-            bank_id=bank,
-            content=text,
-            document_id=resolved_id,
-            context=context,
-            metadata={k: str(v) for k, v in meta.items()},
-            tags=out_tags,
-            timestamp=timestamp,
-        )
+        try:
+            resp = await self._call(
+                "retain",
+                bank_id=bank,
+                content=text,
+                document_id=resolved_id,
+                context=context,
+                metadata={k: str(v) for k, v in meta.items()},
+                tags=out_tags,
+                timestamp=timestamp,
+            )
+        except Exception as exc:
+            # #1420: a raised retain is write-path evidence, distinct from the
+            # daemon-reachability signal ``_call`` already updated (a 4xx means
+            # the daemon is fine AND the write still didn't land).
+            self._mark_write_failure(str(exc), reason="retain_failed")
+            raise
         document_id = resolved_id
         out = {"id": document_id, "timestamp": _now()}
         # retain is async on this engine — surface the operation id so
