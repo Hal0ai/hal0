@@ -2037,6 +2037,95 @@ else
     fi
 fi
 
+# ── config-convergence migrations ─────────────────────────────────────────────
+# Every step below is an upgrade migration over /etc/hal0. None of them is
+# required for hal0 to start, and every one of them can meet a config file that
+# an older hal0 wrote and today's validators reject.
+#
+# This file runs under `set -euo pipefail` (:17), so a bare heredoc here aborts
+# the WHOLE install on any raise — before start_or_restart_api is ever reached.
+# ensure_seed_profiles raises ConfigParseError on a profiles.toml that fails the
+# current extra="forbid" ProfileConfig, which is exactly the pre-v1.0 shape this
+# block exists to fix: the migration that repairs an old box was the one most
+# likely to brick its upgrade.
+#
+# Updater.commit() already wraps the identical calls in try/except-and-warn.
+# hal0_migration_step gives install.sh the same posture: report the failure,
+# keep going, let the service start. `if ! cmd` also suppresses `set -e` for the
+# call itself.
+hal0_migration_step() {
+    # $1 = human label for the warning; python source arrives on stdin.
+    local label="$1"
+    if "${VENV_DIR}/bin/python" -; then
+        return 0
+    fi
+    warn "${label}: migration step failed — continuing with the install"
+    warn "  this is non-fatal; hal0-api still starts. Re-run 'sudo bash install.sh'"
+    warn "  after fixing the reported problem, or check 'journalctl -u hal0-api'."
+    return 0
+}
+
+# ── profile catalog: one-shot v1.0 reset ──────────────────────────────────────
+# v1.0 makes profiles tuning-only. A pre-v1.0 /etc/hal0/profiles.toml can hold
+# shapes the v1.0 loader no longer accepts, so converging such a box means
+# deleting the file — the built-in catalog is virtual (overlaid from code on
+# every load), so the reseed is free.
+#
+# Gated on hal0.toml's [meta] schema_version, so it fires exactly once per box
+# and never again. A timestamped backup is written to /var/lib/hal0/backups/
+# before anything is removed. The prompt is asked ONLY when operator-authored
+# profiles would actually be lost; a fresh install (no profiles.toml) and a
+# `curl | bash` run therefore stay fully non-interactive. Set
+# HAL0_RESET_PROFILES=1 to pre-approve it in a script. MUST run before the
+# schema migration below: the reset's gate IS meta.schema_version, and letting
+# the migration stamp it forward first would make the gate unreadable on the
+# very box it exists for.
+PROFILES_TOML="${ETC_DIR}/profiles.toml"
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping profile catalog reset (no system writes)"
+else
+    # Export so the heredoc's python child sees it (sudo strips a bare prefix).
+    export HAL0_RESET_PROFILES="${HAL0_RESET_PROFILES:-}"
+    hal0_migration_step "profile catalog reset" <<'PYEOF'
+import os
+
+from hal0.updater.updater import profile_reset_status, reset_profile_catalog
+
+status = profile_reset_status()
+approved = None
+
+if not status["due"]:
+    print(f"  profile catalog already at the v1.0 shape ({status['reason']})")
+elif status["needs_consent"]:
+    names = ", ".join(status["custom_profiles"])
+    if os.environ.get("HAL0_RESET_PROFILES") == "1":
+        approved = True
+        print(f"  HAL0_RESET_PROFILES=1 — resetting; custom profiles removed: {names}")
+    else:
+        # stdin is this heredoc, so a prompt has to read the controlling
+        # terminal directly (same reason as _confirm_cpu_only above). No tty
+        # (curl | bash, cron, CI) means no consent: leave them alone.
+        print("  hal0 v1.0 makes profiles tuning-only; /etc/hal0/profiles.toml is reset once.")
+        print(f"  These operator-authored profiles would be deleted: {names}")
+        print("  A timestamped copy is written to /var/lib/hal0/backups/ first.")
+        try:
+            with open("/dev/tty", "r+") as tty:
+                tty.write("Reset the profile catalog now? [Y/n] ")
+                tty.flush()
+                approved = (tty.readline().strip().lower() or "y") in ("y", "yes")
+        except OSError:
+            approved = None
+            print("  no terminal available — keeping them; re-run with HAL0_RESET_PROFILES=1.")
+
+if status["due"]:
+    result = reset_profile_catalog(approved=approved)
+    if result["performed"]:
+        print(f"  profile catalog reset (backup: {result['backup']})")
+    else:
+        print(f"  profile catalog NOT reset ({result['outcome']}) — still due on the next run")
+PYEOF
+fi
+
 # ── post-activation migrations (schema + seed-profile/mtp/image-pin/extra-args) ─
 # One shared sequence with Updater.commit()'s self-update path (GH #1475):
 # hal0.toml schema migrations, profiles.toml virtual-seed pruning (seeds live
@@ -2053,13 +2142,27 @@ fi
 # runner-image pins, and unsanitised defaults.extra_args that `hal0 update`
 # would have fixed — two boxes on the same version with different on-disk
 # state. Operator edits and non-seed profiles are always left untouched.
+#
+# Ran through hal0_migration_step (not a bare heredoc): the schema migration
+# used to be able to abort this whole script under set -euo pipefail before
+# start_or_restart_api was ever reached, on exactly the pre-v1.0 boxes this
+# repair path exists for. The ceiling mirrors Updater.commit(): re-derive
+# whether the profile-catalog reset above is still outstanding (its own gate
+# is meta.schema_version, re-read fresh here) and cap the migration target
+# below the watermark so an outright decline doesn't silently consume the
+# one-shot.
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping post-activation migrations (no system writes)"
 else
     info "running post-activation migrations (schema + seed-profile/mtp/image-pin/extra-args)"
-    "${VENV_DIR}/bin/python" - <<'PYEOF'
-from hal0.updater.updater import run_post_activation_migrations
-source, target = run_post_activation_migrations()
+    hal0_migration_step "post-activation migrations" <<'PYEOF'
+from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
+from hal0.updater.updater import profile_reset_status, run_post_activation_migrations
+
+status = profile_reset_status()
+reset_outstanding = bool(status["due"])
+ceiling = PROFILE_CATALOG_SCHEMA_VERSION - 1 if reset_outstanding else None
+source, target = run_post_activation_migrations(ceiling=ceiling)
 if target != source:
     print(f"  hal0.toml schema migrated {source} -> {target}")
 else:
@@ -2067,6 +2170,33 @@ else:
 print("  seed-profile / stale-MTP / runner-image / extra-args cleanup passes ran (see log for any per-item detail)")
 PYEOF
 fi
+
+# ── SlotConfig.enabled sweep (#1369) ──────────────────────────────────────────
+# `enabled` is gone — a non-empty [model].default IS the activation signal — and
+# `enabled = false` alongside a bound model would silently switch a deliberately
+# disabled slot back ON. The identical idempotent sweep runs at hal0-api boot,
+# but only into `journalctl -u hal0-api`, which nobody watching an install ever
+# sees. Run it here so the result lands in the install transcript.
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping slot 'enabled' sweep (no system writes)"
+else
+    hal0_migration_step "slot 'enabled' key sweep" <<'PYEOF'
+from hal0.updater.updater import sweep_slot_enabled_keys
+swept = sweep_slot_enabled_keys()
+if swept:
+    print(f"  swept the removed 'enabled' key off {len(swept)} slot(s): {', '.join(swept)}")
+    print("    (a slot that was 'enabled = false' WITH a bound model is now model-less,")
+    print("     which is how 'off' is expressed in v1.0 — re-bind a model to turn it on)")
+else:
+    print("  no slot carries the removed 'enabled' key")
+PYEOF
+fi
+
+# Stale former-default runner-image pins and hal0-managed flags in model
+# defaults.extra_args (parity with Updater.commit() steps 7d/7e) are handled
+# by the consolidated "post-activation migrations" call above — it runs
+# retag_stale_slot_images and sanitize_model_extra_args itself, so a second
+# call here would just repeat the same passes.
 
 # ── hal0-api service start / restart ──────────────────────────────────────────
 # Deliberately NOT the same policy as the slot units below. A slot is a running
@@ -2101,13 +2231,56 @@ start_or_restart_api() {
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping slot-unit re-render (no system writes)"
 else
-    "${VENV_DIR}/bin/python" - <<'PYEOF'
+    hal0_migration_step "slot-unit re-render" <<'PYEOF'
 from hal0.updater.updater import rerender_slot_units
 n = rerender_slot_units()
 if n:
     print(f"  re-rendered {n} slot unit(s) through the new code (services not restarted)")
 else:
     print("  all slot units already match the new code")
+PYEOF
+fi
+
+# ── convergence verdict ───────────────────────────────────────────────────────
+# Same report `hal0 update` prints, from the same code, so both entry points
+# tell an operator the same story about the same box.
+#
+# The three spec-hw-slot-ownership / spec-flags-ownership folds are deliberately
+# NOT run here. `hal0 slot migrate-hw --apply` refuses outright while hal0-api
+# or any hal0-slot@* unit is active, because rewriting slot TOMLs under a live
+# runtime split-brains it — and on an upgrade the old hal0-api is still serving
+# at this point in the script. slot_flags_fold can also legitimately REFUSE a
+# model when two slots disagree, which needs a human. So: detect (write-free
+# planners), name what is outstanding, print the exact command, and let the
+# operator run it in a real window.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    hal0_migration_step "convergence check" <<'PYEOF'
+from hal0.updater.updater import convergence_report
+
+report = convergence_report()
+pending = report["ownership_migrations"]["pending"]
+if report["converged"]:
+    print("  on-disk config is fully converged to the v1.0 shape")
+else:
+    if report["profile_reset"]["due"]:
+        print("  ! profile catalog reset is still outstanding "
+              "(re-run this installer on a terminal, or with HAL0_RESET_PROFILES=1)")
+    if pending:
+        print("  ! this box is still on the pre-v1.0 slot/model shape. hal0 works, but the")
+        print("    per-slot launch tune, NGL/runner pins and mtp/vision/reasoning settings")
+        print("    below are still where the OLD schema put them and are no longer read at")
+        print("    launch. Stop hal0 (systemctl stop 'hal0-slot@*' hal0-api), then run:")
+        for key in pending:
+            entry = report["ownership_migrations"]["detail"][key]
+            print(f"      {entry['command']}")
+            if entry.get("error"):
+                print(f"        needs manual resolution first: {entry['error']}")
+            for line in entry["lines"][:5]:
+                print(f"        {line}")
+            if len(entry["lines"]) > 5:
+                print(f"        … and {len(entry['lines']) - 5} more")
+        print("    Each is dry-run without --apply, and backs up the slot config + registry")
+        print("    DB before any write.")
 PYEOF
 fi
 
