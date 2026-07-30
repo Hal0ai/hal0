@@ -6,7 +6,8 @@
 // `.test.mjs` file added here would silently never execute.
 import { describe, expect, it } from 'vitest'
 
-// @ts-expect-error — slot-shared.js is untyped JS (tsconfig allowJs/checkJs:false)
+// slot-shared.js is untyped JS; tsconfig has allowJs with checkJs:false, so the
+// import resolves and the exports come through as `any`.
 import { slotModelId, slotModelRow } from './slot-shared.js'
 
 const ROWS = [
