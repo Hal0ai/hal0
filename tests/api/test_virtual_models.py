@@ -25,7 +25,6 @@ class _FakeSlotManager:
             {
                 "name": "agent",
                 "type": "llm",
-                "enabled": True,
                 "model": {"default": "big"},
                 "ctx_size": 65536,
                 "device": "gpu-vulkan",

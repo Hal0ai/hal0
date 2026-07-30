@@ -10,9 +10,10 @@
  *   serving + last>1h           → yellow "ready" (stuck-request demotion)
  *   running + healthy / ready   → yellow (resident, awaiting prompt)
  *   pulling / starting / warming→ amber pulse
- *   !enabled + stopped          → grey "off"
- *   !enabled + container live   → yellow "running" (disabled but still up/serving)
  *   stopped / offline           → grey "stopped" (auto-reloads on request)
+ *
+ * (#1369 removed the two `!enabled` rows: the field is gone, so a stale key on
+ * the wire is inert and residency is the whole story.)
  *
  * Slots without container enrichment (`container_status == null`, e.g. a
  * stale /api/status union entry) classify on the bare state string.
@@ -169,18 +170,13 @@ test.describe('slotIndicator helper', () => {
     expect(ind.tooltip).toMatch(/last used 1h ago/)
   })
 
-  test('!enabled → offline (grey "off")', async ({ page }) => {
-    const ind = await page.evaluate<Indicator>(() => {
-      return (window as any).slotIndicator({ state: 'ready', enabled: false })
-    })
-    expect(ind.cls).toBe('offline')
-    expect(ind.label).toBe('off')
-  })
+  // #1369: `enabled` is gone from the slot payload. A stale key from a
+  // pre-migration payload (or an old client) must be INERT — the two tests
+  // that used to pin an `enabled === false` short-circuit, and the
+  // "disabled but still running" escape hatch it needed, are replaced by
+  // these: the classifier reads container state and nothing else.
 
-  test('!enabled but container running + healthy → stale (yellow "running")', async ({ page }) => {
-    // A disabled slot whose container is still up + healthy is holding GPU and
-    // may be serving — surface it distinctly instead of a plain grey "off", so
-    // an orphaned / manually-started container is never invisible.
+  test('a stale enabled:false does not mask a live container', async ({ page }) => {
     const ind = await page.evaluate<Indicator>(() => {
       return (window as any).slotIndicator({
         state: 'ready',
@@ -190,8 +186,20 @@ test.describe('slotIndicator helper', () => {
       })
     })
     expect(ind.cls).toBe('stale')
-    expect(ind.label).toBe('running')
-    expect(ind.tooltip).toMatch(/disabl/i)
+    expect(ind.label).toBe('ready')
+    expect(ind.tooltip).not.toMatch(/disabl/i)
+  })
+
+  test('a stale enabled:false does not change a stopped slot', async ({ page }) => {
+    const [clean, stale] = await page.evaluate<[Indicator, Indicator]>(() => {
+      const base = { state: 'ready', container_status: 'stopped', container_health: false }
+      return [
+        (window as any).slotIndicator(base),
+        (window as any).slotIndicator({ ...base, enabled: false }),
+      ]
+    })
+    expect(stale).toEqual(clean)
+    expect(stale.cls).toBe('offline')
   })
 
   test('container running + healthy overrides a stale offline state → stale (yellow)', async ({ page }) => {

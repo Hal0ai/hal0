@@ -242,7 +242,6 @@ def _llm_cfg(name: str = "chat", **over: Any) -> dict[str, Any]:
         "name": name,
         "port": 8081,
         "type": "llm",
-        "enabled": True,
         "model": {"default": "qwen3-4b"},
     }
     cfg.update(over)
@@ -278,7 +277,6 @@ class TestConfigEnrichment:
                 "name": "stt-npu",
                 "device": "npu",
                 "type": "transcription",
-                "enabled": True,
                 "model": {"default": "whisper-v3"},
             },
         ]
@@ -286,18 +284,60 @@ class TestConfigEnrichment:
         assert out["agent"]["coresident_group"] == "npu-flm-trio"
         assert out["stt-npu"]["coresident_group"] == "npu-flm-trio"
 
-    def test_no_coresident_group_without_enabled_anchor(self) -> None:
+    def test_no_coresident_group_without_a_live_anchor(self) -> None:
+        """No NPU LLM anchor with a model bound → no trio (#1369)."""
         configs = [
             {
                 "name": "stt-npu",
                 "device": "npu",
                 "type": "transcription",
-                "enabled": True,
                 "model": {"default": "whisper-v3"},
             },
         ]
         out = config_enrichment(configs)
         assert "coresident_group" not in out["stt-npu"]
+
+    def test_no_coresident_group_when_the_anchor_has_no_model(self) -> None:
+        """The seeded model-less ``flm`` anchor doesn't make a trio real."""
+        configs = [
+            _llm_cfg(name="flm", device="npu", model={"default": ""}),
+            {
+                "name": "flm-stt",
+                "device": "npu",
+                "type": "transcription",
+                "model": {"default": "whisper-v3"},
+            },
+        ]
+        out = config_enrichment(configs)
+        assert "coresident_group" not in out["flm-stt"]
+        assert "coresident_group" not in out["flm"]
+
+    def test_shadow_modality_lifted_from_the_anchor(self) -> None:
+        """#1369: the shadow's ON/OFF pill reads the ANCHOR's [npu] table.
+
+        The shadow's own config can't answer — it carries a placeholder model
+        and (pre-#1369) a mirrored flag that drifted from FLM's launch flags.
+        """
+        configs = [
+            _llm_cfg(name="flm", device="npu", npu={"asr": True, "embed": False}),
+            {
+                "name": "flm-stt",
+                "device": "npu",
+                "type": "transcription",
+                "model": {"default": "whisper-v3"},
+            },
+            {
+                "name": "flm-embed",
+                "device": "npu",
+                "type": "embedding",
+                "model": {"default": "embed-gemma"},
+            },
+        ]
+        out = config_enrichment(configs)
+        assert out["flm-stt"]["npu_modality_active"] is True
+        assert out["flm-embed"]["npu_modality_active"] is False
+        # The anchor itself is not a shadow — no lifted modality key.
+        assert "npu_modality_active" not in out["flm"]
 
     def test_config_fields_surfaced(self) -> None:
         # spec-hw-slot-ownership §1: enable_thinking/mtp/vision are no longer
@@ -322,7 +362,9 @@ class TestConfigEnrichment:
         assert e["type"] == "llm"
         assert e["model_default"] == "qwen3-4b"
         assert e["labels"] == ["tool-calling"]
-        assert e["enabled"] is True
+        # #1369: no ``enabled`` key is lifted — ``model_default`` IS the
+        # activation signal the dashboard reads.
+        assert "enabled" not in e
         assert "enable_thinking" not in e
         assert "mtp" not in e
         assert "vision" not in e
@@ -665,14 +707,18 @@ class TestShadowSlotStatusInheritance:
         assert out["embed"]["container_status"] == "stopped"
         assert out["embed"]["served_by"] == "npu"
 
-    async def test_disabled_shadow_not_inherited(self) -> None:
+    async def test_every_npu_shadow_inherits_from_a_live_anchor(self) -> None:
+        """#1369: shadows carry placeholder models, so there is no per-shadow
+        opt-out any more — a live anchor serves all of them coresident. (The
+        old test pinned ``enabled=False`` suppressing inheritance; the modality
+        gate now lives on the anchor's ``[npu]`` table instead.)"""
         out = await container_enrichment(
-            [_npu_anchor_cfg(), _shadow_cfg(enabled=False)],
+            [_npu_anchor_cfg(), _shadow_cfg()],
             pull_jobs={},
             provider=MapContainerProvider({"npu": True}, healthy=True),
         )
-        assert out["embed"]["container_status"] == "stopped"
-        assert "served_by" not in out["embed"]
+        assert out["embed"]["container_status"] == "running"
+        assert out["embed"]["served_by"] == "npu"
 
     async def test_shadow_without_anchor_stays_stopped(self) -> None:
         out = await container_enrichment(
@@ -683,9 +729,10 @@ class TestShadowSlotStatusInheritance:
         assert out["embed"]["container_status"] == "stopped"
         assert "served_by" not in out["embed"]
 
-    async def test_disabled_anchor_does_not_serve(self) -> None:
+    async def test_model_less_anchor_does_not_serve(self) -> None:
+        """A model-less anchor isn't running FLM, so it can't serve shadows."""
         out = await container_enrichment(
-            [_npu_anchor_cfg(enabled=False), _shadow_cfg()],
+            [_npu_anchor_cfg(model={"default": ""}), _shadow_cfg()],
             pull_jobs={},
             provider=MapContainerProvider({"npu": True}, healthy=True),
         )
@@ -879,7 +926,7 @@ class TestSnapshotComposition:
         payload = views[0].to_dict()
         # Pure config lift lands on the wire payload.
         assert payload["model_default"] == "qwen3-4b"
-        assert payload["enabled"] is True
+        assert "enabled" not in payload
         # And NO legacy live-state key sneaks in.
         assert "backend_url" not in payload
 

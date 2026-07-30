@@ -44,7 +44,7 @@ base URL is still the host-and-port of `hal0-api` itself.
 <Aside type="note" title="Slot aliases vs model ids">
 The `model` field accepts either a **slot alias** (`agent`, `utility`, or
 any name of a `type=llm` slot you've created), a **virtual role**
-(`hal0/agent`, `hal0/utility`, `hal0/npu`, or `hal0/<any-enabled-llm-slot>`),
+(`hal0/agent`, `hal0/utility`, `hal0/npu`, or `hal0/<any-model-bound-llm-slot>`),
 or a **raw registry model id** from the catalogue. The aliases are stable
 across model swaps — pin to `agent` and you don't have to chase the
 backing model id every time you re-pick. See [Slot as
@@ -318,7 +318,7 @@ to `http://localhost:8080` today — you'll get a 404 on every request.
 |---|---|---|
 | `404 Not Found` on every chat request | The `base_url` is missing the `/v1` suffix — the client is hitting `http://localhost:8080/chat/completions` instead of `http://localhost:8080/v1/chat/completions`. | Append `/v1` to the `base_url`. The OpenAI spec nests everything under `/v1`; hal0 follows the same shape. |
 | Client refuses to start with `Missing API key` / `Authorization header required` | The SDK enforces a non-empty `Authorization` header even when the server doesn't check it. | Pass any placeholder string (e.g. `not-needed`) as the `api_key`. hal0 ignores the value. |
-| `Model 'agent-pro' not found` (or similar alias 404) | The slot alias is a typo, or the slot isn't enabled / has no model assigned. | Run `curl http://localhost:8080/v1/models` to see the exact aliases in play, or `hal0 slot list` to confirm the slot exists. Note: a typo'd chat model **silently** falls through to the `agent` slot's last-resort heuristic rather than 404'ing — see [Slot as model](/docs/reference/api/slot-as-model#slot-name-vs-registry-ref). |
+| `Model 'agent-pro' not found` (or similar alias 404) | The slot alias is a typo, or the slot has no model assigned (which is the same thing since #1369). | Run `curl http://localhost:8080/v1/models` to see the exact aliases in play, or `hal0 slot list` to confirm the slot exists. Note: a typo'd chat model **silently** falls through to the `agent` slot's last-resort heuristic rather than 404'ing — see [Slot as model](/docs/reference/api/slot-as-model#slot-name-vs-registry-ref). |
 | Streaming prints the whole response at once (no incremental chunks) | The client is buffering the SSE stream, or parsing JSON instead of the SSE wire format. | `curl -N` to disable buffering, or use the SDK's streaming entry point (`client.chat.completions.create(..., stream=True)` then iterate). hal0 emits standard OpenAI SSE — `data: {...}\n\n` per chunk plus a `data: [DONE]` sentinel; see [Streaming (SSE)](/docs/reference/api/streaming). |
 | LangChain embeddings: `ValueError: input length 9000 exceeds model context length 8192` on inputs well within hal0's slot limit | LangChain's local precheck (`check_embedding_ctx_length`, default `True`) compares input length against its hard-coded registry, not against hal0's actual slot context length. | Set `check_embedding_ctx_length=False` on `OpenAIEmbeddings`. hal0 enforces the real slot limit server-side and returns a clean 400 if the input is too long. |
 | `400 request.missing_model` from `/v1/audio/transcriptions` | The OpenAI spec requires a `model` form field on the multipart upload; the client sent only the audio file. | Add `"model": "<slot-alias-or-model-id>"` as a multipart form field alongside the audio. hal0 rejects a missing model up front rather than 404'ing ambiguously. |

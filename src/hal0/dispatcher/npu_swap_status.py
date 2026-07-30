@@ -15,7 +15,7 @@ the slot's lifecycle state. Transitional states (PULLING/STARTING/
 WARMING/UNLOADING) map to ``in_progress=True``; settled states
 (READY/SERVING/IDLE/OFFLINE/ERROR) map to ``in_progress=False``.
 
-By design, only one NPU LLM slot may be enabled at a time.
+By design, only one NPU LLM slot may have a model bound at a time.
 :meth:`hal0.slots.manager.SlotManager._check_npu_exclusivity` guards the
 *write* path; this module observes the *runtime* state.
 """
@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hal0.dispatcher._npu_common import is_container_npu_cfg
+from hal0.slots.activation import claims_npu_anchor, slot_model_id
 from hal0.slots.state import SlotState
 
 log = logging.getLogger(__name__)
@@ -37,14 +38,14 @@ class NpuSwapStatus:
     """Snapshot of the NPU trio swap state.
 
     Attributes:
-        in_progress: True iff the enabled NPU LLM container slot is in a
+        in_progress: True iff the live NPU LLM container slot is in a
             transitional lifecycle state (model swap = container restart).
         from_model: Always ``None`` — a restarting container exposes no
             "previously loaded" signal; the dashboard shows the banner
             without naming the outgoing model.
-        to_model: The model_name configured on the enabled NPU LLM
-            slot (the "to" side of the swap). ``None`` when no NPU
-            LLM slot is enabled, or when its ``model.default`` is empty.
+        to_model: The model_name configured on the NPU LLM anchor (the
+            "to" side of the swap). ``None`` when no NPU LLM slot has a
+            model bound — which, post-#1369, is the same condition.
     """
 
     in_progress: bool
@@ -59,33 +60,22 @@ class NpuSwapStatus:
         }
 
 
-def _enabled_npu_llm_slot(slot_configs: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Return the (at most one) enabled NPU LLM slot config, or None.
+def _npu_llm_anchor(slot_configs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the (at most one) model-bound NPU LLM slot config, or None.
 
-    The NPU-exclusivity validation guarantees at most one such slot
-    exists on disk; we walk the list defensively anyway and return the
-    first match. A multi-match would itself be a bug, surfaced upstream
-    by the validator the next time the operator saves.
+    The NPU-exclusivity validation guarantees at most one such slot exists on
+    disk; we walk the list defensively anyway and return the first match. A
+    multi-match would itself be a bug, surfaced upstream by the validator the
+    next time the operator saves.
+
+    ``claims_npu_anchor`` also covers the "no model bound" case that used to
+    be a separate ``enabled is False`` skip (#1369) — a model-less anchor has
+    no swap to report either way.
     """
     for cfg in slot_configs:
-        if cfg.get("device") != "npu":
-            continue
-        if cfg.get("type") != "llm":
-            continue
-        if cfg.get("enabled") is False:
-            continue
-        return cfg
+        if claims_npu_anchor(cfg):
+            return cfg
     return None
-
-
-def _slot_model_default(slot_cfg: dict[str, Any]) -> str:
-    """Pull ``model.default`` out of a slot config dict."""
-    model_section = slot_cfg.get("model")
-    if isinstance(model_section, dict):
-        default = model_section.get("default")
-        if isinstance(default, str):
-            return default
-    return ""
 
 
 #: SlotState values that indicate a container NPU slot is mid-transition
@@ -112,10 +102,10 @@ async def fetch_npu_swap_status(
     states (READY/SERVING/IDLE/OFFLINE/ERROR) map to ``in_progress=False``.
 
     Never raises: the dashboard poll must never see a swap-status 503.
-    Missing slot manager, no enabled NPU LLM slot, a non-container NPU
+    Missing slot manager, no model-bound NPU LLM slot, a non-container NPU
     slot, or any accessor error all degrade to ``in_progress=False``.
     """
-    npu_slot_cfg = _enabled_npu_llm_slot(slot_configs)
+    npu_slot_cfg = _npu_llm_anchor(slot_configs)
     if npu_slot_cfg is None or slot_manager is None:
         return NpuSwapStatus(in_progress=False, from_model=None, to_model=None)
     if not is_container_npu_cfg(npu_slot_cfg):
@@ -123,10 +113,10 @@ async def fetch_npu_swap_status(
         return NpuSwapStatus(
             in_progress=False,
             from_model=None,
-            to_model=_slot_model_default(npu_slot_cfg) or None,
+            to_model=slot_model_id(npu_slot_cfg) or None,
         )
 
-    to_model = _slot_model_default(npu_slot_cfg) or None
+    to_model = slot_model_id(npu_slot_cfg) or None
 
     try:
         slot = await slot_manager.status(npu_slot_cfg.get("name") or "npu")

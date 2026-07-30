@@ -304,7 +304,6 @@ def app_with_slot(tmp_hal0_home: str) -> FastAPI:
                 "port = 8081",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
-                "enabled = true",
                 "[model]",
                 'default = "qwen2.5-0.5b-instruct-q4_k_m"',
                 "",

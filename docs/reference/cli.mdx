@@ -132,6 +132,7 @@ hal0 setup --auto --no-pull --no-extensions
 | `slot migrate-hw` | One-shot, operator-run: unwind the flags-fold so hardware sticks to slots (folds model NGL/runner + profile/slot image pins onto each slot's typed HW grid). Dry-run by default; `--apply` writes (backs itself up first) and needs hal0 stopped. | `--apply`, `--yes`/`-y`, `--stop-services` |
 | `slot migrate-caps` | One-shot, operator-run: fold slot-level `mtp`/`enable_thinking`/`vision` onto each slot's bound model defaults (the model owns tuning caps; an existing model opinion wins, divergent slots are reported first-slot-wins) and drop the slot keys. Dry-run by default; `--apply` writes (backs itself up first) and needs hal0 stopped. | `--apply`, `--yes`/`-y`, `--stop-services` |
 | `slot migrate-flags` | One-shot, operator-run: fold each slot's effective launch tune (`[server].extra_args`, `parallel`, per-slot `chat_template`, layered over its profile flags) onto the bound model's `defaults` — the only tier the launch path still reads. Two slots folding divergent tunes onto one model refuse as a group, writing nothing. Dry-run by default; `--apply` writes (backs itself up first) and needs hal0 stopped. | `--apply`, `--yes`/`-y`, `--stop-services` |
+| `slot migrate-enabled-removal` | Drop the removed `enabled` key from slot TOMLs (a bound model is the activation signal now). A slot that was `enabled = false` while still holding a `[model].default` gets the model cleared, so the disable survives the upgrade; NPU trio shadows keep their placeholder model and only lose the key. Dry-run by default; `--apply` writes. Unlike the other `migrate-*` commands this needs no deploy window — the same sweep already runs on every API start and is idempotent. | `--apply` |
 
 `slot create` flags:
 
@@ -313,7 +314,7 @@ migrated (v0.1.x → v0.2 is a clean break).
 | `memory recall <query>` | Debug recall through the ACL front door (`/api/memory/recall`) — see what an agent would get back. | `--bank <namespace>`, `--tags` (repeatable), `--types` (repeatable), `--max-tokens`, `--json` |
 
 `memory graph enable --slot <name>` repoints the Hindsight engine's native
-extraction LLM at the named slot (ADR-0023). `<name>` must be an enabled
+extraction LLM at the named slot (ADR-0023). `<name>` must be a model-bound
 `type=llm` slot — the server validates it against the live slot set and restarts
 `hindsight-api` to apply. Omit `--slot` to keep the current slot. The legacy
 `--route`/`--provider`/`--model` options were removed in ADR-0023.

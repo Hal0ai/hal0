@@ -12,6 +12,8 @@ whole Phase 2 contract in one pass:
     serves it coresident — no standalone process);
   - the anchor is never eagerly restarted; ``pending_reload`` is True;
   - the persisted capabilities.toml reflects device=npu + enabled.
+    (``CapabilitySelection.enabled`` survives #1369 — it is the operator's
+    intent in capabilities.toml; only its projection onto the slot changed.)
 
 The on-disk layout is the "drift" fixture: capabilities.toml says
 npu/flm/enabled while the embed slot TOML still says vulkan — exactly the
@@ -106,7 +108,6 @@ async def test_npu_phase2_embed_enable_end_to_end(
                 "port = 8082",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
-                "enabled = false",
                 "[model]",
                 'default = "nomic-embed-text-v1.5-q8_0"',
                 "",
@@ -138,7 +139,8 @@ async def test_npu_phase2_embed_enable_end_to_end(
                 "type": "llm",
                 "device": "npu",
                 "profile": "flm",
-                "enabled": True,
+                # A bound model is what makes this a live FLM anchor (#1369).
+                "model": {"default": "gemma3:1b"},
             }
         ]
     )
@@ -166,18 +168,17 @@ async def test_npu_phase2_embed_enable_end_to_end(
 
     # 2. A device=npu, type=embedding slot record is in force. The slot TOML
     #    existed with NO type (drift shape), so the apply must stamp
-    #    type=embedding alongside enabled — WITHOUT a nested model (Decision 4).
-    enabled_writes = [
+    #    type=embedding — WITHOUT a nested model (Decision 4) and, since #1369,
+    #    without any activation flag (step 1's anchor toggle IS the gate).
+    type_writes = [
         c
         for c in fake.calls
         if c[0] == "update_config"
         and c[1] == "embed"
-        and c[2]["updates"].get("enabled") is True
         and c[2]["updates"].get("type") == "embedding"
     ]
-    assert enabled_writes, f"no enabled+type write on embed slot: {fake.calls}"
-    # That write must NOT carry the nested model (Decision 4).
-    assert "model" not in enabled_writes[-1][2]["updates"]
+    assert type_writes, f"no type write on embed slot: {fake.calls}"
+    assert type_writes[-1][2]["updates"] == {"type": "embedding"}, type_writes[-1]
 
     # 3. ZERO standalone spawn on the embed slot.
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (

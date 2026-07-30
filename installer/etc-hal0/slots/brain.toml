@@ -27,7 +27,6 @@ type = "llm"
 device = "gpu-vulkan"
 runtime = "container"
 profile = "brain"
-enabled = true
 port = 8089
 n_gpu_layers = -1
 threads = 0

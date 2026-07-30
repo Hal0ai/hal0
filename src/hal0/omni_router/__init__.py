@@ -12,7 +12,7 @@ Eight tools ship in v0.2:
     ``route_to_chat``.
 
 Dynamic filtering: a tool ships to the LLM only if at least one
-enabled slot of its target type exists and (for label-gated tools) at
+model-bound slot of its target type exists and (for label-gated tools) at
 least one of those slots has a model with the required labels. LLMs
 without the ``tool-calling`` label receive no tools at all.
 

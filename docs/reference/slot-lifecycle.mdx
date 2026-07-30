@@ -186,8 +186,9 @@ with a stable `slot.*` code:
 | `NpuExclusivityViolation` | `slot.npu_exclusivity_violation` | 409 |
 
 `NpuExclusivityViolation` guards the AMD XDNA hardware context, which admits
-exactly one NPU LLM at a time: two enabled `device=npu, type=llm` slots cannot
-coexist.
+exactly one NPU LLM at a time: two `device=npu, type=llm` slots **with a model
+configured** cannot coexist, so the 409 lands on the write that binds the second
+model. Model-less NPU LLM slots (the shipped `flm` seed is one) coexist freely.
 
 ## Related references
 

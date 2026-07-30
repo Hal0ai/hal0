@@ -33,7 +33,6 @@ def _gpu_vulkan_cfg(name: str, model: str) -> dict:
         "type": "llm",
         "device": "gpu-vulkan",
         "provider": "llama-server",
-        "enabled": True,
         "group": "custom",
         "model": {"default": model},
     }

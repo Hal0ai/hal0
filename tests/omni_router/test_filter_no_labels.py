@@ -79,7 +79,6 @@ def test_loaded_slot_from_config_prefers_model_info_tool_calling() -> None:
     cfg = {
         "name": "primary",
         "type": "llm",
-        "enabled": True,
         "model": {"default": "agent-7b"},  # no labels key at all
     }
     model_info = {"id": "agent-7b", "capability_flags": {"tool_calling": True}}
@@ -94,7 +93,6 @@ def test_loaded_slot_from_config_falls_back_without_model_info() -> None:
     cfg = {
         "name": "primary",
         "type": "llm",
-        "enabled": True,
         "model": {"default": "agent-7b", "labels": ["tool-calling"]},
     }
     slot = loaded_slot_from_config(cfg, model_info=None)

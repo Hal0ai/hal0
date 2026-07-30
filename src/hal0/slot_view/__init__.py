@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hal0.model_meta import device_to_backend
+from hal0.slots.activation import claims_npu_anchor, npu_modality_active
 from hal0.slots.reaper import is_pinned as reaper_is_pinned
 
 log = logging.getLogger(__name__)
@@ -208,36 +209,30 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     """Per-slot TOML-derived fields for slot snapshots. Pure.
 
     Lifts the edit-drawer seed fields (type, model default + labels,
-    enabled, n_gpu_layers, rope_freq_base, idle_timeout_s, workers,
-    llamacpp_args) plus the NPU trio grouping so the dashboard renders
-    cards + drawers without a per-slot ``/config`` fetch.
+    n_gpu_layers, rope_freq_base, idle_timeout_s, workers, llamacpp_args)
+    plus the NPU trio grouping and per-shadow modality state so the dashboard
+    renders cards + drawers without a per-slot ``/config`` fetch.
     ``enable_thinking`` / ``mtp`` / ``vision`` are NOT lifted here — they
     are model-owned tri-state caps now (spec-hw-slot-ownership §1),
-    surfaced via ``/api/models`` instead.
+    surfaced via ``/api/models`` instead. Neither is ``enabled``: the field
+    is gone (#1369) and the UI derives "grey / not configured" from
+    ``model_default`` being absent.
 
     Coresident grouping:
       A slot of type=llm + device=npu serving as the chat anchor and
-      any sibling ``stt`` / ``embed`` alias records that are enabled
-      share a ``coresident_group=npu-flm-trio`` marker. The dashboard
-      uses this to render a "trio" badge linking the cards.
+      any sibling ``stt`` / ``embed`` alias records share a
+      ``coresident_group=npu-flm-trio`` marker. The dashboard uses this to
+      render a "trio" badge linking the cards.
     """
-    # First pass — pick out the NPU LLM slot(s) so we can decide if
-    # the trio is "active" (i.e. there IS an npu-llm slot enabled).
-    npu_llm_enabled: list[str] = [
-        str(cfg.get("name", ""))
-        for cfg in configs
-        if cfg.get("device") == "npu"
-        and cfg.get("type") == "llm"
-        and cfg.get("enabled") is not False
-    ]
-    trio_active = bool(npu_llm_enabled)
+    # First pass — is there an NPU LLM anchor with a model bound? That, not a
+    # separate flag, is what makes the trio real (#1369).
+    trio_active = any(claims_npu_anchor(cfg) for cfg in configs)
 
     out: dict[str, dict[str, Any]] = {}
     for cfg in configs:
         name = str(cfg.get("name", ""))
         if not name:
             continue
-        enabled = cfg.get("enabled") is not False
         model_default = ""
         model_labels: list[str] = []
         model_section = cfg.get("model")
@@ -249,13 +244,13 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         entry: dict[str, Any] = {}
 
         # PR-18: lift slot ``type`` + model ``labels`` + model ``default``
-        # + ``enabled`` so the dashboard's chat surface can build the
-        # persona dropdown (which chat-type slots are enabled?) and
-        # decide whether to opt in to OmniRouter (does the active
-        # persona's model carry the ``tool-calling`` label?) without
-        # making a second call to /api/slots/{name}/config per slot.
-        # The fields are purely additive — pre-PR-18 consumers ignore
-        # them.
+        # so the dashboard's chat surface can build the persona dropdown
+        # (which chat-type slots have a model?) and decide whether to opt
+        # in to OmniRouter (does the active persona's model carry the
+        # ``tool-calling`` label?) without making a second call to
+        # /api/slots/{name}/config per slot. ``model_default`` doubles as
+        # the activation signal since #1369 — absent means grey/unconfigured,
+        # so no separate ``enabled`` key is lifted.
         slot_type = cfg.get("type")
         if isinstance(slot_type, str) and slot_type:
             entry["type"] = slot_type
@@ -263,7 +258,6 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
             entry["model_default"] = model_default
         if model_labels:
             entry["labels"] = model_labels
-        entry["enabled"] = enabled
 
         # §21.10 operator pin (#1367): lift the *effective* pin state —
         # explicit ``pinned`` key wins, else the default anchor set
@@ -380,13 +374,24 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         if declared_backend:
             entry["declared_backend"] = declared_backend
 
+        # npu_modality_active: for a trio SHADOW, whether the anchor is
+        # actually serving its modality (the anchor's ``[npu].asr`` / ``.embed``
+        # — i.e. the ``flm serve`` flags). The shadow's own config cannot answer
+        # this: it carries a placeholder model and, pre-#1369, a mirrored
+        # ``enabled`` flag that drifted from what FLM launched with. Lifting the
+        # resolved answer here keeps the shadow card's ON/OFF pill from having
+        # to hunt for the anchor in the slot list.
+        if cfg.get("device") == "npu" and cfg.get("type") != "llm":
+            entry["npu_modality_active"] = npu_modality_active(configs, str(cfg.get("type") or ""))
+
         # Coresident grouping — every device=npu slot (anchor + stt/embed
         # shadows) backs the same FLM process, so they share a group marker.
         # Keyed on device, NOT slot name: deployment renamed the trio to
-        # npu/stt/embed, so the old name-based set never matched in prod. A
-        # slot only joins when (a) the NPU LLM anchor is enabled and (b) THIS
-        # slot is enabled — disabled siblings don't claim membership.
-        if cfg.get("device") == "npu" and trio_active and enabled:
+        # npu/stt/embed, so the old name-based set never matched in prod.
+        # Membership requires only a live anchor: the shadows are records for
+        # that one process and carry placeholder models, so per-shadow
+        # membership was never independently meaningful (#1369).
+        if cfg.get("device") == "npu" and trio_active:
             entry["coresident_group"] = "npu-flm-trio"
 
         out[name] = entry
@@ -577,14 +582,7 @@ async def container_enrichment(
     # unit or container of their own; the npu anchor's FLM child serves them
     # coresident. Their own probe always reads "stopped", so inherit the
     # anchor's live status instead and mark the relationship for the UI.
-    anchor_cfg = next(
-        (
-            c
-            for c in configs
-            if c.get("device") == "npu" and c.get("type") == "llm" and c.get("enabled") is not False
-        ),
-        None,
-    )
+    anchor_cfg = next((c for c in configs if claims_npu_anchor(c)), None)
     if anchor_cfg is not None:
         anchor_name = str(anchor_cfg.get("name", ""))
         anchor_entry = out.get(anchor_name)
@@ -596,7 +594,6 @@ async def container_enrichment(
                     and name != anchor_name
                     and cfg.get("device") == "npu"
                     and cfg.get("type") != "llm"
-                    and cfg.get("enabled") is not False
                     and name in out
                 ):
                     out[name]["container_status"] = anchor_entry["container_status"]

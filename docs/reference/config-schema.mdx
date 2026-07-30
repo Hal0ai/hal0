@@ -152,7 +152,7 @@ load — they no longer validate or round-trip.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `enabled` | bool | `false` | Off by default. On the Hindsight engine this is a reporting gate — Hindsight builds its graph natively; vector recall works either way. |
-| `extraction_slot` | str | `"utility"` | The local `type=llm` slot Hindsight uses for graph extraction. Propagated to `hindsight-api` as `HINDSIGHT_API_LLM_MODEL=hal0/<slot>` via a systemd drop-in. Validated against the live enabled-llm-slot set at set-time. Slot-name grammar (lowercase alnum/`-`/`_`, ≤32, leading alphanumeric). |
+| `extraction_slot` | str | `"utility"` | The local `type=llm` slot Hindsight uses for graph extraction. Propagated to `hindsight-api` as `HINDSIGHT_API_LLM_MODEL=hal0/<slot>` via a systemd drop-in. Validated against the live model-bound-llm-slot set at set-time. Slot-name grammar (lowercase alnum/`-`/`_`, ≤32, leading alphanumeric). |
 | `llm_timeout_s` | int (30–3600) | `300` | Timeout for the Hindsight daemon's LLM calls — extraction, consolidation, and reflect. Covers cold slot starts and long reflects. Propagated to `hindsight-api` as `HINDSIGHT_API_LLM_TIMEOUT` via the same systemd drop-in as `extraction_slot`; the daemon restarts to pick it up. |
 
 <Aside type="note">
@@ -209,9 +209,9 @@ A slot config has `[slot]`, `[model]`, and optional `[server]` / `[npu]` /
 | `device` | str | `gpu-rocm` | `gpu-rocm` \| `gpu-vulkan` \| `gpu-cuda` \| `cpu` \| `npu`. |
 | `gpu_index` | int \| null (≥0) | `null` | Pins the slot to one GPU on multi-GPU hosts (`HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` on ROCm, `GGML_VK_VISIBLE_DEVICES` on Vulkan, CDI device mapping on CUDA). `null` = all GPUs. No dashboard control yet — TOML/CLI only. |
 | `provider` | str | `llama-server` | Engine label (round-trips for compatibility/UI). |
+| ~~`enabled`~~ | — | — | **Removed (#1369).** A slot is activated by binding `[model].default`; there is no separate flag. A stale key round-trips harmlessly (the schema is `extra="allow"`) until the boot sweep drops it — see `hal0 slot migrate-enabled-removal`. A `PUT /api/slots/{name}/config` carrying it is refused with `slot.removed_key_denied`. |
 | `profile` | str \| null | `null` | Profile name from `profiles.toml` (image + tuned flags). |
 | `image` | str \| null | `null` | Top-level image-ref override. Resolution order: `image` (this field) → `profile.image` → the code-pinned default runner. Wins over the profile's own image without cloning the profile. **Not** the `[image]` table below (that's ComfyUI's image-gen settings) — this is a bare string key named `image` directly under `[slot]`. |
-| `enabled` | bool | `true` | Start this slot on hal0 startup. |
 | `enable_thinking` | bool \| null | `null` | Per-slot reasoning default; overridable per request. |
 | `mtp` | bool \| null | `null` | Tri-state multi-token-prediction override: `true` forces on, `false` forces off, `null` (Auto) enables MTP only when the profile opts in (`profile.mtp`) **and** the model itself ships MTP heads (registry `mtp` tag, or a delimited `mtp` marker in the model id/filename, e.g. `-MTP-`/`_mtp`/`.MTP`). |
 | `chat_template` | str \| null | `null` | Chat-template id override (`auto`/null = GGUF-embedded). |

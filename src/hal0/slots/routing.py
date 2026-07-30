@@ -97,7 +97,7 @@ _SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 @dataclass(frozen=True, slots=True)
 class LoadedSlot:
-    """Typed routing result for an enabled slot.
+    """Typed routing result for a slot with a model bound.
 
     Returned by :meth:`SlotManager.resolve_for_request` and
     :meth:`SlotManager.loaded_slot` so callers do not have to route to a
@@ -119,7 +119,6 @@ class LoadedSlot:
     model_id: str
     slot_type: str
     device: str
-    enabled: bool
     labels: frozenset[str]
     system_prompt: str = ""
     profile: str | None = None
@@ -154,9 +153,11 @@ def loaded_slot_from_config(
 ) -> LoadedSlot | None:
     """Convert one raw slot config dict into a :class:`LoadedSlot`.
 
-    Returns ``None`` when the config does not describe an enabled slot
-    with a model id. The raw TOML shapes are intentionally absorbed here
-    so request routers and tool dispatchers consume a typed result.
+    Returns ``None`` when the config does not name a slot type or has no
+    ``[model].default`` — model-presence is the activation signal (#1369),
+    so a model-less slot is simply not routable. The raw TOML shapes are
+    intentionally absorbed here so request routers and tool dispatchers
+    consume a typed result.
 
     ``model_info`` (optional) is the registry ``Model.model_dump()``-shaped
     dict for ``cfg``'s bound model — pass it when the caller already has a
@@ -171,8 +172,6 @@ def loaded_slot_from_config(
     name = str(cfg.get("name") or "").strip()
     slot_type = str(cfg.get("type") or "").strip()
     if not name or not slot_type:
-        return None
-    if cfg.get("enabled") is False:
         return None
 
     model_section = cfg.get("model") or {}
@@ -203,7 +202,6 @@ def loaded_slot_from_config(
         model_id=model_id,
         slot_type=slot_type,
         device=str(cfg.get("device") or ""),
-        enabled=True,
         labels=labels,
         system_prompt=system_prompt,
         profile=profile if isinstance(profile, str) and profile else None,
@@ -235,7 +233,7 @@ async def default_slot_for(host: RoutingHost, slot_type: str) -> str | None:
     misconfiguration surfaces at the routing call site instead of
     silently picking one. Returns ``None`` when no slot of the
     type has ``default = true`` (the caller is expected to
-    fall-through to the first enabled slot — see
+    fall-through to the first model-bound slot — see
     :func:`route_for_request`).
     """
     candidates: list[str] = []
@@ -275,7 +273,7 @@ async def _model_info_for(host: RoutingHost, cfg: dict[str, Any]) -> dict[str, A
 
 
 async def loaded_slot(host: RoutingHost, name: str) -> LoadedSlot | None:
-    """Return a typed view of an enabled configured slot, or ``None``.
+    """Return a typed view of a model-bound configured slot, or ``None``.
 
     Resolves back-compat aliases transparently. This is a read-only
     inventory helper; it does not probe runtime state.
@@ -306,9 +304,9 @@ async def resolve_for_request(
          required label (sourced from the slot's
          ``model.labels`` list). The default is dropped if it
          can't satisfy the overlay.
-      3. **Fall-through.** Otherwise pick the first ``enabled =
-         true`` slot of ``slot_type`` in TOML declaration order
-         (still satisfying the label overlay if any).
+      3. **Fall-through.** Otherwise pick the first model-bound slot
+         of ``slot_type`` in TOML declaration order (still satisfying
+         the label overlay if any).
       4. ``None`` when nothing matches.
     Returning :class:`LoadedSlot` keeps callers from reopening raw slot
     configs to discover the model id, labels, device, or system prompt.
@@ -335,7 +333,7 @@ async def resolve_for_request(
         if default_slot is not None and _satisfies(default_slot):
             return default_slot
 
-    # Step 3: fall-through to first enabled + label-matching slot.
+    # Step 3: fall-through to first model-bound + label-matching slot.
     for slot in slots:
         if not _satisfies(slot):
             continue
@@ -433,7 +431,6 @@ async def add_slot(
         "type": type,
         "device": device,
         "provider": "llama-server",
-        "enabled": True,
         "model": {"default": model},
     }
     return await host.create(name, cfg)

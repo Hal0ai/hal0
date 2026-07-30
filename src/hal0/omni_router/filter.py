@@ -3,7 +3,7 @@
 Given the active chat slot and the live SlotManager state, compute
 the subset of tools that:
 
-  1. Have at least one enabled slot of the tool's ``target_slot_type``.
+  1. Have at least one model-bound slot of the tool's ``target_slot_type``.
   2. (For label-gated tools) have at least one of those slots with a
      model that carries every required label.
   3. Are gated by the chat slot's own caller ``tool_calling`` flag —
@@ -32,6 +32,7 @@ from typing import Any, Protocol
 
 from hal0.model_meta import labels_of, model_capabilities_of
 from hal0.omni_router.tools import TOOL_DEFINITIONS, ToolDefinition
+from hal0.slots.activation import is_activated
 
 
 class SlotManagerLike(Protocol):
@@ -110,15 +111,14 @@ async def active_tools_for(
     active: list[ToolDefinition] = []
     for tool in tools:
         if tool.name == "route_to_chat":
-            # route_to_chat is included iff at least one OTHER enabled
-            # chat slot exists. The caller's own tool_calling flag has
-            # been validated above; the targets don't need it (a target
-            # without tool_calling simply returns a non-tool-call
-            # response, which is fine).
+            # route_to_chat is included iff at least one OTHER chat slot
+            # has a model bound (#1369: model-presence is what makes a slot
+            # a real target). The caller's own tool_calling flag has been
+            # validated above; the targets don't need it (a target without
+            # tool_calling simply returns a non-tool-call response, which is
+            # fine).
             has_peer = any(
-                c.get("type") == "llm"
-                and c.get("enabled", True)
-                and c.get("name") != chat_slot_name
+                c.get("type") == "llm" and is_activated(c) and c.get("name") != chat_slot_name
                 for c in configs
             )
             if has_peer:

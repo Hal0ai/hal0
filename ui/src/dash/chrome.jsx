@@ -828,8 +828,9 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
       title: serviceById.openwebui?.detail || (serviceHealth.pending ? 'service health pending' : 'openwebui down'),
     },
   ];
-  // runtimes group — one LED pip per enabled slot, plus the ready count.
-  const enabledSlots = (useSlots().data || []).filter((s) => s.enabled !== false);
+  // runtimes group — one LED pip per CONFIGURED slot (a model bound is what
+  // makes a slot real, #1369), plus the ready count.
+  const configuredSlots = (useSlots().data || []).filter((s) => !!(s.model || s.model_default));
   const servicesReady = footerIndicators.filter((s) => s.tone === 'up').length;
 
   return (
@@ -964,7 +965,7 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
         {/* runtimes — one LED pip per enabled slot + ready count */}
         <div className="foot-health" data-testid="foot-health-runtimes" title={runtimeTitle}>
           <span className="pips" aria-hidden="true">
-            {enabledSlots.map((s, i) => (
+            {configuredSlots.map((s, i) => (
               <span key={s.name ?? i} className={"pip " + _slotPip(s)} />
             ))}
           </span>

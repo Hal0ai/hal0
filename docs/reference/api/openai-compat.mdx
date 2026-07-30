@@ -55,7 +55,7 @@ Returns the OpenAI listing shape:
 
 The list combines two kinds of entries:
 
-- **Per-slot alias entries** — every enabled chat slot (`type == "llm"`) with
+- **Per-slot alias entries** — every chat slot (`type == "llm"`) with
   a configured model appears once, with `id` equal to the slot alias (the slot
   name, e.g. `agent`, the canonical default/anchor slot per ADR-0023, or
   `utility`), a human `name`, and the slot's `context_length`. Both warm and

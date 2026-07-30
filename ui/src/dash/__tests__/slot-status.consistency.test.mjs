@@ -55,15 +55,17 @@ for (const cs of ["running", "starting", "pulling", "stopped", "crashed"]) {
     });
   }
 }
-// Disabled slot (button branch is bypassed in the UI, but the helper must
-// still return a non-running phase so nothing offers "Stop" on a disabled slot).
-cases.push({ label: "disabled", slot: { name: "chat", state: "ready", container_status: "running", container_health: true, enabled: false } });
+// A stale `enabled` key on the wire (#1369 removed the field; a
+// pre-migration payload or an old client may still send it). It must be inert:
+// the dot and the button both classify on container state, so this case has to
+// obey the SAME mapping as every case above rather than a special exemption.
+cases.push({ label: "stale-enabled-key", slot: { name: "chat", state: "ready", container_status: "running", container_health: true, enabled: false } });
 
 console.log(`slot-status consistency: ${cases.length} cases`);
 for (const { label, slot } of cases) {
   const ind = slotIndicatorFromPhase(slot, NOW);
   const phase = slotButtonPhase(slot, NOW);
-  const expected = slot.enabled === false ? "off" : CLS_TO_PHASE[ind.cls];
+  const expected = CLS_TO_PHASE[ind.cls];
   if (expected === undefined) {
     fail(`${label}: dot cls "${ind.cls}" has no defined button mapping`);
     continue;

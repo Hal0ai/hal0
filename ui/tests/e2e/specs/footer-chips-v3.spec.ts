@@ -23,7 +23,7 @@ test.describe('Footer runtime chip reflects container readiness (#221)', () => {
 
     const runtimes = footer.locator('[data-testid="foot-health-runtimes"]')
     await expect(runtimes).toBeVisible()
-    // HAL0_DATA seeds 8 enabled slots (legacy is disabled); all are ready
+    // HAL0_DATA seeds 8 model-bound slots (legacy has no model, #1369); all ready
     // → "8 / 8 ready", all LED pips lit green.
     await expect(runtimes.locator('.lbl .v')).toContainText('8 / 8 ready')
     await expect(runtimes.locator('.pip.ok')).toHaveCount(8)

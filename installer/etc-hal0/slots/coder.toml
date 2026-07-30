@@ -9,15 +9,14 @@
 # Family-specific overrides go in profile.<family>-coding for specific
 # coder model families (e.g. profile.qwopus-coding) — out of scope for 1.0.
 #
-# Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a
-# model-less box boots a GREY tile. The operator assigns a coder model
-# later, which flips the slot enabled.
+# Clean seed (WS-E, #1107): no `[model].default` pin, so a model-less box
+# boots a GREY tile. The operator assigns a coder model later; filling in
+# `[model].default` is what activates the slot (#1369).
 name = "coder"
 type = "llm"
 device = "gpu-vulkan"
 runtime = "container"
 profile = "coding"
-enabled = false
 port = 8082
 n_gpu_layers = -1
 threads = 0

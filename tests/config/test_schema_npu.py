@@ -96,7 +96,6 @@ def test_seed_flm_toml_validates() -> None:
     # download, no crash-loop. context_size is a tuning default for later.
     assert slot.model is not None and slot.model.default == ""
     assert slot.model.context_size == 16384
-    assert slot.enabled is False
 
 
 def test_seed_tts_toml_validates() -> None:

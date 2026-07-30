@@ -215,7 +215,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
   // tests/slot_config/test_validation_and_lock.py::TestRejectModelOwnedSlotKeys.
 
   const MTP_SLOT = { name: 'chat', type: 'llm', device: 'gpu-rocm', profile: 'rocm-mtp', backend: 'rocm',
-    model_id: 'qwen-mtp', model: 'qwen-mtp', state: 'serving', port: 8092, runtime: 'container', enabled: true }
+    model_id: 'qwen-mtp', model: 'qwen-mtp', state: 'serving', port: 8092, runtime: 'container' }
 
   async function seedSlotsAndModels(page: Page, slots: any[], models: any[]) {
     await page.addInitScript(({ slots, models }: { slots: any[]; models: any[] }) => {
@@ -244,7 +244,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     const CT_SLOT = {
       name: 'chat', type: 'llm', device: 'gpu-rocm', profile: 'rocm-mtp', backend: 'rocm',
       model_id: 'qwen-ct', model: 'qwen-ct', state: 'serving', port: 8092,
-      runtime: 'container', enabled: true,
+      runtime: 'container',
       // No chat_template override on disk — starts in read-only mode.
     }
     const CT_MODEL = { id: 'qwen-ct', name: 'qwen-ct', capabilities: ['chat'], tags: [], defaults: { chat_template: 'chatml' } }

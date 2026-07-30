@@ -1,8 +1,8 @@
 # TTS slot — kokoro-onnx in a podman container (hal0-slot@tts), CPU-only.
 #
-# Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a
-# model-less box boots a GREY tile (no surprise download, no crash-loop).
-# The operator picks a voice model later, which flips the slot enabled.
+# Clean seed (WS-E, #1107): no `[model].default` pin, so a model-less box
+# boots a GREY tile (no surprise download, no crash-loop). The operator picks
+# a voice model later; filling in `[model].default` activates it (#1369).
 #
 # Per spec §5.4: port drift fix. Was 8084 (which conflicted with
 # _SETUP_SLOTS["stt"] = 8084); now 8085 per _SETUP_SLOTS["tts"]. Existing
@@ -12,7 +12,6 @@ type = "tts"
 device = "cpu"
 runtime = "container"
 profile = "kokoro"
-enabled = false
 port = 8085
 n_gpu_layers = 0
 threads = 8

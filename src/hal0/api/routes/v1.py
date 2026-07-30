@@ -617,17 +617,19 @@ async def _wake_capability_slot(request: Request) -> None:
     slot_manager = getattr(request.app.state, "slot_manager", None)
     if slot_manager is None:
         return
-    # Only wake a KNOWN managed slot that is ENABLED; an unconfigured
+    # Only wake a KNOWN managed slot that has a model bound; an unconfigured
     # capability path must dispatch as-is (and 404 as before) rather than trip
-    # a spurious load. Critically, a DISABLED slot must stay dark: the routing
-    # layer drops ``enabled is False`` slots (``_loaded_slot_from_config``), so
-    # waking one here would revive a capability an operator explicitly disabled
-    # (and undo the SC-1 disable semantics). Mirror that rule.
+    # a spurious load. Critically, a model-less slot must stay dark: the
+    # routing layer drops it (``_loaded_slot_from_config``), so waking one here
+    # would revive a capability the operator deliberately cleared — and there
+    # is nothing to load anyway. Mirror that rule (#1369).
     try:
         cfgs = await slot_manager.iter_configs()
     except Exception:
         return
-    eligible = {c.get("name") for c in cfgs if c.get("enabled") is not False}
+    from hal0.slots.activation import is_activated
+
+    eligible = {c.get("name") for c in cfgs if is_activated(c)}
     if slot_name not in eligible:
         return
     # Nothing to do unless the slot was actually evicted to OFFLINE — a
@@ -1034,14 +1036,24 @@ async def _is_npu_trio_request(
 
     PR-19. We route to the trio when:
 
-      1. The request body's ``model`` matches an enabled slot whose
-         ``device == "npu"`` AND ``type == slot_type``. We look at both
+      1. The request body's ``model`` matches a slot whose ``device ==
+         "npu"`` AND ``type == slot_type``. We look at both
          ``slot.model.default`` AND ``slot.name`` so callers that pass
          either the model id or the slot name (e.g. dashboard cards
          using ``model="flm-stt"``) hit the same path. The pre-canon
          capability aliases ``embed-npu`` / ``stt-npu`` also route here
          (see ``_NPU_TRIO_LEGACY_ALIAS``).
-      2. The :class:`NpuTrioRouter` itself is attached on ``app.state``
+      2. The ANCHOR (the ``device=npu, type=llm`` slot) has a model bound
+         and has ``slot_type``'s modality on in its ``[npu]`` table
+         (:func:`hal0.slots.activation.npu_modality_active`). #1369: this
+         replaces a check on the shadow's own ``enabled`` flag. The shadows
+         are display/dispatch records for the anchor's single FLM process
+         and always carry a placeholder ``[model].default``, so they cannot
+         express "off" — and the anchor's ``[npu]`` table is the stronger
+         signal regardless: it IS the ``flm serve --asr/--embed`` flag set,
+         so a modality that was never launched can no longer advertise
+         itself as routable and 503 on the liveness probe instead.
+      3. The :class:`NpuTrioRouter` itself is attached on ``app.state``
          (lifespan didn't fail to construct it).
 
     Returning ``False`` means we fall through to the regular dispatcher
@@ -1069,12 +1081,14 @@ async def _is_npu_trio_request(
         configs = await slot_manager.iter_configs()
     except Exception:
         return False
+    from hal0.slots.activation import npu_modality_active
+
+    if not npu_modality_active(configs, slot_type):
+        return False
     for cfg in configs:
         if cfg.get("type") != slot_type:
             continue
         if cfg.get("device") != "npu":
-            continue
-        if cfg.get("enabled") is False:
             continue
         # Match by model.default OR by slot name — callers may pass
         # either through depending on UI affordance.
@@ -1172,7 +1186,8 @@ async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Respon
         return None
     # Resolve the caller slot. We look up by the request's ``model``
     # field against configured slots' ``model.default``. The first
-    # matching enabled slot wins.
+    # match wins (a match implies a bound model, so no separate
+    # activation check is needed — #1369).
     slot_manager = getattr(request.app.state, "slot_manager", None)
     if slot_manager is None:
         return None
@@ -1183,8 +1198,6 @@ async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Respon
     caller_slot_name: str | None = None
     for cfg in configs:
         if cfg.get("type") != "llm":
-            continue
-        if not cfg.get("enabled", True):
             continue
         model_section = cfg.get("model") or {}
         if isinstance(model_section, dict):

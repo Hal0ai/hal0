@@ -251,6 +251,46 @@ def reject_model_owned_slot_keys(payload: dict[str, Any]) -> None:
         )
 
 
+# ── removed slot-write keys (#1369) ─────────────────────────────────────────
+#
+# Keys that used to be declared ``SlotConfig`` fields and no longer exist.
+# ``extra="allow"`` means a write carrying one would round-trip to disk as
+# inert debris while the caller believes the setting took — the exact silent
+# failure the unknown-key boundary exists to stop. Reported with the
+# replacement rather than as a generic "unknown key" so an old client can
+# actually be fixed. ``enabled`` split into two distinct verbs: bind/clear
+# ``[model].default`` (activation) and POST /unload (lifecycle).
+REMOVED_SLOT_KEYS: dict[str, str] = {
+    "enabled": (
+        "activation is now model-presence — bind or clear '[model].default' "
+        "instead; to stop a running slot use POST /api/slots/{name}/unload"
+    ),
+}
+
+
+def reject_removed_slot_keys(payload: dict[str, Any]) -> None:
+    """400 when a slot-config write body carries a key removed from the schema.
+
+    Runs alongside :func:`reject_model_owned_slot_keys` at every write
+    boundary, BEFORE :func:`unknown_slot_config_keys`, so the operator gets
+    the migration pointer instead of a "check spelling" hint for a key they
+    spelled perfectly. Top level only — every removed key was top-level.
+    """
+    from hal0.errors import BadRequest
+
+    offenders = sorted(k for k in payload if k in REMOVED_SLOT_KEYS)
+    if offenders:
+        keys = ", ".join(repr(k) for k in offenders)
+        raise BadRequest(
+            f"key(s) {keys} were removed from the slot schema and no longer do anything",
+            details={
+                "keys": offenders,
+                "hint": "; ".join(REMOVED_SLOT_KEYS[k] for k in offenders),
+            },
+            code="slot.removed_key_denied",
+        )
+
+
 #: Extra keys tolerated inside specific sub-tables, keyed by sub-table name.
 #: ``[model].ctx_size`` is the documented legacy alias of ``context_size``
 #: (#585) — accepted on write, folded by :func:`fold_ctx_size_alias`.
@@ -562,17 +602,25 @@ class SlotConfigStore:
     ) -> dict[str, Any] | None:
         """Project a selection onto the existing slot TOML dict.
 
-        The store is the single owner of the slot's ``enabled`` flag (SC-1):
+        The store is the single owner of the slot's ACTIVATION (SC-1). Since
+        #1369 the slot has no ``enabled`` flag, so activation is expressed the
+        only way the slot can express it — whether a model is bound:
 
-          - ``enabled`` is written UNCONDITIONALLY when the file exists — a
-            disable flips ``enabled = false`` (so the request router stops
-            resolving the slot) and an enable clears any stale
-            ``enabled = false``,
-          - the backend/device/provider/model/profile fields are reconciled
-            ONLY when the selection is enabled (a pure disable never rewrites
-            the model/device siblings),
-          - both ``device`` (v0.2 canonical) and ``backend`` (one-release
-            legacy alias) written, translated via :mod:`hal0.model_meta`.
+          - a **disable** writes ``model.default = ""``, which is what makes
+            the request router (``loaded_slot_from_config``) stop resolving
+            the slot. The operator's model pick is NOT lost: it stays in
+            ``capabilities.toml`` as ``CapabilitySelection.model``, so a
+            re-enable restores it,
+          - an **enable** writes the device/provider/model/profile fields as
+            before; the model write IS the activation,
+          - a pure disable never rewrites the device/provider/profile
+            siblings, only the model,
+          - ``device`` is the v0.2 canonical field, translated via
+            :mod:`hal0.model_meta`.
+
+        Note ``CapabilitySelection.enabled`` survives — capabilities.toml is
+        where the operator's on/off intent lives. Only its *projection* onto
+        the slot changed.
 
         Once the store-specific ``updates`` dict is built, the actual
         projection — the one-level-deep ``[model]`` merge (so sibling keys
@@ -596,15 +644,20 @@ class SlotConfigStore:
         if raw_before is None:
             return raw_before
 
-        # ``enabled`` is written UNCONDITIONALLY — this is the single owner of
-        # the slot's enablement (SC-1). A disable must flip ``enabled = false``
-        # so the request router (``_loaded_slot_from_config``) stops resolving
-        # the slot; an enable clears any stale ``enabled = false``.
-        updates: dict[str, Any] = {"enabled": selection.enabled}
-        if selection.enabled:
+        # Activation is model-presence (SC-1, #1369). A disable clears
+        # ``[model].default`` so the request router
+        # (``loaded_slot_from_config``) stops resolving the slot; the pick
+        # itself survives in capabilities.toml for the re-enable. A stale
+        # pre-#1369 ``enabled`` key is deliberately left alone — sweeping it is
+        # the migration's job, and touching it here would make the migration's
+        # idempotence check depend on capability traffic.
+        updates: dict[str, Any] = {}
+        if not selection.enabled:
+            updates["model"] = {"default": ""}
+        else:
             # The device/provider/model/profile reconciliation only
             # applies when the slot is going to run — a pure disable never
-            # rewrites the model/device siblings.
+            # rewrites the device/provider siblings.
             slot_device = canonical_device(selection.device)
             if slot_device:
                 updates["device"] = slot_device
@@ -665,6 +718,7 @@ def _write_state(fs: FileState) -> None:
 
 __all__ = [
     "MODEL_OWNED_SLOT_KEYS",
+    "REMOVED_SLOT_KEYS",
     "TOLERATED_SLOT_CONFIG_KEYS",
     "ChangeSet",
     "FileState",
@@ -673,6 +727,7 @@ __all__ = [
     "fold_ctx_size_alias",
     "merge_slot_config",
     "reject_model_owned_slot_keys",
+    "reject_removed_slot_keys",
     "slot_write_lock",
     "unknown_slot_config_keys",
     "write_slot_toml",

@@ -13,7 +13,7 @@
  *   Fallback:  un-enriched snapshots (no container_status — e.g. a stale
  *              /api/status union entry) classify on the bare state string:
  *              isSlotLive(slot) === LIVE_STATES.has(slot.state)
- *              for ALL state strings — independent of enabled.
+ *              for ALL state strings.
  *   Container: isSlotLive = running + healthy (own rule, not state-string).
  */
 import { test, expect } from '../fixtures/apiMock'
@@ -59,9 +59,10 @@ test.describe('isSlotLive — state-string fallback ≡ legacy LIVE_STATES', () 
     expect(live).toBe(true)
   })
 
-  test('un-enriched ready slot stays LIVE even when enabled=false (legacy ignored enabled)', async ({ page }) => {
-    // Legacy LIVE_STATES.has('ready') === true regardless of enabled; a
-    // disabled-but-resident slot still held memory, so it must still attribute.
+  test('un-enriched ready slot stays LIVE despite a stale enabled:false key', async ({ page }) => {
+    // The fallback keys solely off slot.state, and #1369 removed `enabled`
+    // entirely — so a leftover key from a pre-migration payload must not hide
+    // a resident slot from memory attribution.
     const live = await page.evaluate(() =>
       (window as any).isSlotLive({ state: 'ready', enabled: false }),
     )

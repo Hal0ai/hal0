@@ -53,8 +53,10 @@ def test_build_slot_cfg_sets_device_profile_model():
     assert cfg["name"] == "chat"
     assert cfg["device"] == "gpu-rocm"
     assert cfg["profile"] == "rocm"
-    # WS-E (#1108): born DISABLED — enable-on-pull-success flips it later.
-    assert cfg["enabled"] is False
+    # WS-E (#1108) + #1369: born MODEL-LESS. The caller passes model_id="" for
+    # the guided path; the id is stamped only once the pull lands, and since
+    # model-presence IS activation, withholding it is the start gate itself.
+    assert "enabled" not in cfg
     assert cfg["model"]["default"] == "qwen3.6-27b"
     assert cfg["model"]["context_size"] == 32768
     # v2 sets device+profile, NOT the legacy `backend` field.
@@ -114,11 +116,12 @@ def test_apply_seeds_jobs_and_creates_slots(isolated_app_client, tmp_hal0_home, 
     # Slot TOML written OFFLINE (not started).
     toml = Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "agent.toml"
     cfg = tomllib.loads(toml.read_text())
-    assert cfg["model"]["default"] == "qwen3.5-9b"
     assert "profile" in cfg
-    # WS-E (#1108): the fake pull completed successfully → the slot, created
-    # DISABLED, was flipped enabled=True by run_pull_and_activate.
-    assert cfg["enabled"] is True
+    # WS-E (#1108) + #1369: the slot was created model-less; the fake pull
+    # completed successfully → run_pull_and_activate stamped the model id,
+    # which IS the activation. No separate flag is written.
+    assert cfg["model"]["default"] == "qwen3.5-9b"
+    assert "enabled" not in cfg
 
 
 def test_apply_unknown_tier_400(isolated_app_client):

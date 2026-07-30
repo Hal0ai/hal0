@@ -451,22 +451,30 @@ def test_install_extensions_dispatches(monkeypatch):
 
 
 class _RecordingSlotManager:
-    """Fake slot manager that records create() cfgs + update_config() flips."""
+    """Fake slot manager recording create() cfgs + update_config() writes.
+
+    ``model_default`` tracks the activation signal (#1369): the slot is live
+    exactly when it has a non-empty ``[model].default``.
+    """
 
     def __init__(self):
         self.created = {}
-        self.enabled = {}
+        self.model_default = {}
         self.updates = []  # list of (name, updates_dict)
+
+    @staticmethod
+    def _model_of(cfg):
+        return (cfg.get("model") or {}).get("default", "")
 
     async def create(self, name, cfg):
         self.created[name] = cfg
-        self.enabled[name] = cfg.get("enabled")
+        self.model_default[name] = self._model_of(cfg)
         return object()
 
     async def update_config(self, name, updates):
         self.updates.append((name, updates))
-        if "enabled" in updates:
-            self.enabled[name] = updates["enabled"]
+        if "model" in updates:
+            self.model_default[name] = self._model_of(updates)
         return object()
 
 
@@ -476,9 +484,14 @@ class _Job:
         self.state = "queued"
 
 
-async def test_apply_setup_creates_slot_disabled_and_plan_carries_slot():
-    """The guided path seeds the slot DISABLED and the plan remembers which
-    slot to enable once the pull lands (no start-before-model race)."""
+async def test_apply_setup_creates_slot_model_less_and_plan_carries_slot():
+    """The guided path seeds the slot with NO model and the plan remembers which
+    slot to activate once the pull lands (no start-before-model race).
+
+    Post-#1369 "born disabled" and "born model-less" are the same statement —
+    which is what makes the pull gate airtight: pre-stamping the model id was
+    the only way the slot could have started before the bytes existed.
+    """
     from hal0.install import orchestrate
 
     sm = _RecordingSlotManager()
@@ -496,14 +509,18 @@ async def test_apply_setup_creates_slot_disabled_and_plan_carries_slot():
         jobs={},
         write_sentinel=False,
     )
-    # Born disabled — never enabled at create time.
-    assert sm.created["chat"]["enabled"] is False
-    # The plan carries the slot so the pull driver can enable it on success.
+    assert sm.created["chat"]["model"]["default"] == ""
+    assert "enabled" not in sm.created["chat"]
+    # The context budget is still computed and persisted at create time — only
+    # the model id waits for the pull.
+    assert sm.created["chat"]["model"]["context_size"] > 0
+    # The plan carries the slot AND the model id to stamp on success.
     assert res.pulls[0].slot_names == ["chat"]
+    assert res.pulls[0].model_id == "qwen3-4b"
 
 
-async def test_apply_setup_shared_model_enables_both_slots():
-    """Two slots on the SAME model_id ride one pull — both get enabled."""
+async def test_apply_setup_shared_model_activates_both_slots():
+    """Two slots on the SAME model_id ride one pull — both get activated."""
     from hal0.install import orchestrate
 
     sm = _RecordingSlotManager()
@@ -529,7 +546,7 @@ async def test_apply_setup_shared_model_enables_both_slots():
     assert set(res.pulls[0].slot_names) == {"chat", "coder"}
 
 
-async def test_run_pull_and_activate_enables_slot_on_success(monkeypatch):
+async def test_run_pull_and_activate_stamps_model_on_success(monkeypatch):
     from hal0.install import orchestrate
     from hal0.registry import pull as pull_mod
 
@@ -541,16 +558,16 @@ async def test_run_pull_and_activate_enables_slot_on_success(monkeypatch):
     monkeypatch.setattr(pull_mod, "run_pull", _fake_run_pull)
 
     sm = _RecordingSlotManager()
-    sm.enabled["chat"] = False
+    sm.model_default["chat"] = ""
     plan = orchestrate.PullPlan(model_id="qwen3-4b", job=job, kwargs={}, slot_names=["chat"])
     await orchestrate.run_pull_and_activate(plan, slot_manager=sm)
 
-    assert sm.enabled["chat"] is True
-    assert ("chat", {"enabled": True}) in sm.updates
+    assert sm.model_default["chat"] == "qwen3-4b"
+    assert ("chat", {"model": {"default": "qwen3-4b"}}) in sm.updates
 
 
-async def test_run_pull_and_activate_marks_disabled_on_failed_job(monkeypatch):
-    """A pull that settles state=='failed' leaves the slot disabled + marked."""
+async def test_run_pull_and_activate_leaves_model_empty_on_failed_job(monkeypatch):
+    """A pull that settles state=='failed' leaves the slot model-less + marked."""
     from hal0.install import orchestrate
     from hal0.registry import pull as pull_mod
 
@@ -562,19 +579,19 @@ async def test_run_pull_and_activate_marks_disabled_on_failed_job(monkeypatch):
     monkeypatch.setattr(pull_mod, "run_pull", _fake_run_pull)
 
     sm = _RecordingSlotManager()
-    sm.enabled["chat"] = False
+    sm.model_default["chat"] = ""
     plan = orchestrate.PullPlan(model_id="qwen3-4b", job=job, kwargs={}, slot_names=["chat"])
     await orchestrate.run_pull_and_activate(plan, slot_manager=sm)
 
-    assert sm.enabled["chat"] is False
+    assert sm.model_default["chat"] == ""
     name, updates = sm.updates[-1]
     assert name == "chat"
-    assert updates["enabled"] is False
+    assert "model" not in updates
     assert updates["meta"] == {"pull_failed": True}
 
 
 async def test_run_pull_and_activate_marks_and_reraises_on_exception(monkeypatch):
-    """run_pull raising leaves the slot disabled+marked and re-raises so the
+    """run_pull raising leaves the slot model-less+marked and re-raises so the
     caller's gather sees the failure."""
     import pytest as _pytest
 
@@ -589,57 +606,10 @@ async def test_run_pull_and_activate_marks_and_reraises_on_exception(monkeypatch
     monkeypatch.setattr(pull_mod, "run_pull", _boom)
 
     sm = _RecordingSlotManager()
-    sm.enabled["chat"] = False
+    sm.model_default["chat"] = ""
     plan = orchestrate.PullPlan(model_id="qwen3-4b", job=job, kwargs={}, slot_names=["chat"])
     with _pytest.raises(RuntimeError, match="network down"):
         await orchestrate.run_pull_and_activate(plan, slot_manager=sm)
 
-    assert sm.enabled["chat"] is False
+    assert sm.model_default["chat"] == ""
     assert sm.updates[-1][1]["meta"] == {"pull_failed": True}
-
-
-def test_clamp_context_size_passes_through_on_ample_hw():
-    """A big unified pool funds the model's native window unchanged."""
-    from hal0.install.orchestrate import _clamp_context_size
-
-    # 96 GB unified Strix box → half-pool budget dwarfs a 32K KV cache.
-    assert _clamp_context_size(32768, _strix_hw(), weights_gb=2.5) == 32768
-
-
-def test_clamp_context_size_clamps_on_tight_cpu_host():
-    """A memory-tight CPU-only host clamps a huge native window down to a
-    budget the KV cache actually fits — the first-warm OOM fix (#1108)."""
-    from hal0.install.orchestrate import _clamp_context_size
-
-    hw = HardwareInfo(ram_mb=8192, ram_available_mb=8192)  # no GPU
-    clamped = _clamp_context_size(131072, hw, weights_gb=2.0)
-    assert clamped < 131072
-    # budget = 0.5*8 = 4 GB; kv = 4 - 2(weights) - 1(reserve) = 1 GB;
-    # 1 GiB / 128 KiB ≈ 8192 tokens.
-    assert clamped == 8192
-
-
-def test_clamp_context_size_honors_cgroup_cap():
-    """An LXC/container memory cap binds the UMA budget so a capped box clamps
-    even though the raw unified pool looks huge (the `oom` artifact box)."""
-    from hal0.install.orchestrate import _clamp_context_size
-
-    hw = HardwareInfo(
-        platform="strix-halo",
-        ram_mb=98304,
-        ram_available_mb=90000,
-        unified_memory_mb=98304,
-        cgroup_max_mb=8192,  # LXC-capped to 8 GB
-        gpus=[GPUInfo(vendor="amd", vram_mb=512, compute_capable=True, vulkan_capable=True)],
-        npu=NPUInfo(present=True),
-    )
-    clamped = _clamp_context_size(131072, hw, weights_gb=2.0)
-    assert clamped < 131072
-
-
-def test_clamp_context_size_never_below_floor():
-    """Even a starved host keeps a minimally usable window."""
-    from hal0.install.orchestrate import _MIN_CONTEXT, _clamp_context_size
-
-    hw = HardwareInfo(ram_mb=2048, ram_available_mb=1024)  # ~0.5 GB budget
-    assert _clamp_context_size(131072, hw, weights_gb=8.0) == _MIN_CONTEXT

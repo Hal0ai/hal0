@@ -113,7 +113,6 @@ class TestSnapshot:
                     'device = "npu"',
                     'provider = "flm"',
                     'model = "bge-m3"',
-                    "enabled = true",
                     "",
                 ]
             ),
@@ -162,7 +161,6 @@ class TestSnapshot:
                     'device = "npu"',
                     'provider = "flm"',
                     'model = "bge-m3"',
-                    "enabled = true",
                     "",
                 ]
             ),

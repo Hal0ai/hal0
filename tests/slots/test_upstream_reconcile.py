@@ -30,7 +30,6 @@ def _write_trio_shadow(slot_root: Path) -> None:
                 'device = "npu"',
                 'type = "embedding"',
                 'backend = "flm"',
-                "enabled = true",
                 "[model]",
                 'default = "embed-gemma:300m"',
                 "",

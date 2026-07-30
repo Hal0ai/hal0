@@ -23,17 +23,18 @@ def test_validate_target_missing() -> None:
     configs = [make_slot("primary", type="llm", model="x", labels=("tool-calling",))]
     err = validate_delegation(configs, caller_slot_name="primary", target="nope", current_depth=0)
     assert err is not None
-    assert "not enabled" in err
+    assert "no model configured" in err
 
 
-def test_validate_target_disabled_is_rejected() -> None:
+def test_validate_model_less_target_is_rejected() -> None:
+    """#1369: a chat slot with no model bound is not a delegation target."""
     configs = [
         make_slot("primary", type="llm", model="x", labels=("tool-calling",)),
-        make_slot("coder", type="llm", model="qwen", labels=(), enabled=False),
+        make_slot("coder", type="llm", model="", labels=()),
     ]
     err = validate_delegation(configs, caller_slot_name="primary", target="coder", current_depth=0)
     assert err is not None
-    assert "not enabled" in err
+    assert "no model configured" in err
 
 
 def test_validate_self_delegation_rejected() -> None:
@@ -120,7 +121,7 @@ def test_validate_target_wrong_type_rejected() -> None:
     ]
     err = validate_delegation(configs, caller_slot_name="primary", target="embed", current_depth=0)
     assert err is not None
-    assert "not enabled" in err
+    assert "no model configured" in err
 
 
 def test_validate_happy_path_returns_none() -> None:

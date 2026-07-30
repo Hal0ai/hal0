@@ -30,7 +30,6 @@ def test_seed_rerank_toml_validates() -> None:
     assert slot.server.extra_args is None
     # Clean seed (WS-E, #1107): no model pin — boots grey, no surprise download.
     assert slot.model.default == ""
-    assert slot.enabled is False
 
 
 def test_seed_utility_toml_validates() -> None:
@@ -47,7 +46,6 @@ def test_seed_utility_toml_validates() -> None:
     # tuning default that applies once the operator assigns a model.
     assert slot.model.default == ""
     assert slot.model.context_size == 65536
-    assert slot.enabled is False
 
 
 def test_rerank_defaults_are_hindsight_era() -> None:
@@ -105,25 +103,25 @@ def test_seed_slot_ports_are_mutually_unique() -> None:
 
 #: Seeds the clean-seed invariant applies to — every operator-facing slot.
 #: ``brain`` is the one deliberate exception (see test_brain_seed_ships_ready):
-#: the platform steward must work out of the box, so #1258 ships it enabled
-#: with a small 1B model pinned. Every other seed ships model-less/disabled.
+#: the platform steward must work out of the box, so #1258 ships it with a
+#: small 1B model pinned. Every other seed ships model-less (= inactive).
 _CLEAN_SEED_SLOTS = sorted((set(STATIC_SEED_SLOTS) | {"qwen3tts"}) - {"brain"})
 
 
 @pytest.mark.parametrize("name", _CLEAN_SEED_SLOTS)
 def test_seed_toml_ships_clean(name: str) -> None:
-    """Clean-seed invariant (WS-E, #1107): every shipped seed ships DISABLED with
-    no `[model].default` pin, so a fresh box boots a grey tile — no surprise
-    multi-GB download, no crash-loop. Regressing any seed to enabled=true or a
-    reintroduced model pin (the removed gemma-4-12b-it / sdxl-turbo ghosts) is
-    the exact #1107 regression this guards. model is a default_factory
-    ModelConfig with default=="" so the assertion holds for [model]-less TOMLs.
+    """Clean-seed invariant (WS-E, #1107): every shipped seed ships with no
+    `[model].default` pin, so a fresh box boots a grey tile — no surprise
+    multi-GB download, no crash-loop. Since #1369 model-presence IS the
+    activation signal, so an empty pin is the whole invariant: a reintroduced
+    model pin (the removed gemma-4-12b-it / sdxl-turbo ghosts) is the exact
+    #1107 regression this guards. model is a default_factory ModelConfig with
+    default=="" so the assertion holds for [model]-less TOMLs.
 
     ``brain`` is intentionally excluded (see test_brain_seed_ships_ready): it is
     the platform steward and ships ready, not clean, by design (#1258).
     """
     slot = _load_seed_slot(_SEEDED_SLOTS_DIR / f"{name}.toml")
-    assert slot.enabled is False
     assert slot.model.default == ""
 
 
@@ -131,15 +129,14 @@ def test_brain_seed_ships_ready() -> None:
     """The brain steward is the deliberate exception to the clean-seed rule
     (#1258): unlike operator slots (which ship model-less so the operator picks),
     the brain drives the dashboard's sidebar steward chat and must work out of
-    the box, so it ships ENABLED with a small 1B tool-use model pinned. Loading
+    the box, so it ships WITH a small 1B tool-use model pinned. Loading
     stays lazy (the chat falls back to the ``agent`` slot until the brain model
     is bound), so this does not reintroduce the #1107 eager-download regression.
 
     This pins the intent from both sides: if a future edit reverts the brain to
-    clean/disabled, the steward silently stops working out of the box and this
+    a clean model-less seed, the steward silently stops working and this
     fails; test_seed_toml_ships_clean guards every *other* seed against the
     opposite regression.
     """
     slot = _load_seed_slot(_SEEDED_SLOTS_DIR / "brain.toml")
-    assert slot.enabled is True
     assert slot.model.default != ""

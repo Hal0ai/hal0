@@ -31,7 +31,7 @@ async function seedSlots(page: Page, slots: any[]) {
 const RUNNING = {
   name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
   model: 'qwen3.6-27b-mtp-q4_k_m', model_id: 'qwen3.6-27b-mtp', id: 1,
-  state: 'serving', port: 8092, isDefault: true, enabled: true, runtime: 'container',
+  state: 'serving', port: 8092, isDefault: true, runtime: 'container',
   container_status: 'running', container_health: true,
   metrics: { ctx: 8192, toks: 42, ttft: 180 },
 }

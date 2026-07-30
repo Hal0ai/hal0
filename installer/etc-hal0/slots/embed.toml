@@ -7,15 +7,14 @@
 # embedding-capable model (nomic-embed, qwen3-embedding-0-6b-q8-0,
 # bge-base-en-v1.5-q4_k_m, etc.).
 #
-# Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a
-# model-less box boots a GREY tile. The operator assigns an embed model
-# later, which flips the slot enabled.
+# Clean seed (WS-E, #1107): no `[model].default` pin, so a model-less box
+# boots a GREY tile. The operator assigns an embed model later; filling in
+# `[model].default` is what activates the slot (#1369).
 name = "embed"
 type = "embedding"
 device = "gpu-vulkan"
 runtime = "container"
 profile = "embedding"
-enabled = false
 port = 8083
 n_gpu_layers = -1
 threads = 0

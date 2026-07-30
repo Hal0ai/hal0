@@ -231,7 +231,6 @@ async def test_chat_slot_alias_map_includes_agent_canonical():
             {
                 "name": "agent",
                 "type": "llm",
-                "enabled": True,
                 "model_id": "qwen3-8b",
             }
         ]
@@ -254,7 +253,6 @@ async def test_chat_slot_alias_map_utility_no_alias_injection():
             {
                 "name": "utility",
                 "type": "llm",
-                "enabled": True,
                 "model_id": "qwen3-0.8b",
             }
         ]
@@ -272,9 +270,9 @@ async def test_chat_slot_alias_map_alias_does_not_override_explicit():
     slot_manager = MagicMock()
     slot_manager.iter_configs = AsyncMock(
         return_value=[
-            {"name": "agent", "type": "llm", "enabled": True, "model_id": "qwen3-8b"},
+            {"name": "agent", "type": "llm", "model_id": "qwen3-8b"},
             # Pre-migration slot still named "agent-hermes"
-            {"name": "agent-hermes", "type": "llm", "enabled": True, "model_id": "old-model"},
+            {"name": "agent-hermes", "type": "llm", "model_id": "old-model"},
         ]
     )
     result = await hal0_chat_slot_alias_map(slot_manager)
