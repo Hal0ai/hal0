@@ -492,6 +492,22 @@ function MemGraphExplorer() {
   const loading = activeQuery.isLoading;
   const payload = activeQuery.data;
 
+  // #1471: an engine outage used to render as "No graph data for this
+  // bank/filter." — the stage only ever consulted isLoading and node count, so
+  // a 503 memory.unavailable / memory.engine_unreachable was indistinguishable
+  // from a genuinely empty bank. Every sibling surface already gets this right
+  // (the Overview engine card's "unreachable" chip, the settings panel's
+  // statusQuery.isError branch); this tab was the odd one out, and it is the
+  // one where "empty" is the most plausible-looking lie.
+  //
+  // The subgraph/ego queries count too: when a bank is big the stage renders
+  // THEIR payload, so their failure is equally invisible behind an empty stage.
+  const graphError =
+    (activeQuery.isError && activeQuery.error) ||
+    (metaBig && subQuery.isError && subQuery.error) ||
+    (direction === 'c' && egoQuery.isError && egoQuery.error) ||
+    null;
+
   const nodeCount = activeGraph.nodes.length;
   const edgeCount = activeGraph.links.length;
   const big = metaBig || nodeCount > 240;
@@ -629,7 +645,19 @@ function MemGraphExplorer() {
       </div>
 
       <div ref={stageRef} className="mg-host">
-        {!loading && nodeCount === 0 ? (
+        {graphError ? (
+          <div className="empty mono mem-graph-error" data-testid="mem-graph-error">
+            <div>Memory engine unreachable — {graphError?.message || 'the graph could not be loaded'}</div>
+            <button
+              className="btn ghost sm"
+              style={{marginTop: 10}}
+              data-testid="mem-graph-retry"
+              onClick={() => { activeQuery.refetch?.(); subQuery.refetch?.(); egoQuery.refetch?.(); }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : !loading && nodeCount === 0 ? (
           <div className="empty mono mem-graph-empty">No graph data for this bank/filter.</div>
         ) : direction === 'a' ? (
           <GraphLensed

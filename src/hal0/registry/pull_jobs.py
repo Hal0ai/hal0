@@ -645,6 +645,17 @@ async def enqueue(
         chat_template = body.get("chat_template") if isinstance(body, dict) else None
         if not isinstance(chat_template, str):
             chat_template = None
+        # #1394: the Add-by-HF modal writes its registry row HERE, not through
+        # POST /api/models, so the model-write screen never sees it — a ticked
+        # ``vision`` label with no mmproj file picked would seed exactly the
+        # projector-less vision row #1393 closed on the other door. Screen the
+        # label set against the sidecar this pull will install, BEFORE seeding
+        # or scheduling anything. ``require_on_disk=False``: ``mmproj_file`` is
+        # an HF filename inside the repo, not a host path — it is downloaded by
+        # the job we are about to schedule.
+        from hal0.services.models_service import screen_vision_mmproj
+
+        screen_vision_mmproj(labels, mmproj_file, require_on_disk=False)
         seed_registry_from_body(request, model_id, hf_repo, hf_file, labels, chat_template)
     job = make_job(model_id)
     jobs[model_id] = job

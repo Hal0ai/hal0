@@ -95,33 +95,18 @@ its `release_kind`.
 ![The Settings → Updates panel showing current version, available update, and channel selector](/screenshots/settings-page.png)
 *Settings → Updates: current version, available release, and channel selector.*
 
-## Update from git (local dev)
+## Editable/dev installs
 
-For development or local testing, you can update hal0 directly from a git checkout:
+`hal0 update` refuses outright on an editable/dev install (e.g. a `pip
+install -e` checkout) — there is no git-based update path. The command dies
+early with:
 
-```sh
-hal0 update --source git
+```
+hal0 is installed in editable mode from <path>. Install from release wheel with `pip install hal0`.
 ```
 
-This clones or fetches the GitHub repository and pip-installs the newer version
-directly, without downloading or verifying a release tarball. On an interactive
-terminal it prompts to confirm before applying — `--yes` has no effect on this
-path (it's only wired for the release path above); to skip the prompt, run
-`hal0 update --source git` from a non-interactive or piped invocation instead.
-
-To check for an update via git without applying it:
-
-```sh
-hal0 update --source git --check
-```
-
-Unlike the release path, a git-based update does **not** automatically restart
-`hal0-api` — the CLI prints `Restart hal0-api to apply: systemctl restart
-hal0-api` and leaves that to you. The post-update slot-drift banner still
-appears, so you can restart drifted slots with `hal0 update --restart-slots`
-when convenient. This code path skips the cosign signature and digest
-verification described in the next section; it is intended for development and
-testing, not production.
+To update a dev box, install from a release wheel with `pip install hal0`, or
+rebuild/reinstall the checkout manually.
 
 ## How the atomic update works
 

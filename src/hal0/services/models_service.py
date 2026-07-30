@@ -1274,7 +1274,79 @@ def _screen_model_defaults(defaults: dict[str, Any]) -> None:
         )
 
 
-def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> None:
+# ── the vision↔mmproj invariant (#1380 → #1393) ───────────────────────────────
+#
+# A registry row that advertises ``vision`` but carries no ``mmproj`` gives the
+# launch path no ``--mmproj`` to hand llama-server, so the slot loads a
+# text-only model under a vision alias — a failure that surfaces minutes later
+# at load time, far from the write that caused it. PR #1392 gated the model
+# drawer client-side; ``screen_vision_mmproj`` is the wire-level half, shared by
+# the model write screen (create/PUT/validate) and the pull route's label seed
+# (#1394), which writes its row through a different door entirely.
+
+
+def screen_vision_mmproj(
+    capabilities: Any,
+    mmproj: Any,
+    *,
+    require_on_disk: bool = True,
+) -> None:
+    """Reject a vision-capable model description with no usable projector.
+
+    ``capabilities`` is the EFFECTIVE capability list and ``mmproj`` the
+    EFFECTIVE projector for the row after the write lands — callers holding a
+    sparse patch must merge it over the stored row before calling (see
+    :func:`screen_model_write`), or the guard both false-negatives (a PUT adding
+    ``vision`` without mentioning ``mmproj``) and false-positives (a
+    defaults-only save on an already-valid vision row).
+
+    Two violations, two codes:
+
+    * ``model.vision_requires_mmproj`` — ``vision`` present, projector absent.
+    * ``model.mmproj_not_found`` — a projector path that is not a file on this
+      host. Checked only when ``require_on_disk``; the pull route passes
+      ``require_on_disk=False`` because its ``mmproj`` is an HF *filename* that
+      by definition has not been downloaded yet. Every path that reaches the
+      registry with ``require_on_disk=True`` is a caller-supplied host path
+      (``Model.mmproj`` is documented as absolute and is handed verbatim to
+      ``--mmproj``); the pull worker writes the post-download path straight
+      through ``registry.update``, never through this screen, so a
+      still-downloading sidecar can never trip it.
+    """
+    from hal0.errors import BadRequest
+
+    caps = {str(c).strip().lower() for c in capabilities or ()}
+    if "vision" not in caps:
+        return
+    projector = mmproj.strip() if isinstance(mmproj, str) else mmproj
+    if not projector:
+        raise BadRequest(
+            "a model advertising the 'vision' capability must carry an mmproj "
+            "projector sidecar — without one the runner gets no --mmproj and "
+            "loads text-only. Set mmproj, or drop the 'vision' capability.",
+            code="model.vision_requires_mmproj",
+            details={"capabilities": sorted(caps)},
+        )
+    if not require_on_disk:
+        return
+    from pathlib import Path
+
+    if not Path(str(projector)).is_file():
+        raise BadRequest(
+            f"mmproj path does not exist on this host: {projector}. It is passed "
+            "verbatim to the runner as --mmproj, so a missing file fails the "
+            "slot at load time.",
+            code="model.mmproj_not_found",
+            details={"mmproj": str(projector)},
+        )
+
+
+def screen_model_write(
+    body: dict[str, Any],
+    *,
+    runner_images: Any = None,
+    existing: dict[str, Any] | None = None,
+) -> None:
     """Validate the launch-affecting fields of a model create/update/validate body.
 
     Raises :class:`~hal0.errors.BadRequest` on the first violation, with the same
@@ -1293,6 +1365,17 @@ def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> No
       smuggled ``--model``/``--host``/``--port``/``--ctx-size``/``--alias`` fails
       at SAVE with the same ``slot.managed_arg_denied`` code the launcher raises,
       instead of persisting a row that can never load (or silently rebinds a slot).
+    * ``capabilities`` + ``mmproj`` — the vision↔mmproj invariant (#1393), via
+      :func:`screen_vision_mmproj`. ``existing`` is the stored row (``None`` on
+      create) and the two fields are read body-over-stored, because PUT bodies
+      are sparse: a body that adds ``vision`` must be screened against the
+      STORED projector.
+
+      Deliberately scoped to writes that TOUCH one of the two keys. Rows already
+      in the broken state — written before this guard existed, or by the pull
+      worker — stay editable, so an unrelated rename does not have to fix an
+      invariant it never violated. Every write that could CREATE or PRESERVE the
+      broken pairing is still screened.
 
     spec-hw-slot-ownership: ``preferred_runner`` is no longer a model field (the
     runner is slot-owned via ``SlotConfig.binary``) — it is neither validated nor
@@ -1301,6 +1384,13 @@ def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> No
     """
     del runner_images  # preferred_runner is gone from the model — nothing to screen
     from hal0.errors import BadRequest
+
+    if "capabilities" in body or "mmproj" in body:
+        prior = existing or {}
+        screen_vision_mmproj(
+            body.get("capabilities", prior.get("capabilities")),
+            body.get("mmproj", prior.get("mmproj")),
+        )
 
     defaults = body.get("defaults")
     if isinstance(defaults, dict):
