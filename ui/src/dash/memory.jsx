@@ -40,7 +40,7 @@ function fmtWhen(iso) {
 
 // ── Provider card shell ─────────────────────────────────────────────────────
 //
-// Shared shell for the two engine-identity cards (Hindsight + Honcho) so the
+// Shared shell for the engine-identity card (Hindsight) so the
 // Memory pane reads as "two providers, one system" instead of two bespoke
 // layouts. Callers supply the identity bits (icon/name/chip/meta), a 3-up
 // stats grid, an actions row, and an optional footer (graph-extraction /
@@ -212,270 +212,6 @@ function MemHindsightCard({
       actions={actions}
       footer={footer}
     />
-  );
-}
-
-// ── Honcho provider card ────────────────────────────────────────────────────
-
-function MemHonchoCard() {
-  const useHonchoStats = window.__hal0UseHonchoStats;
-  const useHonchoSync = window.__hal0UseHonchoSync;
-  const useSetHonchoSync = window.__hal0UseSetHonchoSync;
-  const useHonchoSyncRun = window.__hal0UseHonchoSyncRun;
-
-  const statsQuery = useHonchoStats ? useHonchoStats() : { data: null, isLoading: false };
-  const syncQuery = useHonchoSync ? useHonchoSync() : { data: null };
-  const setSync = useSetHonchoSync ? useSetHonchoSync() : null;
-  const runSync = useHonchoSyncRun ? useHonchoSyncRun() : null;
-
-  const [migrating, setMigrating] = useStateMem(false);
-  const [runState, setRunState] = useStateMem('idle'); // idle | busy | ok | err
-  const [runNote, setRunNote] = useStateMem(null);
-
-  async function doRunSync() {
-    if (!runSync || runState === 'busy') return;
-    setRunState('busy');
-    setRunNote(null);
-    try {
-      // POST /honcho/sync/run is fail-soft server-side — a systemctl failure
-      // still comes back HTTP 200 with {started: false, note}. A resolved
-      // promise here does NOT mean the sync actually started; `.started`
-      // must be checked explicitly.
-      const res = await runSync.mutateAsync();
-      if (res && res.started === false) {
-        setRunState('err');
-        setRunNote(res.note || null);
-        memToast(res.note || 'Honcho graph sync failed to start', 'err');
-      } else {
-        setRunState('ok');
-        memToast('Honcho graph sync started', 'ok');
-      }
-    } catch (err) {
-      setRunState('err');
-      setRunNote(err?.message || null);
-      memToast(err?.message || 'Sync run failed', 'err');
-    } finally {
-      setTimeout(() => setRunState('idle'), 2600);
-    }
-  }
-
-  function doToggleSync() {
-    if (!setSync || !syncQuery.data) return;
-    const next = !syncQuery.data.timer_enabled;
-    setSync.mutate({ enabled: next }, {
-      onSuccess: () => memToast(`Graph sync ${next ? 'enabled' : 'disabled'}`, next ? 'ok' : 'warn'),
-      onError: (err) => memToast(err?.message || 'Sync toggle failed', 'err'),
-    });
-  }
-
-  if (statsQuery.isLoading) {
-    return (
-      <div className="card mo-engine mo-provider" data-testid="mem-provider-card-honcho">
-        <div className="mo-engine-head">
-          <span className="mono mo-engine-name"><Icon name="connections" size={15} /> Honcho</span>
-        </div>
-        <div className="empty mono">Probing engine…</div>
-      </div>
-    );
-  }
-
-  const s = statsQuery.data || {};
-  const enabled = s.enabled !== false;
-
-  if (!enabled) {
-    return (
-      <div className="card mo-engine mo-provider dimmed" data-testid="mem-provider-card-honcho">
-        <div className="mo-engine-head">
-          <span className="mono mo-engine-name"><Icon name="connections" size={15} /> Honcho</span>
-          <span className="chip">disabled</span>
-        </div>
-        <div className="empty mono">Honcho isn't enabled on this install — turn it on under Settings → Memory to route agents here.</div>
-      </div>
-    );
-  }
-
-  const reachable = !!s.reachable;
-  const sy = syncQuery.data || {};
-  const facts = (s.observations || 0) + (s.conclusions || 0);
-  const deriverQueue = (s.deriver_pending || 0) + (s.deriver_processing || 0);
-
-  const chip = (
-    <span className={'chip ' + (reachable ? 'ok' : 'warn')}>{reachable ? 'reachable' : 'unreachable'}</span>
-  );
-  const meta = (
-    <>
-      <span>{s.version ? `v${s.version}` : 'version unknown'}</span>
-      <span className="pf-sep">·</span>
-      <span>{s.workspace ? s.workspace : '— workspace'}</span>
-    </>
-  );
-  const stats = [
-    { label: 'Peers', value: s.peers ?? '—' },
-    { label: 'Facts', value: facts, title: 'observations + conclusions' },
-    { label: 'Deriver queue', value: deriverQueue, warn: deriverQueue > 0, title: 'pending + processing' },
-  ];
-  const actions = (
-    <>
-      <button
-        className={'btn ghost xs' + (runState !== 'idle' ? ' ' + runState : '')}
-        onClick={doRunSync}
-        disabled={runState === 'busy'}
-        title={runState === 'err' && runNote ? runNote : undefined}
-        data-testid="mem-btn-sync-now"
-      >
-        {runState === 'busy' ? 'Syncing…' : runState === 'ok' ? 'Synced' : runState === 'err' ? 'Sync failed' : 'Sync graph now'}
-      </button>
-      <button className="btn ghost xs" onClick={() => setMigrating((v) => !v)} data-testid="mem-btn-migrate">
-        Migrate…
-      </button>
-    </>
-  );
-  const footer = (
-    <>
-      <div className="mo-graphline">
-        <span className="mono">
-          <span className={'dot' + (sy.timer_enabled ? ' ready' : '')} /> graph sync ·{' '}
-          <b style={{ color: sy.timer_enabled ? 'var(--ok)' : 'var(--fg-4)' }}>{sy.timer_enabled ? 'on' : 'off'}</b>
-          {sy.timer_enabled && sy.interval ? <span> · every {sy.interval}</span> : null}
-          {sy.last_run_at ? <span> · last {fmtWhen(sy.last_run_at)}{sy.last_run_ok === false ? ' (failed)' : ''}</span> : null}
-        </span>
-        <button
-          className="btn ghost xs"
-          onClick={doToggleSync}
-          disabled={!!setSync?.isPending}
-          data-testid="mem-sync-toggle"
-        >
-          {sy.timer_enabled ? 'Disable' : 'Enable'}
-        </button>
-      </div>
-      {migrating && (
-        <div className="mo-migrate-box mono" data-testid="mem-migrate-confirm">
-          Migration moves memories between engines and isn't wired to a one-click
-          action here — it's irreversible enough to want a human at the terminal.
-          Run it from the CLI:
-          <div className="mo-migrate-hint mono">
-            hal0 memory migrate --from honcho --to hindsight<br />
-            hal0 memory migrate --from hindsight --to honcho
-          </div>
-          <button className="btn ghost xs" onClick={() => setMigrating(false)}>Close</button>
-        </div>
-      )}
-    </>
-  );
-
-  return (
-    <MemProviderCard
-      testId="mem-provider-card-honcho"
-      icon={<Icon name="connections" size={15} />}
-      name="honcho"
-      chip={chip}
-      meta={meta}
-      stats={stats}
-      actions={actions}
-      footer={footer}
-    />
-  );
-}
-
-// ── Per-agent provider routing strip ────────────────────────────────────────
-
-function MemProviderRoutingStrip({ provider, isLoading }) {
-  const useSetMemoryProvider = window.__hal0UseSetMemoryProvider;
-  const setProvider = useSetMemoryProvider ? useSetMemoryProvider() : null;
-  const [confirmingAgent, setConfirmingAgent] = useStateMem(null);
-  const [draft, setDraft] = useStateMem({});
-  const [errorFor, setErrorFor] = useStateMem(null);
-
-  const agents = provider?.agents || {};
-  const agentIds = Object.keys(agents);
-  const engines = provider?.engines || {};
-
-  if (isLoading || agentIds.length === 0) return null;
-
-  function draftFor(id) {
-    return draft[id] || agents[id] || { provider: 'hindsight', private: false };
-  }
-  function setDraftField(id, field, value) {
-    setDraft((d) => ({ ...d, [id]: { ...draftFor(id), [field]: value } }));
-  }
-  function isDirty(id) {
-    const d = draftFor(id);
-    const a = agents[id] || {};
-    return d.provider !== a.provider || !!d.private !== !!a.private;
-  }
-
-  async function apply(id) {
-    if (!setProvider) return;
-    const d = draftFor(id);
-    setErrorFor(null);
-    try {
-      await setProvider.mutateAsync({ agent: id, provider: d.provider, private: !!d.private, restart: true });
-      memToast(`${id} routed to ${d.provider}`, 'ok');
-      setConfirmingAgent(null);
-    } catch (err) {
-      if (err?.status === 409) {
-        setErrorFor({ id, msg: err.message || `${d.provider} is unreachable` });
-      } else {
-        memToast(err?.message || 'Provider switch failed', 'err');
-      }
-    }
-  }
-
-  return (
-    <div className="card mo-routing" data-testid="mem-provider-routing">
-      <div className="mo-card-h">
-        <span className="mo-eyebrow">Per-agent routing</span>
-        <span className="grow" />
-      </div>
-      <div className="mo-routing-rows">
-        {agentIds.map((id) => {
-          const d = draftFor(id);
-          const dirty = isDirty(id);
-          const engineDown = d.provider && engines[d.provider] && !engines[d.provider].healthy;
-          return (
-            <div className="mo-routing-row" key={id} data-testid={`mem-agent-provider-row-${id}`}>
-              <span className="mono mo-routing-agent">{id}</span>
-              <select
-                className="input mono sm"
-                value={d.provider}
-                onChange={(e) => setDraftField(id, 'provider', e.target.value)}
-                data-testid={`mem-agent-provider-select-${id}`}
-              >
-                <option value="hindsight">hindsight</option>
-                <option value="honcho">honcho</option>
-              </select>
-              <label className="mo-routing-priv mono">
-                <input
-                  type="checkbox"
-                  checked={!!d.private}
-                  onChange={(e) => setDraftField(id, 'private', e.target.checked)}
-                  data-testid={`mem-agent-private-${id}`}
-                />
-                private
-              </label>
-              {engineDown && <span className="chip warn">target down</span>}
-              {dirty && confirmingAgent !== id && (
-                <button className="btn ghost xs" onClick={() => setConfirmingAgent(id)} data-testid={`mem-agent-apply-${id}`}>
-                  Apply
-                </button>
-              )}
-              {confirmingAgent === id && (
-                <span className="mo-routing-confirm mono">
-                  Switch {id} to {d.provider}{d.private ? ' (private)' : ''}? This restarts the agent.
-                  <button className="btn xs" onClick={() => apply(id)} disabled={!!setProvider?.isPending}>
-                    {setProvider?.isPending ? 'Applying…' : 'Confirm'}
-                  </button>
-                  <button className="btn ghost xs" onClick={() => setConfirmingAgent(null)}>Cancel</button>
-                </span>
-              )}
-              {errorFor?.id === id && (
-                <span className="mono mo-routing-err" data-testid={`mem-agent-error-${id}`}>{errorFor.msg}</span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
   );
 }
 
@@ -906,8 +642,6 @@ function MemoryView({ param } = {}) {
   const consolidate = useConsolidate ? useConsolidate() : null;
   const useRetryFailedExtractions = window.__hal0UseRetryFailedExtractions;
   const retryFailed = useRetryFailedExtractions ? useRetryFailedExtractions() : null;
-  const useMemoryProvider = window.__hal0UseMemoryProvider;
-  const providerQuery = useMemoryProvider ? useMemoryProvider() : { data: null, isLoading: false };
 
   const banks = banksQuery.data?.banks || [];
   const [selectedId, setSelectedId] = useStateMem(() => {
@@ -996,9 +730,8 @@ function MemoryView({ param } = {}) {
         <MemGraphExplorer />
       ) : (
       <div className="mo">
-      {/* Provider identity: two engine cards (Hindsight + Honcho) side by
-          side, each owning its own reachability/stats/actions, followed by
-          the per-agent routing strip. Full-width so the 3-up stat grids have
+      {/* Provider identity: the Hindsight engine card owns its own
+          reachability/stats/actions. Full-width so the 3-up stat grid has
           room to breathe. */}
       <div className="mo-providers-row">
         <MemHindsightCard
@@ -1014,9 +747,7 @@ function MemoryView({ param } = {}) {
           onRetryFailed={doRetryFailed}
           retryingFailed={!!retryFailed?.isPending}
         />
-        <MemHonchoCard />
       </div>
-      <MemProviderRoutingStrip provider={providerQuery.data} isLoading={providerQuery.isLoading} />
       {/* Aggregated graph-extraction stats + bank timeseries, beside the
           bank list. */}
       <div className="mo-top2">
