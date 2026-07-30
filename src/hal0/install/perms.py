@@ -300,6 +300,50 @@ def ownership_table(
             optional=False,
             role="slots/ (runtime slot state, recursive)",
         ),
+        # hal0.db — the PRIMARY database (``paths.db_path()`` ->
+        # ``var_lib/"hal0.db"``): the model registry today, plus metrics and
+        # runtime-state tables later. Distinct from the ``registry/hal0.db``
+        # row further down, which only ever matches a
+        # ``SqliteModelRegistry(registry_dir=...)`` override — a test/dev
+        # isolation path that production never takes.
+        #
+        # This row was missing entirely (#1546). install.sh creates the file
+        # as root (the schema migrator runs during install, before the
+        # User=hal0 daemon first starts), the ownership pass then reconciled
+        # 37 paths without touching it, and ``doctor perms`` reported the box
+        # clean — while the daemon could not write the registry. Every model
+        # pull downloaded in full and only then failed with "attempt to write
+        # a readonly database", leaving orphaned weights on disk. Same shape
+        # as #1466: the check agreed with the bug.
+        #
+        # 0644 is sqlite3.connect's birth mode and is functionally sufficient
+        # — a single writer (the hal0 daemon). The -wal/-shm siblings get
+        # their own rows because ``hal0.db.connection`` switches every
+        # connection to WAL journaling: SQLite must write those two as well,
+        # and they are born from whichever process opens the database first,
+        # which during install is root. Covering the database but not its
+        # journal would leave the identical failure reachable by a side door.
+        PermRow(
+            var_lib / "hal0.db",
+            state_owner,
+            service_group,
+            0o644,
+            role="hal0.db (primary database)",
+        ),
+        PermRow(
+            var_lib / "hal0.db-wal",
+            state_owner,
+            service_group,
+            0o644,
+            role="hal0.db-wal (WAL journal)",
+        ),
+        PermRow(
+            var_lib / "hal0.db-shm",
+            state_owner,
+            service_group,
+            0o644,
+            role="hal0.db-shm (WAL shared-memory index)",
+        ),
         # registry/ — the model registry, also born root:root from the same
         # install.sh mkdir and also written by the User=hal0 daemon. Same O13
         # birth-ownership class as slots/ above; heal the dir. registry/ is
@@ -316,10 +360,16 @@ def ownership_table(
         #     0644 birth mode) to match the SAME cross-process-shared
         #     rationale as the *.lock rows above — a root-run tool may create
         #     it first, and the hal0 daemon must still be able to flock it.
-        #   * hal0.db — hal0.registry.sqlite_store, opened via sqlite3.connect
-        #     -> born 0644 (verified locally); single writer (the hal0
-        #     daemon), so 0644 is both the birth mode and functionally
-        #     sufficient.
+        #   * hal0.db — NOT the production database. This path is only ever
+        #     reached by ``SqliteModelRegistry(registry_dir=...)``, whose
+        #     db_path override puts the file at ``registry_dir/hal0.db`` for
+        #     test/dev isolation. Production falls through to
+        #     ``paths.db_path()`` -> ``var_lib/"hal0.db"``, covered by its own
+        #     row above — do not read this row as covering the real registry
+        #     (that misreading is #1546). Kept so a box that did take the
+        #     override path still heals. Born 0644 via sqlite3.connect;
+        #     single writer (the hal0 daemon), so 0644 is both the birth mode
+        #     and functionally sufficient.
         PermRow(
             var_lib / "registry",
             state_owner,
