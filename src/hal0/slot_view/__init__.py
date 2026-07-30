@@ -418,6 +418,26 @@ def _resolve_container_provider(provider: Any) -> Any:
     return container_provider()
 
 
+#: Wall-clock bound on ONE slot's container probe (issue #1427).
+#:
+#: The probe is four independent IO waits (``systemctl is-active``, GET
+#: /health on the slot port, ``podman inspect`` on the container, ``podman
+#: image inspect`` on the declared image). Each has its own inner timeout,
+#: but nothing bounded their SUM, and the whole thing ran serially across
+#: every slot — which is where ``GET /api/slots`` got its measured 17–41 s.
+#: A slot that blows this budget degrades to ``stopped`` / unhealthy for
+#: that poll, exactly as a probe exception already did; the next poll
+#: (2.5 s later) re-probes it.
+_PROBE_TIMEOUT_S = 8.0
+
+#: How many slot probes may be in flight at once. The probes are dominated
+#: by subprocess waits that land in the default thread-pool executor, so an
+#: unbounded fan-out over ~30 slots would just queue there while spawning
+#: ~90 podman/systemctl children at once. Wide enough that a typical
+#: deployment finishes in one wave.
+_PROBE_CONCURRENCY = 8
+
+
 async def container_enrichment(
     configs: list[dict[str, Any]],
     *,
@@ -441,60 +461,87 @@ async def container_enrichment(
     ContainerProvider lazily so route-level patches on the class keep
     working. Never raises — probe failures degrade to ``stopped`` /
     ``False`` rather than surfacing as a 500.
+
+    Slots are probed **concurrently** (bounded by
+    :data:`_PROBE_CONCURRENCY`) and each slot's probe is bounded by
+    :data:`_PROBE_TIMEOUT_S`. Issue #1427: this loop used to run serially,
+    so ``GET /api/slots`` paid the sum of every slot's connect timeouts —
+    17–41 s measured on a 19–29 slot box. Concurrency turns that sum into a
+    max, and the per-slot deadline bounds the max.
     """
     from hal0.slots.manager import _cfg_port  # type: ignore[attr-defined]
 
     jobs = pull_jobs or {}
-    out: dict[str, dict[str, Any]] = {}
-    for cfg in configs:
-        name = str(cfg.get("name", ""))
-        if not name:
-            continue
+    named = [(str(cfg.get("name", "")), cfg) for cfg in configs]
+    named = [(name, cfg) for name, cfg in named if name]
+    if not named:
+        return {}
 
-        entry: dict[str, Any] = {}
+    # The profile catalogue is process-global config, not per-slot state —
+    # load it ONCE instead of re-reading and re-parsing profiles.toml inside
+    # every slot's probe.
+    try:
+        from hal0.config.loader import load_profiles_config
 
+        profiles: dict[str, Any] | None = load_profiles_config().profile
+    except Exception:
+        # ``None`` (not ``{}``) so an unreadable catalogue degrades exactly as
+        # the old per-slot ``except`` did: image + resolved_command are nulled
+        # rather than half-resolved.
+        profiles = None
+
+    loop = asyncio.get_event_loop()
+    sem = asyncio.Semaphore(_PROBE_CONCURRENCY)
+
+    async def _probe_status(name: str, cfg: dict[str, Any]) -> tuple[str, bool]:
+        """(container_status, container_health) for one slot."""
         try:
             cp = _resolve_container_provider(provider)
-            # 1) systemctl is-active (synchronous — run in executor). The CONFIG
+            # 1) systemctl is-active (synchronous — run in executor, #1427: on
+            # the event loop it would serialise every slot's check). The CONFIG
             # goes down, not the name: the unit is keyed by the slot's instance
             # token, which is the durable id on a post-migration box (#1417).
-            active = await asyncio.get_event_loop().run_in_executor(None, cp.is_active, cfg)
+            active = await loop.run_in_executor(None, cp.is_active, cfg)
             if active:
                 # 2) /health probe on the slot port to distinguish running vs starting
                 port = _cfg_port(cfg)
                 if port:
                     health = await cp.health(port)
                     container_health = bool(health.get("ok"))
-                    container_status = "running" if container_health else "starting"
-                else:
-                    container_health = False
-                    container_status = "running"
-            else:
-                container_health = False
-                # Distinguish crashed (failed) from clean stop by checking unit state
-                # via is-active exit codes: 0=active, 3=inactive, other=failed
-                container_status = "stopped"
-                try:
-                    import subprocess
+                    return ("running" if container_health else "starting", container_health)
+                return "running", False
+            # Distinguish crashed (failed) from clean stop by checking unit state
+            # via is-active exit codes: 0=active, 3=inactive, other=failed
+            try:
+                import subprocess
 
-                    result = subprocess.run(
-                        # Through the naming seam, not an f-string on the name:
-                        # this discriminator was the last place that hardcoded
-                        # a name-keyed unit (#1417), so on an id-keyed box it
-                        # reported every slot "stopped" and never "crashed".
+                # In an executor: subprocess.run blocks, and on the event loop
+                # it would serialise every stopped slot's 5 s worst case into
+                # the request (#1427). Through the naming seam, not an
+                # f-string on the name: this discriminator was the last place
+                # that hardcoded a name-keyed unit (#1417), so on an
+                # id-keyed box it reported every slot "stopped" and never
+                # "crashed".
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: subprocess.run(
                         ["systemctl", "is-active", slot_unit_name(slot_instance_token(cfg))],
                         capture_output=True,
                         timeout=5,
-                    )
-                    stdout = result.stdout.decode().strip()
-                    if stdout == "failed":
-                        container_status = "crashed"
-                except Exception:
-                    pass
+                    ),
+                )
+                if result.stdout.decode().strip() == "failed":
+                    return "crashed", False
+            except Exception:
+                pass
+            return "stopped", False
         except Exception:
-            container_health = False
-            container_status = "stopped"
+            return "stopped", False
 
+    async def _one(name: str, cfg: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        entry: dict[str, Any] = {}
+
+        container_status, container_health = await _probe_status(name, cfg)
         entry["container_status"] = container_status
         entry["container_health"] = container_health
 
@@ -521,10 +568,9 @@ async def container_enrichment(
         image: str | None = None
         if profile_name:
             try:
-                from hal0.config.loader import load_profiles_config
-
-                catalog = load_profiles_config()
-                prof = catalog.profile.get(profile_name)
+                if profiles is None:
+                    raise RuntimeError("profiles catalogue unreadable")
+                prof = profiles.get(profile_name)
                 if prof is not None:
                     from hal0.providers.container import _resolve_image_ref
 
@@ -538,10 +584,14 @@ async def container_enrichment(
                 if prof is not None:
                     entry["device_class"] = prof.device_class
                     entry["backend"] = prof.backend
-                # resolved_command = llama-server argv starting from the image
+                # resolved_command = llama-server argv starting from the image.
+                # Off the event loop: it re-reads config + resolves the runner
+                # image, which is filesystem work, not a pure function.
                 from hal0.providers.container import resolved_command_for_slot
 
-                entry["resolved_command"] = resolved_command_for_slot(cfg)
+                entry["resolved_command"] = await loop.run_in_executor(
+                    None, resolved_command_for_slot, cfg
+                )
             except Exception:
                 entry["image"] = None
                 entry["resolved_command"] = None
@@ -561,9 +611,7 @@ async def container_enrichment(
             # By CONFIG: the container is named after the instance token
             # (#1417) — a bare name inspected a container that never exists on
             # an id-keyed box, leaving the image backend-of-record inert.
-            running_image = await asyncio.get_event_loop().run_in_executor(
-                None, cp.running_image, cfg
-            )
+            running_image = await loop.run_in_executor(None, cp.running_image, cfg)
         except Exception:
             running_image = None
         if running_image:
@@ -580,9 +628,7 @@ async def container_enrichment(
         elif image:
             try:
                 cp = _resolve_container_provider(provider)
-                present = await asyncio.get_event_loop().run_in_executor(
-                    None, cp.image_present, image
-                )
+                present = await loop.run_in_executor(None, cp.image_present, image)
                 entry["image_status"] = "present" if present else "missing"
             except Exception:
                 entry["image_status"] = "missing"
@@ -593,6 +639,33 @@ async def container_enrichment(
             # learn to ignore a real "missing" every 30s.
             entry["image_status"] = "not-configured"
 
+        return name, entry
+
+    async def _bounded(name: str, cfg: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        # Acquire FIRST, then start the clock — a slot queued behind the
+        # semaphore must not spend its deadline waiting for a turn.
+        async with sem:
+            try:
+                return await asyncio.wait_for(_one(name, cfg), timeout=_PROBE_TIMEOUT_S)
+            except (TimeoutError, asyncio.TimeoutError):
+                log.warning("slot_view.container_probe_timeout slot=%s", name)
+                return name, {
+                    "container_status": "stopped",
+                    "container_health": False,
+                    "runtime": "container",
+                    "profile": str(cfg.get("profile") or ""),
+                    "image": None,
+                    "resolved_command": None,
+                    "image_status": "not-configured",
+                }
+
+    out: dict[str, dict[str, Any]] = {}
+    for item in await asyncio.gather(
+        *(_bounded(name, cfg) for name, cfg in named), return_exceptions=True
+    ):
+        if isinstance(item, BaseException):
+            continue
+        name, entry = item
         out[name] = entry
 
     # #733: trio shadow slots (embed/stt — device=npu, non-llm) never run a
@@ -764,10 +837,19 @@ class SlotViewAggregator:
         configs = await self._safe_configs()
 
         enrichment = config_enrichment(configs)
-        c_enrichment = await container_enrichment(
-            configs,
-            pull_jobs=self._slot_pull_jobs,
-            provider=self._container_provider,
+        # #1427: the container probe, the capacity probe and the metrics
+        # fan-out are three independent IO waits over the same slot set —
+        # there is no data dependency between them, so awaiting them one
+        # after another just added their latencies together on every
+        # dashboard poll. Run them concurrently.
+        c_enrichment, per_slot_mem, raw_metrics = await asyncio.gather(
+            container_enrichment(
+                configs,
+                pull_jobs=self._slot_pull_jobs,
+                provider=self._container_provider,
+            ),
+            self._safe_per_slot_mem(real_slots),
+            self._safe_metrics(),
         )
         for payload in payloads:
             slot_name = str(payload["name"])
@@ -783,8 +865,8 @@ class SlotViewAggregator:
         # Per-slot resident memory (model weights + KV-cache estimate) so the
         # dashboard memory map (W4) attributes a real footprint per slot. Only
         # resident slots get a non-zero row; everything else reads 0. Never let
-        # a memory-probe failure break the slots list.
-        per_slot_mem = await self._safe_per_slot_mem(real_slots)
+        # a memory-probe failure break the slots list. (Probed above, in the
+        # concurrent gather.)
         mem_by_name: dict[str, float | int] = {}
         for payload in payloads:
             slot_name = str(payload["name"])
@@ -799,8 +881,6 @@ class SlotViewAggregator:
                 self._last_used_model,
                 loaded_models=loaded_model_names_from_slots(real_slots),
             )
-
-        raw_metrics = await self._safe_metrics()
 
         views: list[SlotView] = []
         for payload in payloads:
