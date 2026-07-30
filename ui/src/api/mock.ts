@@ -84,7 +84,11 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   { re: /^\/api\/models$/, key: 'models' },
   { re: /^\/api\/models\/updates\/check$/, key: 'modelUpdatesCheck', networkFirst: true },
   { re: /^\/api\/backends$/, key: 'backends' },
-  { re: /^\/api\/capabilities$/, key: 'capabilities' },
+  // networkFirst: the Voice/Image-gen settings pages need per-spec catalog
+  // fixtures (real bare-array `catalogs.<slot>.<child>` rows — #1454), so
+  // page.route overrides must stay authoritative here like the sibling
+  // profiles/stacks/chat-templates rows below.
+  { re: /^\/api\/capabilities$/, key: 'capabilities', networkFirst: true },
   { re: /^\/api\/hardware$/, key: 'hardware' },
   { re: /^\/api\/npu\/occupancy$/, key: 'npuOccupancy' },
   { re: /^\/api\/journal$/, key: 'journal' },

@@ -17,8 +17,48 @@ export interface CapabilityRow {
   [k: string]: unknown
 }
 
+// A picker row from a `catalogs.<slot>.<child>` array — one installable/
+// installed model, with its per-backend download state.
+export interface CapabilityCatalogItem {
+  id: string
+  capabilities?: string[]
+  size_gb?: number
+  backends?: { id: string; provider: string; downloaded: boolean; pullable?: boolean }[]
+  [k: string]: unknown
+}
+
+// The live selection for one `selections.<slot>.<child>` pair.
+export interface CapabilitySelection {
+  device: string
+  backend: string
+  provider: string
+  model: string | null
+  enabled: boolean
+  slot: string
+  status: string
+  [k: string]: unknown
+}
+
+export interface CapabilityBackend {
+  id: string
+  label?: string
+  short?: string
+  provider?: string
+  multiplex?: boolean
+  [k: string]: unknown
+}
+
+// Real GET /api/capabilities envelope (orchestrator.py get_state /
+// catalogs_by_slot / catalog.available_backends). `catalogs.<slot>.<child>`
+// and `selections.<slot>.<child>` are keyed the same way — e.g.
+// catalogs.voice.stt is a bare CapabilityCatalogItem[], not
+// `{items: [...]}`/`{models: [...]}`. Replaces the obsolete
+// pre-orchestrator `{capabilities: Record<...>}` shape, which doesn't match
+// what the API (or mockFixtures.ts buildCapabilities()) actually ships.
 export interface CapabilitiesBag {
-  capabilities: Record<string, CapabilityRow>
+  backends: CapabilityBackend[]
+  catalogs: Record<string, Record<string, CapabilityCatalogItem[]>>
+  selections: Record<string, Record<string, CapabilitySelection>>
 }
 
 export function useCapabilities() {
