@@ -194,6 +194,23 @@ class UpdateRollbackUnavailable(UpdateError):
     status = 400
 
 
+class UpdatePrivilegeError(UpdateError):
+    """The privileged half of the update cannot be reached (#1464).
+
+    ``hal0-api`` runs as the unprivileged ``hal0`` service account while
+    ``/usr/lib/hal0`` is root-owned and never service-writable
+    (:mod:`hal0.install.perms`). Every activation step therefore routes through
+    the ``hal0-update`` sudo seam. This error is raised by the *preflight*, at
+    the top of :meth:`Updater.prepare`/:meth:`Updater.commit`/
+    :meth:`Updater.rollback`, when neither route is usable — so an operator gets
+    an actionable message immediately instead of a raw ``Permission denied``
+    after a full download + sha256 + cosign pass.
+    """
+
+    code = "system.update_privilege_denied"
+    status = 500
+
+
 # ── Release-manifest schema (pydantic) ─────────────────────────────────────────
 
 
@@ -1132,6 +1149,79 @@ def _current_symlink() -> Path:
     return _usr_lib_root() / "current"
 
 
+# ── Release-directory tokens (the only thing that crosses the privileged seam) ──
+#
+# #1464: the unprivileged API never hands the root helper a *path*. It hands a
+# bare directory BASENAME, matched against this regex on both sides. No '/', no
+# leading '.', bounded length — so a validated token can only ever name a direct
+# child of ``_usr_lib_root()`` and can never traverse out of it.
+RELEASE_DIR_RE = re.compile(r"^hal0-[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+
+
+def release_dir_name(version: str) -> str:
+    """Return the ``hal0-<version>`` directory basename for ``version``."""
+    return assert_release_dir_name(f"hal0-{version}")
+
+
+def assert_release_dir_name(name: str) -> str:
+    """Return ``name`` if it is a legal release-directory basename, else raise.
+
+    Raises :class:`ValueError` — callers translate that into their own typed
+    error. Mirrors ``validate_dir_name`` in ``installer/wrappers/hal0-update``
+    EXACTLY; the wrapper's copy is a fail-fast convenience, this one (running as
+    root inside the helper) is the security boundary.
+    """
+    if not isinstance(name, str) or not RELEASE_DIR_RE.match(name):
+        raise ValueError(f"bad release directory name: {name!r}")
+    return name
+
+
+def assert_trusted_release_dir(path: Path, *, euid: int | None = None) -> None:
+    """Refuse to activate a tree the ``hal0`` service account could have written.
+
+    Called from the ROOT boundary only (``hal0.updater.privileged.main``), which
+    is the one caller acting on behalf of an unprivileged party. ``activate``
+    ends in ``pip install <path>``, which executes the tree's build backend **as
+    root** — so if a compromised hal0-api could write that tree, the seam would
+    be a root-code-execution hole rather than a narrow grant. The trust test is
+    the classic one: the directory and its parent must be owned by uid 0 and not
+    group/other writable, so only root can have produced their contents.
+
+    No-op below euid 0: an operator running ``sudo hal0 update`` staged the tree
+    themselves, and a dev/CI/``HAL0_HOME`` run has no privilege boundary to
+    protect. ``euid`` is injectable so this is testable without root (and so the
+    predicate does not depend on a process-global ``os.geteuid`` that other
+    suites monkeypatch).
+
+    Residual, stated plainly: the check is top-level, not recursive. On the seam
+    path root staged the tree itself into a root-owned ``<usr_lib>``, so a
+    service-writable subdirectory is not reachable.
+    """
+    if (os.geteuid() if euid is None else euid) != 0:
+        return
+    for candidate in (path.parent, path):
+        try:
+            st = candidate.lstat()
+        except OSError as exc:
+            raise UpdateError(
+                f"cannot stat {candidate}: {exc}",
+                details={"path": str(candidate), "error": str(exc)},
+            ) from exc
+        if st.st_uid != 0 or st.st_mode & 0o022:
+            raise UpdatePrivilegeError(
+                f"refusing to activate {path}: {candidate} is not root-owned "
+                f"(uid={st.st_uid}, mode={st.st_mode & 0o7777:04o}) — a tree the "
+                "service account can write must never be pip-installed as root",
+                details={
+                    "path": str(path),
+                    "offending_path": str(candidate),
+                    "uid": st.st_uid,
+                    "mode": f"{st.st_mode & 0o7777:04o}",
+                    "hint": f"sudo chown -R root:root {candidate} && sudo chmod go-w {candidate}",
+                },
+            )
+
+
 def _editable_install_path() -> str | None:
     """Return the source-tree path if hal0 is a pip *editable* install, else None.
 
@@ -1822,6 +1912,246 @@ def rerender_slot_units(*, job_id: str | None = None) -> int:
     return rewritten
 
 
+# ── Privileged primitives (#1464) ──────────────────────────────────────────────
+#
+# The three operations below are the ENTIRE set of update steps that need root
+# on a shipped box: they write ``/usr/lib/hal0`` (root:root 0755, never
+# service-writable) or the root-owned venv. Everything else the updater does —
+# config migrations, seed-profile pruning, the mtp/extra-args/image sweeps, the
+# rollback breadcrumb, the slot-unit re-render — writes ``/etc/hal0``,
+# ``/var/lib/hal0`` or goes through the existing ``hal0-systemctl`` seam, all of
+# which the ``hal0`` service account already owns. Keeping those OUT of the root
+# helper is deliberate: running them as root would silently re-own hal0's own
+# config and SQLite files and break the next unprivileged write.
+#
+# They are plain module-level functions (not Updater methods) because they run
+# in TWO processes: in-process on a dev/CI/root install, and inside
+# ``python -m hal0.updater.privileged`` as root when hal0-api routes through the
+# ``hal0-update`` sudo seam. :class:`hal0.updater.privileged.UpdateSeam` picks.
+
+
+async def stage_release(
+    channel: str,
+    version: str | None = None,
+    *,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """§9 steps 1-6: fetch + authenticate + download + verify + extract.
+
+    The whole of this runs on the PRIVILEGED side on a shipped box, deliberately
+    including the manifest fetch, the sha256 check and ``cosign verify-blob``.
+    Splitting it — letting the unprivileged API download and verify, then asking
+    root to install the result — would make the grant a root-code-execution hole:
+    a compromised hal0-api would simply skip the verification and hand root an
+    attacker-supplied tree. Root re-derives the target version and re-verifies
+    the bytes itself, so the only thing the caller controls is *which channel*
+    and an optional exact-match version pin.
+
+    Returns ``{version, install_dir, cache_dir, notes}``.
+    """
+    # Step 1: fetch, validate, and authenticate the manifest itself.
+    log.info("updater.prepare_start", job_id=job_id, channel=channel, pinned=version)
+    raw, manifest, _ = await _fetch_verified_release_manifest(channel, job_id=job_id)
+
+    # Step 2: treat the optional version as an optimistic exact pin. It is
+    # never a historical resolver or a caller-controlled staging label:
+    # authenticated manifest.version remains the sole target authority.
+    requested_version = (
+        _require_release_version(version, field="requested_version")
+        if version is not None
+        else None
+    )
+    target_version = _require_release_version(manifest.version, field="manifest_version")
+    if requested_version is not None and requested_version != target_version:
+        raise UpdateManifestInvalid(
+            "requested version does not match authenticated channel manifest",
+            details={
+                "channel": channel,
+                "requested_version": requested_version,
+                "manifest_version": target_version,
+            },
+        )
+
+    # Residual: concurrent prepares for the same version share cache/install
+    # paths and are not serialized. A lock redesign is intentionally out of
+    # scope; signed immutable same-version assets limit current release risk
+    # because both prepares authenticate the same publisher-pinned bytes.
+
+    # Step 3: download tarball + Sigstore bundle (survives cert expiry, #1159).
+    cache = _cache_dir(target_version)
+    cache.mkdir(parents=True, exist_ok=True)
+    tarball_path = cache / f"hal0-{target_version}.tar.gz"
+    bundle_path = cache / f"hal0-{target_version}.tar.gz.bundle"
+    log.info("updater.download_start", job_id=job_id, version=target_version, url=manifest.url)
+    await _download(manifest.url, tarball_path)
+    await _download(manifest.bundle_url, bundle_path)
+    log.info(
+        "updater.download_ok",
+        job_id=job_id,
+        tarball=str(tarball_path),
+        bundle=str(bundle_path),
+    )
+
+    # Step 4: sha256 verify.
+    got_digest = _sha256_file(tarball_path)
+    if got_digest != manifest.digest_sha256:
+        raise UpdateVerifyError(
+            f"sha256 digest mismatch (expected {manifest.digest_sha256}, got {got_digest})",
+            details={
+                "expected": manifest.digest_sha256,
+                "got": got_digest,
+                "tarball": str(tarball_path),
+            },
+        )
+    log.info("updater.sha256_ok", job_id=job_id, digest=got_digest)
+
+    # Step 5: verify against the identity derived from authenticated release
+    # policy, never a manifest-selected broader expression.
+    expected_identity = exact_manifest_identity(manifest.release_kind, manifest.version)
+    await asyncio.to_thread(
+        _verify_cosign,
+        tarball_path,
+        bundle_path,
+        identity_regexp=expected_identity,
+        issuer=_MANIFEST_SIGNER_ISSUER,
+        job_id=job_id,
+    )
+
+    # Step 6: extract. `_extract_tarball` quarantines a prior hal0
+    # extraction at the same path (see its docstring) so a retry
+    # after a half-failed apply isn't permanently wedged.
+    install_dir = _versioned_install_dir(target_version)
+    await asyncio.to_thread(_extract_tarball, tarball_path, install_dir, job_id=job_id)
+
+    # Cache the verified manifest so commit() reads min_data_version without a
+    # re-fetch (which could resolve a *newer* release than the one just
+    # verified), then read release notes from the *verified* tree — so what an
+    # operator reviews before commit is exactly what cosign signed.
+    _write_atomic_text(_manifest_cache_path(target_version), json.dumps(raw))
+    notes = _read_release_notes(install_dir)
+    # The cache tree lives under the service-owned /var/lib/hal0. When this ran
+    # as root (the seam path) the freshly-created files are root-owned, which
+    # would break the next unprivileged retry — hand them back to the service
+    # account. Best-effort: a dev/CI box has no hal0 user and needs no chown.
+    await asyncio.to_thread(_restore_service_ownership, cache, job_id=job_id)
+    log.info("updater.prepare_ok", job_id=job_id, version=target_version)
+    return {
+        "version": target_version,
+        "install_dir": str(install_dir),
+        "cache_dir": str(cache),
+        "notes": notes,
+    }
+
+
+def _restore_service_ownership(root: Path, *, job_id: str | None = None) -> None:
+    """chown ``root`` (recursively) back to the ``hal0`` service account.
+
+    Only meaningful when we are euid 0 AND the ``hal0`` user exists — i.e. the
+    real seam path on a shipped box. Everywhere else this is a no-op, so dev,
+    CI and ``HAL0_HOME`` runs are untouched. Failures are logged, never raised:
+    a cache dir with the wrong owner is a retry annoyance, not a failed update.
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        import pwd
+
+        entry = pwd.getpwnam("hal0")
+    except (ImportError, KeyError):
+        return
+    try:
+        for path in (root, *root.rglob("*")):
+            os.chown(path, entry.pw_uid, entry.pw_gid)
+    except OSError as exc:
+        log.warning("updater.cache_chown_failed", job_id=job_id, path=str(root), error=str(exc))
+
+
+def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, Any]:
+    """§9 step 8 + 8b: swap ``current`` to ``<usr_lib>/<dir_name>`` and re-pip it.
+
+    THE single activation primitive — :meth:`Updater.commit` and
+    :meth:`Updater.rollback` both go through it, so "swap the symlink, refresh
+    the venv, and undo the swap if pip fails" has exactly one implementation.
+    ``dir_name`` is a bare basename (never a path). The root boundary
+    (:func:`hal0.updater.privileged.main`) additionally asserts the named tree
+    is root-owned before calling this — see :func:`assert_trusted_release_dir`.
+
+    Returns ``{"previous": <prior target or None>, "target": <activated path>}``.
+    """
+    try:
+        name = assert_release_dir_name(dir_name)
+    except ValueError as exc:
+        raise UpdateError(
+            f"refusing to activate: {exc}",
+            details={"dir_name": dir_name, "error": str(exc)},
+        ) from exc
+
+    target = _usr_lib_root() / name
+    if not target.is_dir() or target.is_symlink():
+        raise UpdateError(
+            f"nothing to activate at {target} — not a directory",
+            details={"dir_name": name, "path": str(target)},
+        )
+    # NOTE: the "must be root-owned" trust test is NOT here. It belongs to the
+    # root boundary — hal0.updater.privileged.main — because that is the only
+    # caller acting on behalf of an unprivileged party. An operator running
+    # `sudo hal0 update` staged the tree themselves, and a dev/CI/HAL0_HOME run
+    # has no privilege boundary to protect at all.
+
+    link = _current_symlink()
+    try:
+        prior = _atomic_symlink_swap(target, link)
+    except OSError as exc:
+        raise UpdateSwapError(
+            f"atomic symlink swap failed: {exc}",
+            details={"link": str(link), "target": str(target), "error": str(exc)},
+        ) from exc
+
+    # Re-install the swapped-in code into the running venv. The symlink swap
+    # alone changes nothing — the venv imports hal0 from its own site-packages
+    # (#495). On failure roll the symlink back so `current` and the installed
+    # code never disagree.
+    if not _is_editable_install():
+        try:
+            _reinstall_into_venv(target, job_id=job_id)
+        except UpdateError:
+            if prior is not None:
+                with contextlib.suppress(OSError):
+                    _atomic_symlink_swap(prior, link)
+            raise
+
+    log.info(
+        "updater.activate_ok",
+        job_id=job_id,
+        target=str(target),
+        previous=str(prior) if prior else None,
+    )
+    return {"previous": str(prior) if prior else None, "target": str(target)}
+
+
+def discard_release(dir_name: str, *, job_id: str | None = None) -> None:
+    """Remove a staged ``<usr_lib>/<dir_name>`` tree (rm -rf semantics).
+
+    The failure-cleanup primitive: ``commit`` calls it when a config migration
+    aborts the update so a half-installed tree is never left behind. Idempotent
+    — a missing tree is success, matching the ``shutil.rmtree`` + suppress this
+    replaced.
+    """
+    try:
+        name = assert_release_dir_name(dir_name)
+    except ValueError as exc:
+        raise UpdateError(
+            f"refusing to discard: {exc}",
+            details={"dir_name": dir_name, "error": str(exc)},
+        ) from exc
+    target = _usr_lib_root() / name
+    if target.is_symlink() or not target.exists():
+        return
+    with contextlib.suppress(OSError):
+        shutil.rmtree(target)
+    log.info("updater.discard_ok", job_id=job_id, target=str(target))
+
+
 async def _rerender_units_after_swap(job_id: str | None) -> None:
     """Re-render every slot unit through a FRESH interpreter of the
     just-activated code, so any subsequent start (``systemctl restart``,
@@ -1895,6 +2225,19 @@ class Updater:
         """
         self.channel = channel
         self.job_id = job_id
+
+    def _seam(self) -> Any:
+        """Return the privileged-update seam (#1464).
+
+        Imported lazily: :mod:`hal0.updater.privileged` imports *this* module at
+        the top level (it wraps the primitives above), so a top-level import
+        here would be circular. The seam is constructed per call — it is
+        stateless and default-constructed = production behaviour, exactly like
+        :class:`hal0.system.seam.SystemCtlSeam`.
+        """
+        from hal0.updater.privileged import UpdateSeam
+
+        return UpdateSeam(job_id=self.job_id)
 
     # ── check ──────────────────────────────────────────────────────────────────
 
@@ -1976,99 +2319,11 @@ class Updater:
         # which does not exist in an editable checkout.  Continuing would
         # silently extract a tarball that is never actually loaded.
         _raise_if_editable_install()
-
-        # Step 1: fetch, validate, and authenticate the manifest itself.
-        log.info("updater.prepare_start", job_id=self.job_id, channel=self.channel, pinned=version)
-        raw, manifest, _ = await _fetch_verified_release_manifest(self.channel, job_id=self.job_id)
-
-        # Step 2: treat the optional version as an optimistic exact pin. It is
-        # never a historical resolver or a caller-controlled staging label:
-        # authenticated manifest.version remains the sole target authority.
-        requested_version = (
-            _require_release_version(version, field="requested_version")
-            if version is not None
-            else None
-        )
-        target_version = _require_release_version(manifest.version, field="manifest_version")
-        if requested_version is not None and requested_version != target_version:
-            raise UpdateManifestInvalid(
-                "requested version does not match authenticated channel manifest",
-                details={
-                    "channel": self.channel,
-                    "requested_version": requested_version,
-                    "manifest_version": target_version,
-                },
-            )
-
-        # Residual: concurrent prepares for the same version share cache/install
-        # paths and are not serialized. A lock redesign is intentionally out of
-        # scope; signed immutable same-version assets limit current release risk
-        # because both prepares authenticate the same publisher-pinned bytes.
-
-        # Step 3: download tarball + Sigstore bundle (survives cert expiry, #1159).
-        cache = _cache_dir(target_version)
-        cache.mkdir(parents=True, exist_ok=True)
-        tarball_path = cache / f"hal0-{target_version}.tar.gz"
-        bundle_path = cache / f"hal0-{target_version}.tar.gz.bundle"
-        log.info(
-            "updater.download_start",
-            job_id=self.job_id,
-            version=target_version,
-            url=manifest.url,
-        )
-        await _download(manifest.url, tarball_path)
-        await _download(manifest.bundle_url, bundle_path)
-        log.info(
-            "updater.download_ok",
-            job_id=self.job_id,
-            tarball=str(tarball_path),
-            bundle=str(bundle_path),
-        )
-
-        # Step 4: sha256 verify.
-        got_digest = _sha256_file(tarball_path)
-        if got_digest != manifest.digest_sha256:
-            raise UpdateVerifyError(
-                f"sha256 digest mismatch (expected {manifest.digest_sha256}, got {got_digest})",
-                details={
-                    "expected": manifest.digest_sha256,
-                    "got": got_digest,
-                    "tarball": str(tarball_path),
-                },
-            )
-        log.info("updater.sha256_ok", job_id=self.job_id, digest=got_digest)
-
-        # Step 5: verify against the identity derived from authenticated release
-        # policy, never a manifest-selected broader expression.
-        expected_identity = exact_manifest_identity(manifest.release_kind, manifest.version)
-        await asyncio.to_thread(
-            _verify_cosign,
-            tarball_path,
-            bundle_path,
-            identity_regexp=expected_identity,
-            issuer=_MANIFEST_SIGNER_ISSUER,
-            job_id=self.job_id,
-        )
-
-        # Step 6: extract. `_extract_tarball` quarantines a prior hal0
-        # extraction at the same path (see its docstring) so a retry
-        # after a half-failed apply isn't permanently wedged.
-        install_dir = _versioned_install_dir(target_version)
-        await asyncio.to_thread(_extract_tarball, tarball_path, install_dir, job_id=self.job_id)
-
-        # Cache the verified manifest so commit() reads min_data_version without a
-        # re-fetch (which could resolve a *newer* release than the one just
-        # verified), then read release notes from the *verified* tree — so what an
-        # operator reviews before commit is exactly what cosign signed.
-        _write_atomic_text(_manifest_cache_path(target_version), json.dumps(raw))
-        notes = _read_release_notes(install_dir)
-        log.info("updater.prepare_ok", job_id=self.job_id, version=target_version)
-        return {
-            "version": target_version,
-            "install_dir": str(install_dir),
-            "cache_dir": str(cache),
-            "notes": notes,
-        }
+        # #1464: prove we can reach the root-only tree (directly or through the
+        # hal0-update seam) BEFORE burning a download + sha256 + cosign pass.
+        seam = self._seam()
+        seam.assert_privileges()
+        return await seam.stage(self.channel, version)
 
     async def commit(self, version: str) -> dict[str, Any]:
         """Activate a previously :meth:`prepare`d ``version`` (§9 steps 7-9+).
@@ -2085,6 +2340,8 @@ class Updater:
         shape as the old single-step apply.
         """
         _raise_if_editable_install()
+        seam = self._seam()
+        seam.assert_privileges()
         target_version = _require_release_version(version, field="commit_version")
         install_dir = _versioned_install_dir(target_version)
         cache = _cache_dir(target_version)
@@ -2127,9 +2384,10 @@ class Updater:
             )
         except Hal0Error as exc:
             # Don't leave the new tree orphaned on a migration failure —
-            # nuke the half-installed dir so a retry starts fresh.
-            with contextlib.suppress(OSError):
-                shutil.rmtree(install_dir)
+            # nuke the half-installed dir so a retry starts fresh. Routed
+            # through the seam: /usr/lib/hal0 is root-only (#1464).
+            with contextlib.suppress(Exception):
+                seam.discard(release_dir_name(target_version))
             raise UpdateError(
                 f"config migration failed during update: {exc.message}",
                 details={**exc.details, "version": target_version},
@@ -2141,37 +2399,48 @@ class Updater:
         # manually via `hal0 slot migrate-hw` (mirrors slot_flags_fold). Auto-
         # running an irreversible hardware re-partition on every update is unsafe.
 
-        # Step 8 + 9: atomic symlink swap + record previous.
+        # Step 7d: roll stale former-default runner-image pins to the current
+        # DEFAULT_ROCMFPX_IMAGE (runs before the unit re-render below so the
+        # rewritten units carry the new ref; applies on next slot start).
+        try:
+            await asyncio.to_thread(retag_stale_slot_images, job_id=self.job_id)
+        except Exception as exc:
+            log.warning(
+                "updater.image_retag_failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+            # Non-fatal: a stale pin just keeps the previous runner image.
+
+        # Step 7e: strip hal0-managed flags (§21.7) from model
+        # defaults.extra_args — rows stamped via the pre-screen duplicate path
+        # carry -c/--port debris that hard-fails every launch. Loud per-row log.
+        try:
+            await asyncio.to_thread(sanitize_model_extra_args, job_id=self.job_id)
+        except Exception as exc:
+            log.warning(
+                "updater.extra_args_sanitize_failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+            # Non-fatal: an affected model keeps failing to launch until the
+            # operator removes the managed flag in the model drawer.
+
+        # Step 8 + 8b: atomic symlink swap + venv re-pip, as ONE privileged
+        # operation (`activate_release`). The venv imports hal0 from its own
+        # site-packages, so a symlink swap alone would NOT change the running
+        # version (#495); activate rolls the symlink back itself if the re-pip
+        # fails, so `current` and the installed code never disagree.
         link = _current_symlink()
         try:
-            prior = _atomic_symlink_swap(install_dir, link)
-        except OSError as exc:
+            activated = await seam.activate(release_dir_name(target_version))
+        except UpdateSwapError:
             # Roll back the extracted tree so /usr/lib stays clean.
-            with contextlib.suppress(OSError):
-                shutil.rmtree(install_dir)
-            raise UpdateSwapError(
-                f"atomic symlink swap failed: {exc}",
-                details={"link": str(link), "target": str(install_dir), "error": str(exc)},
-            ) from exc
-
-        # Step 8b: re-install the swapped-in code into the running venv.
-        # apply() only swaps the `current` symlink; the venv imports hal0
-        # from its own site-packages (a normal, non-editable install), so a
-        # symlink swap alone would NOT change the running version. Re-pip the
-        # freshly-swapped tree so the next hal0-api restart actually runs the
-        # new code (#495). Editable/dev installs are exempt — there is no FHS
-        # venv to refresh and apply() is unsupported there.
-        if not _is_editable_install():
-            try:
-                await asyncio.to_thread(_reinstall_into_venv, install_dir, job_id=self.job_id)
-            except UpdateError:
-                # Re-pip failed: roll the symlink back (when there is a prior
-                # target) so `current` and the venv's installed code stay
-                # consistent — both = prior.
-                if prior is not None:
-                    with contextlib.suppress(OSError):
-                        _atomic_symlink_swap(prior, link)
-                raise
+            with contextlib.suppress(Exception):
+                seam.discard(release_dir_name(target_version))
+            raise
+        prior_str = activated.get("previous")
+        prior = Path(prior_str) if prior_str else None
 
         # Step 8c: re-render existing slot units through the NEW code. Must
         # run AFTER the 8b venv reinstall (see _rerender_units_after_swap).
@@ -2241,6 +2510,8 @@ class Updater:
             UpdateSwapError: The symlink swap itself failed.
             UpdateError: Re-pip of the prior tree failed (non-editable only).
         """
+        seam = self._seam()
+        seam.assert_privileges()
         record = _previous_record()
         if not record.exists():
             raise UpdateRollbackUnavailable(
@@ -2268,31 +2539,23 @@ class Updater:
                 details={"previous": str(prior_path)},
             )
 
-        log.info("updater.rollback_start", job_id=self.job_id, previous=str(prior_path))
-        try:
-            current_target = _atomic_symlink_swap(prior_path, link)
-        except OSError as exc:
-            raise UpdateSwapError(
-                f"rollback symlink swap failed: {exc}",
-                details={"link": str(link), "target": str(prior_path), "error": str(exc)},
-            ) from exc
+        # The recorded target must be a direct child of the install root — the
+        # seam only ever takes a bare `hal0-<version>` basename, never a path
+        # (#1464). A breadcrumb pointing anywhere else is not rollable.
+        if prior_path.parent != _usr_lib_root():
+            raise UpdateRollbackUnavailable(
+                f"previous-version record points outside the install root: {prior_path}",
+                details={"previous": str(prior_path), "install_root": str(_usr_lib_root())},
+            )
 
-        # Step 8b: re-install the prior tree into the running venv so the
-        # next hal0-api restart serves the rolled-back version. Editable/dev
-        # installs are exempt (no FHS venv to refresh; mirrors apply()).
-        if not _is_editable_install():
-            try:
-                await asyncio.to_thread(_reinstall_into_venv, prior_path, job_id=self.job_id)
-            except UpdateError:
-                # Re-pip failed: swap the symlink forward again so `current`
-                # and the venv's installed code stay consistent — both remain
-                # pointing at current_target (the version we just rolled away
-                # from), rather than leaving the symlink at prior_path while
-                # site-packages still has the newer code.
-                if current_target is not None:
-                    with contextlib.suppress(OSError):
-                        _atomic_symlink_swap(current_target, link)
-                raise
+        log.info("updater.rollback_start", job_id=self.job_id, previous=str(prior_path))
+        # Steps 8 + 8b via the same privileged primitive commit() uses: swap the
+        # symlink back and re-pip the prior tree so the next hal0-api restart
+        # actually serves the rolled-back version. On a pip failure activate
+        # swaps *forward* again, so `current` and site-packages stay consistent.
+        activated = await seam.activate(prior_path.name)
+        current_str = activated.get("previous")
+        current_target = Path(current_str) if current_str else None
 
         # Step 8c: re-render existing slot units through the rolled-back
         # code, mirroring commit()'s same step (GH #1475) — otherwise the
@@ -2349,14 +2612,21 @@ __all__ = [
     "UpdateError",
     "UpdateExtractError",
     "UpdateManifestInvalid",
+    "UpdatePrivilegeError",
     "UpdateRollbackUnavailable",
     "UpdateSwapError",
     "UpdateVerifyError",
     "Updater",
+    "activate_release",
+    "assert_release_dir_name",
+    "assert_trusted_release_dir",
+    "discard_release",
     "ensure_seed_profiles",
     "fetch_release_manifest",
+    "release_dir_name",
     "releases_url",
     "run_post_activation_migrations",
     "sanitize_model_extra_args",
+    "stage_release",
     "validate_manifest_for_channel",
 ]

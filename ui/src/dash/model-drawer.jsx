@@ -423,6 +423,7 @@ function DuplicateModelDialog({ open, onClose, model, profiles }) {
 			onConfirm={onConfirm}
 			title={`Duplicate ${model.longName || model.name || model.id}?`}
 			confirmLabel={duplicate.isPending ? "Duplicating…" : "Duplicate"}
+			footerNote="The duplicate can be deleted at any time; weights are shared."
 			message={
 				<span>
 					A new model row shares the same weights (refcounted — no re-download)

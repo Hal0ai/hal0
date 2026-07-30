@@ -1,0 +1,120 @@
+#!/bin/bash
+# hal0-update — privileged seam for hal0-api's self-update ops (#1464).
+#
+# Background: hal0-api runs as the unprivileged `hal0` system user (P3-perms;
+# installer/install.sh ships User=hal0), while /usr/lib/hal0 is pinned
+# root:root 0755 and declared "never service-writable at any point"
+# (src/hal0/install/perms.py). Self-update, however, has to extract a release
+# into <lib>/hal0-<version>/, swap the <lib>/current symlink, and re-pip the
+# tree into the root-owned venv — all EACCES for the service account. This
+# script is the ENTIRE privileged surface for those ops, modeled exactly on
+# hal0-systemctl / hal0-agentenv / hal0-benchctl: every argument is validated
+# against a strict regex, no shell is ever evaluated, and no wildcards are
+# accepted.
+#
+# WHY `stage` DOES THE VERIFICATION TOO: the smaller-looking grant — let the
+# unprivileged API download + verify, then ask root to install the result — is
+# a root-code-execution hole, because `activate` ends in `pip install`, which
+# runs the tree's build backend AS ROOT. A compromised hal0-api would simply
+# skip the cosign check and hand root an attacker-supplied tarball. So root
+# re-fetches the manifest, re-derives the target version, re-checks the sha256
+# and re-runs `cosign verify-blob` itself. The only things that cross this
+# boundary are a channel name from a three-value allow-list, an optional exact
+# version pin, and a `hal0-<version>` directory BASENAME — never a path, never
+# a file body, never a URL.
+#
+# The real work lives in Python (hal0.updater.privileged), not in bash: tar-slip
+# vetting, digest comparison, cosign identity binding and the atomic symlink
+# swap are all reviewed, unit-tested code, and re-implementing them in shell
+# would be strictly worse. This file's job is argv validation + a hardened
+# re-entry into the interpreter.
+
+set -euo pipefail
+
+# Resolve the interpreter from OUR OWN location rather than a hardcoded path,
+# so a non-default HAL0_PREFIX install works: the wrapper is installed at
+# ${LIB_DIR}/bin/hal0-update, so the venv is ../venv. Both directories are
+# root-owned 0755 (perms.py), so this is not an attacker-controlled lookup.
+SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+LIB_ROOT="$(dirname -- "${SELF_DIR}")"
+PY="${LIB_ROOT}/venv/bin/python"
+
+die() { echo "hal0-update: $1" >&2; exit 64; }
+
+[[ -x "${PY}" ]] || die "interpreter not found at ${PY}"
+
+# Run from / so nothing in the caller's working directory can influence the
+# child. Belt and braces with `python -I` below (isolated mode: ignores every
+# PYTHON* env var, drops user site-packages, and does NOT prepend the CWD to
+# sys.path) — without both, a caller-controlled cwd containing a `hal0/`
+# package would be imported by a root interpreter.
+cd /
+
+# Mirrors CHANNELS in src/hal0/updater/privileged.py EXACTLY.
+validate_channel() {
+  local ch="$1"
+  [[ -n "${ch}" ]] || die "missing channel"
+  case "${ch}" in
+    stable|preview|nightly) ;;
+    *) die "bad channel: ${ch}" ;;
+  esac
+}
+
+# Loose-but-bounded: the exact grammar is ReleasePolicy's, re-validated as root
+# by validate_release_version(). No '/', no whitespace, no option-looking
+# leading '-', bounded length.
+validate_version() {
+  local v="$1"
+  [[ -n "${v}" ]] || die "missing version"
+  [[ "${v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+-][A-Za-z0-9.]{1,40})?$ ]] || die "bad version: ${v}"
+}
+
+# Mirrors RELEASE_DIR_RE in src/hal0/updater/updater.py EXACTLY. A validated
+# token contains no '/', so it can only ever name a direct child of the install
+# root; the leading [A-Za-z0-9] after the prefix also rules out `hal0-..`.
+validate_dir_name() {
+  local d="$1"
+  [[ -n "${d}" ]] || die "missing release directory name"
+  [[ "${d}" =~ ^hal0-[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] || die "bad release directory name: ${d}"
+}
+
+cmd="${1:-help}"; shift || true
+
+case "${cmd}" in
+  check)                      # non-mutating liveness probe (doctor + preflight)
+    exec "${PY}" -I -m hal0.updater.privileged check
+    ;;
+
+  stage)                      # stage <channel> [version]
+    channel="${1:-}"; validate_channel "${channel}"
+    version="${2:-}"
+    if [[ -n "${version}" ]]; then
+      validate_version "${version}"
+      exec "${PY}" -I -m hal0.updater.privileged stage "${channel}" "${version}"
+    fi
+    exec "${PY}" -I -m hal0.updater.privileged stage "${channel}"
+    ;;
+
+  activate)                   # activate <hal0-VERSION>
+    dir_name="${1:-}"; validate_dir_name "${dir_name}"
+    exec "${PY}" -I -m hal0.updater.privileged activate "${dir_name}"
+    ;;
+
+  discard)                    # discard <hal0-VERSION>   (rm -rf semantics)
+    dir_name="${1:-}"; validate_dir_name "${dir_name}"
+    exec "${PY}" -I -m hal0.updater.privileged discard "${dir_name}"
+    ;;
+
+  help|"")
+    cat <<EOF
+usage: hal0-update <command> [args]
+  check                            prove the grant resolves (no side effects)
+  stage <channel> [version]        download + sha256 + cosign + extract a release
+                                   channel: stable|preview|nightly
+  activate <hal0-VERSION>          swap ${LIB_ROOT}/current + re-pip the venv
+  discard <hal0-VERSION>           remove a staged ${LIB_ROOT}/<dir> tree
+EOF
+    ;;
+
+  *) die "bad cmd: ${cmd}" ;;
+esac

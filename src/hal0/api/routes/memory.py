@@ -730,12 +730,24 @@ async def memory_list(
 async def memory_delete(request: Request) -> dict[str, int]:
     """Delete by id. Body: ``{ids: [...], dataset?}``. Returns ``{deleted: int}``.
 
+    ``ids`` are **document ids** — the ``id`` field every read surface
+    returns (``/api/memory/list``, ``/api/memory/search``, recall). In
+    unified-bank mode a per-fact id (``metadata.fact_id``) is accepted as
+    an alias and resolved to its owning document; the engine only ever
+    deletes documents. See #1456.
+
     ``dataset`` optionally directs the engine's bank sweep (e.g.
     ``project:<id>`` items live outside the default shared + own-private
-    sweep). Identity headers otherwise are not consulted: id-scoped
-    delete bypasses the namespace surface entirely (the wrapper's audit
-    log still stamps the call with the agent identity for forensics —
-    see the provider's audit hook).
+    sweep). It goes through the same ``resolve_read_datasets`` closed-set
+    resolver the MCP surface uses — a list that names no addressable
+    namespace is a 400, never a silent widening to ``shared`` (#1451).
+
+    Identity headers **are** consulted: in unified-bank mode the single
+    shared bank holds every agent's ``visibility:private`` docs and every
+    project's docs, so the delete is gated on the same ACL the read paths
+    enforce (``_deletable_ids``) — a doc the caller could not have read in
+    this call is withheld. The wrapper's audit log stamps the call with the
+    agent identity either way.
     """
     body = await _read_json_body(request)
     ids = body.get("ids")
@@ -750,12 +762,14 @@ async def memory_delete(request: Request) -> dict[str, int]:
     dataset: str | list[str] | None
     if requested is None or (isinstance(requested, str) and not requested.strip()):
         dataset = None
-    elif isinstance(requested, list):
-        dataset = [str(d) for d in requested]
     else:
+        # #1451: this branch used to forward a list verbatim
+        # (``[str(d) for d in requested]``), skipping the closed-set
+        # resolver the MCP surface goes through — the exact two-surface
+        # drift ``hal0.memory.namespace`` exists to prevent.
         try:
-            dataset = resolve_write_dataset(
-                str(requested),
+            dataset = resolve_read_datasets(
+                requested if isinstance(requested, list) else str(requested),
                 private=private,
                 client_id=agent_id if agent_id != "anonymous" else None,
             )

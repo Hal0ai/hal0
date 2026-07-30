@@ -162,6 +162,23 @@ def ownership_table(
             optional=False,
             role="/usr/lib/hal0 (shipped, read-only)",
         ),
+        # The seam wrappers themselves (#1465). They were named in the comment
+        # above but had no row, so `doctor perms --fix` could not repair a
+        # wrapper whose mode or owner had drifted — and a wrapper the service
+        # account can write is a privilege hole, not a cosmetic nit. Optional:
+        # a dev/HAL0_HOME tree has no bin/ at all. `hal0 doctor all`'s
+        # privileged-seam row additionally proves the matching
+        # /etc/sudoers.d grants (which live outside every hal0 prefix and so
+        # cannot be a PermRow) actually work.
+        PermRow(
+            paths.lib() / "bin",
+            "root",
+            "root",
+            0o755,
+            glob="hal0-*",
+            child_mode=0o755,
+            role="seam wrappers (hal0-systemctl, hal0-update, …)",
+        ),
         # ── /etc/hal0 — config seed (root-owned today; service-owned under flip) ─
         # The API atomically rewrites slots/*.toml, capabilities.toml, hal0.toml,
         # api.env and chat-templates via temp-file + rename, which needs *dir*

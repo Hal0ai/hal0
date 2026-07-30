@@ -268,6 +268,19 @@ function BoardView() {
     if (window.__hal0Toast) window.__hal0Toast(msg, kind);
   };
 
+  // #1472: the board's toasts fired synchronously with .mutate(), so a failed
+  // reassign / nudge / lane drag still read as success while the change
+  // silently reverted on the next refetch (useUpdateTask rolls its optimistic
+  // move back without telling anyone). Settle first, then report which way it
+  // went — that confirmation is the whole reason the toast exists.
+  const settle = (mutation, vars, okMsg, what) => {
+    if (!mutation) return;
+    mutation.mutate(vars, {
+      onSuccess: () => { if (okMsg) toast(okMsg); },
+      onError: (err) => toast(`${what} failed — ${err?.message || "see logs"}`, "err"),
+    });
+  };
+
   // ── data extraction ──
   const tasks = boardViewQ.data?.tasks ?? [];
   const boards = Array.isArray(boardsQ.data)
@@ -328,11 +341,15 @@ function BoardView() {
   // ── mutations: multi-card moves ride the audited POST /tasks/bulk (one
   // round-trip, one audit row); single-card moves stay on PATCH so the
   // optimistic drag update applies. ──
-  const moveTo = (ids, status) => {
+  const moveTo = (ids, status, okMsg) => {
     if (ids.length > 1 && bulkTasks) {
-      bulkTasks.mutate({ ids, update: { status } });
+      settle(bulkTasks, { ids, update: { status } }, okMsg, "bulk move");
     } else if (updateTask) {
-      ids.forEach(id => updateTask.mutate({ id, body: { status } }));
+      // Success is announced once; failures are announced per id, because
+      // "which one didn't move" is the detail worth having.
+      ids.forEach((id, i) =>
+        settle(updateTask, { id, body: { status } }, i === 0 ? okMsg : null, `move ${id}`),
+      );
     }
   };
 
@@ -345,10 +362,16 @@ function BoardView() {
 
   const doReassign = () => {
     if (!reassignTarget || !reassignTask) return;
-    [...sel].forEach(id => reassignTask.mutate({ id, body: { assignee: reassignTarget } }));
+    [...sel].forEach((id, i) =>
+      settle(
+        reassignTask,
+        { id, body: { assignee: reassignTarget } },
+        i === 0 ? "reassigned" : null,
+        `reassign ${id}`,
+      ),
+    );
     clearSel();
     setReassignTarget("");
-    toast("reassigned");
   };
 
   const doSwitchBoard = (slug) => {
@@ -359,8 +382,7 @@ function BoardView() {
   };
 
   const doNudge = () => {
-    if (nudge) nudge.mutate({});
-    toast("dispatcher nudged");
+    settle(nudge, {}, "dispatcher nudged", "nudge");
   };
 
   const doRefresh = () => {
@@ -380,8 +402,9 @@ function BoardView() {
     onDragEnd: () => { setDragId(null); setDragOver(null); setArchArmed(false); },
     onDrop: (laneId) => {
       if (dragId) {
-        moveTo([dragId], laneId);
-        toast(dragId + " → " + laneId);
+        // The toast now rides on the mutation's own settlement (#1472) — a
+        // rejected drag must not read as a completed one.
+        moveTo([dragId], laneId, dragId + " → " + laneId);
       }
       setDragId(null);
       setDragOver(null);
@@ -589,9 +612,9 @@ function BoardView() {
                 <span className="bsel">{sel.size} selected</span>
                 <span className="bdiv" />
                 <button className="bb-act" data-testid="board-action-todo"
-                  onClick={() => { moveTo([...sel], "todo"); toast(sel.size + " → todo"); clearSel(); }}>→ todo</button>
+                  onClick={() => { moveTo([...sel], "todo", sel.size + " → todo"); clearSel(); }}>→ todo</button>
                 <button className="bb-act" data-testid="board-action-ready"
-                  onClick={() => { moveTo([...sel], "ready"); toast(sel.size + " → ready"); clearSel(); }}>→ ready</button>
+                  onClick={() => { moveTo([...sel], "ready", sel.size + " → ready"); clearSel(); }}>→ ready</button>
                 <button className="bb-act" data-testid="board-action-block"
                   onClick={() => { moveTo([...sel], "blocked"); clearSel(); }}>block</button>
                 <button className="bb-act" data-testid="board-action-unblock"
