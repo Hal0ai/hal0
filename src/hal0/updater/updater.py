@@ -1917,6 +1917,24 @@ def reset_profile_catalog(
     return {**status, "performed": True, "outcome": "reset", "backup": backup, "stamped": stamped}
 
 
+def _slot_display_name(config_dir: Any, stem: str) -> str:
+    """Resolve a slot TOML stem to the slot's ``name``, or the stem itself.
+
+    Both keying layouts are live in the wild: ``<name>.toml`` (pre-rework, and
+    what CT150 runs) and ``<id>.toml`` (post ``migrate_slot_id_keying``). Only
+    the second needs resolving, and only for display.
+    """
+    import tomllib
+
+    try:
+        raw = tomllib.loads((config_dir / f"{stem}.toml").read_text(encoding="utf-8"))
+    except Exception:
+        return stem
+    table = raw.get("slot") if isinstance(raw.get("slot"), dict) else raw
+    name = table.get("name") if isinstance(table, dict) else None
+    return str(name) if isinstance(name, str) and name.strip() else stem
+
+
 def sweep_slot_enabled_keys(*, job_id: str | None = None) -> list[str]:
     """Run the ``SlotConfig.enabled`` removal sweep and report which slots moved.
 
@@ -1927,11 +1945,18 @@ def sweep_slot_enabled_keys(*, job_id: str | None = None) -> list[str]:
     is actually watching the upgrade.
 
     Returns the slot names that were rewritten (empty when already swept).
+
+    ``migrate_slot_dir`` reports each file's *stem*, which on an id-keyed box
+    (``1.toml`` carrying ``id = 1``, post ``migrate_slot_id_keying``) is ``"1"``
+    — a filename, not a slot. An operator reading an install transcript needs
+    the slot name, so the stem is resolved back through the rewritten TOML's
+    ``name`` field, falling back to the stem when there is none.
     """
     from hal0.config.migrations.slot_enabled_removal import migrate_slot_dir
 
     try:
-        swept = list(migrate_slot_dir(paths.slots_config_dir()))
+        config_dir = paths.slots_config_dir()
+        swept = [_slot_display_name(config_dir, stem) for stem in migrate_slot_dir(config_dir)]
     except Exception as exc:
         log.warning("updater.slot_enabled_sweep_failed", job_id=job_id, error=str(exc))
         return []
