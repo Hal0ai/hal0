@@ -179,6 +179,49 @@ function matchAllowlist(path: string) {
   return null
 }
 
+// ─── Per-path passthrough escape hatch (#1498 / #1527) ─────────────
+//
+// Forced-mock guarantees SUCCESS for every allowlisted GET, by two separate
+// mechanisms in `mockFetch` below:
+//
+//   1. A plain (non-`networkFirst`) row is substituted BEFORE any fetch runs,
+//      so no request is issued at all — a Playwright `page.route` override
+//      never even sees the URL. 24 of the 30 allowlisted routes are this kind.
+//   2. A `networkFirst` row does hit the network, but any non-ok response is
+//      replaced with the baked payload. The remaining 6 are this kind.
+//
+// Either way an error response is unrepresentable, so every UI error branch
+// behind an allowlisted route — "engine unreachable", "could not load
+// capabilities", any `isError` render — is untestable BY CONSTRUCTION. That
+// is not a gap in two specs; it is a structural blind spot across the whole
+// class, and it means a working error path and a broken one look identical
+// from the suite's point of view.
+//
+// This is the opt-out. A spec declares the paths it wants to drive itself:
+//
+//   await page.addInitScript(() => {
+//     window.__hal0MockPassthrough = ['/api/memory/banks/']
+//   })
+//
+// …and every substitution path below is skipped for matching requests, so the
+// spec's own `page.route` fulfil (503, 500, network abort) reaches the app
+// exactly as written. Accepts string prefixes or RegExps.
+//
+// Safe by construction outside tests: it can only ever DISABLE substitution,
+// never enable it, and nothing sets the global in dev or production — where
+// it is simply an undefined lookup per allowlisted GET.
+function passthroughRequested(path: string): boolean {
+  const raw = (globalThis as unknown as { __hal0MockPassthrough?: unknown })
+    .__hal0MockPassthrough
+  if (!raw) return false
+  const list = Array.isArray(raw) ? raw : [raw]
+  for (const entry of list) {
+    if (typeof entry === 'string' && entry && path.startsWith(entry)) return true
+    if (entry instanceof RegExp && entry.test(path)) return true
+  }
+  return false
+}
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body ?? null), {
     status: body == null ? 404 : status,
@@ -222,7 +265,12 @@ export async function mockFetch(
   // Substitution — forced or fallback — is GET-only for every row, no
   // exceptions. A network-erroring or 404-ing POST/PUT/PATCH/DELETE always
   // surfaces as a real failure to the caller.
-  const substitutable = !!hit && method === 'GET'
+  // #1498 / #1527: a spec can claim a path and drive its own responses —
+  // including failures, which forced-mock otherwise makes unrepresentable.
+  // Gating `substitutable` covers the 404 and network-error fallbacks too, so
+  // one flag opts a path out of EVERY substitution branch rather than leaving
+  // a hole in whichever one this comment forgets to mention.
+  const substitutable = !!hit && method === 'GET' && !passthroughRequested(path)
   // The 404/network-error fallback (mode 2) only runs in dev/preview or
   // forced-mock — never in a plain production build.
   const fallbackAllowed = FORCED || DEV
