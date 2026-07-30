@@ -89,14 +89,18 @@ _PINNED_BY_DEFAULT: frozenset[str] = frozenset({"agent", "utility", "npu"})
 def is_pinned(canonical_name: str, cfg: dict[str, Any] | None) -> bool:
     """True when *canonical_name* is exempt from automatic eviction.
 
-    §21.10 operator pin: overlays ``SlotConfig.pinned = true`` (any slot)
-    onto the pre-existing default-pinned anchor set (``agent``/``utility``/
-    ``npu``). Used by both the idle-TTL and pressure-eviction paths, and
-    by :meth:`hal0.slots.manager.SlotManager.is_pinned` (the manual
+    §21.10 operator pin: an *explicit* ``SlotConfig.pinned`` key in the
+    raw TOML dict always wins — ``true`` pins any slot, ``false`` un-pins
+    a default anchor (#1367). Only when the key is absent (or the config
+    is missing/unreadable) does the default-pinned anchor set (``agent``/
+    ``utility``/``npu``) apply. ``cfg`` is the raw TOML dict from
+    ``_load_slot_config`` — key presence distinguishes "authored false"
+    from "unset". Used by both the idle-TTL and pressure-eviction paths,
+    and by :meth:`hal0.slots.manager.SlotManager.is_pinned` (the manual
     unload/delete 409 guard).
     """
-    if cfg is not None and cfg.get("pinned") is True:
-        return True
+    if cfg is not None and cfg.get("pinned") is not None:
+        return bool(cfg["pinned"])
     return canonical_name in _PINNED_BY_DEFAULT
 
 

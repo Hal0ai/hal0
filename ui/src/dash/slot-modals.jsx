@@ -524,18 +524,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// drawer in a blocked "Saving…" state for the whole model-load.
 	const saving = editMut.isPending || defaultsMut.isPending;
 
-	// Instant-apply enable/disable for the drawer header toggle. Mirrors the
-	// card's onToggleEnabled — fire the PUT, toast the result, and let the slots
-	// poll re-render from server truth. On error leave server state untouched
-	// (e.g. the npu-exclusivity 409 when enabling a 2nd NPU LLM) and toast.
-	const enabled = slot.enabled !== false;
-	const onToggleEnabled = async (next) => {
+	// Instant-apply pin/unpin for the drawer header toggle (§21.10, #1367).
+	// Fires the PUT, toasts the result, and lets the slots poll re-render from
+	// server truth. `slot.pinned` is the *effective* pin lifted by slot_view
+	// (explicit config value overlaid on the agent/utility/npu anchor set), so
+	// a fresh-install anchor seeds the toggle on. Pinning never starts/stops
+	// anything — it guards unload/delete (409 slot.pinned without ?force=true)
+	// and exempts the slot from idle/pressure eviction.
+	const pinned = slot.pinned === true;
+	const onTogglePinned = async (next) => {
 		setEnableBusy(true);
 		try {
-			await editMut.mutateAsync({ name: slot.name, body: { enabled: next } });
+			await editMut.mutateAsync({ name: slot.name, body: { pinned: next } });
 			window.__hal0Toast &&
 				window.__hal0Toast(
-					`${slot.name} ${next ? "enabled" : "disabled"}`,
+					`${slot.name} ${next ? "pinned" : "unpinned"}`,
 					"ok",
 				);
 		} catch (err) {
@@ -646,17 +649,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				headRight={
 					<label
 						className="slot-enable-toggle drawer-enable"
-						title={enabled ? "Disable slot" : "Enable slot"}
+						title={
+							pinned
+								? "Unpin slot"
+								: "Pin slot — exempt from idle/pressure eviction; unload/delete require ?force=true"
+						}
 					>
 						<span className="drawer-enable-label mono">
-							{enabled ? "Enabled" : "Disabled"}
+							{pinned ? "Pinned" : "Unpinned"}
 						</span>
 						<input
 							type="checkbox"
-							checked={enabled}
+							checked={pinned}
 							disabled={enableBusy}
-							onChange={() => onToggleEnabled(!enabled)}
-							aria-label={enabled ? "Disable slot" : "Enable slot"}
+							onChange={() => onTogglePinned(!pinned)}
+							aria-label={pinned ? "Unpin slot" : "Pin slot"}
 						/>
 						<span className="slot-enable-track" aria-hidden="true" />
 					</label>

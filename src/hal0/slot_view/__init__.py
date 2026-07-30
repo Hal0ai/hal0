@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hal0.model_meta import device_to_backend
+from hal0.slots.reaper import is_pinned as reaper_is_pinned
 
 log = logging.getLogger(__name__)
 
@@ -263,6 +264,13 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         if model_labels:
             entry["labels"] = model_labels
         entry["enabled"] = enabled
+
+        # §21.10 operator pin (#1367): lift the *effective* pin state —
+        # explicit ``pinned`` key wins, else the default anchor set
+        # (``agent``/``utility``/``npu``) applies — so the drawer's
+        # Pinned/Unpinned toggle and the card badge render without a
+        # per-slot /config fetch.
+        entry["pinned"] = reaper_is_pinned(name, cfg)
 
         # ctx_max: the configured context window. The canonical TOML key is
         # ``[model].context_size`` (the dashboard's ``ctx_size`` alias is
