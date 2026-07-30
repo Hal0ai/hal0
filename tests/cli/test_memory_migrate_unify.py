@@ -1,6 +1,6 @@
 """Tests for ``hal0 memory migrate unify``.
 
-The ``migrate`` default callback (the Hindsight<->Honcho ``--from/--to``
+The ``migrate`` default callback (retired engine-migration ``--from/--to``
 engine migration) is covered in tests/cli/test_memory_provider_commands.py.
 This module pins the ``unify`` subcommand: its ``--apply`` path gates on
 ``/version``'s ``features.document_export_api``/``document_import_api`` flags
