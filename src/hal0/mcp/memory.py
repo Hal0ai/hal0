@@ -74,10 +74,8 @@ from typing import Any
 import structlog
 
 from hal0.memory.namespace import (
-    DEFAULT_DATASET as _DEFAULT_DATASET,
-)
-from hal0.memory.namespace import (
     MemoryNamespaceError,
+    resolve_read_datasets,
     resolve_write_dataset,
 )
 
@@ -164,6 +162,30 @@ def _resolve_dataset(
     compatibility with existing MCP dispatcher error envelopes."""
     try:
         return resolve_write_dataset(requested, private=private, client_id=client_id)
+    except MemoryNamespaceError as exc:
+        raise MemorySchemaError(str(exc)) from exc
+
+
+def _resolve_read_dataset(
+    requested: str | list[str] | None,
+    *,
+    private: bool,
+    client_id: str | None,
+) -> str | list[str]:
+    """Thin shim around :func:`hal0.memory.namespace.resolve_read_datasets`
+    that re-raises ``MemoryNamespaceError`` as ``MemorySchemaError``.
+
+    This is the read-side counterpart to :func:`_resolve_dataset` above.
+    Diagnosis #8: the three list-accepting handlers below (``search``,
+    ``delete``, ``recall``) used to build the effective ``dataset`` filter
+    by hand (``[str(d) for d in requested]``) with zero membership check
+    against the spec §3 closed namespace table — a foreign/unknown
+    namespace string in a list arg passed straight through to the engine.
+    ``resolve_read_datasets`` filters (fail-open-empty, matching the REST
+    routes in ``api/routes/memory.py``) instead of trusting the caller.
+    """
+    try:
+        return resolve_read_datasets(requested, private=private, client_id=client_id)
     except MemoryNamespaceError as exc:
         raise MemorySchemaError(str(exc)) from exc
 
@@ -267,16 +289,11 @@ async def _memory_search(
     if not isinstance(limit_raw, int) or limit_raw < 1 or limit_raw > 200:
         raise MemorySchemaError("limit must be 1..200")
     requested = args.get("dataset")
-    dataset: str | list[str]
-    if isinstance(requested, list):
-        dataset = [str(d) for d in requested]
-    elif requested is None or (isinstance(requested, str) and not requested):
-        # Private-mode read sees both shared + own-private namespace.
-        dataset = ["shared", f"private:{client_id}"] if private and client_id else _DEFAULT_DATASET
-    elif isinstance(requested, str):
-        dataset = _resolve_dataset(requested, private=private, client_id=client_id)
-    else:
+    if requested is not None and not isinstance(requested, (str, list)):
         raise MemorySchemaError("dataset must be str | list[str] | null")
+    # Namespace-validated via resolve_read_datasets (spec §3 closed set) —
+    # private-mode empty/None reads expand to [shared, private:<client_id>].
+    dataset = _resolve_read_dataset(requested, private=private, client_id=client_id)
     tags = _normalise_tags(args.get("tags"))
     before = _optional(args, "before", str)
     after = _optional(args, "after", str)
@@ -344,15 +361,12 @@ async def _memory_delete(
         raise MemorySchemaError("ids must be a non-empty list[str]")
     ids = [str(i) for i in ids_raw]
     requested = args.get("dataset")
-    dataset: str | list[str] | None
-    if requested is None or (isinstance(requested, str) and not requested.strip()):
-        dataset = None
-    elif isinstance(requested, list):
-        dataset = [str(d) for d in requested]
-    elif isinstance(requested, str):
-        dataset = _resolve_dataset(requested, private=private, client_id=client_id)
-    else:
+    if requested is not None and not isinstance(requested, (str, list)):
         raise MemorySchemaError("dataset must be str | list[str] | null")
+    # Namespace-validated via resolve_read_datasets (spec §3 closed set) —
+    # an unset dataset resolves to "shared", which the providers already
+    # expand to include the caller's own private bank during the sweep.
+    dataset = _resolve_read_dataset(requested, private=private, client_id=client_id)
     result = await wrapper.delete(ids=ids, client_id=client_id, dataset=dataset)
     deleted_raw = result.get("deleted", len(ids))
     # Accept either a count or the list of deleted ids from the wrapper
@@ -388,15 +402,11 @@ async def _memory_recall(
     if not isinstance(max_tokens, int) or max_tokens < 1 or max_tokens > 32768:
         raise MemorySchemaError("max_tokens must be 1..32768")
     requested = args.get("dataset")
-    dataset: Any
-    if isinstance(requested, list):
-        dataset = [str(d) for d in requested]
-    elif requested is None or (isinstance(requested, str) and not requested):
-        dataset = ["shared", f"private:{client_id}"] if private and client_id else _DEFAULT_DATASET
-    elif isinstance(requested, str):
-        dataset = _resolve_dataset(requested, private=private, client_id=client_id)
-    else:
+    if requested is not None and not isinstance(requested, (str, list)):
         raise MemorySchemaError("dataset must be str | list[str] | null")
+    # Namespace-validated via resolve_read_datasets (spec §3 closed set) —
+    # private-mode empty/None reads expand to [shared, private:<client_id>].
+    dataset = _resolve_read_dataset(requested, private=private, client_id=client_id)
     tags = _normalise_tags(args.get("tags"))
     types = args.get("types")
     tags_match = _optional(args, "tags_match", str)
@@ -437,15 +447,17 @@ _PENDING_APPROVAL_DETAIL = (
 )
 
 
-def _needs_approval(tool: str, args: dict[str, Any]) -> bool:
+def _needs_approval(tool: str, args: dict[str, Any], *, client_id: str | None = None) -> bool:
     """True when this memory call must gate through the approval queue.
 
     Delegates to ``admin.is_gated`` so ``/mcp/memory`` and ``/mcp/admin``
-    can never drift on what counts as a bulk delete.
+    can never drift on what counts as a bulk delete. ``client_id`` lets
+    the namespace check (#8) recognise the caller's own ``private:<id>``
+    dataset as autonomous instead of over-gating it.
     """
     from hal0.mcp.admin import is_gated
 
-    return is_gated(tool, args)
+    return is_gated(tool, args, client_id=client_id)
 
 
 def make_dispatcher(
@@ -498,7 +510,7 @@ def make_dispatcher(
             return {"status": "ok", **payload}
 
         try:
-            if approval_queue is not None and _needs_approval(tool, args):
+            if approval_queue is not None and _needs_approval(tool, args, client_id=client_id):
                 approval_id = await approval_queue.enqueue(
                     tool=tool,
                     args=args,
