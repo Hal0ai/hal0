@@ -246,11 +246,14 @@ export const MOCK_DATA = {
 
   approvals: [] as any[],
 
+  // Seed profiles carry no slot-hardware flags (-ngl belongs on the slot's
+  // NGL field) — resolved_flags still shows it, since the slot contributes it
+  // at resolve time. Keeps the fixture honest about flag ownership.
   profiles: [
     {
       name: 'rocm',
       image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
-      flags: '--flash-attn on -ngl 999',
+      flags: '--flash-attn on',
       mtp: false,
       resolved_flags: '--flash-attn on -ngl 999',
       device_class: 'gpu',
@@ -265,7 +268,7 @@ export const MOCK_DATA = {
     {
       name: 'rocm-mtp',
       image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
-      flags: '--flash-attn on -ngl 999',
+      flags: '--flash-attn on',
       mtp: true,
       resolved_flags: '--flash-attn on -ngl 999 --draft-model /mnt/ai-models/mtp/llama-3b.gguf',
       device_class: 'gpu',
@@ -280,7 +283,7 @@ export const MOCK_DATA = {
     {
       name: 'vulkan',
       image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server',
-      flags: '--flash-attn on -ngl 999',
+      flags: '--flash-attn on',
       mtp: false,
       resolved_flags: '--flash-attn on -ngl 999',
       device_class: 'gpu',

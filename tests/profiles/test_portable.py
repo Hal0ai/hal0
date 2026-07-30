@@ -185,17 +185,13 @@ class TestImportProfile:
         """§21.7: import routes through the catalog write seam, so an envelope
         carrying a hal0-managed flag (-c/--port/…) is rejected — the import
         path must not bypass the screens the create/update routes enforce."""
-        env = export_envelope(
-            "orig", ProfileConfig(flags="-fa on -c 131072"), exported_at="t"
-        )
+        env = export_envelope("orig", ProfileConfig(flags="-fa on -c 131072"), exported_at="t")
         with pytest.raises(BadRequest) as exc:
             import_profile(env, "copied", _catalog(tmp_hal0_home))
         assert exc.value.code == "slot.managed_arg_denied"
 
     def test_slot_hardware_flag_rejected(self, tmp_hal0_home: str) -> None:
-        env = export_envelope(
-            "orig", ProfileConfig(flags="-fa on -ngl 999"), exported_at="t"
-        )
+        env = export_envelope("orig", ProfileConfig(flags="-fa on -ngl 999"), exported_at="t")
         with pytest.raises(BadRequest) as exc:
             import_profile(env, "copied", _catalog(tmp_hal0_home))
         assert exc.value.code == "slot.hardware_flag_denied"

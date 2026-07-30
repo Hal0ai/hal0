@@ -1293,7 +1293,7 @@ def _strip_denied_flags(flags: str) -> str:
 
     The duplicate path persists a profile's flags straight into the new row's
     ``defaults.extra_args`` without going through :func:`screen_model_write`,
-    so a legacy profile still carrying ``-c``/``-ngl`` would mint a row that
+    so a stale profile still carrying ``-c``/``-ngl`` would mint a row that
     hard-fails every launch with ``slot.managed_arg_denied``. Silently strip
     the denied tokens (+ values) instead — the duplicate is a fresh row, not
     an operator edit, so there is nothing to reject interactively.
