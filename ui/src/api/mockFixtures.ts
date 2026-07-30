@@ -21,6 +21,58 @@ function data(): any {
   return (typeof window !== 'undefined' && window.HAL0_DATA) || {}
 }
 
+// ─── Degraded-poll simulation (#1391) ─────────────────────────────
+// `config_enrichment` is applied ONLY in the GET /api/slots builder
+// (slot_view/__init__.py); routes/health.py builds the /api/status slot
+// entries from `_slot_to_dict` alone. So when an /api/slots poll drops,
+// `useSlots` falls back to a bare union entry that carries none of the
+// TOML-derived config fields.
+//
+// Forced-mock serves BOTH endpoints from the same HAL0_DATA.slots array, so
+// the divergence is invisible — and `page.route` can't fail /api/slots
+// either, because the mock short-circuits it first (see ./mock.ts). This
+// knob is the harness's only way in: a spec sets
+// `window.__hal0MockSlotsDegraded = true` (addInitScript, or mid-test via
+// page.evaluate — it is read live on every poll) and gets exactly the real
+// degraded shape: /api/slots 404s and /api/status answers with the config
+// keys stripped off.
+function slotsDegraded(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    (window as unknown as { __hal0MockSlotsDegraded?: boolean }).__hal0MockSlotsDegraded === true
+  )
+}
+
+// The exact key set `config_enrichment` lifts onto an /api/slots entry. A
+// bare `_slot_to_dict` /api/status entry has none of them.
+const CONFIG_ENRICHMENT_KEYS = [
+  'type',
+  'model_default',
+  'labels',
+  'pinned',
+  'ctx_max',
+  'chat_template',
+  'n_gpu_layers',
+  'threads',
+  'binary',
+  'image_pin',
+  'rope_freq_base',
+  'idle_timeout_s',
+  'workers',
+  'parallel',
+  'llamacpp_args',
+  'npu',
+  'declared_backend',
+] as const
+
+function stripConfigEnrichment(slots: any[]): any[] {
+  return (Array.isArray(slots) ? slots : []).map((s) => {
+    const bare = { ...s }
+    for (const k of CONFIG_ENRICHMENT_KEYS) delete bare[k]
+    return bare
+  })
+}
+
 // ─── Builders — one per endpoint family ───────────────────────────
 function buildStatus() {
   const d = data()
@@ -43,7 +95,7 @@ function buildStatus() {
     version: '0.3.0-alpha.1',
     status: 'ok',
     hardware: null,
-    slots: d.slots ?? [],
+    slots: slotsDegraded() ? stripConfigEnrichment(d.slots ?? []) : (d.slots ?? []),
     upstreams: [],
     memory_enabled: !memoryOff,
     memory_degraded: memoryOff ? null : false,
@@ -51,6 +103,10 @@ function buildStatus() {
 }
 
 function buildSlots() {
+  // null → jsonResponse() answers 404, which apiGet surfaces as a throw —
+  // the same soft-fail `fetchSlotsUnion` sees when the real aggregator's
+  // heavy per-slot /health probe times out.
+  if (slotsDegraded()) return null
   return data().slots ?? []
 }
 
