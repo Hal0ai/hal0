@@ -130,7 +130,13 @@ test.describe('Model drawer — Context size validation (#1378)', () => {
     await expect(page.locator('.hal0-toast')).toContainText('Updated')
   })
 
-  test('clearing the field still deletes the override (empty stays an explicit clear)', async ({ page }) => {
+  test('clearing the field still deletes the override, now as an explicit null (#1413)', async ({ page }) => {
+    // The wire verb for "clear" changed with #1413. PUT /api/models/{id} used to
+    // replace `defaults` WHOLESALE, so omitting a key WAS the deletion; the merge
+    // is now one level deep, where absent means "keep the stored value" and only
+    // an explicit `null` deletes. Omitting the key here would silently preserve
+    // the 8192 the drawer just cleared — the same class of silent data bug #1378
+    // fixed from the other side.
     await seedStoredCtx(page)
     const puts = await capturePuts(page)
     await openDrawer(page)
@@ -141,6 +147,7 @@ test.describe('Model drawer — Context size validation (#1378)', () => {
 
     await page.getByTestId('model-save').click()
     await expect.poll(() => puts.length).toBe(1)
-    expect(puts[0].defaults).not.toHaveProperty('context_size')
+    expect(puts[0].defaults).toHaveProperty('context_size')
+    expect(puts[0].defaults.context_size).toBeNull()
   })
 })

@@ -362,30 +362,24 @@ function RecipeEditorModal({ open, onClose, model }) {
   if (!model) return null;
 
   const onSave = async () => {
-    // Preserve any ModelDefaults field the editor doesn't surface. The
-    // registry PUT flat-merges `defaults` WHOLESALE, so we must start from the
-    // stored defaults and only override the keys we render inputs for —
-    // otherwise siblings (e.g. a legacy hand-set rope_freq_base, which no
-    // longer has an input here — deprecated backend-side, use extra_args)
-    // are silently cleared. Emptying a shown input clears just that one key
-    // (delete), keeping the "empty = launcher default" affordance intact.
+    // Preserve any ModelDefaults field the editor doesn't surface (e.g. a legacy
+    // hand-set rope_freq_base, which no longer has an input here — deprecated
+    // backend-side, use extra_args) by starting from the stored defaults. Every
+    // key we DO render is then sent explicitly: a value, or `null` to clear.
+    // Since #1413 the registry merges `defaults` one level deep, so absent means
+    // "keep" and only `null` deletes — an emptied input must say `null` to keep
+    // the "empty = launcher default" affordance intact.
     const defaults = { ...init };
-    if (ctx.trim()) {
-      const n = parseInt(ctx, 10);
-      if (Number.isFinite(n)) defaults.context_size = n; else delete defaults.context_size;
-    } else delete defaults.context_size;
-    if (ngl.trim()) {
-      const n = parseInt(ngl, 10);
-      if (Number.isFinite(n)) defaults.n_gpu_layers = n; else delete defaults.n_gpu_layers;
-    } else delete defaults.n_gpu_layers;
-    if (extra.trim()) defaults.extra_args = extra; else delete defaults.extra_args;
+    const ctxNum = ctx.trim() ? parseInt(ctx, 10) : NaN;
+    defaults.context_size = Number.isFinite(ctxNum) ? ctxNum : null;
+    const nglNum = ngl.trim() ? parseInt(ngl, 10) : NaN;
+    defaults.n_gpu_layers = Number.isFinite(nglNum) ? nglNum : null;
+    defaults.extra_args = extra.trim() ? extra : null;
     // Only persist a real template choice — 'auto' means GGUF-embedded, which
     // is the absence of an override, so don't pollute defaults with it.
-    if (chatTemplate && chatTemplate !== "auto") defaults.chat_template = chatTemplate;
-    else delete defaults.chat_template;
+    defaults.chat_template = chatTemplate && chatTemplate !== "auto" ? chatTemplate : null;
     // Preferred profile: "" means no preference (slot keeps its device default).
-    if (profile.trim()) defaults.profile = profile.trim();
-    else delete defaults.profile;
+    defaults.profile = profile.trim() || null;
     const body = { defaults };
     // Display name: only persist a real, changed value — never blank it out.
     const trimmedName = name.trim();
