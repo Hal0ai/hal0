@@ -45,7 +45,6 @@ def _slot_cfg(name: str, model: str, *, mtp: bool | None) -> dict:
         "device": "gpu-vulkan",
         "profile": "vulkan",
         "provider": "llama-server",
-        "enabled": True,
         "group": "custom",
         "model": {"default": model},
     }

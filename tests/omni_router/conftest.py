@@ -28,7 +28,7 @@ class FakeSlotManager(SlotManagerLike):
     Tests build it with a list of slot config dicts; ``iter_configs``
     just returns the list and ``resolve_for_request`` replays the
     routing logic from the real ``SlotManager.resolve_for_request``
-    (type match + default + label filter + enabled fall-through).
+    (type match + default + label filter + model-presence fall-through).
     """
 
     def __init__(self, configs: list[dict[str, Any]]) -> None:
@@ -71,21 +71,27 @@ class FakeSlotManager(SlotManagerLike):
                 return True
             return set(required_labels).issubset(labels_of(cfg))
 
-        configs = [c for c in self._configs if c.get("type") == slot_type]
+        # A slot with no ``[model].default`` is not routable (#1369) — mirror
+        # production's ``loaded_slot_from_config`` returning None for it.
+        configs = [c for c in self._configs if c.get("type") == slot_type and _model_id_of(c)]
         # Default-first.
         for cfg in configs:
             if not cfg.get("default"):
                 continue
-            if cfg.get("enabled", True) and satisfies(cfg):
+            if satisfies(cfg):
                 return _loaded_slot_from_config(cfg)
         # Fall-through.
         for cfg in configs:
-            if not cfg.get("enabled", True):
-                continue
             if not satisfies(cfg):
                 continue
             return _loaded_slot_from_config(cfg)
         return None
+
+
+def _model_id_of(cfg: dict[str, Any]) -> str:
+    model = cfg.get("model") or {}
+    raw = model.get("default", "") if isinstance(model, dict) else ""
+    return raw.strip() if isinstance(raw, str) else ""
 
 
 def _loaded_slot_from_config(cfg: dict[str, Any]) -> LoadedSlot:
@@ -112,7 +118,6 @@ def _loaded_slot_from_config(cfg: dict[str, Any]) -> LoadedSlot:
         model_id=str(model_id),
         slot_type=str(cfg.get("type", "")),
         device=str(cfg.get("device", "")),
-        enabled=cfg.get("enabled", True) is not False,
         labels=labels_set,
         system_prompt=str(cfg.get("system_prompt", "")),
         profile=str(cfg.get("profile")) if cfg.get("profile") else None,
@@ -127,13 +132,16 @@ def make_slot(
     type: str,
     model: str,
     labels: tuple[str, ...] = (),
-    enabled: bool = True,
     default: bool = False,
     device: str = "gpu-rocm",
     system_prompt: str | None = None,
     tool_calling: bool | None = None,
 ) -> dict[str, Any]:
     """Build a slot config dict for tests.
+
+    Pass ``model=""`` for an INACTIVE slot — since #1369 a missing
+    ``[model].default`` is the only way a slot is "off", so that replaces the
+    old ``enabled=False`` kwarg.
 
     ``tool_calling`` (optional) sets ``[model].capability_flags.tool_calling``
     directly — the registry-sourced typed bool — instead of relying on the
@@ -147,7 +155,6 @@ def make_slot(
     cfg: dict[str, Any] = {
         "name": name,
         "type": type,
-        "enabled": enabled,
         "default": default,
         "device": device,
         "model": model_section,

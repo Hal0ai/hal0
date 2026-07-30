@@ -87,7 +87,6 @@ def slot_root(tmp_hal0_home: str) -> Path:
                 'provider = "llama-server"',
                 'runtime = "container"',
                 'profile = "vulkan-radv"',
-                "enabled = true",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "",

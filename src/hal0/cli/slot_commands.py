@@ -1396,3 +1396,69 @@ def slot_migrate_flags(
     for line in lines:
         console.print(f"  {line}")
     console.print("\n[yellow]Restart hal0-api to pick up the model-owned launch tune.[/yellow]")
+
+
+# ── migrate-enabled-removal (#1369 — model-presence is the activation signal) ──
+#
+# NOT a deploy-window operation, unlike the migrate-* commands above: the same
+# sweep runs on every API boot (api._boot_slot_reconcile), it is idempotent, and
+# it only rewrites slots that still carry the removed key. This command is here
+# so an operator can preview or force it without an API restart — hence no
+# backup / unit-stop ceremony.
+
+
+@app.command("migrate-enabled-removal")
+def slot_migrate_enabled_removal(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Actually write the sweep. Without it the command is a DRY-RUN preview only.",
+    ),
+) -> None:
+    """One-shot: drop the removed ``enabled`` key from slot TOMLs (#1369).
+
+    A slot is activated by binding a model, so ``enabled`` is gone from the
+    schema. Leftover keys round-trip harmlessly EXCEPT on a slot that was
+    ``enabled = false`` while still holding a ``[model].default`` — under the
+    new rules that bound model reads as "on", so this clears the model to
+    preserve the operator's intent. NPU trio shadows keep their placeholder
+    model (their gate is the anchor's ``[npu]`` table) and only lose the key.
+
+    Safe to run live and safe to re-run: the boot path already does exactly
+    this, so a second pass finds no keys and rewrites nothing.
+    """
+    from hal0.config import paths
+    from hal0.config.migrations.slot_enabled_removal import (
+        migrate_slot_dir,
+        migrate_slot_toml,
+    )
+
+    slots_dir = paths.slots_config_dir()
+    if not apply:
+        pending: list[str] = []
+        for path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
+            try:
+                raw = tomllib.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                console.print(f"  [yellow]![/yellow] {path.name}: unreadable ({exc})")
+                continue
+            after = migrate_slot_toml(raw)
+            if after is None:
+                continue
+            cleared = raw.get("model", {}).get("default") and not after["model"]["default"]
+            pending.append(
+                f"{path.stem}: drop 'enabled'" + (" + clear [model].default" if cleared else "")
+            )
+        console.print("[bold]Dry run — no files written.[/bold]")
+        if not pending:
+            console.print("  [dim](nothing to sweep)[/dim]")
+        for line in pending:
+            console.print(f"  {line}")
+        console.print("\n[dim]Re-run with --apply to write.[/dim]")
+        return
+
+    migrated = migrate_slot_dir(slots_dir)
+    if not migrated:
+        console.print("[green]✓[/green]  nothing to sweep — no slot carries 'enabled'.")
+        return
+    console.print(f"[green]✓[/green]  swept {len(migrated)} slot(s): {', '.join(migrated)}")

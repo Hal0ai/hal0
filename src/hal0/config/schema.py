@@ -412,10 +412,13 @@ class SlotConfig(BaseModel):
             "for backwards compatibility and UI labels only."
         ),
     )
-    enabled: bool = Field(
-        default=True,
-        description="Whether this slot is started on hal0 startup.",
-    )
+    # NOTE: there is no ``enabled`` field (#1369). A non-empty
+    # ``[model].default`` IS the activation signal — boot autostart is the
+    # Quadlet ``[Install] WantedBy=hal0.target`` stanza gated by
+    # ``SlotManager.load()``'s empty-model guard, and every routability check
+    # already required a model id. Stale ``enabled`` keys from older installs
+    # round-trip harmlessly via ``extra="allow"`` until
+    # ``hal0.config.migrations.slot_enabled_removal`` sweeps them off disk.
     # HAL0-SUNSET: v1.0.0 — runtime is Literal["container"] only; field is ceremony, drop it.
     runtime: Literal["container"] = Field(
         default="container",

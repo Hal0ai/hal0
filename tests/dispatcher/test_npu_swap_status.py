@@ -1,6 +1,6 @@
 """npu_swap_status: container slot lifecycle state drives the swap signal.
 
-``fetch_npu_swap_status`` observes the enabled NPU LLM container slot:
+``fetch_npu_swap_status`` observes the model-bound NPU LLM container slot:
 transitional lifecycle states (PULLING/STARTING/WARMING/UNLOADING) map to
 ``in_progress=True``; settled states (READY/SERVING/IDLE/OFFLINE/ERROR)
 map to ``in_progress=False``. ``from_model`` is always None (a restarting
@@ -33,15 +33,17 @@ def _container_npu_cfg(
     *,
     profile: str = "flm",
     runtime: str | None = None,
-    enabled: bool = True,
     name: str = "npu",
 ) -> dict[str, Any]:
-    """Slot config for a containerized NPU LLM slot."""
+    """Slot config for a containerized NPU LLM slot.
+
+    Pass ``model=""`` for an INACTIVE anchor — since #1369 model-presence is
+    the activation signal, so that replaces the old ``enabled=False``.
+    """
     cfg: dict[str, Any] = {
         "name": name,
         "device": "npu",
         "type": "llm",
-        "enabled": enabled,
         "model": {"default": model},
     }
     if profile:
@@ -57,7 +59,6 @@ def _noncontainer_npu_cfg(model: str = "llama-3.2-3b-npu") -> dict[str, Any]:
         "name": "agent",
         "device": "npu",
         "type": "llm",
-        "enabled": True,
         "model": {"default": model},
         # no profile, no runtime=container
     }
@@ -68,7 +69,6 @@ def _gpu_slot(name: str = "primary", model: str = "phi3") -> dict[str, Any]:
         "name": name,
         "device": "gpu-vulkan",
         "type": "llm",
-        "enabled": True,
         "model": {"default": model},
     }
 
@@ -89,10 +89,11 @@ async def test_no_npu_slot_means_no_swap() -> None:
     assert status == NpuSwapStatus(in_progress=False, from_model=None, to_model=None)
 
 
-async def test_disabled_npu_slot_ignored() -> None:
-    """A disabled NPU LLM slot doesn't drive a swap."""
+async def test_model_less_npu_slot_ignored() -> None:
+    """A model-less NPU LLM slot doesn't drive a swap (#1369) — there is no
+    "to" side, and nothing is loading."""
     status = await fetch_npu_swap_status(
-        [_container_npu_cfg(enabled=False)],
+        [_container_npu_cfg(model="")],
         slot_manager=_slot_manager(),
     )
     assert status.in_progress is False

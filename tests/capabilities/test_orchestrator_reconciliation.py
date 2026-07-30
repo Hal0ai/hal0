@@ -127,7 +127,6 @@ def drifted_state(tmp_hal0_home: str) -> Path:
                 "port = 8082",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
-                "enabled = true",
                 "[model]",
                 'default = "nomic-embed-text-v1.5-q8_0"',
                 "",
@@ -264,13 +263,13 @@ async def test_apply_no_rewrite_on_pure_disable(
     orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
     drifted_state: Path,
 ) -> None:
-    """A pure disable flips only ``enabled`` on the slot TOML, via the store.
+    """A pure disable clears only ``[model].default`` on the slot TOML, via the store.
 
     The STANDARD-lifecycle disable never calls ``update_config`` (persistence
     flows through the store commit, not the SlotManager). Post-SC-1 the store
-    now writes ``enabled = false`` so routing stops resolving the slot — but
-    the model/backend siblings must survive verbatim (a pure disable does not
-    reconcile them).
+    expresses "off" the only way the slot can since #1369 — no model bound —
+    so routing stops resolving it; the device/backend siblings must survive
+    verbatim (a pure disable does not reconcile them).
     """
     orch, fake = orchestrator
     # Pin the persisted selection to a non-NPU backend first: this test is
@@ -298,11 +297,16 @@ async def test_apply_no_rewrite_on_pure_disable(
     update_calls = [c for c in fake.calls if c[0] == "update_config"]
     assert update_calls == [], f"unexpected update_config on disable transition: {update_calls}"
     after = _read_slot_toml(drifted_state)
-    assert after["enabled"] is False, "pure disable must flip enabled=false on the slot TOML"
-    # Only ``enabled`` may differ — the model/backend siblings are untouched.
-    assert {k: v for k, v in after.items() if k != "enabled"} == {
-        k: v for k, v in before.items() if k != "enabled"
-    }, "pure disable rewrote a non-enabled field"
+    assert after["model"]["default"] == "", (
+        "pure disable must clear [model].default on the slot TOML"
+    )
+    # Only ``[model].default`` may differ — every sibling is untouched.
+    assert {k: v for k, v in after.items() if k != "model"} == {
+        k: v for k, v in before.items() if k != "model"
+    }, "pure disable rewrote a field outside [model]"
+    assert {k: v for k, v in after["model"].items() if k != "default"} == {
+        k: v for k, v in before["model"].items() if k != "default"
+    }, "pure disable rewrote a [model] sibling"
 
 
 async def test_apply_commit_failure_leaves_both_files_at_before(
@@ -380,7 +384,6 @@ async def test_disable_hides_slot_from_routing(
                 'backend = "vulkan"',
                 'device = "gpu-vulkan"',
                 'provider = "llama-server"',
-                "enabled = true",
                 "[model]",
                 'default = "nomic-embed-text-v1.5-q8_0"',
                 "",
@@ -504,9 +507,9 @@ def test_ensure_slot_exists_omits_type_for_rerank() -> None:
 
 async def test_fake_slot_manager_iter_configs_roundtrip() -> None:
     fake = FakeSlotManager()
-    fake.set_configs([{"name": "agent", "type": "llm", "device": "npu", "enabled": True}])
-    configs = await fake.iter_configs()
-    assert configs == [{"name": "agent", "type": "llm", "device": "npu", "enabled": True}]
+    seed = [{"name": "agent", "type": "llm", "device": "npu", "model": {"default": "m"}}]
+    fake.set_configs(seed)
+    assert await fake.iter_configs() == seed
 
 
 # ── Step 5: NPU-trio fork (Cases 1-5, 9) ──────────────────────────────────────
@@ -568,7 +571,8 @@ def npu_orchestrator(
                 "type": "llm",
                 "device": "npu",
                 "profile": "flm",
-                "enabled": True,
+                # A bound model is what makes this a live FLM anchor (#1369).
+                "model": {"default": "gemma3:1b"},
             }
         ]
     )
@@ -619,18 +623,20 @@ async def test_npu_embed_enable_writes_anchor_toggle_no_load(
     assert _anchor_npu_writes(fake, {"embed": True}), (
         f"anchor [npu] embed toggle never written: {fake.calls}"
     )
-    # The embed slot must be flipped enabled=true + stamped type=embedding,
-    # WITHOUT a nested model in that write (Decision 4).
-    enabled_writes = [
+    # The embed slot must be stamped type=embedding, WITHOUT a nested model in
+    # that write (Decision 4). #1369: no ``enabled`` is co-written any more —
+    # the anchor's [npu] toggle asserted above is the ONLY dispatch gate, which
+    # also removes the drift between the shadow's flag and FLM's launch flags.
+    type_writes = [
         c
         for c in fake.calls
         if c[0] == "update_config"
         and c[1] == "embed"
-        and c[2]["updates"].get("enabled") is True
         and c[2]["updates"].get("type") == "embedding"
     ]
-    assert enabled_writes, f"no enabled+type update_config on embed slot: {fake.calls}"
-    assert "model" not in enabled_writes[-1][2]["updates"], enabled_writes[-1]
+    assert type_writes, f"no type update_config on embed slot: {fake.calls}"
+    assert "model" not in type_writes[-1][2]["updates"], type_writes[-1]
+    assert "enabled" not in type_writes[-1][2]["updates"], type_writes[-1]
     # ZERO load/swap/unload on the embed slot.
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
         f"NPU embed path must not bounce the slot: {fake.calls}"
@@ -642,7 +648,8 @@ async def test_npu_embed_disable_writes_anchor_toggle_off_no_unload(
     npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
     tmp_hal0_home: str,
 ) -> None:
-    """Case 2: NPU embed disable → anchor [npu] embed=false, slot enabled=False, NO unload."""
+    """Case 2: NPU embed disable → anchor [npu] embed=false, NO unload (#1369:
+    the shadow itself carries no flag; the anchor toggle is the gate)."""
     orch, fake = npu_orchestrator
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="flm", slot_type="embedding")
@@ -663,16 +670,17 @@ async def test_npu_embed_disable_writes_anchor_toggle_off_no_unload(
     assert _anchor_npu_writes(fake, {"embed": False}), (
         f"anchor [npu] embed=false toggle never written: {fake.calls}"
     )
-    disabled_writes = [
+    # The shadow write is the ``type`` stamp only (#1369) — never a flag, and
+    # never the nested model (Decision 4).
+    type_writes = [
         c
         for c in fake.calls
         if c[0] == "update_config"
         and c[1] == "embed"
-        and c[2]["updates"].get("enabled") is False
         and c[2]["updates"].get("type") == "embedding"
     ]
-    assert disabled_writes, f"no enabled=False+type write on embed slot: {fake.calls}"
-    assert "model" not in disabled_writes[-1][2]["updates"], disabled_writes[-1]
+    assert type_writes, f"no type write on embed slot: {fake.calls}"
+    assert type_writes[-1][2]["updates"] == {"type": "embedding"}, type_writes[-1]
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
         f"NPU embed disable must not unload the slot: {fake.calls}"
     )
@@ -934,7 +942,8 @@ async def test_npu_embed_enable_container_anchor_without_external_runtime(
                 "type": "llm",
                 "device": "npu",
                 "profile": "flm",
-                "enabled": True,
+                # A bound model is what makes this a live FLM anchor (#1369).
+                "model": {"default": "gemma3:1b"},
             }
         ]
     )

@@ -122,7 +122,6 @@ def _seed_tts_slot(home: str, port: int = 8084) -> None:
                 f"port = {port}",
                 'type = "tts"',
                 'provider = "kokoro"',
-                "enabled = true",
                 "[model]",
                 'default = "kokoro-v1"',
                 "",

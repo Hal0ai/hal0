@@ -29,7 +29,7 @@ from hal0.dispatcher.npu_trio import NpuTrioNotAvailable, NpuTrioRouter
 def _slot_manager_with_container_npu(
     state: str = "ready",
     *,
-    enabled: bool = True,
+    model: str = "gemma3:1b",
     profile: str = "flm",
     runtime: str | None = None,
     port: int | None = 8088,
@@ -43,10 +43,12 @@ def _slot_manager_with_container_npu(
     """
 
     sm = MagicMock()
+    # ``model=""`` is how a slot is "off" post-#1369 — model-presence is the
+    # activation signal, so ``is_container_npu_cfg`` gates on it.
     cfg: dict[str, Any] = {
         "name": "npu",
         "device": "npu",
-        "enabled": enabled,
+        "model": {"default": model},
     }
     if port is not None:
         cfg["port"] = port
@@ -68,7 +70,7 @@ def _slot_manager_with_noncontainer_npu() -> MagicMock:
             "name": "npu",
             "port": 8099,
             "device": "npu",
-            "enabled": True,
+            "model": {"default": "gemma3:1b"},
             # no profile, no runtime=container
         }
     )
@@ -151,9 +153,9 @@ async def test_no_slot_manager_resolves_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disabled_container_resolves_none() -> None:
-    """enabled=False → not a live container target → None."""
-    router = NpuTrioRouter(_slot_manager_with_container_npu(enabled=False))
+async def test_model_less_container_resolves_none() -> None:
+    """No model bound → not a live container target → None (#1369)."""
+    router = NpuTrioRouter(_slot_manager_with_container_npu(model=""))
     assert await router.resolve_npu_url() is None
 
 
@@ -197,7 +199,7 @@ async def test_is_ready_for_dispatch_raises_resolves_none() -> None:
             "port": 8088,
             "device": "npu",
             "profile": "flm",
-            "enabled": True,
+            "model": {"default": "gemma3:1b"},
         }
     )
     sm.is_ready_for_dispatch = MagicMock(side_effect=RuntimeError("state file corrupt"))

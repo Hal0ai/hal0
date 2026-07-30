@@ -200,8 +200,9 @@ class CapabilityOrchestrator:
         :func:`auto_migrate_capabilities_file` so a stale v1 file is
         promoted to v2 before any read. When the file is
         missing we walk ``/etc/hal0/slots/{embed,stt,tts,img}.toml`` and
-        lift each slot's current device/provider/model + ``enabled`` flag
-        into the matching child. Slots that don't exist on disk get an
+        lift each slot's current device/provider/model into the matching
+        child; ``enabled`` is derived from model-presence (#1369), which is
+        the only activation state the slot has. Slots that don't exist on disk get an
         empty selection so the dashboard can still render an "unset"
         picker.
         """
@@ -245,7 +246,7 @@ class CapabilityOrchestrator:
                 selection.device = canonical_device(slot_cfg.device)
                 selection.provider = slot_cfg.provider
                 selection.model = slot_cfg.model.default or ""
-                selection.enabled = bool(slot_cfg.enabled) and bool(selection.model)
+                selection.enabled = bool(selection.model)
                 cfg.selections[slot][child] = selection
 
             self._save(cfg)
@@ -321,19 +322,17 @@ class CapabilityOrchestrator:
 
         Shadow selections (stt/embed served coresident by the trio) have
         no process of their own — their effective status is the anchor's.
-        Returns ``None`` when no enabled npu-llm slot exists so callers
-        keep the selection's own status.
+        Returns ``None`` when no npu-llm slot has a model bound (#1369: that
+        IS "no live anchor") so callers keep the selection's own status.
         """
+        from hal0.slots.activation import claims_npu_anchor
+
         try:
             configs = await self._slot_manager.iter_configs()
         except Exception:
             return None
         for cfg in configs:
-            if (
-                cfg.get("device") == "npu"
-                and cfg.get("type") == "llm"
-                and cfg.get("enabled") is not False
-            ):
+            if claims_npu_anchor(cfg):
                 name = str(cfg.get("name", ""))
                 if name:
                     return await self._slot_status_string(name)
@@ -682,7 +681,9 @@ class CapabilityOrchestrator:
             "port": port,
             "device": slot_device or "gpu-rocm",
             "provider": provider,
-            "enabled": True,
+            # No ``enabled`` key (#1369): the model write below IS the
+            # activation, and an empty selection.model correctly creates the
+            # grey/unconfigured slot the dashboard renders as a picker.
             "model": {"default": selection.model or ""},
         }
         # Stamp the trio dispatch discriminator for embed/stt children so
@@ -724,20 +725,22 @@ class CapabilityOrchestrator:
 
           1. Ensure the device=npu, type=embedding|transcription slot
              RECORD exists (create path stamps ``type``).
-          2. Write ``{enabled, type}`` via ``update_config`` (covers enable
-             AND disable so ``v1._is_npu_trio_request``'s ``enabled is
-             False`` check blocks dispatch). The ``type`` stamp is essential
+          2. Write ``{type}`` via ``update_config``. The stamp is essential
              for PRE-EXISTING slots: ``_ensure_slot_exists_npu`` early-returns
              when the TOML exists, so a real drifted ``embed.toml`` with no
              ``type`` would otherwise never gate trio dispatch. ``type`` is a
-             top-level SCALAR, so co-writing it is safe under Decision 4 —
-             that prohibition is specifically about the nested ``model`` dict
+             top-level SCALAR, so writing it is safe under Decision 4 — that
+             prohibition is specifically about the nested ``model`` dict
              (replaced wholesale by the shallow merge), which we still NEVER
              pass here. Runs AFTER the store commit that reconciled the
-             slot TOML.
+             slot TOML. (Pre-#1369 an ``enabled`` flag was co-written here so
+             ``v1._is_npu_trio_request`` could block dispatch; step 3 is now
+             the ONLY gate, which also removes the drift between the shadow's
+             flag and the flags FLM actually launched with.)
           3. Toggle the modality on the anchor via
              :meth:`_set_flm_modality`, which writes the anchor's ``[npu]``
-             TOML toggle. The anchor is never bounced.
+             TOML toggle — the single dispatch gate. The anchor is never
+             bounced.
           4. Return ``pending_reload=True`` ALWAYS (Decision 1: never
              auto-restart the live anchor; if the anchor is offline the new
              toggle won't take effect until the user loads it — still
@@ -745,13 +748,10 @@ class CapabilityOrchestrator:
              for ``type==llm && device==npu``; we never restart it here.
         """
         await self._ensure_slot_exists_npu(slot_name, child, selection)
-        # Stamp {enabled, type} — NEVER the nested ``model`` (Decision 4).
-        # ``type`` is required even for an existing slot whose TOML predates
-        # Phase 2 and carries no ``type``; without it trio dispatch no-ops.
-        await self._slot_manager.update_config(
-            slot_name,
-            {"enabled": selection.enabled, "type": _CHILD_TO_SLOT_TYPE[child]},
-        )
+        # Stamp {type} — NEVER the nested ``model`` (Decision 4). ``type`` is
+        # required even for an existing slot whose TOML predates Phase 2 and
+        # carries no ``type``; without it trio dispatch no-ops.
+        await self._slot_manager.update_config(slot_name, {"type": _CHILD_TO_SLOT_TYPE[child]})
         await self._set_flm_modality(child, enable=selection.enabled)
         # Decision 1: surface pending_reload whether or not the anchor is
         # live; we never eagerly bounce it.
@@ -827,7 +827,8 @@ class CapabilityOrchestrator:
             "port": port,
             "device": "npu",
             "provider": "flm",
-            "enabled": bool(selection.enabled),
+            # No ``enabled`` key (#1369) — the shadow's dispatch eligibility is
+            # the anchor's ``[npu]`` toggle, written by ``_set_flm_modality``.
             "model": {"default": selection.model or ""},
             "type": _CHILD_TO_SLOT_TYPE[child],
         }

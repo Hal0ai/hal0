@@ -4,8 +4,11 @@ The reconcile pass keeps the ``flm-stt`` / ``flm-embed`` shadow records
 coherent on every API start: it renames legacy ``stt-npu`` / ``embed-npu``
 TOMLs to ``{anchor}-stt`` / ``{anchor}-embed``, normalizes the coresident
 structural fields (device=npu, profile=flm, served_by=<anchor>, port=<anchor
-port>, type), and seeds any missing shadow with ``enabled`` mirroring the
-anchor's ``[npu]`` toggle.
+port>, type), and seeds any missing shadow with the placeholder model for its
+modality. Since #1369 the shadow carries no activation state of its own —
+whether the modality dispatches is read off the anchor's ``[npu]`` toggle at
+request time (``hal0.slots.activation.npu_modality_active``), so the reconcile
+no longer mirrors it onto the shadow.
 """
 
 from __future__ import annotations
@@ -54,7 +57,7 @@ def _anchor(root: Path, *, asr: bool = True, embed: bool = True, name: str = "fl
     )
 
 
-async def test_creates_missing_shadows_mirroring_anchor_toggles(tmp_hal0_home: str) -> None:
+async def test_creates_missing_shadows_with_placeholder_models(tmp_hal0_home: str) -> None:
     root = _slots_dir(tmp_hal0_home)
     _anchor(root, asr=True, embed=False)
 
@@ -71,16 +74,20 @@ async def test_creates_missing_shadows_mirroring_anchor_toggles(tmp_hal0_home: s
         assert cfg["served_by"] == "flm"
         assert cfg["port"] == 8088
         assert cfg["type"] == slot_type
-    # enabled mirrors the anchor's [npu] toggle (asr on, embed off).
-    assert stt["enabled"] is True
-    assert embed["enabled"] is False
+    # The shadows are seeded with FLM's bundled placeholder model per modality
+    # and carry NO activation state of their own — the anchor's [npu] toggle
+    # (asr on, embed off here) is the gate, read at dispatch time (#1369).
+    assert stt["model"]["default"] == "whisper-v3:turbo"
+    assert embed["model"]["default"] == "embed-gemma:300m"
+    assert "enabled" not in stt
+    assert "enabled" not in embed
 
 
 async def test_renames_and_normalizes_legacy_shadow(tmp_hal0_home: str) -> None:
     root = _slots_dir(tmp_hal0_home)
     _anchor(root)
     # Legacy stt-npu with a distinct (wrong) port and no profile/served_by,
-    # plus an operator-set enabled + model that must survive the rename.
+    # plus an operator-set model that must survive the rename.
     _write(
         root,
         "stt-npu",
@@ -89,7 +96,6 @@ async def test_renames_and_normalizes_legacy_shadow(tmp_hal0_home: str) -> None:
             'device = "npu"',
             'type = "transcription"',
             "port = 8084",
-            "enabled = true",
             "[model]",
             'default = "whisper-v3:turbo"',
         ],
@@ -107,7 +113,6 @@ async def test_renames_and_normalizes_legacy_shadow(tmp_hal0_home: str) -> None:
     assert stt["port"] == 8088  # normalized to the anchor port
     assert stt["type"] == "transcription"
     # Operator state preserved across the rename.
-    assert stt["enabled"] is True
     assert stt["model"]["default"] == "whisper-v3:turbo"
 
 
@@ -129,7 +134,6 @@ async def test_rename_skipped_when_canon_exists(tmp_hal0_home: str) -> None:
             'profile = "flm"',
             'served_by = "flm"',
             "port = 8088",
-            "enabled = false",
             "[model]",
             'default = "whisper-v3:turbo"',
         ],
@@ -150,7 +154,14 @@ async def test_noop_without_container_npu_anchor(tmp_hal0_home: str) -> None:
     _write(
         root,
         "agent",
-        ['name = "agent"', 'device = "npu"', 'type = "llm"', "port = 8082", "enabled = true"],
+        [
+            'name = "agent"',
+            'device = "npu"',
+            'type = "llm"',
+            "port = 8082",
+            "[model]",
+            'default = "qwen3:4b"',
+        ],
     )
 
     sm = SlotManager()

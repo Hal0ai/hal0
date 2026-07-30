@@ -2646,24 +2646,22 @@ class SlotManager:
     ) -> None:
         """Reject a write that would land a second NPU LLM anchor.
 
-        Plan §5.3: the AMDXDNA hardware context admits
-        ONE ``device=npu, type=llm`` slot at a time. Disabled NPU LLM
-        slots may coexist with another disabled (or enabled) one, but
-        two enabled anchors cannot be configured. This guard runs on
-        every ``create()`` and ``update_config()`` so the constraint
-        holds before any TOML hits disk.
+        Plan §5.3: the AMDXDNA hardware context admits ONE ``device=npu,
+        type=llm`` slot **with a model bound** at a time. Model-less NPU LLM
+        slots are inert config and may coexist freely (the shipped ``flm``
+        seed is one), but two model-bound anchors cannot be configured — so
+        since #1369 the model write IS the write that 409s. This guard runs
+        on every ``create()`` and ``update_config()`` so the constraint holds
+        before any TOML hits disk.
 
-        Cheap fast paths:
-          - the slot being written is not ``device=npu, type=llm`` →
-            no possible violation, return.
-          - the slot being written is not ``enabled`` → at most one
-            enabled NPU LLM can survive (the OTHER one, if any),
-            return.
+        Cheap fast path: the slot being written doesn't claim the anchor
+        (not ``device=npu, type=llm``, or has no ``[model].default``) → no
+        possible violation, return.
 
-        On the slow path we walk the other configured slots to see
-        whether any pre-existing NPU LLM is already enabled. Reading
-        the writer's own slot from disk is skipped — the in-memory
-        ``cfg_dict`` IS the authoritative new state.
+        On the slow path we walk the other configured slots to see whether
+        any pre-existing NPU LLM already has a model. Reading the writer's
+        own slot from disk is skipped — the in-memory ``cfg_dict`` IS the
+        authoritative new state.
 
         Thin async wrapper (kept for the public method surface and test
         monkeypatchability) over the module-level sync

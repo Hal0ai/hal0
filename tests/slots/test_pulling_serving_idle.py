@@ -287,7 +287,6 @@ def _write_min_slot(
         f"port = {port}",
         'backend = "vulkan"',
         'provider = "llama-server"',
-        "enabled = true",
     ]
     if idle_timeout_s is not None:
         lines.append(f"idle_timeout_s = {idle_timeout_s}")

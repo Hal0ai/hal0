@@ -48,7 +48,6 @@ _PRIMARY = [
         # ADR-0023: the canonical default/anchor slot is `agent` (was `chat`).
         "name": "agent",
         "type": "llm",
-        "enabled": True,
         "device": "gpu-vulkan",
         "role": None,
         "model": {"default": "big", "context_size": 4096},
@@ -332,7 +331,6 @@ async def test_hal0_brain_alias_resolves_via_kind_slot_upstream_o21():
         {
             "name": "brain",
             "type": "llm",
-            "enabled": True,
             "device": "gpu-rocm",
             "role": None,
             "model": {"default": "hal0-brain-fpx8-agent", "context_size": 16384},

@@ -5,8 +5,9 @@
 # ComfyUI's models are freed (POST /free) when LLM slots come back after
 # [image].idle_restore_minutes with no jobs (spec §7).
 #
-# Clean seed (WS-E, #1107): no `[model].default` pin and DISABLED, so a model-less
-# box boots a grey tile — no surprise multi-GB checkpoint download (the previous
+# Clean seed (WS-E, #1107): no `[model].default` pin — filling one in is what
+# activates the slot (#1369) — so a model-less box boots a grey tile: no
+# surprise multi-GB checkpoint download (the previous
 # `sdxl-turbo` pin) and no crash-loop. ComfyUI capability picks land via the
 # guided setup's `comfyui_defaults` sidecar → POST /api/comfyui/models/fetch; the
 # operator enables this slot once a checkpoint is present.
@@ -17,7 +18,6 @@ provider = "comfyui"
 device = "gpu-rocm"
 runtime = "container"
 profile = "comfyui"
-enabled = false
 port = 8188
 n_gpu_layers = -1
 threads = 0

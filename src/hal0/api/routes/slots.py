@@ -446,9 +446,16 @@ def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
     ``mtp``/``enable_thinking``/``vision`` would otherwise just fall out as
     generic "unknown slot config key(s)" here instead of the more actionable
     "belongs on the model" message.
-    """
-    from hal0.slot_config import unknown_slot_config_keys
 
+    Keys REMOVED from the schema (``enabled``, #1369) are split out the same
+    way, but from inside this function rather than at each call site so all
+    three write boundaries stay in sync: they are spelled correctly, so a
+    "check spelling" hint would send the caller hunting for a typo that
+    doesn't exist.
+    """
+    from hal0.slot_config import reject_removed_slot_keys, unknown_slot_config_keys
+
+    reject_removed_slot_keys(payload)
     unknown = unknown_slot_config_keys(payload)
     if unknown:
         raise BadRequest(
@@ -1053,24 +1060,11 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     ) as _rec:
         snap = await sm.update_config(name, body)
         _rec.after = body
-    # Spec 1 / Component 2: an explicit ``enabled: false`` write must take a
-    # running slot actually offline so the faded card matches reality. The
-    # config write alone only flips the on-disk flag; without this a disabled
-    # slot would keep its llama-server child resident until the next restart.
-    # ``unload`` is idempotent (short-circuits when already OFFLINE), but we
-    # gate on a live state so an offline/error slot incurs no /v1/unload call.
-    if body.get("enabled") is False:
-        from hal0.slots.state import SlotState
-
-        _LIVE = {
-            SlotState.STARTING,
-            SlotState.WARMING,
-            SlotState.READY,
-            SlotState.SERVING,
-            SlotState.IDLE,
-        }
-        if snap.state in _LIVE:
-            snap = await sm.unload(name)
+    # NOTE (#1369): this route is a PURE config write — no lifecycle side
+    # effect. It used to unload a running slot on an ``enabled: false`` body
+    # (so the faded card matched reality); with the field gone, config edits
+    # and lifecycle are separate verbs and stopping a slot is
+    # ``POST /{name}/unload`` (pin-gated per #1367).
     out = _slot_to_dict(snap, request)
     # Fit-check (spec-hw-slot-ownership §4): warn — never reject — when the
     # slot's post-save (device, BINARY) pair is incompatible. Compute over the

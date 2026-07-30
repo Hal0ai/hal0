@@ -243,7 +243,7 @@ Addressing a slot by its name (e.g. `model: "agent"`) is the stable way to pin
 a co-resident model: the name doesn't change when you swap the underlying
 model file. hal0 also advertises three virtual model names that resolve to
 whichever slot is actually loaded — `hal0/agent`, `hal0/utility`, and
-`hal0/npu` — and generalizes the pattern to any enabled `type: llm` slot: a
+`hal0/npu` — and generalizes the pattern to any `type: llm` slot with a model bound: a
 custom slot named `research` is addressable as `hal0/research` even though
 it isn't one of the three advertised names.
 

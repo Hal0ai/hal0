@@ -92,13 +92,15 @@ class PullPlan:
     """A registered-but-not-yet-run pull. The caller decides how to run it
     (``background.add_task`` for the route; ``await`` with progress for the TUI).
 
-    ``slot_names`` are the slots created DISABLED for this model (WS-E, #1108).
-    The caller MUST drive each plan through :func:`run_pull_and_activate` so the
-    slot(s) flip ``enabled=True`` only after the bytes land — never before the
-    model exists on disk (the start-before-model race). A FAILED pull leaves the
-    slot(s) disabled and marked (``[meta].pull_failed``), so a half-provisioned
-    box parks the slot instead of crash-looping a container against a missing
-    model.
+    ``slot_names`` are the slots created MODEL-LESS for this model (WS-E,
+    #1108). The caller MUST drive each plan through
+    :func:`run_pull_and_activate` so ``model.default`` is stamped only after the
+    bytes land — never before the model exists on disk (the start-before-model
+    race). Since model-presence IS activation (#1369), withholding the id is the
+    gate itself rather than a flag shadowing it. A FAILED pull leaves the
+    slot(s) model-less and marked (``[meta].pull_failed``), so a
+    half-provisioned box parks the slot instead of crash-looping a container
+    against a missing model.
     """
 
     model_id: str
@@ -118,20 +120,22 @@ class SetupResult:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _build_slot_cfg(*, slot, model_id, device, profile, port, context_size=4096, enabled=False):
+def _build_slot_cfg(*, slot, model_id, device, profile, port, context_size=4096):
     """Podman-aware slot config dict (device+profile, NOT backend — #807).
 
-    Born DISABLED by default (WS-E, #1108): the guided apply path creates the
-    slot, THEN queues the pull, and only flips ``enabled=True`` once the pull
-    completes (:func:`run_pull_and_activate`). Seeding ``enabled=True`` here
-    would let the slot start before its model exists on disk.
+    Born MODEL-LESS (WS-E, #1108): callers pass ``model_id=""`` for the guided
+    apply path, which creates the slot, THEN queues the pull, and stamps
+    ``model.default`` only once the pull completes
+    (:func:`run_pull_and_activate`). Because model-presence is the activation
+    signal (#1369), stamping the id up front is exactly what would let the slot
+    start before its model exists on disk — there is no separate flag left to
+    hold it back. ``context_size`` is a tuning default and lands immediately.
     """
     return {
         "name": slot,
         "port": port,
         "device": device,
         "profile": profile,
-        "enabled": enabled,
         "model": {"default": model_id, "context_size": context_size},
     }
 
@@ -208,21 +212,31 @@ def _clamp_context_size(requested: int, hw: HardwareInfo, *, weights_gb: float =
     return max(min(int(requested), budget_tokens), _MIN_CONTEXT)
 
 
-# ── Enable-on-pull-success (WS-E / #1108) ───────────────────────────────────────
+# ── Activate-on-pull-success (WS-E / #1108) ─────────────────────────────────────
 
 
-async def _set_slot_enabled(slot_manager, slot_name: str, enabled: bool, *, failed: bool) -> None:
-    """Best-effort flip of a slot's ``enabled`` flag after its pull settles.
+async def _activate_slot_model(
+    slot_manager, slot_name: str, model_id: str | None, *, failed: bool
+) -> None:
+    """Best-effort stamp of a slot's ``model.default`` after its pull settles.
+
+    ``model_id`` is the id to bind on success, or ``None`` to leave the slot
+    model-less (the failure path) — model-presence is the activation signal
+    (#1369), so writing nothing IS leaving the slot parked.
 
     Non-aborting by design: a failed config rewrite must not crash the pull
     driver. On a FAILED pull we also stamp ``[meta].pull_failed`` so the parked
     slot is clearly marked (the dashboard / ``hal0 doctor`` can surface it).
     """
-    updates: dict[str, Any] = {"enabled": enabled}
+    updates: dict[str, Any] = {}
+    if model_id:
+        updates["model"] = {"default": model_id}
     if failed:
         updates["meta"] = {"pull_failed": True}
+    if not updates:
+        return
     # Activation is best-effort — the model still downloaded; the operator can
-    # enable the slot by hand. Never let this abort the pull driver.
+    # bind it by hand. Never let this abort the pull driver.
     with contextlib.suppress(Exception):
         await slot_manager.update_config(slot_name, updates)
 
@@ -230,10 +244,11 @@ async def _set_slot_enabled(slot_manager, slot_name: str, enabled: bool, *, fail
 async def run_pull_and_activate(plan: PullPlan, *, slot_manager) -> None:
     """Run one planned pull, then activate its slot(s) — WS-E (#1108).
 
-    On SUCCESS: flip every ``plan.slot_names`` slot to ``enabled=True`` (the
-    model now exists on disk, so a start is safe). On FAILURE (``run_pull``
-    raised, or the job settled ``state == "failed"``): leave the slot(s)
-    disabled and mark them, so nothing crash-loops against a missing model.
+    On SUCCESS: stamp ``model.default = plan.model_id`` on every
+    ``plan.slot_names`` slot (the model now exists on disk, so a start is
+    safe). On FAILURE (``run_pull`` raised, or the job settled
+    ``state == "failed"``): leave the slot(s) model-less and mark them, so
+    nothing crash-loops against a missing model.
 
     Re-raises the original exception after marking, so callers that inspect
     ``gather(..., return_exceptions=True)`` results still see the failure.
@@ -244,14 +259,14 @@ async def run_pull_and_activate(plan: PullPlan, *, slot_manager) -> None:
         await run_pull(plan.job, **plan.kwargs)
     except BaseException:
         for name in plan.slot_names:
-            await _set_slot_enabled(slot_manager, name, False, failed=True)
+            await _activate_slot_model(slot_manager, name, None, failed=True)
         raise
     if getattr(plan.job, "state", None) == "failed":
         for name in plan.slot_names:
-            await _set_slot_enabled(slot_manager, name, False, failed=True)
+            await _activate_slot_model(slot_manager, name, None, failed=True)
         return
     for name in plan.slot_names:
-        await _set_slot_enabled(slot_manager, name, True, failed=False)
+        await _activate_slot_model(slot_manager, name, plan.model_id, failed=False)
 
 
 def _ensure_registry_entry(registry, model_id) -> None:
@@ -487,8 +502,8 @@ async def apply_setup(
     pulls: list[PullPlan] = []
     # WS-E (#1108): map model_id → the plan WE created this run, so two slots
     # sharing one model_id (e.g. chat + coder on the same pick) both get
-    # enabled off the single pull rather than the second slot being stranded
-    # disabled.
+    # activated off the single pull rather than the second slot being stranded
+    # model-less.
     plans_by_model: dict[str, PullPlan] = {}
 
     # Honour the operator's chosen store BEFORE planning pulls: the pull engine
@@ -540,15 +555,16 @@ async def apply_setup(
             hardware,
             weights_gb=float(getattr(curated, "size_gb", 0.0) or 0.0),
         )
-        # Born DISABLED — flipped to enabled only after the pull completes.
+        # Born MODEL-LESS — the id is stamped only after the pull completes
+        # (#1369: the withheld model.default IS the start gate). The plan below
+        # carries ``s.model_id`` forward to the activation write.
         cfg = _build_slot_cfg(
             slot=s.slot_name,
-            model_id=s.model_id,
+            model_id="",
             device=device,
             profile=profile,
             port=s.port,
             context_size=ctx,
-            enabled=False,
         )
         try:
             await slot_manager.create(s.slot_name, cfg)
@@ -562,14 +578,14 @@ async def apply_setup(
         own_plan = plans_by_model.get(s.model_id)
         if own_plan is not None:
             # Second slot for a model WE already planned this run — ride the
-            # same pull so it, too, gets enabled on success.
+            # same pull so it, too, gets its model stamped on success.
             own_plan.slot_names.append(s.slot_name)
             job = own_plan.job
         elif existing is not None and getattr(existing, "state", None) in ("queued", "running"):
             # A pull for this model is already in flight from elsewhere; don't
-            # double-run it. The slot stays disabled (safer than the old
-            # enabled-before-model default) for the operator to enable once the
-            # in-flight pull lands.
+            # double-run it. The slot stays model-less (safer than the old
+            # model-stamped-before-download default) for the operator to bind
+            # once the in-flight pull lands.
             job = existing
         else:
             job = make_job(s.model_id)

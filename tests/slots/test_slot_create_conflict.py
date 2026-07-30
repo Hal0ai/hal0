@@ -44,7 +44,6 @@ async def test_create_rejects_duplicate_and_preserves_config_and_state(
             "port": 8081,
             "device": "gpu-rocm",
             "type": "llm",
-            "enabled": True,
             "model": {"default": "qwen3-4b-q4_k_m"},
         },
     )
@@ -62,7 +61,6 @@ async def test_create_rejects_duplicate_and_preserves_config_and_state(
                 "port": 8082,
                 "device": "gpu-rocm",
                 "type": "llm",
-                "enabled": True,
                 "model": {"default": "qwen3-4b-q4_k_m"},
             },
         )
@@ -99,7 +97,6 @@ async def test_reconcile_precheck_pattern_is_idempotent_noop(
                 "port": port,
                 "device": "gpu-rocm",
                 "type": "llm",
-                "enabled": True,
                 "model": {"default": "qwen3-4b-q4_k_m"},
             },
         )

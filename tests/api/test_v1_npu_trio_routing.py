@@ -3,7 +3,7 @@
 A single ``flm serve`` process inside the containerized ``npu`` slot answers
 chat + STT + embed on ONE static port (from the npu slot's TOML). When a
 request lands on ``/v1/embeddings`` or ``/v1/audio/transcriptions`` and its
-``model`` matches an enabled ``device=npu`` shadow-role slot (``flm-embed``
+``model`` matches a ``device=npu`` shadow-role slot (``flm-embed``
 / ``flm-stt``), v1.py forwards it straight to that port via
 ``app.state.npu_trio_router`` (:class:`hal0.dispatcher.npu_trio.NpuTrioRouter`).
 
@@ -72,9 +72,11 @@ def seed_npu_trio(tmp_hal0_home: str) -> None:
             'device = "npu"',
             'type = "llm"',
             'runtime = "container"',
-            "enabled = true",
             "[model]",
             'default = "gemma3:1b"',
+            "[npu]",
+            "asr = true",
+            "embed = true",
         ],
     )
     _seed_slot_toml(
@@ -85,7 +87,6 @@ def seed_npu_trio(tmp_hal0_home: str) -> None:
             "port = 8084",
             'device = "npu"',
             'type = "transcription"',
-            "enabled = true",
             "[model]",
             'default = "whisper-v3"',
         ],
@@ -98,7 +99,6 @@ def seed_npu_trio(tmp_hal0_home: str) -> None:
             "port = 8085",
             'device = "npu"',
             'type = "embedding"',
-            "enabled = true",
             "[model]",
             'default = "embed-gemma"',
         ],
@@ -242,9 +242,13 @@ def test_embed_npu_returns_503_when_npu_not_dispatchable(
     assert "load an NPU chat slot first" in body["error"]["message"]
 
 
-def test_embed_npu_skips_trio_when_slot_disabled(tmp_hal0_home: str) -> None:
-    """Disabled embed-npu slot → trio router NOT called; the request flows
-    through the normal dispatcher path (here: typed no-route 404)."""
+def test_embed_npu_skips_trio_without_an_anchor(tmp_hal0_home: str) -> None:
+    """A shadow with no NPU LLM anchor → trio router NOT called; the request
+    flows through the normal dispatcher path (here: typed no-route 404).
+
+    Post-#1369 the shadow cannot be "disabled" (it always carries a
+    placeholder model), so the gate is the anchor: no anchor, no trio.
+    """
     _seed_slot_toml(
         tmp_hal0_home,
         "embed-npu",
@@ -253,7 +257,6 @@ def test_embed_npu_skips_trio_when_slot_disabled(tmp_hal0_home: str) -> None:
             "port = 8085",
             'device = "npu"',
             'type = "embedding"',
-            "enabled = false",
             "[model]",
             'default = "embed-gemma"',
         ],
@@ -271,7 +274,7 @@ def test_embed_npu_skips_trio_when_slot_disabled(tmp_hal0_home: str) -> None:
         # Trio never touched; the dispatcher found no upstream and raised
         # its typed NoRouteFound envelope.
         assert captures["calls"] == [], (
-            f"trio router was called despite disabled embed-npu slot: {captures['calls']}"
+            f"trio router was called with no NPU anchor present: {captures['calls']}"
         )
         assert r.status_code == 404, r.text
         assert r.json()["error"]["code"] == "dispatch.no_route"
@@ -354,8 +357,8 @@ def test_stt_npu_returns_503_when_npu_not_dispatchable(seed_npu_trio: None) -> N
     assert "load an NPU chat slot first" in body["error"]["message"]
 
 
-def test_stt_npu_skips_trio_when_slot_disabled(tmp_hal0_home: str) -> None:
-    """Disabled stt-npu → trio NOT called; standard dispatch runs."""
+def test_stt_npu_skips_trio_without_an_anchor(tmp_hal0_home: str) -> None:
+    """A transcription shadow with no NPU LLM anchor → trio NOT called."""
     _seed_slot_toml(
         tmp_hal0_home,
         "stt-npu",
@@ -364,7 +367,6 @@ def test_stt_npu_skips_trio_when_slot_disabled(tmp_hal0_home: str) -> None:
             "port = 8084",
             'device = "npu"',
             'type = "transcription"',
-            "enabled = false",
             "[model]",
             'default = "whisper-v3"',
         ],
@@ -379,8 +381,61 @@ def test_stt_npu_skips_trio_when_slot_disabled(tmp_hal0_home: str) -> None:
         data = {"model": "whisper-v3"}
         client.post("/v1/audio/transcriptions", files=files, data=data)
         assert captures["calls"] == [], (
-            f"trio router was called despite disabled stt-npu slot: {captures['calls']}"
+            f"trio router was called with no NPU anchor present: {captures['calls']}"
         )
+
+
+def test_embed_skips_trio_when_anchor_modality_is_off(tmp_hal0_home: str) -> None:
+    """``[npu].embed = false`` on the ANCHOR keeps embed requests off the trio.
+
+    This is the #1369 gate: the shadow's own config can't express "off"
+    (it always carries a placeholder model), and the anchor's ``[npu]`` table
+    is the *more* accurate signal anyway — it is literally the ``flm serve
+    --embed`` flag set, so a shadow whose modality was never launched can no
+    longer advertise itself as routable.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "flm",
+        [
+            'name = "flm"',
+            f"port = {_NPU_PORT}",
+            'device = "npu"',
+            'type = "llm"',
+            'runtime = "container"',
+            "[model]",
+            'default = "gemma3:1b"',
+            "[npu]",
+            "asr = true",
+            "embed = false",
+        ],
+    )
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "flm-embed",
+        [
+            'name = "flm-embed"',
+            "port = 8085",
+            'device = "npu"',
+            'type = "embedding"',
+            "[model]",
+            'default = "embed-gemma"',
+        ],
+    )
+    captures: dict[str, Any] = {"calls": []}
+    app = create_app()
+    with TestClient(app) as client:
+        client.app.state.npu_trio_router._http_client = httpx.AsyncClient(
+            transport=_make_capture_transport(captures)
+        )
+        r = client.post("/v1/embeddings", json={"model": "embed-gemma", "input": "hello"})
+        assert captures["calls"] == [], (
+            f"trio router was called with [npu].embed off: {captures['calls']}"
+        )
+        # A 503 npu.trio_unavailable would mean we entered the trio path and
+        # only bailed on the liveness probe — the gate has to reject earlier.
+        assert r.status_code == 404, r.text
+        assert r.json()["error"]["code"] == "dispatch.no_route"
 
 
 def test_stt_request_matches_trio_by_slot_name(

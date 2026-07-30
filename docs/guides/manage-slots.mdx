@@ -363,8 +363,8 @@ Stops the unit and removes the config. You'll be asked to confirm; pass
 Seeded slots (`utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`,
 `agent`) are reserved and cannot be deleted — the API rejects the request.
 To stop one of these from serving, disable its capability in
-`capabilities.toml` (or `hal0 slot edit <name>` its `enabled` flag) instead
-of trying to remove it.
+`capabilities.toml` (or clear the slot's `[model].default` — a slot with no
+model bound is inactive by definition) instead of trying to remove it.
 </Aside>
 
 ## Idle eviction and memory pressure
@@ -386,10 +386,11 @@ An idle-evicted slot isn't gone: the dispatcher reloads it transparently on
 its next request (wake-on-request), including `embed` / `rerank` / `tts`
 slots — these previously 404'd until a manual `hal0 slot load` after an
 idle eviction. The one exception is a slot **disabled** via a capability
-toggle: hal0 writes `enabled = false` to the slot's TOML, and a disabled
-slot is excluded from wake-on-request, so it stays off until you re-enable
-the capability — a disable now genuinely sticks instead of being silently
-woken by the next matching request.
+toggle: hal0 clears the slot's `[model].default` (#1369), and a slot with no
+model bound is excluded from wake-on-request, so it stays off until you
+re-enable the capability — a disable genuinely sticks instead of being
+silently woken by the next matching request. Your model pick isn't lost; it
+stays in `capabilities.toml` and is rebound on re-enable.
 
 See [Configuration schema reference](/docs/reference/config-schema) for
 `idle_timeout_s` and `evict_pressure_mb`.

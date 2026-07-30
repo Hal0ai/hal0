@@ -19,27 +19,26 @@ async def test_llm_slot_views_filters_and_projects():
         {
             "name": "primary",
             "type": "llm",
-            "enabled": True,
             "device": "gpu-vulkan",
             "model": {"default": "big", "context_size": 65536},
         },
         {
             "name": "utility",
             "type": "llm",
-            "enabled": True,
             "device": "gpu-vulkan",
             "model": {"default": "tiny", "context_size": 8192},
         },
         {
             "name": "agent",
             "type": "llm",
-            "enabled": True,
             "device": "npu",
             "model": {"default": "flm", "ctx_size": 32768},
         },
-        {"name": "embed", "type": "embedding", "enabled": True, "model": {"default": "e5"}},
-        {"name": "off", "type": "llm", "enabled": False, "model": {"default": "x"}},
-        {"name": "nomodel", "type": "llm", "enabled": True, "model": {}},
+        {"name": "embed", "type": "embedding", "model": {"default": "e5"}},
+        # #1369: model-presence is the sole filter, so BOTH "off" shapes are
+        # the same shape now — an empty [model] table and an empty default.
+        {"name": "nomodel", "type": "llm", "model": {}},
+        {"name": "off", "type": "llm", "model": {"default": ""}},
     ]
     views = await hal0_llm_slot_views(_FakeSlotManager(cfgs))
     by_name = {v["name"]: v for v in views}
@@ -64,7 +63,6 @@ async def test_llm_slot_views_translates_flm_id_to_colon_tag():
         {
             "name": "npu",
             "type": "llm",
-            "enabled": True,
             "device": "npu",
             "model": {"default": "gemma4-it-e2b-FLM", "context_size": 18000},
         },

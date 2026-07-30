@@ -33,7 +33,6 @@ def slot_toml(tmp_hal0_home: str) -> Path:
                 'name = "chat"',
                 'type = "llm"',
                 'device = "gpu-vulkan"',
-                "enabled = true",
                 "port = 8081",
                 "[model]",
                 'default = "qwen3-4b"',

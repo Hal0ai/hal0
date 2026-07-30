@@ -100,23 +100,26 @@ def _write_typed_slot(
     name: str,
     *,
     slot_type: str,
-    enabled: bool = True,
+    model: str | None = None,
     default: bool | None = None,
     labels: tuple[str, ...] = (),
     port: int = 8081,
 ) -> None:
-    """Write a typed slot TOML for routing tests."""
+    """Write a typed slot TOML for routing tests.
+
+    ``model=""`` writes an INACTIVE slot — since #1369 an empty
+    ``[model].default`` is the only way a slot is "off".
+    """
     lines = [
         f'name = "{name}"',
         f"port = {port}",
         f'type = "{slot_type}"',
         'provider = "llama-server"',
-        f"enabled = {str(enabled).lower()}",
     ]
     if default is not None:
         lines.append(f"default = {str(default).lower()}")
     lines.append("[model]")
-    lines.append(f'default = "{name}-model"')
+    lines.append(f'default = "{f"{name}-model" if model is None else model}"')
     if labels:
         lines.append("labels = [" + ", ".join(f'"{x}"' for x in labels) + "]")
     (root / f"{name}.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -150,11 +153,12 @@ async def test_route_for_request_prefers_default(slot_root: Path) -> None:
     assert await sm.route_for_request("llm") == "b"
 
 
-async def test_route_for_request_falls_through_when_default_disabled(
+async def test_route_for_request_falls_through_when_default_has_no_model(
     slot_root: Path,
 ) -> None:
-    _write_typed_slot(slot_root, "a", slot_type="llm", default=False, enabled=True, port=8081)
-    _write_typed_slot(slot_root, "b", slot_type="llm", default=True, enabled=False, port=8082)
+    """A ``default = true`` slot with no model can't be routed to (#1369)."""
+    _write_typed_slot(slot_root, "a", slot_type="llm", default=False, port=8081)
+    _write_typed_slot(slot_root, "b", slot_type="llm", default=True, model="", port=8082)
     sm = SlotManager()
     assert await sm.route_for_request("llm") == "a"
 
@@ -467,7 +471,6 @@ async def test_status_flags_running_container_config_drift(
                 'backend = "vulkan"',
                 'provider = "llama-server"',
                 'profile = "vulkan"',
-                "enabled = true",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "context_size = 131072",
@@ -938,7 +941,6 @@ async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
                 'name = "chat"',
                 "port = 8081",
                 'provider = "llama-server"',
-                "enabled = true",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "context_size = 4096",
@@ -1001,7 +1003,6 @@ async def test_update_config_model_merge_matches_shared_helper(
                 'name = "chat"',
                 "port = 8081",
                 'provider = "llama-server"',
-                "enabled = true",
                 "[model]",
                 *seed_model_lines,
                 "",
@@ -1037,7 +1038,6 @@ def _write_img_slot(root: Path, *, idle_restore_minutes: int, port: int = 8188) 
                 'device = "gpu-rocm"',
                 'runtime = "container"',
                 'profile = "comfyui"',
-                "enabled = true",
                 "[model]",
                 'default = "sdxl-turbo"',
                 "[image]",

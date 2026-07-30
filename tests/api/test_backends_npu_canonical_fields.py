@@ -206,7 +206,6 @@ def test_install_slot_model_preserves_all_existing_top_level_fields(
                 'device = "gpu-vulkan"',
                 'runtime = "container"',
                 'profile = "vulkan"',
-                "enabled = true",
                 "[model]",
                 'default = "qwen3.5-9b"',
                 "context_size = 65536",
@@ -230,7 +229,10 @@ def test_install_slot_model_preserves_all_existing_top_level_fields(
     assert cfg["device"] == "gpu-vulkan"
     assert cfg["runtime"] == "container"
     assert cfg["profile"] == "vulkan"
-    assert cfg["enabled"] is True
+    assert cfg["type"] == "llm"
+    # #1369: no ``enabled`` key to preserve — activation IS ``[model].default``,
+    # which this update deliberately rewrites (asserted above).
+    assert "enabled" not in cfg
 
 
 # ── (c) PUT /api/install/slots/{name}/model — missing slot → typed 404 ───────

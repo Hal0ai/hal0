@@ -7,13 +7,14 @@
 # seed is absent (setup_command._SETUP_SLOTS — chat capability, same name +
 # port), and never overwrites an existing file.
 #
-# Per spec-p3-brain.final.md §5b/5c: ships WITHOUT a `[model].default` and
-# DISABLED, so a fresh, deliberately model-less box boots a GREY tile — no
-# surprise multi-GB download and no crash-loop. The operator assigns a model
-# later (dashboard / `hal0 setup`), which flips the slot enabled. The
+# Per spec-p3-brain.final.md §5b/5c: ships WITHOUT a `[model].default`, so a
+# fresh, deliberately model-less box boots a GREY tile — no surprise multi-GB
+# download and no crash-loop. The operator assigns a model later (dashboard /
+# `hal0 setup`), and filling in `[model].default` is what activates it (#1369).
+# The
 # readiness gate (brain/readiness.py) warms this slot when brain_chat.enabled
 # + tool_model resolves here. Per §5b we choose reconcile-on-provision
-# (rather than seed-enabled-with-default-model) because model-less +
+# (rather than seeding a default model) because model-less +
 # surprise-download-free is the cleanest WS-E #1107 pattern.
 #
 # profile = chadrock-moe: agent slot is the chadrock 35B Saber anchor per
@@ -26,7 +27,6 @@ type = "llm"
 device = "gpu-vulkan"
 runtime = "container"
 profile = "chadrock-moe"
-enabled = false
 port = 8081
 n_gpu_layers = -1
 threads = 0

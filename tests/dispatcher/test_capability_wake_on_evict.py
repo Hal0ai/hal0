@@ -34,8 +34,12 @@ from hal0.upstreams.registry import UpstreamRegistry
 from tests.slots.conftest import FakeContainerProvider
 
 
-def _write_min_slot(root: Path, name: str, *, port: int, enabled: bool = True) -> None:
-    """Write a minimal llama-server slot TOML (mirrors the slots suite helper)."""
+def _write_min_slot(root: Path, name: str, *, port: int, model: str = "qwen3-4b-q4_k_m") -> None:
+    """Write a minimal llama-server slot TOML (mirrors the slots suite helper).
+
+    ``model=""`` writes an INACTIVE slot — since #1369 model-presence is the
+    activation signal, so that replaces the old ``enabled=False``.
+    """
     root.mkdir(parents=True, exist_ok=True)
     (root / f"{name}.toml").write_text(
         "\n".join(
@@ -44,9 +48,8 @@ def _write_min_slot(root: Path, name: str, *, port: int, enabled: bool = True) -
                 f"port = {port}",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
-                f"enabled = {'true' if enabled else 'false'}",
                 "[model]",
-                'default = "qwen3-4b-q4_k_m"',
+                f'default = "{model}"',
                 "",
             ]
         ),
@@ -187,22 +190,23 @@ async def test_capability_slot_wakes_on_request_after_eviction(
     assert captured["call"].upstream_name == "rerank"
 
 
-async def test_disabled_capability_slot_is_not_woken(
+async def test_model_less_capability_slot_is_not_woken(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DR-1 ↔ SC-1 interaction: the wake path must NOT revive a DISABLED slot.
+    """DR-1 ↔ SC-1 interaction: the wake path must NOT revive a CLEARED slot.
 
-    When an operator disables a capability, SC-1 writes ``enabled = false`` and
-    the reconciler unloads it to OFFLINE / deregisters its upstream. A follow-up
-    capability request must still 404 — waking a disabled slot would start its
-    container and re-register the upstream, silently undoing the disable. The
-    wake gate mirrors the routing layer's ``enabled is False`` drop rule.
+    When an operator disables a capability, SC-1 clears ``[model].default``
+    (#1369) and the reconciler unloads it to OFFLINE / deregisters its upstream.
+    A follow-up capability request must still 404 — waking the slot would start
+    its container and re-register the upstream, silently undoing the disable
+    (and there is no model to launch anyway). The wake gate mirrors the routing
+    layer's model-presence drop rule.
     """
     fake = FakeContainerProvider()
     monkeypatch.setattr("hal0.providers.container.container_provider", lambda: fake)
 
     root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
-    _write_min_slot(root, "rerank", port=8090, enabled=False)
+    _write_min_slot(root, "rerank", port=8090, model="")
 
     registry = UpstreamRegistry()
     sm = SlotManager(
@@ -218,7 +222,7 @@ async def test_disabled_capability_slot_is_not_woken(
         slot_manager=sm,
     )
 
-    # Disabled slot starts OFFLINE with no upstream — the exact post-disable state.
+    # A model-less slot starts OFFLINE with no upstream — the post-disable state.
     assert (await sm.status("rerank")).state == SlotState.OFFLINE
     assert registry.get("rerank") is None
 
@@ -231,5 +235,5 @@ async def test_disabled_capability_slot_is_not_woken(
         )
     assert exc.value.code == "dispatch.no_route"
     # The wake gate skipped it: no container load, no re-registered upstream.
-    assert _rerank_load_count(fake) == 0, "a disabled slot must never be woken"
+    assert _rerank_load_count(fake) == 0, "a model-less slot must never be woken"
     assert registry.get("rerank") is None

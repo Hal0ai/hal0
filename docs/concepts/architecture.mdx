@@ -149,7 +149,7 @@ a request went where it did.
 <Steps>
 
 1. A client `POST`s to `/v1/chat/completions` with a `model` field — that can
-   be a model id, or a **slot alias**: the name of any enabled llm slot, such
+   be a model id, or a **slot alias**: the name of any llm slot with a model bound, such
    as `agent` or `utility`.
 
 2. The route layer translates a slot alias to the slot's configured model id,

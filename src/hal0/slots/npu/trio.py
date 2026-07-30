@@ -53,9 +53,15 @@ def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
 
 #: FLM-trio shadow spec: (name suffix, slot type, anchor ``[npu]`` toggle
 #: key, default model id). Drives :func:`reconcile_trio_slots`.
-_TRIO_SHADOW_SPEC: tuple[tuple[str, str, str, str], ...] = (
-    ("stt", "transcription", "asr", "whisper-v3:turbo"),
-    ("embed", "embedding", "embed", "embed-gemma:300m"),
+# (name suffix, slot type, placeholder model id). The placeholder model is
+# structural, not an operator choice: FLM has no per-role model selection, so
+# the shadow's ``[model].default`` just names the bundled whisper / embed-gemma
+# it will serve. Whether the modality actually runs is the ANCHOR's ``[npu]``
+# table (hal0.slots.activation.NPU_MODALITY_KEY) — which is why the shadows
+# never carried a meaningful activation state of their own (#1369).
+_TRIO_SHADOW_SPEC: tuple[tuple[str, str, str], ...] = (
+    ("stt", "transcription", "whisper-v3:turbo"),
+    ("embed", "embedding", "embed-gemma:300m"),
 )
 
 
@@ -92,10 +98,11 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
          shadow without a resolvable npu profile makes the edit drawer take
          the wrong branch, per the flm-satellite-slots-fix incident),
          ``served_by=<anchor>``, ``port=<anchor port>``, and the trio
-         ``type``. A newly-created shadow's ``enabled`` mirrors the anchor's
-         ``[npu]`` toggle (``asr`` / ``embed``) so trio dispatch works out
-         of the box; an existing shadow's ``enabled`` and ``model.default``
-         are the operator's and left untouched.
+         ``type``. A new shadow is seeded with the placeholder model for its
+         modality; an existing shadow's ``model.default`` is the operator's
+         and left untouched. Whether the modality dispatches is read off the
+         ANCHOR's ``[npu]`` table at request time (#1369), so nothing here
+         needs to mirror it.
 
     No-op when there is no container NPU anchor. Best-effort: per-shadow
     failures are logged and never block startup.
@@ -125,13 +132,9 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
     anchor_port = anchor_cfg.get("port")
     if not anchor_name or not anchor_port:
         return 0
-    npu_tbl = anchor_cfg.get("npu")
-    if not isinstance(npu_tbl, dict):
-        npu_tbl = {}
-
     changed = 0
     slots_dir = paths.slots_config_dir()
-    for suffix, slot_type, npu_field, default_model in _TRIO_SHADOW_SPEC:
+    for suffix, slot_type, default_model in _TRIO_SHADOW_SPEC:
         canon = f"{anchor_name}-{suffix}"
         legacy = f"{suffix}-npu"  # stt-npu / embed-npu
         canon_path = slots_dir / f"{canon}.toml"
@@ -181,9 +184,8 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
                     log.info("slot.trio_shadow_normalized", extra={"slot": canon})
                 continue
 
-            # 3. Missing → create it. ``enabled`` mirrors the anchor toggle
-            #    so trio dispatch is live when the modality is on.
-            enabled = bool(npu_tbl.get(npu_field))
+            # 3. Missing → create it. Dispatch eligibility is the anchor's
+            #    ``[npu]`` toggle, read at request time — not mirrored here.
             cfg_dict = {
                 "name": canon,
                 "port": int(anchor_port),
@@ -192,15 +194,11 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
                 "profile": "flm",
                 "served_by": anchor_name,
                 "type": slot_type,
-                "enabled": enabled,
                 "model": {"default": default_model},
             }
             await mgr.create(canon, cfg_dict)
             changed += 1
-            log.info(
-                "slot.trio_shadow_created",
-                extra={"slot": canon, "enabled": enabled},
-            )
+            log.info("slot.trio_shadow_created", extra={"slot": canon})
         except Exception as exc:
             log.warning(
                 "slot.reconcile_trio_shadow_failed",

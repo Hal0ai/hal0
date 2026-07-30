@@ -100,7 +100,6 @@ def slot_root(tmp_hal0_home: str) -> Path:
                 'provider = "llama-server"',
                 'runtime = "container"',
                 'profile = "vulkan-radv"',
-                "enabled = true",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "",
@@ -124,7 +123,6 @@ def npu_trio_slot_root(tmp_hal0_home: str) -> Path:
             "port = 8082",
             'device = "npu"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "gemma3-1b"',
         ],
@@ -137,7 +135,6 @@ def npu_trio_slot_root(tmp_hal0_home: str) -> Path:
             "port = 8084",
             'device = "npu"',
             'type = "transcription"',
-            "enabled = true",
             "[model]",
             'default = "whisper-v3"',
         ],
@@ -150,7 +147,6 @@ def npu_trio_slot_root(tmp_hal0_home: str) -> Path:
             "port = 8085",
             'device = "npu"',
             'type = "embedding"',
-            "enabled = true",
             "[model]",
             'default = "embed-gemma"',
         ],
@@ -349,7 +345,6 @@ def test_agent_hermes_slot_name_resolves_to_agent(
             'provider = "llama-server"',
             'runtime = "container"',
             'profile = "vulkan-radv"',
-            "enabled = true",
             "[model]",
             'default = "qwen3-4b-q4_k_m"',
         ],
@@ -428,45 +423,51 @@ def test_unload_after_load_transitions_to_offline(
     assert container_stub["unload_calls"], "expected unload_sync to be called"
 
 
-# ── Spec 1 / Component 2: enabled transition safety ─────────────────────────
+# ── #1369: PUT /config is a pure config write ───────────────────────────────
 
 
-def test_disable_running_slot_stops_it(
+def test_config_write_never_unloads_a_running_slot(
     slot_root: Path,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """PUT /config {enabled: false} on a RUNNING slot persists the flag AND stops it.
+    """PUT /config has no lifecycle side effect — a running slot stays running.
 
-    The faded card must match reality — a disabled slot should not keep a
-    container child resident, so the config write is followed by an unload.
+    The old ``enabled: false → unload()`` coupling died with the field
+    (#1369): editing config and stopping a slot are separate verbs, and
+    stopping is ``POST /{name}/unload`` (pin-gated per #1367). A hidden
+    unload inside a config write is exactly the surprise that made the
+    "disabled but running" UI escape hatch necessary.
     """
     isolated_client.post("/api/slots/chat/load")
-    # Clear the load-path bookkeeping so we assert only the disable's unload.
+    # Clear the load-path bookkeeping so we assert only what this write did.
     container_stub["unload_calls"].clear()
 
-    r = isolated_client.put("/api/slots/chat/config", json={"enabled": False})
+    r = isolated_client.put("/api/slots/chat/config", json={"n_gpu_layers": 12})
     assert r.status_code == 200, r.text
-    # The persisted flag is off …
-    cfg = isolated_client.get("/api/slots/chat/config").json()
-    assert cfg.get("enabled") is False
-    # … and the running child was actually stopped.
-    assert container_stub["unload_calls"], "disabling a running slot must stop its container unit"
+    assert container_stub["unload_calls"] == [], (
+        "a config write must not stop the slot's container unit"
+    )
 
 
-def test_disable_offline_slot_does_not_unload(
+def test_config_write_rejects_the_removed_enabled_key(
     slot_root: Path,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """Disabling an already-offline slot writes the flag with no unload call."""
-    # The slot was never loaded: the container stub reports it inactive,
-    # so the adoption probe never marks chat running.
+    """A legacy ``{"enabled": ...}`` write is refused loudly, not silently kept.
+
+    Accepting it would persist inert debris and leave the caller believing it
+    changed something — the same failure mode ``_reject_unknown_config_keys``
+    exists to prevent (and how the removed ``backend`` key is handled). The
+    message has to name the replacement so an old client can be fixed.
+    """
     r = isolated_client.put("/api/slots/chat/config", json={"enabled": False})
-    assert r.status_code == 200, r.text
-    assert container_stub["unload_calls"] == [], (
-        "an offline slot needs no stop — the write alone suffices"
-    )
+    assert r.status_code == 400, r.text
+    body = r.json()["error"]
+    assert "enabled" in body["message"]
+    assert "model" in body["details"]["hint"]
+    assert "unload" in body["details"]["hint"]
 
 
 def test_delete_forwards_force_query_param(
@@ -613,12 +614,16 @@ def test_put_config_pinned_round_trips(
     assert cfg.get("pinned") is False
 
 
-def test_invalid_enable_surfaces_conflict(
+def test_binding_a_second_npu_model_surfaces_conflict(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """Enabling a 2nd NPU LLM anchor → 409 with the exclusivity message, no write."""
+    """Binding a model to a 2nd NPU LLM anchor → 409, no write.
+
+    Post-#1369 the model write IS the activation, so it is the write the
+    exclusivity guard has to refuse (it used to be the ``enabled`` flip).
+    """
     root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     root.mkdir(parents=True, exist_ok=True)
     for nm in ("agent", "agent2"):
@@ -628,21 +633,20 @@ def test_invalid_enable_surfaces_conflict(
                     f'name = "{nm}"',
                     'device = "npu"',
                     'type = "llm"',
-                    f"enabled = {'true' if nm == 'agent' else 'false'}",
                     "[model]",
-                    'default = "gemma3-1b"',
+                    f'default = "{"gemma3-1b" if nm == "agent" else ""}"',
                     "",
                 ]
             ),
             encoding="utf-8",
         )
-    # agent is enabled; enabling agent2 would land a second NPU LLM anchor.
-    r = isolated_client.put("/api/slots/agent2/config", json={"enabled": True})
+    # agent holds the anchor; giving agent2 a model would land a second one.
+    r = isolated_client.put("/api/slots/agent2/config", json={"model": {"default": "qwen3-1b"}})
     assert r.status_code == 409, r.text
     assert r.json()["error"]["code"] == "slot.npu_exclusivity_violation"
-    # The rejected write must not have flipped agent2 on.
+    # The rejected write must not have bound a model to agent2.
     cfg = isolated_client.get("/api/slots/agent2/config").json()
-    assert cfg.get("enabled") is False
+    assert cfg["model"]["default"] == ""
 
 
 # ── state-stream-shape ─────────────────────────────────────────────────────
@@ -1111,11 +1115,11 @@ def test_patch_defaults_canonicalizes_ctx_size_key(
 # ── config-field enrichment (ported from the retired enrichment suite) ──────
 #
 # /api/slots enriches every entry with TOML-derived fields via
-# ``hal0.slot_view.config_enrichment``: drawer seeds (enable_thinking,
-# n_gpu_layers, rope_freq_base, idle_timeout_s, workers, llamacpp_args),
-# persona-surface fields (type, model_default, labels, enabled), the
-# normalized ``declared_backend`` token, and ``coresident_group`` for the
-# NPU FLM trio.
+# ``hal0.slot_view.config_enrichment``: drawer seeds (n_gpu_layers,
+# rope_freq_base, idle_timeout_s, workers, llamacpp_args), persona-surface
+# fields (type, model_default, labels), the normalized ``declared_backend``
+# token, and ``coresident_group`` for the NPU FLM trio. ``model_default``
+# doubles as the activation signal (#1369) — there is no ``enabled`` key.
 
 
 # ── coresident_group field ──────────────────────────────────────────────────
@@ -1126,7 +1130,7 @@ def test_list_slots_emits_coresident_group_for_npu_trio(
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """When NPU LLM anchor is enabled, all three trio slots get coresident_group."""
+    """When the NPU LLM anchor has a model bound, every trio slot gets coresident_group."""
     r = isolated_client.get("/api/slots")
     assert r.status_code == 200, r.text
     by_name = {e["name"]: e for e in r.json()}
@@ -1156,7 +1160,6 @@ def test_list_slots_coresident_group_uses_device_not_legacy_names(
             "port = 8082",
             'device = "npu"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "gemma3-4b-FLM"',
         ],
@@ -1169,7 +1172,6 @@ def test_list_slots_coresident_group_uses_device_not_legacy_names(
             "port = 8084",
             'device = "npu"',
             'type = "transcription"',
-            "enabled = true",
             "[model]",
             'default = "whisper-v3"',
         ],
@@ -1182,7 +1184,6 @@ def test_list_slots_coresident_group_uses_device_not_legacy_names(
             "port = 8085",
             'device = "npu"',
             'type = "embedding"',
-            "enabled = true",
             "[model]",
             'default = "embed-gemma"',
         ],
@@ -1195,12 +1196,16 @@ def test_list_slots_coresident_group_uses_device_not_legacy_names(
         )
 
 
-def test_list_slots_no_coresident_group_when_npu_anchor_disabled(
+def test_list_slots_no_coresident_group_when_npu_anchor_has_no_model(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """Disabled NPU LLM anchor → no trio markers on the sibling slots."""
+    """A model-less NPU LLM anchor → no trio markers on the siblings (#1369).
+
+    This is the shipped ``flm`` seed's shape: the trio isn't real until the
+    operator binds an FLM model to the anchor.
+    """
     _seed_slot_toml(
         tmp_hal0_home,
         "agent",
@@ -1209,9 +1214,8 @@ def test_list_slots_no_coresident_group_when_npu_anchor_disabled(
             "port = 8082",
             'device = "npu"',
             'type = "llm"',
-            "enabled = false",
             "[model]",
-            'default = "gemma3-1b"',
+            'default = ""',
         ],
     )
     _seed_slot_toml(
@@ -1222,7 +1226,6 @@ def test_list_slots_no_coresident_group_when_npu_anchor_disabled(
             "port = 8084",
             'device = "npu"',
             'type = "transcription"',
-            "enabled = true",
             "[model]",
             'default = "whisper-v3"',
         ],
@@ -1232,12 +1235,18 @@ def test_list_slots_no_coresident_group_when_npu_anchor_disabled(
     assert by_name["stt-npu"].get("coresident_group") is None
 
 
-def test_list_slots_skips_coresident_for_disabled_sibling(
+def test_list_slots_marks_every_sibling_of_a_live_anchor(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """A disabled sibling slot doesn't claim coresident membership."""
+    """#1369: membership follows the anchor, with no per-sibling opt-out.
+
+    The shadows are records for the anchor's single FLM process and always
+    carry a placeholder model, so a "disabled sibling" (the case this test
+    used to pin) is no longer representable — the anchor's ``[npu]`` table is
+    where a modality is turned off.
+    """
     _seed_slot_toml(
         tmp_hal0_home,
         "agent",
@@ -1246,7 +1255,6 @@ def test_list_slots_skips_coresident_for_disabled_sibling(
             "port = 8082",
             'device = "npu"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "gemma3-1b"',
         ],
@@ -1259,25 +1267,22 @@ def test_list_slots_skips_coresident_for_disabled_sibling(
             "port = 8084",
             'device = "npu"',
             'type = "transcription"',
-            "enabled = false",
             "[model]",
             'default = "whisper-v3"',
         ],
     )
     r = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r.json()}
-    # Anchor still marked.
     assert by_name["agent"].get("coresident_group") == "npu-flm-trio"
-    # Disabled sibling is NOT marked.
-    assert by_name["stt-npu"].get("coresident_group") is None
+    assert by_name["stt-npu"].get("coresident_group") == "npu-flm-trio"
 
 
 # ── config-field exposure (Spec 1 / Component 1) ───────────────────────────
 #
 # The slot-edit panel seeds its card + drawer controls from the slot list
-# payload. Two SlotConfig fields must ride along so the UI doesn't have to
-# fetch /config per slot: ``enabled`` (top-level), ``n_gpu_layers`` (from
-# [model]). ``enable_thinking`` moved off the slot (spec-hw-slot-ownership
+# payload, so the UI doesn't have to fetch /config per slot: ``n_gpu_layers``
+# (from [model]) and ``model_default`` (which is also the activation signal
+# since #1369 — there is no ``enabled`` key to lift). ``enable_thinking`` moved off the slot (spec-hw-slot-ownership
 # §1 — it is ``ModelDefaults.enable_thinking`` now) and is deliberately no
 # longer lifted here, even when a pre-migration TOML still carries the key.
 
@@ -1296,7 +1301,6 @@ def test_list_slots_exposes_n_gpu_layers(
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "qwen3"',
             "n_gpu_layers = 99",
@@ -1307,7 +1311,7 @@ def test_list_slots_exposes_n_gpu_layers(
     by_name = {e["name"]: e for e in r.json()}
     primary = by_name["chat"]
     assert primary["n_gpu_layers"] == 99
-    assert primary["enabled"] is True
+    assert "enabled" not in primary
 
 
 def test_list_slots_omits_enable_thinking_even_when_pre_migration_debris_present(
@@ -1327,7 +1331,6 @@ def test_list_slots_omits_enable_thinking_even_when_pre_migration_debris_present
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
-            "enabled = true",
             "enable_thinking = true",
             "[model]",
             'default = "qwen3"',
@@ -1374,7 +1377,6 @@ def test_list_slots_exposes_idle_timeout_workers_llamacpp_args(
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
-            "enabled = true",
             "workers = 4",
             "idle_timeout_s = 1200",
             "[model]",
@@ -1411,7 +1413,6 @@ def test_list_slots_llamacpp_args_none_when_server_table_absent(
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
-            "enabled = true",
             "workers = 2",
             "idle_timeout_s = 600",
             "[model]",
@@ -1447,7 +1448,6 @@ def test_list_slots_exposes_rope_freq_base(
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "qwen3"',
             "rope_freq_base = 500000.0",
@@ -1474,7 +1474,6 @@ def test_list_slots_rope_freq_base_null_when_absent(
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "qwen3"',
         ],
@@ -1501,7 +1500,6 @@ def test_put_config_rope_freq_base_roundtrip(
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "qwen3-4b"',
         ],
@@ -1587,7 +1585,7 @@ def test_list_slots_emits_type_and_model_default_for_persona_dropdown(
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """PR-18: each entry carries ``type`` + ``model_default`` + ``enabled``.
+    """PR-18: each entry carries ``type`` + ``model_default``.
 
     The dashboard's persona dropdown filters /api/slots to ``type=llm``
     rows and uses ``model_default`` as the value posted in
@@ -1603,7 +1601,7 @@ def test_list_slots_emits_type_and_model_default_for_persona_dropdown(
     agent = by_name["agent"]
     assert agent["type"] == "llm"
     assert agent["model_default"] == "gemma3-1b"
-    assert agent["enabled"] is True
+    assert "enabled" not in agent
 
     # The transcription sibling is type=transcription — the dashboard's
     # persona dropdown filters this row OUT.
@@ -1631,7 +1629,6 @@ def test_list_slots_emits_labels_for_tool_calling_gate(
             'name = "chat"',
             "port = 8081",
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "qwen3-4b"',
             'labels = ["tool-calling", "vision"]',
@@ -1710,7 +1707,6 @@ def test_list_slots_emits_declared_backend_from_device(
             "port = 8081",
             'device = "gpu-vulkan"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "qwen3-4b"',
         ],
@@ -1748,7 +1744,6 @@ def test_list_slots_omits_declared_backend_when_no_device(
             'name = "chat"',
             "port = 8081",
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "qwen3-4b"',
         ],
@@ -1791,7 +1786,6 @@ def test_config_profile_change_keeps_slot_owned_device_via_route(
             'provider = "llama-server"',
             'runtime = "container"',
             'profile = "vulkan"',
-            "enabled = true",
             "[model]",
             'default = "m"',
         ],
@@ -1824,7 +1818,6 @@ def test_put_config_round_trips_hw_grid_fields(
             'device = "gpu-rocm"',
             'provider = "llama-server"',
             'runtime = "container"',
-            "enabled = true",
             "[model]",
             'default = "m"',
         ],
@@ -1870,7 +1863,6 @@ def test_put_config_fit_check_warns_on_incompatible_pair(
             'device = "gpu-rocm"',
             'provider = "llama-server"',
             'runtime = "container"',
-            "enabled = true",
             "[model]",
             'default = "m"',
         ],
@@ -1898,7 +1890,6 @@ def test_put_config_no_fit_warning_when_compatible(
             'device = "gpu-rocm"',
             'provider = "llama-server"',
             'runtime = "container"',
-            "enabled = true",
             "[model]",
             'default = "m"',
         ],

@@ -68,10 +68,9 @@ export interface Slot {
    *  model in memory. Source of truth for the memory-map attribution
    *  (BE-METRICS contract). Prefer this over equal-split GTT division. */
   mem_mb?: number
-  /** Whether the slot is activated. Disabled slots fade on the card, sort to
-   *  the end of the grid, and hide their lifecycle buttons. Defaults to true
-   *  when absent (a slot is enabled unless explicitly off). */
-  enabled?: boolean
+  // (former `enabled` field removed — #1369: a slot is activated by having a
+  // model bound, so `model`/`model_default` IS the activation signal. Cards
+  // fade, sort last, and hide lifecycle buttons when there is no model.)
   // (former enable_thinking / mtp / vision fields removed — spec-hw-slot-
   // ownership §1: those are model-owned tri-state caps now, read from
   // /api/models' `defaults` instead of the slot payload.)
@@ -149,6 +148,10 @@ export interface Slot {
    *  the TOML-backed [npu] section; reads/writes go through
    *  PUT /api/slots/{name}/config. */
   npu?: { asr: boolean; embed: boolean } | null
+  /** For an NPU trio SHADOW (stt/embed): whether the ANCHOR is serving this
+   *  modality, resolved server-side from the anchor's [npu] table (#1369). The
+   *  shadow's own config can't answer — it carries a placeholder model. */
+  npu_modality_active?: boolean | null
   /** True when the container unit is active AND /health returns ok.
    *  False when stopped, starting (health probe not yet passing), or crashed. */
   container_health?: boolean | null
@@ -287,10 +290,6 @@ function normalizeSlot(s: any): Slot {
     declared_backend: s?.declared_backend ?? null,
     actual_backend: s?.actual_backend ?? null,
     backend_mismatch: !!s?.backend_mismatch,
-    // Spec 1: a slot is enabled unless explicitly off. /api/status-sourced
-    // entries in the union may omit the flag, so default it here rather than
-    // letting the card read undefined as "disabled".
-    enabled: s?.enabled !== false,
     // Container runtime fields (#657). Pass through verbatim; absent keys
     // surface as null/undefined so the card can render safely.
     runtime: s?.runtime ?? 'container',
@@ -309,8 +308,10 @@ function normalizeSlot(s: any): Slot {
     // resolved_command: backend-provided llama-server argv for container slots
     // (issue #658).
     resolved_command: s?.resolved_command ?? null,
-    // npu: trio modality toggles for npu slots (Phase A).
+    // npu: trio modality toggles for npu slots (Phase A), plus the shadow's
+    // resolved modality state (#1369 — lifted from the anchor server-side).
     npu: s?.npu ?? null,
+    npu_modality_active: s?.npu_modality_active ?? null,
     // Hardware grid (spec-hw-slot-ownership §2). Pass through verbatim; absent
     // keys surface as undefined/null so the card + editor render safely.
     n_gpu_layers: s?.n_gpu_layers,

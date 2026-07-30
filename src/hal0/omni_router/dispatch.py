@@ -131,7 +131,7 @@ async def _route_or_error(
     if target is None:
         return None, {
             "error": (
-                f"no enabled slot of type '{tool.target_slot_type}' "
+                f"no configured slot of type '{tool.target_slot_type}' "
                 f"with required labels {list(tool.required_model_labels)!r}"
             )
         }

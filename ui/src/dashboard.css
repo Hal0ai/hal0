@@ -1843,18 +1843,12 @@ a { color: inherit; text-decoration: none; }
 /* While the inline swap dropdown is open, stop clipping so the
    absolutely-positioned .swap-pop can extend past the card bottom. */
 .slot.swap-open { overflow: visible; }
-/* C3: disabled slot — fade the card body, but keep the enable toggle (which
-   lives in .slot-h .right) full-opacity + interactive so it can be flipped
-   back on. */
-.slot--disabled { opacity: 0.5; }
-.slot--disabled:hover { opacity: 0.72; }
-.slot--disabled .slot-enable-toggle { opacity: 1; }
-/* A disabled slot whose container is still up + healthy stays full-opacity —
-   it's holding GPU / may be serving, so don't fade it like a dormant slot.
-   slots.jsx adds .slot--live when isSlotLive() is true on a disabled slot. */
-.slot--disabled.slot--live { opacity: 1; }
-.slot--disabled.slot--live:hover { opacity: 1; }
-.slot-disabled-note { font-size: 11px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.04em; }
+/* C3 (#1369): a slot with no model bound — fade the card body. There is no
+   longer a "faded but live" case to exempt (a slot with a running container has
+   a model by construction), so the old .slot--live override is gone with it. */
+.slot--unconfigured { opacity: 0.5; }
+.slot--unconfigured:hover { opacity: 0.72; }
+.slot-unconfigured-note { font-size: 11px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.04em; }
 /* C7: Capabilities section — denser quarter-width grid for the narrow utility
    cards (embed/rerank/stt/tts). Collapses 4-up → 2-up → 1-up. */
 .slot-h { display: flex; align-items: center; gap: 8px; }
