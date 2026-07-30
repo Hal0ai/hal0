@@ -175,3 +175,96 @@ def test_gemma4_dialect_unknown_tool_is_not_a_call() -> None:
     calls, cleaned = parse_text_tool_calls(text, _KNOWN)
     assert calls == []
     assert cleaned == text
+
+
+# ── #1509 — sibling calls in one wrapper, and close-less prose capture ───────
+#
+# Both are silent-loss bugs in the same parser as #1419/#1434: nothing raises,
+# nothing logs, and the cleaned text carries no trace of what went missing.
+
+
+def test_two_functions_in_one_tool_call_wrapper_both_execute() -> None:
+    """A wrapper holding two calls must run BOTH (#1509).
+
+    The nested branch accepted only ``nested[0]`` while recording the whole
+    wrapper's span, so pass 2b then skipped the siblings as already-consumed
+    and the second tool was dropped with no error. A model that asks for two
+    tools and silently gets one is indistinguishable, from the operator's
+    side, from a model that only asked for one.
+    """
+    text = (
+        "<tool_call>"
+        '<function name="get_weather"><param name="city">Paris</param></function>'
+        '<function name="get_board"><param name="slug">main</param></function>'
+        "</tool_call>"
+    )
+    calls, cleaned = parse_text_tool_calls(text, _KNOWN)
+    assert [c["name"] for c in calls] == ["get_weather", "get_board"]
+    assert calls[0]["arguments"] == {"city": "Paris"}
+    assert calls[1]["arguments"] == {"slug": "main"}
+    assert cleaned == ""
+
+
+def test_three_functions_in_one_wrapper_all_execute() -> None:
+    """Not special-cased at two — the loop must accept every sibling."""
+    text = (
+        "<tool_call>"
+        '<function name="get_weather"><param name="city">Paris</param></function>'
+        '<function name="get_board"><param name="slug">a</param></function>'
+        '<function name="get_weather"><param name="city">Berlin</param></function>'
+        "</tool_call>"
+    )
+    calls, _ = parse_text_tool_calls(text, _KNOWN)
+    assert [c["name"] for c in calls] == ["get_weather", "get_board", "get_weather"]
+    assert [c["arguments"] for c in calls] == [
+        {"city": "Paris"},
+        {"slug": "a"},
+        {"city": "Berlin"},
+    ]
+
+
+def test_unknown_sibling_does_not_suppress_the_known_one() -> None:
+    """An unsurfaced tool beside a real one must not cost us the real one."""
+    text = (
+        "<tool_call>"
+        '<function name="launch_missiles"><param name="when">now</param></function>'
+        '<function name="get_weather"><param name="city">Paris</param></function>'
+        "</tool_call>"
+    )
+    calls, _ = parse_text_tool_calls(text, _KNOWN)
+    assert [c["name"] for c in calls] == ["get_weather"]
+
+
+def test_close_less_call_does_not_swallow_trailing_prose() -> None:
+    """A mangled call with no ``</function>`` must not eat the rest of the turn.
+
+    ``body_end = span_end = next_call_at`` degrades to ``len(text)`` when no
+    later call follows, so the last param's value ran to end-of-text AND the
+    span covering it stripped that prose from the visible reply — the argument
+    is corrupted and the user never sees the sentence (#1509).
+    """
+    text = (
+        "Let me check that for you.\n"
+        '<function name="get_weather"><param name="city">Paris\n'
+        "\n"
+        "I will summarise the forecast once I have it."
+    )
+    calls, cleaned = parse_text_tool_calls(text, _KNOWN)
+    assert [c["name"] for c in calls] == ["get_weather"]
+    # the argument stops at the value, not at end-of-turn
+    assert calls[0]["arguments"] == {"city": "Paris"}
+    # and the model's prose survives into the reply
+    assert "I will summarise the forecast once I have it." in cleaned
+    assert "Let me check that for you." in cleaned
+
+
+def test_close_less_call_keeps_a_multiline_value_intact() -> None:
+    """The blank-line bound must not truncate a legitimately multi-line value.
+
+    A close-less call whose value genuinely spans consecutive lines (no blank
+    line) still has to arrive whole — the fix bounds on a paragraph break, not
+    on the first newline.
+    """
+    text = '<function name="get_board"><param name="slug">line-one\nline-two'
+    calls, _ = parse_text_tool_calls(text, _KNOWN)
+    assert calls[0]["arguments"] == {"slug": "line-one\nline-two"}

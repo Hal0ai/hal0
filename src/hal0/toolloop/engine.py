@@ -209,6 +209,8 @@ _XML_ATTR_TOKEN_RE = re.compile(
 )
 _XML_FUNCTION_CLOSE_RE = re.compile(r"</\s*function\s*>", re.IGNORECASE)
 _XML_PARAM_CLOSE_TAIL_RE = re.compile(r"</\s*param\s*>\s*$", re.IGNORECASE)
+#: Paragraph break — the bound for a close-less call's trailing param (#1509).
+_PARA_BREAK_RE = re.compile(r"\n[ \t]*\n")
 _CDATA_RE = re.compile(r"\A<!\[CDATA\[(.*)\]\]>\Z", re.DOTALL)
 
 # The Gemma-4 agentic dialect (#1419 follow-up): pipes INSIDE both delimiters,
@@ -274,7 +276,23 @@ def _xml_attr_tool_calls(
         if close is not None and close.start() <= next_call_at:
             body_end, span_end = close.start(), close.end()
         else:
-            body_end = span_end = next_call_at
+            # No usable </function> — the mangled wire form (#1434). The bound
+            # then degrades to the next call opener, or end-of-text when this
+            # is the last call, which meant the final param's value ran to the
+            # end of the turn: the tool got a corrupted argument AND the span
+            # covering it stripped the model's closing prose from the visible
+            # reply (#1509).
+            #
+            # Bound at the first paragraph break instead. A blank line is the
+            # cheapest signal that the value ended and the model went back to
+            # talking; bounding at the first NEWLINE would truncate the many
+            # legitimately multi-line values (file bodies, patches, prompts).
+            bound = next_call_at
+            if close is None:
+                para = _PARA_BREAK_RE.search(text, opener_end)
+                if para is not None and para.start() < bound:
+                    bound = para.start()
+            body_end = span_end = bound
         args: dict[str, Any] = {}
         for k in range(i + 1, nxt):
             p_start, p_end, _p_kind, p_name = tokens[k]
@@ -340,9 +358,15 @@ def parse_text_tool_calls(
     calls: list[dict[str, Any]] = []
     spans: list[tuple[int, int]] = []
 
+    def _record(name: str, args: dict[str, Any]) -> bool:
+        """Append a surfaced call. Returns whether it was accepted."""
+        if name not in known_names:
+            return False
+        calls.append({"id": f"txt-{len(calls)}-{name}", "name": name, "arguments": args})
+        return True
+
     def _accept(name: str, args: dict[str, Any], span: tuple[int, int]) -> None:
-        if name in known_names:
-            calls.append({"id": f"txt-{len(calls)}-{name}", "name": name, "arguments": args})
+        if _record(name, args):
             spans.append(span)
 
     # 1) <tool_call>...</tool_call> — JSON body, a nested <function=...> tag,
@@ -362,7 +386,19 @@ def parse_text_tool_calls(
             continue
         nested = _xml_attr_tool_calls(body, known_names)
         if nested:
-            _accept(nested[0][0], nested[0][1], m.span())
+            # Accept EVERY nested call (#1509). Taking only ``nested[0]`` while
+            # still recording the whole wrapper's span dropped the siblings
+            # twice over: they were never accepted here, and pass 2b then
+            # skipped them as already-consumed. A model asking for two tools
+            # silently got one.
+            #
+            # The wrapper span is recorded exactly ONCE no matter how many
+            # calls it held — ``cleaned`` deletes each recorded span in turn,
+            # so a duplicated span would cut a second, unrelated slice of the
+            # reply out from under the first.
+            accepted = [_record(n_name, n_args) for n_name, n_args, _n_span in nested]
+            if any(accepted):
+                spans.append(m.span())
 
     # 2) bare <function=NAME>{...}</function> outside a wrapper.
     for m in _FUNCTION_TAG_RE.finditer(text):
