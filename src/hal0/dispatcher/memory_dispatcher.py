@@ -34,7 +34,7 @@ from typing import Any
 
 import structlog
 
-from hal0.mcp.memory import make_dispatcher
+from hal0.mcp.memory import GATED_UPSTREAM, make_dispatcher
 
 log = structlog.get_logger(__name__)
 
@@ -77,10 +77,17 @@ class MemoryDispatcher:
         # Build the underlying closure once. Re-binding per-call would
         # waste work — make_dispatcher's closure already reads the
         # resolvers at call time.
+        # GATED_UPSTREAM, not "no queue": this adapter is only ever handed to
+        # ``admin.dispatch`` as ``memory_dispatcher=``, and admin classifies
+        # and gates the call BEFORE invoking it as the approved executor.
+        # Gating again here would re-enqueue an already-approved delete
+        # forever. Stating the reason keeps that from reading as an oversight
+        # (#1302).
         self._inner = make_dispatcher(
             wrapper,
             client_id_resolver=client_id_resolver,
             private_resolver=private_resolver,
+            approval_queue=GATED_UPSTREAM,
         )
 
     async def dispatch(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:

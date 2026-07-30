@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from hal0.mcp import memory
+from hal0.mcp.approval_queue import ApprovalQueue
 
 
 class _FakeWrapper:
@@ -81,6 +82,7 @@ def dispatcher(wrapper: _FakeWrapper):
         wrapper,
         client_id_resolver=lambda: "pi-coder",
         private_resolver=lambda: False,
+        approval_queue=memory.TRUSTED_IN_PROCESS,
     )
 
 
@@ -114,6 +116,7 @@ async def test_memory_add_private_namespace_promotion(wrapper: _FakeWrapper) -> 
         wrapper,
         client_id_resolver=lambda: "pi-coder",
         private_resolver=lambda: True,
+        approval_queue=memory.TRUSTED_IN_PROCESS,
     )
     await disp("memory_add", {"text": "secret"})
     assert wrapper.add_calls[0]["dataset"] == "private:pi-coder"
@@ -152,6 +155,7 @@ async def test_memory_search_private_mode_reads_both_datasets(
         wrapper,
         client_id_resolver=lambda: "pi-coder",
         private_resolver=lambda: True,
+        approval_queue=memory.TRUSTED_IN_PROCESS,
     )
     await disp("memory_search", {"query": "cats"})
     assert wrapper.search_calls[0]["dataset"] == ["shared", "private:pi-coder"]
@@ -216,6 +220,7 @@ async def test_private_without_client_id_errors(wrapper: _FakeWrapper) -> None:
         wrapper,
         client_id_resolver=lambda: None,
         private_resolver=lambda: True,
+        approval_queue=memory.TRUSTED_IN_PROCESS,
     )
     out = await disp("memory_add", {"text": "x"})
     assert out["status"] == "error"
@@ -226,7 +231,7 @@ async def test_private_without_client_id_errors(wrapper: _FakeWrapper) -> None:
 async def test_standalone_server_tools_carry_annotations(wrapper: _FakeWrapper) -> None:
     """The standalone /mcp/memory server must surface MCP hints —
     matching what the admin server reports for the same tool names."""
-    server = memory.build_server(wrapper=wrapper)
+    server = memory.build_server(wrapper=wrapper, approval_queue=ApprovalQueue())
     tools = await server.list_tools()
     by_name = {t.name: t for t in tools}
     for tool_name in ("memory_add", "memory_search", "memory_list", "memory_delete"):
@@ -277,7 +282,12 @@ async def test_memory_add_surfaces_async_operation_id(dispatcher_factory: Any = 
             return {"id": "doc-1", "timestamp": "t", "operation_id": "op-42"}
 
     wrapper = _AsyncEngineWrapper()
-    disp = memory.make_dispatcher(wrapper, client_id_resolver=lambda: "a", private_resolver=None)
+    disp = memory.make_dispatcher(
+        wrapper,
+        client_id_resolver=lambda: "a",
+        private_resolver=None,
+        approval_queue=memory.TRUSTED_IN_PROCESS,
+    )
     out = await disp("memory_add", {"text": "x"})
     assert out["status"] == "ok"
     assert out["operation_id"] == "op-42"
@@ -312,7 +322,10 @@ async def test_memory_failed_error_scrubs_engine_urls() -> None:
             raise _EngineError()
 
     disp = memory.make_dispatcher(
-        _BoomWrapper(), client_id_resolver=lambda: "a", private_resolver=None
+        _BoomWrapper(),
+        client_id_resolver=lambda: "a",
+        private_resolver=None,
+        approval_queue=memory.TRUSTED_IN_PROCESS,
     )
     out = await disp("memory_delete", {"ids": ["x"]})
     assert out["status"] == "error"
@@ -326,7 +339,7 @@ async def test_memory_failed_error_scrubs_engine_urls() -> None:
 async def test_standalone_server_publishes_typed_schemas(wrapper: _FakeWrapper) -> None:
     """Tools must advertise real parameter schemas — the old single
     ``args: object`` param made every client guess the call shape."""
-    server = memory.build_server(wrapper=wrapper)
+    server = memory.build_server(wrapper=wrapper, approval_queue=ApprovalQueue())
     tools = await server.list_tools()
     props = {t.name: set((t.inputSchema or {}).get("properties", {})) for t in tools}
     assert {"text", "dataset", "tags", "metadata", "document_id"} <= props["memory_add"]
@@ -341,7 +354,7 @@ async def test_standalone_server_legacy_args_envelope_still_works(
 ) -> None:
     """Pre-schema clients sent {"args": {...}} — that envelope keeps working,
     with explicit params winning over same-named args keys."""
-    server = memory.build_server(wrapper=wrapper)
+    server = memory.build_server(wrapper=wrapper, approval_queue=ApprovalQueue())
     result = await server.call_tool("memory_add", {"args": {"text": "legacy shape"}})
     # FastMCP returns (content, structured) — the structured payload carries the envelope.
     structured = result[1] if isinstance(result, tuple) else result
@@ -437,13 +450,20 @@ async def test_standalone_non_delete_tools_never_gate(wrapper: _FakeWrapper) -> 
 
 
 @pytest.mark.asyncio
-async def test_standalone_bulk_delete_ungated_without_queue(wrapper: _FakeWrapper) -> None:
-    """No queue wired (admin's in-process path, tests) → gating is the
-    caller's job and the dispatcher executes as before."""
+async def test_bulk_delete_runs_ungated_only_with_a_declared_reason(
+    wrapper: _FakeWrapper,
+) -> None:
+    """A DECLARED bypass still executes — that path is load-bearing.
+
+    ``GATED_UPSTREAM`` is how ``admin.dispatch`` runs an already-approved
+    delete through this same callable; re-gating it would re-enqueue the
+    approved call forever.
+    """
     disp = memory.make_dispatcher(
         wrapper,
         client_id_resolver=lambda: "pi-coder",
         private_resolver=lambda: False,
+        approval_queue=memory.GATED_UPSTREAM,
     )
     out = await disp("memory_delete", {"ids": ["a", "b"]})
     assert out["status"] == "ok"

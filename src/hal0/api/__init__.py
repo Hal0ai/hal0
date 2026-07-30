@@ -1688,12 +1688,19 @@ async def _boot_memory_dispatch(
         # when hal0-memory is unreachable.
         return {"ok": False, "error": "memory provider not configured"}
 
-    from hal0.mcp.memory import make_dispatcher
+    from hal0.mcp.memory import TRUSTED_IN_PROCESS, make_dispatcher
 
+    # TRUSTED_IN_PROCESS, not "no queue": this runs during boot-time agent
+    # provisioning, in-process, with no transport and no remote principal in
+    # front of it. There is no operator session to prompt for approval and
+    # nothing untrusted to gate against — but that is a claim worth making
+    # out loud, because the tools reachable here include memory_delete
+    # (#1302).
     dispatcher = make_dispatcher(
         memory_provider,
         client_id_resolver=lambda: agent_id,
         private_resolver=lambda: private,
+        approval_queue=TRUSTED_IN_PROCESS,
     )
     try:
         result = await dispatcher(tool, arguments)

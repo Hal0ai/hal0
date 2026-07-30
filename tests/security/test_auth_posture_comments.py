@@ -74,9 +74,7 @@ def test_memory_route_comment_states_both_halves() -> None:
     assert "require_auth_enabled" in source, (
         "the posture comment must name the toggle that makes it inert"
     )
-    assert "False by default" in source, (
-        "the posture comment must state the shipped default is OFF"
-    )
+    assert "False by default" in source, "the posture comment must state the shipped default is OFF"
     assert "ADMIN" in source, "the posture comment must state /api/memory's exposure class"
 
 

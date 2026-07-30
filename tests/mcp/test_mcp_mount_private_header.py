@@ -150,6 +150,7 @@ async def test_memory_add_private_toggle_requires_identity_via_resolvers() -> No
         wrapper,
         client_id_resolver=mcp_mount.client_id_resolver,
         private_resolver=mcp_mount.private_resolver,
+        approval_queue=memory.TRUSTED_IN_PROCESS,
     )
 
     # Private toggle with no/anonymous agent id is REJECTED, not mis-scoped

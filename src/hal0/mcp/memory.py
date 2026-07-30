@@ -68,6 +68,7 @@ mounts at ``/mcp/memory`` via ``app.mount()``.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -437,6 +438,79 @@ _PENDING_APPROVAL_DETAIL = (
 )
 
 
+# ── "no queue here" is a decision, not an absence ────────────────────────────
+#
+# ``approval_queue=None`` used to carry two incompatible meanings: "something
+# upstream already gated this, run it" and "nobody wired a queue". The first is
+# correct and common; the second is a misconfigured server that executes bulk
+# deletes with no operator in the loop. Both produced the same object, so the
+# dispatcher could not tell a deliberate bypass from a broken one and defaulted
+# to the dangerous reading.
+#
+# The two safe cases are now named values rather than an absent argument. They
+# share a type so the parameter stays single (no queue+flag combination to
+# validate) and so the audit log can record WHICH sanctioned bypass applied
+# instead of just noting that one did.
+#
+# ``None`` keeps its remaining honest meaning — nobody decided — and now fails
+# closed. See :func:`make_dispatcher` and :func:`build_server`.
+
+
+@dataclass(frozen=True)
+class UngatedReason:
+    """A named, deliberate reason this dispatcher does not gate destructive calls.
+
+    Only the module-level constants below are sanctioned; the type is public
+    solely so type annotations and ``isinstance`` checks can name it.
+    """
+
+    label: str
+    detail: str
+
+    def __str__(self) -> str:  # pragma: no cover — trivial
+        return self.label
+
+
+#: An admin dispatcher classifies and gates BEFORE invoking this callable as
+#: the approved executor (:func:`hal0.mcp.admin.dispatch`). Gating a second
+#: time here would re-enqueue the already-approved call forever.
+GATED_UPSTREAM = UngatedReason(
+    "gated_upstream",
+    "hal0.mcp.admin.dispatch gates this call before invoking the executor",
+)
+
+#: An in-process caller inside hal0 itself, with no remote principal and no
+#: transport in front of it — e.g. boot-time agent provisioning. There is no
+#: operator session to prompt and no untrusted party to gate against.
+TRUSTED_IN_PROCESS = UngatedReason(
+    "trusted_in_process",
+    "in-process hal0 caller; no remote principal reaches this dispatcher",
+)
+
+_MISCONFIGURED_DETAIL = (
+    "memory server is misconfigured: this call requires operator approval but "
+    "no approval queue is wired to this dispatcher, and no deliberate bypass "
+    "was declared. Refusing rather than executing an ungated bulk delete."
+)
+
+
+def _require_enqueue(queue: Any) -> None:
+    """Reject an object passed as an approval queue that cannot enqueue.
+
+    Duck-typed rather than ``isinstance(ApprovalQueue)`` so tests can pass a
+    recording double, but not so loose that any truthy object silently
+    disarms the gate: without this, ``approval_queue=True`` (or a stale
+    handle) would pass the ``is not None`` check and then blow up mid-delete
+    with ``AttributeError`` — after the caller already believed it was gated.
+    """
+    if not callable(getattr(queue, "enqueue", None)):
+        raise TypeError(
+            f"approval_queue must expose an awaitable enqueue(); got {type(queue).__name__}. "
+            "To run without a queue, pass an explicit GATED_UPSTREAM or "
+            "TRUSTED_IN_PROCESS reason instead."
+        )
+
+
 def _needs_approval(tool: str, args: dict[str, Any]) -> bool:
     """True when this memory call must gate through the approval queue.
 
@@ -453,7 +527,7 @@ def make_dispatcher(
     *,
     client_id_resolver: Any = None,
     private_resolver: Any = None,
-    approval_queue: Any = None,
+    approval_queue: Any,
 ):
     """Return an async dispatcher closure bound to ``wrapper``.
 
@@ -470,14 +544,27 @@ def make_dispatcher(
     ``private_resolver`` returns the per-call ``--private`` toggle
     state (the transport layer reads this off the agent's session).
 
-    ``approval_queue`` arms this dispatcher's own destructive-call gate
-    (#1302). Pass it when the dispatcher is the OUTERMOST layer — i.e.
-    the standalone ``/mcp/memory`` mount, where no admin dispatcher sits
-    in front to classify the call. Leave it ``None`` when the dispatcher
-    is handed to ``admin.dispatch``: admin gates first and then invokes
-    the approved executor through this same callable, so a second gate
-    here would re-enqueue the approved call forever.
+    ``approval_queue`` (#1302) is REQUIRED — not because every dispatcher
+    needs a queue, but because every dispatcher needs to have *decided*.
+    It takes exactly one of three values:
+
+    * an :class:`~hal0.mcp.approval_queue.ApprovalQueue` — this dispatcher is
+      the outermost layer and gates destructive calls itself.
+    * :data:`GATED_UPSTREAM` — ``admin.dispatch`` classifies and gates first,
+      then invokes this callable as the approved executor; a second gate here
+      would re-enqueue the approved call forever.
+    * :data:`TRUSTED_IN_PROCESS` — an in-process hal0 caller with no remote
+      principal (boot-time provisioning); there is no operator session to
+      prompt and nothing untrusted to gate against.
+
+    ``None`` is none of those: it means nobody decided. Rather than take the
+    dangerous reading and execute, such a dispatcher REFUSES gated calls with
+    a ``mcp.memory_gate_unconfigured`` error. Non-destructive tools keep
+    working — a delete-gate misconfiguration should not become a total memory
+    outage, and the refusal is the signal.
     """
+    if approval_queue is not None and not isinstance(approval_queue, UngatedReason):
+        _require_enqueue(approval_queue)
 
     async def _dispatch(tool: str, args: dict[str, Any]) -> dict[str, Any]:
         handler = _MEMORY_HANDLERS.get(tool)
@@ -498,7 +585,35 @@ def make_dispatcher(
             return {"status": "ok", **payload}
 
         try:
-            if approval_queue is not None and _needs_approval(tool, args):
+            if _needs_approval(tool, args):
+                # Fail closed: no queue AND no declared bypass means the
+                # server was never configured, not that the call is safe.
+                if approval_queue is None:
+                    audit_log.error(
+                        "mcp.memory.gate_unconfigured",
+                        tool=tool,
+                        client_id=client_id,
+                        detail=_MISCONFIGURED_DETAIL,
+                    )
+                    return {
+                        "status": "error",
+                        "error": {
+                            "code": "mcp.memory_gate_unconfigured",
+                            "detail": _MISCONFIGURED_DETAIL,
+                        },
+                    }
+                if isinstance(approval_queue, UngatedReason):
+                    # A sanctioned bypass — record WHICH one, so an audit
+                    # reader can tell an admin-gated executor call from a
+                    # boot-time provisioning call.
+                    audit_log.info(
+                        "mcp.memory.ungated",
+                        tool=tool,
+                        client_id=client_id,
+                        reason=approval_queue.label,
+                        detail=approval_queue.detail,
+                    )
+                    return await _run(args)
                 approval_id = await approval_queue.enqueue(
                     tool=tool,
                     args=args,
@@ -582,7 +697,7 @@ def build_server(
     name: str = "hal0-memory",
     client_id_resolver: Any = None,
     private_resolver: Any = None,
-    approval_queue: Any = None,
+    approval_queue: Any,
 ) -> FastMCP:
     """Construct a focused memory-only FastMCP server.
 
@@ -596,11 +711,31 @@ def build_server(
     transport-layer hooks the orchestrator stitches into the active
     MCP session's HTTP headers.
 
-    ``approval_queue`` is the process-wide :class:`ApprovalQueue`. This
-    server is an outermost mount (nothing gates in front of it), so pass
-    it — otherwise the narrow surface becomes a bypass around the admin
-    surface's bulk-delete gate (#1302).
+    ``approval_queue`` must be a real process-wide
+    :class:`~hal0.mcp.approval_queue.ApprovalQueue`, and is required.
+
+    Unlike :func:`make_dispatcher`, this constructor accepts NO bypass. A
+    server built here is by definition an outermost mount reached over a
+    transport by a remote caller — nothing gates in front of it, so
+    :data:`GATED_UPSTREAM` would be a false statement and
+    :data:`TRUSTED_IN_PROCESS` a contradiction in terms. Without a queue the
+    narrow ``/mcp/memory`` surface becomes a bypass around the admin surface's
+    bulk-delete gate (#1302), which is precisely the hole it must not be.
+
+    Raises :class:`ValueError` at construction rather than deferring to the
+    dispatcher's per-call refusal: a misconfigured mount should die at boot,
+    where an operator sees it, not silently serve a surface that rejects
+    deletes at 3am.
     """
+    if approval_queue is None or isinstance(approval_queue, UngatedReason):
+        raise ValueError(
+            "build_server requires a real ApprovalQueue: /mcp/memory is an "
+            "outermost mount, so there is no upstream gate and no trusted "
+            f"in-process caller to defer to (got {approval_queue!r}). "
+            "Without it the narrow memory surface bypasses the admin "
+            "surface's bulk-delete gate (#1302)."
+        )
+    _require_enqueue(approval_queue)
     server = FastMCP(name)
     dispatcher = make_dispatcher(
         wrapper,
@@ -746,8 +881,11 @@ def build_server(
 
 
 __all__ = [
+    "GATED_UPSTREAM",
+    "TRUSTED_IN_PROCESS",
     "_ANNOTATIONS",
     "MemorySchemaError",
+    "UngatedReason",
     "build_server",
     "make_dispatcher",
 ]
