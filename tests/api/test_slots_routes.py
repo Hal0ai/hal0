@@ -489,6 +489,130 @@ def test_delete_forwards_force_query_param(
     assert isolated_client.get("/api/slots/chat/config").status_code == 404
 
 
+# ── §21.10 operator pin: route guards + payload exposure (#1367) ────────────
+
+
+def test_unload_pinned_slot_refuses_without_force(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """POST /unload on a pinned slot → 409 slot.pinned with the force hint."""
+    # Insert top-level (before the [model] table — appending would land the
+    # key inside [model] and the pin overlay reads the top level only).
+    toml = (slot_root / "chat.toml").read_text(encoding="utf-8")
+    (slot_root / "chat.toml").write_text(
+        toml.replace("[model]", "pinned = true\n[model]"), encoding="utf-8"
+    )
+    isolated_client.post("/api/slots/chat/load")
+    container_stub["unload_calls"].clear()
+
+    r = isolated_client.post("/api/slots/chat/unload")
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.pinned"
+    assert "pass ?force=true to unload it anyway" in err["message"]
+    assert container_stub["unload_calls"] == [], "pinned slot must not be stopped"
+
+
+def test_unload_pinned_slot_force_true_succeeds(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """?force=true bypasses the pin guard and actually stops the container."""
+    toml = (slot_root / "chat.toml").read_text(encoding="utf-8")
+    (slot_root / "chat.toml").write_text(
+        toml.replace("[model]", "pinned = true\n[model]"), encoding="utf-8"
+    )
+    isolated_client.post("/api/slots/chat/load")
+    container_stub["unload_calls"].clear()
+
+    r = isolated_client.post("/api/slots/chat/unload?force=true")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "offline"
+    assert container_stub["unload_calls"], "force unload must stop the container"
+
+
+def test_explicitly_unpinned_default_anchor_unloads_without_force(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """``pinned = false`` on a default anchor (utility) disables the 409 guard."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "utility",
+        [
+            'name = "utility"',
+            "port = 8090",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            "pinned = false",
+            "[model]",
+            'default = "qwen3-4b-q4_k_m"',
+        ],
+    )
+    isolated_client.post("/api/slots/utility/load")
+    container_stub["unload_calls"].clear()
+
+    r = isolated_client.post("/api/slots/utility/unload")
+    assert r.status_code == 200, r.text
+    assert container_stub["unload_calls"], "unpinned anchor must stop without force"
+
+
+def test_slot_list_exposes_effective_pinned(
+    tmp_hal0_home: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """GET /api/slots lifts the *effective* pin state into each entry.
+
+    - ``utility`` with no ``pinned`` key → pinned via the default anchor set.
+    - ``chat`` with no ``pinned`` key → not pinned.
+    - explicit config values override both directions (covered at the
+      unit level in tests/slots/test_pin_semantics.py; the route test
+      pins down the payload key itself).
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "utility",
+        [
+            'name = "utility"',
+            "port = 8090",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            "[model]",
+            'default = "qwen3-4b-q4_k_m"',
+        ],
+    )
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    assert by_name["utility"]["pinned"] is True, "default anchor must surface pinned=true"
+    assert by_name["chat"]["pinned"] is False, "non-anchor without config pin must be false"
+
+
+def test_put_config_pinned_round_trips(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """PUT /config {pinned} persists and is echoed by GET /config."""
+    r = isolated_client.put("/api/slots/chat/config", json={"pinned": True})
+    assert r.status_code == 200, r.text
+    cfg = isolated_client.get("/api/slots/chat/config").json()
+    assert cfg.get("pinned") is True
+
+    r = isolated_client.put("/api/slots/chat/config", json={"pinned": False})
+    assert r.status_code == 200, r.text
+    cfg = isolated_client.get("/api/slots/chat/config").json()
+    assert cfg.get("pinned") is False
+
+
 def test_invalid_enable_surfaces_conflict(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
