@@ -45,6 +45,24 @@ def test_lifespan_seeds_static_slots(tmp_hal0_home: str) -> None:
     assert "agent" in names
 
 
+def test_lifespan_newly_seeded_slot_gets_identity_row_same_boot(tmp_hal0_home: str) -> None:
+    """GH #1475: a slot the boot seeder adds this boot must get an identity
+    row THIS SAME boot, not the next one.
+
+    ``fold_identity`` runs in the earlier ``slot_reconcile`` phase, before
+    ``seed_static_slots`` (the ``seeds`` phase) has written any new file —
+    so on an upgraded box a slot added by a new release (e.g. a fresh
+    ``coder``/``embed``/``qwen3tts`` seed) sat name-keyed with NO identity
+    row for the rest of that boot: exactly the name+id coexistence #1422
+    reports as duplicate ``/api/slots`` entries. A re-fold after seeding
+    closes the gap immediately.
+    """
+    app = create_app()
+    with TestClient(app):
+        names = app.state.slot_manager.identity_names()
+        assert set(STATIC_SEED_SLOTS) <= names
+
+
 def test_lifespan_slot_seed_converges_old_box_without_touching_edits(
     tmp_hal0_home: str,
 ) -> None:

@@ -690,8 +690,8 @@
     "semantic_hash": ""
   },
   "installer/install.sh": {
-    "mtime": 1785437039.0066519,
-    "ast_hash": "6752026a439e4766ec7c15f06aa1c082",
+    "mtime": 1785437229.8720472,
+    "ast_hash": "8d81fd3f15a289bc1912dac57920ce8c",
     "semantic_hash": ""
   },
   "installer/lib/distro.sh": {
@@ -1040,8 +1040,8 @@
     "semantic_hash": ""
   },
   "src/hal0/api/__init__.py": {
-    "mtime": 1785424223.296856,
-    "ast_hash": "792cc19a0724dfb66fa3284e6ae70c27",
+    "mtime": 1785437229.8724484,
+    "ast_hash": "202a800f48d0a2b7863ae33ee0a2ee60",
     "semantic_hash": ""
   },
   "src/hal0/api/_audit.py": {
@@ -2750,8 +2750,8 @@
     "semantic_hash": ""
   },
   "src/hal0/updater/updater.py": {
-    "mtime": 1785430343.776932,
-    "ast_hash": "c2b57f37c553b0c21da5dc85bb815919",
+    "mtime": 1785437260.4295352,
+    "ast_hash": "f9919f960a2ad28681e877a39497b34f",
     "semantic_hash": ""
   },
   "src/hal0/upstreams/__init__.py": {
@@ -3460,8 +3460,8 @@
     "semantic_hash": ""
   },
   "tests/api/test_startup_slot_seed.py": {
-    "mtime": 1785424223.3242488,
-    "ast_hash": "df2477a78b3e43e33683bad72f73c18d",
+    "mtime": 1785437229.8724484,
+    "ast_hash": "b07fbda286e4baa3cbf4b7bd0764f9c6",
     "semantic_hash": ""
   },
   "tests/api/test_stats_requests_route.py": {
@@ -4255,8 +4255,8 @@
     "semantic_hash": ""
   },
   "tests/config/test_schema_seeds_c5.py": {
-    "mtime": 1785424223.3315976,
-    "ast_hash": "73c71a43024750259b4b469b9d625222",
+    "mtime": 1785437229.8724484,
+    "ast_hash": "56c51476926d1c12d9af260b55898b77",
     "semantic_hash": ""
   },
   "tests/config/test_schema_seeds_d1.py": {
@@ -5820,8 +5820,8 @@
     "semantic_hash": ""
   },
   "tests/updater/test_updater.py": {
-    "mtime": 1785424223.347604,
-    "ast_hash": "6a99198da2e885c41ca68d9d88984388",
+    "mtime": 1785437229.8731506,
+    "ast_hash": "c7bb31eac037b8bdb9a4f51dd1e9d2ca",
     "semantic_hash": ""
   },
   "tests/upstreams/__init__.py": {
@@ -7440,8 +7440,8 @@
     "semantic_hash": ""
   },
   "CHANGELOG.md": {
-    "mtime": 1785437039.0026517,
-    "ast_hash": "018a4ee4f2c33f471f6c43dd2671dbe9",
+    "mtime": 1785437229.8713448,
+    "ast_hash": "af0444ac1ac3766ab33b52696a87637c",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -8904,9 +8904,19 @@
     "ast_hash": "36d579bc2f3e5cc8f14bc2a4d65697fb",
     "semantic_hash": ""
   },
+  "tests/installer/test_migration_convergence.py": {
+    "mtime": 1785437229.8724484,
+    "ast_hash": "e6ac56a3c312bfb174d3926c298c4e3b",
+    "semantic_hash": ""
+  },
   "tests/installer/test_seam_verification.py": {
     "mtime": 1785428092.68762,
     "ast_hash": "89e054bdd79c6152c624411ee6c397e4",
+    "semantic_hash": ""
+  },
+  "tests/installer/test_seed_order.py": {
+    "mtime": 1785437229.8724484,
+    "ast_hash": "2e9b70d51e9c2ad6d7224dfb0c6014e0",
     "semantic_hash": ""
   },
   "tests/security/test_api_env_mode.py": {
@@ -8922,6 +8932,11 @@
   "tests/system/test_seam_check.py": {
     "mtime": 1785428092.68762,
     "ast_hash": "879a5fa1385c6bd6f5adda09520a50ca",
+    "semantic_hash": ""
+  },
+  "tests/updater/test_post_activation_migrations.py": {
+    "mtime": 1785437229.8731506,
+    "ast_hash": "d03a56e57c227b588a70843aa1ed3fe8",
     "semantic_hash": ""
   },
   "tests/updater/test_privileged_seam.py": {

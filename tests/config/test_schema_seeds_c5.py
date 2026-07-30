@@ -101,11 +101,9 @@ def test_seed_slot_ports_are_mutually_unique() -> None:
     assert not dupes, f"seed slot port collisions: {dupes}"
 
 
-#: Seeds the clean-seed invariant applies to — every operator-facing slot.
-#: ``brain`` is the one deliberate exception (see test_brain_seed_ships_ready):
-#: the platform steward must work out of the box, so #1258 ships it with a
-#: small 1B model pinned. Every other seed ships model-less (= inactive).
-_CLEAN_SEED_SLOTS = sorted((set(STATIC_SEED_SLOTS) | {"qwen3tts"}) - {"brain"})
+#: Seeds the clean-seed invariant applies to — every static seed, including
+#: ``brain`` (GH #1475 reverses the #1258 exception below).
+_CLEAN_SEED_SLOTS = sorted(set(STATIC_SEED_SLOTS) | {"qwen3tts"})
 
 
 @pytest.mark.parametrize("name", _CLEAN_SEED_SLOTS)
@@ -118,25 +116,16 @@ def test_seed_toml_ships_clean(name: str) -> None:
     #1107 regression this guards. model is a default_factory ModelConfig with
     default=="" so the assertion holds for [model]-less TOMLs.
 
-    ``brain`` is intentionally excluded (see test_brain_seed_ships_ready): it is
-    the platform steward and ships ready, not clean, by design (#1258).
+    ``brain`` used to be the deliberate exception here (#1258: the platform
+    steward "must work out of the box"), but the pinned id
+    (``MiniCPM5-1B-Agentic-Tooluse``) was never in either shipped catalog
+    (GH #1475 v1.0 GA polish audit) — an unresolvable id the operator could
+    not pull from any dashboard surface, and post-#1408 a bound model IS the
+    activation signal, so the slot showed "activated" while unable to
+    actually serve. Strictly worse than the clean-seed grey tile every other
+    seed uses (the steward chat already falls back to the ``agent`` slot
+    until brain has a real model bound — see ``brain.toml``'s own comment).
+    Reversed to the clean-seed default; #1258's exception is retired.
     """
     slot = _load_seed_slot(_SEEDED_SLOTS_DIR / f"{name}.toml")
     assert slot.model.default == ""
-
-
-def test_brain_seed_ships_ready() -> None:
-    """The brain steward is the deliberate exception to the clean-seed rule
-    (#1258): unlike operator slots (which ship model-less so the operator picks),
-    the brain drives the dashboard's sidebar steward chat and must work out of
-    the box, so it ships WITH a small 1B tool-use model pinned. Loading
-    stays lazy (the chat falls back to the ``agent`` slot until the brain model
-    is bound), so this does not reintroduce the #1107 eager-download regression.
-
-    This pins the intent from both sides: if a future edit reverts the brain to
-    a clean model-less seed, the steward silently stops working and this
-    fails; test_seed_toml_ships_clean guards every *other* seed against the
-    opposite regression.
-    """
-    slot = _load_seed_slot(_SEEDED_SLOTS_DIR / "brain.toml")
-    assert slot.model.default != ""
