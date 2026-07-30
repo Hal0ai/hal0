@@ -40,6 +40,11 @@ const PORT = String(
 
 export default defineConfig({
   testDir: './tests/e2e',
+  // Playwright's default testMatch also globs `*.test.ts`, which would collect
+  // the vitest unit file next to the fixtures (tests/e2e/port.test.ts) and
+  // abort collection for the ENTIRE suite on its `vitest` import. Every e2e
+  // file here is a `.spec.ts`, so pin that explicitly (#1399).
+  testMatch: '**/*.spec.ts',
   timeout: LIVE ? 180_000 : 30_000,
   globalTimeout: LIVE ? 30 * 60_000 : 12 * 60_000,
   expect: { timeout: 5_000 },
