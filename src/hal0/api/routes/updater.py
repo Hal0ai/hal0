@@ -288,13 +288,31 @@ async def _run_apply_job(
     else:
         # Bounce hal0-api so the new tree is actually serving. Fail-soft:
         # the swap already succeeded - a restart hiccup is a breadcrumb,
-        # not a rollback trigger. Record the restart outcome BEFORE flipping
-        # the job to its terminal "applied" state so a status poll never
-        # observes "applied" without the restart breadcrumb attached.
+        # not a rollback trigger.
+        #
+        # The terminal state is persisted BEFORE the restart is attempted,
+        # because the restart can kill this very process: when hal0-api runs
+        # as the service user we shell `systemctl restart hal0-api.service`
+        # from inside the unit's own cgroup, and systemd SIGTERMs us while
+        # that call is still in flight. Writing "applied" afterwards meant a
+        # successful update frequently never recorded its own success — the
+        # CLI then re-attached after the restart, read a stale "running"
+        # snapshot and eventually failed a successful update (#1540).
+        #
+        # `restarted=None` is the third state this introduces: "terminal, but
+        # the restart outcome is not known yet". A poll that observes it
+        # knows the update itself succeeded and that the bounce is still in
+        # flight - distinct from False, which is a restart that definitively
+        # failed. The CLI only warns on False, so None stays quiet.
+        job["restarted"] = None
+        job["restart_error"] = None
+        job["state"] = "applied"
+        job["updated_at"] = time.time()
+        _persist_job(job)
+
         restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
         job["restarted"] = restarted
         job["restart_error"] = restart_error
-        job["state"] = "applied"
     finally:
         job["updated_at"] = time.time()
         _persist_job(job)
@@ -360,10 +378,19 @@ async def _run_commit_job(
         job["error"] = str(exc)
         job["error_code"] = type(exc).__name__
     else:
+        # Terminal state first, then the restart - see the long note in
+        # _run_apply_job. commit() is the path #1540 was reported against:
+        # the restart kills this process, so "applied" has to already be on
+        # disk when it happens or a successful update reports failure.
+        job["restarted"] = None
+        job["restart_error"] = None
+        job["state"] = "applied"
+        job["updated_at"] = time.time()
+        _persist_job(job)
+
         restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
         job["restarted"] = restarted
         job["restart_error"] = restart_error
-        job["state"] = "applied"
     finally:
         job["updated_at"] = time.time()
         _persist_job(job)

@@ -618,11 +618,14 @@ def test_apply_success_tries_restart_hal0_api_fail_soft(
     r = isolated_client.post("/api/updates/apply", json={})
     job_id = r.json()["id"]
 
+    # "applied" is now persisted BEFORE the restart is attempted (#1540), so a
+    # poll can legitimately observe the terminal state with restarted=None
+    # while the bounce is still in flight. Wait for the breadcrumb itself.
     deadline = time.monotonic() + 6.0
     final: dict = {}
     while time.monotonic() < deadline:
         final = isolated_client.get(f"/api/updates/status/{job_id}").json()
-        if final["state"] in ("applied", "failed"):
+        if final["state"] == "failed" or final.get("restarted") is not None:
             break
         time.sleep(0.05)
 
@@ -651,11 +654,13 @@ def test_apply_success_restart_failure_is_fail_soft(
     r = isolated_client.post("/api/updates/apply", json={})
     job_id = r.json()["id"]
 
+    # As above: wait for the restart breadcrumb, not just the terminal state,
+    # which is now persisted first (#1540).
     deadline = time.monotonic() + 6.0
     final: dict = {}
     while time.monotonic() < deadline:
         final = isolated_client.get(f"/api/updates/status/{job_id}").json()
-        if final["state"] in ("applied", "failed"):
+        if final["state"] == "failed" or final.get("restarted") is not None:
             break
         time.sleep(0.05)
 
@@ -864,3 +869,112 @@ def test_commit_route_rejects_invalid_version_before_queueing(
     assert response.status_code == 400, response.text
     assert response.json()["error"]["code"] == "validation.invalid"
     assert not (Path(tmp_hal0_home) / "var-lib" / "hal0" / "update-jobs").exists()
+
+
+# ── terminal state must outlive the self-killing restart (#1540) ──────────────
+
+
+def test_apply_persists_applied_before_attempting_the_restart(
+    isolated_client: TestClient, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "applied" must already be on disk when the restart is attempted.
+
+    The restart shells `systemctl restart hal0-api.service` from inside the
+    unit's own cgroup, so systemd can SIGTERM this process while the call is
+    still in flight. Writing the terminal state afterwards meant a successful
+    update frequently never recorded its own success: the CLI re-attached
+    after the restart, read a stale "running" snapshot, and eventually
+    reported failure for an update that worked (#1540).
+
+    This asserts the ordering directly by reading the job file off disk at
+    the moment the restart is invoked.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    async def fake_apply(self: object, version: str | None = None) -> dict:
+        return {"version": "0.0.9", "installed_at": time.time()}
+
+    monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
+
+    # Record the durability timeline: every state _persist_job commits, and
+    # the point at which the restart was attempted. Asserting on this order
+    # is what matters — whatever has been persisted by the time the restart
+    # runs is exactly what survives a SIGTERM from that restart.
+    persisted_states: list[str | None] = []
+    states_at_restart: list[str | None] = []
+    real_persist = u_mod._persist_job
+
+    def spy_persist(job: dict) -> None:
+        persisted_states.append(job.get("state"))
+        real_persist(job)
+
+    monkeypatch.setattr(u_mod, "_persist_job", spy_persist)
+
+    def fake_run(cmd: list[str], *a: object, **k: object) -> object:
+        states_at_restart.extend(persisted_states)
+
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(u_mod.subprocess, "run", fake_run)
+
+    r = isolated_client.post("/api/updates/apply", json={})
+    job_id = r.json()["id"]
+
+    # Wait for the restart itself, not just the terminal state: the whole
+    # point of the fix is that "applied" now lands BEFORE the restart runs,
+    # so breaking out at "applied" would race fake_run.
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] == "failed" or final.get("restarted") is not None:
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") == "applied", final
+    assert states_at_restart, "the restart ran without any job state persisted first"
+    assert "applied" in states_at_restart, (
+        "the terminal state was not durable before the restart that can kill "
+        f"this process; states persisted by then were {states_at_restart!r}"
+    )
+
+
+def test_apply_reaches_applied_on_disk_even_if_the_restart_never_returns(
+    isolated_client: TestClient, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart that kills us mid-call must not cost the terminal state.
+
+    Stands in for the SIGTERM: the restart raises, so nothing after it runs.
+    The on-disk snapshot must still say "applied".
+    """
+    from hal0.api.routes import updater as u_mod
+
+    async def fake_apply(self: object, version: str | None = None) -> dict:
+        return {"version": "0.0.9", "installed_at": time.time()}
+
+    monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
+
+    def fake_run(cmd: list[str], *a: object, **k: object) -> object:
+        raise OSError("Terminated")
+
+    monkeypatch.setattr(u_mod.subprocess, "run", fake_run)
+
+    r = isolated_client.post("/api/updates/apply", json={})
+    job_id = r.json()["id"]
+    job_file = Path(tmp_hal0_home) / "var-lib" / "hal0" / "update-jobs" / f"{job_id}.json"
+
+    deadline = time.monotonic() + 6.0
+    on_disk: dict = {}
+    while time.monotonic() < deadline:
+        if job_file.exists():
+            on_disk = json.loads(job_file.read_text(encoding="utf-8"))
+            if on_disk.get("state") in ("applied", "failed"):
+                break
+        time.sleep(0.05)
+
+    assert on_disk.get("state") == "applied", on_disk
