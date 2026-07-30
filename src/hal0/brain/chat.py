@@ -1183,12 +1183,11 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     messages = _frame_messages(payload, system_prompt)
 
     tools = _surfaced_tool_schemas(request)
-    # Model precedence: an explicit per-request model wins; then — because the
-    # steward always offers tools — the [brain_chat] tool_model (route tool
-    # turns to a capable, tool-format-compatible model when the brain slot's
-    # own model can't emit parseable calls); then the [brain_chat] model
-    # override (e.g. hal0/npu); then the persona's preferred_model / default.
-    # model selection (brain handles tool calls internally — no model swap).
+    # Model precedence: an explicit per-request model wins; then the
+    # [brain_chat] model override (e.g. hal0/npu); then the persona's
+    # preferred_model / default. Tool turns are NOT rerouted to a second
+    # model — the steward's own model handles them internally, on whatever
+    # it resolves to here.
     model = payload.get("model") or cfg.model or default_model
     body: dict[str, Any] = {
         "model": model,
