@@ -1470,6 +1470,79 @@ def clear_stale_mtp_overrides(*, job_id: str | None = None, registry: Any = None
     return cleared
 
 
+def sanitize_model_extra_args(*, job_id: str | None = None, registry: Any = None) -> int:
+    """Strip hal0-managed flags from model ``defaults.extra_args`` (upgrade migration).
+
+    ``defaults.extra_args`` rides the untrusted ``model_extra_args`` argv
+    segment, which hard-rejects the §21.7 managed flags at every launch
+    (``slot.managed_arg_denied``). Rows stamped before the screens existed —
+    notably via the unscreened ``POST /api/models/{id}/duplicate`` profile
+    stamp, back when 8 seed profiles carried ``-c <N>`` — are therefore
+    bricked: they can never load until the flag is hand-removed. Strip exactly
+    the denylisted tokens (+ values) from every model's ``extra_args`` and log
+    loudly per row. Matching is token-exact via the argv alias table, so
+    ``--model_path``/``--threads-batch`` are never touched; slot-hardware
+    flags (``--threads``/``-dev``) are left alone too — they are functional at
+    launch, so stripping them would change working rows.
+
+    Args:
+        job_id: Optional breadcrumb for structured-log tracing.
+        registry: Model-registry override for tests (anything with ``list()``
+            and ``update(model_id, updates)``). ``None`` uses the real
+            :class:`~hal0.registry.store.ModelRegistry`.
+
+    Returns:
+        Number of model rows sanitized.
+    """
+    import shlex
+
+    from hal0.slots.argv import strip_managed_flags
+
+    if registry is None:
+        from hal0.registry.store import ModelRegistry
+
+        registry = ModelRegistry()
+
+    sanitized = 0
+    for model in registry.list():
+        defaults = getattr(model, "defaults", None)
+        extra = getattr(defaults, "extra_args", None) if defaults is not None else None
+        if not extra or not extra.strip():
+            continue
+        try:
+            tokens = shlex.split(extra)
+        except ValueError:
+            continue  # malformed quoting — leave for the edit-path screens
+        clean, removed = strip_managed_flags(tokens)
+        if not removed:
+            continue
+        defaults_dict = defaults.model_dump(mode="python")
+        defaults_dict["extra_args"] = " ".join(shlex.quote(tok) for tok in clean)
+        try:
+            registry.update(model.id, {"defaults": defaults_dict})
+        except Exception as exc:
+            log.warning(
+                "updater.extra_args_sanitize_write_failed",
+                job_id=job_id,
+                model=model.id,
+                error=str(exc),
+            )
+            continue
+        sanitized += 1
+        log.warning(
+            "updater.model_extra_args_sanitized",
+            job_id=job_id,
+            model=model.id,
+            removed=removed,
+            note=(
+                "defaults.extra_args carried hal0-managed flag(s) the launcher "
+                "hard-rejects (slot.managed_arg_denied); stripped so the model "
+                "can load again. Context/port/host come from the slot config."
+            ),
+        )
+    return sanitized
+
+
 def retag_stale_slot_images(*, job_id: str | None = None) -> int:
     """Retag slot ``image`` pins that are stale FORMER DEFAULTS (upgrade migration).
 
@@ -1981,6 +2054,20 @@ class Updater:
             )
             # Non-fatal: a stale pin just keeps the previous runner image.
 
+        # Step 7e: strip hal0-managed flags (§21.7) from model
+        # defaults.extra_args — rows stamped via the pre-screen duplicate path
+        # carry -c/--port debris that hard-fails every launch. Loud per-row log.
+        try:
+            await asyncio.to_thread(sanitize_model_extra_args, job_id=self.job_id)
+        except Exception as exc:
+            log.warning(
+                "updater.extra_args_sanitize_failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+            # Non-fatal: an affected model keeps failing to launch until the
+            # operator removes the managed flag in the model drawer.
+
         # Step 8 + 9: atomic symlink swap + record previous.
         link = _current_symlink()
         try:
@@ -2220,5 +2307,6 @@ __all__ = [
     "ensure_seed_profiles",
     "fetch_release_manifest",
     "releases_url",
+    "sanitize_model_extra_args",
     "validate_manifest_for_channel",
 ]
