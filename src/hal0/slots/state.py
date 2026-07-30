@@ -143,6 +143,40 @@ def is_dispatchable_state(state: SlotState | str) -> bool:
     return str(getattr(state, "value", state) or "").lower() in DISPATCHABLE_STATES
 
 
+# ── health-ranked selection order (#1418) ────────────────────────────────────
+
+#: Selection preference when SEVERAL slots are candidates for one request —
+#: typically two slots binding the same model id. Lower rank wins. The ONE
+#: definition both the ``/v1`` route layer's backend-aware load and the
+#: dispatcher's upstream ordering consult, so they can never disagree about
+#: which of two same-model slots to use.
+#:
+#: The ordering is "closest to serving first": a dispatchable slot answers now,
+#: a loading one will answer shortly, an OFFLINE one needs a cold load, and an
+#: ERROR slot is the LAST resort — it has already failed to load, so choosing it
+#: over a live sibling turns a healthy model into a 502 (#1418).
+_SELECTION_ORDER: tuple[frozenset[SlotState], ...] = (
+    DISPATCHABLE_STATES,
+    frozenset({SlotState.WARMING, SlotState.STARTING, SlotState.PULLING}),
+    frozenset({SlotState.OFFLINE, SlotState.UNLOADING}),
+    frozenset({SlotState.ERROR}),
+)
+
+
+def slot_selection_rank(state: SlotState | str) -> int:
+    """Rank a slot state for candidate selection — lower is more preferred.
+
+    Accepts a :class:`SlotState` or its wire string (same normalisation as
+    :func:`is_dispatchable_state`). An unrecognised value ranks with ERROR:
+    never preferred over a state we positively know is healthy.
+    """
+    wire = str(getattr(state, "value", state) or "").lower()
+    for rank, group in enumerate(_SELECTION_ORDER):
+        if wire in group:
+            return rank
+    return len(_SELECTION_ORDER) - 1
+
+
 #: Providers that serve a baked-in model and don't require an explicit model_id.
 #: Must stay in sync with ui/src/composables/useSlotStats.js SELF_MANAGED_PROVIDERS.
 SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "qwen3tts", "moonshine", "vibevoice"})
@@ -415,5 +449,6 @@ __all__ = [
     "is_transition_legal",
     "provider_requires_model",
     "read_state",
+    "slot_selection_rank",
     "write_state_atomic",
 ]
