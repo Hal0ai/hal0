@@ -31,7 +31,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -1068,6 +1068,24 @@ async def run_pull(
             mmproj=str(mmproj_final) if mmproj_final is not None else None,
         )
 
+        # Blob/file accounting — the SAME bookkeeping the fileset branch does
+        # (#1412). Without it `store_blob`/`model_file` stay empty on every box
+        # that pulls through HF coords, which silently disables refcounting,
+        # hardlink dedup, duplicate_model's refcount bump, and the store GC.
+        installed_rows = [InstalledFile(hf_file, final, size_bytes, digest, "model")]
+        if mmproj_final is not None:
+            mm_rec = job.files[1]
+            installed_rows.append(
+                InstalledFile(
+                    mmproj_file or mmproj_final.name,
+                    mmproj_final,
+                    mm_rec.bytes_done,
+                    mm_rec.sha256,
+                    "mmproj",
+                )
+            )
+        _register_installed_files(registry, model_id=job.model_id, installed=installed_rows)
+
         # Capability-grouped pulls (FirstRun v2, design D2) get a meta.json
         # sidecar preserving HF provenance the canonical model.gguf name drops.
         if capability:
@@ -1197,6 +1215,81 @@ def _register_pulled(
     merged_meta.update(fresh_meta)
     updates["metadata"] = merged_meta
     registry.update(model_id, updates)
+
+
+class InstalledFile(NamedTuple):
+    """One file a pull just installed, as the store accounting sees it.
+
+    ``rel`` is the repo-relative name (the ``model_file`` primary key
+    alongside ``model_id``), ``dest`` the absolute installed path, ``sha256``
+    the verified content digest (``None`` for a non-LFS file — nothing to
+    dedup), and ``role`` the ``model``/``mmproj`` classification.
+    """
+
+    rel: str
+    dest: Path
+    size_bytes: int
+    sha256: str | None
+    role: str
+
+
+def _register_installed_files(
+    registry: ModelRegistry,
+    *,
+    model_id: str,
+    installed: list[InstalledFile],
+) -> None:
+    """Write the ``store_blob`` + ``model_file`` accounting for a single-file
+    (or mmproj-pair) pull — #1412.
+
+    The fileset branch has always done this in two steps
+    (:func:`_register_blob_after_install` per file, then the ``model_file``
+    rows in :func:`_register_pulled_fileset`). The single-file branch did
+    neither, so on any box whose models all arrived via HF coords both tables
+    were empty and every consumer of them — refcount GC, hardlink dedup,
+    ``duplicate_model``'s refcount bump — was a silent no-op.
+
+    The invariant this maintains is *refcount == number of ``model_file`` rows
+    referencing the blob*. That makes the write idempotent: re-pulling the same
+    bytes for the same ``(model_id, rel)`` leaves the count alone instead of
+    ratcheting it upward forever (an inflated count can never fall back to 0,
+    so the bytes would become unreclaimable). A re-pull whose digest CHANGED
+    drops the superseded blob's reference before taking one on the new digest.
+
+    No-op for a non-SQLite registry (the TOML escape hatch) — there is no
+    ``model_file`` table to write, exactly as in :func:`_register_pulled_fileset`.
+    """
+    db = getattr(registry, "db_path", None)
+    if db is None:
+        return
+    with connect(db) as conn, tx(conn):
+        prior = {row["rel"]: row for row in repository.list_model_files(conn, model_id)}
+        for rec in installed:
+            was = prior.get(rec.rel)
+            old_sha = was["sha256"] if was else None
+            if old_sha != rec.sha256:
+                if old_sha:
+                    repository.drop_blob_ref(conn, old_sha)
+                if rec.sha256:
+                    if repository.get_blob(conn, rec.sha256) is None:
+                        repository.insert_blob(
+                            conn,
+                            sha256=rec.sha256,
+                            size_bytes=rec.size_bytes,
+                            blob_path=str(rec.dest),
+                        )
+                    else:
+                        repository.bump_blob_ref(conn, rec.sha256)
+            repository.upsert_model_file(
+                conn,
+                model_id=model_id,
+                rel=rec.rel,
+                dest=str(rec.dest),
+                size_bytes=rec.size_bytes,
+                sha256=rec.sha256,
+                lfs=rec.sha256 is not None,
+                role=rec.role,
+            )
 
 
 # ── file-SET pulling (ML-2/ML-3) ──────────────────────────────────────────
