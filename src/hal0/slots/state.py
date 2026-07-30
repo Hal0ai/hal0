@@ -203,6 +203,23 @@ class SlotHealthFailed(SlotError):
     status = 503
 
 
+class SlotCrashLooping(SlotError):
+    """Load refused by the crash-loop breaker (issue i4).
+
+    A slot in ERROR is re-loadable, but not at request cadence: after a
+    load failure, further ``load()`` calls inside the exponential backoff
+    window — or against a slot parked after too many consecutive failures
+    — raise this WITHOUT any state transition (no STARTING event, no
+    journal row, no systemctl call).  ``details`` carries ``retry_after_s``
+    so the error middleware emits a ``Retry-After`` header exactly like
+    ``SlotLoading``; operator actions (manual load/restart, config edit)
+    reset the breaker.
+    """
+
+    code = "slot.crash_looping"
+    status = 503
+
+
 class SlotTerminateTimeout(SlotError):
     """The container stop did not return inside its timeout (#1224).
 
@@ -385,6 +402,7 @@ __all__ = [
     "IllegalSlotTransition",
     "NpuExclusivityViolation",
     "SlotConfigError",
+    "SlotCrashLooping",
     "SlotError",
     "SlotHealthFailed",
     "SlotNotFound",
