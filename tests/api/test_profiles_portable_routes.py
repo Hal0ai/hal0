@@ -126,7 +126,7 @@ class TestImportCommit:
     def test_commit_creates_profile(self, client: TestClient) -> None:
         env = client.post(f"/api/profiles/{_seed_name()}/export").json()
         r = client.post("/api/profiles/import", json={"envelope": env, "name": "imported-one"})
-        assert r.status_code == 200
+        assert r.status_code == 201
         body = r.json()
         assert body["dry_run"] is False
         assert body["profile"]["name"] == "imported-one"
@@ -173,7 +173,7 @@ class TestRoundTripHttp:
         env = client.post("/api/profiles/source/export").json()
 
         r = client.post("/api/profiles/import", json={"envelope": env, "name": "round-tripped"})
-        assert r.status_code == 200
+        assert r.status_code == 201
 
         names = {p["name"] for p in client.get("/api/profiles").json()}
         assert "round-tripped" in names
