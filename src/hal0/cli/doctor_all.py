@@ -10,7 +10,8 @@ It re-uses the tested :class:`hal0.cli.doctor_verify.Check` row type and the
 verify report-card classifiers (API, runners, DNS, capabilities, memory,
 OpenWebUI, Hermes), then adds the broader health rows the retrofit calls for:
 auth posture, model-store integrity, pending migrations, bound slot ports,
-and the ``hal0.target`` boot-enable anchor (r5-sync-assessment §6.1).
+the ``hal0.target`` boot-enable anchor (r5-sync-assessment §6.1), and the
+privileged sudo seams every slot op + self-update runs through (#1465).
 
 Strictly read-only — there is no ``--fix`` here; the per-surface subcommands
 own repair. Exit codes:
@@ -41,6 +42,7 @@ from hal0.cli.doctor_verify import (
     build_checks,
     gather_payloads,
 )
+from hal0.system.seam_check import REMEDIATION, SeamStatus, probe_seams
 
 console = Console()
 
@@ -197,6 +199,61 @@ def check_hal0_target(
     return Check("hal0_target", "hal0.target", _PASS, "installed and enabled")
 
 
+def check_seams(statuses: list[SeamStatus] | None = None) -> Check:
+    """The privileged sudo seams every slot op and self-update runs through (#1465).
+
+    ``install.sh`` installs each wrapper + ``/etc/sudoers.d`` grant best-effort:
+    a ``visudo -cf`` failure or a missing source produced only a mid-log warn,
+    and *nothing* verified the result afterwards — so a box where that warn
+    fired reported all-green from every doctor surface while every slot start,
+    unit write and daemon-reload failed undiagnosably. This row is that missing
+    verification.
+
+    Required seams (``hal0-systemctl``, ``hal0-update``) failing is a non-critical
+    ``fail``; an optional seam, or a grant we could not test from this account,
+    is an advisory ``warn``. ``statuses`` is injectable so the classification is
+    testable without root or a provisioned box (mirrors ``check_hal0_target``).
+    """
+    rows = probe_seams() if statuses is None else statuses
+    if not rows:
+        return Check("seams", "Privileged seams", _WARN, "no seams to check")
+
+    broken_required = [s for s in rows if s.spec.required and not s.ok]
+    if broken_required:
+        problems = "; ".join(p for s in broken_required for p in s.problems)
+        roles = ", ".join(s.spec.role for s in broken_required)
+        return Check(
+            "seams",
+            "Privileged seams",
+            _FAIL,
+            f"{problems} — {roles} cannot work; {REMEDIATION}",
+        )
+
+    broken_optional = [s for s in rows if not s.spec.required and not s.ok]
+    if broken_optional:
+        problems = "; ".join(p for s in broken_optional for p in s.problems)
+        return Check("seams", "Privileged seams", _WARN, f"{problems} — {REMEDIATION}")
+
+    untested = [s for s in rows if s.spec.probe is not None and s.grant_ok is None]
+    if untested:
+        names = ", ".join(s.spec.name for s in untested)
+        return Check(
+            "seams",
+            "Privileged seams",
+            _WARN,
+            f"{len(rows)} seam(s) installed; grant not exercised for {names} "
+            "(re-run as root to prove it end-to-end)",
+        )
+
+    proved = [s for s in rows if s.grant_ok is True]
+    return Check(
+        "seams",
+        "Privileged seams",
+        _PASS,
+        f"{len(rows)} installed root:root; {len(proved)} grant(s) verified via sudo -n",
+    )
+
+
 def check_ports(slots: Any) -> Check:
     """Bound slot ports (informational evidence, always advisory-clean).
 
@@ -245,6 +302,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_migrations(pending_layout_migration()),
         check_ports(_get_any("/api/slots", base)),
         check_hal0_target(),
+        check_seams(),
     ]
     return verify_rows + extra_rows
 
@@ -298,8 +356,8 @@ def doctor_all_cmd(
 
     Composes the ``doctor verify`` report card (API, runners, DNS, capability
     slots, memory, OpenWebUI, Hermes) with auth posture, model-store integrity,
-    pending migrations, bound slot ports, and the ``hal0.target`` boot-enable
-    anchor. Read-only — use the per-surface subcommands (``perms``/``models``)
+    pending migrations, bound slot ports, the ``hal0.target`` boot-enable
+    anchor, and the privileged sudo seams. Read-only — use the per-surface subcommands (``perms``/``models``)
     for ``--fix``.
 
     Exit codes: 0 clean, 1 an actionable fail, 2 a critical failure (API
@@ -330,6 +388,7 @@ __all__ = [
     "check_migrations",
     "check_model_store",
     "check_ports",
+    "check_seams",
     "doctor_all_cmd",
     "overall_verdict",
     "render_all",

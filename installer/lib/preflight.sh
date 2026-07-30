@@ -1101,6 +1101,111 @@ resolve_node() {
     (( m >= NODE_MIN_MAJOR ))
 }
 
+# ── privileged-seam verification (POST-install, #1465) ──────────────────────
+#
+# Every privileged op hal0 performs post-P3-perms goes through a narrow
+# `sudo -n /usr/lib/hal0/bin/hal0-*` wrapper: slot lifecycle (hal0-systemctl)
+# and self-update (hal0-update) are load-bearing; agentenv/benchctl/podman-ro
+# are optional. install.sh used to install each best-effort — a `visudo -cf`
+# failure produced only a mid-log warn and the run still printed its success
+# box — and NOTHING verified the result afterwards, so a box where that warn
+# fired reported all-green from every surface while every slot start failed
+# undiagnosably.
+#
+# DELIBERATELY NOT IN preflight_all: preflight runs BEFORE the seams are
+# installed, where asserting them would fail every fresh install. This is a
+# post-install assertion — install.sh calls it once the wrappers + grants are
+# down, and `hal0 doctor all` carries the same predicate in Python
+# (src/hal0/system/seam_check.py). Keep the two inventories in lock-step.
+HAL0_REQUIRED_SEAMS=("hal0-systemctl" "hal0-update")
+HAL0_OPTIONAL_SEAMS=("hal0-agentenv" "hal0-benchctl" "hal0-podman-ro")
+
+# Probe verbs that are provably side-effect-free (`help` prints usage,
+# `check` only proves the interpreter loads). Seams absent from this map are
+# presence-checked only, never invoked.
+_hal0_seam_probe() {
+    case "$1" in
+        hal0-systemctl) printf 'help\n' ;;
+        hal0-update)    printf 'check\n' ;;
+        *)              return 1 ;;
+    esac
+}
+
+# Verify ONE seam: wrapper present + root-owned + 0755, sudoers drop-in
+# present + root-owned + 0440, and — the fact that actually matters — the
+# grant works when exercised AS the hal0 user. Returns non-zero on any
+# failure, printing an actionable line per problem.
+_preflight_seam() {
+    local name="$1" required="$2" bin_dir="${3:-/usr/lib/hal0/bin}" sudoers_dir="${4:-/etc/sudoers.d}"
+    local bin="${bin_dir}/${name}" grant="${sudoers_dir}/${name}" rc=0 mode owner
+    local report; report=$([[ "${required}" == "required" ]] && echo err || echo warn)
+
+    if [[ ! -f "${bin}" ]]; then
+        "${report}" "seam ${name}: wrapper ${bin} is missing — re-run 'sudo bash install.sh'"
+        return 1
+    fi
+    mode="$(stat -c '%a' "${bin}" 2>/dev/null || echo '?')"
+    owner="$(stat -c '%U:%G' "${bin}" 2>/dev/null || echo '?')"
+    if [[ "${mode}" != "755" || "${owner}" != "root:root" ]]; then
+        "${report}" "seam ${name}: ${bin} is ${owner} ${mode}, expected root:root 755"
+        rc=1
+    fi
+
+    if [[ ! -f "${grant}" ]]; then
+        "${report}" "seam ${name}: sudoers grant ${grant} is missing — re-run 'sudo bash install.sh'"
+        return 1
+    fi
+    mode="$(stat -c '%a' "${grant}" 2>/dev/null || echo '?')"
+    owner="$(stat -c '%U' "${grant}" 2>/dev/null || echo '?')"
+    if [[ "${mode}" != "440" || "${owner}" != "root" ]]; then
+        # sudo ignores (and on some builds refuses) a drop-in with the wrong
+        # mode, so this is a total, silent failure rather than a nit.
+        "${report}" "seam ${name}: ${grant} is ${owner} ${mode}, expected root 440 — sudo ignores it"
+        rc=1
+    fi
+
+    local probe
+    if probe="$(_hal0_seam_probe "${name}")" && (( rc == 0 )); then
+        # The grant is written for the hal0 user, so the only honest test runs
+        # AS that user. -n keeps it non-interactive: a missing grant fails
+        # immediately instead of prompting.
+        if ! sudo -n -u hal0 sudo -n "${bin}" "${probe}" >/dev/null 2>&1; then
+            "${report}" "seam ${name}: 'sudo -n ${name} ${probe}' failed as the hal0 user — the ${grant} grant does not apply"
+            rc=1
+        fi
+    fi
+    return "${rc}"
+}
+
+# Verify every seam. Required seams failing is a hard failure; optional ones
+# only warn. Skipped entirely when not root (a grant written for `hal0` cannot
+# be exercised from an unrelated account, and reporting that as broken would
+# be a false alarm).
+preflight_seams() {
+    local bin_dir="${1:-/usr/lib/hal0/bin}" sudoers_dir="${2:-/etc/sudoers.d}"
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        warn "privileged seams: not root — skipping grant verification (re-run 'sudo hal0 doctor')"
+        return 0
+    fi
+    if ! id -u hal0 >/dev/null 2>&1; then
+        warn "privileged seams: no hal0 service user on this box — skipping"
+        return 0
+    fi
+    local rc=0 name
+    for name in "${HAL0_REQUIRED_SEAMS[@]}"; do
+        _preflight_seam "${name}" required "${bin_dir}" "${sudoers_dir}" || rc=1
+    done
+    for name in "${HAL0_OPTIONAL_SEAMS[@]}"; do
+        _preflight_seam "${name}" optional "${bin_dir}" "${sudoers_dir}" || true
+    done
+    if (( rc == 0 )); then
+        info "privileged seams: ${HAL0_REQUIRED_SEAMS[*]} installed and their sudo grants verified"
+    else
+        err "privileged seams: a required sudo grant is missing or does not work — slot lifecycle and/or self-update WILL fail on this box"
+    fi
+    return "${rc}"
+}
+
 # ── aggregate runner ────────────────────────────────────────────────────────
 
 # Run every check; return non-zero if any failed. We deliberately don't

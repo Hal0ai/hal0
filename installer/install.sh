@@ -1360,11 +1360,19 @@ PYEOF
     # per-slot systemd units, daemon-reload, and start/stop/restart of a slot
     # unit (+ restarting hal0-api itself on self-update). Narrow + validated
     # (no shell, no wildcards, literal slot-id regex) — see the wrapper source.
+    #
+    # #1465: this seam is LOAD-BEARING — without it every slot start, unit write
+    # and daemon-reload fails, and (pre-fix) a warn here still produced a green
+    # success box and a green `hal0 doctor`. A real install now dies instead of
+    # shipping a box that cannot run a single slot. Dev installs keep warning:
+    # they run non-root, have no sudoers to write, and the seam is a passthrough.
     SYSTEMCTL_SRC="${REPO_ROOT}/installer/wrappers/hal0-systemctl"
     if [[ -f "${SYSTEMCTL_SRC}" ]]; then
         install -d "${LIB_DIR}/bin"
         install -m 0755 "${SYSTEMCTL_SRC}" "${LIB_DIR}/bin/hal0-systemctl"
         info "wrote ${LIB_DIR}/bin/hal0-systemctl"
+    elif [[ "${DEV_MODE}" -eq 0 ]]; then
+        die "${SYSTEMCTL_SRC} not found — the slot-lifecycle seam cannot be installed; hal0 would be unable to start any slot"
     else
         warn "${SYSTEMCTL_SRC} not found — systemctl seam helper not installed"
     fi
@@ -1372,6 +1380,8 @@ PYEOF
     # sudoers grant for the systemctl seam. Real installs only; visudo-validate
     # before activating so a malformed drop-in can never wedge sudo for the box.
     if [[ "${DEV_MODE}" -eq 0 ]]; then
+        command -v visudo >/dev/null 2>&1 \
+            || die "visudo not found — hal0 requires the 'sudo' package (every privileged op routes through a sudo seam); install it and re-run"
         SYSTEMCTL_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-systemctl"
         SYSTEMCTL_SUDOERS_DST="/etc/sudoers.d/hal0-systemctl"
         if [[ -f "${SYSTEMCTL_SUDOERS_SRC}" ]]; then
@@ -1379,10 +1389,44 @@ PYEOF
                 install -m 0440 "${SYSTEMCTL_SUDOERS_SRC}" "${SYSTEMCTL_SUDOERS_DST}"
                 info "wrote ${SYSTEMCTL_SUDOERS_DST}"
             else
-                warn "${SYSTEMCTL_SUDOERS_SRC} failed visudo check — systemctl sudoers grant not installed"
+                die "${SYSTEMCTL_SUDOERS_SRC} failed visudo check — refusing to continue; without this grant every slot start, unit write and daemon-reload fails"
             fi
         else
-            warn "${SYSTEMCTL_SUDOERS_SRC} not found — systemctl sudoers grant not installed"
+            die "${SYSTEMCTL_SUDOERS_SRC} not found — refusing to continue; without this grant every slot start, unit write and daemon-reload fails"
+        fi
+    fi
+
+    # Privileged seam #6 (#1464): hal0-update covers the genuinely-root
+    # self-update ops. /usr/lib/hal0 is root:root 0755 and never
+    # service-writable (src/hal0/install/perms.py), so the unprivileged
+    # hal0-api cannot stage a release, swap the `current` symlink, or re-pip
+    # the venv — self-update was structurally impossible on the shipped
+    # posture. Same narrow shape as hal0-systemctl: validated argv, no shell,
+    # no wildcards; `stage` verifies the release cosign-side AS ROOT so the
+    # grant can never be used to pip-install an unverified tree.
+    UPDATE_SRC="${REPO_ROOT}/installer/wrappers/hal0-update"
+    if [[ -f "${UPDATE_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${UPDATE_SRC}" "${LIB_DIR}/bin/hal0-update"
+        info "wrote ${LIB_DIR}/bin/hal0-update"
+    elif [[ "${DEV_MODE}" -eq 0 ]]; then
+        die "${UPDATE_SRC} not found — the self-update seam cannot be installed; this box could never take an update"
+    else
+        warn "${UPDATE_SRC} not found — self-update seam helper not installed"
+    fi
+
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        UPDATE_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-update"
+        UPDATE_SUDOERS_DST="/etc/sudoers.d/hal0-update"
+        if [[ -f "${UPDATE_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${UPDATE_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${UPDATE_SUDOERS_SRC}" "${UPDATE_SUDOERS_DST}"
+                info "wrote ${UPDATE_SUDOERS_DST}"
+            else
+                die "${UPDATE_SUDOERS_SRC} failed visudo check — refusing to continue; without this grant this box could never take an update"
+            fi
+        else
+            die "${UPDATE_SUDOERS_SRC} not found — refusing to continue; without this grant this box could never take an update"
         fi
     fi
 
@@ -1424,6 +1468,16 @@ fi
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     systemctl daemon-reload
     info "systemctl daemon-reload"
+
+    # #1465: post-install assertion. Everything above installs the seams
+    # best-effort *per file*; this proves the result end-to-end — wrapper
+    # present + root:root 0755, sudoers drop-in present + root 0440, and
+    # `sudo -n <seam> <probe>` actually working AS the hal0 user. Without it a
+    # box whose grant silently failed to install still printed a success box
+    # and still reported green from every `hal0 doctor` surface, while every
+    # slot start and every update failed undiagnosably.
+    preflight_seams "${LIB_DIR}/bin" /etc/sudoers.d \
+        || die "privileged seam verification failed (see above) — fix the grants and re-run 'sudo bash install.sh'"
 fi
 
 # AppArmor preflight for podman on unconfined LXC (RATIFIED 2026-07-18,

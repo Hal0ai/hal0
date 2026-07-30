@@ -195,11 +195,14 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
     # neither spuriously fails.
     monkeypatch.setattr(da.Path, "exists", lambda self: True)
     monkeypatch.setattr(da, "_hal0_target_enabled_probe", lambda: True)
+    # Privileged seams (#1465): probed against the real filesystem otherwise,
+    # which is neither present nor relevant in CI — pretend all installed.
+    monkeypatch.setattr(da, "probe_seams", lambda: [])
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 5 extras.
-    assert keys[-5:] == ["auth", "models", "migrations", "ports", "hal0_target"]
+    # 7 verify rows + 6 extras.
+    assert keys[-6:] == ["auth", "models", "migrations", "ports", "hal0_target", "seams"]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
 
