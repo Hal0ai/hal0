@@ -15,12 +15,21 @@ silently coming back:
 It deliberately does NOT assert the reverse (doc-only commands) beyond
 the curated "Planned" section, because the doc legitimately mentions
 planned-but-unimplemented verbs under a clearly-labelled heading.
+
+Issue #1462 added a second, narrower guard: the "Key options" cells of
+the "## Top-level" command table must only ever name real flags. The
+original bug (a documented ``--source {release|git}`` flag that had been
+deleted from ``hal0 update``) would have gone undetected forever by the
+command-path check above, since ``update`` itself is a real command —
+only one of its documented *flags* was phantom.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
+import click
 import typer
 
 from hal0.cli.main import app
@@ -94,4 +103,97 @@ def test_allowed_missing_are_still_real_commands() -> None:
         "ALLOWED_MISSING lists commands that no longer exist in the CLI: "
         + ", ".join(stale)
         + ". Remove them from the exemption list."
+    )
+
+
+# --- "## Top-level" table flag-drift guard (issue #1462) -------------------
+
+# Matches the command cell of a "## Top-level" table row, e.g. the
+# ``update`` in ``| `hal0 update` | ... |`` or ``update owui`` in
+# ``| `hal0 update owui` | ... |``. Rows whose first token after ``hal0``
+# isn't a plain command word (e.g. the ``` `hal0 --version` / `-V` ``` row)
+# don't match on purpose — that row documents a root eager-option, not a
+# subcommand, and has no Typer command to check flags against.
+_ROW_COMMAND_RE = re.compile(r"^\|\s*`hal0\s+([a-zA-Z][a-zA-Z0-9-]*(?:\s+[a-zA-Z][a-zA-Z0-9-]*)*)`")
+
+# A documented flag token: `--foo-bar` or `-x`.
+_FLAG_RE = re.compile(r"`(--[a-zA-Z][a-zA-Z0-9-]*|-[a-zA-Z])")
+
+
+def _split_table_row(line: str) -> list[str]:
+    """Split a markdown table row into cells, treating ``\\|`` as a literal pipe.
+
+    Several "Key options" cells embed an escaped pipe inside a choice list
+    (e.g. ``` `--channel {stable\\|preview\\|nightly}` ```) — a naive
+    ``line.split("|")`` would slice that cell in two. Protect escaped pipes
+    before splitting, then restore them.
+    """
+    protected = line.replace("\\|", "\x00")
+    cells = [c.strip() for c in protected.strip().strip("|").split("|")]
+    return [c.replace("\x00", "\\|") for c in cells]
+
+
+def _top_level_table_rows(text: str) -> list[tuple[str, str]]:
+    """Return ``(command path, key-options cell)`` for each row under "## Top-level"."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "## Top-level")
+    rows: list[tuple[str, str]] = []
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            break
+        match = _ROW_COMMAND_RE.match(stripped)
+        if not match:
+            continue
+        cells = _split_table_row(stripped)
+        assert len(cells) == 3, f"unexpected column count in Top-level row: {stripped!r}"
+        rows.append((match.group(1), cells[2]))
+    return rows
+
+
+def _resolve_click_command(path: str) -> click.Command:
+    """Walk the live Click command tree along a space-separated path.
+
+    e.g. ``"update owui"`` -> the ``owui`` subcommand of the ``update`` group.
+    """
+    node: click.Command = typer.main.get_command(app)
+    for part in path.split():
+        assert isinstance(node, click.Group) and part in node.commands, (
+            f"cli.mdx documents `hal0 {path}`, but `{part}` is not a real "
+            "subcommand at that point in the live CLI."
+        )
+        node = node.commands[part]
+    return node
+
+
+def test_cli_mdx_options_table_has_no_phantom_flags() -> None:
+    """Every flag in the "## Top-level" table's "Key options" cells must be real.
+
+    Issue #1462: the ``hal0 update`` row documented a ``--source
+    {release|git}`` flag years after the git-based update path (and the
+    flag itself) had been deleted from the CLI. The command-path check in
+    ``test_cli_mdx_documents_every_command`` didn't catch it because
+    ``update`` is still a real command — the drift was at the flag level.
+    """
+    text = _CLI_MDX.read_text(encoding="utf-8")
+    rows = _top_level_table_rows(text)
+    assert rows, "expected at least one row in the '## Top-level' table"
+
+    phantom: list[str] = []
+    for path, options_cell in rows:
+        flags = _FLAG_RE.findall(options_cell)
+        if not flags:
+            continue
+        command = _resolve_click_command(path)
+        real_opts: set[str] = set()
+        for param in command.params:
+            if isinstance(param, click.Option):
+                real_opts.update(param.opts)
+        for flag in flags:
+            if flag not in real_opts:
+                phantom.append(f"`hal0 {path}` documents `{flag}`, which is not a real option")
+
+    assert not phantom, (
+        "docs/reference/cli.mdx 'Top-level' table documents flags that don't "
+        "exist on the live CLI:\n" + "\n".join(phantom)
     )

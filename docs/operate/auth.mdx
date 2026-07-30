@@ -168,6 +168,21 @@ either. A few narrower gates exist inside hal0 itself:
   human clears from the dashboard, the CLI, or the approvals API. See
   [Agents](/docs/concepts/agents) for how personas, tool gating, and the
   approval queue fit together.
+- **Login/rotate brute-force limiter** — every `POST /api/auth/login` and
+  `/api/auth/rotate` attempt is metered by a per-caller sliding-window
+  limiter before the key is checked. Behind a reverse proxy every direct
+  caller is the proxy's own IP by default, so the limiter's shared bucket
+  can lock out every real user after one remote guesser. If your proxy
+  sets `X-Forwarded-For` (nginx does by default in the example above;
+  Caddy and Traefik forward it through their `reverse_proxy`/service
+  unmodified too) and is known to **strip or overwrite** any
+  client-supplied `X-Forwarded-For` before adding its own — true for all
+  three in their default configurations — set
+  `[security].trust_forwarded_for = true` in `hal0.toml` (or
+  `HAL0_TRUST_FORWARDED_FOR=1`) so the limiter keys on the real caller
+  instead. Leave it off (the default) if you're not certain your proxy
+  scrubs the header: a client that can set it directly would otherwise
+  pick its own rate-limit bucket.
 
 None of the above is a substitute for authentication at the edge — they
 narrow specific browser/DNS-rebinding attack surfaces and give you an audit
