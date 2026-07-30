@@ -612,6 +612,36 @@ async def test_forward_already_loaded_skips_load_and_forwards(
     assert json.loads(forwarded["body"]) == {"model": "chat"}
 
 
+@pytest.mark.asyncio
+async def test_forward_crash_looping_slot_surfaces_retryable_503() -> None:
+    """Issue i4: SlotCrashLooping from the crash-loop breaker surfaces as-is
+    (503 + retry_after_s) — never re-wrapped into the non-retryable
+    SlotLoadFailed 502 (#987)."""
+    from hal0.slots.state import SlotCrashLooping, SlotState
+
+    class _CrashLoopingSlotManager(_FakeSlotManager):
+        async def load(self, slot_name: str, model_id: str | None = None) -> None:
+            self.load_calls.append(slot_name)
+            raise SlotCrashLooping(
+                f"slot {slot_name!r} failed 3 consecutive load(s)",
+                details={"slot": slot_name, "failures": 3, "retry_after_s": 20},
+            )
+
+    sm = _CrashLoopingSlotManager(state=SlotState.ERROR)
+    dispatcher = Dispatcher(slot_manager=sm)  # type: ignore[arg-type]
+    call = UpstreamCall(
+        upstream_name="utility",
+        target_url="http://127.0.0.1:8085/v1/chat/completions",
+        body=json.dumps({"model": "utility"}).encode(),
+        slot_name="utility",
+    )
+    with pytest.raises(SlotCrashLooping) as exc_info:
+        await dispatcher.forward(call)
+    assert exc_info.value.status == 503
+    assert exc_info.value.details["retry_after_s"] == 20
+    assert sm.load_calls == ["utility"]
+
+
 # ── container-slot preemption over a stale registry binding ────────────────────
 
 
