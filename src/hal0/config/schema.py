@@ -1116,22 +1116,39 @@ class ProfileConfig(BaseModel):
     device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
         default=None,
         description=(
-            "Device class this profile targets.  None (default, per "
-            "spec-hw-slot-ownership.md §4.1 / seeded-profile-rework §4.1) "
-            "means the profile is device-agnostic — the slot owns device "
-            "and the profile supplies the logical tune only.  ``'gpu'``, "
-            "``'cpu'``, ``'npu'``, ``'img'`` are explicit-fit values; "
-            "``profile_fits_slot`` skips the device-class gate when this is "
-            "None."
+            "INERT MATCH-ONLY FIT HINT — selects no hardware (v1.0, "
+            "spec-hw-slot-ownership §2/§4.1). A profile is a bundle of "
+            "model-tuning flags and carries no hardware placement; the SLOT's "
+            "``device`` enum is the single authoritative hardware fact. This "
+            "field is read ONLY by ``hal0.model_fit.profile_fits_slot`` (does "
+            "this profile suit this slot?), by the display/runtime-family "
+            "classification in ``hal0.profiles._runtime_family``, and as a "
+            "last-resort fallback in "
+            "``providers.container._effective_backend_and_device_class`` for a "
+            "hand-built slot dict that declares no ``device`` at all. It no "
+            "longer gates real ``/dev/kfd`` + ``/dev/dri`` passthrough — it "
+            "did until 1.0, which let a ``cpu-chat`` profile request GPU device "
+            "nodes on a ``device='cpu'`` slot. None (the default, and what "
+            "every shipped seed uses) means device-agnostic: "
+            "``profile_fits_slot`` skips the device-class gate entirely. "
+            "RETAINED on this class rather than removed because published "
+            "``.hal0profile.json`` artifacts carry it and their checksums cover "
+            "it — dropping it would break import round-trip."
         ),
     )
     backend: Literal["rocm", "vulkan", "cuda"] | None = Field(
         default=None,
         description=(
-            "GPU runtime this profile targets — the authoritative source for the "
-            "ROCm-vs-Vulkan-vs-CUDA choice (replaces sniffing the image tag).  "
-            "``None`` for non-GPU profiles (npu/cpu/img), where ``device_class`` "
-            "drives display and slot-card colour."
+            "INERT MATCH-ONLY FIT HINT — selects no runtime (v1.0, "
+            "spec-hw-slot-ownership §2). NOT the source of the "
+            "ROCm-vs-Vulkan-vs-CUDA choice: that is derived from the SLOT's "
+            "``device`` enum by ``hal0.model_meta.device_to_backend`` via "
+            "``providers.container._effective_backend_and_device_class``, which "
+            "feeds BOTH the image/capability resolution and the device-node "
+            "passthrough gate so the two can never drift. Read here only as the "
+            "last-resort fallback for a slot dict with no ``device``. ``None`` "
+            "for non-GPU profiles (npu/cpu/img). RETAINED for on-disk and "
+            "envelope-checksum back-compat (see ``device_class``)."
         ),
     )
     cloned_from: str | None = Field(
