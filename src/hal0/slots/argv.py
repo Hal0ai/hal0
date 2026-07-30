@@ -228,6 +228,37 @@ def _deny_managed_flags(tokens: list[str], *, segment: str) -> None:
         )
 
 
+def strip_managed_flags(
+    tokens: list[str], *, denylist: frozenset[str] = MANAGED_ARGS_DENYLIST
+) -> tuple[list[str], list[str]]:
+    """Drop every denylisted flag (and its value) from ``tokens``.
+
+    The healing counterpart of :func:`_deny_managed_flags`: instead of
+    rejecting, it removes each offending flag together with its value so
+    already-persisted state (custom profiles / model ``defaults.extra_args``
+    stamped before the guards existed) can be sanitized in place. Matching is
+    token-exact via ``_canon()`` — ``-c`` maps onto ``--ctx-size`` but
+    ``--threads-batch``/``--model_path`` never collide with ``--threads``/
+    ``--model``. Pass ``denylist`` to screen a different flag set (e.g.
+    ``MANAGED_ARGS_DENYLIST | SLOT_HARDWARE_FLAGS``).
+
+    Returns:
+        ``(clean_tokens, removed_flags)`` — the surviving tokens in order, and
+        the offending flags by their original spelling (empty = already clean).
+    """
+    clean: list[str] = []
+    removed: list[str] = []
+    for pair in _split_pairs(tokens):
+        if pair.canon is not None and pair.canon in denylist:
+            assert pair.flag is not None
+            removed.append(pair.flag)
+            continue
+        if pair.flag is not None:
+            clean.append(pair.flag)
+        clean.extend(pair.values)
+    return clean, removed
+
+
 def _deny_slot_hardware_flags(tokens: list[str], *, segment: str) -> None:
     """Raise :class:`~hal0.errors.BadRequest` if ``tokens`` set a slot-hardware flag.
 
@@ -446,4 +477,5 @@ __all__ = [
     "merge_flags",
     "normalize_argv",
     "resolve_argv",
+    "strip_managed_flags",
 ]

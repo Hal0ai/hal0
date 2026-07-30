@@ -111,6 +111,29 @@ def test_duplicate_with_profile_stamps_flags(registry: SqliteModelRegistry, tmp_
     assert registry.get("p").defaults is None
 
 
+def test_duplicate_profile_stamp_strips_denied_flags(
+    registry: SqliteModelRegistry, tmp_path: Path, tmp_hal0_home: str
+) -> None:
+    """A legacy profile still carrying hal0-owned flags must not mint a row
+    that hard-fails every launch (slot.managed_arg_denied) — the stamp strips
+    the managed + slot-hardware tokens before persisting. Written straight to
+    disk: the catalog screens create/update, but pre-guard TOML still exists
+    (and load-time sanitization strips only the MANAGED set, not --threads)."""
+    from hal0.config.paths import profiles_toml
+
+    target = profiles_toml()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        '[profile.legacy-tune]\nflags = "--jinja -fa on --threads 8 -b 2048"\nmtp = false\n',
+        encoding="utf-8",
+    )
+    f = tmp_path / "d.gguf"
+    f.write_bytes(b"\x00")
+    registry.add(Model(id="d", path=str(f)))
+    out = duplicate_model(registry, source_id="d", new_id="d-copy", profile="legacy-tune")
+    assert out["defaults"]["extra_args"] == "--jinja -fa on -b 2048"
+
+
 def test_duplicate_unknown_source_raises(registry: SqliteModelRegistry) -> None:
     with pytest.raises(ModelNotFound):
         duplicate_model(registry, source_id="nope", new_id="x")

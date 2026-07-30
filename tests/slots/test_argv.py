@@ -18,6 +18,7 @@ from hal0.slots.argv import (
     _deny_slot_hardware_flags,
     normalize_argv,
     resolve_argv,
+    strip_managed_flags,
 )
 
 # The flag portion of the live `agent` slot resolved_command (post `--port`).
@@ -433,3 +434,46 @@ def test_deny_slot_hardware_flags_allows_clean_tune() -> None:
     hardware flags, so the guard is a no-op."""
     tokens = ["-b", "2048", "-ub", "512", "-fa", "on", "-ctk", "q8_0", "--no-mmap"]
     _deny_slot_hardware_flags(tokens, segment="model defaults.extra_args")  # must not raise
+
+
+# ── strip_managed_flags: the healing counterpart of the deny guards ───────────
+
+
+def test_strip_managed_flags_drops_flag_and_value() -> None:
+    clean, removed = strip_managed_flags(["-fa", "on", "-c", "131072", "--jinja"])
+    assert clean == ["-fa", "on", "--jinja"]
+    assert removed == ["-c"]
+
+
+def test_strip_managed_flags_catches_both_spellings() -> None:
+    clean, removed = strip_managed_flags(
+        ["--ctx-size", "8192", "-ngl", "99", "--port", "9999", "-b", "2048"]
+    )
+    assert clean == ["-b", "2048"]
+    assert removed == ["--ctx-size", "-ngl", "--port"]
+
+
+def test_strip_managed_flags_clean_input_untouched() -> None:
+    tokens = ["-fa", "on", "-b", "2048", "-ub", "512", "-ctk", "q8_0"]
+    clean, removed = strip_managed_flags(tokens)
+    assert clean == tokens
+    assert removed == []
+
+
+def test_strip_managed_flags_never_touches_lookalike_tokens() -> None:
+    """Token-exact matching: --model_path / --threads-batch are NOT --model /
+    --threads (the kokoro / cpu-chat seed flags depend on this)."""
+    tokens = ["--model_path", "/models/kokoro", "--threads-batch", "8"]
+    clean, removed = strip_managed_flags(
+        tokens, denylist=MANAGED_ARGS_DENYLIST | SLOT_HARDWARE_FLAGS
+    )
+    assert clean == tokens
+    assert removed == []
+
+
+def test_strip_managed_flags_custom_denylist_covers_hardware() -> None:
+    clean, removed = strip_managed_flags(
+        ["--threads", "8", "-fa", "on"], denylist=MANAGED_ARGS_DENYLIST | SLOT_HARDWARE_FLAGS
+    )
+    assert clean == ["-fa", "on"]
+    assert removed == ["--threads"]

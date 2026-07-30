@@ -24,6 +24,12 @@ import {
 } from '@/api/hooks/useProfiles'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { prettyProfile } from './profile-names'
+import {
+  findManagedFlags,
+  findSlotHardwareFlags,
+  tokenizeFlags,
+  MANAGED_FLAG_SOURCE,
+} from './flags-tune.js'
 
 // Backend runtime hue map — built from meta.devices (GET /api/meta/enums via
 // useMetaEnums, static fallback when absent) instead of the old hardcoded
@@ -204,6 +210,21 @@ function Section({ title, count, hint, children }) {
 // FormRow is a shared primitive (primitives.jsx) — the superset variant this
 // view seeded (error/warn/ok/counter + real <label htmlFor>).
 
+// Managed / slot-hardware rejection copy — mirrors the model drawer's inline
+// messages (model-drawer.jsx) so both flag editors speak with one voice.
+function managedFlagError(offenders) {
+  const first = offenders[0];
+  const canon = first === '-ngl' ? '--n-gpu-layers' : first === '-c' ? '--ctx-size' : first;
+  const where = MANAGED_FLAG_SOURCE[first] || MANAGED_FLAG_SOURCE[canon] || 'the slot/model configuration';
+  const rest = offenders.length > 1 ? ` (also managed: ${offenders.slice(1).join(', ')})` : '';
+  return `${first} is computed by hal0 and can't be set here — it comes from ${where}. Remove it.${rest}`;
+}
+function hardwareFlagError(offenders) {
+  const first = offenders[0];
+  const rest = offenders.length > 1 ? ` (also: ${offenders.slice(1).join(', ')})` : '';
+  return `${first} is hardware — it belongs on the slot (device · NGL · THREADS grid), not the profile. Remove it.${rest}`;
+}
+
 function validateForm(form, existing) {
   const errs = {};
   const name = (form.name || '').trim();
@@ -212,6 +233,16 @@ function validateForm(form, existing) {
   else if (existing.includes(name)) errs.name = `“${name}” already exists`;
   // spec-hw-slot-ownership §3: profiles no longer carry an image — only a name
   // + device-agnostic tune. Image lives on the runner (RUNNER_IMAGES[binary]).
+  // Flag-ownership screens (§21.7 managed + §5 slot-hardware) — mirror the
+  // server hard-reject inline so the save never surfaces the 400. Hardware
+  // first so -ngl (in both sets) gets the "belongs on the slot" message.
+  const flagsText = form.flags || '';
+  const quoteErr = tokenizeFlags(flagsText).error;
+  const hw = quoteErr ? [] : findSlotHardwareFlags(flagsText);
+  const managed = quoteErr ? [] : findManagedFlags(flagsText);
+  if (quoteErr) errs.flags = quoteErr;
+  else if (hw.length) errs.flags = hardwareFlagError(hw);
+  else if (managed.length) errs.flags = managedFlagError(managed);
   return errs;
 }
 
@@ -363,10 +394,13 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
             placeholder="FP4 · Q4_K_M …" data-testid="pf-input-quant" />
         </FormRow>
 
-        <FormRow label="Flags" sub="appended to the run command">
-          <textarea className="pf-input mono pf-textarea" value={form.flags || ''}
-            onChange={e => set('flags', e.target.value)} rows={3} placeholder="--flash-attn on -ngl 999"
-            data-testid="pf-input-flags" />
+        <FormRow label="Flags" sub="appended to the run command"
+          error={show('flags') ? errs.flags : null}>
+          <textarea className={'pf-input mono pf-textarea' + (show('flags') && errs.flags ? ' err' : '')}
+            value={form.flags || ''}
+            onChange={e => set('flags', e.target.value)} onBlur={() => touch('flags')}
+            rows={3} placeholder="-fa on --jinja -b 2048 -ub 512"
+            aria-invalid={!!(show('flags') && errs.flags)} data-testid="pf-input-flags" />
         </FormRow>
 
         <FormRow label="MTP" sub="Multi-Token Prediction speculative decode">
