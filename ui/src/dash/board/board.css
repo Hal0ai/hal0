@@ -335,6 +335,7 @@
 .b-drawer .msg-b { border: 1px solid var(--line); border-radius: var(--rad-lg); padding: 10px 13px; font-size: 13px; line-height: 1.55; color: var(--fg); text-wrap: pretty; background: var(--bg); }
 .b-drawer .msg.operator .msg-b { background: var(--accent-soft); border-color: var(--accent-line); }
 .b-drawer .msg.agent .msg-b { background: var(--bg-2); }
+.b-drawer .msg-retry { display: block; margin-top: 8px; font-size: 11px; padding: 3px 10px; }
 .b-drawer .msg-refs { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .b-drawer .msg-ref { display: inline-flex; align-items: center; gap: 6px; font-family: var(--jbm); font-size: 10.5px; color: var(--fg-2); border: 1px solid var(--line-strong); border-radius: var(--rad-sm); padding: 2px 7px; cursor: pointer; background: var(--bg-1); }
 .b-drawer .msg-ref:hover { border-color: var(--accent-line); color: var(--accent); }
