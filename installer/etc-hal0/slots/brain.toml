@@ -31,8 +31,19 @@
 #     slot stays model-less and the install still succeeds — a grey tile,
 #     not a crash loop.
 #
-# The previous seed pinned `MiniCPM5-1B-Agentic-Tooluse`, an id no registry
-# or curated entry ever defined, so it could only 404 at first use.
+# WHAT REPLACED WHAT — the previous seed pinned `MiniCPM5-1B-Agentic-Tooluse`.
+# That is a REAL, PULLABLE model: the public GGUF repack of the upstream
+# tool-use base at ewinregirgojr/MiniCPM5-1B-Agentic-Tooluse-GGUF
+# (`...Nemotron-DPO.F16.gguf`, 2,166,552,576 B, anonymous read). Moving to the
+# `Hal0ai/hal0-brain-sft-ROCmFPX-GGUF` variants is an UPGRADE, not a repair:
+# from the upstream base in F16-only, to hal0's own SFT with quants matched to
+# the detected hardware. Two caveats the old pin still had, and which are why
+# the id does not simply stay here:
+#   * it is not in the SHIPPED curated catalogue (registry/curated.py), so a
+#     fresh box has no coordinates for it until something scans or adds it —
+#     it resolves on boxes whose registry already carries the row, not on a
+#     box straight out of install.sh;
+#   * it is F16-only, so a ROCmFPX box gets no benefit from the quants.
 #
 # Port 8089: 8088 belongs to the flm seed.
 #

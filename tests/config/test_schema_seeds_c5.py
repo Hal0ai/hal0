@@ -103,10 +103,8 @@ def test_seed_slot_ports_are_mutually_unique() -> None:
 
 #: Seeds the clean-seed invariant applies to — every operator-facing slot.
 #: ``brain`` is included as of v1.0: it used to be the one exception (#1258
-#: pinned a 1B model so the steward "worked out of the box"), but the pinned id
-#: ``MiniCPM5-1B-Agentic-Tooluse`` was never defined by any registry or curated
-#: entry, so it could only 404 at first use. The steward's readiness now comes
-#: from the installer actually pulling the weights — see
+#: pinned a 1B model so the steward "worked out of the box"). The steward's
+#: readiness now comes from the installer actually pulling the weights — see
 #: test_brain_seed_defers_its_model_to_the_installer.
 _CLEAN_SEED_SLOTS = sorted(set(STATIC_SEED_SLOTS) | {"qwen3tts"})
 
@@ -130,16 +128,27 @@ def test_brain_seed_defers_its_model_to_the_installer() -> None:
     is what makes it ready (v1.0).
 
     #1258 pinned ``MiniCPM5-1B-Agentic-Tooluse`` here so the dashboard's
-    sidebar steward chat would work on a fresh box. It didn't: no registry row
-    and no curated entry ever defined that id, so the pin could only 404 at
-    first use — and because model-presence IS the activation signal (#1369), a
-    pin written before any bytes exist on disk is exactly the start-before-model
-    race #1108 closed.
+    sidebar steward chat would work on a fresh box. That id is a real,
+    anonymously-pullable model (the public GGUF repack of the upstream
+    tool-use base, ``ewinregirgojr/MiniCPM5-1B-Agentic-Tooluse-GGUF``), so
+    this is NOT a dangling-reference fix. Two things were still wrong with
+    pinning it HERE:
 
-    So the seed ships model-less and ``install.sh``'s "Brain model" step pulls
-    the weights and stamps ``[model].default`` once they land
+    * the id is absent from the SHIPPED curated catalogue, so a fresh box —
+      the only box this seed file ever lands on first — has no coordinates to
+      resolve it with;
+    * a pin written before any bytes exist on disk is exactly the
+      start-before-model race #1108 closed, because model-presence IS the
+      activation signal (#1369). True of ANY id, pullable or not.
+
+    Moving to the ``Hal0ai/hal0-brain-sft-ROCmFPX-GGUF`` variants is
+    separately an upgrade: hal0's own SFT instead of the upstream base, with
+    a quant matched to the detected hardware instead of F16 for everyone.
+
+    So the seed ships model-less and ``install.sh``'s brain step pulls the
+    weights and stamps ``[model].default`` once they land
     (:mod:`hal0.install.brain_model`). This test pins BOTH halves of that
-    contract: no phantom id in the seed, and a genuinely pullable curated id for
+    contract: no id in the seed, and a genuinely pullable curated id for
     either hardware class the installer can land on.
     """
     from hal0.install.brain_model import (

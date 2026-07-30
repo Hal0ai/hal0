@@ -6,7 +6,7 @@ WORK out of the box instead of shipping as a grey model-less tile. This module
 is what makes that true — ``installer/install.sh`` runs it as
 ``python -m hal0.install.brain_model`` right after the first-run seeding step.
 
-Three properties are deliberate:
+Four properties are deliberate:
 
 **Never fatal.** No network, no disk, an unreadable ``hardware.json``, a
 missing curated entry — every failure path returns a non-zero exit code with a
@@ -27,6 +27,12 @@ download a gigabyte only to crash-loop the container.
 ``[meta].pull_failed`` when they don't. Since model-presence is the activation
 signal (#1369), that is exactly the "seed it model-less on failure" behaviour —
 no bespoke rollback needed here.
+
+**Idempotent across install.sh re-runs.** The pull engine has no
+already-on-disk short circuit — ``run_pull``/``_download_one`` stream from HF
+unconditionally, and a COMPLETED pull leaves no ``.part`` for the resume path
+to reuse. :func:`already_pulled` is the guard that stops a re-run from
+re-downloading gigabytes it already has.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 
 from hal0.config.schema import HardwareInfo
 
@@ -100,6 +107,63 @@ def brain_model_for_hardware(hw: HardwareInfo, *, override: str | None = None) -
     return BRAIN_MODEL_ROCMFPX if rocmfpx_capable(hw) else BRAIN_MODEL_PORTABLE
 
 
+def already_pulled(model_id: str, *, capability: str = "chat") -> Path | None:
+    """Path of a COMPLETE, existing pull of exactly *model_id*, else ``None``.
+
+    Why this exists: neither :func:`hal0.registry.pull.run_pull` nor
+    :func:`~hal0.install.orchestrate.run_pull_and_activate` checks whether the
+    destination already holds the file. ``_download_one`` streams from HF
+    unconditionally, and its ``.part`` resume is keyed on ``(model_id,
+    filename)`` — a completed pull leaves no ``.part``, so there is nothing to
+    resume from. Without this guard, every re-run of ``install.sh`` on a box
+    that already has the brain re-downloads it in full, which quietly
+    contradicts the documented "re-running install.sh is safe/idempotent"
+    contract.
+
+    The test is provenance, not just presence: the ``meta.json`` sidecar
+    :func:`~hal0.registry.pull.write_model_meta` writes beside every
+    capability-grouped pull must name THIS ``curated_id`` and ``hf_file``, and
+    the recorded ``size_bytes`` must match what is on disk. A truncated,
+    hand-replaced, or differently-sourced file therefore re-pulls rather than
+    being silently trusted — the failure mode this guard must not create is
+    "install completes, slot activates, container crash-loops on a bad file".
+
+    SCOPE — this dedupes an id against ITSELF, not against equivalent bytes
+    under a different id. hal0's store is id-addressed
+    (``<store>/<capability>/<id>/model.gguf``) and nothing is content-addressed,
+    so e.g. a pre-existing ``hal0-brain-sft`` row does NOT satisfy a
+    ``hal0-brain-sft-f16`` pull even when the artefact is identical. Fixing
+    that means content-addressing the store, which is a registry-wide design
+    change, not an installer one.
+    """
+    from hal0.registry.curated import get_curated
+
+    # Private imports from sibling modules, same convention as the
+    # `_build_offline_deps` import in main() below: these are the exact
+    # functions run_pull would use to place the file, so re-deriving the path
+    # any other way would be a second resolver that can drift from the writer.
+    from hal0.registry.pull import _final_path_for_entry, read_model_meta
+
+    curated = get_curated(model_id)
+    if curated is None:
+        return None
+    try:
+        dest: Path = _final_path_for_entry(model_id, curated.hf_file, None, capability)
+        if not dest.is_file():
+            return None
+        meta = read_model_meta(dest)
+        if not meta:
+            return None
+        if meta.get("curated_id") != model_id or meta.get("hf_file") != curated.hf_file:
+            return None
+        size = meta.get("size_bytes")
+        if isinstance(size, int) and size > 0 and dest.stat().st_size != size:
+            return None
+    except OSError:
+        return None
+    return dest
+
+
 def _load_hardware() -> HardwareInfo:
     """Prefer the ``hardware.json`` the first-run seeding step just wrote.
 
@@ -151,6 +215,16 @@ async def provision_brain_model(
     if hasattr(registry, "ensure"):
         registry.ensure(model_id)
 
+    # Already on disk from an earlier install run? Bind it and stop. Nothing
+    # below dedupes, so without this a re-run re-downloads the whole file.
+    existing = already_pulled(model_id)
+    if existing is not None:
+        from hal0.install.orchestrate import _activate_slot_model
+
+        log.info("install.brain_model_already_present id=%s path=%s", model_id, existing)
+        await _activate_slot_model(slot_manager, BRAIN_SLOT_NAME, model_id, failed=False)
+        return model_id
+
     plan = PullPlan(
         model_id=model_id,
         job=make_job(model_id),
@@ -198,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
             else "no ROCm/Vulkan device — using the portable F16 build (stock llama.cpp)"
         )
         print(f"  brain model: {chosen} ({why})")
+        if already_pulled(chosen) is not None:
+            print("  already on disk from an earlier run — binding it, no download")
         slot_manager, registry = _build_offline_deps()
         landed = asyncio.run(
             provision_brain_model(

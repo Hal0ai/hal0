@@ -332,3 +332,75 @@ def test_main_returns_zero_on_a_successful_pull(monkeypatch: pytest.MonkeyPatch)
     )
     _stub_run_pull(monkeypatch, state="completed")
     assert main([]) == 0
+
+
+# ── re-run idempotence ──────────────────────────────────────────────────────
+# Shares brain_model.already_pulled. It matters MORE here: re-downloading
+# 15-31 GB because an operator re-ran install.sh and said yes twice is not a
+# small mistake.
+
+
+@pytest.fixture()
+def store(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    import hal0.config.store as store_mod
+
+    monkeypatch.setattr(store_mod, "store_root", lambda: tmp_path)
+    return tmp_path
+
+
+def _place(model_id: str) -> None:
+    import json
+
+    from hal0.registry.pull import _final_path_for_entry
+
+    curated = get_curated(model_id)
+    assert curated is not None
+    dest = _final_path_for_entry(model_id, curated.hf_file, None, "chat")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"weights")
+    (dest.parent / "meta.json").write_text(
+        json.dumps(
+            {
+                "curated_id": model_id,
+                "hf_repo": curated.hf_repo,
+                "hf_file": curated.hf_file,
+                "size_bytes": len(b"weights"),
+                "capability": "chat",
+            }
+        )
+    )
+
+
+def test_the_offer_stops_quoting_a_download_once_the_bytes_are_there(store) -> None:
+    """Quoting "31.41 GB download" for a file already on disk would scare an
+    operator out of a free, instant bind."""
+    _place(AGENT_MODEL_QUALITY)
+    offer = describe_offer(_strix(128 * 1024))
+    assert offer is not None
+    model_id, _, sentence = offer.partition("\t")
+    assert model_id == AGENT_MODEL_QUALITY
+    assert "already downloaded" in sentence
+    assert "GB download" not in sentence
+
+
+def test_a_fresh_box_still_gets_the_size(store) -> None:
+    offer = describe_offer(_strix(128 * 1024))
+    assert offer is not None and "GB download" in offer
+
+
+def test_provisioning_reuses_an_existing_pull_without_downloading(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hal0.registry.pull as pull_mod
+
+    async def _explode(job, **kwargs):
+        raise AssertionError("run_pull must not be called when the file is already on disk")
+
+    monkeypatch.setattr(pull_mod, "run_pull", _explode)
+    _place(AGENT_MODEL_QUALITY)
+    sm, reg = _FakeSlotManager(), _FakeRegistry()
+    landed = asyncio.run(
+        provision_agent_model(hw=_strix(128 * 1024), slot_manager=sm, registry=reg)
+    )
+    assert landed == AGENT_MODEL_QUALITY
+    assert sm.updates == [(AGENT_SLOT_NAME, {"model": {"default": AGENT_MODEL_QUALITY}})]

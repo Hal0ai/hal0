@@ -74,9 +74,7 @@ def _run_scaffold_pass(home: Path) -> None:
     from hal0.registry.store import ModelRegistry
     from hal0.slots.manager import SlotManager
 
-    hw = HardwareInfo(
-        platform="strix-halo", gpus=[GPUInfo(vendor="amd", compute_capable=True)]
-    )
+    hw = HardwareInfo(platform="strix-halo", gpus=[GPUInfo(vendor="amd", compute_capable=True)])
     sel = build_auto_selections(
         hw,
         storage_dir=str(home / "models"),

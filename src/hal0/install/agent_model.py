@@ -42,7 +42,7 @@ import os
 import sys
 
 from hal0.config.schema import HardwareInfo
-from hal0.install.brain_model import rocmfpx_capable
+from hal0.install.brain_model import already_pulled, rocmfpx_capable
 
 log = logging.getLogger(__name__)
 
@@ -140,6 +140,14 @@ def describe_offer(hw: HardwareInfo, *, override: str | None = None) -> str | No
     curated = get_curated(model_id)
     if curated is None:  # pragma: no cover — guarded by test_agent_model.py
         return None
+    if already_pulled(model_id) is not None:
+        # Re-run of install.sh on a box that already has these bytes. Quoting
+        # a multi-gigabyte "download" for a file that is sitting on disk would
+        # scare an operator out of a free, instant bind.
+        return (
+            f"{model_id}\t{curated.display_name} — already downloaded; "
+            "binding it to the agent slot costs nothing"
+        )
     return (
         f"{model_id}\t{curated.display_name} — {curated.size_gb:.2f} GB download "
         f"(~{curated.vram_gb_min:.0f} GB memory to serve)"
@@ -181,6 +189,17 @@ async def provision_agent_model(
 
     if hasattr(registry, "ensure"):
         registry.ensure(model_id)
+
+    # Already on disk? Bind and stop — see brain_model.already_pulled. This
+    # matters more here than for the brain: re-downloading 15-31 GB because an
+    # operator re-ran install.sh and said yes twice is not a small mistake.
+    existing = already_pulled(model_id)
+    if existing is not None:
+        from hal0.install.orchestrate import _activate_slot_model
+
+        log.info("install.agent_model_already_present id=%s path=%s", model_id, existing)
+        await _activate_slot_model(slot_manager, AGENT_SLOT_NAME, model_id, failed=False)
+        return model_id
 
     plan = PullPlan(
         model_id=model_id,
@@ -251,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
         hw = _load_hardware()
         chosen = agent_model_for_hardware(hw, override=override)
         print(f"  agent model: {chosen}")
+        if chosen and already_pulled(chosen) is not None:
+            print("  already on disk from an earlier run — binding it, no download")
         slot_manager, registry = _build_offline_deps()
         landed = asyncio.run(
             provision_agent_model(

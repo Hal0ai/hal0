@@ -230,6 +230,10 @@ meanwhile. An optional model can never fail a platform install.
 
 Set `HAL0_SKIP_BRAIN_MODEL=1` to skip the download entirely.
 
+Re-running the installer does **not** re-download it. A model already on disk
+from an earlier run is recognised by its `meta.json` provenance sidecar and
+simply re-bound; only a missing, truncated, or foreign file is pulled again.
+
 ## The agent model (optional)
 
 The brain can *chat* the moment the install finishes. It cannot **call tools**

@@ -5,8 +5,11 @@ Covers the three things that can silently break the platform steward:
 * the quant choice — a Q8/Q4 build carries custom GGML tensor type ids that
   stock llama.cpp REJECTS, so pulling one onto a CPU-only box means a gigabyte
   downloaded for a container that can never start;
-* the pullability of whatever id gets chosen (the old ``brain.toml`` pinned
-  ``MiniCPM5-1B-Agentic-Tooluse``, which no catalogue ever defined); and
+* the pullability of whatever id gets chosen. (The old ``brain.toml`` pinned
+  ``MiniCPM5-1B-Agentic-Tooluse`` — a real, anonymously-pullable model, but one
+  the SHIPPED curated catalogue does not define, so a fresh box could not
+  resolve it. Whatever the installer picks must be resolvable from code
+  alone.); and
 * the fail-soft contract — a failed pull must leave the slot MODEL-LESS and
   never abort the install.
 
@@ -30,6 +33,7 @@ from hal0.install.brain_model import (
     BRAIN_MODEL_ROCMFPX,
     BRAIN_MODEL_SMALL,
     BRAIN_SLOT_NAME,
+    already_pulled,
     brain_model_for_hardware,
     main,
     provision_brain_model,
@@ -84,7 +88,13 @@ def test_override_selects_a_known_variant() -> None:
 
 
 def test_unknown_override_falls_back_instead_of_404ing() -> None:
-    """A typo'd HAL0_BRAIN_MODEL must not become a doomed pull."""
+    """An off-catalogue HAL0_BRAIN_MODEL must not become a doomed pull.
+
+    ``MiniCPM5-1B-Agentic-Tooluse`` is deliberately the example: it exists
+    upstream and is anonymously pullable, but the shipped catalogue has no row
+    for it, so ``get_curated`` returns None and the installer would have no
+    coordinates. Falling back beats attempting it.
+    """
     hw = _hw()
     assert brain_model_for_hardware(hw, override="MiniCPM5-1B-Agentic-Tooluse") == (
         BRAIN_MODEL_PORTABLE
@@ -140,7 +150,7 @@ def _stub_run_pull(monkeypatch: pytest.MonkeyPatch, *, state: str, exc: Exceptio
     """
     import hal0.registry.pull as pull_mod
 
-    async def _fake(job, **kwargs):  # noqa: ANN001, ANN003
+    async def _fake(job, **kwargs):
         if exc is not None:
             raise exc
         job.state = state
@@ -217,3 +227,136 @@ def test_main_returns_zero_on_a_successful_pull(monkeypatch: pytest.MonkeyPatch)
     )
     _stub_run_pull(monkeypatch, state="completed")
     assert main() == 0
+
+
+# ── re-run idempotence: never re-download what is already on disk ───────────
+#
+# Neither run_pull nor run_pull_and_activate checks the destination before
+# streaming, and a COMPLETED pull leaves no `.part` for the resume path to find
+# — so without `already_pulled` every `install.sh` re-run re-downloads the
+# whole model, contradicting the documented "re-running install.sh is safe"
+# contract. These pin the guard AND its deliberate limits.
+
+
+@pytest.fixture()
+def store(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Point the pull-destination resolver at a tmp store."""
+    import hal0.config.store as store_mod
+
+    monkeypatch.setattr(store_mod, "store_root", lambda: tmp_path)
+    return tmp_path
+
+
+def _place(store_root, model_id: str, *, meta: dict | None = None, body: bytes = b"weights"):
+    """Write a model file (and its meta.json sidecar) where a pull would."""
+    import json
+
+    from hal0.registry.pull import _final_path_for_entry
+
+    curated = get_curated(model_id)
+    assert curated is not None
+    dest = _final_path_for_entry(model_id, curated.hf_file, None, "chat")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(body)
+    if meta is None:
+        meta = {
+            "curated_id": model_id,
+            "hf_repo": curated.hf_repo,
+            "hf_file": curated.hf_file,
+            "sha256": None,
+            "size_bytes": len(body),
+            "quant": None,
+            "capability": "chat",
+        }
+    if meta is not False:  # type: ignore[comparison-overlap]
+        (dest.parent / "meta.json").write_text(json.dumps(meta))
+    return dest
+
+
+def test_nothing_on_disk_is_not_already_pulled(store) -> None:
+    assert already_pulled(BRAIN_MODEL_PORTABLE) is None
+
+
+def test_a_complete_prior_pull_is_recognised(store) -> None:
+    dest = _place(store, BRAIN_MODEL_PORTABLE)
+    assert already_pulled(BRAIN_MODEL_PORTABLE) == dest
+
+
+def test_a_file_with_no_sidecar_is_not_trusted(store) -> None:
+    """Presence alone proves nothing about provenance — re-pull."""
+    _place(store, BRAIN_MODEL_PORTABLE, meta=False)  # type: ignore[arg-type]
+    assert already_pulled(BRAIN_MODEL_PORTABLE) is None
+
+
+def test_a_truncated_file_re_pulls(store) -> None:
+    """The failure this guard must never create: activating a slot on a
+    half-written file, which then crash-loops the container."""
+    _place(
+        store,
+        BRAIN_MODEL_PORTABLE,
+        meta={
+            "curated_id": BRAIN_MODEL_PORTABLE,
+            "hf_file": get_curated(BRAIN_MODEL_PORTABLE).hf_file,
+            "size_bytes": 999_999,
+        },
+    )
+    assert already_pulled(BRAIN_MODEL_PORTABLE) is None
+
+
+def test_a_sidecar_from_a_different_model_re_pulls(store) -> None:
+    _place(store, BRAIN_MODEL_PORTABLE, meta={"curated_id": "something-else", "hf_file": "x.gguf"})
+    assert already_pulled(BRAIN_MODEL_PORTABLE) is None
+
+
+def test_a_malformed_sidecar_re_pulls(store) -> None:
+    from hal0.registry.pull import _final_path_for_entry
+
+    curated = get_curated(BRAIN_MODEL_PORTABLE)
+    assert curated is not None
+    _place(store, BRAIN_MODEL_PORTABLE)
+    dest = _final_path_for_entry(BRAIN_MODEL_PORTABLE, curated.hf_file, None, "chat")
+    (dest.parent / "meta.json").write_text("{not json")
+    assert already_pulled(BRAIN_MODEL_PORTABLE) is None
+
+
+def test_an_unknown_id_is_never_already_pulled(store) -> None:
+    assert already_pulled("no-such-curated-id") is None
+
+
+def test_a_variant_on_disk_does_not_satisfy_a_sibling(store) -> None:
+    """Documented limit: the store is id-addressed, not content-addressed.
+
+    A box carrying the F16 build does NOT satisfy a Q8 pull — different id,
+    different directory, genuinely different bytes. The same mechanic is why a
+    pre-existing `hal0-brain-sft` row does not satisfy `hal0-brain-sft-f16`
+    even though the artefacts are the same size.
+    """
+    _place(store, BRAIN_MODEL_PORTABLE)
+    assert already_pulled(BRAIN_MODEL_ROCMFPX) is None
+
+
+def test_provisioning_reuses_an_existing_pull_without_downloading(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point: bind the slot, touch the network zero times."""
+    import hal0.registry.pull as pull_mod
+
+    async def _explode(job, **kwargs):
+        raise AssertionError("run_pull must not be called when the file is already on disk")
+
+    monkeypatch.setattr(pull_mod, "run_pull", _explode)
+    _place(store, BRAIN_MODEL_PORTABLE)
+    sm, reg = _FakeSlotManager(), _FakeRegistry()
+    landed = asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+    assert landed == BRAIN_MODEL_PORTABLE
+    assert sm.updates == [(BRAIN_SLOT_NAME, {"model": {"default": BRAIN_MODEL_PORTABLE}})]
+
+
+def test_provisioning_still_pulls_when_the_prior_file_is_untrustworthy(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_run_pull(monkeypatch, state="completed")
+    _place(store, BRAIN_MODEL_PORTABLE, meta=False)  # type: ignore[arg-type]
+    sm, reg = _FakeSlotManager(), _FakeRegistry()
+    landed = asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+    assert landed == BRAIN_MODEL_PORTABLE
