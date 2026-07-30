@@ -74,7 +74,7 @@ class FakeContainerProvider:
         self._present = present
         self._raise = raise_exc
 
-    def is_active(self, slot_name: str) -> bool:
+    def is_active(self, slot: Any) -> bool:
         if self._raise:
             raise RuntimeError("podman exploded")
         return self._active
@@ -82,7 +82,7 @@ class FakeContainerProvider:
     async def health(self, port: int) -> dict[str, Any]:
         return {"ok": self._healthy}
 
-    def running_image(self, slot_name: str) -> str | None:
+    def running_image(self, slot: Any) -> str | None:
         return self._running_image
 
     def image_present(self, image: str) -> bool:
@@ -628,8 +628,11 @@ class MapContainerProvider(FakeContainerProvider):
         super().__init__(**kw)
         self._active_map = active_map
 
-    def is_active(self, slot_name: str) -> bool:
-        return self._active_map.get(slot_name, False)
+    def is_active(self, slot: Any) -> bool:
+        # Production passes the slot CONFIG (#1417 — the provider derives the
+        # id-keyed instance token from it); index the per-slot map by name.
+        name = str(slot.get("name") or "") if isinstance(slot, dict) else str(slot)
+        return self._active_map.get(name, False)
 
 
 def _npu_anchor_cfg(**over: Any) -> dict[str, Any]:

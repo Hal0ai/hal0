@@ -51,6 +51,7 @@ from typing import Any
 
 from hal0.model_meta import device_to_backend
 from hal0.slots.activation import claims_npu_anchor, npu_modality_active
+from hal0.slots.naming import slot_instance_token, slot_unit_name
 from hal0.slots.reaper import is_pinned as reaper_is_pinned
 
 log = logging.getLogger(__name__)
@@ -447,8 +448,10 @@ async def container_enrichment(
 
         try:
             cp = _resolve_container_provider(provider)
-            # 1) systemctl is-active (synchronous — run in executor)
-            active = await asyncio.get_event_loop().run_in_executor(None, cp.is_active, name)
+            # 1) systemctl is-active (synchronous — run in executor). The CONFIG
+            # goes down, not the name: the unit is keyed by the slot's instance
+            # token, which is the durable id on a post-migration box (#1417).
+            active = await asyncio.get_event_loop().run_in_executor(None, cp.is_active, cfg)
             if active:
                 # 2) /health probe on the slot port to distinguish running vs starting
                 port = _cfg_port(cfg)
@@ -468,7 +471,11 @@ async def container_enrichment(
                     import subprocess
 
                     result = subprocess.run(
-                        ["systemctl", "is-active", f"hal0-slot@{name}.service"],
+                        # Through the naming seam, not an f-string on the name:
+                        # this discriminator was the last place that hardcoded
+                        # a name-keyed unit (#1417), so on an id-keyed box it
+                        # reported every slot "stopped" and never "crashed".
+                        ["systemctl", "is-active", slot_unit_name(slot_instance_token(cfg))],
                         capture_output=True,
                         timeout=5,
                     )
@@ -544,8 +551,11 @@ async def container_enrichment(
             from hal0.providers.container import _image_mismatch
 
             cp = _resolve_container_provider(provider)
+            # By CONFIG: the container is named after the instance token
+            # (#1417) — a bare name inspected a container that never exists on
+            # an id-keyed box, leaving the image backend-of-record inert.
             running_image = await asyncio.get_event_loop().run_in_executor(
-                None, cp.running_image, name
+                None, cp.running_image, cfg
             )
         except Exception:
             running_image = None

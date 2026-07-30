@@ -51,6 +51,7 @@ from hal0.dispatcher._capability_resolve import (
     LegacyResolutionFailed,
     resolve_by_capability,
 )
+from hal0.dispatcher.lane_pin import lane_slot_pin, rank_slot_name
 from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
 from hal0.slots.state import SlotCrashLooping, SlotState
@@ -490,13 +491,20 @@ class Dispatcher:
             original_model = raw_model.strip()
         model_id = original_model or self._default_for_path(path)
         streaming = bool(body.get("stream"))
+        # The ``hal0/<slot>`` lane the caller named, if the route layer resolved
+        # one (#1418). The alias rewrite reduces the lane to a bare model id, so
+        # without this the dispatcher cannot tell which of two slots sharing that
+        # id the request actually asked for.
+        lane_slot = lane_slot_pin(request)
 
         # ── Step 0: container-slot preemption ────────────────────────────
         # A loaded container slot (kind="remote" + slot_name) is the
         # authoritative server for the models it advertises, and must win
         # over a stale/generic registry binding for the same id (cutover
         # #662). Only fires on a warm cache hit for a container remote.
-        for upstream in self._upstreams_in_priority_order():
+        # Health-ordered (#1418): with two container slots advertising one
+        # model, the live one wins over an ERROR-parked sibling.
+        for upstream in self._upstreams_in_priority_order(lane_slot):
             if _container_slot_name_of(upstream) and model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
@@ -559,7 +567,21 @@ class Dispatcher:
                         error=str(exc),
                     )
 
-            if online:
+            if online and self._outranked_by_a_healthier_slot(upstream, model_id, lane_slot):
+                # #1418: the binding is stale-by-health. Two slots can advertise
+                # one model id; committing to the bound one because it is
+                # "online" sent every request for that model at an ERROR-parked
+                # slot (whose next load could only fail again — a hard
+                # ``slot.load_failed`` 502) while its healthy sibling was
+                # already generating. Fall through to the health-ordered
+                # passthrough step rather than to the readiness gate.
+                log.info(
+                    "registry binding outranked by a healthier slot; falling through",
+                    upstream=upstream.name,
+                    model=model_id,
+                    lane_slot=lane_slot or None,
+                )
+            elif online:
                 # Slot-as-truth body remap: if the requested model id isn't
                 # in the slot's advertised set, rewrite to what the slot
                 # actually has loaded (required for strict backends like vLLM).
@@ -584,18 +606,19 @@ class Dispatcher:
                 )
                 self._log_decision(call, t0, cache_state="warm" if advertised else "probed")
                 return call
-            # Registry-bound slot offline → fall through.
-            log.info(
-                "registry binding offline; falling through",
-                upstream=upstream.name,
-                model=model_id,
-            )
+            else:
+                # Registry-bound slot offline → fall through.
+                log.info(
+                    "registry binding offline; falling through",
+                    upstream=upstream.name,
+                    model=model_id,
+                )
 
         # ── Step 2: passthrough on warm caches ───────────────────────────
         # Backend-aware loading for slot-backed models is handled at the
         # route layer before dispatch (#430), independent of which upstream
         # wins here.
-        for upstream in self._upstreams_in_priority_order():
+        for upstream in self._upstreams_in_priority_order(lane_slot):
             if model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
@@ -616,12 +639,12 @@ class Dispatcher:
         # ── Step 3: cold-cache prefetch ──────────────────────────────────
         cold_remotes = [
             u
-            for u in self._upstreams_in_priority_order()
+            for u in self._upstreams_in_priority_order(lane_slot)
             if u.kind == "remote" and not self._cached_models(u.name)
         ]
         if cold_remotes:
             await self._cold_prefetch(cold_remotes)  # TIER2 + TIER3
-            for upstream in self._upstreams_in_priority_order():
+            for upstream in self._upstreams_in_priority_order(lane_slot):
                 if model_id in self._cached_models(upstream.name):
                     call = UpstreamCall(
                         upstream_name=upstream.name,
@@ -1211,14 +1234,79 @@ class Dispatcher:
         # tuple natively, this method may be monkey-patched in tests.
         return (route, model_id)
 
-    def _upstreams_in_priority_order(self) -> list[Upstream]:
+    def _outranked_by_a_healthier_slot(
+        self,
+        bound: Upstream,
+        model_id: str,
+        lane_slot: str = "",
+    ) -> bool:
+        """Does another upstream advertising ``model_id`` beat ``bound`` on health?
+
+        The registry binds a model id to ONE upstream, but several slots can
+        serve that id (#1418). This is the "is the binding stale-by-health"
+        question: True only when some other upstream already advertises the same
+        model AND its slot ranks strictly better (a serving slot over an
+        ERROR-parked one, or the caller's own ``hal0/<slot>`` lane). Warm-cache
+        evidence only — never probes, so the hot path is unchanged.
+
+        False whenever there is nothing to compare: no slot manager, a bound
+        remote with no slot behind it, or a single-candidate model. The
+        single-slot case therefore keeps its existing behaviour, including the
+        readiness gate's retry/recover envelope.
+        """
+        if self._slot_manager is None:
+            return False
+        bound_slot = _slot_of(bound)
+        if not bound_slot:
+            return False
+        bound_key = rank_slot_name(self._slot_manager, bound_slot, lane_slot=lane_slot)
+        for upstream in self._upstreams_in_priority_order(lane_slot):
+            if upstream.name == bound.name:
+                continue
+            slot_name = _slot_of(upstream)
+            if not slot_name or model_id not in self._cached_models(upstream.name):
+                continue
+            if rank_slot_name(self._slot_manager, slot_name, lane_slot=lane_slot) < bound_key:
+                return True
+        return False
+
+    def _upstreams_in_priority_order(self, lane_slot: str = "") -> list[Upstream]:
+        """Routable upstreams, most-preferred first.
+
+        Registration order is the base priority. Slot-backed upstreams are then
+        re-ordered by the health of the slot behind them (#1418): two slots can
+        advertise the SAME model id, and picking the first-registered one sent
+        every request for that model at an ERROR-parked slot while its healthy
+        sibling was serving. A ``lane_slot`` pin (the ``hal0/<slot>`` the caller
+        actually named) wins over both. Non-slot upstreams keep their relative
+        order and are never demoted — this only breaks ties the old ordering
+        resolved arbitrarily.
+        """
         try:
             # Disabled upstreams are invisible to routing (operator
             # kill-switch). getattr-guard keeps cross-subtree stubs working.
-            return [u for u in self._upstreams.list() if getattr(u, "enabled", True)]
+            upstreams = [u for u in self._upstreams.list() if getattr(u, "enabled", True)]
         except NotImplementedError:
             # Cross-subtree stub fallback.
             return []
+        if self._slot_manager is None:
+            return upstreams
+        # Permute ONLY the slot-backed entries, in place among the positions
+        # they already occupy: a genuine remote (OpenAI, OpenRouter…) keeps its
+        # exact priority slot, so this can only change which of two slots wins.
+        positions = [i for i, u in enumerate(upstreams) if _slot_of(u)]
+        if len(positions) < 2:
+            return upstreams
+        ranked = sorted(
+            # (health/lane key, original position) — position is the final
+            # tiebreak, so equally-healthy slots keep registration order.
+            (rank_slot_name(self._slot_manager, _slot_of(upstreams[i]), lane_slot=lane_slot), i)
+            for i in positions
+        )
+        out = list(upstreams)
+        for position, (_key, source) in zip(positions, ranked, strict=True):
+            out[position] = upstreams[source]
+        return out
 
     def _build_headers(self, request: Request, upstream: Upstream) -> dict[str, str]:
         """Forward client headers minus hop-by-hop, plus upstream auth slot.
@@ -1353,6 +1441,15 @@ def _container_slot_name_of(upstream: Upstream) -> str:
         return ""
     # slot_name is set only for container-backed remotes (see _register_container_upstream)
     return upstream.slot_name or ""
+
+
+def _slot_of(upstream: Upstream) -> str:
+    """The local slot behind ``upstream`` — container-backed or ``kind="slot"``.
+
+    ``""`` for a genuine remote. One accessor for "is there a slot whose health
+    should influence selection here" (#1418).
+    """
+    return _container_slot_name_of(upstream) or _slot_name_of(upstream)
 
 
 def _join_url(upstream_url: str, request_path: str) -> str:
