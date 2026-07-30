@@ -153,6 +153,80 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# ── time-window filtering + list cursors (#1471) ─────────────────────────────
+
+
+def _parse_stamp(value: Any) -> datetime | None:
+    """Best-effort ISO-8601 → aware datetime; ``None`` when unparseable.
+
+    Accepts the bare dates callers actually type (``2026-05-01``) as well as
+    full timestamps, and normalises a naive value to UTC so comparisons against
+    Hindsight's aware ``mentioned_at`` never raise.
+    """
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _within_window(item: dict[str, Any], *, before: Any = None, after: Any = None) -> bool:
+    """Is ``item``'s timestamp inside ``[after, before]``?
+
+    Bounds are inclusive-of-unknown: an item whose timestamp will not parse is
+    KEPT rather than dropped, because silently discarding a memory over a
+    formatting quirk is worse than returning one the caller can see and judge.
+    An unparseable BOUND is ignored for the same reason (a typo'd filter must
+    not look like an empty bank).
+    """
+    stamp = _parse_stamp(item.get("timestamp"))
+    if stamp is None:
+        return True
+    lower = _parse_stamp(after)
+    if lower is not None and stamp < lower:
+        return False
+    upper = _parse_stamp(before)
+    return not (upper is not None and stamp > upper)
+
+
+def _encode_cursor(bank: str, offset: int) -> str:
+    """``bank@offset`` — opaque to callers, cheap to read in a log line.
+
+    Hindsight's ``/memories/list`` already supports ``offset``, so a cursor
+    needs to carry nothing else. The bank is part of it because a read can fan
+    out across several banks and a page may stop partway through one.
+    """
+    return f"{bank}@{offset}"
+
+
+def _decode_cursor(cursor: str | None, banks: list[str]) -> tuple[str | None, int]:
+    """Inverse of :func:`_encode_cursor`, clamped to ``banks``.
+
+    Returns ``(bank, offset)``, or ``(None, 0)`` when the cursor names a bank
+    this caller may no longer read — a revoked namespace must not be walkable
+    with a cursor minted while access was still granted. A malformed cursor
+    restarts from the first bank rather than erroring: a paging token is not
+    worth a 500, and restarting is visible to the caller.
+    """
+    if not banks:
+        return None, 0
+    if not cursor:
+        return banks[0], 0
+    bank, _, raw_offset = str(cursor).rpartition("@")
+    if not bank or bank not in banks:
+        return (None, 0) if bank else (banks[0], 0)
+    try:
+        offset = max(0, int(raw_offset))
+    except ValueError:
+        offset = 0
+    return bank, offset
+
+
 def _http_status(exc: Exception) -> int | None:
     """Status code of an httpx.HTTPStatusError-shaped exception, else None.
 
@@ -659,16 +733,58 @@ class HindsightProvider(MemoryProvider):
         mode: str = "vector",
         client_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        # search delegates to recall (back-compat surface); the fan-out lives
-        # in recall (Task P1-3). limit is honored after the merge.
+        """Search, honouring the time window the whole surface advertises (#1471).
+
+        ``before``/``after`` used to be accepted and then dropped on the floor:
+        the REST route documents and forwards them, the MCP schema exposes
+        them, and ``PgVectorProvider`` — the degrade fallback — applies them,
+        so a caller filtering by time window silently got UNFILTERED results
+        from the durable default engine and filtered ones from the fallback.
+
+        Hindsight's ``recall`` has no time-range parameter (its
+        ``query_timestamp`` is an "as of when" for temporal reasoning, NOT a
+        range filter — mapping a window onto it would change what the query
+        means), so the window is applied here, on the merged result. To keep
+        ``limit`` honest under filtering we over-fetch the token budget rather
+        than the item count, then cut after filtering.
+
+        ``mode`` is rejected rather than ignored — see :meth:`_reject_mode`.
+        """
+        self._reject_mode(mode)
+        windowed = before is not None or after is not None
         out = await self.recall(
             query=query,
-            max_tokens=max(256, limit * 256),
+            # Over-fetch when a window will thin the result, so a filtered page
+            # can still fill `limit` instead of returning a short page.
+            max_tokens=max(256, limit * 256 * (4 if windowed else 1)),
             dataset=dataset,
             tags=tags,
             client_id=client_id,
         )
+        if windowed:
+            out = [item for item in out if _within_window(item, before=before, after=after)]
         return out[:limit]
+
+    @staticmethod
+    def _reject_mode(mode: str | None) -> None:
+        """Refuse a retrieval ``mode`` this engine cannot actually perform.
+
+        ``mode`` ("vector"|"graph"|"hybrid") is declared on the provider
+        protocol and exposed in the MCP tool schema, but nothing on this engine
+        ever consumed it — a caller explicitly asking for graph traversal got
+        plain vector recall and no indication of the substitution (#1471).
+        Hindsight builds its graph natively and exposes no traversal knob on
+        recall, so the honest answer is an error naming the engine, not a
+        silent downgrade. ``None``/``"vector"`` is the default path and stays
+        free of charge.
+        """
+        if mode in (None, "", "vector"):
+            return
+        raise ValueError(
+            f"retrieval mode {mode!r} is not supported by the Hindsight engine — "
+            "it serves vector recall and builds its graph natively, with no "
+            "per-query traversal control. Use mode='vector' (the default)."
+        )
 
     async def list_items(
         self,
@@ -677,23 +793,70 @@ class HindsightProvider(MemoryProvider):
         limit: int = 50,
         client_id: str | None = None,
     ) -> dict[str, Any]:
+        """Page through a bank, honouring ``cursor`` (#1471).
+
+        ``cursor`` used to be accepted and ignored: every call issued
+        ``offset=0`` and returned ``next_cursor=None``, so only the first
+        ``limit`` rows of a bank were reachable — on the live shared bank
+        that is the first page of 1629 facts, silently. The cursor now encodes
+        ``bank@offset`` (see :func:`_encode_cursor`), which is all Hindsight's
+        ``/memories/list`` needs since it already supports ``offset``.
+
+        Two ordering rules the old loop got wrong:
+
+        * The visibility filter runs BEFORE the page is cut, not after. It used
+          to break out of the bank loop on the RAW count, so a unified-mode
+          reader whose page was mostly other agents' private docs received
+          fewer than ``limit`` items even when more visible ones existed.
+        * Over-fetch per bank so a heavily-filtered page can still fill, and
+          only advertise a ``next_cursor`` when the bank actually reported more
+          rows behind the offset we consumed.
+        """
         banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
+        start_bank, offset = _decode_cursor(cursor, banks)
+        if start_bank is None:
+            return {"items": [], "next_cursor": None}
+
         items: list[dict[str, Any]] = []
-        for bank in banks:
+        next_cursor: str | None = None
+        # Walk banks from the cursor's bank onward, carrying its offset into
+        # the first one only — later banks start from the top.
+        for bank in banks[banks.index(start_bank) :]:
+            bank_offset = offset if bank == start_bank else 0
+            while len(items) < limit:
+                try:
+                    # Over-fetch: the ACL filter below may discard most of a page.
+                    fetch = max(limit * 2, 50)
+                    resp = await self._call(
+                        "list_memories", bank_id=bank, limit=fetch, offset=bank_offset
+                    )
+                except Exception:
+                    break  # fail-soft per bank, same as before
+                raw = resp.get("items", []) or []
+                if not raw:
+                    break
+                bank_offset += len(raw)
+                # Same read ACL as recall: in unified mode the shared bank holds
+                # every agent's private docs AND every project's docs, so list
+                # must not surface other agents' private items or out-of-scope
+                # project items. No-op in pre-unified multi-bank mode. Applied
+                # BEFORE the page cut so the page fills with visible rows.
+                page = self._filter_visible(
+                    [self._list_fact_to_item(fact, bank) for fact in raw], client_id, dataset
+                )
+                items.extend(page)
+                total = resp.get("total")
+                exhausted = len(raw) < fetch if not isinstance(total, int) else bank_offset >= total
+                if exhausted:
+                    break
             if len(items) >= limit:
+                # More may remain in THIS bank — resume here next call. The
+                # offset counts raw rows consumed, not visible ones, so the
+                # walk stays stable regardless of what the ACL filtered.
+                consumed = bank_offset - max(0, len(items) - limit)
+                next_cursor = _encode_cursor(bank, consumed)
                 break
-            try:
-                resp = await self._call("list_memories", bank_id=bank, limit=limit, offset=0)
-            except Exception:
-                continue  # fail-soft per bank
-            for fact in resp.get("items", []):
-                items.append(self._list_fact_to_item(fact, bank))
-        # Same read ACL as recall: in unified mode the shared bank holds every
-        # agent's private docs AND every project's docs, so list must not
-        # surface other agents' private items or out-of-scope project items.
-        # No-op in pre-unified multi-bank mode.
-        items = self._filter_visible(items, client_id, dataset)
-        return {"items": items[:limit], "next_cursor": None}
+        return {"items": items[:limit], "next_cursor": next_cursor}
 
     @staticmethod
     def _list_fact_to_item(fact: dict[str, Any], bank: str) -> dict[str, Any]:
