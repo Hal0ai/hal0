@@ -174,7 +174,9 @@ For a full production deployment, use the bootstrap script above.
    `vision`) get a device, profile, and port derived from the hardware
    probe, with **no model assigned**. Nothing is downloaded here.
 
-6. **Download the brain steward model** — see [The brain slot](#the-brain-slot).
+6. **Download the brain steward model**, then **offer** the agent anchor —
+   see [The brain slot](#the-brain-slot) and
+   [The agent model](#the-agent-model-optional).
 
 7. **NPU prerequisites, ComfyUI model share, bundled agent skills**, then
    **start the API**.
@@ -183,12 +185,13 @@ For a full production deployment, use the bootstrap script above.
 
 ## Operator input
 
-The installer asks exactly two questions, and only when stdin is a terminal:
+The installer asks at most three questions, and only when stdin is a terminal:
 
 | Question | Pre-filled from | If you press Enter |
 |---|---|---|
 | Where should downloaded models live? | `--models-dir=PATH` / `HAL0_MODELS_DIR` | `/var/lib/hal0/models` |
 | Hugging Face token (input hidden) | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | skipped — open models need none |
+| Download the agent model? (size shown) | — | **no** — see [The agent model](#the-agent-model-optional) |
 
 A supplied `--models-dir` / `HAL0_MODELS_DIR` is never re-asked. A non-default
 store is written to `/etc/hal0/hal0.toml` as `[models].store`, so pulls, scans,
@@ -227,6 +230,39 @@ meanwhile. An optional model can never fail a platform install.
 
 Set `HAL0_SKIP_BRAIN_MODEL=1` to skip the download entirely.
 
+## The agent model (optional)
+
+The brain can *chat* the moment the install finishes. It cannot **call tools**
+on its own: it is a ~1 B model, and on hal0's runtime a model that size does not
+emit tool calls the parser accepts. So the steward routes tool turns to a
+capable model — `[brain_chat] tool_model`, which defaults to `hal0/agent`.
+The `agent` slot ships model-less like every other slot, which means tool calls
+have nowhere to go until you bind one.
+
+The installer therefore *offers* the agent anchor right after the brain pull.
+It is a genuine opt-in, because it is a 15–31 GB download:
+
+- The prompt **states the exact size** before you answer. The figure is read off
+  hal0's curated catalogue, so it is the number that actually gets downloaded.
+- The **default is no** — press Enter and nothing is downloaded.
+- It is **never asked on a headless install**, and never blocks one. Set
+  `HAL0_PULL_AGENT_MODEL=1` to opt in unattended.
+- Declining, skipping, or a failed pull all leave the install **successful**.
+  You get a plain note that chat works and tool calls need a model, and the
+  `agent` slot stays grey.
+
+Which build is offered depends on the detected memory pool — a full 128 GB
+unified pool is offered the highest-fidelity repack, a smaller pool a leaner
+one, and a box with no ROCm/Vulkan device or under ~15 GB is offered nothing at
+all. `HAL0_AGENT_MODEL=<curated-id>` forces a specific pick.
+
+You can always do it later instead:
+
+```sh
+hal0 model pull <id>
+hal0 slot load agent
+```
+
 ## Environment variables and flags
 
 The installer reads several environment variables and accepts a few
@@ -242,6 +278,9 @@ flags:
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | _(unset)_ | Hugging Face read token; pre-fills the prompt, or supplies it outright on a headless install |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe and the capability-slot scaffolding step |
 | `HAL0_SKIP_BRAIN_MODEL` | _(unset)_ | Set to `1` to skip the brain steward model download |
+| `HAL0_PULL_AGENT_MODEL` | _(unset)_ | `1` pulls the agent anchor unattended (no prompt); `0` never offers it |
+| `HAL0_AGENT_MODEL` | _(unset)_ | Curated id to use for the agent anchor instead of the hardware-derived pick |
+| `HAL0_BRAIN_MODEL` | _(unset)_ | Curated id to use for the brain steward instead of the hardware-derived pick |
 | `HAL0_CHANNEL` | `stable` | Bootstrap channel: `stable`, `preview`, or `nightly` |
 | `HAL0_RELEASES_URL` | `https://releases.hal0.dev/<channel>.json` | Full manifest URL override; the exact sibling `.bundle` remains mandatory |
 

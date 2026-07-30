@@ -1719,7 +1719,12 @@ fi
 #
 # HAL0_SKIP_BRAIN_MODEL=1 skips it entirely; HAL0_BRAIN_MODEL=<curated-id>
 # forces a specific quant instead of the hardware-derived pick.
-ui_step "Brain model"
+#
+# The AGENT anchor offer below shares this step (no extra ui_step banner, so
+# UI_STEP_TOTAL is unchanged) because it is the second half of one story: the
+# brain pull makes steward CHAT work; the agent pull is what makes steward
+# TOOL CALLS work.
+ui_step "Steward + agent models"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping the brain model pull (no system writes)"
@@ -1729,6 +1734,89 @@ else
     HF_TOKEN="${HF_TOKEN_VAL}" HAL0_BRAIN_MODEL="${HAL0_BRAIN_MODEL:-}" \
         "${VENV_DIR}/bin/python" -m hal0.install.brain_model \
         || warn "brain model pull did not complete — the brain slot stays model-less and the install continues; retry later with 'hal0 model pull <id>' or from the dashboard"
+fi
+
+# ── agent anchor model — OPT-IN, size disclosed, default SKIP ───────────────
+# Measured on a GPU box: the 1B brain model does NOT emit tool calls. Given the
+# `hal0-function-xml` contract and an explicit tool request it reasons and
+# returns an empty `content` with no function block — exactly what
+# installer/etc-hal0/slots/brain.toml predicts. Tool turns are therefore routed
+# to `[brain_chat] tool_model`, whose code default is "hal0/agent"
+# (src/hal0/config/schema.py). But agent.toml ships model-less on purpose
+# (#1369: model-presence is the activation signal), so on a fresh box brain
+# tool calling is DEAD until someone binds an agent model.
+#
+# That is what this offer fixes — and the shape of the offer is the whole
+# point. Unlike the brain pull (unconditional, ~1-2 GB) the anchor is 15-31 GB,
+# so:
+#
+#   * it is ASKED, never assumed, and the exact GB figure is printed first;
+#   * the default answer is NO (bare Enter skips);
+#   * it sits behind `_interactive`, so `curl | bash`, a tty-less ssh install
+#     and HAL0_NONINTERACTIVE=1 all skip WITHOUT BLOCKING — a prompt that can
+#     hang CI is a broken install;
+#   * declining, skipping, or failing all leave the slot model-less, print
+#     what that costs, and let the install SUCCEED (ruling 7).
+#
+# The size string comes from `python -m hal0.install.agent_model --plan`, which
+# reads it off the curated row. Bash never hardcodes a GB number, so the figure
+# the operator consents to is the figure that gets downloaded.
+#
+# HAL0_PULL_AGENT_MODEL=1 opts in unattended (automation that wants the bytes);
+# =0 forces the skip even on a terminal. HAL0_AGENT_MODEL=<curated-id> forces a
+# specific rung of the ladder instead of the hardware-derived pick.
+_agent_plan=""
+_agent_id=""
+_agent_desc=""
+_agent_answer=""
+_agent_wanted=0
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    :  # dev mode writes nothing to the system store — no offer, no notice
+elif [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_PULL_AGENT_MODEL:-}" == "0" ]]; then
+    info "Skipping the agent model (HAL0_SKIP_SETUP/HAL0_PULL_AGENT_MODEL=0 set)."
+    info "brain chat works, but TOOL CALLS need an agent model bound to the agent slot ([brain_chat] tool_model, default hal0/agent)."
+else
+    # `|| true`: a plan that cannot be computed is simply no offer. Never fatal.
+    _agent_plan="$(HAL0_AGENT_MODEL="${HAL0_AGENT_MODEL:-}" \
+        "${VENV_DIR}/bin/python" -m hal0.install.agent_model --plan 2>/dev/null || true)"
+    _agent_plan="${_agent_plan%%$'\n'*}"
+    if [[ -z "${_agent_plan}" || "${_agent_plan}" != *$'\t'* ]]; then
+        info "No agent model fits this box (a ROCm/Vulkan device and ~15 GB of pool are the floor) — not offering one."
+    else
+        _agent_id="${_agent_plan%%$'\t'*}"
+        _agent_desc="${_agent_plan#*$'\t'}"
+        if [[ "${HAL0_PULL_AGENT_MODEL:-}" == "1" ]]; then
+            info "Agent model opt-in via HAL0_PULL_AGENT_MODEL=1: ${_agent_desc}"
+            _agent_wanted=1
+        elif _interactive; then
+            printf '\n' >/dev/tty 2>/dev/null || true
+            info "The brain steward can chat now, but it cannot CALL TOOLS on its own — it routes tool turns to the agent slot, which has no model yet."
+            info "Optional download: ${_agent_desc}"
+            _tty_read _agent_answer "Download the agent model now? [y/N]" "n"
+            case "${_agent_answer}" in
+                [Yy]|[Yy][Ee][Ss]) _agent_wanted=1 ;;
+                *) _agent_wanted=0 ;;
+            esac
+            unset _agent_answer
+        else
+            info "Non-interactive install — not pulling the ${_agent_desc%% —*} agent model (set HAL0_PULL_AGENT_MODEL=1 to opt in)."
+        fi
+    fi
+
+    if [[ "${_agent_wanted}" -eq 1 ]]; then
+        if HF_TOKEN="${HF_TOKEN_VAL}" HAL0_AGENT_MODEL="${_agent_id}" \
+            "${VENV_DIR}/bin/python" -m hal0.install.agent_model; then
+            :
+        else
+            warn "agent model pull did not complete — the agent slot stays model-less and the install continues"
+            _agent_wanted=0
+        fi
+    fi
+    if [[ "${_agent_wanted}" -ne 1 ]]; then
+        info "brain chat works, but TOOL CALLS need an agent model: the steward routes tool turns to [brain_chat] tool_model (default hal0/agent) and the agent slot has no model bound."
+        info "Assign one from the dashboard, or 'hal0 model pull <id> && hal0 slot load agent', whenever you like."
+    fi
 fi
 
 # ── NPU prerequisites (FastFlowLM) ─────────────────────────────────────────

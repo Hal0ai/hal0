@@ -261,3 +261,95 @@ def test_brain_model_pull_cannot_fail_the_install(install_sh_text: str) -> None:
     tail = install_sh_text[idx : idx + 400]
     assert "|| warn" in tail, "the brain model pull has no `|| warn` containment"
     assert "HAL0_SKIP_BRAIN_MODEL" in install_sh_text, "no opt-out for the brain model pull"
+
+
+# ── 6. the agent anchor is opt-in, size-disclosed, and defaults to skip ─────
+
+
+@pytest.fixture(scope="module")
+def agent_block(install_sh_text: str) -> str:
+    """The install.sh block that offers the agent anchor."""
+    start = install_sh_text.index("agent anchor model — OPT-IN")
+    end = install_sh_text.index("# ── NPU prerequisites", start)
+    return install_sh_text[start:end]
+
+
+def test_agent_pull_is_never_unconditional(agent_block: str) -> None:
+    """The brain pull is unconditional (~1-2 GB). This one is 15-31 GB, so it
+    must be reached only through an explicit yes or an explicit env opt-in."""
+    assert "-m hal0.install.agent_model --plan" in agent_block, "the offer half is gone"
+    # The pull half must be guarded by the consent flag, not run inline.
+    pull_idx = agent_block.index('"${VENV_DIR}/bin/python" -m hal0.install.agent_model;')
+    guard_idx = agent_block.index('if [[ "${_agent_wanted}" -eq 1 ]]; then')
+    assert guard_idx < pull_idx, "the agent pull is not behind the consent flag"
+
+
+def test_agent_prompt_sits_behind_the_same_interactive_gate(agent_block: str) -> None:
+    """A headless install must never block here.
+
+    ``_interactive`` tests stdin, so ``curl | bash``, a tty-less ssh install,
+    and ``HAL0_NONINTERACTIVE=1`` all fall through to the non-interactive
+    branch without asking anything.
+    """
+    assert "elif _interactive; then" in agent_block
+    prompt_idx = agent_block.index("_tty_read _agent_answer")
+    gate_idx = agent_block.index("elif _interactive; then")
+    assert gate_idx < prompt_idx, "the agent prompt is not inside the _interactive branch"
+    assert "Non-interactive install" in agent_block, "no headless branch — it would fall through"
+
+
+def test_agent_prompt_defaults_to_skip(agent_block: str) -> None:
+    """Bare Enter must mean NO. ``_tty_read``'s third argument is the default it
+    substitutes for an empty answer, and only an explicit y/yes proceeds."""
+    m = re.search(r'_tty_read _agent_answer "([^"]*)" "([^"]*)"', agent_block)
+    assert m, "the agent prompt is gone or changed shape"
+    prompt, default = m.group(1), m.group(2)
+    assert default == "n", f"agent prompt default is {default!r}, must be 'n'"
+    assert "[y/N]" in prompt, f"prompt does not show a skip-by-default hint: {prompt!r}"
+    assert re.search(r"\[Yy\]\|\[Yy\]\[Ee\]\[Ss\]\)\s*_agent_wanted=1", agent_block), (
+        "only an explicit y/yes may set the consent flag"
+    )
+
+
+def test_agent_offer_discloses_the_size_from_the_curated_row(agent_block: str) -> None:
+    """The prompt must state the download size, and bash must not invent it.
+
+    ``--plan`` renders the GB figure off the curated row, so the number the
+    operator consents to is the number the pull engine downloads.
+    """
+    assert "${_agent_desc}" in agent_block, "the offer sentence is never shown"
+    # Comments may discuss sizes; the CODE must not print one it made up. The
+    # only GB figure allowed in an executed line is the "~15 GB" floor in the
+    # no-offer message, which is a capability statement, not a download size.
+    code = [
+        ln
+        for ln in agent_block.splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+    offenders = [
+        ln for ln in code if re.search(r"\d+(\.\d+)?\s*GB", ln) and "~15 GB" not in ln
+    ]
+    assert not offenders, (
+        "install.sh hardcodes a GB figure — it must come from --plan/curated.py: " f"{offenders}"
+    )
+
+
+def test_a_declined_or_failed_agent_pull_still_succeeds(agent_block: str) -> None:
+    """Ruling 7: never hard-fail an install over an optional model pull."""
+    assert "|| warn" in agent_block or "warn " in agent_block
+    # The failure branch clears the flag so the notice below still prints.
+    assert "_agent_wanted=0" in agent_block
+    assert 'if [[ "${_agent_wanted}" -ne 1 ]]; then' in agent_block
+
+
+def test_the_skip_path_explains_what_tool_calls_now_need(agent_block: str) -> None:
+    """A blank tool call must never be a mystery: skipping has to say that brain
+    CHAT works, tool calls do not, and which setting points where."""
+    assert "tool_model" in agent_block
+    assert "hal0/agent" in agent_block
+    assert "chat works" in agent_block
+
+
+def test_agent_model_env_overrides_are_wired(install_sh_text: str) -> None:
+    assert "HAL0_PULL_AGENT_MODEL" in install_sh_text, "no unattended opt-in"
+    assert "HAL0_AGENT_MODEL" in install_sh_text, "no way to force a specific rung"

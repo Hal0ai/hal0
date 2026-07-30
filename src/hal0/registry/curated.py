@@ -468,12 +468,54 @@ CURATED_MODELS: list[CuratedModel] = [
     # Strix-Halo ROCmFP4/MTP repacks; the Jackrong/unsloth ones are GGUF MTP
     # builds. ``id`` matches the existing registry id EXACTLY so a coord-less
     # registry row pulls via get_curated() fallback.
+    #
+    # THREE OF THESE ARE THE `agent` ANCHOR LADDER — read before editing sizes.
+    # ``hal0.install.agent_model`` offers one of them as the install-time
+    # opt-in agent-slot pull, largest-that-fits-first by ``vram_gb_min``:
+    #
+    #   chadrock-35b-ace-saber-moequality-7bpw                       31.41 GB
+    #   qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean  19.05 GB
+    #   chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean              14.82 GB
+    #
+    # The installer PRINTS ``size_gb`` in the consent prompt, so these are
+    # exact HF blob sizes (bytes/1e9), verified against the HF API — not
+    # rounded marketing figures. Keep them exact.
+    #
+    # ``jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp`` also ships
+    # ``mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj`` (902,821,824 B = 0.90 GB).
+    # It is deliberately NOT wired as ``mmproj_file`` on either 35B row:
+    # attaching it would make the seeded `agent` anchor multimodal on every
+    # fresh box, which is a behaviour change the model-owned vision caps
+    # partition has to sign off on first. Recorded here so the coordinate
+    # isn't lost.
+    CuratedModel(
+        id="chadrock-35b-ace-saber-moequality-7bpw",
+        display_name="CHADROCK 35B Ace Saber (MoE Quality 7.07 BPW)",
+        description="Highest-fidelity Ace Saber repack — the agent anchor on a full 128 GB pool.",
+        family="qwen",
+        size_gb=31.41,
+        vram_gb_min=34.0,
+        license="apache-2.0",
+        license_url="https://huggingface.co/jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp",
+        hf_repo="jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp",
+        hf_file="CHADROCK-35B-Ace-Saber-MTP-ROCmFPX-MoEQuality-7.07BPW.gguf",
+        context_length=65536,
+        recommended_slot="chat",
+        tags=["chat", "agent", "tool-use", "mtp", "rocmfp4"],
+        notes=(
+            "Strix-Halo ROCmFPX/MTP build at 7.07 BPW — same weights as the "
+            "STRIX_LEAN row, less quantisation damage, ~12 GB more on disk. "
+            "Top rung of the `agent` anchor ladder (hal0.install.agent_model)."
+        ),
+        capability="chat",
+        backend="llamacpp",
+    ),
     CuratedModel(
         id="qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean",
         display_name="Qwen3.6 35B-A3B NSC ACE SABER (ROCmFP4 STRIX)",
         description="35B-A3B ACE SABER chat build with MTP, packed for Strix Halo.",
         family="qwen",
-        size_gb=19.0,
+        size_gb=19.05,
         vram_gb_min=20.0,
         license="apache-2.0",
         license_url="https://huggingface.co/jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp",
@@ -481,8 +523,11 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf",
         context_length=65536,
         recommended_slot="chat",
-        tags=["chat", "mtp", "rocmfp4"],
-        notes="Strix-Halo ROCmFP4/MTP build (F16-to-ROCmFP4 STRIX_LEAN).",
+        tags=["chat", "agent", "tool-use", "mtp", "rocmfp4"],
+        notes=(
+            "Strix-Halo ROCmFP4/MTP build (F16-to-ROCmFP4 STRIX_LEAN). Middle "
+            "rung of the `agent` anchor ladder (hal0.install.agent_model)."
+        ),
         capability="chat",
         backend="llamacpp",
     ),
@@ -491,7 +536,7 @@ CURATED_MODELS: list[CuratedModel] = [
         display_name="CHADROCK3.6 27B Pi-Agent (ROCmFP4 STRIX)",
         description="27B Pi-Agent chat build with MTP, packed for Strix Halo.",
         family="qwen",
-        size_gb=14.8,
+        size_gb=14.82,
         vram_gb_min=15.0,
         license="apache-2.0",
         license_url="https://huggingface.co/jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp",
@@ -499,8 +544,12 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="CHADROCK3.6-27B-Pi-Agent-MTP-ROCmFP4-STRIX_LEAN.gguf",
         context_length=65536,
         recommended_slot="chat",
-        tags=["chat", "mtp", "rocmfp4"],
-        notes="Strix-Halo ROCmFP4/MTP build (Pi-Agent STRIX_LEAN).",
+        tags=["chat", "agent", "tool-use", "mtp", "rocmfp4"],
+        notes=(
+            "Strix-Halo ROCmFP4/MTP build (Pi-Agent STRIX_LEAN). Bottom rung of "
+            "the `agent` anchor ladder (hal0.install.agent_model); also the "
+            "`hal0/code` override brain.toml documents for tool routing."
+        ),
         capability="chat",
         backend="llamacpp",
     ),
