@@ -202,7 +202,7 @@ class _FakeSlotManager:
 def _stub_run_pull(monkeypatch: pytest.MonkeyPatch, *, state: str, exc: Exception | None = None):
     import hal0.registry.pull as pull_mod
 
-    async def _fake(job, **kwargs):  # noqa: ANN001, ANN003
+    async def _fake(job, **kwargs):
         if exc is not None:
             raise exc
         job.state = state
@@ -280,7 +280,7 @@ def test_plan_never_pulls(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(am, "_load_hardware", lambda: _strix(128 * 1024))
 
-    async def _explode(job, **kwargs):  # noqa: ANN001, ANN003
+    async def _explode(job, **kwargs):
         raise AssertionError("--plan must never reach the pull engine")
 
     monkeypatch.setattr(pull_mod, "run_pull", _explode)

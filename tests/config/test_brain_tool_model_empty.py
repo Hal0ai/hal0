@@ -34,7 +34,7 @@ def test_an_empty_tool_model_resolves_to_the_default(empty) -> None:
 
 
 def test_the_coercion_is_loud(caplog: pytest.LogCaptureFixture) -> None:
-    """"Or at minimum warn loudly" — we do both. A silent coercion would swap
+    """ "Or at minimum warn loudly" — we do both. A silent coercion would swap
     one invisible behaviour for another."""
     with caplog.at_level(logging.WARNING, logger="hal0.config.schema"):
         BrainChatConfig(tool_model="")
