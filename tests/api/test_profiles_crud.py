@@ -43,6 +43,21 @@ def _seed_flat_slot_toml(home: str, name: str, profile: str, port: int = 8090) -
     return path
 
 
+def _seed_profiles_toml(home: str, name: str, flags: str, **fields: str) -> Path:
+    """Write a custom profile straight into profiles.toml, bypassing the API.
+
+    The only way to stage state the write-path screens would refuse — i.e. the
+    pre-guard profiles #1411 is about, authored before spec-hw-slot-ownership §5
+    shipped. Mirrors the ``[profile.<name>]`` table shape the loader reads.
+    """
+    root = Path(home) / "etc" / "hal0"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "profiles.toml"
+    extras = "".join(f'{k} = "{v}"\n' for k, v in fields.items())
+    path.write_text(f'[profile.{name}]\nflags = "{flags}"\n{extras}', encoding="utf-8")
+    return path
+
+
 def _seed_corrupt_slot_toml(home: str, name: str) -> Path:
     """Write a slot TOML that fails to parse."""
     root = Path(home) / "etc" / "hal0" / "slots"
@@ -155,6 +170,80 @@ def test_update_profile_rejects_managed_flag(client: TestClient) -> None:
     r = client.put("/api/profiles/edit-ctx", json={"flags": "-b 2048 --port 9999"})
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+
+
+# ── #1411: the §5 screen must not brick profiles authored before it ────────────
+
+
+def test_update_grandfathers_stored_hardware_flag_on_rename_only_put(
+    tmp_hal0_home: str,
+) -> None:
+    """A profile authored before §5 shipped must stay editable (#1411).
+
+    Saving it back verbatim — exactly what the drawer does, since it round-trips
+    the flag text from GET — used to 400 on the profile's OWN stored flags, so
+    every pre-guard custom profile was read-only through the API. The screen
+    now looks at what the PUT *introduces*, not what it inherits.
+    """
+    _seed_profiles_toml(
+        tmp_hal0_home,
+        "legacy",
+        "-fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 --threads 8",
+        intent="pre-guard tune",
+    )
+    with TestClient(create_app()) as client:
+        stored = client.get("/api/profiles/legacy")
+        assert stored.status_code == 200, stored.text
+        flags = stored.json()["flags"]
+        assert "-dev" in flags and "--threads" in flags
+
+        # Rename-only intent change, re-sending the stored flags verbatim.
+        r = client.put("/api/profiles/legacy", json={"flags": flags, "intent": "retuned"})
+        assert r.status_code == 200, r.text
+        assert r.json()["intent"] == "retuned"
+        assert r.json()["flags"] == flags
+
+
+def test_update_without_flags_key_never_screens(tmp_hal0_home: str) -> None:
+    """A patch that doesn't name `flags` at all must not be screened against the
+    stored ones (#1411)."""
+    _seed_profiles_toml(tmp_hal0_home, "legacy2", "-fa on -dev ROCm0")
+    with TestClient(create_app()) as client:
+        r = client.put("/api/profiles/legacy2", json={"intent": "still editable"})
+        assert r.status_code == 200, r.text
+        assert r.json()["intent"] == "still editable"
+
+
+def test_update_still_rejects_a_newly_added_hardware_flag(tmp_hal0_home: str) -> None:
+    """Grandfathering is per-flag, not a blanket amnesty: a legacy `-dev` does
+    not buy the right to ALSO add `--threads` (#1411)."""
+    _seed_profiles_toml(tmp_hal0_home, "legacy3", "-fa on -dev ROCm0")
+    with TestClient(create_app()) as client:
+        r = client.put("/api/profiles/legacy3", json={"flags": "-fa on -dev ROCm0 --threads 8"})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+        assert r.json()["error"]["details"]["flags"] == ["--threads"]
+
+
+def test_update_can_drop_the_legacy_hardware_flag(tmp_hal0_home: str) -> None:
+    """The migration path stays open — removing the legacy flag is accepted and
+    the grandfather no longer applies afterwards (#1411)."""
+    _seed_profiles_toml(tmp_hal0_home, "legacy4", "-fa on -dev ROCm0")
+    with TestClient(create_app()) as client:
+        cleaned = client.put("/api/profiles/legacy4", json={"flags": "-fa on"})
+        assert cleaned.status_code == 200, cleaned.text
+        assert cleaned.json()["flags"] == "-fa on"
+        # Now that the stored text is clean, re-adding -dev is a NEW reach.
+        r = client.put("/api/profiles/legacy4", json={"flags": "-fa on -dev ROCm0"})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+
+
+def test_create_is_never_grandfathered(client: TestClient) -> None:
+    """POST has no stored baseline, so §5 stays a hard reject there (#1411)."""
+    r = client.post("/api/profiles", json={"name": "fresh", "flags": "-fa on -dev ROCm0"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
 
 
 def test_create_profile_accepts_device_agnostic_tune(client: TestClient) -> None:

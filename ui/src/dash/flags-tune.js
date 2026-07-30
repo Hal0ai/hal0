@@ -58,6 +58,34 @@ export function findSlotHardwareFlags(text) {
   return offenders;
 }
 
+// Short → long canonicalisation for the hardware set. Mirrors the subset of
+// argv.py's FLAG_ALIASES that covers SLOT_HARDWARE_FLAGS.
+const SLOT_HARDWARE_CANON = {
+  "-ngl": "--n-gpu-layers",
+  "-dev": "--device",
+  "-t": "--threads",
+};
+
+const canonHardware = (flag) => SLOT_HARDWARE_CANON[flag] || flag;
+
+// The slot-hardware flags `text` INTRODUCES relative to `storedText` (#1411).
+//
+// The §5 screen shipped with no data migration, so a profile authored before it
+// carries -dev/--threads in its own stored flags — and the drawer round-trips
+// that text verbatim, so a plain re-save tripped the guard on the profile's own
+// data. The server now screens what an update ADDS, not what it inherits
+// (hal0.profiles.screen_profile_flags), so this inline mirror has to do the same
+// or the drawer keeps blocking a save the API would accept. Matching is by
+// canonical flag, like the server's, so a stored `-dev` also covers `--device`.
+//
+// `storedText` empty (create/clone) ⇒ nothing inherited ⇒ identical to
+// findSlotHardwareFlags. Models never grandfather; they keep the strict finder.
+export function findNewSlotHardwareFlags(text, storedText = "") {
+  const inherited = new Set(findSlotHardwareFlags(storedText).map(canonHardware));
+  if (!inherited.size) return findSlotHardwareFlags(text);
+  return findSlotHardwareFlags(text).filter((f) => !inherited.has(canonHardware(f)));
+}
+
 // Where each managed flag is actually controlled from — surfaced in the inline
 // rejection so the operator knows why it's off-limits and where to set it.
 export const MANAGED_FLAG_SOURCE = {

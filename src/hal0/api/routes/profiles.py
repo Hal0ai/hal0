@@ -19,6 +19,7 @@ atomic writes.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -29,13 +30,15 @@ from pydantic import BaseModel, Field, field_validator
 from hal0.api._audit import record_action
 from hal0.config.schema import ProfileConfig
 from hal0.errors import BadRequest
-from hal0.profiles import ProfileCatalog, ProfilePatch
+from hal0.profiles import ProfileCatalog, ProfilePatch, screen_profile_flags
 from hal0.profiles.portable import (
     export_envelope,
     import_profile,
     parse_envelope,
     verify_checksum,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -126,36 +129,19 @@ def list_profiles() -> list[dict[str, Any]]:
     return [profile.to_dict() for profile in ProfileCatalog().list()]
 
 
-def _screen_profile_flags(flags: str | None) -> None:
-    """Reject hal0-owned flags in a profile's freeform ``flags`` text.
-
-    spec-hw-slot-ownership §5: a profile is a device-agnostic tune template, so
-    its ``flags`` must not carry the slot-hardware flags (``-ngl``/``--device``/
-    ``--threads``). §21.7: nor the managed args hal0 computes per-slot
-    (``--model``/``--host``/``--port``/``--ctx-size``/``--alias``) — a profile
-    that persists ``-c``/``--port`` only explodes later when stamped onto a
-    model. Symmetric to the model ``defaults.extra_args`` guard in
-    :func:`hal0.services.models_service.screen_model_write`; raises the same
-    ``slot.hardware_flag_denied`` / ``slot.managed_arg_denied`` BadRequests so
-    both surfaces render one path. Empty / unset flags are a no-op; an
-    unparseable flag string is left to the ProfileConfig schema to reject.
-    """
-    if not flags or not flags.strip():
-        return
-    import shlex
-
-    from hal0.slots.argv import _deny_managed_flags, _deny_slot_hardware_flags
-
-    try:
-        tokens = shlex.split(flags)
-    except ValueError:
-        # Malformed quoting — defer to the pydantic/config layer's own error
-        # rather than masking it with a partition message.
-        return
-    # Hardware first so -ngl (in both sets) gets the "belongs on the slot"
-    # message — mirrors screen_model_write's ordering.
-    _deny_slot_hardware_flags(tokens, segment="profile flags")
-    _deny_managed_flags(tokens, segment="profile flags")
+# `screen_profile_flags` (hal0.profiles) rejects hal0-owned flags in a profile's
+# freeform `flags` text — spec-hw-slot-ownership §5 (-ngl/--device/--threads
+# belong on the slot's hardware grid) and §21.7 (--model/--host/--port/
+# --ctx-size/--alias are hal0-computed). Symmetric to the model
+# `defaults.extra_args` guard in `models_service.screen_model_write`, raising the
+# same slot.hardware_flag_denied / slot.managed_arg_denied envelope so both
+# surfaces render one path.
+#
+# This file used to carry a route-local `_screen_profile_flags` duplicating the
+# catalog's screen token-for-token. #1411 needed the UPDATE path to grandfather a
+# profile's own stored hardware flags, and a screen in two places would have had
+# to learn that in two places — so the route delegates to the catalog's one
+# screen, which is also the seam the import and CLI paths hit.
 
 
 @router.post("", status_code=201)
@@ -170,9 +156,9 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
         400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
         400 slot.managed_arg_denied: flags carry a hal0-managed flag.
     """
-    # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed
-    # flags before persisting.
-    _screen_profile_flags(body.flags)
+    # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed flags
+    # before persisting. A create has no stored baseline, so no grandfathering.
+    screen_profile_flags(body.flags)
     async with record_action(
         request, category="profile", action="profile.create", target=body.name
     ) as rec:
@@ -202,15 +188,30 @@ async def import_profile_route(request: Request) -> dict[str, Any]:
 
     Body::
 
-        { "envelope": {...}, "name": "name", "dry_run": false }
+        { "envelope": {...}, "name": "name", "dry_run": false, "force": false }
 
     ``dry_run`` validates the envelope + checksum and reports whether the target
     name already exists, without creating anything. A commit creates the profile
     under ``name`` and returns the resolved profile item.
 
+    The commit path VERIFIES the envelope checksum (#1416). It previously did
+    not: ``verify_checksum`` was referenced only inside the ``dry_run`` branch,
+    so the integrity stamp was decorative on the one path that writes — a
+    hand-edited or transport-corrupted envelope created a profile with a 200 and
+    no warning. A profile is a launch-flag template that gets stamped into a
+    slot's argv (and, via ``POST /api/models/{id}/duplicate?profile=…``, into a
+    model's ``defaults.extra_args``), so importing one unverified is the wrong
+    default. ``force: true`` is the escape hatch for a deliberately hand-edited
+    envelope — it waives the checksum ONLY; the §5/§21.7 flag screen still
+    applies (``ProfileCatalog.create``), so an envelope can never back-door a
+    hardware or managed flag past the guards ``POST``/``PUT`` enforce.
+
     Raises:
         400 profiles.bad_envelope: not a valid hal0.profile envelope.
+        400 profiles.checksum_mismatch: checksum does not cover the body (#1416).
         400 profiles.import_no_name: commit requested without a name.
+        400 slot.hardware_flag_denied / slot.managed_arg_denied: the envelope's
+            flags reach for slot- or authority-owned flags.
         409 profiles.exists: name already exists.
     """
     try:
@@ -226,6 +227,7 @@ async def import_profile_route(request: Request) -> dict[str, Any]:
 
     envelope = body.get("envelope", body)
     dry_run = bool(body.get("dry_run", False))
+    force = bool(body.get("force", False))
     name = body.get("name")
 
     if dry_run:
@@ -246,6 +248,26 @@ async def import_profile_route(request: Request) -> dict[str, Any]:
         raise BadRequest(
             "import commit requires a 'name'",
             code="profiles.import_no_name",
+        )
+
+    # #1416: verify on COMMIT, not just on the dry run. Parse FIRST so a
+    # structurally wrong envelope keeps its own, more actionable
+    # `profiles.bad_envelope` diagnostic — `verify_checksum` also returns False
+    # for those, and reporting a checksum mismatch for `{"kind": "nope"}` would
+    # point the operator at the wrong problem.
+    env = parse_envelope(envelope)
+    if isinstance(envelope, dict) and not force and not verify_checksum(envelope):
+        raise BadRequest(
+            "envelope checksum does not match its profile body — the file was "
+            "hand-edited or corrupted in transit. Re-export it, or pass "
+            "'force': true to import it anyway.",
+            code="profiles.checksum_mismatch",
+            details={"name": name, "envelope_name": env.name or ""},
+        )
+    if force:
+        log.warning(
+            "profile import bypassed the envelope checksum on operator request",
+            extra={"event": "profile.import_checksum_forced", "profile": name},
         )
 
     async with record_action(
@@ -301,17 +323,21 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
         409 profiles.seed_immutable: name is a seed profile.
         404 profiles.not_found: custom profile not found.
         422: pydantic validation failure.
-        400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
+        400 slot.hardware_flag_denied: flags NEWLY introduce a slot-owned
+            hardware flag. Ones the profile already stores are grandfathered
+            (#1411) — see :func:`hal0.profiles.screen_profile_flags`.
         400 slot.managed_arg_denied: flags carry a hal0-managed flag.
     """
-    # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed
-    # flags before persisting.
-    _screen_profile_flags(body.flags)
     catalog = ProfileCatalog()
     before = None
     existing = next((p for p in catalog.list() if p.name == name), None)
     if existing is not None:
         before = existing.to_dict()
+    # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed flags
+    # before persisting. Screened AFTER the read (#1411) so the profile's own
+    # stored flags are the grandfather baseline — a pre-guard profile has to stay
+    # editable, and the drawer re-sends its stored flag text verbatim on save.
+    screen_profile_flags(body.flags, grandfathered=existing.flags if existing else None)
     async with record_action(
         request,
         category="profile",
