@@ -25,8 +25,7 @@ Escape-hatch table (why each non-"forbid" entry is intentional):
   - ServerConfig        -- forbid, with ``extra_args``/``env`` as the
                            declared-field escape hatch (freeform CLI
                            passthrough / arbitrary env-var dict).
-  - memory/honcho models (MemoryGraphConfig, MemoryEmbeddingConfig,
-    HonchoLLMFeatureConfig, HonchoLLMConfig, HonchoConfig)
+  - memory models (MemoryGraphConfig, MemoryEmbeddingConfig)
                         -- ignore: deliberate silent drop of retired
                            cognee/route keys on load.
   - ProvidersConfig/UpstreamsConfig/MemoryConfig/ModelsConfig/AgentConfig/
@@ -71,9 +70,6 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # Deliberate silent-drop of retired keys -> ignore
     "MemoryGraphConfig": "ignore",
     "MemoryEmbeddingConfig": "ignore",
-    "HonchoLLMFeatureConfig": "ignore",
-    "HonchoLLMConfig": "ignore",
-    "HonchoConfig": "ignore",
     # Leaf tunables / entries with no legitimate unknown key -> forbid
     "NpuConfig": "forbid",
     "ImageGenConfig": "forbid",

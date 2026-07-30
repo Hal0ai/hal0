@@ -388,40 +388,6 @@ function GraphLensed({ graph, source, query, width, height, banner }) {
   );
 }
 
-// Relative-time formatter for the Honcho sync chip — same buckets as
-// slot-status.js's _formatAgo, duplicated locally since dash/*.jsx files
-// don't cross-import (no-ES-imports prototype convention, see header).
-function _honchoAgo(iso) {
-  if (!iso) return 'never';
-  const deltaMs = Date.now() - new Date(iso).getTime();
-  if (!isFinite(deltaMs)) return 'never';
-  if (deltaMs < 0) return 'just now';
-  const s = Math.floor(deltaMs / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} min ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
-// Provenance chip: when an agent's memory is routed to Honcho, the graph
-// shown here also reflects Honcho facts synced into the Hindsight graph by
-// the sync timer (see MemHonchoCard in memory.jsx). Hidden entirely when
-// Honcho is disabled on this install.
-function MemGraphHonchoChip() {
-  const useHonchoStats = window.__hal0UseHonchoStats;
-  const useHonchoSync = window.__hal0UseHonchoSync;
-  const statsQuery = useHonchoStats ? useHonchoStats() : { data: null };
-  const syncQuery = useHonchoSync ? useHonchoSync() : { data: null };
-  if (!statsQuery.data?.enabled) return null;
-  return (
-    <span className="mg-meta-honcho" data-testid="mem-graph-honcho-chip">
-      <Icon name="connections" size={11} /> includes Honcho sync · last {_honchoAgo(syncQuery.data?.last_run_at)}
-    </span>
-  );
-}
-
 // tiny CSS.escape fallback for attribute selectors (node ids may contain odd chars)
 function cssEsc(s) {
   if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(String(s));
@@ -660,7 +626,6 @@ function MemGraphExplorer() {
           ? 'loading graph…'
           : `${nodeCount} nodes · ${edgeCount} edges${totals}`}
         <span className="mg-meta-dir">direction <b>{DIRECTIONS.find((d) => d.id === direction).label.toLowerCase()}</b></span>
-        <MemGraphHonchoChip />
       </div>
 
       <div ref={stageRef} className="mg-host">
