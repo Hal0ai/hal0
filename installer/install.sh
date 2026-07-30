@@ -1458,6 +1458,47 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/n
     ui_spinner_run "Pulling ${OPENWEBUI_IMAGE} in background" sleep 3
 fi
 
+# ── Container slot seeds (A10) ────────────────────────────────────────────
+# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img,agent,brain}.toml
+# if absent
+# (the loop below is the single source of truth). Idempotent: never
+# overwrite an operator-edited file. Each slot is seeded unconditionally so
+# the dashboard can show its tile on any hal0 install; each gates on its own
+# runtime validation at load time. runtime=container + profile=<X> routes
+# to ContainerProvider (podman).
+#
+# Single source of truth: seeds are COPIED from the repo tree
+# (installer/etc-hal0/slots/<name>.toml — same files the schema tests
+# validate), never duplicated inline. Present in every install flow:
+# the release tarball ships the whole installer/ dir (release.yml
+# `cp -a installer "${STAGE}/"`), git checkouts carry it, and the prod
+# rsync to ${PREFIX} (which REPO_ROOT is re-pointed at) has no exclude
+# that touches installer/.
+#
+# GH #1475: this MUST run before `hal0 setup --auto` below. Both write the
+# same slot names (agent/embed/rerank/stt/tts/vision) — setup with generic
+# derived profiles (agent→chat, embed→embedding, ...), these curated seeds
+# with hand-tuned ones (agent.toml's chadrock-moe profile, brain.toml's
+# brain profile, embed.toml's 4096 context, ...). Both sides are
+# never-overwrite, so whichever runs FIRST wins; setup previously ran
+# first, so the curated seeds never reached a fresh box at all — every
+# seed's own docstring already asserted the opposite ordering ("hal0 setup
+# scaffolds the same slot when this seed is absent").
+for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
+    SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
+    SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
+    if [[ -f "${SLOT_TOML}" ]]; then
+        info "${seed_slot} slot: ${SLOT_TOML} exists — left alone"
+    else
+        [[ -f "${SLOT_SRC}" ]] \
+            || die "installer bundle incomplete: ${SLOT_SRC} missing (installer/etc-hal0/ should ship with every release tree)"
+        mkdir -p "${ETC_DIR}/slots"
+        cp "${SLOT_SRC}" "${SLOT_TOML}"
+        chmod 0644 "${SLOT_TOML}"
+        info "seeded ${seed_slot} slot → ${SLOT_TOML}"
+    fi
+done
+
 ui_step "Hardware probe"
 
 if [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_NO_PROBE:-0}" == "1" ]]; then
@@ -1701,77 +1742,34 @@ else
     fi
 fi
 
-# ── Container slot seeds (A10) ────────────────────────────────────────────
-# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img,agent,brain}.toml
-# if absent
-# (the loop below is the single source of truth). Idempotent: never
-# overwrite an operator-edited file. Each slot is seeded unconditionally so
-# the dashboard can show its tile on any hal0 install; each gates on its own
-# runtime validation at load time. runtime=container + profile=<X> routes
-# to ContainerProvider (podman).
-#
-# Single source of truth: seeds are COPIED from the repo tree
-# (installer/etc-hal0/slots/<name>.toml — same files the schema tests
-# validate), never duplicated inline. Present in every install flow:
-# the release tarball ships the whole installer/ dir (release.yml
-# `cp -a installer "${STAGE}/"`), git checkouts carry it, and the prod
-# rsync to ${PREFIX} (which REPO_ROOT is re-pointed at) has no exclude
-# that touches installer/.
-for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
-    SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
-    SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
-    if [[ -f "${SLOT_TOML}" ]]; then
-        info "${seed_slot} slot: ${SLOT_TOML} exists — left alone"
-    else
-        [[ -f "${SLOT_SRC}" ]] \
-            || die "installer bundle incomplete: ${SLOT_SRC} missing (installer/etc-hal0/ should ship with every release tree)"
-        mkdir -p "${ETC_DIR}/slots"
-        cp "${SLOT_SRC}" "${SLOT_TOML}"
-        chmod 0644 "${SLOT_TOML}"
-        info "seeded ${seed_slot} slot → ${SLOT_TOML}"
-    fi
-done
-
-# ── profiles.toml virtual-seed migration ──────────────────────────────────────
-# Seeds are virtual: the built-in profile catalog lives in code (SEED_PROFILES)
-# and is overlaid on every load, so a re-tuned seed reaches this install with no
-# on-disk change. Older installs materialised every seed into profiles.toml,
-# which froze stale definitions on upgrade; if such a file exists, prune those
-# materialised seeds so the code definition wins. Operator (non-seed) profiles
-# are left untouched. On a fresh install the file does not exist and the seeds
-# are served in-memory until the operator saves a custom profile.
-PROFILES_TOML="${ETC_DIR}/profiles.toml"
+# ── post-activation migrations (schema + seed-profile/mtp/image-pin/extra-args) ─
+# One shared sequence with Updater.commit()'s self-update path (GH #1475):
+# hal0.toml schema migrations, profiles.toml virtual-seed pruning (seeds live
+# in code and are overlaid on every load — an older install that materialised
+# them into profiles.toml froze stale definitions; this prunes them so the
+# code definition wins again), stale mtp=true slot-override clearing (a
+# force-on pointing at a model with no MTP heads crashes llama-server at load
+# once the unit re-renders under post-separation code), stale runner-image
+# pin retagging, and defaults.extra_args sanitizing. Every pass after the
+# schema migration is independently best-effort — a single pass failing never
+# aborts the others. Previously this block ran only the seed-profile and
+# stale-MTP passes directly, so a box upgraded by re-running install.sh (the
+# documented repair/upgrade path) kept a stale meta.schema_version, stale
+# runner-image pins, and unsanitised defaults.extra_args that `hal0 update`
+# would have fixed — two boxes on the same version with different on-disk
+# state. Operator edits and non-seed profiles are always left untouched.
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    info "dev mode — skipping profiles.toml seed migration (no system writes)"
-elif [[ -f "${PROFILES_TOML}" ]]; then
-    info "profiles.toml exists — pruning any materialised seed profiles (seeds are virtual)"
-    "${VENV_DIR}/bin/python" - <<'PYEOF'
-from hal0.updater.updater import ensure_seed_profiles
-n = ensure_seed_profiles()
-if n:
-    print(f"  pruned {n} materialised seed profile(s) from /etc/hal0/profiles.toml")
-else:
-    print("  profiles.toml holds no materialised seeds (nothing to prune)")
-PYEOF
+    info "dev mode — skipping post-activation migrations (no system writes)"
 else
-    info "profiles.toml absent — seeds served in-memory on first request"
-fi
-
-# ── stale mtp=true slot-override migration ────────────────────────────────────
-# A slot forcing MTP on for a model with no MTP heads crashes llama-server at
-# load once the unit re-renders under post-separation code (the old baked units
-# masked the contradiction). Clear exactly those overrides (→ AUTO), loudly;
-# eligible or unresolvable models are left untouched.
-if [[ "${DEV_MODE}" -eq 1 ]]; then
-    info "dev mode — skipping stale-MTP slot migration (no system writes)"
-else
+    info "running post-activation migrations (schema + seed-profile/mtp/image-pin/extra-args)"
     "${VENV_DIR}/bin/python" - <<'PYEOF'
-from hal0.updater.updater import clear_stale_mtp_overrides
-n = clear_stale_mtp_overrides()
-if n:
-    print(f"  cleared {n} crash-only mtp=true slot override(s) — see log for slots")
+from hal0.updater.updater import run_post_activation_migrations
+source, target = run_post_activation_migrations()
+if target != source:
+    print(f"  hal0.toml schema migrated {source} -> {target}")
 else:
-    print("  no stale mtp=true slot overrides found")
+    print(f"  hal0.toml schema already at {target}")
+print("  seed-profile / stale-MTP / runner-image / extra-args cleanup passes ran (see log for any per-item detail)")
 PYEOF
 fi
 

@@ -8,16 +8,23 @@
 # slot when this seed is absent (setup_command._BRAIN_SLOT — chat
 # capability, same name + port), and never overwrites an existing file.
 #
-# UNLIKE a normal user slot (which ships model-less so the operator picks),
-# the brain is the platform steward — it must work out of the box — so it
-# ships WITH a model pick: MiniCPM5-1B-Agentic-Tooluse, the strongest tool-use
-# 1B in the default library. Port 8089: 8088 belongs to the flm seed.
+# Clean seed (GH #1475), like every other capability seed: no
+# `[model].default` pin, so a model-less box boots a GREY tile — the
+# operator assigns a model later; filling in `[model].default` is what
+# activates the slot (#1369). Previously shipped a hardcoded
+# `MiniCPM5-1B-Agentic-Tooluse` pin, which is in neither shipped catalog
+# (`registry/seeds/haloai_models.json`, `registry/curated.py`) — an
+# unresolvable id the operator could not pull from any dashboard surface,
+# on a slot that (post-#1408) is "activated" purely by having a model
+# bound. It only ever worked on the box it was hand-pulled to. Port 8089:
+# 8088 belongs to the flm seed.
 #
-# Tool-calling note: on the FPX brain runtime a 1B can't emit tool calls the
-# native parser accepts (it leaks/500s). There is no per-turn reroute for
-# this — the steward's own model handles tool calls internally on whatever
+# If you point this slot at a small (~1B) model, note the tool-calling
+# caveat: on the FPX brain runtime a 1B can't emit tool calls the native
+# parser accepts (it leaks/500s). There is no per-turn reroute for this —
+# the steward's own model handles tool calls internally on whatever
 # `[brain_chat] model` resolves to. If that matters on your box, point the
-# whole steward chat at a tool-capable model instead of the seeded 1B, e.g.
+# whole steward chat at a tool-capable model instead, e.g.
 # `[brain_chat] model = "hal0/agent"` (the always-on anchor every fallback
 # chain ends in, ADR-0023). The chadrock family are confirmed clean native
 # tool-callers on this runtime: `hal0/code` (27B coder, lighter) and
@@ -32,5 +39,4 @@ n_gpu_layers = -1
 threads = 0
 
 [model]
-default = "MiniCPM5-1B-Agentic-Tooluse"
 context_size = 65536
