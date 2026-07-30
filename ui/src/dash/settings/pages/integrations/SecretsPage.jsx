@@ -41,7 +41,20 @@ function HfTokenField() {
         <button
           className="btn"
           disabled={!val.trim() || setSecret.isPending}
-          onClick={() => setSecret.mutate({ name: "HF_TOKEN", value: val.trim() }, { onSuccess: () => setVal("") })}
+          onClick={() => setSecret.mutate(
+            { name: "HF_TOKEN", value: val.trim() },
+            {
+              onSuccess: () => setVal(""),
+              // #1467: Save had no onError — a rejected write (e.g. 400
+              // secret.value_invalid) vanished silently, the field kept the
+              // typed token, and status stayed "not set" with zero
+              // feedback. Toast matches the Remove path below.
+              onError: (err) => window.__hal0Toast && window.__hal0Toast(
+                `HF token save failed — ${err?.message || "see logs"}`,
+                "err",
+              ),
+            },
+          )}
         >
           {setSecret.isPending ? "Saving…" : "Save"}
         </button>

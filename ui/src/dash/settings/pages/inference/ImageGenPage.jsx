@@ -111,11 +111,21 @@ export function ImageGenPage() {
   };
 
   const loading = capsQuery.isLoading;
+  // #1467: a failed probe used to render blank/unchecked controls as if
+  // nothing were configured, with Save gated only on `loading` (isLoading,
+  // false once the query settles to an error) — so a manually-typed model
+  // id in the free-text fallback could still Save against unknown live
+  // state. Mirrors AdvancedPage.jsx's isError banner + suppressed Save.
+  const errored = capsQuery.isError;
 
   return (
     <div className="s-section">
       <h2>Image-gen</h2>
       <p className="desc">ComfyUI / stable-diffusion image generation slot configuration. Changes persist to the img.img capability slot.</p>
+
+      {errored && (
+        <div className="err">{capsQuery.error?.message || "Could not load capabilities — Save is disabled until the probe succeeds"}</div>
+      )}
 
       <div className="s-panel">
         <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
@@ -155,7 +165,7 @@ export function ImageGenPage() {
               setImgProvider(imgSelection.provider || "");
             }}>Reset</button>
           )}
-          <button className="btn sm" disabled={!imgDirty || loading || applyCapability.isPending} onClick={doSave}>Save Image-gen</button>
+          <button className="btn sm" disabled={!imgDirty || loading || errored || applyCapability.isPending} onClick={doSave}>Save Image-gen</button>
         </div>
       </div>
 

@@ -15,10 +15,15 @@
 //
 // Wiring (vs. the design refs): endpoints target the GATEWAY (slot ports bind
 // loopback inside the runtime, not the LAN); the model id — not a per-slot
-// port — selects the slot. Auth is open on the LAN, so the cURL carries an
-// optional `$HAL0_KEY` placeholder rather than a real key. Tool detail comes
-// from GET /api/mcp/servers (`tool_details`).
+// port — selects the slot. Auth posture is read live from GET
+// /api/auth/status (useAuthStatus): while enforcement is off the cURL
+// carries no Authorization header (trusted-LAN-open); once the operator
+// arms `require_auth` (Settings ▸ Security), every generated command gets
+// `-H "Authorization: Bearer $HAL0_CLIENT_KEY"` so a copy-pasted request
+// doesn't 401 (#1467). Tool detail comes from GET /api/mcp/servers
+// (`tool_details`).
 
+import { useAuthStatus } from '@/api/hooks/useAuthStatus'
 import { useSlots } from '@/api/hooks/useSlots'
 import { slotIndicatorFromPhase } from './slot-status.js'
 import { useMcpServers } from '@/api/hooks/useMcp'
@@ -122,8 +127,8 @@ function copyText(t) {
     /* no-op */
   }
 }
-function toast(msg) {
-  if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg)
+function toast(msg, kind) {
+  if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind)
 }
 function devClass(d) {
   return 'chip dev-' + (d || 'cpu').replace('gpu-', '')
@@ -185,14 +190,16 @@ function defaultPrompt(s) {
   return 'Reply with the single word: pong'
 }
 
-// cURL targets the gateway /v1; the model id selects the slot. The runtime
-// is open on the LAN (no inbound auth in v0.3), so the command carries no
-// Authorization header.
-function buildCurl(s, apiBase, prompt) {
+// cURL targets the gateway /v1; the model id selects the slot. authRequired
+// mirrors the live require-auth posture (useAuthStatus) — when armed the
+// /v1/* surface is CLIENT-classified (routes/auth.py), so the generated
+// command carries a bearer placeholder or it 401s the moment it's pasted.
+function buildCurl(s, apiBase, prompt, authRequired) {
   const url = apiBase + routeFor(s)
   const model = modelId(s)
+  const authHeader = authRequired ? ' \\\n  -H "Authorization: Bearer $HAL0_CLIENT_KEY"' : ''
   if (isStt(s)) {
-    return 'curl ' + url + ' \\\n  -F model=' + model + ' \\\n  -F file=@clip.wav'
+    return 'curl ' + url + authHeader + ' \\\n  -F model=' + model + ' \\\n  -F file=@clip.wav'
   }
   const g = slotGroup(s)
   let body
@@ -202,7 +209,7 @@ function buildCurl(s, apiBase, prompt) {
   else body = { model, messages: [{ role: 'user', content: prompt }], stream: false }
   const json = JSON.stringify(body, null, 2)
   return (
-    'curl ' + url + ' \\\n  -H "Content-Type: application/json" \\\n  -d \'' + json + "'"
+    'curl ' + url + authHeader + ' \\\n  -H "Content-Type: application/json" \\\n  -d \'' + json + "'"
   )
 }
 
@@ -489,7 +496,7 @@ function EnginePane({ live, glyph, title, sub, pill, headRight, strip, foot, def
 }
 
 // ─── one endpoint row (inline list + expandable quick actions) ───────
-function EndpointRow({ slot, apiBase }) {
+function EndpointRow({ slot, apiBase, authRequired }) {
   const [open, setOpen] = useCS(false)
   const [prompt, setPrompt] = useCS(defaultPrompt(slot))
   const [testing, setTesting] = useCS(false)
@@ -498,7 +505,7 @@ function EndpointRow({ slot, apiBase }) {
   const base = apiBase
   const st = epState(slot)
   const toks = slotToks(slot)
-  const curl = buildCurl(slot, apiBase, prompt)
+  const curl = buildCurl(slot, apiBase, prompt, authRequired)
   const dimmed = st === 'offline' || st === 'idle'
   const grp = slotGroup(slot)
 
@@ -573,7 +580,9 @@ function EndpointRow({ slot, apiBase }) {
                 </div>
                 <div className="kv">
                   <span className="k">auth</span>
-                  <span className="val">none · open on lan</span>
+                  <span className="val">
+                    {authRequired ? 'client key required' : 'none · open on lan'}
+                  </span>
                 </div>
                 <div className="kv">
                   <span className="k">ctx</span>
@@ -843,6 +852,8 @@ function toMcpRow(s) {
 function LocalEndpointsPanel() {
   const slotsQuery = useSlots()
   const cfg = useConfigUrls()
+  const authQuery = useAuthStatus()
+  const authRequired = !!authQuery.data?.auth_required
 
   const slots = slotsQuery.data ?? []
 
@@ -895,7 +906,7 @@ function LocalEndpointsPanel() {
           <span className="v">{tls ? 'on' : 'off · lan only'}</span>
           <span className="sep">·</span>
           <span className="k">auth</span>
-          <span className="v">open · lan</span>
+          <span className="v">{authRequired ? 'client key required' : 'open · lan'}</span>
         </>
       }
     >
@@ -914,7 +925,7 @@ function LocalEndpointsPanel() {
           <div className="cn-empty mono">No slots configured. Create one from Slots.</div>
         )}
         {slots.map((s) => (
-          <EndpointRow key={s.name} slot={s} apiBase={apiBase} />
+          <EndpointRow key={s.name} slot={s} apiBase={apiBase} authRequired={authRequired} />
         ))}
       </div>
     </EnginePane>
@@ -1070,25 +1081,35 @@ function UpstreamRow({ up, defaultOpen }) {
     })
   }
 
+  function updateErr(label) {
+    return (e) => toast(`${up.name} ${label} failed — ${e?.message || 'see logs'}`, 'err')
+  }
+
   function applyFilters() {
-    update.mutate({ name: up.name, patch: { model_filters: draft } })
+    update.mutate(
+      { name: up.name, patch: { model_filters: draft } },
+      { onError: updateErr('filter update') },
+    )
   }
 
   function clearFilters() {
     setModelsText('')
     setIncludeText('')
     setExcludeText('')
-    update.mutate({
-      name: up.name,
-      patch: { model_filters: { models: [], include: [], exclude: [] } },
-    })
+    update.mutate(
+      { name: up.name, patch: { model_filters: { models: [], include: [], exclude: [] } } },
+      { onError: updateErr('filter clear') },
+    )
   }
 
   function saveKey() {
     if (!keyValue || !up.auth_value_env) return
     setCredential.mutate(
       { name: up.name, key: up.auth_value_env, value: keyValue },
-      { onSuccess: () => setKeyValue('') }, // write-only: never keep the secret around
+      {
+        onSuccess: () => setKeyValue(''), // write-only: never keep the secret around
+        onError: (e) => toast(`${up.name} key save failed — ${e?.message || 'see logs'}`, 'err'),
+      },
     )
   }
 
@@ -1115,7 +1136,10 @@ function UpstreamRow({ up, defaultOpen }) {
                 type="checkbox"
                 checked={up.enabled}
                 onChange={(e) =>
-                  update.mutate({ name: up.name, patch: { enabled: e.target.checked } })
+                  update.mutate(
+                    { name: up.name, patch: { enabled: e.target.checked } },
+                    { onError: updateErr('enabled toggle') },
+                  )
                 }
               />
               <span>
@@ -1127,7 +1151,10 @@ function UpstreamRow({ up, defaultOpen }) {
                 type="checkbox"
                 checked={up.advertise_models}
                 onChange={(e) =>
-                  update.mutate({ name: up.name, patch: { advertise_models: e.target.checked } })
+                  update.mutate(
+                    { name: up.name, patch: { advertise_models: e.target.checked } },
+                    { onError: updateErr('advertise toggle') },
+                  )
                 }
               />
               <span>
@@ -1235,7 +1262,12 @@ function UpstreamRow({ up, defaultOpen }) {
                 </button>
                 <button
                   className="btn sm danger"
-                  onClick={() => remove.mutate(up.name)}
+                  onClick={() =>
+                    remove.mutate(up.name, {
+                      onError: (e) =>
+                        toast(`${up.name} delete failed — ${e?.message || 'see logs'}`, 'err'),
+                    })
+                  }
                   disabled={remove.isPending}
                 >
                   Confirm delete
@@ -1285,9 +1317,19 @@ function AddUpstreamForm({ onClose }) {
       onSuccess: (created) => {
         const env = created?.auth_value_env
         if (apiKey && env) {
+          // onSuccess/onError (not onSettled): a failed key write must keep
+          // the form open with the error shown — the upstream now exists but
+          // is keyless, and closing silently was the only clue an operator
+          // had that anything went wrong (#1467).
           setCredential.mutate(
             { name: created.name, key: env, value: apiKey },
-            { onSettled: () => onClose() },
+            {
+              onSuccess: () => onClose(),
+              onError: (e) =>
+                setError(
+                  `Upstream created, but the key write failed — ${e?.message || 'see logs'}. Retry from the row below.`,
+                ),
+            },
           )
         } else {
           onClose()

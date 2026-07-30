@@ -262,8 +262,7 @@ export const ENDPOINTS = {
   // GET /api/auth/exposure (ADMIN) — serializes RULES + OPEN_ALLOWLIST from
   // security/exposure.py: the live per-(method,path) deny-by-default
   // classification table + per-class counts. Backs the Settings ▸ Security
-  // exposure table (ExposureTable.jsx currently ships a stub-with-reason —
-  // wiring it to this route is a separate lane's follow-up).
+  // exposure table (ExposureTable.jsx) — wired live since Phase 1 wave 2.
   authExposure: '/api/auth/exposure',
 
   // ── Flag-migration report (D5 migration-resolve) ─────────────────

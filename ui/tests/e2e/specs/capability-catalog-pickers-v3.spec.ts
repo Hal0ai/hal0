@@ -115,3 +115,24 @@ test.describe('Capability catalog pickers (#1454)', () => {
     await expect(modelRows.nth(0).locator('select')).toHaveCount(0)
   })
 })
+
+// #1467 item 4: neither page had an isError branch for GET /api/capabilities
+// — a failed probe rendered blank/unchecked controls as if nothing were
+// configured, and Save stayed clickable (gated only on `loading`, i.e.
+// isLoading, which is false once the query has settled to an error). Fixed
+// by mirroring AdvancedPage.jsx's isError pattern: an error banner + Save
+// suppressed via `errored` alongside the existing dirty/loading/pending
+// gates (VoicePage.jsx Save STT / Save TTS, ImageGenPage.jsx Save Image-gen).
+//
+// NOT e2e-covered: `/api/capabilities` is `networkFirst` in
+// src/api/mock.ts's MOCK_ALLOWLIST (needed so THIS spec's page.route
+// fixtures above stay authoritative under the suite's forced-mock build —
+// see the allowlist comment). But `mockFetch`'s FORCED+networkFirst branch
+// substitutes the baked payload for ANY non-ok response, network exception
+// included (`if (FORCED && hit.row.networkFirst && !res.ok) { …fallback… }`)
+// — so a page.route 500/abort on this endpoint is silently papered over
+// with a 200 mock payload before it ever reaches react-query, and
+// capsQuery.isError is unreachable from a Playwright spec against this
+// harness. Verified by direct code inspection instead (matches the
+// AdvancedPage/SecretsPage isError precedent exactly); flagged in the
+// #1467 report as a test-infra gap, not a shortcut in the fix itself.

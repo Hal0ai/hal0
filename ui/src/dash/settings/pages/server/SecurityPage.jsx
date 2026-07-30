@@ -5,12 +5,16 @@
 //   { auth_required, has_admin_key, tier } — posture booleans, never a value.
 //
 // So this page shows STATUS ONLY. It never renders a key VALUE. Key rotation is
-// real (POST /api/auth/rotate) and returns status-only fields — after a rotate
-// the admin-key row shows the returned fingerprint + rotated-at (never the
-// value). GET /api/auth/exposure landed (Phase 1 wave 2), so the route-exposure
-// table below is now LIVE (ExposureTable.jsx / useAuthExposure), not a stub.
-// What /api/auth/status still can't back (client-key set/unset, live
-// login-throttle counts) stays surfaced as disabled-with-reason — those are
+// real for BOTH tiers (POST /api/auth/rotate {tier: 'admin'|'client'}) and
+// returns status-only fields — after a rotate that row shows the returned
+// fingerprint + rotated-at (never the value); RotateKeyDialog is shared,
+// parameterised by tier (#1467 wired the client row to it — it used to be a
+// disabled "Set key…" button claiming no route existed). GET /api/auth/
+// exposure landed (Phase 1 wave 2), so the route-exposure table below is now
+// LIVE (ExposureTable.jsx / useAuthExposure), not a stub. What /api/auth/
+// status still can't back — client-key set/unset LIVE STATUS (the pip stays
+// "unknown", rotation is independent of reading status) and live
+// login-throttle counts — stays surfaced as disabled-with-reason; those are
 // genuinely still missing routes (API-lane requests below), not stale gates.
 // Assumed ADMIN-gated: a browser HMAC session is admin-equivalent (spec §22 /
 // KB-1).
@@ -60,17 +64,23 @@ const CLIENT_KEY_REASON =
   'Client-key set/unset is not reported by /api/auth/status — it returns admin posture only. (API-lane request: add client_key_configured to the status payload)'
 const THROTTLE_REASON =
   'Live login-throttle counters are not exposed — the per-IP limiter runs server-side (routes/auth.py) but publishes no status. (API-lane request: GET /api/auth/throttle)'
-const SET_CLIENT_REASON =
-  'Setting/clearing the client key has no route yet — keys are configured via HAL0_*_KEY env today. (API-lane request: POST /api/auth/keys/client)'
 
 export function SecurityPage() {
   const auth = useAuthStatus()
   const setRequireAuth = useSetRequireAuth()
   const logout = useLogout()
   const [rotateOpen, setRotateOpen] = useStateS(false)
+  // Which tier the open RotateKeyDialog targets — both the admin and client
+  // rows share the one dialog instance (#1467: rotate is real for both).
+  const [rotateTier, setRotateTier] = useStateS('admin')
   // Last rotation result per tier (status-only: { fingerprint, rotated_at }).
   // Never a key value — the endpoint never returns one.
-  const [lastRotated, setLastRotated] = useStateS(null)
+  const [lastRotated, setLastRotated] = useStateS({ admin: null, client: null })
+
+  const openRotate = (tier) => {
+    setRotateTier(tier)
+    setRotateOpen(true)
+  }
 
   const s = auth.data
   const loading = auth.isPending
@@ -196,8 +206,8 @@ export function SecurityPage() {
           testid="security-key-admin"
           name="admin key"
           gates={
-            lastRotated
-              ? `fingerprint ${lastRotated.fingerprint} · rotated ${lastRotated.rotated_at}`
+            lastRotated.admin
+              ? `fingerprint ${lastRotated.admin.fingerprint} · rotated ${lastRotated.admin.rotated_at}`
               : 'gates every ADMIN route'
           }
           state={adminState}
@@ -205,7 +215,7 @@ export function SecurityPage() {
             <button
               className="btn ghost sm"
               data-testid="security-rotate-admin"
-              onClick={() => setRotateOpen(true)}
+              onClick={() => openRotate('admin')}
             >
               Rotate…
             </button>
@@ -214,16 +224,19 @@ export function SecurityPage() {
         <KeyRow
           testid="security-key-client"
           name="client key"
-          gates="gates CLIENT routes (/v1/*)"
+          gates={
+            lastRotated.client
+              ? `fingerprint ${lastRotated.client.fingerprint} · rotated ${lastRotated.client.rotated_at}`
+              : 'gates CLIENT routes (/v1/*)'
+          }
           state="unknown"
           action={
             <button
               className="btn ghost sm"
-              data-testid="security-set-client"
-              disabled
-              title={SET_CLIENT_REASON}
+              data-testid="security-rotate-client"
+              onClick={() => openRotate('client')}
             >
-              Set key…
+              Rotate…
             </button>
           }
         />
@@ -257,8 +270,13 @@ export function SecurityPage() {
 
       <RotateKeyDialog
         open={rotateOpen}
-        tier="admin"
-        onRotated={(r) => setLastRotated({ fingerprint: r.fingerprint, rotated_at: r.rotated_at })}
+        tier={rotateTier}
+        onRotated={(r) =>
+          setLastRotated((prev) => ({
+            ...prev,
+            [rotateTier]: { fingerprint: r.fingerprint, rotated_at: r.rotated_at },
+          }))
+        }
         onClose={() => setRotateOpen(false)}
       />
     </div>

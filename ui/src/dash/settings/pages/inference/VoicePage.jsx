@@ -147,6 +147,12 @@ export function VoicePage() {
   };
 
   const loading = capsQuery.isLoading;
+  // #1467: a failed probe used to render blank/unchecked controls as if
+  // nothing were configured, with Save gated only on `loading` (isLoading,
+  // false once the query settles to an error) — so a manually-typed model
+  // id in the free-text fallback could still Save against unknown live
+  // state. Mirrors AdvancedPage.jsx's isError banner + suppressed Save.
+  const errored = capsQuery.isError;
   const sttStatus = sttSelection.status || "offline";
   const ttsStatus = ttsSelection.status || "offline";
 
@@ -159,6 +165,10 @@ export function VoicePage() {
     <div className="s-section">
       <h2>Voice</h2>
       <p className="desc">STT (speech-to-text) and TTS (text-to-speech) slot configuration. Changes persist to the voice.stt and voice.tts capability slots.</p>
+
+      {errored && (
+        <div className="err">{capsQuery.error?.message || "Could not load capabilities — Save is disabled until the probe succeeds"}</div>
+      )}
 
       {/* ── STT ── */}
       <div className="s-panel" style={{marginBottom: 12}}>
@@ -194,7 +204,7 @@ export function VoicePage() {
           {sttDirty && (
             <button className="btn ghost sm" onClick={() => { setSttModel(sttSelection.model || ""); setSttEnabled(!!sttSelection.enabled); }}>Reset</button>
           )}
-          <button className="btn sm" disabled={!sttDirty || loading || applyCapability.isPending} onClick={doSaveStt}>Save STT</button>
+          <button className="btn sm" disabled={!sttDirty || loading || errored || applyCapability.isPending} onClick={doSaveStt}>Save STT</button>
         </div>
       </div>
 
@@ -307,7 +317,7 @@ export function VoicePage() {
               setTtsFormat(origFormat);
             }}>Reset</button>
           )}
-          <button className="btn sm" disabled={!ttsDirty || !speedValid || loading || applyCapability.isPending || editSlot.isPending} onClick={doSaveTts}>Save TTS</button>
+          <button className="btn sm" disabled={!ttsDirty || !speedValid || loading || errored || applyCapability.isPending || editSlot.isPending} onClick={doSaveTts}>Save TTS</button>
         </div>
       </div>
     </div>

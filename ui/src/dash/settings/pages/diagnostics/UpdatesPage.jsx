@@ -132,12 +132,13 @@ export function UpdatesPage() {
             />
           }
         />
-        <SRow
-          k="Auto-check"
-          sub="Background update checks by the daemon"
-          mono
-          v={stateQuery.data ? (u.autoCheck ? <span style={{color: "var(--ok)"}}>enabled</span> : <span style={{color: "var(--fg-4)"}}>disabled</span>) : "—"}
-        />
+        {/* #1467: an "Auto-check" evidence row used to live here, but
+            GET /api/updates/state hardcodes `autoCheck: true` (routes/
+            updater.py) — no timer/unit state or config knob backs it, so
+            the row could never read anything but "enabled" even if the
+            check mechanism were masked. A permanently-green row is worse
+            than none for a GA release; dropped rather than papered over
+            with a fabricated derivation. */}
         <SRow
           k="Channel"
           sub="Release track · persisted to hal0.toml"

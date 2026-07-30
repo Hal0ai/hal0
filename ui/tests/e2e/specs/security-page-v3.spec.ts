@@ -60,9 +60,12 @@ test.describe('Settings → Security', () => {
 
     await expect(page.getByTestId('security-key-admin-status')).toContainText(/set/i)
     await expect(page.getByTestId('security-tier')).toContainText('admin')
-    // Client-key status is not reported by the endpoint → disabled + reason.
-    await expect(page.getByTestId('security-set-client')).toBeDisabled()
+    // Client-key LIVE STATUS still isn't reported by /api/auth/status → the
+    // status pip stays "unknown" with a reason. Rotation, unlike status, is a
+    // real route (POST /api/auth/rotate {tier:'client'}) — #1467 replaced the
+    // dead disabled "Set key…" button with a live "Rotate…" action.
     await expect(page.getByTestId('security-client-reason')).toContainText(/API-lane/i)
+    await expect(page.getByTestId('security-rotate-client')).toBeEnabled()
     // Throttle counters are not published.
     await expect(page.getByTestId('security-throttle-status')).toContainText(/unavailable/i)
   })
@@ -173,5 +176,49 @@ test.describe('Settings → Security', () => {
     // After Done, the admin key row shows the fingerprint (status-only), no value.
     await page.getByTestId('rotate-done').click()
     await expect(page.getByTestId('security-key-admin')).toContainText('ab12cd34')
+  })
+
+  // #1467 item 2: POST /api/auth/rotate {tier:'client'} is live (routes/
+  // auth.py) — the client-key row's "Set key…" button used to be
+  // disabled-with-reason claiming no route existed. Now it's a real
+  // "Rotate…" action wired to the same dialog the admin row uses.
+  test('client-key row rotates via the same dialog, status-only, tier=client', async ({
+    page,
+  }) => {
+    await mockAuthStatus(page, { auth_required: true, has_admin_key: true, tier: 'admin' })
+    let rotateBody: any = null
+    await page.route('**/api/auth/rotate', (route) => {
+      rotateBody = route.request().postDataJSON()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          tier: 'client',
+          rotated_at: '2026-07-30T06:00:00Z',
+          key_len: 43,
+          fingerprint: 'ef56gh78',
+          applies_live: true,
+          restart_required: false,
+          session_preserved: true,
+          note: 'New client key written to /etc/hal0/api.env — retrieve it there.',
+        }),
+      })
+    })
+    await openSecurity(page)
+
+    await page.getByTestId('security-rotate-client').click()
+    // Dialog confirms the CLIENT tier specifically, not admin.
+    await expect(page.getByTestId('rotate-confirm-input')).toBeVisible()
+    await page.getByTestId('rotate-confirm-input').fill('rotate client')
+    await page.getByTestId('rotate-confirm').click()
+
+    await expect(page.getByTestId('rotate-result')).toBeVisible()
+    await expect(page.getByTestId('rotate-fingerprint')).toContainText('ef56gh78')
+    expect(rotateBody).toEqual({ tier: 'client' })
+
+    // Done closes the dialog; the client-key row now shows the fingerprint,
+    // never a value.
+    await page.getByTestId('rotate-done').click()
+    await expect(page.getByTestId('security-key-client')).toContainText('ef56gh78')
   })
 })

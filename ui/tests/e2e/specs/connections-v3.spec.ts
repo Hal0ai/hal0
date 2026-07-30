@@ -150,6 +150,172 @@ test.describe('Local endpoints (Slots ▸ Endpoints, #slots/endpoints)', () => {
 
 })
 
+// ── Local endpoints — auth-aware cURL + kv/foot (#1467 item 1) ──
+// The pane used to hardcode "auth none · open on lan" and never attach a
+// bearer header, regardless of the live require-auth posture (GET
+// /api/auth/status). With enforcement armed the copied cURL 401s and the
+// posture readout lies. Reads useAuthStatus() and reacts to auth_required.
+test.describe('Local endpoints — auth-aware cURL (#1467)', () => {
+  test('auth_required:true adds the Authorization header and flips the auth readouts', async ({
+    page,
+  }) => {
+    await page.route('**/api/auth/status', (route) =>
+      json(route, { auth_required: true, has_admin_key: true, tier: 'admin' }),
+    )
+    await page.goto('/#slots/endpoints', { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.eprow').first()).toBeVisible({ timeout: 5_000 })
+
+    const primary = page.locator('.eprow').filter({ hasText: 'primary' }).first()
+    await primary.locator('.eprow-main').click()
+
+    // cURL now carries a bearer placeholder for the client key.
+    const curl = primary.locator('.curl-code pre')
+    await expect(curl).toContainText('Authorization: Bearer $HAL0_CLIENT_KEY')
+
+    // The endpoint kv row no longer claims open auth.
+    const authKv = primary.locator('.kv', { hasText: 'auth' })
+    await expect(authKv).toContainText(/client key required/i)
+    await expect(authKv).not.toContainText(/open on lan/i)
+
+    // The pane foot posture readout matches (scope to the Local endpoints
+    // pane — Upstream providers renders its own .cpane-foot alongside it).
+    const foot = page.locator('.cpane', { hasText: 'Local endpoints' }).locator('.cpane-foot')
+    await expect(foot).toContainText(/client key required/i)
+    await expect(foot).not.toContainText(/open · lan/i)
+  })
+
+  test('auth_required:false keeps the open-lan copy and no Authorization header', async ({
+    page,
+  }) => {
+    await page.route('**/api/auth/status', (route) =>
+      json(route, { auth_required: false, has_admin_key: false, tier: 'open' }),
+    )
+    await page.goto('/#slots/endpoints', { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.eprow').first()).toBeVisible({ timeout: 5_000 })
+
+    const primary = page.locator('.eprow').filter({ hasText: 'primary' }).first()
+    await primary.locator('.eprow-main').click()
+
+    const curl = primary.locator('.curl-code pre')
+    await expect(curl).not.toContainText('Authorization')
+
+    const authKv = primary.locator('.kv', { hasText: 'auth' })
+    await expect(authKv).toContainText(/open on lan/i)
+  })
+})
+
+// ── Upstream providers — mutation error surfacing (#1467 item 5) ──
+// Enabled/advertise toggles, filter Apply/Clear, Delete, and the credential
+// write all fired their mutation with no onError — a failed PATCH just
+// snapped the checkbox back on refetch with zero feedback, and a failed
+// AddUpstreamForm credential write still closed the form (onSettled),
+// leaving a keyless upstream with no message.
+const UPSTREAM_FIXTURE = {
+  name: 'openrouter',
+  kind: 'remote',
+  url: 'https://openrouter.ai/api/v1',
+  auth_style: 'bearer',
+  auth_header: 'Authorization',
+  auth_value_env: 'OPENROUTER_API_KEY',
+  auth_configured: true,
+  auth_key_present: false,
+  timeout_seconds: 30,
+  slot_name: null,
+  warmup_strategy: 'none',
+  advertise_models: true,
+  enabled: true,
+  model_filters: { models: [], include: [], exclude: [] },
+  models: [],
+}
+
+test.describe('Upstream providers — mutation error surfacing (#1467)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/upstreams', (route) => {
+      if (route.request().method() === 'GET') return json(route, [UPSTREAM_FIXTURE])
+      return json(route, {})
+    })
+    await page.goto('/#slots/endpoints', { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.cpane', { hasText: 'Upstream providers' })).toBeVisible({
+      timeout: 5_000,
+    })
+  })
+
+  test('a failed enabled-toggle PATCH surfaces a toast', async ({ page }) => {
+    await page.route('**/api/upstreams/openrouter', (route) => {
+      if (route.request().method() === 'PATCH')
+        return json(route, { error: { code: 'upstream.write_failed', message: 'disk full' } }, 500)
+      return json(route, UPSTREAM_FIXTURE)
+    })
+    // The panel opens the sole upstream row by default (defaultOpen =
+    // remotes.length === 1 && i === 0) — no need to click it open, and
+    // clicking .up-main here would just toggle it CLOSED.
+    const row = page.locator('.uprow').filter({ hasText: 'openrouter' })
+    await expect(row).toHaveClass(/expanded/)
+    const enabledInput = row.locator('.up-toggle', { hasText: 'enabled' }).locator('input')
+    await expect(enabledInput).toBeVisible()
+    await enabledInput.click()
+
+    await expect(page.locator('.hal0-toast')).toContainText(/failed/i)
+  })
+
+  test('a failed Delete surfaces a toast', async ({ page }) => {
+    await page.route('**/api/upstreams/openrouter', (route) => {
+      if (route.request().method() === 'DELETE')
+        return json(route, { error: { code: 'upstream.write_failed', message: 'locked' } }, 500)
+      return json(route, UPSTREAM_FIXTURE)
+    })
+    // Sole upstream row is expanded by default — see comment above.
+    const row = page.locator('.uprow').filter({ hasText: 'openrouter' })
+    await expect(row).toHaveClass(/expanded/)
+    await row.locator('button', { hasText: 'Delete' }).click()
+    await expect(row.locator('button', { hasText: 'Confirm delete' })).toBeVisible()
+    await row.locator('button', { hasText: 'Confirm delete' }).click({ force: true })
+
+    await expect(page.locator('.hal0-toast')).toContainText(/failed/i)
+  })
+
+  test('AddUpstreamForm keeps the form open and shows the error when the credential write fails', async ({
+    page,
+  }) => {
+    await page.route('**/api/providers/catalog', (route) =>
+      json(route, {
+        openrouter: {
+          id: 'openrouter',
+          name: 'OpenRouter',
+          base_url: 'https://openrouter.ai/api/v1',
+          auth: 'bearer',
+          auth_header_name: 'Authorization',
+          models_path: '/models',
+          default_models: [],
+          default_model: '',
+          capabilities: ['chat'],
+          docs_url: '',
+          category: 'cloud',
+          notes: '',
+        },
+      }),
+    )
+    await page.route('**/api/upstreams', (route) => {
+      if (route.request().method() === 'POST')
+        return json(route, { ...UPSTREAM_FIXTURE, name: 'newprov' }, 201)
+      return json(route, [UPSTREAM_FIXTURE])
+    })
+    await page.route('**/api/providers/newprov/credentials', (route) =>
+      json(route, { error: { code: 'secret.value_invalid', message: 'rejected' } }, 400),
+    )
+
+    await page.locator('button', { hasText: '+ Add upstream' }).click()
+    await page.locator('.up-add select').selectOption('openrouter')
+    await page.locator('.up-add input[placeholder="openrouter"]').fill('newprov')
+    await page.locator('.up-add input[type="password"]').fill('sk-bad-key')
+    await page.locator('.up-add button', { hasText: 'Add upstream' }).click()
+
+    // The form stays open (not silently closed) and shows the failure.
+    await expect(page.locator('.up-add')).toBeVisible()
+    await expect(page.locator('.up-add')).toContainText(/rejected|failed/i)
+  })
+})
+
 // ── MCP servers — now the Agent ▸ MCP tab (#mcp / #agent/mcp) ──
 test.describe('MCP servers (Agent ▸ MCP, #mcp)', () => {
   test.beforeEach(async ({ page }) => {
