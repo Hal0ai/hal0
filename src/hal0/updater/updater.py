@@ -1158,20 +1158,21 @@ def _is_git_install() -> bool:
 
 
 def _reinstall_into_venv(install_dir: Path, *, job_id: str | None = None) -> None:
-    """``pip install --no-deps --force-reinstall <install_dir>`` into the running venv.
+    """``pip install --force-reinstall <install_dir>`` into the running venv.
 
     apply() swaps the ``current`` symlink but the venv imports hal0 from its own
     site-packages, so the swap alone changes nothing until the code is
-    reinstalled. ``--no-deps`` keeps it fast and offline-safe (deps were
-    resolved at install time); a release that changes deps needs a full
-    reinstall. Raises ``UpdateError`` on a non-zero pip exit.
+    reinstalled. Installs the release's full dependency set (deliberately NO
+    ``--no-deps``, #12): with ``--no-deps`` a release that adds or bumps a
+    ``[project.dependencies]`` entry silently never installs it — pip reports
+    success and the gap only surfaces as a deferred ``ImportError`` the first
+    time the new code path runs. Raises ``UpdateError`` on a non-zero pip exit.
     """
     cmd = [
         sys.executable,
         "-m",
         "pip",
         "install",
-        "--no-deps",
         "--force-reinstall",
         str(install_dir),
     ]
