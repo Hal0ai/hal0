@@ -11,8 +11,9 @@
 // fingerprint / last-rotated timestamp, the CLIENT-key set/unset state, or
 // login-throttle counters. The Security page surfaces those as
 // disabled-with-reason (API-lane requests, see SecurityPage.jsx) rather than
-// inventing data the backend doesn't send. There is likewise no key-rotation
-// route — the rotate flow is built but gated disabled-with-reason.
+// inventing data the backend doesn't send. Key rotation is a SEPARATE route
+// (POST /api/auth/rotate, both tiers — see useAuthActions.ts) and is live;
+// it just isn't reflected back through this status probe.
 
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '../client'
