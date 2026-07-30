@@ -7,6 +7,8 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    // tests/e2e/port.test.ts covers the Playwright port derivation (#1399) —
+    // pure logic, no browser, so it belongs to the unit suite not the e2e run.
+    include: ['src/**/*.test.ts', 'tests/e2e/*.test.ts'],
   },
 })
