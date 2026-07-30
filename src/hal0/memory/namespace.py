@@ -24,9 +24,17 @@ The rule:
     Free-form names used to pass through verbatim, which let any caller
     read/write arbitrary engine banks (and made the items undeletable
     through the id-scoped delete sweep). Writes to unknown namespaces
-    now raise; reads silently drop them — matching the foreign-private
-    fail-open-empty posture so multi-namespace reads degrade instead of
-    erroring.
+    now raise; reads *degrade* — an unaddressable entry is dropped from a
+    list that still names at least one addressable namespace, so a
+    multi-namespace read keeps working instead of erroring.
+  - A read request that names namespaces and resolves to NONE of them
+    fails CLOSED (#1451). Dropping the last entry used to yield ``[]``,
+    which every downstream ``requested or [DEFAULT_DATASET]`` read back
+    as "nothing requested" and expanded into the default shared sweep —
+    so an approval-gated ``memory_delete`` scoped to a nonexistent bank
+    executed against ``shared``, and reads scoped exclusively to banks
+    the caller may not address returned shared rows. ``[]`` means *no
+    banks*; only ``None`` may expand to the default.
 
 This module is intentionally tiny: pure functions + the
 ``MemoryNamespaceError`` sentinel. The wrapper-level enforcement
@@ -126,10 +134,17 @@ def resolve_read_datasets(
 
     Mirrors the read branch from :func:`hal0.mcp.memory._memory_search`:
 
-      - ``requested`` already a list → filtered against the spec §3
-        namespace table (unknown / foreign-private entries are dropped,
-        fail-open-empty — the provider applies the same rule, this keeps
-        the contract visible at the front door).
+      - ``requested`` already a non-empty list → filtered against the
+        spec §3 namespace table (unknown / foreign-private entries are
+        dropped — the provider applies the same rule, this keeps the
+        contract visible at the front door). If **every** entry is
+        dropped the call raises ``MemoryNamespaceError`` rather than
+        returning ``[]``: an empty filter result is indistinguishable
+        from "unscoped" to every downstream ``or DEFAULT_DATASET``, and
+        that collapse is #1451 (an approved foreign-bank delete executing
+        against ``shared``). Partial drops still degrade.
+      - ``requested`` an empty list → no namespace was named at all, so it
+        is treated exactly like ``None`` (below), not as a rejection.
       - ``requested`` empty/``None`` + ``private`` + ``client_id`` →
         expand to ``[shared, private:<client_id>]`` per §3.
       - ``requested`` empty/``None`` otherwise → :data:`DEFAULT_DATASET`.
@@ -138,9 +153,17 @@ def resolve_read_datasets(
         ``shared`` from a private-mode client still gets promoted —
         consistent with the write side).
     """
-    if isinstance(requested, list):
-        return [str(d) for d in requested if is_known_namespace(str(d), client_id=client_id)]
-    if requested is None or (isinstance(requested, str) and not requested.strip()):
+    if isinstance(requested, list) and requested:
+        names = [str(d) for d in requested]
+        kept = [d for d in names if is_known_namespace(d, client_id=client_id)]
+        if not kept:
+            raise MemoryNamespaceError(
+                "no addressable namespace in the requested scope "
+                f"{names!r}; reads accept 'shared', 'agents', 'project:<id>', "
+                "or your own 'private:<client_id>'"
+            )
+        return kept
+    if requested is None or isinstance(requested, list) or not requested.strip():
         if private and client_id:
             return [DEFAULT_DATASET, f"{PRIVATE_PREFIX}{client_id}"]
         return DEFAULT_DATASET

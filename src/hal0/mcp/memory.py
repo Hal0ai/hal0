@@ -181,8 +181,12 @@ def _resolve_read_dataset(
     by hand (``[str(d) for d in requested]``) with zero membership check
     against the spec §3 closed namespace table — a foreign/unknown
     namespace string in a list arg passed straight through to the engine.
-    ``resolve_read_datasets`` filters (fail-open-empty, matching the REST
-    routes in ``api/routes/memory.py``) instead of trusting the caller.
+    ``resolve_read_datasets`` filters the list against the closed table
+    instead of trusting the caller — degrading on a partial drop, and
+    (#1451) raising when *every* entry is unaddressable rather than
+    returning ``[]`` for the providers to re-expand into the default
+    shared sweep. ``api/routes/memory.py`` calls the same resolver on
+    every read AND on delete, so the two surfaces cannot drift.
     """
     try:
         return resolve_read_datasets(requested, private=private, client_id=client_id)
