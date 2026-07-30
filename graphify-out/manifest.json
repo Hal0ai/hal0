@@ -1260,7 +1260,7 @@
     "semantic_hash": ""
   },
   "src/hal0/api/routes/health.py": {
-    "mtime": 1785419544.866679,
+    "mtime": 1785417249.552676,
     "ast_hash": "4fbd3b6eaeec5457ced0c1849bab5dda",
     "semantic_hash": ""
   },
@@ -1670,7 +1670,7 @@
     "semantic_hash": ""
   },
   "src/hal0/cli/memory_commands.py": {
-    "mtime": 1785419544.866679,
+    "mtime": 1785417249.552676,
     "ast_hash": "9dbc5276197b07f8cf52125ee79fbca8",
     "semantic_hash": ""
   },
@@ -2110,7 +2110,7 @@
     "semantic_hash": ""
   },
   "src/hal0/memory/hindsight_provider.py": {
-    "mtime": 1785419544.867679,
+    "mtime": 1785417249.552676,
     "ast_hash": "992740e9cd53c98a1c7477026fcfc45c",
     "semantic_hash": ""
   },
@@ -2450,8 +2450,8 @@
     "semantic_hash": ""
   },
   "src/hal0/registry/pull.py": {
-    "mtime": 1785419544.7556772,
-    "ast_hash": "6b5a7f4cba4f5245abb11de4aea1585b",
+    "mtime": 1785415859.488921,
+    "ast_hash": "9f3dbd9b4bd9feb9267fad368f39f821",
     "semantic_hash": ""
   },
   "src/hal0/registry/pull_jobs.py": {
@@ -2535,8 +2535,8 @@
     "semantic_hash": ""
   },
   "src/hal0/services/models_service.py": {
-    "mtime": 1785419544.7566772,
-    "ast_hash": "40e5b2ae2d67b6be0822fb9293c60e52",
+    "mtime": 1785415859.4905455,
+    "ast_hash": "205bf5317bc7c5bbcc397c53e9824af6",
     "semantic_hash": ""
   },
   "src/hal0/services/registry.py": {
@@ -2740,7 +2740,7 @@
     "semantic_hash": ""
   },
   "src/hal0/toolloop/engine.py": {
-    "mtime": 1785419544.867679,
+    "mtime": 1785417249.552676,
     "ast_hash": "3fcdef600def0eaac8d0fd22b15dab89",
     "semantic_hash": ""
   },
@@ -3240,8 +3240,8 @@
     "semantic_hash": ""
   },
   "tests/api/test_models_add_from_path.py": {
-    "mtime": 1785419544.7566772,
-    "ast_hash": "1608629e918a3c901e17e66727644e38",
+    "mtime": 1785415859.499921,
+    "ast_hash": "851ab9ed597727879f9f6c73007a5050",
     "semantic_hash": ""
   },
   "tests/api/test_models_catalogue.py": {
@@ -7440,8 +7440,8 @@
     "semantic_hash": ""
   },
   "CHANGELOG.md": {
-    "mtime": 1785419575.5440795,
-    "ast_hash": "47f7e4325efd079b3e6a772bb5208bf7",
+    "mtime": 1785417316.564761,
+    "ast_hash": "ea26ecc53033197e25ee9849c2b4e944",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -8719,9 +8719,24 @@
     "ast_hash": "a24fa3ff2250f2626e985fc74ca710b1",
     "semantic_hash": ""
   },
+  "tests/api/test_memory_write_degraded_status.py": {
+    "mtime": 1785417287.8927264,
+    "ast_hash": "28f8c79c420493edde89676de2913487",
+    "semantic_hash": ""
+  },
   "tests/bench/test_harness_matrix.py": {
     "mtime": 1785415859.5045762,
     "ast_hash": "3d18be674cb8e76349a6677b9d8a96d0",
+    "semantic_hash": ""
+  },
+  "tests/board/test_xml_attr_tool_calls.py": {
+    "mtime": 1785416536.1337671,
+    "ast_hash": "a4c355d27bfc336c0258b77565ab3a07",
+    "semantic_hash": ""
+  },
+  "tests/cli/test_memory_status_write_rows.py": {
+    "mtime": 1785417232.4002752,
+    "ast_hash": "94a5e5a6b98396cb0add0dad2990a004",
     "semantic_hash": ""
   },
   "tests/cli/test_slot_migrate_flags.py": {
@@ -8734,9 +8749,9 @@
     "ast_hash": "e322cf11ba0c701f3a33ab29c01f6976",
     "semantic_hash": ""
   },
-  "tests/registry/test_pull_refcount_rows.py": {
-    "mtime": 1785419544.7566772,
-    "ast_hash": "3c0ed2a665ad03de0a2978288b07b69b",
+  "tests/memory/test_memory_write_degraded.py": {
+    "mtime": 1785417287.8927264,
+    "ast_hash": "c43218d7c97735de25507dc40ea5b4a6",
     "semantic_hash": ""
   },
   "tests/scripts/test_update_cosign_pin.py": {
@@ -8822,26 +8837,6 @@
   "docs/rework/hal0-specs/spec-slot-pin-lifecycle.md": {
     "mtime": 1785415859.3949192,
     "ast_hash": "3315c8ae6b0a981ad571f5ce8d5a03a6",
-    "semantic_hash": ""
-  },
-  "tests/api/test_memory_write_degraded_status.py": {
-    "mtime": 1785419544.867679,
-    "ast_hash": "28f8c79c420493edde89676de2913487",
-    "semantic_hash": ""
-  },
-  "tests/board/test_xml_attr_tool_calls.py": {
-    "mtime": 1785419544.867679,
-    "ast_hash": "a4c355d27bfc336c0258b77565ab3a07",
-    "semantic_hash": ""
-  },
-  "tests/cli/test_memory_status_write_rows.py": {
-    "mtime": 1785419544.867679,
-    "ast_hash": "94a5e5a6b98396cb0add0dad2990a004",
-    "semantic_hash": ""
-  },
-  "tests/memory/test_memory_write_degraded.py": {
-    "mtime": 1785419544.867679,
-    "ast_hash": "c43218d7c97735de25507dc40ea5b4a6",
     "semantic_hash": ""
   }
 }
