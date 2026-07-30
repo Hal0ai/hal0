@@ -143,6 +143,42 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 # ── hal0.toml ─────────────────────────────────────────────────────────────────
 
+#: Table -> key pairs pulled out of a raw ``hal0.toml`` dict before
+#: validation, for fields that used to exist and no longer do.
+#: ``BrainChatConfig`` is ``extra="forbid"`` (a leaf tunable table), so a
+#: file written before a field's removal would otherwise hard-fail
+#: :meth:`Hal0Config.model_validate` on every boot — not just after the
+#: packaged ``hal0 update`` path (which runs ``hal0.config.migrations``
+#: first); a plain code swap + service restart hits this too. Dropping the
+#: key here makes every load path forgiving regardless of how the new code
+#: got onto disk.
+#: HAL0-SUNSET: v1.1 — drop this once no box in the field can still be
+#: running a pre-#1453 hal0.toml (one full release cycle through
+#: ``hal0 update`` is enough; that path already writes the key back out).
+_DEAD_KEYS: dict[str, tuple[str, ...]] = {
+    "brain_chat": ("tool_model",),  # #1453: never read anywhere; dropped.
+}
+
+
+def _drop_dead_keys(raw: dict[str, Any]) -> dict[str, Any]:
+    """Strip fields removed from the schema out of a raw config dict.
+
+    A no-op (returns ``raw`` unchanged) when none of ``_DEAD_KEYS`` are
+    present, so an already-clean file isn't rewritten or copied.
+    """
+    out = raw
+    for table, keys in _DEAD_KEYS.items():
+        section = out.get(table)
+        if not isinstance(section, dict):
+            continue
+        present = [k for k in keys if k in section]
+        if not present:
+            continue
+        if out is raw:
+            out = dict(raw)
+        out[table] = {k: v for k, v in section.items() if k not in keys}
+    return out
+
 
 def load_hal0_config(path: Path | None = None) -> Hal0Config:
     """Load and validate hal0.toml.
@@ -161,6 +197,7 @@ def load_hal0_config(path: Path | None = None) -> Hal0Config:
     if not Path(target).exists():
         return Hal0Config()
     raw = _read_toml(Path(target))
+    raw = _drop_dead_keys(raw)
     try:
         return Hal0Config.model_validate(raw)
     except Exception as exc:
