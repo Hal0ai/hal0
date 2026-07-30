@@ -233,15 +233,16 @@ test.describe('Slot drawer — parallel wiring', () => {
 
 test.describe('Slot drawer — chat-template override wiring', () => {
   // Setting/changing an override is covered by slot-drawer-profile-v3 C7k.
-  // REMOVING one is not — and today it silently does nothing (#1372): the
-  // drawer gates both the dirty check and the save body on `overrideOpen`,
-  // which "Clear override" has just flipped to false, so the persisted
-  // template survives while the UI claims the model default is in effect.
+  // REMOVING one used to silently do nothing (#1372): both the dirty check and
+  // the save body were gated on `overrideOpen`, which "Clear override" has
+  // itself just flipped to false, so the persisted template survived while the
+  // UI claimed the model default was back in effect.
   //
-  // Annotated test.fail() so the suite stays green on the known bug and trips
-  // (unexpected pass) the moment #1372 lands — drop the annotation then.
-  test.fail(true, 'known bug — see #1372')
-  test('W7 — Clear override writes the removal to /config', async ({ page }) => {
+  // The removal must ride as `null`, NOT `""`: `reconcile_slot_updates`
+  // implements None-means-delete, so `null` drops the key from the slot TOML
+  // while `""` would persist an empty-string override (asserted backend-side in
+  // tests/api/test_slot_config_validation.py).
+  test('W7 — Clear override writes chat_template: null to /config', async ({ page }) => {
     const puts = await captureConfig(page, 'primary')
     await page.route('**/api/chat-templates', (route) =>
       route.fulfill({
@@ -264,9 +265,36 @@ test.describe('Slot drawer — chat-template override wiring', () => {
     await page.locator('.drawer button:has-text("Save")').click()
 
     await expect.poll(() => puts.length).toBe(1)
-    // Empty-string vs null is the open contract question in #1372; either is a
-    // removal, both beat sending nothing at all.
-    expect(puts[0].chat_template ?? '').toBe('')
+    expect(puts[0]).toHaveProperty('chat_template', null)
+  })
+
+  test('W7 — Clear override then reopening the override is not a phantom write', async ({ page }) => {
+    // Guard the inverse: clearing and re-picking the SAME template the slot
+    // already had must collapse back to "nothing changed".
+    const puts = await captureConfig(page, 'primary')
+    await page.route('**/api/chat-templates', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'auto', label: 'Auto (GGUF embedded)' },
+          { id: 'chatml', label: 'ChatML' },
+        ]),
+      }),
+    )
+    await seedSlots(page, [{ ...PRIMARY, chat_template: 'chatml' }, EMBED])
+
+    await page.goto('/#slots/primary')
+    const row = page
+      .locator('.drawer .form-row')
+      .filter({ has: page.locator('.form-lbl > span', { hasText: /^Template$/ }) })
+    await row.getByRole('button', { name: 'Clear override' }).click()
+    await row.getByRole('button', { name: 'Override' }).click()
+    await row.locator('select').selectOption('chatml')
+    await page.locator('.drawer button:has-text("Save")').click()
+
+    await expect(page.locator('.drawer')).toHaveCount(0)
+    expect(puts).toEqual([])
   })
 })
 

@@ -399,9 +399,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			return;
 		}
 		setFieldErrs({});
-		// Task 5: include chat_template only when the user has set/changed an override.
-		const chatTemplateChanged =
-			overrideOpen && chatTemplate !== (slot.chat_template || "");
+		// Task 5 / #1372: include chat_template whenever the effective override
+		// changed — a SET, a CHANGE, or a REMOVAL. Shares `chatTemplateDirty`
+		// with the unsaved-changes guard so the two can never disagree again.
+		const chatTemplateChanged = chatTemplateDirty;
 		// Per-slot extra_args override — ship only when changed, nested under
 		// [server] so the backend one-level merge preserves sibling server keys.
 		const extraArgsChanged = extraArgs !== extraArgsBaseline;
@@ -438,7 +439,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			if (binaryChanged) slotBody.binary = binary;
 			if (imagePinChanged) slotBody.image_pin = pinValue;
 			if (chatTemplateChanged) {
-				slotBody.chat_template = chatTemplate;
+				// null clears the override outright; a string pins it.
+				slotBody.chat_template = effectiveChatTemplate;
 			}
 			if (extraArgsChanged) {
 				slotBody.server = { extra_args: extraArgs };
@@ -593,6 +595,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const parRawNow = String(parallel).trim();
 	const parValueNow = parRawNow === "" ? null : Number(parRawNow);
 	const parallelDirty = parValueNow !== (slot.parallel ?? null);
+	// #1372: the EFFECTIVE per-slot chat-template override. Collapsed to a
+	// single source of truth because the dirty check and the save body used to
+	// carry their own copy of this predicate, and both gated on `overrideOpen`
+	// — which "Clear override" itself sets to false before either one runs, so
+	// removing a persisted override silently wrote nothing.
+	//
+	// null (never "") is the removal value: `reconcile_slot_updates` implements
+	// None-means-delete, so null drops the key from the slot TOML, whereas ""
+	// would persist an empty-string override (a different, still-wrong state).
+	// Covered by tests/api/test_slot_config_validation.py.
+	const effectiveChatTemplate = overrideOpen ? chatTemplate || null : null;
+	const chatTemplateDirty =
+		effectiveChatTemplate !== (slot.chat_template || null);
 	const dirty =
 		extraArgsDirty ||
 		ctxDirty ||
@@ -602,7 +617,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		binaryDirty ||
 		imagePinDirty ||
 		parallelDirty ||
-		(overrideOpen && chatTemplate !== (slot.chat_template || ""));
+		chatTemplateDirty;
 	const requestClose = () => {
 		if (dirty) {
 			setDiscardOpen(true);
