@@ -1180,6 +1180,83 @@ def screen_extra_args_json(raw: str, *, segment: str = "extra_args") -> None:
             ) from None
 
 
+# #1414 / #1378: the launchable range for ``defaults.context_size``.
+#
+# FLOOR mirrors the model drawer's client-side reject (#1378, hardened in #1386)
+# and the slot drawer's own ≥ 128 gate, so the three surfaces agree on one
+# number. 0 / negative are the shapes the live box happily persisted before the
+# screen existed; both are unlaunchable — llama-server refuses a non-positive
+# --ctx-size, so the row could only ever fail at slot start.
+#
+# CEILING is an absurdity screen, not a capability claim: 2**24 tokens is ~16x
+# the largest advertised window on any shipping model (Llama 4 Scout's 10M) and
+# ~64x the biggest GGUF ``context_length`` seen in the wild catalog (262144).
+# It exists so a fat-fingered 99999999 fails at SAVE with an actionable message
+# instead of reserving a KV cache no host can allocate. Deliberately NOT
+# cross-checked against the row's own GGUF ``metadata.context_length``:
+# over-riding the header upward is legitimate (RoPE scaling), so that stays a
+# warning-shaped concern for a later pass.
+CONTEXT_SIZE_MIN = 128
+CONTEXT_SIZE_MAX = 2**24
+
+
+def _screen_model_defaults(defaults: dict[str, Any]) -> None:
+    """Typed screen for the incoming ``defaults`` patch (#1414).
+
+    Two jobs, in order:
+
+    1. Parse the patch through ``ModelDefaults`` so client garbage
+       (``{"context_size": "abc"}``) fails as ``400 model.defaults_invalid``.
+       Before this, an unparseable value escaped all the way to
+       ``Model.model_validate`` inside :func:`hal0.registry.store.merge_update`,
+       which wraps EVERY failure in ``RegistryError`` — a 500 with a raw
+       pydantic traceback in ``details.reason`` for a plain bad body.
+    2. Range-check ``context_size`` against
+       ``[CONTEXT_SIZE_MIN, CONTEXT_SIZE_MAX]`` → ``400
+       model.context_size_out_of_range``.
+
+    Lives here rather than as a ``Field(ge=…, le=…)`` constraint on
+    ``ModelDefaults.context_size`` on purpose: a model-level constraint also
+    applies on the READ path, so any already-persisted row carrying an
+    out-of-range value would stop loading — the exact "policy applied to data
+    that predates it" trap #1411 documents on the profile side. Screening at
+    the write boundary rejects new garbage while leaving existing rows
+    readable (and therefore fixable through the drawer).
+    """
+    from pydantic import ValidationError
+
+    from hal0.errors import BadRequest
+    from hal0.registry.model import ModelDefaults
+
+    # Only the keys the client actually sent — `merge_update` keeps the rest, and
+    # a stored value that predates this screen must not fail someone else's patch.
+    try:
+        parsed = ModelDefaults.model_validate(defaults)
+    except ValidationError as exc:
+        first = exc.errors()[0] if exc.errors() else {}
+        loc = ".".join(str(p) for p in first.get("loc", ())) or "defaults"
+        raise BadRequest(
+            f"defaults.{loc} is not a valid value: {first.get('msg', 'invalid')}",
+            code="model.defaults_invalid",
+            details={"field": f"defaults.{loc}", "reason": first.get("msg")},
+        ) from exc
+
+    ctx = parsed.context_size
+    if ctx is not None and not (CONTEXT_SIZE_MIN <= ctx <= CONTEXT_SIZE_MAX):
+        raise BadRequest(
+            f"defaults.context_size must be between {CONTEXT_SIZE_MIN} and "
+            f"{CONTEXT_SIZE_MAX} tokens (got {ctx}) — a context size outside "
+            "that range cannot launch",
+            code="model.context_size_out_of_range",
+            details={
+                "field": "defaults.context_size",
+                "value": ctx,
+                "min": CONTEXT_SIZE_MIN,
+                "max": CONTEXT_SIZE_MAX,
+            },
+        )
+
+
 def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> None:
     """Validate the launch-affecting fields of a model create/update/validate body.
 
@@ -1188,6 +1265,10 @@ def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> No
     ``POST /api/models``, ``PUT /api/models/{id}`` and ``POST /api/models/validate``
     so the three can never drift (UI-API-1 item 1). Screens:
 
+    * ``defaults`` as a whole — parses against ``ModelDefaults`` so a malformed
+      value is ``400 model.defaults_invalid`` instead of a 500 leaking a pydantic
+      traceback, then range-checks ``context_size`` (``400
+      model.context_size_out_of_range``). See :func:`_screen_model_defaults` (#1414).
     * ``defaults.extra_args`` — shell-quoting integrity (O10), then the slot-
       hardware partition guard (spec-hw-slot-ownership §5: ``-ngl``/``-dev``/
       ``--threads`` belong on the slot, not the device-agnostic model — raised as
@@ -1205,6 +1286,8 @@ def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> No
     from hal0.errors import BadRequest
 
     defaults = body.get("defaults")
+    if isinstance(defaults, dict):
+        _screen_model_defaults(defaults)
     if isinstance(defaults, dict) and isinstance(defaults.get("extra_args"), str):
         import shlex
 

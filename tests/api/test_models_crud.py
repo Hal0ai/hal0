@@ -488,6 +488,147 @@ def test_validate_accepts_device_agnostic_tune(crud_client: TestClient) -> None:
     assert r.json()["ok"] is True
 
 
+# ── #1413: PUT merges `defaults` one level deep, not wholesale ────────────────
+
+
+def test_put_partial_defaults_preserves_unsent_siblings(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """The route documents `defaults` as a partial patch, so a body naming only
+    ``extra_args`` must not reset ``context_size``/``chat_template``/the
+    tri-states the client never sent (#1413)."""
+    fpath = crud_models_root / "m1413.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "m1413", "path": str(fpath)})
+    seed = crud_client.put(
+        "/api/models/m1413",
+        json={
+            "defaults": {
+                "context_size": 8192,
+                "chat_template": "minicpm5-1b",
+                "mtp": True,
+                "jinja": False,
+            }
+        },
+    )
+    assert seed.status_code == 200, seed.text
+
+    r = crud_client.put("/api/models/m1413", json={"defaults": {"extra_args": "--temp 0.5"}})
+    assert r.status_code == 200, r.text
+    got = r.json()["defaults"]
+    assert got["extra_args"] == "--temp 0.5"
+    assert got["context_size"] == 8192
+    assert got["chat_template"] == "minicpm5-1b"
+    assert got["mtp"] is True
+    assert got["jinja"] is False
+    # And the persisted row agrees (not just the response echo).
+    assert crud_client.get("/api/models/m1413").json()["defaults"]["context_size"] == 8192
+
+
+def test_put_explicit_null_sub_key_still_clears(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """`null` remains the DELETE verb for one sub-key — the tri-state contract
+    the drawer relies on to clear an override (#1413)."""
+    fpath = crud_models_root / "m1413b.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "m1413b", "path": str(fpath)})
+    crud_client.put(
+        "/api/models/m1413b",
+        json={"defaults": {"context_size": 8192, "extra_args": "-b 512"}},
+    )
+    r = crud_client.put("/api/models/m1413b", json={"defaults": {"context_size": None}})
+    assert r.status_code == 200, r.text
+    got = r.json()["defaults"]
+    assert got["context_size"] is None
+    assert got["extra_args"] == "-b 512"
+
+
+# ── #1414: typed context_size validation (server half of #1378) ────────────────
+
+
+@pytest.mark.parametrize("bad", ["abc", "32k", "", "8192.5", [], {}])
+def test_put_unparseable_context_size_is_400_not_500(
+    crud_client: TestClient,
+    crud_models_root: Path,
+    bad: object,
+) -> None:
+    """Client garbage must never escape as a 5xx with a raw pydantic traceback
+    (#1414a)."""
+    fpath = crud_models_root / "ctx-bad.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "ctxbad", "path": str(fpath)})
+    r = crud_client.put("/api/models/ctxbad", json={"defaults": {"context_size": bad}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.defaults_invalid"
+
+
+@pytest.mark.parametrize("bad", [0, -1, 127, 99999999])
+def test_put_out_of_range_context_size_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+    bad: int,
+) -> None:
+    """A context size that cannot launch is rejected at SAVE, not accepted with
+    a 200 and discovered at slot start (#1414b). Floor mirrors the drawer's
+    ≥ 128 (#1378/#1386); the ceiling is an absurdity screen."""
+    fpath = crud_models_root / "ctx-range.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "ctxrange", "path": str(fpath)})
+    r = crud_client.put("/api/models/ctxrange", json={"defaults": {"context_size": bad}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.context_size_out_of_range"
+    # Nothing persisted — the stored row keeps its (absent) override.
+    assert crud_client.get("/api/models/ctxrange").json()["defaults"] is None
+
+
+@pytest.mark.parametrize("good", [128, 4096, 262144])
+def test_put_in_range_context_size_accepted(
+    crud_client: TestClient,
+    crud_models_root: Path,
+    good: int,
+) -> None:
+    fpath = crud_models_root / "ctx-ok.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "ctxok", "path": str(fpath)})
+    r = crud_client.put("/api/models/ctxok", json={"defaults": {"context_size": good}})
+    assert r.status_code == 200, r.text
+    assert r.json()["defaults"]["context_size"] == good
+
+
+def test_create_rejects_out_of_range_context_size(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """POST create screens context_size like PUT does — one screen, three paths
+    (#1414)."""
+    fpath = crud_models_root / "ctx-create.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={"id": "ctxcreate", "path": str(fpath), "defaults": {"context_size": 0}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.context_size_out_of_range"
+    assert crud_client.get("/api/models/ctxcreate").status_code == 404
+
+
+def test_validate_reports_bad_context_size_inline(crud_client: TestClient) -> None:
+    """The drawer's dry-run screen surfaces the range violation inline instead
+    of returning {"ok": true} (#1414)."""
+    r = crud_client.post("/api/models/validate", json={"defaults": {"context_size": -1}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.context_size_out_of_range"
+
+
+def test_validate_reports_unparseable_context_size_inline(crud_client: TestClient) -> None:
+    r = crud_client.post("/api/models/validate", json={"defaults": {"context_size": "abc"}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.defaults_invalid"
+
+
 # ── Deliverable 3: duplicate-model endpoint ────────────────────────────────────
 
 
