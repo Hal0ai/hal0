@@ -58,13 +58,21 @@ class ProfileBody(BaseModel):
     )
     flags: str = Field(default="", description="Bench-tuned llama-server CLI flags.")
     mtp: bool = Field(default=False, description="Append MTP bundle to flags when True.")
-    device_class: Literal["gpu", "cpu", "npu", "img"] = Field(
-        default="gpu",
-        description="Device class this profile targets.",
-    )
-    backend: Literal["rocm", "vulkan"] | None = Field(
+    device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
         default=None,
-        description="GPU runtime (rocm|vulkan); None for non-GPU profiles.",
+        description=(
+            "INERT match-only fit hint — selects no hardware. None (the default) "
+            "means device-agnostic, which is what every shipped seed is and what "
+            "a tuning-only profile should be. Was `'gpu'`, which silently "
+            "stamped a hardware claim onto every profile created without one."
+        ),
+    )
+    backend: Literal["rocm", "vulkan", "cuda"] | None = Field(
+        default=None,
+        description=(
+            "INERT match-only fit hint (rocm|vulkan|cuda); None for non-GPU "
+            "profiles. Selects no runtime — the slot's `device` does."
+        ),
     )
     cloned_from: str | None = Field(
         default=None,
@@ -90,11 +98,15 @@ class ProfileUpdateBody(BaseModel):
     mtp: bool | None = Field(default=None, description="MTP toggle.")
     device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
         default=None,
-        description="Device class this profile targets.",
+        description="INERT match-only fit hint; None leaves the stored value unchanged.",
     )
-    backend: Literal["rocm", "vulkan"] | None = Field(
+    backend: Literal["rocm", "vulkan", "cuda"] | None = Field(
         default=None,
-        description="GPU runtime (rocm|vulkan); None for non-GPU profiles.",
+        description=(
+            "INERT match-only fit hint (rocm|vulkan|cuda); None leaves the "
+            "stored value unchanged. `cuda` was missing here while ProfileConfig "
+            "accepted it, so a CUDA profile 422'd on every PUT — un-editable."
+        ),
     )
     intent: str | None = Field(default=None, description="Human label for the card headline.")
     quant: str | None = Field(default=None, description="Weight quant shown as a card chip.")

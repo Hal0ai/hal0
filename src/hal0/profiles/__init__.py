@@ -96,7 +96,9 @@ class ProfilePatch:
     flags: str | None = None
     mtp: bool | None = None
     device_class: Literal["gpu", "cpu", "npu", "img"] | None = None
-    backend: Literal["rocm", "vulkan"] | None = None
+    #: Mirrors ProfileConfig.backend, which accepts "cuda" too. Omitting it here
+    #: made a CUDA profile un-patchable through this seam.
+    backend: Literal["rocm", "vulkan", "cuda"] | None = None
     intent: str | None = None
     quant: str | None = None
 
