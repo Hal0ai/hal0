@@ -99,8 +99,9 @@ quant = ""
 # Brain steward workload + MiniCPM5-1B-Agentic-Tooluse quirks (per
 # spec-p3-brain.final.md §5a). Brain is 1:1 with its model (the only
 # 1B model the steward runs), so a single combined profile is cleaner
-# than overlay. Small batch (1B model), reasoning off, no native
-# toolcalls on FPX — tool turns route via [brain_chat] tool_model.
+# than overlay. Small batch (1B model), reasoning off; the steward
+# handles its own tool-call turns on this model — there is no separate
+# per-turn model reroute.
 flags = "--jinja -fa on -b 512 -ub 256 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.9 --top-k 20 --no-mmproj"
 mtp = false
 intent = "Brain steward (1B MiniCPM5 + persona + tool-call routing) · 64K ctx"

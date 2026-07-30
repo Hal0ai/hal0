@@ -14,14 +14,14 @@
 # 1B in the default library. Port 8089: 8088 belongs to the flm seed.
 #
 # Tool-calling note: on the FPX brain runtime a 1B can't emit tool calls the
-# native parser accepts (it leaks/500s), so the steward chat routes TOOL turns
-# to a capable model via `[brain_chat] tool_model` — the 1B here serves the
-# steward's plain chat. Default `tool_model = "hal0/agent"` per
-# spec-p3-brain.final.md §5a + ADR-0023 (hal0/agent is the always-on
-# anchor every fallback chain ends in). The chadrock family are confirmed
-# clean native tool-callers on this runtime: `hal0/code` (27B coder, lighter)
-# and `hal0/agent` (35B anchor). The brain's `tool_model` config field is the
-# override knob (default hal0/agent; can be flipped to hal0/code).
+# native parser accepts (it leaks/500s). There is no per-turn reroute for
+# this — the steward's own model handles tool calls internally on whatever
+# `[brain_chat] model` resolves to. If that matters on your box, point the
+# whole steward chat at a tool-capable model instead of the seeded 1B, e.g.
+# `[brain_chat] model = "hal0/agent"` (the always-on anchor every fallback
+# chain ends in, ADR-0023). The chadrock family are confirmed clean native
+# tool-callers on this runtime: `hal0/code` (27B coder, lighter) and
+# `hal0/agent` (35B anchor).
 name = "brain"
 type = "llm"
 device = "gpu-vulkan"
