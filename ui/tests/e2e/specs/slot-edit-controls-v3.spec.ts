@@ -22,6 +22,10 @@
  *       its own PATCH /defaults path. The grid also carries device / THREADS /
  *       BINARY / image_pin, with a non-blocking fit-check warning (§4).
  *   C6. configured slots (a model bound) sort before unconfigured ones.
+ *   (RETIRED — #1379) the Parallel and Extra Args controls are GONE, with
+ *       the Template override and the Regenerate overlay. All three were
+ *       inert at launch (spec-flags-ownership §1/§4); their absence and the
+ *       wire-level guarantee are covered by slot-drawer-sunset-removal-v3.
  *
  * The dashboard renders the slot LIST from in-bundle HAL0_DATA
  * (VITE_MOCK_HAL0=1 short-circuits GET /api/slots before page.route
@@ -127,18 +131,6 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(row.locator('.field-info-pop')).toContainText('emits -ngl')
     await page.mouse.move(0, 0)
     await expect(row.locator('.field-info-pop')).toBeHidden()
-  })
-
-  test('Parallel description is available only from its info icon', async ({ page }) => {
-    await seedSlots(page, [PRIMARY, EMBED])
-    await page.goto('/#slots/primary')
-
-    const row = page.locator('.drawer .form-row').filter({
-      has: page.locator('.form-lbl > span', { hasText: /^Parallel$/ }),
-    })
-    await expect(row).toBeVisible()
-    await expect(row.locator('.field-info-pop')).toContainText('How many requests can run at once')
-    await expect(row.locator('.form-ctl > .hint')).toHaveCount(0)
   })
 
   test('C5 — editing NGL Save PUTs /config { n_gpu_layers } (top-level)', async ({ page }) => {
@@ -274,26 +266,6 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [{ ...PRIMARY, device: 'cpu', binary: 'rocmfpx' }, EMBED])
     await page.goto('/#slots/primary')
     await expect(page.getByTestId('slot-hw-fit-warning')).toBeVisible()
-  })
-
-  test('extra_args is editable and persists under server', async ({ page }) => {
-    const puts: any[] = []
-    await page.route('**/api/slots/primary/config', async (route) => {
-      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await page.route('**/api/slots/primary/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
-    await seedSlots(page, [{ ...PRIMARY, llamacpp_args: '--threads 6' }, EMBED])
-
-    await page.goto('/#slots/primary')
-    const input = page.getByTestId('extra-args-input')
-    await expect(input).toHaveValue('--threads 6')
-    await input.fill('--threads 6 -fa on')
-    await page.locator('.drawer button:has-text("Save")').click()
-    await expect.poll(() => puts.length).toBeGreaterThan(0)
-    expect(puts[0].server).toEqual({ extra_args: '--threads 6 -fa on' })
   })
 
   test('NPU modality controls remain visible and wire ASR updates', async ({ page }) => {

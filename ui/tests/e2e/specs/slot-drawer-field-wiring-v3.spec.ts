@@ -2,8 +2,7 @@
  * slot-drawer-field-wiring-v3 — field → wire-key contract for the slot edit
  * drawer (`#slots/:name`).
  *
- * Companion to slot-edit-controls-v3 (HW grid / ctx / extra_args) and
- * slot-drawer-profile-v3 (chat-template override). This file closes the
+ * Companion to slot-edit-controls-v3 (HW grid / ctx). This file closes the
  * remaining gaps where a drawer control had NO assertion that its edit
  * actually reaches the wire with the right key on the right route:
  *
@@ -11,8 +10,6 @@
  *       — its OWN route, never folded into the batched PUT /config.
  *   W2. Same select on a LIVE container slot → ConfirmDialog gate; cancel
  *       fires nothing, confirm fires the same POST body.
- *   W3. Parallel → PUT /config { parallel } (int), and empty → { parallel: null }
- *       (the None-means-delete merge clears a persisted override).
  *   W4. NPU · Embed toggle → PUT /config { npu: { chat, asr, embed } } + restart
  *       (the ASR lane is covered in slot-edit-controls-v3; embed was not).
  *   W5. NPU chat-model pick, installed tag → PUT /config { npu, model.default }.
@@ -169,134 +166,15 @@ test.describe('Slot drawer — model swap wiring', () => {
   })
 })
 
-test.describe('Slot drawer — parallel wiring', () => {
-  const parallelInput = (page: Page) =>
-    page
-      .locator('.drawer .form-row')
-      .filter({ has: page.locator('.form-lbl > span', { hasText: /^Parallel$/ }) })
-      .locator('input')
-
-  test('W3 — editing Parallel Saves PUT /config { parallel } as an int', async ({ page }) => {
-    const puts = await captureConfig(page, 'primary')
-    await seedSlots(page, [PRIMARY, EMBED])
-
-    await page.goto('/#slots/primary')
-    await expect(parallelInput(page)).toHaveValue('')
-    await parallelInput(page).fill('4')
-    await page.locator('.drawer button:has-text("Save")').click()
-
-    await expect.poll(() => puts.length).toBe(1)
-    expect(puts[0]).toHaveProperty('parallel', 4)
-    // Nothing else was touched, so nothing else rides along.
-    expect(Object.keys(puts[0])).toEqual(['parallel'])
-  })
-
-  test('W3 — clearing Parallel PUTs { parallel: null } (inherit the profile)', async ({ page }) => {
-    const puts = await captureConfig(page, 'primary')
-    await seedSlots(page, [{ ...PRIMARY, parallel: 4 }, EMBED])
-
-    await page.goto('/#slots/primary')
-    await expect(parallelInput(page)).toHaveValue('4')
-    await parallelInput(page).fill('')
-    await page.locator('.drawer button:has-text("Save")').click()
-
-    await expect.poll(() => puts.length).toBe(1)
-    expect(puts[0]).toHaveProperty('parallel', null)
-  })
-
-  test('W3 — an untouched Parallel never rides a Save', async ({ page }) => {
-    const puts = await captureConfig(page, 'primary')
-    await seedSlots(page, [{ ...PRIMARY, parallel: 4 }, EMBED])
-
-    await page.goto('/#slots/primary')
-    await page.getByTestId('slot-hw-ngl').fill('24')
-    await page.locator('.drawer button:has-text("Save")').click()
-
-    await expect.poll(() => puts.length).toBe(1)
-    expect(puts[0]).toHaveProperty('n_gpu_layers', 24)
-    expect(puts[0]).not.toHaveProperty('parallel')
-  })
-
-  test('W3 — a sub-1 Parallel blocks Save with an inline error', async ({ page }) => {
-    const puts = await captureConfig(page, 'primary')
-    await seedSlots(page, [PRIMARY, EMBED])
-
-    await page.goto('/#slots/primary')
-    await parallelInput(page).fill('0')
-    await page.locator('.drawer button:has-text("Save")').click()
-
-    await expect(page.locator('.drawer .hint', { hasText: 'Must be an integer ≥ 1' })).toBeVisible()
-    await page.waitForTimeout(200)
-    expect(puts).toEqual([])
-  })
-})
-
-test.describe('Slot drawer — chat-template override wiring', () => {
-  // Setting/changing an override is covered by slot-drawer-profile-v3 C7k.
-  // REMOVING one used to silently do nothing (#1372): both the dirty check and
-  // the save body were gated on `overrideOpen`, which "Clear override" has
-  // itself just flipped to false, so the persisted template survived while the
-  // UI claimed the model default was back in effect.
-  //
-  // The removal must ride as `null`, NOT `""`: `reconcile_slot_updates`
-  // implements None-means-delete, so `null` drops the key from the slot TOML
-  // while `""` would persist an empty-string override (asserted backend-side in
-  // tests/api/test_slot_config_validation.py).
-  test('W7 — Clear override writes chat_template: null to /config', async ({ page }) => {
-    const puts = await captureConfig(page, 'primary')
-    await page.route('**/api/chat-templates', (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([
-          { id: 'auto', label: 'Auto (GGUF embedded)' },
-          { id: 'chatml', label: 'ChatML' },
-        ]),
-      }),
-    )
-    await seedSlots(page, [{ ...PRIMARY, chat_template: 'chatml' }, EMBED])
-
-    await page.goto('/#slots/primary')
-    const row = page
-      .locator('.drawer .form-row')
-      .filter({ has: page.locator('.form-lbl > span', { hasText: /^Template$/ }) })
-    await expect(row.locator('select')).toHaveValue('chatml')
-    await row.getByRole('button', { name: 'Clear override' }).click()
-    await page.locator('.drawer button:has-text("Save")').click()
-
-    await expect.poll(() => puts.length).toBe(1)
-    expect(puts[0]).toHaveProperty('chat_template', null)
-  })
-
-  test('W7 — Clear override then reopening the override is not a phantom write', async ({ page }) => {
-    // Guard the inverse: clearing and re-picking the SAME template the slot
-    // already had must collapse back to "nothing changed".
-    const puts = await captureConfig(page, 'primary')
-    await page.route('**/api/chat-templates', (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([
-          { id: 'auto', label: 'Auto (GGUF embedded)' },
-          { id: 'chatml', label: 'ChatML' },
-        ]),
-      }),
-    )
-    await seedSlots(page, [{ ...PRIMARY, chat_template: 'chatml' }, EMBED])
-
-    await page.goto('/#slots/primary')
-    const row = page
-      .locator('.drawer .form-row')
-      .filter({ has: page.locator('.form-lbl > span', { hasText: /^Template$/ }) })
-    await row.getByRole('button', { name: 'Clear override' }).click()
-    await row.getByRole('button', { name: 'Override' }).click()
-    await row.locator('select').selectOption('chatml')
-    await page.locator('.drawer button:has-text("Save")').click()
-
-    await expect(page.locator('.drawer')).toHaveCount(0)
-    expect(puts).toEqual([])
-  })
-})
+// W3 (Parallel) and W7 (chat-template override) were removed with their
+// controls in #1379. Both wrote slot-tier keys that are INERT at launch
+// (spec-flags-ownership §1/§4), and the template write additionally fired a
+// cold restart to apply nothing. Their replacement is the wire-level guarantee
+// in slot-drawer-sunset-removal-v3: no Save may put `parallel`, `chat_template`
+// or `server.extra_args` on the wire, even when the slot TOML still carries
+// them. The #1372 clear-path contract W7 protected now lives entirely in the
+// backend (tests/api/test_slot_config_validation.py) and in the fold migrator
+// `hal0 slot migrate-flags` (#1396/#1397).
 
 test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
   const NPU_SLOT = {
