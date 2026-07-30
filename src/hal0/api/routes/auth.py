@@ -21,6 +21,7 @@ from hal0.api.auth import (
     has_admin_key,
     require_auth_enabled,
     resolve_principal_from_scope,
+    trust_forwarded_for_enabled,
     verify_admin_key,
 )
 from hal0.config.loader import load_hal0_config, save_hal0_config
@@ -70,7 +71,20 @@ def _client_ip(request: Request) -> str:
     Falls back to a constant bucket when the ASGI scope carries no client
     tuple (some test transports) so those requests still share ONE budget
     rather than silently escaping the limiter.
+
+    Behind a reverse proxy the raw TCP peer is the proxy itself — every
+    real caller then collapses onto one shared bucket, so a single remote
+    guesser can 429-lock out the operator too (GH #1476). When
+    ``trust_forwarded_for_enabled()`` opts in (OFF by default — a client
+    can forge this header), the leftmost ``X-Forwarded-For`` entry is used
+    instead: the convention for the original client behind a single
+    well-behaved hop that appends rather than overwrites.
     """
+    if trust_forwarded_for_enabled():
+        forwarded = request.headers.get("x-forwarded-for", "")
+        first = forwarded.split(",", 1)[0].strip()
+        if first:
+            return first
     client = request.client
     return client.host if client is not None else "unknown"
 
