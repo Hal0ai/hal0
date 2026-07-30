@@ -77,8 +77,10 @@ def test_static_seed_slot_populates_hw_grid(slot_name: str, expected: tuple) -> 
 
 
 def test_brain_slot_docstring_recommends_hal0_agent() -> None:
-    """brain.toml docstring recommends tool_model = hal0/agent per spec-p3-brain §5a
-    (legacy comment said hal0/code — that was the older recommendation)."""
+    """brain.toml docstring recommends `[brain_chat] model = "hal0/agent"` as the
+    tool-capable steward override (#1453: the field-level `tool_model` escape
+    hatch this used to describe was never wired to anything and was dropped —
+    the surviving `model` override is the real knob)."""
     brain_path = SLOTS_DIR / "brain.toml"
     content = brain_path.read_text()
     assert "hal0/agent" in content, (
