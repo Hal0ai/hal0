@@ -174,6 +174,25 @@ export interface Slot {
    *  read false; the InferencePane gates a "pending" style off this so a card
    *  doesn't flash zeroed metrics while a slow /api/slots poll is in flight. */
   _enriched?: boolean
+  /** True when this entry came from the heavy `GET /api/slots` builder, which
+   *  is the ONLY place `config_enrichment` runs (slot_view/__init__.py).
+   *  `routes/health.py` builds the `/api/status` slot entries from
+   *  `_slot_to_dict` alone, so a bare union entry carries none of the
+   *  TOML-derived config fields — no `ctx_max`, `chat_template`,
+   *  `llamacpp_args`, `n_gpu_layers`, `threads`, `binary`, `image_pin` or
+   *  `parallel`.
+   *
+   *  This is deliberately PROVENANCE, not a shape sniff: every one of those
+   *  keys is legitimately absent when the slot simply has no override on
+   *  disk, so no key test can tell "unset" from "this payload never carried
+   *  it". Anything that dirty-tracks or writes config must refuse to derive a
+   *  baseline while this reads false (#1391) — otherwise one dropped poll
+   *  makes every field look changed and Save rewrites the slot.
+   *
+   *  NOT carried forward by `reconcileEnrichment`: that only re-stamps the
+   *  four live container/metrics keys, so claiming config enrichment survived
+   *  a dropped poll would be exactly the lie this flag exists to prevent. */
+  _configEnriched?: boolean
   /** True for synthetic upstream-backed entries (composite endpoints). */
   _synthetic?: boolean
   /** Operator-facing explanation of why this entry isn't a real slot. */
@@ -339,10 +358,20 @@ async function fetchSlotsUnion(): Promise<Slot[]> {
   } catch {
     // soft-fail; statusSlots covers
   }
-  const byName = new Map<string, Slot>()
-  for (const s of statusSlots) byName.set(s.name, s)
-  for (const s of realSlots) byName.set(s.name, s)
-  return reconcileEnrichment([...byName.values()].map(normalizeSlot))
+  // Track WHICH fetch each surviving entry came from. `/api/slots` is the only
+  // builder that applies config_enrichment, so its provenance is the honest
+  // answer to "does this payload carry the TOML-derived config fields?" — see
+  // `Slot._configEnriched`. Real slots overwrite status ones, so the flag ends
+  // up true whenever the authoritative poll succeeded for that slot.
+  const byName = new Map<string, { raw: any; fromSlotsApi: boolean }>()
+  for (const s of statusSlots) byName.set(s.name, { raw: s, fromSlotsApi: false })
+  for (const s of realSlots) byName.set(s.name, { raw: s, fromSlotsApi: true })
+  return reconcileEnrichment(
+    [...byName.values()].map(({ raw, fromSlotsApi }) => ({
+      ...normalizeSlot(raw),
+      _configEnriched: fromSlotsApi,
+    })),
+  )
 }
 
 // Container enrichment (container_status / container_health) is only present
