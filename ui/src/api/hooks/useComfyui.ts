@@ -239,6 +239,11 @@ export interface ComfyuiV2PaneData {
   gtt: { used: number; ceil: number }
   ram: { used: number; ceil: number }
   stats: { util: number; temp: number; clk: number; its: number }
+  // Per-category weight-file counts on the model share (comfyui.py
+  // _model_inventory — VERIFIED, never faked). null when the share root is
+  // absent (dev box / fresh install) — the pane must hide the models block
+  // rather than render zeros it can't stand behind.
+  inventory: Record<string, number> | null
 }
 
 // Transform a live /status payload (+ optional V2 extension fields) into the
@@ -306,5 +311,6 @@ export function transformComfyuiStatus(
       clk: status.clock ?? 0,
       its: status.it_s ?? 0,
     },
+    inventory: status.inventory ?? null,
   }
 }

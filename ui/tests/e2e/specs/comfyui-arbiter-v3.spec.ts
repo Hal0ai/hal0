@@ -247,4 +247,56 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
     await openQueue(page)
     await expect(pane.locator('.qcard.row.running')).toBeVisible()
   })
+
+  // ── 9. Models block: real backend inventory, never fabricated (#1455) ────
+  //
+  // The pane used to mount <ModelsBlock /> with no props, so a hardcoded
+  // INV_DEFAULT/MODELS_DEFAULT (6 checkpoints, 11 loras, 'Wan 2.2 ·
+  // Qwen-Image · HunyuanVideo 1.5 · LTX-2') rendered unconditionally,
+  // ignoring the /status `inventory` field the backend actually verifies
+  // (src/hal0/api/routes/comfyui.py _model_inventory). This pins the block
+  // rendering the live counts by category.
+
+  test('models block renders the backend verified inventory counts, not the fabricated defaults', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status({
+      // Deliberately distinct from the old hardcoded 6/4/11/3 so a
+      // still-fabricated render is caught, and matches the live-box example
+      // from #1455's evidence (checkpoints:2, diffusion:7, loras:4, vae:5,
+      // controlnet:4, upscale:2, text_encoders:6).
+      inventory: { checkpoints: 2, diffusion: 7, loras: 4, vae: 5, controlnet: 4, upscale: 2, text_encoders: 6 },
+    })))
+    await gotoImageTab(page)
+
+    const pane = page.locator('.comfy-v2-pane')
+    const inv = pane.locator('.activity-extras .inv')
+    await expect(inv).toBeVisible()
+    await expect(inv).toContainText('2')
+    await expect(inv).toContainText('checkpoints')
+    await expect(inv).toContainText('7')
+    await expect(inv).toContainText('text encoders')
+    // The old fabricated pill counts/family string must never render.
+    await expect(inv).not.toContainText('11')
+    await expect(pane).not.toContainText('Wan 2.2 · Qwen-Image')
+  })
+
+  test('models block is hidden entirely when the backend reports inventory: null (fresh install)', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status({ inventory: null })))
+    await gotoImageTab(page)
+
+    const pane = page.locator('.comfy-v2-pane')
+    await expect(pane.locator('.activity-extras .inv')).toHaveCount(0)
+  })
+
+  test('no fabricated system-ram sparkline or non-functional "manager" note remain', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
+    await gotoImageTab(page)
+
+    const pane = page.locator('.comfy-v2-pane')
+    // SPARK_DEFAULT-backed BarSpark had no real per-tick RAM history behind
+    // it — the backend exposes only a point-in-time ram used/ceil, no
+    // timeseries, so the bars were pure decoration.
+    await expect(pane.locator('.ram-metric .cspark')).toHaveCount(0)
+    // The "manager ↗" note on the models block header linked to nothing real.
+    await expect(pane).not.toContainText('manager ↗')
+  })
 })

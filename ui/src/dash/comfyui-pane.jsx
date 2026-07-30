@@ -177,24 +177,6 @@ function Gauge({ pct, label, sub, size = 116, warn = false }) {
   )
 }
 
-// ── Bar sparkline ─────────────────────────────────────────────────────────────
-const SPARK_DEFAULT = [1.5, 1.7, 1.6, 1.8, 1.9, 1.7, 2.0, 1.8, 1.9, 2.1, 1.9, 2.0, 1.8, 1.9, 2.0, 1.9]
-
-function BarSpark({ data = SPARK_DEFAULT, hotN = 4, style }) {
-  const max = Math.max(...data, 1)
-  return (
-    <div className="cspark" style={style}>
-      {data.map((v, i) => (
-        <i
-          key={i}
-          className={i >= data.length - hotN ? 'hot' : ''}
-          style={{ height: (v / max * 100) + '%' }}
-        />
-      ))}
-    </div>
-  )
-}
-
 // ── Block header ─────────────────────────────────────────────────────────────
 function BlkH({ icon, acc, children, note }) {
   return (
@@ -337,27 +319,37 @@ function WorkflowsBlock({ flows = FLOWS_DEFAULT, comfyBaseUrl, max = 6, maxCusto
 }
 
 // ── Models inventory ──────────────────────────────────────────────────────────
-const INV_DEFAULT = [
-  { n: 6,  l: 'checkpoints' },
-  { n: 4,  l: 'video', u: true },
-  { n: 11, l: 'loras' },
-  { n: 3,  l: 'vae' },
-]
-const MODELS_DEFAULT = 'Wan 2.2 · Qwen-Image · HunyuanVideo 1.5 · LTX-2'
+// Labels for the backend's verified per-category weight-file counts
+// (src/hal0/api/routes/comfyui.py _INVENTORY_DIRS / _model_inventory —
+// counted on disk, never faked). Keys must stay in sync with that dict; an
+// unrecognised key still renders (falls back to the raw key) rather than
+// disappearing, so a new backend category is visible immediately.
+const INV_LABELS = {
+  checkpoints: 'checkpoints',
+  diffusion: 'diffusion',
+  loras: 'loras',
+  vae: 'vae',
+  controlnet: 'controlnet',
+  upscale: 'upscale',
+  text_encoders: 'text encoders',
+}
 
-function ModelsBlock({ inv = INV_DEFAULT, models = MODELS_DEFAULT }) {
+// `inventory` is the /status `inventory` field, threaded through
+// transformComfyuiStatus — null means the model share root is absent (dev
+// box / fresh install); the caller must not mount this block in that case
+// rather than render a hardcoded/fabricated inventory.
+function ModelsBlock({ inventory }) {
+  const rows = Object.entries(inventory || {}).filter(([, n]) => typeof n === 'number')
   return (
     <div>
-      <BlkH icon="layers" note="manager ↗">models</BlkH>
+      <BlkH icon="layers">models</BlkH>
       <div className="inv">
-        {inv.map((m, i) => (
-          <span className="inv-pill" key={i}>
-            <b>{m.n}</b>
-            {m.u ? <span className="u">{m.l}</span> : ` ${m.l}`}
+        {rows.map(([cat, n]) => (
+          <span className="inv-pill" key={cat}>
+            <b>{n}</b> {INV_LABELS[cat] || cat}
           </span>
         ))}
       </div>
-      <div className="inv-models">{models}</div>
     </div>
   )
 }
@@ -388,6 +380,7 @@ export const COMFYUI_V2_MOCK = {
   gtt: { used: 54, ceil: 80 },
   ram: { used: 61, ceil: 96 },
   stats: { util: 97, temp: 71, clk: 2.7, its: 1.9 },
+  inventory: { checkpoints: 6, diffusion: 4, loras: 11, vae: 3 },
 }
 
 // ── Card header ───────────────────────────────────────────────────────────────
@@ -473,7 +466,7 @@ export function ImageGenCard({
   onLogs,
   comfyBaseUrl,
 }) {
-  const { engine, run, queue, gtt, ram, stats } = mock
+  const { engine, run, queue, gtt, ram, stats, inventory } = mock
   const t = useTick(900)
 
   // Queue + model inventory (bottom half) collapse by default; the top
@@ -596,7 +589,10 @@ export function ImageGenCard({
                 visible (no longer tucked behind the queue expander). */}
             <div className="activity-extras">
               <WorkflowsBlock comfyBaseUrl={comfyBaseUrl} />
-              <ModelsBlock />
+              {/* Backend's fresh-install contract: inventory is null when
+                  the model share root is absent — hide the block rather
+                  than render a fabricated/zeroed inventory. */}
+              {inventory ? <ModelsBlock inventory={inventory} /> : null}
             </div>
           </div>
 
@@ -615,7 +611,6 @@ export function ImageGenCard({
                 <div className="tp-num">
                   {ram.used}<span className="u">/ {ram.ceil} GB</span>
                 </div>
-                <BarSpark />
               </div>
             </div>
             <div>
