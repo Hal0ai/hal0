@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hal0.config.schema import (
     FAMILY_DEFAULTS,
     MTP_FLAG_BUNDLE,
@@ -33,6 +35,8 @@ from hal0.providers import container as _container_mod
 from hal0.providers._gpu import resolve_gpu_group_ids
 from hal0.providers.base import RuntimeLaunchPlan
 from hal0.providers.container import (
+    _CTX_DENSE_CAP,
+    _CTX_SAFE_FALLBACK,
     _MODEL_STORE_MOUNT,
     _UNIT_STOP_TIMEOUT_S,
     ContainerProvider,
@@ -1247,6 +1251,60 @@ class TestContextSizeOwnership:
     def test_unset_ceiling_means_follow_the_model(self) -> None:
         mi = _model_info(defaults={"context_size": 16384})
         assert _resolve_context_size(None, mi) == 16384
+
+    # ── #1414: making the model authoritative must not entrench a bad row ────
+    #
+    # `PUT /api/models/{id}` accepted 0 / -1 / 99999999 with a 200 and 500'd on
+    # an unparseable value. The write boundary is being tightened separately
+    # (#1432) — but deliberately only for NEW writes, so rows already persisted
+    # stay readable and therefore fixable. Those rows are still on disk and
+    # still reach this resolver.
+    #
+    # Before the ownership flip the damage was masked: the slot's
+    # `[model].context_size` won outright, so a sane slot covered for a garbage
+    # model row. Now the model is authoritative and the value goes straight to
+    # `--ctx-size`. Making the model the owner WITHOUT this guard would have
+    # turned a bad-but-survivable row into a slot that never warms.
+
+    @pytest.mark.parametrize("bad", ["abc", "8k", "", [1], {}, 1.5])
+    def test_unparseable_model_ctx_falls_back_instead_of_launching(self, bad: Any) -> None:
+        """An int() failure yields the native window / safe floor, never a
+        crash and never a garbage `--ctx-size`."""
+        mi = _model_info(defaults={"context_size": bad})
+        assert _resolve_context_size(None, mi) == _CTX_SAFE_FALLBACK
+
+    @pytest.mark.parametrize("bad", [-1, -8192, 1, 127, 2**24 + 1, 99999999])
+    def test_implausible_model_ctx_falls_back_instead_of_launching(self, bad: int) -> None:
+        """Outside [128, 2**24] is ignored, NOT clamped — a half-applied garbage
+        number is harder to diagnose than falling through, and the operator's
+        intent is unrecoverable either way."""
+        mi = _model_info(defaults={"context_size": bad})
+        assert _resolve_context_size(None, mi) == _CTX_SAFE_FALLBACK
+
+    def test_implausible_model_ctx_still_defers_to_the_native_window(self) -> None:
+        """Falling back means falling through the NORMAL chain, so a model with
+        a real GGUF window still gets it rather than the bare floor."""
+        mi = _model_info(metadata={"context_length": 131072}, defaults={"context_size": -1})
+        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
+
+    def test_zero_model_ctx_is_treated_as_unset(self) -> None:
+        """0 was already falsy-skipped; pinned so the new range check does not
+        change that path's answer."""
+        mi = _model_info(metadata={"context_length": 16384}, defaults={"context_size": 0})
+        assert _resolve_context_size(None, mi) == 16384
+
+    @pytest.mark.parametrize("ok", [128, 4096, 131072, 2**24])
+    def test_plausible_boundary_values_are_honored(self, ok: int) -> None:
+        """The guard must not reject legitimate windows, including both bounds."""
+        mi = _model_info(defaults={"context_size": ok})
+        assert _resolve_context_size(None, mi) == ok
+
+    def test_bad_model_ctx_reaches_the_launch_command_as_the_fallback(self) -> None:
+        """End-to-end through `container_spec`: the emitted `--ctx-size` is a
+        usable number, not `-1`."""
+        cfg = _slot_cfg()
+        mi = _model_info(defaults={"context_size": -1})
+        assert self._ctx(self._spec(cfg, mi).command) == str(_CTX_SAFE_FALLBACK)
 
 
 class TestFamilyDefaults:

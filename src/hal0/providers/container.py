@@ -1062,6 +1062,21 @@ def _profile_runtime_family(slot_cfg: dict[str, Any]) -> str | None:
 _CTX_SAFE_FALLBACK = 8192
 _CTX_DENSE_CAP = 32768
 
+#: Plausibility bounds for an EXPLICIT ``defaults.context_size`` on the launch
+#: path (#1414). Mirrors the write-boundary range check so the two agree; kept
+#: as a separate launch-side guard on purpose, because the write boundary can
+#: only screen NEW writes — rows persisted before that screen existed (0, -1,
+#: 99999999 all returned HTTP 200) are deliberately left readable so they stay
+#: fixable, which means they are still on disk and still reach this function.
+#:
+#: Before the v1.0 ownership flip the damage was masked: the slot's
+#: ``[model].context_size`` won outright, so a slot with a sane value covered
+#: for a garbage model row. Now the MODEL is authoritative and a bad value goes
+#: straight to ``--ctx-size``, where -1 or 99999999 is a slot that never warms.
+#: Making the model the owner without this guard would have ENTRENCHED #1414.
+_CTX_MIN_PLAUSIBLE = 128
+_CTX_MAX_PLAUSIBLE = 2**24
+
 
 def _model_declared_ctx(model_info: dict[str, Any]) -> int | None:
     """The MODEL's own explicit context window (``defaults.context_size``).
@@ -1069,14 +1084,45 @@ def _model_declared_ctx(model_info: dict[str, Any]) -> int | None:
     This is the authoritative value under the v1.0 ownership split — an
     operator's deliberate, model-scoped choice made in the model drawer. It is
     NOT dense-capped: an explicit number means what it says.
+
+    An unparseable or implausible value (outside
+    ``[_CTX_MIN_PLAUSIBLE, _CTX_MAX_PLAUSIBLE]``) is treated as ABSENT, not
+    clamped — a half-applied garbage number is harder to diagnose than falling
+    through to the native window or the safe floor, and the operator's stated
+    intent is unrecoverable either way. Logged at warning so the bad row is
+    visible in ``journalctl -u hal0-api`` instead of surfacing as a slot that
+    silently never warms.
     """
     defaults = model_info.get("defaults")
-    if isinstance(defaults, dict) and defaults.get("context_size"):
-        try:
-            return int(defaults["context_size"])
-        except (TypeError, ValueError):
-            pass
-    return None
+    if not isinstance(defaults, dict) or not defaults.get("context_size"):
+        return None
+    raw = defaults["context_size"]
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "slot.context_size_unparseable",
+            extra={
+                "raw": repr(raw),
+                "hint": "model defaults.context_size is not a number; ignoring it and "
+                "falling back to the model's native window. Fix it in the model drawer.",
+            },
+        )
+        return None
+    if not (_CTX_MIN_PLAUSIBLE <= value <= _CTX_MAX_PLAUSIBLE):
+        log.warning(
+            "slot.context_size_implausible",
+            extra={
+                "value": value,
+                "min": _CTX_MIN_PLAUSIBLE,
+                "max": _CTX_MAX_PLAUSIBLE,
+                "hint": "model defaults.context_size is outside the plausible range; "
+                "ignoring it and falling back to the model's native window. Fix it in "
+                "the model drawer.",
+            },
+        )
+        return None
+    return value
 
 
 def _native_ctx(model_info: dict[str, Any]) -> int | None:
@@ -1109,7 +1155,9 @@ def _resolve_context_size(
     the slot silently overrode the model. Precedence is now, highest first:
 
     1. ``model_info["defaults"]["context_size"]`` — the model's own explicit
-       window (:func:`_model_declared_ctx`). Authoritative, NOT dense-capped.
+       window (:func:`_model_declared_ctx`). Authoritative, NOT dense-capped —
+       but an unparseable or implausible value is ignored rather than launched
+       (#1414; see :data:`_CTX_MIN_PLAUSIBLE`).
     2. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
        window (:func:`_native_ctx`), dense-capped at :data:`_CTX_DENSE_CAP`.
        Still a model fact, but a *derived* one, so an explicit choice outranks
