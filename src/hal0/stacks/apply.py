@@ -389,6 +389,11 @@ class StackApplyEngine:
                 report.skipped.append(entry.slot)
                 return
             if snap is None or snap.state not in _DISPATCHABLE:
+                # Stack apply is operator intent — clear the crash-loop
+                # breaker (issue i4) so a parked slot gets a real attempt.
+                reset = getattr(self._slot_manager, "reset_load_failures", None)
+                if reset is not None:
+                    reset(entry.slot)
                 await self._slot_manager.load(entry.slot, model_id=entry.model)
                 report.loaded.append(entry.slot)
             elif snap.model_id != entry.model:

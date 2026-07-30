@@ -99,6 +99,7 @@ from hal0.slots.state import (
     DISPATCHABLE_STATES,
     IllegalSlotTransition,
     SlotConfigError,
+    SlotCrashLooping,
     SlotNotFound,
     SlotPinned,
     SlotState,
@@ -159,6 +160,20 @@ class RegistryUnavailableError(Hal0Error):
 # NOTE: idle-monitor tunables (_IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S,
 # _EVICT_AFTER_S) and _PINNED_BY_DEFAULT moved to hal0.slots.reaper
 # (P3-slots §1b) — imported + re-exported below.
+
+# Crash-loop breaker (issue i4): a load() from ERROR is throttled with
+# exponential backoff — min(base * 2**(failures-1), max) — and after
+# _CRASH_LOOP_PARK_AFTER consecutive failures the slot is parked (refuses
+# lazy-load until an operator action resets the breaker).
+_CRASH_LOOP_BASE_S = 5.0
+_CRASH_LOOP_MAX_S = 300.0
+_CRASH_LOOP_PARK_AFTER = 5
+
+# slot.state event coalescing window: identical ERROR-edged transition
+# pairs (error→starting / starting→error) within this window fold into
+# one emitted event carrying the repeat count, so a flap can't flood the
+# EventBus ring + durable activity journal.
+_FLAP_COALESCE_WINDOW_S = 60.0
 
 
 # ── Hook protocols ───────────────────────────────────────────────────────────
@@ -345,6 +360,16 @@ class SlotManager:
         self._cfg_cache: dict[int, tuple[int, int, dict[str, Any]]] = {}
         # In-memory copy of the latest state per slot (mirrors state.json).
         self._states: dict[int, SlotStateRecord] = {}
+        # Crash-loop breaker (issue i4): consecutive load-failure count +
+        # last-failure monotonic timestamp per slot. Incremented in load()'s
+        # except branch, cleared on a healthy transition (READY/IDLE) and by
+        # explicit operator actions (reset_load_failures).
+        self._load_failures: dict[int, tuple[int, float]] = {}
+        # slot.state flap coalescing: (slot key, "from→to") → (last emit
+        # monotonic ts, suppressed count). Tuple-keyed, so deliberately NOT
+        # in _KEY_DICTS_ATTR — a rename orphaning a coalesce record only
+        # costs one extra emitted event.
+        self._flap_emits: dict[tuple[int, str], tuple[float, int]] = {}
         # SSE subscribers: list of queues; one per active state_stream().
         self._subscribers: list[asyncio.Queue[SlotStateRecord]] = []
         # Idle-tracking — last request timestamp per slot.
@@ -705,6 +730,7 @@ class SlotManager:
         "_fail_watchers",
         "_serving_count",
         "_dispatch_tickets",
+        "_load_failures",
     )
 
     def _bind_key(self, name: str, key: int) -> None:
@@ -1160,6 +1186,14 @@ class SlotManager:
         carried_extra: dict[str, Any] = dict(prior.extra) if prior else {}
         if extra:
             carried_extra.update(extra)
+        if to_state in (SlotState.READY, SlotState.IDLE):
+            # Converged healthy — clear the crash-loop breaker and its
+            # carried extras. Covers load() success AND out-of-band
+            # recovery (adoption), so a healthy slot can never stay
+            # refused as "parked".
+            self._load_failures.pop(key, None)
+            carried_extra.pop("parked", None)
+            carried_extra.pop("load_failures", None)
         effective_model_id = (
             model_id if model_id is not None else (prior.model_id if prior else None)
         )
@@ -1237,14 +1271,31 @@ class SlotManager:
                 payload["model_id"] = record.model_id
             if message:
                 payload["error" if severity == "error" else "message"] = message
-            with contextlib.suppress(Exception):
-                await self._event_bus.emit(
-                    "slot.state",
-                    severity,
-                    f"slot:{name}",
-                    f"{name}: {current.value} → {to_state.value}",
-                    data=payload,
-                )
+            # Flap coalescing (issue i4, defense in depth): fold repeats of
+            # an identical ERROR-edged pair within the window into one event
+            # per window, ``repeats`` carrying the fold count so operators
+            # retain evidence. Non-error pairs are never coalesced.
+            emit = True
+            if SlotState.ERROR in (current, to_state):
+                pair = (key, f"{current.value}→{to_state.value}")
+                now = time.monotonic()
+                last_emit, folded = self._flap_emits.get(pair, (0.0, 0))
+                if now - last_emit < _FLAP_COALESCE_WINDOW_S:
+                    self._flap_emits[pair] = (last_emit, folded + 1)
+                    emit = False
+                else:
+                    if folded:
+                        payload["repeats"] = folded
+                    self._flap_emits[pair] = (now, 0)
+            if emit:
+                with contextlib.suppress(Exception):
+                    await self._event_bus.emit(
+                        "slot.state",
+                        severity,
+                        f"slot:{name}",
+                        f"{name}: {current.value} → {to_state.value}",
+                        data=payload,
+                    )
         # TIER1: spawn/cancel the push-driven fail-watcher to match the new
         # state.  Done after broadcast so the SSE frame for the transition
         # itself lands before any watcher-induced follow-up frame.
@@ -1316,6 +1367,55 @@ class SlotManager:
         """See :meth:`hal0.slots.watchdog.SlotWatchdog.readiness_check`."""
         return await self._watchdog.readiness_check(slot_name)
 
+    # ── crash-loop breaker (issue i4) ────────────────────────────────────────
+
+    def _check_crash_loop_gate(self, slot_name: str) -> None:
+        """Raise :class:`SlotCrashLooping` when an ERROR slot must not respawn yet.
+
+        Called from :meth:`load` (inside the slot lock, before any transition)
+        so a throttled retry costs nothing: no STARTING event, no journal row,
+        no systemctl call. ``details.retry_after_s`` rides the same error-
+        middleware promotion to a ``Retry-After`` header as ``SlotLoading``.
+        """
+        failures, last_failure = self._load_failures.get(self._key(slot_name), (0, 0.0))
+        if failures <= 0:
+            return
+        if failures >= _CRASH_LOOP_PARK_AFTER:
+            raise SlotCrashLooping(
+                f"slot {slot_name!r} is parked after {failures} consecutive load "
+                "failures — fix the cause, then load/restart it manually",
+                details={
+                    "slot": slot_name,
+                    "failures": failures,
+                    "parked": True,
+                    "retry_after_s": int(_CRASH_LOOP_MAX_S),
+                },
+            )
+        backoff_s = min(_CRASH_LOOP_BASE_S * (2 ** (failures - 1)), _CRASH_LOOP_MAX_S)
+        remaining = last_failure + backoff_s - time.monotonic()
+        if remaining > 0:
+            raise SlotCrashLooping(
+                f"slot {slot_name!r} failed {failures} consecutive load(s) — "
+                f"backing off {remaining:.0f}s before the next spawn attempt",
+                details={
+                    "slot": slot_name,
+                    "failures": failures,
+                    "retry_after_s": max(1, int(remaining) + 1),
+                },
+            )
+
+    def reset_load_failures(self, slot_name: str) -> None:
+        """Clear the crash-loop breaker for *slot_name* (operator intent).
+
+        Called by the manual API surfaces (POST /{name}/load, /restart) and
+        :meth:`update_config` — the operator presumably fixed the cause, so
+        the next load must run unthrottled. Dispatcher/v1 lazy-load callers
+        never reset; they go through the throttled path unchanged.
+        """
+        key = self._peek_key(self._resolve_alias(slot_name))
+        if key is not None:
+            self._load_failures.pop(key, None)
+
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def load(self, slot_name: str, model_id: str | None = None) -> Slot:
@@ -1369,6 +1469,22 @@ class SlotManager:
                 await self._transition(slot_name, SlotState.OFFLINE, force=True)
                 # Fall through into the normal load below, which re-renders
                 # the unit from the current TOML.
+            elif current == SlotState.ERROR:
+                # Crash-loop breaker (issue i4): an ERROR slot is freely
+                # re-loadable per LEGAL_TRANSITIONS, but per-request lazy-
+                # load callers (dispatcher, v1 routes) must not respawn it
+                # at request cadence. Raises SlotCrashLooping (503 +
+                # Retry-After) with NO transition while the backoff window
+                # is open or the slot is parked.
+                self._check_crash_loop_gate(slot_name)
+                # Allowed retry — best-effort terminate + OFFLINE first
+                # (mirrors restart()'s ERROR branch) so the systemd
+                # start-limit state from the previous crash loop is
+                # actually cleared; otherwise backoff just spaces out
+                # guaranteed start-limit failures.
+                with contextlib.suppress(Exception):
+                    await self.terminate(slot_name)
+                await self._transition(slot_name, SlotState.OFFLINE, force=True)
 
             # Configuration check: a slot with no resolvable model is
             # NOT an ERROR (which would render red and flag for operator
@@ -1495,6 +1611,16 @@ class SlotManager:
                             },
                         )
             except Exception as exc:
+                # Crash-loop bookkeeping: consecutive failures drive the
+                # backoff/park gate above. ``parked`` rides ``extra`` (not a
+                # new enum value — wire/state-machine compatible) so the UI
+                # can render "parked — manual restart required".
+                key = self._key(slot_name)
+                failures = self._load_failures.get(key, (0, 0.0))[0] + 1
+                self._load_failures[key] = (failures, time.monotonic())
+                err_extra: dict[str, Any] = {"load_failures": failures}
+                if failures >= _CRASH_LOOP_PARK_AFTER:
+                    err_extra["parked"] = True
                 # TIER1: never swallow — record ERROR with details, re-raise.
                 await self._transition(
                     slot_name,
@@ -1502,6 +1628,7 @@ class SlotManager:
                     model_id=resolved_model,
                     port=_cfg_port(cfg),
                     message=str(exc),
+                    extra=err_extra,
                     force=True,
                 )
                 raise
@@ -1568,6 +1695,9 @@ class SlotManager:
         """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
+        # Restart is operator intent — clear the crash-loop breaker so the
+        # reload below is never refused as SlotCrashLooping.
+        self.reset_load_failures(slot_name)
         if self._current_state(slot_name) == SlotState.ERROR:
             async with self._lock(slot_name):
                 # Best-effort cleanup of the wedged unit; never let a stuck
@@ -2305,6 +2435,10 @@ class SlotManager:
                     f"failed to rewrite {cfg_path}: {exc}",
                 ) from exc
             self._invalidate_cfg_cache(slot_name)
+
+        # Config edit is operator intent: the crash cause was presumably
+        # fixed, so the crash-loop breaker must not refuse the next load.
+        self.reset_load_failures(slot_name)
 
         # Issue #359: invalidate stale top-level metadata in state.json
         # whenever the operator's update changes a field that's also
