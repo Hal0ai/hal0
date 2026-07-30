@@ -250,8 +250,12 @@ def _decide_profile_reset(status: dict | None, *, yes: bool) -> bool | None:
             "profiles are re-seeded from code automatically, but these "
             "operator-authored profiles would be deleted:\n\n"
             + "\n".join(f"  • {n}" for n in names)
-            + "\n\n[dim]A timestamped copy is written to /var/lib/hal0/backups/ first. "
-            "Slots pointing at a deleted profile fall back to their base config.[/dim]",
+            + "\n\nThis includes any profile the UI currently refuses to save — a stored "
+            "hardware flag (-dev, --threads, -ngl) makes v1.0 reject it on edit (#1411). "
+            "Those are deleted here, not repaired.\n\n"
+            "[dim]A timestamped copy is written to /var/lib/hal0/backups/ first, and it is "
+            "the only way to get any of them back. Slots pointing at a deleted profile fall "
+            "back to their base config.[/dim]",
             title="Profile catalog reset",
             border_style="yellow",
         )

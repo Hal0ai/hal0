@@ -2139,6 +2139,14 @@ approved = None
 
 if not status["due"]:
     print(f"  profile catalog already at the v1.0 shape ({status['reason']})")
+elif status["unreadable"]:
+    # No prompt: there is no recoverable operator content to weigh, and the file
+    # is actively breaking this box. Say so anyway — a silent delete of a file
+    # the operator believes holds their work is indistinguishable from a bug.
+    print("  /etc/hal0/profiles.toml does NOT parse, so its whole contents — including")
+    print("  any profiles you authored — are removed by the v1.0 reset. The original")
+    print("  bytes are copied to /var/lib/hal0/backups/ first; that copy is the only")
+    print("  way to recover them.")
 elif status["needs_consent"]:
     names = ", ".join(status["custom_profiles"])
     if os.environ.get("HAL0_RESET_PROFILES") == "1":
@@ -2150,7 +2158,17 @@ elif status["needs_consent"]:
         # (curl | bash, cron, CI) means no consent: leave them alone.
         print("  hal0 v1.0 makes profiles tuning-only; /etc/hal0/profiles.toml is reset once.")
         print(f"  These operator-authored profiles would be deleted: {names}")
-        print("  A timestamped copy is written to /var/lib/hal0/backups/ first.")
+        # #1411: a pre-existing custom profile whose stored flags include hardware
+        # flags (-dev, --threads, -ngl) is rejected by the v1.0 hardware screen on
+        # PUT, so it cannot be edited or repaired through the UI. Those profiles
+        # are in the list above and are deleted like any other. An operator who
+        # has been fighting an un-editable profile must not discover that the
+        # upgrade quietly resolved it by destruction.
+        print("  This includes profiles the UI currently refuses to save (their stored")
+        print("  flags contain hardware flags v1.0 no longer accepts) — they are deleted,")
+        print("  not repaired.")
+        print("  A timestamped copy is written to /var/lib/hal0/backups/ first; it is the")
+        print("  only way to get any of them back.")
         try:
             with open("/dev/tty", "r+") as tty:
                 tty.write("Reset the profile catalog now? [Y/n] ")

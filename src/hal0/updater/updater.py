@@ -1774,6 +1774,12 @@ def _backup_profiles_toml(*, job_id: str | None = None) -> str | None:
     convention (:func:`ensure_seed_profiles`) is deliberately write-once, so it
     captures only the first migration a box ever ran and silently goes stale;
     this one never clobbers and never lies about what it holds.
+
+    The stamp has one-second resolution, so a second reset inside the same
+    second would land on the same name — suffix until the name is free rather
+    than overwrite (same idiom ``ensure_seed_profiles`` uses for ``-custom{n}``).
+    A backup that silently replaces the backup it was meant to sit beside is the
+    write-once flaw wearing a different hat.
     """
     import shutil
     from datetime import UTC, datetime
@@ -1784,6 +1790,10 @@ def _backup_profiles_toml(*, job_id: str | None = None) -> str | None:
     backup_root = paths.var_lib() / "backups"
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     dest = backup_root / f"profiles-{stamp}.toml"
+    n = 2
+    while dest.exists():
+        dest = backup_root / f"profiles-{stamp}-{n}.toml"
+        n += 1
     try:
         backup_root.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
