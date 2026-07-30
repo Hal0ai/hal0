@@ -324,7 +324,7 @@ sudo bash installer/install.sh <span class="flag">--no-start</span></pre>
     <li><strong>Verify health</strong> — <code>hal0 doctor</code> should report all-green; <code>GET :8080/api/health</code> returns <code>200</code>. Services show <span class="pill ok"><span class="dot" style="background:var(--ok)"></span> active</span> in the dashboard.</li>
   </ol>
   <pre data-label="shell"><span class="cmt"># Sanity from the CLI</span>
-hal0 doctor <span class="flag">--json</span>
+hal0 doctor verify <span class="flag">--json</span>
 hal0 slot list
 curl -fsS <span class="str">http://127.0.0.1:8080/api/health</span></pre>
 </section>
@@ -334,7 +334,7 @@ curl -fsS <span class="str">http://127.0.0.1:8080/api/health</span></pre>
   <pre data-label="shell"><span class="cmt"># Pull a model into the catalog, create a slot, chat</span>
 hal0 model pull <span class="str">&lt;model&gt;</span>
 hal0 slot create <span class="str">my-slot</span> <span class="flag">--model</span> <span class="str">&lt;model&gt;</span> <span class="flag">--provider</span> llama-server
-hal0 chat <span class="flag">--slot</span> <span class="str">my-slot</span></pre>
+hal0 chat <span class="flag">--model</span> <span class="str">my-slot</span></pre>
   <div class="note info"><span class="tag">Note · v1.0.0-alpha.0</span><p>Models own logical behavior such as chat templates. Physical launch facts — device, NGL, threads, binary, profile, and image pin — belong to the slot.</p></div>
 </section>
 
@@ -382,10 +382,10 @@ sudo hal0 update</pre>
         <td><code>--dry-run</code> · <code>--yes</code>/<code>-y</code> · <code>--stop-services</code></td>
       </tr>
       <tr>
-        <td><code>hal0 memory migrate --from honcho --to hindsight</code></td>
-        <td>One-shot memory-engine migration; only needed if you ran Honcho.</td>
-        <td>apply; use <code>--dry-run</code> to preview</td>
-        <td><code>--dry-run</code> · <code>--agent</code> · <code>--dataset</code> · <code>--since</code> · <code>--resume</code></td>
+        <td>—</td>
+        <td>No command needed. Hindsight is the only memory engine — Honcho was fully removed, and there is no honcho-to-hindsight migration command.</td>
+        <td>—</td>
+        <td>—</td>
       </tr>
     </tbody>
   </table>
@@ -456,8 +456,7 @@ systemctl list-units 'hal0-slot@*'</pre>
   <div class="note err"><span class="tag">Rollback boundary</span><p>The id-keying command has no undo. It writes a timestamped backup under <code>/var/lib/hal0/backups/</code> before moving anything.</p><p>If verification fails, stop hal0 and restore that backup. Use <code>--stop-services</code> instead of the manual stop command when desired.</p></div>
 
   <h4>Honcho → Hindsight</h4>
-  <p>Only boxes that previously ran Honcho need the memory migration. Run it before upgrading; Hindsight-only boxes are already current.</p>
-  <pre data-label="shell">hal0 memory migrate <span class="flag">--from</span> honcho <span class="flag">--to</span> hindsight</pre>
+  <p>Honcho was fully removed as a memory engine. Hindsight is the only memory engine now, so there is nothing to migrate and no command to run — Honcho-era boxes and Hindsight-only boxes are both already current.</p>
 </section>
 
 <section id="backcompat">
@@ -543,7 +542,7 @@ id -nG hal0</pre>
   <h4>Hardened host: permissions look wrong after install</h4>
   <p>A CIS/STIG umask (<code>0027</code>/<code>0077</code>) leaking into the install can leave the tree <code>0700</code>. The installer normalizes to <code>022</code> for its own body; if you see <code>PermissionError</code> reading <code>/usr/lib/hal0</code> or <code>/etc/hal0/slots</code>, run <code>hal0 doctor perms --fix</code>.</p>
 
-  <div class="note info"><span class="tag">Always start here</span><p><code>hal0 doctor --json</code> reports health across slots, memory banks, Hermes, services, and perms. It's the fastest first look for any issue.</p></div>
+  <div class="note info"><span class="tag">Always start here</span><p><code>hal0 doctor all --json</code> reports health across slots, memory banks, Hermes, and services in one pass. It's the fastest first look for any issue — for a permissions-specific audit, run <code>hal0 doctor perms</code> separately.</p></div>
 </section>
 
 <hr class="sep"/>
@@ -575,7 +574,7 @@ id -nG hal0</pre>
           <tr><td><code>hal0 doctor migrations</code></td><td>detect pending model-layout links</td></tr>
           <tr><td><code>hal0 migrate model-layout</code></td><td>preview/apply canonical model links</td></tr>
           <tr><td><code>hal0 update</code></td><td>atomic in-place upgrade</td></tr>
-          <tr><td><code>hal0 chat --slot &lt;s&gt;</code></td><td>talk to a slot</td></tr>
+          <tr><td><code>hal0 chat --model &lt;model&gt;</code></td><td>talk to a slot</td></tr>
         </tbody>
       </table>
     </div>
