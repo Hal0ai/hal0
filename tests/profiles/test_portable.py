@@ -197,6 +197,76 @@ class TestImportProfile:
         assert exc.value.code == "slot.hardware_flag_denied"
 
 
+# ── #1416: the COMMIT path verifies the checksum, not just dry_run ───────────
+
+
+class TestImportVerifiesChecksum:
+    """``POST /api/profiles/import`` computed ``checksum_ok`` on a dry run and
+    then committed without ever checking it — the integrity signal was advisory
+    only. A tampered envelope imported silently."""
+
+    def test_tampered_body_is_rejected_on_commit(self, tmp_hal0_home: str) -> None:
+        env = export_envelope("orig", _profile(), exported_at="t")
+        env["profile"]["intent"] = "SOMETHING ELSE"  # checksum now stale
+        assert verify_checksum(env) is False
+        with pytest.raises(BadRequest) as exc:
+            import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert exc.value.code == "profiles.checksum_mismatch"
+
+    def test_tampered_flags_are_rejected_before_anything_is_written(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """The rejection must happen BEFORE ``catalog.create`` — otherwise the
+        corrupt profile is already on disk when the error surfaces."""
+        catalog = _catalog(tmp_hal0_home)
+        env = export_envelope("orig", _profile(), exported_at="t")
+        env["profile"]["flags"] = "-fa off"
+        with pytest.raises(BadRequest):
+            import_profile(env, "copied", catalog)
+        assert not any(p.name == "copied" for p in catalog.list())
+
+    def test_wrong_checksum_string_is_rejected(self, tmp_hal0_home: str) -> None:
+        env = export_envelope("orig", _profile(), exported_at="t")
+        env["checksum"] = "sha256:" + "0" * 64
+        with pytest.raises(BadRequest) as exc:
+            import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert exc.value.code == "profiles.checksum_mismatch"
+        assert exc.value.details["expected"] == env["checksum"]
+        assert exc.value.details["actual"] != env["checksum"]
+
+    def test_absent_checksum_is_still_accepted(self, tmp_hal0_home: str) -> None:
+        """A hand-authored envelope legitimately omits the checksum;
+        ``ProfileEnvelope.checksum`` defaults to ``""``. Only a checksum that is
+        PRESENT and WRONG means corruption."""
+        env = export_envelope("orig", _profile(), exported_at="t")
+        del env["checksum"]
+        resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert resolved.name == "copied"
+
+    def test_empty_checksum_is_still_accepted(self, tmp_hal0_home: str) -> None:
+        env = export_envelope("orig", _profile(), exported_at="t")
+        env["checksum"] = ""
+        resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert resolved.name == "copied"
+
+    def test_intact_envelope_still_imports(self, tmp_hal0_home: str) -> None:
+        """Guard against the check being too strict — an untouched export must
+        still import."""
+        env = export_envelope("orig", _profile(), exported_at="t")
+        resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert resolved.name == "copied"
+
+    def test_published_artifact_still_imports_with_its_real_checksum(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """The whole point of 1a: the shipped brain profile carries a real
+        checksum, so tightening import must NOT reject it."""
+        resolved = import_profile(
+            _PUBLISHED_CHAT_LONG_CONTEXT, "brain-long-ctx", _catalog(tmp_hal0_home)
+        )
+        assert resolved.name == "brain-long-ctx"
+
+
 # ── the SHIPPED artifact: exact-checksum round-trip guarantee ────────────────
 
 #: The published brain profile, byte-for-byte as it ships in

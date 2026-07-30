@@ -219,6 +219,10 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
     applies (``ProfileCatalog.create``), so an envelope can never back-door a
     hardware or managed flag past the guards ``POST``/``PUT`` enforce.
 
+    A commit verifies the envelope checksum as well (#1416) — ``dry_run`` used
+    to be the only place it was checked, so a tampered file that failed the
+    dry-run report still imported cleanly on the next call.
+
     Raises:
         400 profiles.bad_envelope: not a valid hal0.profile envelope.
         400 profiles.checksum_mismatch: checksum does not cover the body (#1416).
