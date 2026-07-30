@@ -219,12 +219,18 @@ class ProfileCatalog:
                     code="profiles.not_found",
                     details={"profile": name},
                 )
-            in_use = self.slots_using(name)
-            if in_use:
+            in_use_slots = self.slots_using(name)
+            in_use_models = self.models_using(name)
+            if in_use_slots or in_use_models:
+                clauses = []
+                if in_use_slots:
+                    clauses.append(f"slot(s): {', '.join(in_use_slots)}")
+                if in_use_models:
+                    clauses.append(f"model(s): {', '.join(in_use_models)}")
                 raise Conflict(
-                    f"profile {name!r} is in use by slot(s): {', '.join(in_use)}",
+                    f"profile {name!r} is in use by " + " and ".join(clauses),
                     code="profiles.in_use",
-                    details={"slots": in_use},
+                    details={"slots": in_use_slots, "models": in_use_models},
                 )
             del catalog.profile[name]
             save_profiles_config(catalog, self._path)
@@ -232,6 +238,25 @@ class ProfileCatalog:
     def slots_using(self, name: str) -> list[str]:
         """Return slot names whose TOML references ``name``."""
         return [slot for slot, profile in self._slot_profiles() if profile == name]
+
+    def models_using(self, name: str) -> list[str]:
+        """Return model ids whose ``defaults.profile`` references ``name``.
+
+        HAL0-41 / GH #1437: ``slots_using`` alone missed a model that
+        prefers a profile via ``defaults.profile`` but isn't (yet) bound to
+        any slot — deleting the profile out from under it left a dangling
+        reference. Errors reading the registry are logged and treated as
+        "no models found" so a registry hiccup never blocks a slot-only
+        delete, mirroring ``_slot_profiles``'s per-slot error tolerance.
+        """
+        from hal0.registry.store import ModelRegistry
+
+        try:
+            models = ModelRegistry().list()
+        except Exception as exc:
+            log.warning("profiles.in_use_model_scan_error error=%s", exc)
+            return []
+        return [model.id for model in models if model.defaults and model.defaults.profile == name]
 
     def _slot_profiles(self) -> list[tuple[str, str | None]]:
         """Return ``(slot_name, profile_name)`` for every slot, in one pass.
