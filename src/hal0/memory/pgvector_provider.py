@@ -58,10 +58,18 @@ class PgVectorProvider(MemoryProvider):
             ),
         )
 
-    def _allowed(self, requested: str | list[str], client_id: str | None) -> list[str]:
+    def _allowed(self, requested: str | list[str] | None, client_id: str | None) -> list[str]:
+        # ``None`` = nothing requested → default sweep. ``[]`` = every
+        # requested namespace was unaddressable → sweep nothing. Collapsing
+        # the two is #1451; the same fix lands in HindsightProvider.
         cid = client_id or self._client_id
         own = f"{_PRIVATE}{cid}"
-        reqs = [requested] if isinstance(requested, str) else list(requested or [_SHARED])
+        if requested is None:
+            reqs = [_SHARED]
+        elif isinstance(requested, str):
+            reqs = [requested]
+        else:
+            reqs = list(requested)
         out: list[str] = []
         for ds in reqs:
             if ds == _SHARED:
