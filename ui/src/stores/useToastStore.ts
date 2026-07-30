@@ -88,3 +88,33 @@ export function installToastGlobal() {
   }
   ;(window as any).__hal0ToastInstalled = true
 }
+
+/**
+ * Install `window.__hal0UseToastQueue()` — a hook bridge, same pattern as
+ * `board-hook-bridge.ts`'s `window.__hal0UseBoardChat` — so the strict
+ * no-ES-imports prototype file `dash/main.jsx` can subscribe to this
+ * store's queue without importing it directly. Idempotent (re-installing
+ * would only rebind the same function).
+ *
+ * GH #1473: this store's `push()` was already the canonical
+ * `window.__hal0Toast` implementation (installed above, before React even
+ * mounts), but nothing ever rendered `queue` — main.jsx kept its own
+ * single-slot `useState` and unconditionally overwrote `window.__hal0Toast`
+ * with it on every App mount, so a second toast replaced the first instead
+ * of queueing, and anything fired before mount went into this store's
+ * queue and was never seen. Wiring a real consumer closes both gaps.
+ */
+export function installToastQueueHook() {
+  if (typeof window === 'undefined') return
+  ;(window as any).__hal0UseToastQueue = () => {
+    // Select `queue` alone (a stable array reference unless push/dismiss/
+    // clear actually ran) rather than a `{queue, dismiss}` object literal —
+    // a fresh object every render fails zustand's snapshot-equality check
+    // and the resulting resubscribe loop is an infinite "Maximum update
+    // depth exceeded" crash. `dismiss` doesn't need a subscription (its
+    // reference is stable for the store's lifetime), so it's read directly
+    // off getState().
+    const queue = useToastStore((s) => s.queue)
+    return { queue, dismiss: useToastStore.getState().dismiss }
+  }
+}

@@ -291,3 +291,35 @@ test.describe('dashboard redesign — needs attention', () => {
     await expect(page).toHaveURL(/#settings\/updates/)
   })
 })
+
+test.describe('dashboard redesign — throughput card footer null-guard (GH #1473)', () => {
+  test('a reading with no usable last sample reads "no samples yet", never interpolates null', async ({ page }) => {
+    // useThroughputHistory's own isPending already gates a genuinely EMPTY
+    // `samples: []` (isPending is true when samples.length === 0), so that
+    // exact shape now shows "source pending" — the narrower, still-live gap
+    // is a NON-empty history whose latest sample lacks a numeric total_tps
+    // (e.g. a metrics-writer hiccup mid-poll): isPending is false (samples
+    // exist) but RDThroughputCard's own hasReading check is also false, so
+    // `serving` stays null and the footer interpolated the literal string
+    // "null" straight into "null slots serving".
+    await page.route(/\/api\/stats\/throughput\/history/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          samples: [
+            { ts: 1, total_tps: 12.3, serving_slots: 1 },
+            { ts: 2, total_tps: null, serving_slots: null },
+          ],
+        }),
+      }),
+    )
+    await gotoDashboard(page, [servingSlot(), readySlot()])
+    const throughput = page.locator('.rd-card', { has: page.locator('.rd-card-title', { hasText: /^Throughput$/ }) })
+    await expect(throughput).toBeVisible({ timeout: 10_000 })
+
+    const foot = throughput.locator('.rd-card-foot')
+    await expect(foot).not.toContainText('null')
+    await expect(foot).toContainText(/no samples yet/i)
+  })
+})

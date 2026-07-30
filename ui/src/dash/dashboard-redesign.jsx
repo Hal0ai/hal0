@@ -525,7 +525,13 @@ function RDThroughputCard({ swap }) {
         })}
       </div>
       <div className="rd-card-foot mono">
-        <span>{isPending ? 'source pending' : `${serving} slot${serving !== 1 ? 's' : ''} serving`}</span>
+        <span>
+          {isPending
+            ? 'source pending'
+            : serving == null
+              ? 'no samples yet'
+              : `${serving} slot${serving !== 1 ? 's' : ''} serving`}
+        </span>
         <span className="num">{peak != null ? `peak ${fmt1(peak)} tok/s` : ''}</span>
       </div>
     </RDCard>

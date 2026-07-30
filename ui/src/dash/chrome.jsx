@@ -1078,25 +1078,16 @@ function ApprovalModal({ open, onClose, items, onApprove, onDeny }) {
                   <span className="k">argument</span>
                   <span className="v">{a.arg}</span>
                 </div>
-                <div className="arg-row">
-                  <span className="k">capability</span>
-                  <span className="v">{a.tool.startsWith("model_") ? "registry-write" : a.tool.startsWith("fs_") ? "fs-write" : "shell-exec"}</span>
-                </div>
-                <div className="arg-row">
-                  <span className="k">policy</span>
-                  <span className="v">gated · requires operator approval</span>
-                </div>
               </div>
               <div className="approval-actions">
                 <button className="btn danger sm" onClick={() => onDeny && onDeny(a.id)}>Deny</button>
-                <button className="btn ghost sm" onClick={() => onDeny && onDeny(a.id)}>Deny + remember</button>
                 <button className="btn sm" onClick={() => onApprove && onApprove(a.id)}>Approve</button>
               </div>
             </div>
           ))}
         </div>
         <div className="modal-foot mono">
-          <span>Configure auto-approve rules in the agent view.</span>
+          <span />
           <button className="btn ghost sm" onClick={onClose}>Close</button>
         </div>
       </div>
