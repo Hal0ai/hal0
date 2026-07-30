@@ -30,12 +30,12 @@ hostname the client uses to reach it.
 |---|---|
 | Same machine as hal0 | `http://localhost:8080/v1` |
 | Another LAN / tailnet machine | `http://<hal0-host>:8080/v1` (LAN IP, mDNS name like `hal0.local`, or a Tailscale address) |
-| Inside a container on the hal0 host (e.g. OpenWebUI, Honcho) | `http://host.docker.internal:8080/v1` |
+| Inside a container on the hal0 host (e.g. OpenWebUI) | `http://host.docker.internal:8080/v1` |
 | Behind a reverse proxy | `https://<your-public-domain>/v1` (set `HAL0_OPENWEBUI_PUBLIC_URL` and friends in `/etc/hal0/api.env` for the dashboard to link to it cleanly) |
 
 <Aside type="note" title="Don't confuse the two PUBLIC_URLs">
 `HAL0_OPENWEBUI_PUBLIC_URL` (and `HAL0_HERMES_PUBLIC_URL`,
-`HAL0_COMFYUI_PUBLIC_URL`, `HAL0_HONCHO_PUBLIC_URL`) only changes the
+`HAL0_COMFYUI_PUBLIC_URL`) only changes the
 **dashboard link** that points operators at those services. It has
 nothing to do with the `/v1` base URL clients use to talk to hal0 — that
 base URL is still the host-and-port of `hal0-api` itself.

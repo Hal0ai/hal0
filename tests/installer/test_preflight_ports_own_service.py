@@ -2,7 +2,7 @@
 
 install.sh's pre-install port gate used to hard-fail whenever 8080/3001
 were already LISTENing — including the documented
-``HAL0_INSTALL_HONCHO=1 sudo bash install.sh`` re-install-over-a-live-box
+a re-install-over-a-live-box
 path, where the listener is hal0's own hal0-api/hal0-openwebui unit. These
 tests drive ``preflight_ports`` through fake ``ss``/``systemctl`` shims on
 PATH (real port binding + real systemd units aren't available in CI) to
