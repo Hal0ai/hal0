@@ -1,0 +1,10 @@
+{
+  "openIssue": {
+    "path": "/Users/you/.linear/open-in-superset.sh",
+    "env": [
+      "LINEAR_ISSUE_IDENTIFIER",
+      "LINEAR_ISSUE_BRANCH_NAME",
+      "LINEAR_PROMPT"
+    ]
+  }
+}

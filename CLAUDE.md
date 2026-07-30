@@ -35,3 +35,7 @@ The five canonical triage labels, unmodified (`needs-triage`, `needs-info`, `rea
 ### Domain docs
 
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root (created lazily). See `docs/agents/domain.md`.
+
+### Superset.sh
+
+Local dev-agent workspaces (git worktrees + Claude/Codex/etc. sessions), wired to the Hal0 Linear mirror and GitHub Issues. See `docs/agents/superset-integration.md`.
