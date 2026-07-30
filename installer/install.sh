@@ -1662,11 +1662,40 @@ ui_step "Container slot seeds"
 # (`existing_slots`, setup_command.py), so the scaffold pass sees the
 # curated files and leaves them alone, while still scaffolding the slots
 # that have NO static seed (e.g. `vision`).
+# slot_name_exists — "does a slot with this NAME already exist, in ANY keying
+# layout?". The obvious `[[ -f "${ETC_DIR}/slots/<name>.toml" ]]` test is only
+# correct on a NAME-keyed box. After `hal0 slot migrate-id-keying` the same slot
+# lives at `<id>.toml` carrying `name = "<name>"`, so the filename test misses it
+# and the seed loop below re-seeds all ten curated names as name-keyed
+# DUPLICATES of slots that already exist (#1421/#1422). That chains: duplicate
+# `GET /api/slots` rows, and then `migrate_slot_id_keying` — which walks
+# `sorted(glob("*.toml"))`, skips `<id>.toml` as already-migrated, and later
+# reaches the stale `<name>.toml` — rewrites the LIVE `<id>.toml` from the seed
+# content. A configured slot silently reverts to a seed.
+#
+# Cheap, layout-agnostic answer: filename first, then the `name =` field of
+# every slot TOML in the directory.
+slot_name_exists() {
+    local want="$1" dir="${ETC_DIR}/slots" f
+    [[ -f "${dir}/${want}.toml" ]] && return 0
+    [[ -d "${dir}" ]] || return 1
+    for f in "${dir}"/*.toml; do
+        [[ -f "${f}" ]] || continue
+        if grep -qE "^[[:space:]]*name[[:space:]]*=[[:space:]]*[\"']${want}[\"'][[:space:]]*\$" "${f}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+SEEDED_NEW_SLOTS=()
+SEEDED_EXISTING_SLOTS=0
 for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
-    if [[ -f "${SLOT_TOML}" ]]; then
-        info "${seed_slot} slot: ${SLOT_TOML} exists — left alone"
+    if slot_name_exists "${seed_slot}"; then
+        info "${seed_slot} slot: already present — left alone"
+        SEEDED_EXISTING_SLOTS=$((SEEDED_EXISTING_SLOTS + 1))
     else
         [[ -f "${SLOT_SRC}" ]] \
             || die "installer bundle incomplete: ${SLOT_SRC} missing (installer/etc-hal0/ should ship with every release tree)"
@@ -1674,8 +1703,22 @@ for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
         cp "${SLOT_SRC}" "${SLOT_TOML}"
         chmod 0644 "${SLOT_TOML}"
         info "seeded ${seed_slot} slot → ${SLOT_TOML}"
+        SEEDED_NEW_SLOTS+=("${seed_slot}")
     fi
 done
+
+# EXPECTED, NOT A BUG: the loop above closes gaps, so upgrading a box that
+# predates a curated slot ADDS it (most often `utility`, added after the
+# original seed set). A parallel boot-time closer does the same thing —
+# hal0.install.static_seeds.seed_static_slots, wired into hal0-api startup — so
+# the slot also appears after a plain service restart with no installer run.
+# Called out explicitly here so an upgrade test does not misreport a new tile on
+# the dashboard as a regression.
+if (( SEEDED_EXISTING_SLOTS > 0 )) && (( ${#SEEDED_NEW_SLOTS[@]} > 0 )); then
+    info "note: ${#SEEDED_NEW_SLOTS[@]} curated slot(s) added to this existing install: ${SEEDED_NEW_SLOTS[*]}"
+    info "      that is intentional gap-closing (this release ships slots your install predates),"
+    info "      not a stray slot — each stays inert until you bind a model to it."
+fi
 
 ui_step "Hardware probe"
 
