@@ -416,7 +416,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		}
 		// Block Save on malformed extra_args (unbalanced quotes) the same way
 		// numeric fields block — the resolved command can't be built from it.
-		if (extraArgsErr) {
+		// #1389: only when the value would actually be WRITTEN, i.e. it is
+		// dirty. `extraArgs` is seeded from disk, so a slot whose persisted
+		// value is already malformed used to start blocked without the
+		// operator typing anything — and since the row (with its inline error)
+		// lives inside the `device !== "npu"` branch, on an NPU slot the veto
+		// came from a field that is neither visible nor editable: an enabled
+		// Save that silently did nothing, forever. Dirty-gating is the right
+		// axis rather than visibility — a malformed value the operator typed
+		// still blocks even if they then switch Device and unmount the row,
+		// because that value is still headed for the wire.
+		if (extraArgsDirty && extraArgsErr) {
 			errs.extraArgs = extraArgsErr;
 		}
 		if (Object.keys(errs).length > 0) {
@@ -740,6 +750,22 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									{submitErr}
 								</span>
 							)}
+							{/* #1389: the footer is the one place guaranteed to be mounted
+							    for every device, so a Save refused by a field that is
+							    currently off-screen still explains itself instead of
+							    presenting a dead button. */}
+							{(() => {
+								const blocking = Object.values(fieldErrs).filter(Boolean);
+								if (blocking.length === 0) return null;
+								return (
+									<span
+										data-testid="slot-save-blocked"
+										style={{ color: "var(--err)", fontSize: 11 }}
+									>
+										{blocking.join(" · ")}
+									</span>
+								);
+							})()}
 							<button className="btn ghost sm" onClick={requestClose}>
 								Cancel
 							</button>
@@ -1430,7 +1456,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<input
 									className="input mono"
 									value={extraArgs}
-									onChange={(e) => setExtraArgs(e.target.value)}
+									onChange={(e) => {
+										setExtraArgs(e.target.value);
+										setFieldErrs((p) => ({ ...p, extraArgs: undefined }));
+									}}
 									placeholder="--flag value  (one-off, no new profile)"
 									spellCheck={false}
 									data-testid="extra-args-input"
