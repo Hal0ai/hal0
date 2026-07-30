@@ -38,9 +38,11 @@ from starlette.types import ASGIApp
 
 log = structlog.get_logger("hal0.api.mcp_mount")
 
-# Header carrying the caller's agent identity (Bearer auth was removed;
-# identity flows on this header, same as the REST memory
-# surface in :mod:`hal0.api.routes.memory`).
+# Header carrying the caller's agent identity. Identity is a SEPARATE axis
+# from authentication: the Bearer token (when auth is enabled — see
+# :func:`hal0.api.auth.require_auth_enabled`, which is off by default)
+# answers "may you call this at all"; this header answers "as whom". Same
+# split as the REST memory surface in :mod:`hal0.api.routes.memory`.
 _AGENT_HEADER = "x-hal0-agent"
 
 # Identity grammar — alnum + ``-`` + ``_``, ≤64 chars. The
@@ -78,9 +80,14 @@ def _mcp_transport_security():
     ``421 Invalid Host header`` — exactly what happens the moment another
     homelab node, or the Traefik vhost, tries to reach ``/mcp/*``.
 
-    hal0 removed network auth entirely and binds ``0.0.0.0`` on
-    the trusted LAN, so the mount has to be reachable by its real host
-    name. We keep the secure localhost default but let operators widen it,
+    hal0 binds ``0.0.0.0`` on the trusted LAN and ships with auth OFF by
+    default (:func:`hal0.api.auth.require_auth_enabled` — the middleware
+    exists and classifies ``/mcp/*`` in :mod:`hal0.security.exposure`, but
+    it enforces nothing until an operator enables it), so the mount has to
+    be reachable by its real host name. DNS-rebinding protection is a
+    distinct control from auth and stays on regardless: it bounds which
+    *hosts* may address the mount, not who may call it. We keep the secure
+    localhost default but let operators widen it,
     mirroring the ``HAL0_ALLOWED_ORIGINS`` knob in ``api/agents/_auth``:
 
     * ``HAL0_MCP_ALLOWED_HOSTS`` — comma-separated ``host`` / ``host:port``

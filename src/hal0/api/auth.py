@@ -8,10 +8,12 @@ Three-tier, deny-by-default auth built around one classification table
 - Key resolution: cookie -> ``Authorization: Bearer`` -> ``?api_key=``,
   in that priority order (browsers can't set headers on a WebSocket
   upgrade, hence the query-param fallback for WS/SSE).
-- :func:`require_auth_enabled` — the rollout posture. Defaults to
-  enforcing only when the bind host is non-loopback or a key has been
-  configured, so the existing ~700-test TestClient suite (loopback,
-  no keys) keeps running dev-open, unchanged.
+- :func:`require_auth_enabled` — the rollout posture. Defaults to **OFF**
+  (operator decision 2026-07-19, finding O19): auth is explicit-enable
+  only, via ``HAL0_REQUIRE_AUTH`` or ``[security].require_auth``. KB-1's
+  original derived default (auto-on for a non-loopback bind or a
+  configured key) is gone — see that function's docstring for why. The
+  existing TestClient suite therefore keeps running dev-open, unchanged.
 - :class:`AuthEnforcementMiddleware` — the pure-ASGI gate wired into
   ``create_app()`` right after ``log_scrub.install(app)``. Handles both
   ``http`` (incl. SSE, which is just a long-lived GET) and ``websocket``

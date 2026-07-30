@@ -47,24 +47,43 @@ log = logging.getLogger(__name__)
 
 # ── identity + namespace helpers ────────────────────────────────────────
 #
-# Auth was removed, so hal0-api is open on 0.0.0.0:8080; agent identity
-# flows on the ``X-hal0-Agent`` header (NOT Bearer — auth surface was
-# removed).
+# Agent identity flows on the ``X-hal0-Agent`` header — a separate axis from
+# authentication, which travels on the session cookie / ``Authorization:
+# Bearer`` / ``?api_key=`` (see :mod:`hal0.api.auth`).
 # Private-mode opt-in flows on ``X-hal0-Private`` to match the MCP mount
 # (:mod:`hal0.api.mcp_mount`); the same toggle gates the same namespace
 # promotion rule across both surfaces (issue #317).
 #
-# AUTH POSTURE (#1302, ratified — perimeter-only). The agent header is
-# self-asserted and hal0 does not authenticate it: there is no credential
-# to check it against, by design (ADR-0012 removed auth and TLS platform
-# wide, not just here). We validate its *shape* and refuse a body-supplied
-# ``source`` so audit can never disagree with the namespace a write landed
-# in — but a caller who can already reach these routes can claim any agent
-# id. Therefore ``private:<agent>`` is an ISOLATION boundary between
-# cooperating agents on one host, NOT a security boundary against a hostile
-# LAN caller; the reverse proxy is the auth boundary, and a multi-tenant
-# deployment must inject ``X-hal0-Agent`` there from an authenticated
-# identity (overwriting any client value). Documented for operators in
+# AUTH POSTURE (#1302, ratified — perimeter-only). Two facts, both true, and
+# the second is the one that bites:
+#
+# 1. hal0 DOES have an auth surface on this route.
+#    :class:`hal0.api.auth.AuthEnforcementMiddleware` is wired into
+#    ``create_app()``, and :mod:`hal0.security.exposure` classifies the whole
+#    ``/api/memory`` prefix as ``AuthClass.ADMIN`` — with the destructive
+#    subset (every ``DELETE``, plus ``POST /api/memory/delete``) pinned by
+#    rules placed AHEAD of the prefix rule so the classification cannot be
+#    widened by accident (#1024).
+#
+# 2. That middleware is INERT on a shipped install.
+#    :func:`hal0.api.auth.require_auth_enabled` returns **False by default**
+#    (operator decision 2026-07-19, finding O19: the previous auto-on posture
+#    locked operators out of a dashboard that shipped no login UI, so they
+#    disabled auth wholesale — the posture defeated itself). Until an operator
+#    sets ``HAL0_REQUIRE_AUTH`` or flips ``[security].require_auth``, hal0-api
+#    is open on its bind address and the ADMIN class above is *classified but
+#    not enforced*.
+#
+# So on a default box the agent header is self-asserted and unauthenticated:
+# there is no credential in play to check it against. We validate its *shape*
+# and refuse a body-supplied ``source`` so audit can never disagree with the
+# namespace a write landed in — but a caller who can already reach these
+# routes can claim any agent id. Therefore ``private:<agent>`` is an ISOLATION
+# boundary between cooperating agents on one host, NOT a security boundary
+# against a hostile LAN caller. With auth OFF the reverse proxy is the only
+# auth boundary; a multi-tenant deployment must enable auth AND inject
+# ``X-hal0-Agent`` at the proxy from an authenticated identity (overwriting
+# any client value). Documented for operators in
 # ``docs/concepts/security.mdx`` §"What X-hal0-Agent is and is not".
 #
 # Independent of the header, destructive calls carry their own layer:
