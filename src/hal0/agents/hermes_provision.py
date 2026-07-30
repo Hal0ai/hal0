@@ -1862,8 +1862,8 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     config_after = config_path.read_text(encoding="utf-8") if config_path.exists() else None
     new_hash = content_hash(config_after) if config_after is not None else None
     # Convergence signal: the overlay changed the file content, a list key was
-    # merged, or a stale legacy honcho.json was disabled. A no-drift re-run
-    # is byte-identical.
+    # merged, or a stale pre-removal honcho.json was disabled. A no-drift
+    # re-run is byte-identical.
     changed = bool((config_before != config_after) or list_merge_changed or honcho_json_changed)
     # Non-fatal posture (run-all): a partial set still leaves a usable config.
     # FAIL only when the overlay couldn't apply at all (hermes_bin broken) —
