@@ -62,6 +62,13 @@ log = logging.getLogger(__name__)
 # os.replace, so a flock on the .toml would guard a now-unlinked inode.
 _PROCESS_LOCK_FILENAME = "registry.toml.lock"
 
+# #1413: the nested `Model` tables `merge_update` merges ONE level deep instead
+# of replacing wholesale. Deliberately NOT `metadata` — that one is a freeform
+# bag with no schema, so "absent = keep" would leave callers no way to drop a
+# key; it stays replace-only. Same pair `_model_to_toml` special-cases for the
+# None-leaf strip, and for the same reason: they are the schema'd subtables.
+_MERGED_SUBTABLES = frozenset({"defaults", "capability_flags"})
+
 
 # ── Typed errors ──────────────────────────────────────────────────────────────
 
@@ -490,7 +497,7 @@ class TomlModelRegistry:
 
 
 def merge_update(existing: Model, model_id: str, updates: dict[str, Any]) -> Model:
-    """Flat field-level merge shared by every ``update()`` implementation.
+    """Field-level merge shared by every ``update()`` implementation.
 
     ``updates`` overwrites matching top-level fields on ``existing``; the
     ``id`` key in ``updates`` is always ignored (``model_id`` wins) — the
@@ -499,11 +506,36 @@ def merge_update(existing: Model, model_id: str, updates: dict[str, Any]) -> Mod
     :meth:`hal0.registry.sqlite_store.SqliteModelRegistry.update` so the
     two stores can never drift on merge semantics or error shape.
 
+    The two NESTED tables in :data:`_MERGED_SUBTABLES` — ``defaults`` and
+    ``capability_flags`` — merge ONE level deep (#1413). The merge used to
+    be flat everywhere, which made a body that so much as named
+    ``defaults`` replace the whole ``ModelDefaults`` table: every sibling
+    key the client didn't resend (``context_size``, ``chat_template``,
+    ``mtp``/``jinja``/``enable_thinking``/``vision`` …) silently reset to
+    ``None`` behind an HTTP 200, contradicting the route's own documented
+    "body accepts any subset" contract. The sub-key semantics are the
+    tri-state ones the fields already carry:
+
+    * absent sub-key    → keep the stored value
+    * ``null`` sub-key  → clear that ONE value (the DELETE verb)
+    * ``{"defaults": null}`` → drop the whole table (unchanged)
+
+    Anything that isn't a dict (or a table not in the set — ``metadata``
+    stays freeform and replace-only) keeps the flat overwrite.
+
     Raises:
         RegistryError: If the merged fields fail ``Model`` validation.
     """
     existing_dict = existing.model_dump(mode="python")
-    merged = {**existing_dict, **{k: v for k, v in updates.items() if k != "id"}}
+    merged = dict(existing_dict)
+    for key, value in updates.items():
+        if key == "id":
+            continue
+        if key in _MERGED_SUBTABLES and isinstance(value, dict):
+            stored = existing_dict.get(key)
+            merged[key] = {**(stored if isinstance(stored, dict) else {}), **value}
+            continue
+        merged[key] = value
     merged["id"] = model_id
     try:
         return Model.model_validate(merged)

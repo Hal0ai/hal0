@@ -434,8 +434,9 @@ async def validate_model_write(request: Request) -> dict[str, Any]:
     instead of only at the eventual save (or, worse, at launch). Returns
     ``{"ok": true}`` on a clean body; a violation raises the SAME typed envelope
     (``slot.managed_arg_denied`` / ``model.extra_args_unparseable`` /
-    ``model.extra_args_json_quoting`` / ``model.unknown_runner``) the create and
-    PUT paths raise, so the drawer renders one error path.
+    ``model.extra_args_json_quoting`` / ``model.unknown_runner`` /
+    ``model.defaults_invalid`` / ``model.context_size_out_of_range``) the create
+    and PUT paths raise, so the drawer renders one error path.
     """
     try:
         body = await request.json()
@@ -599,6 +600,23 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     (``license``, ``tags``, ``metadata`` …). Emits ``model.updated`` with
     ``changed_fields`` so the footer ticker can render a "you edited X"
     chip.
+
+    ``defaults`` and ``capability_flags`` are the two tables where "any
+    subset" reaches INSIDE the object (#1413): an absent sub-key keeps the
+    stored value, an explicit ``null`` clears that one value, and
+    ``{"defaults": null}`` drops the whole table. Every other field —
+    including ``metadata`` and the list-valued ``capabilities``/``tags``/
+    ``backends`` — is a flat replace. See
+    :func:`hal0.registry.store.merge_update`.
+
+    Errors:
+      * ``400 model.defaults_invalid`` — a ``defaults`` value that isn't
+        parseable as its ``ModelDefaults`` type (#1414).
+      * ``400 model.context_size_out_of_range`` — ``defaults.context_size``
+        outside the launchable range (#1414).
+      * ``400 slot.hardware_flag_denied`` / ``400 slot.managed_arg_denied`` —
+        ``defaults.extra_args`` reaching for slot- or authority-owned flags.
+      * ``404 model.not_found`` — ``model_id`` not registered.
     """
     registry = request.app.state.model_registry
     try:
