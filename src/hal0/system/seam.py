@@ -6,7 +6,9 @@ leaves a handful of genuinely-root operations the (now unprivileged) API still
 performs for slot lifecycle: writing a per-slot systemd unit under
 ``/etc/systemd/system`` (root:root, per the ``OwnershipStore`` table),
 ``daemon-reload``, and starting/stopping/restarting/enabling/disabling a slot
-unit. Those route through ``sudo -n /usr/lib/hal0/bin/hal0-systemctl``
+unit — plus stopping/disabling a bundled-agent unit (``hal0-agent@<id>.service``)
+during uninstall, which otherwise escalated via polkit and popped an interactive
+password dialog. Those route through ``sudo -n /usr/lib/hal0/bin/hal0-systemctl``
 (``installer/wrappers/hal0-systemctl`` + ``packaging/sudoers/hal0-systemctl``)
 — the entire privileged surface, argument-validated, no shell, no wildcards.
 
@@ -46,7 +48,21 @@ SEAM_BIN = "/usr/lib/hal0/bin/hal0-systemctl"
 #: Verbs the seam validates + forwards for a ``hal0-slot@<id>.service`` unit.
 _UNIT_VERBS = frozenset({"start", "stop", "restart", "enable", "disable", "reset-failed"})
 
+#: Verbs the seam validates + forwards for a ``hal0-agent@<id>.service`` unit,
+#: mapped to the wrapper's dedicated agent verbs. Deliberately only the two the
+#: uninstall teardown needs (#453): nothing in the unprivileged daemon path
+#: brings an agent unit UP, so ``start``/``restart``/``enable`` are not granted.
+#: Without this routing, ``HermesDriver._stop_services`` ran a bare
+#: ``systemctl stop hal0-agent@hermes.service`` as the ``hal0`` service user →
+#: polkit escalation → an interactive desktop password prompt mid-uninstall.
+_AGENT_UNIT_VERBS: dict[str, str] = {"stop": "stop-agent", "disable": "disable-agent"}
+
 _UNIT_NAME_RE = re.compile(r"^hal0-slot@([A-Za-z0-9_-]{1,64})\.service$")
+#: ``hal0-agent@<id>.service`` — the per-bundled-agent unit
+#: (``packaging/systemd/hal0-agent@.service``). Same identifier class as the
+#: slot regex; the seam wrapper re-validates the id and builds the unit name
+#: itself, so this is a routing filter, not the security boundary.
+_AGENT_UNIT_NAME_RE = re.compile(r"^hal0-agent@([A-Za-z0-9_-]{1,64})\.service$")
 #: P3-quadlet: the Podman Quadlet source file a slot's ``.service`` is generated
 #: from — ``hal0-slot@<token>.container`` under ``/etc/containers/systemd/``.
 #: Root-owned by design; written via ``hal0-systemctl write-quadlet <token>``.
@@ -77,6 +93,13 @@ def _slot_id_from_unit(unit_name: str) -> str | None:
     """Extract ``<id>`` from ``hal0-slot@<id>.service``, or ``None`` if the
     unit name isn't one (e.g. ``hal0-api.service`` — never routed here)."""
     m = _UNIT_NAME_RE.match(unit_name)
+    return m.group(1) if m else None
+
+
+def _agent_id_from_unit(unit_name: str) -> str | None:
+    """Extract ``<id>`` from ``hal0-agent@<id>.service``, or ``None`` if the
+    unit name isn't one (e.g. ``hermes-gateway.service`` — not routed here)."""
+    m = _AGENT_UNIT_NAME_RE.match(unit_name)
     return m.group(1) if m else None
 
 
@@ -171,32 +194,46 @@ class SystemCtlSeam:
             raise ValueError(f"not a hal0-slot@ quadlet file: {quadlet_path.name!r}")
         self._run(self._seam_argv("remove-quadlet", token), check=False)
 
-    def systemctl(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        """Run ``systemctl <args...>``, routing daemon-reload + hal0-slot@
-        unit verbs through the seam when running as the hal0 service user.
+    def systemctl(
+        self, *args: str, check: bool = True, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Run ``systemctl <args...>``, routing daemon-reload + hal0-slot@ and
+        hal0-agent@ unit verbs through the seam when running as the hal0
+        service user.
 
         Read-only queries (``is-active``, ``status``, ...) and anything
-        touching a NON-``hal0-slot@`` unit (e.g. ``hal0-api.service`` itself —
-        use :meth:`restart_self` for that) always pass straight through:
-        neither needs the seam, and the seam wrapper doesn't accept them.
+        touching a unit family the seam doesn't grant (e.g. ``hal0-api.service``
+        itself — use :meth:`restart_self` for that) always pass straight
+        through: neither needs the seam, and the seam wrapper doesn't accept
+        them.
+
+        ``timeout`` bounds the call (seconds, ``None`` = unbounded). A stuck
+        dbus round-trip must not wedge a caller like the uninstall teardown.
         """
+        kwargs: dict[str, object] = {"capture_output": True, "text": True, "check": check}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+
         if not self._is_hal0_user() or not args or args[0] != "systemctl":
-            return self._run(list(args), capture_output=True, text=True, check=check)
+            return self._run(list(args), **kwargs)
 
         verb = args[1] if len(args) > 1 else ""
         if verb == "daemon-reload":
-            return self._run(
-                self._seam_argv("daemon-reload"), capture_output=True, text=True, check=check
-            )
-        if verb in _UNIT_VERBS and len(args) > 2:
-            slot_id = _slot_id_from_unit(args[2])
-            if slot_id is not None:
-                return self._run(
-                    self._seam_argv(verb, slot_id), capture_output=True, text=True, check=check
-                )
-        # Not a routable hal0-slot@ op (e.g. is-active, or a non-slot unit) —
-        # pass through unprivileged; systemctl read-only queries never need root.
-        return self._run(list(args), capture_output=True, text=True, check=check)
+            return self._run(self._seam_argv("daemon-reload"), **kwargs)
+        if len(args) > 2:
+            if verb in _UNIT_VERBS:
+                slot_id = _slot_id_from_unit(args[2])
+                if slot_id is not None:
+                    return self._run(self._seam_argv(verb, slot_id), **kwargs)
+            agent_verb = _AGENT_UNIT_VERBS.get(verb)
+            if agent_verb is not None:
+                agent_id = _agent_id_from_unit(args[2])
+                if agent_id is not None:
+                    return self._run(self._seam_argv(agent_verb, agent_id), **kwargs)
+        # Not a routable hal0-slot@ / hal0-agent@ op (e.g. is-active, or a unit
+        # outside both families) — pass through unprivileged; systemctl
+        # read-only queries never need root.
+        return self._run(list(args), **kwargs)
 
     def restart_self(self) -> subprocess.CompletedProcess[str]:
         """``systemctl restart hal0-api.service`` — the self-update path."""

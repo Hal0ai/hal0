@@ -6,11 +6,12 @@
 # flip in src/hal0/install/perms.py). It still needs a handful of genuinely-root
 # operations for slot lifecycle: writing the per-slot systemd unit under
 # /etc/systemd/system, `daemon-reload`, and start/stop/restart/enable/disable/
-# reset-failed of a slot unit — plus restarting itself on self-update. This
-# script is the ENTIRE privileged surface for those ops, modeled exactly on
-# hal0-agentenv / hal0-benchctl: every argument is validated (a slot id must
-# match a strict identifier regex), no shell is ever evaluated, and no
-# wildcards are accepted.
+# reset-failed of a slot unit — plus stopping/disabling a bundled-agent unit on
+# uninstall, and restarting itself on self-update. This script is the ENTIRE
+# privileged surface for those ops, modeled exactly on hal0-agentenv /
+# hal0-benchctl: every argument is validated (a slot/agent id must match a
+# strict identifier regex and the unit name is built HERE, never accepted from
+# the caller), no shell is ever evaluated, and no wildcards are accepted.
 #
 # NOTE: the iptables FORWARD-chain repair the original P3-perms design doc
 # sketched for this seam is NOT needed — that repair already runs as its own
@@ -22,6 +23,17 @@ set -euo pipefail
 UNIT_PREFIX="hal0-slot@"
 UNIT_DIR="/etc/systemd/system"
 SELF_UNIT="hal0-api.service"
+
+# Bundled-agent units (hal0-agent@<id>.service). The uninstall path has to stop
+# + disable the running agent BEFORE it deletes the agent's files, or the still-
+# live agent recreates them mid-teardown (#453). That teardown runs inside
+# hal0-api (User=hal0), so a bare `systemctl stop` there is an unprivileged
+# system-unit op → polkit escalation → an interactive desktop password prompt.
+# The two verbs below are the ONLY agent-unit ops this seam grants: stop and
+# disable. Deliberately NOT start/restart/enable — nothing in the unprivileged
+# daemon path needs to bring an agent unit up, and a narrower grant is a
+# smaller surface.
+AGENT_UNIT_PREFIX="hal0-agent@"
 
 # P3-quadlet: per-slot Podman Quadlet source files live here, root-owned by
 # design; podman's systemd generator turns hal0-slot@<id>.container into
@@ -41,6 +53,17 @@ validate_slot_id() {   # arg: slot id (the "<id>" in hal0-slot@<id>.service)
   local id="$1"
   [[ -n "$id" ]] || die "missing slot id"
   [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || die "bad slot id: $id"
+}
+
+validate_agent_id() {  # arg: agent id (the "<id>" in hal0-agent@<id>.service)
+  # Same strictness as validate_slot_id, deliberately: one identifier class,
+  # anchored, bounded, no dots / slashes / '@' / whitespace / shell metachars.
+  # The caller supplies ONLY this id — the unit name is built here — so no
+  # caller can aim these verbs at an arbitrary unit (e.g. sshd.service) or at
+  # a systemd template escape (`..`, `foo@bar`, `x.service x.timer`).
+  local id="$1"
+  [[ -n "$id" ]] || die "missing agent id"
+  [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || die "bad agent id: $id"
 }
 
 cmd="${1:-help}"; shift || true
@@ -94,13 +117,21 @@ case "$cmd" in
     exec systemctl "$cmd" "${UNIT_PREFIX}${id}.service"
     ;;
 
+  stop-agent|disable-agent)   # stop-agent <agent-id> / disable-agent <agent-id>
+    # Distinct verb names (not `stop <id>` with a second "kind" argument) so the
+    # unit family a caller can reach is fixed by the verb itself and the id is
+    # never concatenated onto a caller-chosen prefix.
+    id="${1:-}"; validate_agent_id "$id"
+    exec systemctl "${cmd%-agent}" "${AGENT_UNIT_PREFIX}${id}.service"
+    ;;
+
   restart-self)                # literal-only: restart hal0-api.service, never a variable name
     exec systemctl restart "$SELF_UNIT"
     ;;
 
   help|"")
     cat <<EOF
-usage: hal0-systemctl <command> [slot-id]
+usage: hal0-systemctl <command> [slot-id|agent-id]
   write-unit <slot-id>             write ${UNIT_DIR}/${UNIT_PREFIX}<id>.service (body on stdin)
   remove-unit <slot-id>            rm -f ${UNIT_DIR}/${UNIT_PREFIX}<id>.service
   write-quadlet <slot-id>          write ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container (body on stdin)
@@ -110,6 +141,8 @@ usage: hal0-systemctl <command> [slot-id]
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
   enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service
   reset-failed <slot-id>           clear a crash-looped unit's failed sub-state
+  stop-agent <agent-id>            systemctl stop ${AGENT_UNIT_PREFIX}<id>.service
+  disable-agent <agent-id>         systemctl disable ${AGENT_UNIT_PREFIX}<id>.service
   restart-self                     systemctl restart ${SELF_UNIT}
 EOF
     ;;

@@ -28,7 +28,6 @@ keys off the concrete managed-venv artifacts instead.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import shutil
@@ -37,11 +36,24 @@ import subprocess  # nosec B404 — required for shim
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from hal0.agents.manager import (
     AgentDriver,
     HermesUpstreamMissingError,
 )
 from hal0.config import paths as _paths
+
+# hal0.system.seam imports only stdlib (os/pwd/re/subprocess/pathlib) — no hal0
+# package imports at all — so this is cycle-free by construction. It is also
+# already the project's single home for the `sudo -n hal0-systemctl ...`
+# pattern (hal0.providers.container and hal0.slots.migrate_id_keying both use
+# it); hermes_provision._privileged_systemctl is a private, install-time
+# variant of the same pattern that is NOT importable from here without pulling
+# the whole provisioner (and its heavy deps) into the driver.
+from hal0.system.seam import SystemCtlSeam
+
+log = structlog.get_logger(__name__)
 
 # NOTE: provisioning (venv create + pip install hermes-agent + wrapper
 # shim) moved wholesale into the bootstrap pipeline
@@ -264,28 +276,62 @@ class HermesDriver(AgentDriver):
     # ── Internals ───────────────────────────────────────────────────────
 
     @staticmethod
-    def _stop_services() -> None:
+    def _stop_services(*, seam: SystemCtlSeam | None = None) -> None:
         """Stop + disable the hermes-agent systemd service so it doesn't
-        recreate files during uninstall (#453). Best-effort — missing
-        systemctl or a missing unit is not an error; the uninstall proceeds
-        regardless."""
+        recreate files during uninstall (#453).
+
+        Routed through :class:`hal0.system.seam.SystemCtlSeam`, NOT a bare
+        ``systemctl stop``. ``driver.uninstall()`` runs inside ``hal0-api``,
+        which is ``User=hal0`` — an unprivileged ``systemctl stop`` on a system
+        unit escalates via polkit, which on a box with a desktop session popped
+        an interactive "Authentication is required to stop
+        'hal0-agent@hermes.service'" dialog. The seam forwards to
+        ``sudo -n hal0-systemctl stop-agent hermes`` instead (NOPASSWD, no
+        prompt) when we ARE the hal0 service user, and passes straight through
+        to ``systemctl`` otherwise (root installer / dev / CI, where there is
+        nothing to escalate).
+
+        Best-effort, deliberately: a missing ``systemctl``, or a unit that is
+        absent / already stopped, is NOT an error and the uninstall proceeds.
+        But a genuine failure — no sudo grant, seam not installed, polkit
+        denial, timeout — is LOGGED rather than swallowed. The old code wrapped
+        both calls in ``contextlib.suppress`` with ``capture_output=True``, so
+        cancelling the polkit dialog left the agent running and silently
+        recreating files mid-teardown: exactly the condition #453 added this
+        method to prevent.
+        """
         unit = "hal0-agent@hermes.service"
         if shutil.which("systemctl") is None:
+            log.debug("hermes.stop_services.no_systemctl", unit=unit)
             return
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(  # nosec B603 — known-safe argv
-                ["systemctl", "stop", unit],
-                check=False,
-                capture_output=True,
-                timeout=10,
-            )
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(  # nosec B603 — known-safe argv
-                ["systemctl", "disable", unit],
-                check=False,
-                capture_output=True,
-                timeout=5,
-            )
+
+        active_seam = seam if seam is not None else SystemCtlSeam()
+        for verb, timeout in (("stop", 10.0), ("disable", 5.0)):
+            try:
+                proc = active_seam.systemctl("systemctl", verb, unit, check=False, timeout=timeout)
+            except (OSError, subprocess.SubprocessError) as exc:
+                # Timeout / exec failure. Uninstall still proceeds — but say so.
+                log.warning(
+                    "hermes.stop_services.failed",
+                    unit=unit,
+                    verb=verb,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+            if proc.returncode != 0:
+                # Non-zero here covers both benign ("Unit ... not loaded",
+                # "not enabled") and real ("Interactive authentication
+                # required", "sudo: a password is required") cases, and
+                # systemctl does not give us an exit code that separates them
+                # portably. Log at WARNING with the unit's own stderr so the
+                # operator can tell which it was — never silence it.
+                log.warning(
+                    "hermes.stop_services.nonzero",
+                    unit=unit,
+                    verb=verb,
+                    returncode=proc.returncode,
+                    stderr=(proc.stderr or "").strip()[:400],
+                )
 
     def _data_dir(self) -> Path:
         return _paths.var_lib() / "agents" / self.name

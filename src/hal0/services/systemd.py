@@ -10,9 +10,26 @@ This module is the single implementation the services surface uses:
 * :func:`unit_action` — run one allow-listed lifecycle verb.
 
 Everything is fail-soft: a host without systemd (CI, dev laptop) yields
-"unknown" states and honest error strings, never an exception. hal0-api
-runs as root, so systemctl is invoked directly — same assumption as
-``installer._privileged_systemctl_argv`` (the sudoers seam was removed).
+"unknown" states and honest error strings, never an exception.
+
+.. warning::
+
+   :func:`unit_action` invokes ``systemctl`` **directly**. That was correct
+   when hal0-api ran as root; P3-perms flipped it to ``User=hal0``
+   (``installer/install.sh``), so a state-mutating verb here now escalates via
+   polkit on a system unit. The read-only paths (:func:`unit_state`,
+   :func:`unit_is_active`) are unaffected — queries never need privilege.
+
+   ``HermesDriver._stop_services`` hit exactly this and was routed through
+   :class:`hal0.system.seam.SystemCtlSeam` (``hal0-systemctl stop-agent`` /
+   ``disable-agent``). :func:`unit_action` is NOT yet converted: it takes an
+   arbitrary unit name across several families (``hal0-agent@``,
+   ``hermes-gateway``, companion services), and the seam deliberately grants no
+   ``start``/``restart`` verb for agent units, so routing it needs its own
+   design pass rather than a mechanical swap. Callers that mutate a
+   ``hal0-agent@<id>.service`` from the daemon — ``hal0.api.agents.restart``
+   and the ``restart`` branch of ``PUT /api/memory/agent-provider`` — can still
+   stall on a polkit prompt.
 
 The verb allow-list is enforced HERE, at the execution boundary, in
 addition to the per-service ``ServiceDef.actions`` check in the route —
