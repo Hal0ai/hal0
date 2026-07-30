@@ -35,7 +35,7 @@ directly so they work without a running daemon.
 | `hal0 probe` | **[Deprecated]** hidden alias for `hal0 config hardware --refresh` — re-runs hardware detection (`POST /api/hardware/probe`) and updates `hardware.json`. | — |
 | `hal0 setup` | First-run (or re-run) provisioning: seed slots, pull starter models, wire extensions. See the section below. | `--auto`, `--storage-dir`, `--no-pull`, `--no-extensions` |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`), `--port` (default `8080`), `--reload` |
-| `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|preview\|nightly}`, `--target VER`, `--yes`/`-y`, `--restart-slots`, `--source {release\|git}` |
+| `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|preview\|nightly}`, `--target VER`, `--yes`/`-y`, `--restart-slots` |
 | `hal0 update owui` | Repin the OpenWebUI companion image to the latest (or an explicit) digest, pull, and restart. | `--check`, `--tag TAG`, `--target DIGEST`, `--yes`/`-y`, `--force` |
 | `hal0 uninstall` | Uninstall hal0 (wraps `installer/uninstall.sh`). Conservative by default. | `--purge`/`--clean-slate`, `--keep-data`, `--force`/`-f`, `--dev` |
 | `hal0 chat` | Terminal chat REPL over `/v1/chat/completions` (or the hal0-brain steward with `--brain`) — handy for SSH/headless boxes. In-REPL: `/think on\|off\|default`, `/clear`, `/quit` (or Ctrl-D). | `--model` (default `agent`), `--base-url` (default `http://127.0.0.1:8080/v1`), `--no-stream`, `--brain` |
@@ -50,10 +50,9 @@ tree recorded at `/var/lib/hal0/hal0.previous`.
 `--restart-slots` is a standalone action (independent of the check/apply flow)
 that restarts only the slots still running the pre-update launch command —
 i.e. it clears post-update drift on demand, without bouncing a slot that
-hasn't actually drifted. `--source git` switches from the default
-cosign-verified release-tarball flow to a git clone/fetch-based update
-(clone or fetch from GitHub, `pip install`, then a symlink swap) — combine
-with `--check` to only check the git remote without applying.
+hasn't actually drifted. `hal0 update` refuses outright on an editable/dev
+install: "hal0 is installed in editable mode from `{path}`. Install from
+release wheel with `pip install hal0`."
 
 `hal0 uninstall` defaults to keeping `/etc/hal0` and `/var/lib/hal0`.
 `--purge` additionally deletes config, data, the hal0 system user, and all
