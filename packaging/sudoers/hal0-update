@@ -1,0 +1,39 @@
+# hal0 — privileged seam grant for self-update (#1464).
+#
+# hal0-api runs as the unprivileged `hal0` system user (User=hal0,
+# installer/install.sh) while /usr/lib/hal0 is root:root 0755 and never
+# service-writable (src/hal0/install/perms.py). It delegates the three
+# genuinely-root self-update ops — staging a cosign-verified release into
+# <lib>/hal0-<version>/, swapping the <lib>/current symlink + re-pipping the
+# root-owned venv, and discarding a staged tree — to
+# /usr/lib/hal0/bin/hal0-update, which is the entire privileged surface:
+#
+#   check                       non-mutating liveness probe (doctor/preflight)
+#   stage <channel> [version]   fetch + authenticate the manifest, download,
+#                               sha256, `cosign verify-blob`, extract
+#   activate <hal0-VERSION>     atomic symlink swap + pip --force-reinstall
+#   discard <hal0-VERSION>      rm -rf the staged tree
+#
+# The helper validates the channel against a three-value allow-list, the
+# version against the release grammar, and the directory argument against a
+# strict BASENAME regex (no '/', so it can only name a direct child of the
+# install root). It never evaluates a shell and accepts no wildcards. Every
+# argument is re-validated in Python, as root, before it is used.
+#
+# NOTE: `stage` deliberately performs the download AND the signature
+# verification root-side. Splitting them — unprivileged download, privileged
+# install — would let a compromised hal0-api skip cosign and have root
+# pip-install an attacker-supplied tree, i.e. turn this grant into arbitrary
+# root code execution. `activate` additionally refuses any tree that is not
+# root-owned and free of group/other write.
+#
+# Install (as root):
+#   install -m 0755 -o root -g root hal0-update /usr/lib/hal0/bin/hal0-update
+#   install -m 0440 -o root -g root hal0-update /etc/sudoers.d/hal0-update
+#   visudo -cf /etc/sudoers.d/hal0-update
+#
+# Keep this grant pinned to the helper binary; a broader grant would let the
+# API run arbitrary root commands. Revoke with: rm /etc/sudoers.d/hal0-update
+# (self-update then fails fast, with remediation, instead of half-applying.)
+
+hal0 ALL=(root) NOPASSWD: /usr/lib/hal0/bin/hal0-update
