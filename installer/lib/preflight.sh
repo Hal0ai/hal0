@@ -46,6 +46,9 @@
 #                                dashboard UI build just isn't available
 #                                until Node is installed (install.sh
 #                                auto-provisions it).
+#   preflight_podman_network_backend — advisory: when podman>=6 is present,
+#                                warn if netavark/aardvark-dns are still v1
+#                                (podman 6 requires v2). Never fails.
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
 #                                (soft — informational only — when
@@ -606,6 +609,80 @@ preflight_container_runtime() {
 # Back-compat alias: older docs / `hal0 doctor` builds call preflight_docker.
 preflight_docker() { preflight_container_runtime "$@"; }
 
+# Extract the leading major-version integer from a version string, e.g.
+# "podman version 6.0.0" / "netavark 2.1.0" / "6.0.0" → "6". Echoes nothing
+# (non-zero) when no MAJOR.MINOR token is present.
+_semver_major() {
+    # Grab the first NN.NN(.NN) token anywhere in the input, then its major.
+    local ver
+    ver="$(grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' <<<"$1" | head -n1)"
+    [[ -n "${ver}" ]] || return 1
+    echo "${ver%%.*}"
+}
+
+# Locate a podman network-backend helper (netavark / aardvark-dns) and echo
+# its major version. Asks podman first (authoritative — it uses the binary it
+# will actually exec), then falls back to the binary on PATH / common libexec
+# dirs. Non-zero when the tool can't be found or versioned.
+_network_helper_major() {
+    local tool="$1" path ver
+    # podman info exposes the resolved netavark path (>=4.7); aardvark sits
+    # beside it. Prefer this so we version the binary podman actually runs.
+    if [[ "${tool}" == netavark ]]; then
+        path="$(podman info --format '{{.Host.NetworkBackendInfo.Path}}' 2>/dev/null)"
+    fi
+    if [[ -z "${path}" || ! -x "${path}" ]]; then
+        path="$(command -v "${tool}" 2>/dev/null)"
+    fi
+    if [[ -z "${path}" || ! -x "${path}" ]]; then
+        local d
+        for d in /usr/lib/podman /usr/libexec/podman /usr/local/lib/podman; do
+            if [[ -x "${d}/${tool}" ]]; then path="${d}/${tool}"; break; fi
+        done
+    fi
+    [[ -n "${path}" && -x "${path}" ]] || return 1
+    ver="$("${path}" --version 2>/dev/null)" || return 1
+    _semver_major "${ver}"
+}
+
+# Podman 6 modernized networking and REQUIRES netavark + aardvark-dns v2.
+# hal0's bridge slots (GPU llama / FLM / Kokoro / Qwen3-TTS use the default
+# bridge + loopback publish; ComfyUI/llama_server use --network=host) depend
+# on the network backend, so a podman-6 host still carrying netavark/aardvark
+# v1 fails to route/resolve on bridge slots. We install from distro repos
+# (never pin podman ourselves), so a coherent stack is the packager's job —
+# this check is purely advisory: it warns on a mismatch and never fails, matching
+# preflight_podman_forward. It no-ops on podman <6 and on docker-only hosts.
+preflight_podman_network_backend() {
+    command -v podman >/dev/null 2>&1 || return 0
+    local pv major
+    pv="$(podman version --format '{{.Version}}' 2>/dev/null)" || return 0
+    major="$(_semver_major "${pv}")" || return 0
+    (( major >= 6 )) || return 0   # v4/v5 pair with netavark v1 — nothing to assert.
+
+    local nv av mismatch=0
+    if nv="$(_network_helper_major netavark)"; then
+        if (( nv < 2 )); then
+            warn "podman ${pv} needs netavark v2 but found v${nv}.x — bridge slots may fail to route"
+            mismatch=1
+        fi
+    else
+        warn "podman ${pv}: could not determine netavark version (expected v2 for this podman)"
+    fi
+    if av="$(_network_helper_major aardvark-dns)"; then
+        if (( av < 2 )); then
+            warn "podman ${pv} needs aardvark-dns v2 but found v${av}.x — bridge-slot DNS may fail"
+            mismatch=1
+        fi
+    fi
+    if (( mismatch == 1 )); then
+        warn "  fix: upgrade netavark + aardvark-dns from your distro repos to match podman 6"
+    elif [[ -n "${nv}" ]]; then
+        info "podman network backend: netavark v${nv}${av:+, aardvark-dns v${av}} (podman ${pv})"
+    fi
+    return 0
+}
+
 # Docker + podman coexistence: Docker sets the iptables FORWARD policy to DROP
 # and manages that chain. netavark (podman's firewall) adds no explicit
 # NEW-connection ACCEPT for published ports (it assumes FORWARD defaults to
@@ -1040,6 +1117,7 @@ preflight_all() {
     preflight_writable || rc=$?
     preflight_network || rc=$?
     preflight_container_runtime || rc=$?
+    preflight_podman_network_backend || rc=$?
     preflight_podman_forward || rc=$?
     preflight_gpu     || rc=$?
     preflight_node    || rc=$?
