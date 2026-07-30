@@ -9,6 +9,7 @@ import { useState } from 'react'
 import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
 import { SECRET_PRESETS, AddSecretModal } from '../../../extra-modals.jsx'
 import { Icons } from '../../../chrome.jsx'
+import { ConfirmDialog } from '../../../primitives.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 
 // Dedicated, discoverable HuggingFace-token field (P4). Wraps the existing
@@ -58,16 +59,42 @@ function HfTokenField() {
 // the preset table is a user-defined key — say so instead of mislabelling
 // it as a fallback provider.
 const SECRET_DESCRIPTIONS = Object.fromEntries(SECRET_PRESETS.map(p => [p.id, p.desc]));
-const secretDescription = (name) =>
-  SECRET_DESCRIPTIONS[name] || "Custom key · exported to hal0 services and slot containers as an env var";
+
+// #1450: api.env is two stores in one file. HAL0_* rows are service config and
+// auth keys written by the installer / hal0.toml / `hal0 auth rotate` — the
+// route refuses to mutate them (403 secret.protected), so the page must not
+// render buttons that can only fail. The flag comes from the server; the
+// prefix fallback only covers a stale cached payload.
+const isProtected = (s) => s.protected ?? String(s.name).startsWith("HAL0_");
+
+const secretDescription = (s) =>
+  isProtected(s)
+    ? "hal0 service configuration · managed by the installer and `hal0 auth rotate` · read-only here"
+    : SECRET_DESCRIPTIONS[s.name] || "Custom key · exported to hal0 services and slot containers as an env var";
 
 export function SecretsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [addTarget, setAddTarget] = useState(null);
+  // Removing a secret is irreversible — the value is never stored anywhere
+  // else and never shown again after saving, so there is nothing to undo
+  // with. Remove used to fire the mutation straight from onClick (#1450).
+  const [pendingRemove, setPendingRemove] = useState(null);
   const secretsQuery = useSecrets();
   const delSecret = useSecretDelete();
   const rows = secretsQuery.data ?? [];
   const openAdd = (name) => { setAddTarget(name || null); setAddOpen(true); };
+  const confirmRemove = () => {
+    const name = pendingRemove;
+    setPendingRemove(null);
+    if (!name) return;
+    delSecret.mutate(name, {
+      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${name} removed`, "warn"),
+      onError: (err) => window.__hal0Toast && window.__hal0Toast(
+        `Remove failed — ${err?.message || "see logs"}`,
+        "err",
+      ),
+    });
+  };
   return (
     <div className="s-section">
       <h2>Secrets</h2>
@@ -89,26 +116,20 @@ export function SecretsPage() {
           <SRow
             key={s.name}
             k={s.name}
-            sub={secretDescription(s.name)}
+            sub={secretDescription(s)}
             mono
             v={s.set
               ? <span style={{color: "var(--ok)"}}>{s.masked || '••• · set'}</span>
               : <span style={{color: "var(--fg-4)"}}>not set</span>}
-            actions={s.set
+            actions={isProtected(s)
+              ? <span className="mono" data-testid={`secret-locked-${s.name}`} style={{fontSize: 11, color: "var(--fg-4)"}}>service config · locked</span>
+              : s.set
               ? (<>
                   <button className="btn ghost sm" onClick={() => openAdd(s.name)}>Update</button>
                   <button
                     className="btn danger sm"
                     disabled={delSecret.isPending && delSecret.variables === s.name}
-                    onClick={() => {
-                      delSecret.mutate(s.name, {
-                        onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${s.name} removed`, "warn"),
-                        onError: (err) => window.__hal0Toast && window.__hal0Toast(
-                          `Remove failed — ${err?.message || "see logs"}`,
-                          "err",
-                        ),
-                      });
-                    }}
+                    onClick={() => setPendingRemove(s.name)}
                   >{delSecret.isPending && delSecret.variables === s.name ? "Removing…" : "Remove"}</button>
                 </>)
               : <button className="btn ghost sm" onClick={() => openAdd(s.name)}>Add</button>}
@@ -122,6 +143,16 @@ export function SecretsPage() {
         <button className="btn" onClick={() => openAdd(null)}>{Icons.plus} Add secret</button>
       </div>
       <AddSecretModal open={addOpen} initialName={addTarget} onClose={() => setAddOpen(false)} />
+      <ConfirmDialog
+        open={pendingRemove !== null}
+        destructive
+        title={`Remove ${pendingRemove ?? ""}?`}
+        message={`The stored value is deleted from api.env and dropped from the running process immediately. It is never shown again after saving, so hal0 cannot restore it — you will need the original credential to set it back.`}
+        confirmLabel="Remove secret"
+        typeToConfirm={pendingRemove}
+        onCancel={() => setPendingRemove(null)}
+        onConfirm={confirmRemove}
+      />
     </div>
   );
 }

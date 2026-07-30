@@ -961,3 +961,229 @@ async def test_model_registered_reaches_live_subscriber(
     assert any(
         ev["type"] == "model.registered" and ev["data"].get("id") == "sub-1" for ev in received
     )
+
+
+# ── #1393: server-side vision↔mmproj backstop ─────────────────────────────────
+#
+# #1380/PR #1392 fixed the model drawer client-side; the wire stayed open. These
+# lock the invariant at the shared write screen so curl/CLI/MCP inherit it.
+
+
+def test_create_vision_without_mmproj_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """POST create refuses a row that advertises ``vision`` with no projector —
+    the launch path would have no ``--mmproj`` to load (#1393)."""
+    fpath = crud_models_root / "vis1.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={"id": "vis1", "path": str(fpath), "capabilities": ["chat", "vision"]},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+    assert crud_client.get("/api/models/vis1").status_code == 404
+
+
+def test_create_vision_with_mmproj_accepted(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """The legitimate shape — vision + an on-disk projector — still writes."""
+    fpath = crud_models_root / "vis2.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    mm = crud_models_root / "mmproj-vis2-F16.gguf"
+    mm.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={
+            "id": "vis2",
+            "path": str(fpath),
+            "capabilities": ["chat", "vision"],
+            "mmproj": str(mm),
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["mmproj"] == str(mm)
+
+
+def test_put_adding_vision_to_projectorless_row_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """A sparse PUT that adds ``vision`` without mentioning ``mmproj`` is
+    screened against the STORED projector, not against the absent key (#1393)."""
+    fpath = crud_models_root / "vis3.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "vis3", "path": str(fpath)})
+    r = crud_client.put("/api/models/vis3", json={"capabilities": ["chat", "vision"]})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+    assert "vision" not in crud_client.get("/api/models/vis3").json()["capabilities"]
+
+
+def test_put_clearing_mmproj_on_vision_row_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """The mirror image: nulling the projector on a row that still advertises
+    vision is the same broken state, reached from the other side."""
+    fpath = crud_models_root / "vis4.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    mm = crud_models_root / "mmproj-vis4-F16.gguf"
+    mm.write_bytes(b"\x00" * 16)
+    crud_client.post(
+        "/api/models",
+        json={
+            "id": "vis4",
+            "path": str(fpath),
+            "capabilities": ["chat", "vision"],
+            "mmproj": str(mm),
+        },
+    )
+    r = crud_client.put("/api/models/vis4", json={"mmproj": None})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+
+
+def test_put_adding_vision_alongside_mmproj_accepted(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """Both halves in ONE sparse PUT satisfy the merged view — the guard reads
+    body-over-stored, not body-alone."""
+    fpath = crud_models_root / "vis5.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    mm = crud_models_root / "mmproj-vis5-F16.gguf"
+    mm.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "vis5", "path": str(fpath)})
+    r = crud_client.put(
+        "/api/models/vis5",
+        json={"capabilities": ["chat", "vision"], "mmproj": str(mm)},
+    )
+    assert r.status_code == 200, r.text
+    assert "vision" in r.json()["capabilities"]
+
+
+def test_put_defaults_only_save_on_valid_vision_row_accepted(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """A save that touches neither field must not re-litigate the invariant —
+    otherwise every unrelated edit on a vision row pays for the check."""
+    fpath = crud_models_root / "vis6.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    mm = crud_models_root / "mmproj-vis6-F16.gguf"
+    mm.write_bytes(b"\x00" * 16)
+    crud_client.post(
+        "/api/models",
+        json={
+            "id": "vis6",
+            "path": str(fpath),
+            "capabilities": ["chat", "vision"],
+            "mmproj": str(mm),
+        },
+    )
+    r = crud_client.put("/api/models/vis6", json={"defaults": {"extra_args": "-b 2048"}})
+    assert r.status_code == 200, r.text
+
+
+def test_put_unrelated_field_on_preexisting_broken_row_accepted(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """A row already in the broken state (written before the guard existed)
+    stays editable: the screen fires only when the write TOUCHES capabilities
+    or mmproj, so renaming it is not blocked (#1393's pre-existing-rows note)."""
+    from hal0.registry.model import Model
+
+    fpath = crud_models_root / "vis7.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    # Bypass the route to plant the legacy shape the guard would now refuse.
+    crud_client.app.state.model_registry.add(
+        Model(id="vis7", name="vis7", path=str(fpath), capabilities=["chat", "vision"])
+    )
+    r = crud_client.put("/api/models/vis7", json={"name": "renamed"})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "renamed"
+
+
+def test_validate_rejects_vision_without_mmproj(crud_client: TestClient) -> None:
+    """The dry-run screen carries the same envelope so the drawer renders one
+    error path (and nothing is persisted)."""
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"id": "vis-dry", "capabilities": ["vision"]},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+    assert crud_client.get("/api/models/vis-dry").status_code == 404
+
+
+# ── unfiled: an mmproj path that does not exist is accepted today ─────────────
+
+
+def test_create_with_nonexistent_mmproj_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """``mmproj`` is a host path handed verbatim to the runner as ``--mmproj``.
+    A path that isn't there persists happily today and only fails at launch."""
+    fpath = crud_models_root / "vis8.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={
+            "id": "vis8",
+            "path": str(fpath),
+            "capabilities": ["chat", "vision"],
+            "mmproj": str(crud_models_root / "nope-mmproj.gguf"),
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.mmproj_not_found"
+    assert crud_client.get("/api/models/vis8").status_code == 404
+
+
+def test_put_with_mmproj_pointing_at_a_directory_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """A directory is not a projector sidecar — same envelope."""
+    fpath = crud_models_root / "vis9.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "vis9", "path": str(fpath)})
+    r = crud_client.put(
+        "/api/models/vis9",
+        json={"capabilities": ["chat", "vision"], "mmproj": str(crud_models_root)},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.mmproj_not_found"
+
+
+def test_put_clearing_mmproj_and_vision_together_accepted(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """Dropping BOTH halves is the sanctioned way off a vision row — no
+    existence check runs on a null projector."""
+    fpath = crud_models_root / "vis10.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    mm = crud_models_root / "mmproj-vis10-F16.gguf"
+    mm.write_bytes(b"\x00" * 16)
+    crud_client.post(
+        "/api/models",
+        json={
+            "id": "vis10",
+            "path": str(fpath),
+            "capabilities": ["chat", "vision"],
+            "mmproj": str(mm),
+        },
+    )
+    r = crud_client.put(
+        "/api/models/vis10",
+        json={"capabilities": ["chat"], "mmproj": None},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["mmproj"] is None

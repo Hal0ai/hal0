@@ -63,7 +63,11 @@ class FakeHindsightClient:
         return {"memory_units_deleted": before - len(self._facts_by_bank[bank_id])}
 
     async def list_memories(self, *, bank_id, limit=50, offset=0, types=None, query=None):
-        raw = list(self._facts_by_bank.get(bank_id, []))
+        all_facts = list(self._facts_by_bank.get(bank_id, []))
+        # Honour limit/offset the way Hindsight's /memories/list does — this
+        # double used to ignore both and return the whole bank every time,
+        # which made a paging bug in the provider untestable (#1471).
+        raw = all_facts[offset : offset + limit]
         # Expose stored facts in the list-endpoint shape: id falls back to document_id.
         items = [
             {
@@ -75,7 +79,7 @@ class FakeHindsightClient:
             }
             for f in raw
         ]
-        return {"items": items, "total": len(items), "limit": limit, "offset": offset}
+        return {"items": items, "total": len(all_facts), "limit": limit, "offset": offset}
 
 
 def test_namespace_to_bank_mapping():
@@ -316,3 +320,136 @@ async def test_recall_default_types_include_observations():
     fake.recalled.clear()
     await p.recall("anything", dataset="shared", client_id="hermes", types=["world"])
     assert fake.recalled[0]["types"] == ["world"]
+
+
+# ── #1471 item 2: search's time-window filters must not be silently dropped ───
+#
+# search() accepted before/after/mode and delegated to recall() without them,
+# so a caller filtering by time window got UNFILTERED results with no error —
+# while PgVectorProvider (the degrade fallback) honours them. Two engines, two
+# behaviours, one advertised contract.
+
+
+def _stamped(text: str, when: str) -> dict:
+    return {"document_id": text, "text": text, "tags": [], "mentioned_at": when}
+
+
+async def _seed_stamped(fake: FakeHindsightClient) -> None:
+    for text, when in (
+        ("old fact", "2026-01-01T00:00:00+00:00"),
+        ("mid fact", "2026-06-01T00:00:00+00:00"),
+        ("new fact", "2026-12-01T00:00:00+00:00"),
+    ):
+        await fake.retain(bank_id="shared", content=text, document_id=text, tags=[])
+        fake._facts_by_bank["shared"][-1]["mentioned_at"] = when
+
+
+@pytest.mark.asyncio
+async def test_search_after_filters_out_older_items():
+    fake = FakeHindsightClient()
+    await _seed_stamped(fake)
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.search("fact", dataset="shared", client_id="hermes", after="2026-05-01")
+    texts = {r["text"] for r in out}
+    assert texts == {"mid fact", "new fact"}
+
+
+@pytest.mark.asyncio
+async def test_search_before_filters_out_newer_items():
+    fake = FakeHindsightClient()
+    await _seed_stamped(fake)
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.search("fact", dataset="shared", client_id="hermes", before="2026-07-01")
+    texts = {r["text"] for r in out}
+    assert texts == {"old fact", "mid fact"}
+
+
+@pytest.mark.asyncio
+async def test_search_window_combines_both_bounds():
+    fake = FakeHindsightClient()
+    await _seed_stamped(fake)
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.search(
+        "fact", dataset="shared", client_id="hermes", after="2026-03-01", before="2026-09-01"
+    )
+    assert {r["text"] for r in out} == {"mid fact"}
+
+
+@pytest.mark.asyncio
+async def test_search_without_a_window_is_unchanged():
+    """The filter must be inert when no bounds are given — this is the path
+    every existing caller takes."""
+    fake = FakeHindsightClient()
+    await _seed_stamped(fake)
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.search("fact", dataset="shared", client_id="hermes")
+    assert {r["text"] for r in out} == {"old fact", "mid fact", "new fact"}
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_a_mode_the_engine_cannot_honour():
+    """``mode`` was inert everywhere. Silently ignoring a caller's explicit
+    request for graph traversal is the failure this item is about — say so."""
+    fake = FakeHindsightClient()
+    await _seed_stamped(fake)
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    with pytest.raises(ValueError) as exc:
+        await p.search("fact", dataset="shared", client_id="hermes", mode="graph")
+    assert "graph" in str(exc.value)
+
+
+# ── #1471 item 3: list_items pagination is real ──────────────────────────────
+#
+# list_items() took a `cursor`, never used it, always called list_memories with
+# offset=0 and returned next_cursor=None — so only the first page of a
+# 1629-item bank was reachable. The per-bank loop also broke on the raw item
+# count BEFORE the visibility filter, so a unified-mode reader could get fewer
+# than `limit` items even when more visible ones existed.
+
+
+@pytest.mark.asyncio
+async def test_list_items_emits_a_cursor_when_more_remain():
+    fake = FakeHindsightClient()
+    for i in range(5):
+        await fake.retain(bank_id="shared", content=f"f{i}", document_id=f"d{i}", tags=[])
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    page = await p.list_items(dataset="shared", limit=2, client_id="hermes")
+    assert len(page["items"]) == 2
+    assert page["next_cursor"], "a bank with more rows must hand back a cursor"
+
+
+@pytest.mark.asyncio
+async def test_list_items_cursor_walks_the_whole_bank():
+    fake = FakeHindsightClient()
+    for i in range(5):
+        await fake.retain(bank_id="shared", content=f"f{i}", document_id=f"d{i}", tags=[])
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(10):  # generous bound; the walk must terminate well inside it
+        page = await p.list_items(dataset="shared", limit=2, cursor=cursor, client_id="hermes")
+        seen.extend(item["text"] for item in page["items"])
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    assert cursor is None, "the walk must terminate"
+    assert seen == [f"f{i}" for i in range(5)], "every row reachable, exactly once, in order"
+
+
+@pytest.mark.asyncio
+async def test_list_items_last_page_has_no_cursor():
+    fake = FakeHindsightClient()
+    for i in range(2):
+        await fake.retain(bank_id="shared", content=f"f{i}", document_id=f"d{i}", tags=[])
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    page = await p.list_items(dataset="shared", limit=10, client_id="hermes")
+    assert len(page["items"]) == 2
+    assert page["next_cursor"] is None

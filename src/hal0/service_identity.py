@@ -25,14 +25,17 @@ import os
 import secrets
 import tempfile
 
+from hal0.config import paths
+
 # tier -> the env var / api.env key name that carries it.
 _KEY_ENV: dict[str, str] = {"admin": "HAL0_ADMIN_KEY", "client": "HAL0_CLIENT_KEY"}
 
-# The mode a *rotated* api.env is written at. The installer seeds api.env at
-# 0644 (world-readable — see install/perms.py's phase-4 FIXME), but the moment
-# a rotation lands a live secret in it we tighten to 0640 (owner rw, group r,
-# NO world). Never world-readable once it carries a rotated key.
-_API_ENV_MODE = 0o640
+# The mode a rotated api.env is written at. One constant, shared with the
+# installer, the dashboard writer and the perms engine — this file used to
+# hold its own 0640 opinion while the perms table pinned 0644 and quietly
+# reverted it (#1466). Re-exported under the old private name so the rotation
+# code below reads unchanged.
+_API_ENV_MODE = paths.API_ENV_MODE
 
 
 def _tier_order(prefer: str) -> tuple[str, str]:

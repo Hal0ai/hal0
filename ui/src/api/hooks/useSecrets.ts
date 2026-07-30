@@ -12,6 +12,8 @@ export interface SecretEntry {
   set: boolean
   masked?: string
   updated_at?: string | null
+  /** #1450 — a reserved HAL0_* service-config / auth key: listed, never mutable. */
+  protected?: boolean
 }
 
 export function useSecrets() {

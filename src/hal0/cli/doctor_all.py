@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json as jsonlib
 import shutil
+import stat
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -42,6 +43,7 @@ from hal0.cli.doctor_verify import (
     build_checks,
     gather_payloads,
 )
+from hal0.config import paths
 from hal0.system.seam_check import REMEDIATION, SeamStatus, probe_seams
 
 console = Console()
@@ -72,6 +74,49 @@ def check_auth_posture(auth: dict[str, Any] | None) -> Check:
             "auth required but no admin key set — set HAL0_ADMIN_KEY so an operator can log in",
         )
     return Check("auth", "Auth posture", _PASS, "auth required, admin key configured")
+
+
+#: Secret-bearing files whose mode ``doctor`` refuses to let drift open.
+_SECRET_FILES: tuple[Callable[[], Path], ...] = (
+    lambda: paths.api_env(),
+    lambda: paths.openwebui_env(),
+)
+
+
+def check_secret_file_modes() -> Check:
+    """Secret-bearing config files must not be group- or world-readable.
+
+    An independent backstop for #1466, deliberately NOT derived from
+    ``install/perms.py``'s table: that table is what got it wrong — it pinned
+    ``api.env`` at 0644 behind a ``FIXME(phase4)`` while the file held live
+    provider tokens and, after a rotation, the box's admin key. A check
+    generated from the same table would have agreed with the bug. This one
+    asserts the property directly, so a fifth writer, a re-widened PermRow, or
+    a hand ``chmod`` all surface here.
+
+    Critical: the finding is "every local account can read your API keys".
+    A missing file is clean — plenty of boxes have no ``openwebui.env``.
+    """
+    offenders: list[str] = []
+    for resolve in _SECRET_FILES:
+        path = resolve()
+        try:
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            continue  # absent or unreadable — nothing to assert
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            offenders.append(f"{path.name} is {mode:o} ({path})")
+    if offenders:
+        return Check(
+            "secret-modes",
+            "Secret file modes",
+            _FAIL,
+            "world/group-readable secret file(s): "
+            + "; ".join(offenders)
+            + f" — expected {paths.API_ENV_MODE:o}; fix with `hal0 doctor perms --fix`",
+            critical=True,
+        )
+    return Check("secret-modes", "Secret file modes", _PASS, "secret files are owner-only")
 
 
 def check_model_store(
@@ -302,6 +347,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_migrations(pending_layout_migration()),
         check_ports(_get_any("/api/slots", base)),
         check_hal0_target(),
+        check_secret_file_modes(),
         check_seams(),
     ]
     return verify_rows + extra_rows

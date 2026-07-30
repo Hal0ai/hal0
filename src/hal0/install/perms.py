@@ -189,9 +189,13 @@ def ownership_table(
         ),
         PermRow(paths.hal0_toml(), etc_owner, etc_group, 0o600, role="hal0.toml"),
         PermRow(etc / "profiles.toml", etc_owner, etc_group, 0o600, role="profiles.toml"),
-        # FIXME(phase4): api.env is 0644 (world-readable) but may carry tokens —
-        # candidate for 0640 root:hal0 under the hardened model.
-        PermRow(etc / "api.env", etc_owner, etc_group, 0o644, role="api.env"),
+        # api.env carries live tokens (HF/provider keys, HERMES_SESSION_TOKEN)
+        # and, after a rotation, HAL0_ADMIN_KEY/HAL0_CLIENT_KEY. It is owner-only
+        # (#1466 — this row said 0644 behind a FIXME(phase4), so the engine whose
+        # job is converging the filesystem re-flattened every tightening the
+        # dashboard writer and the key rotation applied). One constant, shared
+        # with both of those and with installer/install.sh.
+        PermRow(etc / "api.env", etc_owner, etc_group, paths.API_ENV_MODE, role="api.env"),
         PermRow(etc / "capabilities.toml", etc_owner, etc_group, 0o600, role="capabilities.toml"),
         PermRow(etc / "upstreams.toml", etc_owner, etc_group, 0o644, role="upstreams.toml"),
         PermRow(paths.hardware_json(), etc_owner, etc_group, 0o644, role="hardware.json"),

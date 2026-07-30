@@ -21,3 +21,17 @@ Rules:
 - **Auto-recall runs on session_start; auto-retain runs every 3 turns.** These handle transient session context. Explicit retain/recall calls are for durable long-term facts.
 - **Dynamic bank support is available** — set `dynamicBankId: true` in `~/.pi/agent/settings.json` under the `hindsight` block to auto-isolate memory per project (e.g., `pi-coder::hal0` vs `pi-coder::myapp`).
 - **Check status** with `hindsight_status` before assuming memories are gone — it shows reachability, resolved bank, and bank count.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues (`gh` CLI); Linear is a read-only mirror — migrate any Linear-only item into GitHub and work from git. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage labels, unmodified (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root (created lazily). See `docs/agents/domain.md`.

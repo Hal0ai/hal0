@@ -895,16 +895,23 @@ ${NETWORK_BLOCK}
 # set it in the dashboard (Settings -> Secrets -> HuggingFace token) for a live,
 # no-restart update. If HF_TOKEN/HUGGING_FACE_HUB_TOKEN was present in the
 # installer's own environment it was already gathered and persisted to a
-# root-only secrets/ EnvironmentFile below (NOT here — api.env is 0644,
-# world-readable). Uncommenting below also works, but lands the token in
-# that world-readable file; prefer the secrets file or the dashboard.
+# root-only secrets/ EnvironmentFile below. Uncommenting below also works and
+# is no longer unsafe (api.env is 0600 since #1466), but the dashboard path
+# applies the token live with no restart; prefer it.
 # \`systemctl restart hal0-api\` either way.
 # HF_TOKEN=
 # HAL0_TOOLBOX_IMAGE_VULKAN / HAL0_TOOLBOX_IMAGE_ROCM — optional overrides for
 # the per-backend container image refs used by providers/llama_server.py.
 # Unset = use the image pinned in the provider at release time.
 EOF
-    info "wrote ${API_ENV}"
+    # api.env is the EnvironmentFile that carries provider tokens, operator
+    # secrets and (after a rotation) HAL0_ADMIN_KEY/HAL0_CLIENT_KEY. Owner-only
+    # from the first byte — it was 0644 here and on the refresh branch below,
+    # so every install and every re-run published live tokens to any local
+    # account (#1466). Must match hal0.config.paths.API_ENV_MODE, which the
+    # dashboard writer, the key rotation and the perms engine all read.
+    chmod 0600 "${API_ENV}"
+    info "wrote ${API_ENV} (0600)"
 else
     # Idempotent refresh (see comment above NETWORK_BLOCK): strip any
     # existing marker-delimited block and append a fresh one, atomically.
@@ -916,9 +923,13 @@ else
         !skip       { print }
     ' "${API_ENV}" > "${API_ENV_TMP}"
     printf '%s\n' "${NETWORK_BLOCK}" >> "${API_ENV_TMP}"
-    chmod 0644 "${API_ENV_TMP}"
+    # 0600 on the tmp file so the mode lands with the rename. #1375 made this
+    # refresh run on EVERY re-run over an existing api.env, so the old
+    # `chmod 0644` here re-published every secret in the file on any upgrade
+    # or repair — it undid the dashboard writer and the key rotation both.
+    chmod 0600 "${API_ENV_TMP}"
     mv -f "${API_ENV_TMP}" "${API_ENV}"
-    info "refreshed network vars in ${API_ENV}"
+    info "refreshed network vars in ${API_ENV} (0600)"
 fi
 
 # ── HF_TOKEN gather + persist (WS-D, #1106) ─────────────────────────────────
