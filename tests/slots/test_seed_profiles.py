@@ -116,6 +116,25 @@ def test_all_profiles_have_no_operational_flags(profile_name: str) -> None:
 
 
 @pytest.mark.parametrize("profile_name", ALL_16_PROFILES)
+def test_all_profiles_have_no_managed_or_hardware_flags(profile_name: str) -> None:
+    """§21.7 regression tripwire: a seed's flags must never carry a flag hal0
+    owns (managed denylist: --model/--ctx-size/-c/--host/--port/-ngl/--alias)
+    or a slot-hardware flag. Token-exact via the argv alias table, so
+    --model_path / --threads-batch never false-positive.
+    """
+    import shlex
+
+    from hal0.slots.argv import MANAGED_ARGS_DENYLIST, SLOT_HARDWARE_FLAGS, strip_managed_flags
+
+    profiles = _load_seed_profiles()
+    flags = str(profiles[profile_name].get("flags", ""))
+    _, removed = strip_managed_flags(
+        shlex.split(flags), denylist=MANAGED_ARGS_DENYLIST | SLOT_HARDWARE_FLAGS
+    )
+    assert not removed, f"{profile_name} flags carry hal0-owned flag(s) {removed}: {flags}"
+
+
+@pytest.mark.parametrize("profile_name", ALL_16_PROFILES)
 def test_all_profiles_have_intent(profile_name: str) -> None:
     profiles = _load_seed_profiles()
     assert "intent" in profiles[profile_name], f"{profile_name} missing intent"
