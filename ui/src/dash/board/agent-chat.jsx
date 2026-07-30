@@ -271,6 +271,14 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
                 <div className="msg-b">
                   {m.role === "assistant" && <Thinking text={m.thinking} />}
                   {m.role === "assistant" ? <Markdown text={m.body} /> : m.body}
+                  {m.error && m.retryText && chatHook && (
+                    <button
+                      className="btn ghost msg-retry"
+                      data-testid="board-chat-retry"
+                      title="Resend this message"
+                      onClick={() => chatHook.send(m.retryText)}
+                    >Retry</button>
+                  )}
                   {m.refs && m.refs.length > 0 && (
                     <div className="msg-refs">
                       {m.refs.map(id => byId[id] && (
