@@ -504,22 +504,42 @@ class HindsightProvider(MemoryProvider):
 
     # ── ACL: the caller's allowed namespaces → banks ───────────────────
 
-    def _allowed_namespaces(self, requested: str | list[str], client_id: str | None) -> list[str]:
+    @staticmethod
+    def _requested_list(requested: str | list[str] | None) -> list[str]:
+        """Normalise a namespace request to a list WITHOUT collapsing an
+        empty one onto the default (#1451).
+
+        ``None`` means "the caller named nothing" → the default sweep.
+        ``[]`` means "the caller named namespaces and none of them resolved"
+        → sweep nothing. The old ``requested or [_SHARED]`` read both as the
+        default, which turned an unaddressable scope into a shared-bank
+        wipe. The front door (``namespace.resolve_read_datasets``) now
+        rejects that shape outright; this is the executor-side backstop for
+        the paths that reach a provider without it.
+        """
+        if requested is None:
+            return [_SHARED]
+        if isinstance(requested, str):
+            return [requested]
+        return list(requested)
+
+    def _allowed_namespaces(
+        self, requested: str | list[str] | None, client_id: str | None
+    ) -> list[str]:
         # Unified mode: one bank. No cross-bank fan-out, no own-private
         # expansion — every read resolves to ``shared`` alone, EXCEPT the
         # ``agents`` registry namespace, which keeps its own bank.
+        reqs = self._requested_list(requested)
         if self._unified_bank:
-            reqs = [requested] if isinstance(requested, str) else list(requested or [_SHARED])
             out: list[str] = []
             for ds in reqs:
                 target = _AGENTS if ds == _AGENTS else _SHARED
                 if target not in out:
                     out.append(target)
-            return out or [_SHARED]
+            return out
         cid = client_id or self._client_id
         own = f"{_PRIVATE}{cid}"
-        reqs = [requested] if isinstance(requested, str) else list(requested or [_SHARED])
-        out: list[str] = []
+        out = []
         for ds in reqs:
             if ds == _SHARED:
                 out += [d for d in (_SHARED, own) if d not in out]
@@ -578,8 +598,11 @@ class HindsightProvider(MemoryProvider):
         ``wants_unscoped`` is True when the caller asked for at least one
         non-project namespace (``shared``, ``agents``, ``private:<id>``) —
         those are the reads that should see docs carrying no project tag.
+        An empty request scopes to nothing at all, so neither is True
+        (#1451: ``[]`` used to read back as ``[shared]`` here too, which is
+        what let the unified-mode delete gate wave shared docs through).
         """
-        reqs = [requested] if isinstance(requested, str) else list(requested or [_SHARED])
+        reqs = HindsightProvider._requested_list(requested)
         projects = {ds for ds in reqs if isinstance(ds, str) and ds.startswith(_PROJECT)}
         return projects, len(projects) < len([r for r in reqs if r])
 
@@ -860,15 +883,27 @@ class HindsightProvider(MemoryProvider):
 
     @staticmethod
     def _list_fact_to_item(fact: dict[str, Any], bank: str) -> dict[str, Any]:
-        """Map a Hindsight /memories/list item to the MemoryItem wire shape."""
+        """Map a Hindsight /memories/list item to the MemoryItem wire shape.
+
+        ``id`` is the **document_id**, matching :meth:`_fact_to_item` (recall)
+        and the ``MemoryProvider`` ABC contract — "idempotent, recall-visible,
+        delete-addressable". This used to prefer ``fact["id"]``, the per-fact
+        UUID, which on a real 0.8.x engine is a *different* value: the
+        list→delete round trip the API advertises 404-swept to
+        ``{"deleted": 0}`` (#1456). The per-fact id is still the only handle
+        on an individual extracted fact, so it moves to ``metadata.fact_id``
+        rather than disappearing.
+        """
+        document_id = fact.get("document_id")
+        fact_id = fact.get("id")
         return {
-            "id": fact.get("id") or fact.get("document_id"),
+            "id": document_id or fact_id,
             "text": fact.get("text", ""),
             "timestamp": fact.get("mentioned_at") or fact.get("date") or _now(),
             "dataset": bank.replace("__", ":"),
             "tags": list(fact.get("tags") or []),
             "source": None,
-            "metadata": {},
+            "metadata": {"fact_id": fact_id} if fact_id and fact_id != document_id else {},
             "score": None,
             "type": fact.get("fact_type"),
         }
@@ -879,9 +914,19 @@ class HindsightProvider(MemoryProvider):
         banks: list[str],
         client_id: str | None,
         requested: str | list[str] | None = None,
-    ) -> set[str]:
-        """Return the subset of ``ids`` the caller is allowed to delete under
-        unified-bank visibility.
+    ) -> dict[str, str]:
+        """Map each of ``ids`` the caller is allowed to delete to the
+        **document_id** the engine deletes by, under unified-bank visibility.
+
+        The return type is a mapping, not a set, because the caller-supplied
+        id and the engine-addressable id are not always the same string
+        (#1456). ``id`` on every read surface is now the document_id, but a
+        caller may still hold a per-fact id — from a pre-fix ``list``
+        response or from ``metadata.fact_id`` — and the resolution scan below
+        already has both fields in hand, so accepting either costs nothing.
+        The engine is addressed by document_id in every case; matching on the
+        fact-id field is what made a *correct* document_id fail-closed
+        withheld and left ``POST /api/memory/delete`` deleting nothing.
 
         In unified mode the single ``shared`` bank holds every agent's
         ``visibility:private`` docs and every project's docs, so a blind
@@ -894,16 +939,16 @@ class HindsightProvider(MemoryProvider):
         banks is **withheld** (fail-closed), matching the read filter's posture.
         """
         if not ids:
-            return set()
+            return {}
         caller = self._caller_agent(client_id)
         projects, wants_unscoped = self._requested_scope(requested)
         wanted = set(ids)
-        out: set[str] = set()
+        out: dict[str, str] = {}
         for bank in banks:
-            if not wanted - out:
+            if not wanted - out.keys():
                 break
             offset = 0
-            while wanted - out:
+            while wanted - out.keys():
                 try:
                     resp = await self._call(
                         "list_memories", bank_id=bank, limit=_DELETE_SCAN_PAGE, offset=offset
@@ -912,13 +957,20 @@ class HindsightProvider(MemoryProvider):
                     break  # fail-soft per bank; unresolved ids stay withheld
                 items = resp.get("items", [])
                 for fact in items:
-                    fid = fact.get("id") or fact.get("document_id")
-                    if fid not in wanted or fid in out:
+                    document_id = fact.get("document_id") or fact.get("id")
+                    # Either handle resolves to the same document. Ordered so
+                    # the canonical id wins when a caller passes both.
+                    matches = (
+                        wanted.intersection({i for i in (document_id, fact.get("id")) if i})
+                        - out.keys()
+                    )
+                    if not matches:
                         continue
                     if self._is_visible_to(fact, caller) and self._is_in_scope(
                         fact, projects, wants_unscoped
                     ):
-                        out.add(fid)
+                        for given in matches:
+                            out[given] = document_id
                 if len(items) < _DELETE_SCAN_PAGE:
                     break  # last page
                 offset += _DELETE_SCAN_PAGE
@@ -938,9 +990,13 @@ class HindsightProvider(MemoryProvider):
         # must continue the sweep — previously the first 404 aborted the
         # whole call, which made every private-bank item undeletable
         # (the shared bank is probed first and always 404'd).
-        banks = [
-            namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset or _SHARED, client_id)
-        ]
+        # ``dataset`` is passed through verbatim: an empty list is an
+        # unaddressable scope, NOT an unset one, and must sweep no banks
+        # (#1451 — ``dataset or _SHARED`` here is what turned an approved
+        # foreign-bank delete into a shared-bank delete).
+        banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
+        if not banks:
+            return {"deleted": 0}
         # Unified mode: gate deletes on the same visibility + project ACL the
         # read paths enforce, so one agent can't delete another's private doc
         # by id, and a project-scoped delete can't reach outside its project.
@@ -952,8 +1008,12 @@ class HindsightProvider(MemoryProvider):
             if self._unified_bank
             else None
         )
-        for document_id in ids:
-            if deletable is not None and document_id not in deletable:
+        for given_id in ids:
+            if deletable is None:
+                document_id = given_id
+            elif given_id in deletable:
+                document_id = deletable[given_id]
+            else:
                 continue  # withheld: not visible to this caller (fail-closed)
             for bank in banks:
                 try:

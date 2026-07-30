@@ -89,6 +89,16 @@ const POLL_MS = 60_000
 /**
  * GET /api/migrations/flag-report — typed stub. Returns an empty report until
  * the endpoint exists; a resolved query is always a valid MigrationReport.
+ *
+ * `enabled: false` (GH #1439): the route genuinely does not exist server-side
+ * yet, so firing this on a real box logs a 404 to the console on EVERY page
+ * load — MigrationBanner mounts at the app root (main.jsx), and this hook
+ * polled every 60s regardless of route. The try/catch below only stops a JS
+ * crash; it can't stop the browser from making (and logging) the failed
+ * request in the first place. Flip back to enabled once the migration lane
+ * ships the real endpoint — `report`/`count`/`hasWork` are already correct
+ * in the meantime (they fall back to EMPTY_MIGRATION_REPORT when the query
+ * never runs, same value it always resolved to against a 404).
  */
 export function useMigrationReport() {
   const q = useQuery({
@@ -104,6 +114,7 @@ export function useMigrationReport() {
         return EMPTY_MIGRATION_REPORT
       }
     },
+    enabled: false,
     refetchInterval: POLL_MS,
     retry: false,
   })

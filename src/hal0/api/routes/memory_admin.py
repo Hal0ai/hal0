@@ -303,24 +303,40 @@ async def _delete_preview(client: Any, bank_id: str) -> dict[str, Any]:
     return preview
 
 
-@router.delete("/banks/{bank_id}")
-async def delete_bank(request: Request, bank_id: str) -> Any:
-    client = _client(request)
-    _validate_segments({"bank_id": bank_id})
+async def _require_echoed_confirm(request: Request, client: Any, bank_id: str, what: str) -> None:
+    """Enforce the #1024 echoed-id gate, or raise 400 with a dry-run preview.
+
+    Shared by every route in ``exposure.CONFIRM_GUARDED_MEMORY_ROUTES`` — the
+    bank delete and the bank-memories wipe. #1457 is what happens when one
+    bank-scoped irreversible route gets this treatment and its sibling is left
+    in the generic ``_FORWARDS`` passthrough: same blast radius, zero friction.
+    Duplicating the check per route is how they diverge, so there is one.
+
+    The echo is read from ``?confirm=`` first, then a JSON body ``confirm``
+    key, because the dashboard sends the former and CLI/API callers the latter.
+    """
     body = await _read_body(request)
     confirm = request.query_params.get("confirm")
     if confirm is None and isinstance(body, dict):
         confirm = body.get("confirm")
-    if confirm != bank_id:
-        # #1024: return a dry-run preview (bank id + item counts) instead of a
-        # bare rejection so operators see the blast radius. Status stays 400 and
-        # the DELETE is NOT forwarded — the echoed-id confirm is still required.
-        preview = await _delete_preview(client, bank_id)
-        raise BadRequest(
-            f"confirm={bank_id} required to delete bank {bank_id}",
-            code="memory.confirm_required",
-            details={"bank_id": bank_id, "requires_confirm": True, "preview": preview},
-        )
+    if confirm == bank_id:
+        return
+    # #1024: return a dry-run preview (bank id + item counts) instead of a
+    # bare rejection so operators see the blast radius. Status stays 400 and
+    # the DELETE is NOT forwarded — the echoed-id confirm is still required.
+    preview = await _delete_preview(client, bank_id)
+    raise BadRequest(
+        f"confirm={bank_id} required to {what}",
+        code="memory.confirm_required",
+        details={"bank_id": bank_id, "requires_confirm": True, "preview": preview},
+    )
+
+
+@router.delete("/banks/{bank_id}")
+async def delete_bank(request: Request, bank_id: str) -> Any:
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    await _require_echoed_confirm(request, client, bank_id, f"delete bank {bank_id}")
     log.warning("memory_admin: deleting bank %r (confirmed)", bank_id)
     # #1024 hardening: every confirmed destructive op lands in the audit store
     # (actor + timestamp + outcome) so a bank wipe is attributable after the
@@ -329,6 +345,37 @@ async def delete_bank(request: Request, bank_id: str) -> Any:
         request, category="memory", action="memory.bank.delete", target=bank_id
     ):
         return await _forward(client, "DELETE", f"/v1/default/banks/{bank_id}")
+
+
+@router.delete("/banks/{bank_id}/memories")
+async def delete_bank_memories(request: Request, bank_id: str) -> Any:
+    """Wipe every memory unit in a bank — guarded like the bank delete (#1457).
+
+    Upstream is ``DELETE /v1/default/banks/{bank_id}/memories``, which
+    Hindsight documents as "a destructive operation that cannot be undone".
+    It used to ride ``_FORWARDS`` with an audit row and nothing else, so the
+    ``record_action`` entry described a wipe that had already happened on a
+    call anyone could make. It is special-cased out of the table for the same
+    reason ``DELETE /banks/{bank_id}`` is: the generic handler cannot ask for
+    an echo it knows nothing about.
+
+    Upstream query filters (e.g. ``?types=``) still forward verbatim;
+    ``confirm`` is hal0's own gate and is stripped so it never reaches the
+    engine as an unrecognised filter.
+    """
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    await _require_echoed_confirm(
+        request, client, bank_id, f"delete every memory unit in bank {bank_id}"
+    )
+    params = {k: v for k, v in request.query_params.items() if k != "confirm"} or None
+    log.warning("memory_admin: wiping memories in bank %r (confirmed)", bank_id)
+    async with record_action(
+        request, category="memory", action="memory.memories.delete", target=bank_id
+    ):
+        return await _forward(
+            client, "DELETE", f"/v1/default/banks/{bank_id}/memories", params=params
+        )
 
 
 # ── /banks/{bank_id}/document-transfer — cross-bank migration (NOT a table
@@ -471,7 +518,10 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
     ),
     # memory units
     ("GET", "/banks/{bank_id}/memories", "/v1/default/banks/{bank_id}/memories/list"),
-    ("DELETE", "/banks/{bank_id}/memories", "/v1/default/banks/{bank_id}/memories"),
+    # DELETE /banks/{bank_id}/memories is NOT here — same treatment as
+    # DELETE /banks/{bank_id}: it wipes every memory unit in the bank, so it
+    # is special-cased into the guarded ``delete_bank_memories`` handler
+    # above (irreversible; requires ?confirm=<bank_id>). See #1457.
     (
         "GET",
         "/banks/{bank_id}/memories/{memory_id}",

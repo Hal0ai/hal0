@@ -1342,7 +1342,19 @@ async def slot_logs_stream(
             # "waiting for log lines…". The client listens for 'degraded'.
             yield 'event: degraded\ndata: {"message":"journalctl unavailable"}\n\n'
             return
-        async for line in _logs.tail_journal(f"hal0-slot@{name}.service", backfill, quiet):
+        # #1472: pulse through silence. A quiet slot (warming, idle, or simply
+        # not logging) used to emit zero bytes indefinitely, so a proxy idle
+        # timeout reaped the stream while the client still read
+        # ``disconnected=false`` — and the client's reconnect then replayed the
+        # 400-line backfill into a ring with content-dedup deliberately off.
+        # ``None`` is the idle tick; matches the 15 s cadence of the journal
+        # and activity streams so one proxy timeout value covers them all.
+        async for line in _logs.tail_journal_keepalive(
+            f"hal0-slot@{name}.service", backfill, quiet
+        ):
+            if line is None:
+                yield ": keepalive\n\n"
+                continue
             yield f"data: {json.dumps(redact_log_line(line))}\n\n"
 
     return StreamingResponse(

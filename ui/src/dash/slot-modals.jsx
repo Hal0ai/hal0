@@ -17,7 +17,6 @@ import { useHardware } from "@/api/hooks/useHardware";
 import { useModels, usePullJob } from "@/api/hooks/useModels";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
-import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useMetaEnums } from "@/api/hooks/useMeta";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
@@ -86,31 +85,6 @@ function compatibleModels(models, { type, backend }) {
 // old profile/image/device fields moved to the model drawer.
 
 // ─── Edit-slot drawer ───────────────────────────────────────────
-// Cheap client-side guard for the freeform extra_args field: catch the one
-// error that would make the backend shlex.split() throw — unbalanced quotes.
-// Anything subtler (unknown llama-server flags) is the server's job to reject;
-// this just stops an obviously-malformed string from being saved/regenerated.
-function validateExtraArgs(s) {
-	if (!s) return null;
-	let inSingle = false;
-	let inDouble = false;
-	for (let i = 0; i < s.length; i++) {
-		const c = s[i];
-		if (c === "'" && !inDouble) inSingle = !inSingle;
-		else if (c === '"' && !inSingle) inDouble = !inDouble;
-	}
-	if (inSingle || inDouble) return "Unbalanced quote";
-	return null;
-}
-
-// ''/null/'auto' all mean "no chat-template override" — the backend
-// normalizes them to None everywhere (_chat_template_or_none), so a slot
-// TOML that still carries chat_template = "auto" must not render as an
-// active override (and gets cleaned off disk on the next template save).
-function normTemplate(v) {
-	return v && v !== "auto" ? v : "";
-}
-
 // Backends a runner image can actually execute — RUNNER_IMAGES.supported_backends
 // (the §4 fit-check list), falling back to its single declared `backend` on an
 // older system-info payload. Empty = backend-agnostic, i.e. never a veto. ONE
@@ -160,6 +134,15 @@ const FAMILY_SLOT_TYPES = {
 // may fall back to the live metric when nothing is on disk — but because it is
 // frozen at the same instant as the display value, an untouched field can
 // never become dirty. Nothing here may read a runtime metric at compare time.
+//
+// #1379: chat_template, parallel and [server].extra_args are deliberately NOT
+// baselined. They are sunset — inert at launch (spec-flags-ownership §1/§4;
+// `providers/container.py` does `del profile_flags, slot_parallel,
+// extra_args`) — so the drawer no longer edits them. Baselining them would
+// re-arm the save path: the desired value of an absent control reads as
+// "empty", which against a persisted value looks like a deliberate clear. A
+// slot TOML that still carries them is left strictly alone; folding them into
+// the bound model is `hal0 slot migrate-flags` (#1396/#1397).
 function configBaseline(slot) {
 	if (!slot) return null;
 	return {
@@ -170,18 +153,12 @@ function configBaseline(slot) {
 		// Frozen display seed: persisted value → live metric at open → the
 		// backend's 8192 floor. Mirrors the `setCtx` seed exactly.
 		ctxSeed: slot.ctx_max ?? (slot.metrics?.ctx || 8192),
-		// On-disk [server].extra_args, surfaced on the wire as llamacpp_args.
-		extraArgs: slot.llamacpp_args != null ? slot.llamacpp_args : "",
 		device: slot.device || "gpu-rocm",
 		nGpuLayers: slot.n_gpu_layers ?? -1,
 		threads: slot.threads ?? 0,
 		binary: slot.binary || "",
 		imagePin: slot.image_pin ?? null,
 		profile: slot.profile || "",
-		parallel: slot.parallel ?? null,
-		// Tri-valued (string / null / absent) — kept RAW so both comparisons
-		// below can be derived from it (see deriveChanges).
-		chatTemplateRaw: slot.chat_template ?? null,
 	};
 }
 
@@ -192,41 +169,26 @@ function configBaseline(slot) {
 // which case the drawer refuses to compute dirtiness at all.
 function deriveChanges(baseline, form) {
 	if (!baseline) return null;
-	// Normalised "unset" seeds: -1 NGL, 0 THREADS, empty parallel/image_pin.
+	// Normalised "unset" seeds: -1 NGL, 0 THREADS, empty image_pin.
 	const nglRaw = String(form.nGpuLayers).trim();
 	const nglValue = nglRaw === "" ? -1 : Number(nglRaw);
 	const thrRaw = String(form.threads).trim();
 	const thrValue = thrRaw === "" ? 0 : Number(thrRaw);
-	const parRaw = String(form.parallel).trim();
-	const parValue = parRaw === "" ? null : Number(parRaw);
 	const pinValue = (form.imagePin || "").trim() || null;
 	const ctxValue = Number(String(form.ctx).trim());
-	// Task 5: two template comparisons, deliberately —
-	//   * raw → what the PUT carries, so a stale chat_template = "auto" is
-	//     cleaned off disk instead of lingering as an inert key;
-	//   * normalized → what needs a cold restart, since 'auto' and absent
-	//     produce the identical argv (no --chat-template flag).
-	const templateDesired = form.overrideOpen ? normTemplate(form.chatTemplate) : "";
 	return {
 		// Normalised values, so the Save body ships exactly what was compared.
 		nglValue,
 		thrValue,
-		parValue,
 		pinValue,
 		ctxValue,
-		templateDesired,
 		ctx: ctxValue !== Number(baseline.ctxSeed),
-		extraArgs: form.extraArgs !== baseline.extraArgs,
 		device: form.device !== baseline.device,
 		ngl: nglValue !== baseline.nGpuLayers,
 		threads: thrValue !== baseline.threads,
 		binary: form.binary !== baseline.binary,
 		imagePin: pinValue !== baseline.imagePin,
 		profile: form.profile !== baseline.profile,
-		parallel: parValue !== baseline.parallel,
-		chatTemplate: templateDesired !== (baseline.chatTemplateRaw ?? ""),
-		chatTemplateEffective:
-			templateDesired !== normTemplate(baseline.chatTemplateRaw),
 	};
 }
 
@@ -247,18 +209,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const swapMut = useSlotSwap();
 	const profilesQuery = useProfiles();
 	const modelsQuery = useModels();
-	const chatTemplatesQuery = useChatTemplates(open);
 	// HW grid (spec-hw-slot-ownership §2): device enum from meta, BINARY options +
 	// fit-check metadata from system-info (RUNNER_IMAGES).
 	const metaEnums = useMetaEnums();
 	const systemInfoQuery = useSystemInfo();
-
-	// Seed from the slot list payload when available (PR #587 — same fix
-	// class as #584). llamacpp_args (profile base flags) is read-only;
-	// n_gpu_layers is an editable per-slot override (PATCH /defaults →
-	// [model].n_gpu_layers).
-	const initialExtraArgs =
-		slot?.llamacpp_args != null ? slot.llamacpp_args : "";
 
 	// Seed from the PERSISTED context window (slot.ctx_max, from
 	// [model].context_size) first — NOT the live runtime metric, which is 0
@@ -295,13 +249,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// drawer). Rides Save (PUT /config {profile}), restart-required; the
 	// backend's _reconcile_device_profile keeps device/profile coherent.
 	const [profileSel, setProfileSel] = useStateSM(slot?.profile || "");
-	// Continuous batching: --parallel sequence slots. Empty = inherit the
-	// profile (today: 1). Rides the Save button (PUT /config {parallel}),
-	// restart-required. See the concurrency-batching plan.
-	const [parallel, setParallel] = useStateSM(
-		slot?.parallel != null ? String(slot.parallel) : "",
-	);
-	const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
+	// (#1379: `parallel` and `extra_args` state removed with their controls —
+	// both are INERT at launch, so editing them here only wrote TOML nothing
+	// reads. See configBaseline above.)
 	// #1391: does this payload actually carry the TOML-derived config fields, or
 	// is it the bare /api/status shape a dropped /api/slots poll falls back to?
 	// Provenance from useSlots — an absent key can't answer it (see
@@ -337,15 +287,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const [delOpen, setDelOpen] = useStateSM(false);
 	// Per-field validation errors for numeric inputs (#548).
 	const [fieldErrs, setFieldErrs] = useStateSM({});
-	// Task 5: per-slot chat_template override.
-	// chatTemplate seeds from slot.chat_template (empty/'auto' = no override).
-	// overrideOpen tracks whether the user has clicked [Override] to reveal the select.
-	const [chatTemplate, setChatTemplate] = useStateSM(
-		normTemplate(slot?.chat_template),
-	);
-	const [overrideOpen, setOverrideOpen] = useStateSM(
-		!!normTemplate(slot?.chat_template),
-	);
+	// (#1379: the per-slot chat_template override state went with its control.
+	// `chat_template` is a typed MODEL field in both specs — `resolve_chat_template`
+	// says the per-slot key "is no longer consulted" — so the slot-tier editor
+	// wrote TOML the launch path ignores, and fired a cold restart to apply it.)
 	// Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
 	// device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
 	// revert-on-error.
@@ -505,18 +450,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setBinary(slot.binary || "");
 		setImagePin(slot.image_pin || "");
 		setProfileSel(slot.profile || "");
-		setParallel(slot.parallel != null ? String(slot.parallel) : "");
-		// #587: re-seed from the slot prop so the drawer tracks the real
-		// on-disk values.
-		setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
 		setSubmitErr(null);
 		setDiscardOpen(false);
 		setPendingSwap(null);
 		setModelEditOpen(false);
 		setFieldErrs({});
-		// Task 5: re-seed chat_template override from the slot prop.
-		setChatTemplate(normTemplate(slot.chat_template));
-		setOverrideOpen(!!normTemplate(slot.chat_template));
 		setNpuAsr(slot.npu?.asr === true);
 		setNpuEmbed(slot.npu?.embed === true);
 		// Re-seed the chat pill + all three model selects too, so a save +
@@ -580,16 +518,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		) {
 			errs.threads = "Must be an integer ≥ 0 (0 = runtime default)";
 		}
-		// parallel (--parallel/-np): empty = inherit default; else integer ≥ 1.
-		const parRaw = String(parallel).trim();
-		const parNum = parRaw === "" ? null : Number(parRaw);
-		if (
-			parRaw !== "" &&
-			(!Number.isFinite(parNum) || !Number.isInteger(parNum) || parNum < 1)
-		) {
-			errs.parallel =
-				"Must be an integer ≥ 1 (or empty to inherit the default)";
-		}
 		// image_pin: empty is allowed (release default). When set, must look like a
 		// registry ref — contains ":" (host:tag or repo:tag) and no whitespace.
 		const pinTrim = (imagePin || "").trim();
@@ -597,14 +525,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			errs.imagePin =
 				"Must look like a registry ref (e.g. ghcr.io/owner/repo:tag)";
 		}
-		// Block Save on malformed extra_args (unbalanced quotes) the same way
-		// numeric fields block — the resolved command can't be built from it.
-		// Only when the field is actually mounted (`device !== "npu"` gates the
-		// Model group): a malformed PERSISTED value on an NPU slot must not
-		// veto unrelated saves with the error surface unmounted (#1389).
-		if (extraArgsErr && device !== "npu") {
-			errs.extraArgs = extraArgsErr;
-		}
+		// (#1379: the extra_args shlex gate is gone with the field. It only ever
+		// guarded a value the launch path ignores, and #1389 was that gate vetoing
+		// unrelated saves from an unmounted subtree — a whole failure mode that
+		// removing the control makes unrepresentable.)
 		if (Object.keys(errs).length > 0) {
 			setFieldErrs(errs);
 			return;
@@ -615,10 +539,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// from the frozen baseline). Nothing here re-derives a predicate, and
 		// nothing here reads the live `slot` prop — that pairing is the #1398
 		// bug class: a once-seeded form compared against a 5s-polled payload.
-		const templateDesired = changes.templateDesired;
-		const templateEffectiveChanged = changes.chatTemplateEffective;
-		// A hardware change (device/NGL/threads/binary/image_pin/profile) needs
-		// a cold restart, same as a chat_template change.
+		// A hardware change (device/NGL/threads/binary/image_pin/profile) needs a
+		// cold restart. #1379: `chat_template` is NO LONGER in this trigger — it
+		// changed no argv, so the restart was a model-load for nothing, and the
+		// operator read the unchanged behaviour as "the template didn't take".
 		const hwChanged =
 			changes.device ||
 			changes.ngl ||
@@ -628,8 +552,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			changes.profile;
 		try {
 			// Two-step: defaults (ctx_size lives under [model]) + slot config for the
-			// top-level keys (device / NGL / threads / binary / image_pin /
-			// chat_template / server). These are fast on-disk writes.
+			// top-level keys (device / NGL / threads / binary / image_pin). These
+			// are fast on-disk writes.
+			//
+			// #1379: chat_template / parallel / server.extra_args are absent by
+			// construction — they are not in `changes`, so a slot TOML that still
+			// carries them round-trips untouched. That is deliberate: clearing them
+			// here would be this drawer destroying config it no longer displays,
+			// and the fold into the bound model belongs to `hal0 slot migrate-flags`.
 			const slotBody = {};
 			if (changes.device) slotBody.device = device;
 			if (changes.ngl) slotBody.n_gpu_layers = changes.nglValue;
@@ -637,19 +567,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			if (changes.binary) slotBody.binary = binary;
 			if (changes.imagePin) slotBody.image_pin = changes.pinValue;
 			if (changes.profile) slotBody.profile = profileSel || null;
-			if (changes.chatTemplate) {
-				// null rides the backend's None-means-delete merge — clearing an
-				// override (or picking Auto) removes the key from the slot TOML.
-				slotBody.chat_template = templateDesired || null;
-			}
-			if (changes.extraArgs) {
-				slotBody.server = { extra_args: extraArgs };
-			}
-			// parallel is a top-level slot field. Empty → null (inherit; the
-			// None-means-delete merge clears any persisted override).
-			if (changes.parallel) {
-				slotBody.parallel = changes.parValue;
-			}
 			const defaultsBody = {};
 			if (changes.ctx) defaultsBody.ctx_size = ctxNum;
 			if (Object.keys(defaultsBody).length > 0) {
@@ -668,12 +585,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			setSubmitErr(err?.message || "save failed");
 			return;
 		}
-		// Non-blocking apply: a hardware or effective chat_template change
-		// requires a cold restart that can take model-load seconds-to-minutes.
-		// Fire it in the BACKGROUND (do NOT await) and close the drawer
-		// immediately. A pure 'auto' → absent cleanup changes no argv, so it
-		// deliberately does NOT restart.
-		if (hwChanged || templateEffectiveChanged) {
+		// Non-blocking apply: a hardware change requires a cold restart that can
+		// take model-load seconds-to-minutes. Fire it in the BACKGROUND (do NOT
+		// await) and close the drawer immediately.
+		if (hwChanged) {
 			restartMut.mutate(slot.name, {
 				onError: (err) =>
 					window.__hal0Toast &&
@@ -697,34 +612,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		onClose();
 	}
 
-	// Regenerate: persist the slot's freeform extra_args overlay (NOT the
-	// profile) and let useSlotEdit's invalidation refetch the slot, which
-	// recomputes resolved_command server-side. Does NOT restart — a running slot
-	// keeps its old flags until the next restart.
-	async function onRegenerateClick() {
-		setSubmitErr(null);
-		if (extraArgsErr) return;
-		try {
-			await editMut.mutateAsync({
-				name: slot.name,
-				body: { server: { extra_args: extraArgs } },
-			});
-		} catch (err) {
-			setSubmitErr(err?.message || "regenerate failed");
-			return;
-		}
-		// An explicit save SUCCESS is the one event that legitimately advances the
-		// baseline (the frozen snapshot is otherwise refreshed only on slot
-		// identity change). Advance it from what we just wrote, not from a later
-		// poll — the drawer stays open here, so waiting on the refetch would leave
-		// the stale-command overlay up for an interval.
-		setBaseline((b) => (b ? { ...b, extraArgs } : b));
-		window.__hal0Toast &&
-			window.__hal0Toast(
-				`Slot "${slot.name}" extra_args saved — restart to run with the new flags`,
-				"info",
-			);
-	}
+	// (#1379: `onRegenerateClick` is gone with the Extra Args field. It persisted
+	// the slot override and cleared the stale-command overlay because the
+	// baseline then matched the typed value — but the resolved command it
+	// claimed to "regenerate" came back byte-identical, since the launch path
+	// stopped reading slot extra_args. The overlay vanishing was the only
+	// feedback the operator got, and it was a false positive.)
 
 	// `saving` gates the Save button on the fast config writes only — the
 	// restart is fired in the background (see onSaveClick) and must not keep the
@@ -779,23 +672,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// for why (#1390 · #1391 · #1398).
 	const changes = deriveChanges(baseline, {
 		ctx,
-		extraArgs,
 		device,
 		nGpuLayers,
 		threads,
 		binary,
 		imagePin,
 		profile: profileSel,
-		parallel,
-		chatTemplate,
-		overrideOpen,
 	});
-	// `validateExtraArgs` is a cheap client guard (balanced quotes) — the
-	// backend shlex parse is the real validator.
-	const extraArgsErr = validateExtraArgs(extraArgs);
-	// The resolved command is server-computed from the persisted config, so any
-	// unsaved extra_args edit makes the displayed command stale.
-	const extraArgsDirty = !!changes && changes.extraArgs;
 	// #1391: the payload lost its config enrichment (or the drawer opened on one
 	// that never had it), so there is no baseline to compare against. Refuse to
 	// answer "what changed?" rather than guessing — Save is disabled and the
@@ -803,26 +686,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// kept, so the drawer recovers intact on the next successful poll.
 	const degraded = !configEnriched || !changes;
 
-	// UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields (HW
-	// grid, extra_args, ctx, parallel, chat_template override). The instant-apply
-	// ``enable`` toggle fires its own PUT/POST outside Save and is intentionally
-	// excluded — a flipped toggle is already persisted. (Reasoning/MTP/Vision
-	// were also instant-apply toggles here; they moved to the model drawer —
-	// spec-hw-slot-ownership §1.)
-	// The template leg uses the NORMALIZED comparison: an 'auto' → absent
-	// cleanup changes no argv, so it is not an operator-visible change.
+	// UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields — the
+	// HW grid and ctx. The instant-apply ``pinned`` toggle fires its own PUT
+	// outside Save and is intentionally excluded: a flipped toggle is already
+	// persisted. (Reasoning/MTP/Vision were also instant-apply toggles here;
+	// they moved to the model drawer — spec-hw-slot-ownership §1. Template /
+	// Parallel / Extra Args left with #1379 — see configBaseline.)
 	const dirty =
 		!!changes &&
-		(changes.extraArgs ||
-			changes.ctx ||
+		(changes.ctx ||
 			changes.ngl ||
 			changes.threads ||
 			changes.device ||
 			changes.binary ||
 			changes.imagePin ||
-			changes.profile ||
-			changes.parallel ||
-			changes.chatTemplateEffective);
+			changes.profile);
 	const requestClose = () => {
 		// While the ModelDrawer is stacked on top, one Esc press fires BOTH
 		// drawers' document-level keydown listeners — swallow ours so only the
@@ -1466,203 +1344,20 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							</div>
 						</div>
 
-						{/* Task 5: per-slot chat_template override.
-          Shows the model-level default template (from model.defaults.chat_template)
-          read-only, with an [Override] button to reveal a select for a per-slot
-          override. Override is dirty-tracked against slot.chat_template and
-          included in the config PUT only when changed. A template change requires
-          a cold restart (it changes llama-server --chat-template arg). */}
-						{(() => {
-							const modelTemplate =
-								curModelRow?.defaults?.chat_template || "auto";
-							const templates = Array.isArray(chatTemplatesQuery.data)
-								? chatTemplatesQuery.data
-								: [];
-							return (
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Template</span>
-										<FieldInfoIcon description="⟳ Pick a chat format for this model. Auto uses the
-											built-in template." />
-									</div>
-									<div className="form-ctl">
-										{!overrideOpen ? (
-											<div
-												style={{
-													display: "flex",
-													alignItems: "center",
-													gap: 8,
-												}}
-											>
-												<span
-													className="input mono"
-													style={{
-														flex: 1,
-														padding: "6px 10px",
-														background: "var(--bg)",
-														border: "1px solid var(--line-soft)",
-														borderRadius: "var(--rad-sm)",
-														fontSize: 12,
-														color: "var(--fg-3)",
-													}}
-												>
-													{modelTemplate}{" "}
-													<span style={{ color: "var(--fg-5)", fontSize: 11 }}>
-														(from model)
-													</span>
-												</span>
-												<button
-													type="button"
-													className="btn ghost sm"
-													onClick={() => {
-														setChatTemplate(chatTemplate || modelTemplate);
-														setOverrideOpen(true);
-													}}
-												>
-													Override
-												</button>
-											</div>
-										) : (
-											<>
-												<select
-													className="input mono"
-													value={chatTemplate}
-													onChange={(e) => setChatTemplate(e.target.value)}
-												>
-													<option value="auto">Auto (GGUF embedded)</option>
-													{/* Filter out the backend's own "auto" entry — it's rendered
-                        above as a fixed first option. A template the render-lint
-                        flagged invalid is disabled so it can't be pinned (it would
-                        only crash the slot at cold-start). */}
-													{templates
-														.filter((t) => t.id !== "auto")
-														.map((t) => (
-															<option
-																key={t.id}
-																value={t.id}
-																disabled={t.valid === false}
-															>
-																{(t.label || t.id) +
-																	(t.valid === false ? "  ⚠ invalid" : "")}
-															</option>
-														))}
-												</select>
-												{(() => {
-													const sel = templates.find(
-														(t) => t.id === chatTemplate,
-													);
-													return sel && sel.valid === false ? (
-														<div
-															className="hint"
-															style={{ color: "var(--err)", marginTop: 4 }}
-														>
-															⚠ Template failed to render: {sel.error}
-														</div>
-													) : null;
-												})()}
-												<button
-													type="button"
-													className="btn ghost sm"
-													style={{ marginTop: 4 }}
-													onClick={() => {
-														setChatTemplate("");
-														setOverrideOpen(false);
-													}}
-												>
-													Clear override
-												</button>
-											</>
-										)}
-									</div>
-								</div>
-							);
-						})()}
-
-						{/* Continuous batching — the --parallel / -np sequence-slot count. Rides
-          Save + a cold restart. */}
-						{(() => {
-							const t = slot.type || "llm";
-							if (
-								!["llm", "embedding", "reranking"].includes(t) ||
-								device === "npu"
-							)
-								return null;
-							const parNum = Number(String(parallel).trim());
-							const showPool = Number.isInteger(parNum) && parNum > 1;
-							const ctxNow = Number(String(ctx).trim()) || 0;
-							return (
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Parallel</span>
-										<FieldInfoIcon description="⟳ How many requests can run at once. Empty = use the
-											profile default." />
-									</div>
-									<div className="form-ctl">
-										<input
-											className={
-												"input mono" + (fieldErrs.parallel ? " input-err" : "")
-											}
-											type="number"
-											min="1"
-											step="1"
-											placeholder="1 (profile default)"
-											value={parallel}
-											onChange={(e) => {
-												setParallel(e.target.value);
-												setFieldErrs((p) => ({ ...p, parallel: undefined }));
-											}}
-										/>
-										{showPool && (
-											<div className="hint mono">
-												{parNum} slots share the{" "}
-												{ctxNow ? `${ctxNow.toLocaleString()}-token ` : ""}
-												context pool (--kv-unified); worst case, {parNum}{" "}
-												simultaneous full-context requests get ~
-												{ctxNow
-													? Math.floor(ctxNow / parNum).toLocaleString()
-													: `ctx/${parNum}`}{" "}
-												each.
-											</div>
-										)}
-										{fieldErrs.parallel && (
-											<div className="hint" style={{ color: "var(--err)" }}>
-												{fieldErrs.parallel}
-											</div>
-										)}
-									</div>
-								</div>
-							);
-						})()}
-
-						{/* Per-slot freeform override. Persisted to [server].extra_args. */}
-						<div className="form-row">
-							<div className="form-lbl">
-								<span>Extra Args</span>
-								<FieldInfoIcon description="extra_args — per-slot override flags appended to the runner
-									argv. Takes precedence over the profile defaults." />
-							</div>
-							<div className="form-ctl">
-								<input
-									className="input mono"
-									value={extraArgs}
-									onChange={(e) => setExtraArgs(e.target.value)}
-									placeholder="--flag value  (one-off, no new profile)"
-									spellCheck={false}
-									data-testid="extra-args-input"
-								/>
-								{extraArgsErr && (
-									<div
-										style={{
-											color: "var(--err)",
-											fontSize: 11,
-											paddingTop: 4,
-											fontFamily: "var(--jbm)",
-										}}
-									>
-										{extraArgsErr}
-									</div>
-								)}
-							</div>
+						{/* #1379: Template / Parallel / Extra Args were removed here.
+          All three persisted to the slot TOML and reached nothing —
+          `providers/container.py` does `del profile_flags, slot_parallel,
+          extra_args`, and `resolve_chat_template` no longer consults the
+          per-slot key. spec-flags-ownership §1/§4 puts the launch tune on the
+          MODEL; spec-hw-slot-ownership §8 prescribes this editor as the HW grid
+          + image_pin only. Removed outright rather than left read-only, the
+          same call made for Reasoning/MTP/Vision under §1. Anything already on
+          disk is folded into the bound model by `hal0 slot migrate-flags`
+          (#1396/#1397) — this drawer neither reads nor clears it. */}
+						<div className="hint" data-testid="slot-launch-tune-note">
+							Chat template and launch flags belong to the model — edit them
+							with “Edit model…” above. Flags set on a slot are not applied
+							at launch.
 						</div>
 					</FieldGroup>
 				)}
@@ -1803,14 +1498,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						Advanced
 					</summary>
 
-					{/* Ngl, Parallel, and Extra Args moved to the Model section above.
-          (rope_freq_base was removed — deprecated; set it via extra_args.) */}
-
-					{/* Flags preview — backend-provided resolved_command (real podman argv).
-          The resolved command is computed SERVER-SIDE (profile + MTP + image
-          resolution), so when extra_args is dirty the displayed command is
-          stale: dim it and overlay a Regenerate prompt that persists the slot
-          override and refetches the freshly-resolved command.
+					{/* Flags preview — backend-provided resolved_command (real podman argv),
+          computed SERVER-SIDE (profile + MTP + image resolution). #1379 removed
+          the dim + Regenerate overlay that used to sit on top: it promised to
+          "fold your slot extra_args into the resolved command", but the launch
+          path stopped reading slot extra_args, so the regenerated command came
+          back byte-identical. The preview itself is honest and stays.
           When the /resolved endpoint returns provenance data, we enhance this
           view with per-flag source badges and a duplicate-collapse note. */}
 					<div className="form-section">Resolved command</div>
@@ -1826,8 +1519,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								color: "var(--fg-3)",
 								lineHeight: 1.6,
 								whiteSpace: "pre-wrap",
-								opacity: extraArgsDirty ? 0.28 : 1,
-								filter: extraArgsDirty ? "grayscale(1)" : "none",
 								transition: "opacity .15s ease",
 							}}
 						>
@@ -1848,58 +1539,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								);
 							})()}
 						</div>
-						{extraArgsDirty && (
-							<div
-								style={{
-									position: "absolute",
-									inset: 0,
-									display: "flex",
-									flexDirection: "column",
-									alignItems: "center",
-									justifyContent: "center",
-									gap: 10,
-									textAlign: "center",
-									padding: 12,
-								}}
-								data-testid="resolved-stale-overlay"
-							>
-								<div
-									style={{
-										maxWidth: 360,
-										padding: "12px 16px",
-										background: "var(--bg-2)",
-										border: "1px solid var(--line-soft)",
-										borderRadius: "var(--rad-sm)",
-										boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
-										display: "flex",
-										flexDirection: "column",
-										alignItems: "center",
-										gap: 10,
-									}}
-								>
-									<div
-										style={{
-											fontSize: 11.5,
-											color: "var(--fg-2)",
-											lineHeight: 1.5,
-										}}
-									>
-										Flags changed. Slot{" "}
-										<code style={{ fontFamily: "var(--jbm)" }}>extra_args</code>{" "}
-										take precedence over the profile — regenerate to fold them
-										into the resolved command.
-									</div>
-									<button
-										className="btn sm"
-										disabled={!!extraArgsErr || editMut.isPending}
-										onClick={onRegenerateClick}
-										data-testid="regenerate-resolved"
-									>
-										{editMut.isPending ? "Regenerating…" : "Regenerate"}
-									</button>
-								</div>
-							</div>
-						)}
 					</div>
 					{/* Provenance legend + per-flag badges — only when the /resolved endpoint
           returns data with at least one provenance entry. Gracefully absent for
