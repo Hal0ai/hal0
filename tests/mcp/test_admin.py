@@ -126,6 +126,49 @@ def test_is_gated_memory_delete_branches_on_id_count() -> None:
     assert admin.is_gated("model_pull", {"model_id": "x"}) is True
 
 
+def test_is_gated_memory_delete_single_id_gates_on_dataset() -> None:
+    """Diagnosis #8: a single-id delete stays autonomous with no dataset or
+    a known/own namespace, but gates when directed at a foreign namespace
+    or a multi-bank dataset list — closing the "guessed foreign namespace
+    runs unattended" hole."""
+    # No dataset at all — unaffected, stays autonomous.
+    assert admin.is_gated("memory_delete", {"ids": ["a"]}) is False
+    # Known, closed-set namespace (not private) — autonomous regardless of
+    # client_id ownership (shared/agents/project are not identity-scoped).
+    assert (
+        admin.is_gated("memory_delete", {"ids": ["a"], "dataset": "shared"}, client_id="pi")
+        is False
+    )
+    assert (
+        admin.is_gated("memory_delete", {"ids": ["a"], "dataset": "project:apollo"}, client_id="pi")
+        is False
+    )
+    # The caller's own private namespace — autonomous.
+    assert (
+        admin.is_gated("memory_delete", {"ids": ["a"], "dataset": "private:pi"}, client_id="pi")
+        is False
+    )
+    # A foreign private namespace — gate.
+    assert (
+        admin.is_gated(
+            "memory_delete", {"ids": ["a"], "dataset": "private:someone-else"}, client_id="pi"
+        )
+        is True
+    )
+    # An unrecognized/guessed namespace string — gate.
+    assert (
+        admin.is_gated("memory_delete", {"ids": ["a"], "dataset": "guessed-bank"}, client_id="pi")
+        is True
+    )
+    # A dataset list (multi-bank sweep) — gate even for a single id.
+    assert (
+        admin.is_gated(
+            "memory_delete", {"ids": ["a"], "dataset": ["shared", "agents"]}, client_id="pi"
+        )
+        is True
+    )
+
+
 @pytest.mark.asyncio
 async def test_build_server_registers_full_catalog(queue: ApprovalQueue) -> None:
     server = admin.build_server(approval_queue=queue, base_url="http://t")
@@ -358,6 +401,25 @@ async def test_memory_delete_single_id_autonomous(queue: ApprovalQueue) -> None:
     assert result == {"status": "ok", "deleted": 1}
     assert queue.list_pending() == []
     dispatcher.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_memory_delete_single_id_foreign_dataset_gated(queue: ApprovalQueue) -> None:
+    """Diagnosis #8: a single-id delete aimed at a guessed/foreign
+    namespace must enqueue for approval, not run autonomously."""
+    dispatcher = AsyncMock(return_value={"status": "ok", "deleted": 1})
+    result = await admin.dispatch(
+        tool="memory_delete",
+        args={"ids": ["a"], "dataset": "guessed-foreign-bank"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+        memory_dispatcher=dispatcher,
+    )
+    assert result["status"] == "pending_approval"
+    assert queue.list_pending()[0]["tool"] == "memory_delete"
+    dispatcher.assert_not_awaited()
 
 
 @pytest.mark.asyncio

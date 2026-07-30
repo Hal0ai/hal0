@@ -1,9 +1,12 @@
 /**
  * slot-drawer-profile-v3 — slot drawer profile/HW ownership spec.
  *
- * The 1.0 hw-slot-ownership pivot removed drawer-editable profile/device
- * derivation. Profiles are logical tune templates; device/NGL/threads/binary
- * live on the slot HW grid.
+ * The 1.0 hw-slot-ownership pivot moved device/NGL/threads/binary onto the
+ * slot HW grid and stripped profile FLAGS out of the launch path (they are
+ * copy-on-stamp into the model tune). The slot's `profile` field itself is
+ * still slot-owned — it picks the runtime family, device-class gating and the
+ * MTP draft backend — so the drawer carries a `slot-profile` selector again
+ * (i3). Its save/restart contract lives in slot-drawer-inline-model-v3.
  */
 import { test, expect, MOCK_DATA, type Page } from '../fixtures/apiMock'
 

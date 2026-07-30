@@ -14,11 +14,13 @@ benchmark history so the datasets can later merge.
 Results dir resolution: argv[1] > $HAL0_BENCH_RESULTS > /var/lib/hal0/benchmarks
 """
 
+import hashlib
 import json
 import os
 import sys
 from collections import defaultdict
 from datetime import UTC, datetime
+from pathlib import Path
 
 if len(sys.argv) > 1:
     RESULT_DIR = sys.argv[1]
@@ -26,6 +28,13 @@ else:
     RESULT_DIR = os.environ.get("HAL0_BENCH_RESULTS", "/var/lib/hal0/benchmarks")
 RUNS_DIR = os.path.join(RESULT_DIR, "runs")
 EMIT_V2 = "--emit-v2" in sys.argv
+
+
+#: v2 ``host.platform`` label per resolved hardware tier. Only the tiers that
+#: are definitely not the Strix Halo iGPU appear here; "amd" and an absent
+#: tier both fall through to the historical "strix-halo" default so importing
+#: an existing results dir does not rewrite records.
+_TIER_PLATFORM = {"cpu": "cpu", "nvidia": "nvidia-dgpu"}
 
 
 def test_kind(row):
@@ -52,6 +61,10 @@ def normalize(row, meta, mtime_iso):
     return {
         "timestamp": meta.get("timestamp") or mtime_iso,
         "host": meta.get("host"),
+        # Hardware tier the cell ran on (amd | nvidia | cpu). Absent in
+        # .meta.json written before the CPU tier existed — None then, and the
+        # v2 platform label below keeps its historical value in that case.
+        "tier": meta.get("tier") or None,
         "gpu": meta.get("gpu") or row.get("gpu_info"),
         "gpu_info": row.get("gpu_info"),
         "cpu_info": row.get("cpu_info"),
@@ -332,14 +345,18 @@ def main():
     print(f"Wrote {index_path} ({len(records)} measurements, {len(server_ab)} server-ab files)")
     print(f"Wrote {summary_path}")
 
-    # Emit v2 records (new benchmark system)
+    # Emit v2 records (new benchmark system).
+    #
+    # `hashlib` / `Path` / `datetime` are imported at module scope, NOT here.
+    # A function-body `from datetime import datetime` made the name local to
+    # main() for its WHOLE body, so the `datetime.now(tz=UTC)` above — which
+    # runs long before this branch, and runs unconditionally — raised
+    # UnboundLocalError. Every `hal0-benchctl aggregate` died on it, with or
+    # without --emit-v2.
     if EMIT_V2:
-        from pathlib import Path
         V2_DIR = Path(RESULT_DIR) / "v2"
         V2_DIR.mkdir(parents=True, exist_ok=True)
         RECORDS_PATH = V2_DIR / "records.jsonl"
-        import hashlib
-        from datetime import datetime, timezone
 
         for rec in records:
             # Build identity block for cell_key
@@ -393,8 +410,13 @@ def main():
                 "config": identity["config"],
                 "workload": identity["workload"],
                 "host": {
-                    "name": "hal0",
-                    "platform": "strix-halo",
+                    "name": rec.get("host") or "hal0",
+                    # "strix-halo" was hardcoded, which mislabels every
+                    # non-AMD-iGPU tier — a CPU cell would publish as a Strix
+                    # Halo measurement. Only the tiers that are demonstrably
+                    # NOT the iGPU are relabelled, so records written before
+                    # .meta.json carried a tier keep their historical value.
+                    "platform": _TIER_PLATFORM.get(rec.get("tier") or "", "strix-halo"),
                     "gpu": rec.get("gpu"),
                     "exclusive": True,
                 },

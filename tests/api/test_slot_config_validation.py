@@ -83,6 +83,38 @@ def test_put_config_valid_keys_and_dynamic_server_fields_pass(
     assert on_disk["server"]["env"] == {"HSA_XNACK": "1"}
 
 
+def test_put_config_null_deletes_chat_template(slot_toml: Path, client: TestClient) -> None:
+    """``chat_template: null`` REMOVES a persisted per-slot override (#1372).
+
+    The drawer's "Clear override" needs a wire value that actually unsets the
+    key. ``reconcile_slot_updates`` implements None-means-delete, so ``null``
+    drops it from the TOML entirely — whereas ``""`` (see the companion test
+    below) persists an empty-string override, which is a different thing and
+    would still emit ``--chat-template ''`` on the launch line.
+    """
+    r = client.put("/api/slots/chat/config", json={"chat_template": "chatml"})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["chat_template"] == "chatml"
+
+    r = client.put("/api/slots/chat/config", json={"chat_template": None})
+    assert r.status_code == 200, r.text
+    on_disk = _read(slot_toml)
+    assert "chat_template" not in on_disk
+    # Siblings survive the removal — it is a targeted delete, not a rewrite.
+    assert on_disk["model"]["default"] == "qwen3-4b"
+    assert on_disk["port"] == 8081
+
+
+def test_put_config_empty_string_chat_template_is_not_a_removal(
+    slot_toml: Path, client: TestClient
+) -> None:
+    """``""`` persists an empty override — the reason #1372 clears with null."""
+    client.put("/api/slots/chat/config", json={"chat_template": "chatml"})
+    r = client.put("/api/slots/chat/config", json={"chat_template": ""})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["chat_template"] == ""
+
+
 def test_put_config_tolerated_extras_pass(slot_toml: Path, client: TestClient) -> None:
     """default_voice (voice settings) and string image override keep working."""
     r = client.put("/api/slots/chat/config", json={"default_voice": "Ryan"})
