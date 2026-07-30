@@ -2,7 +2,7 @@
  * slot-npu-dead-save-v3 — #1389: Save must not be silently dead on an NPU
  * slot whose PERSISTED extra_args is malformed.
  *
- * The freeform extra_args field (and its error surface) lives in the Model
+ * The freeform extra_args field (and its error surface) lived in the Model
  * group, which is unmounted for `device === "npu"`. The Save validator still
  * seeded `extraArgsErr` from the persisted `llamacpp_args`, so a malformed
  * persisted value blocked every Save on the slot with zero feedback — the
@@ -10,6 +10,14 @@
  *
  * Contract: a validation error on a field the operator cannot see or edit
  * must not veto the batched Save of unrelated, visible fields.
+ *
+ * #1379 removed the extra_args control outright — it was inert at launch — and
+ * with it the `extraArgsErr` gate, so this specific failure mode is now
+ * unrepresentable rather than merely fixed. The test is kept because the
+ * CONTRACT is what matters and it is cheap to hold: the fixture still carries a
+ * malformed persisted `llamacpp_args` (`--flash-attn "oops`), and a Save of a
+ * visible field must still go through. If a future field ever re-introduces a
+ * validator seeded from persisted-but-unrendered state, this catches it.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
 
