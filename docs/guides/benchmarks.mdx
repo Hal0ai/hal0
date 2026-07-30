@@ -39,6 +39,15 @@ of the real device nodes — so a benchmark runs wherever a slot runs:
 setting cannot be honoured, the sweep fails **before** any container starts and
 names the paths it checked, rather than falling back to a guess.
 
+Each tier has a matching sweep lane. The GPU lanes (`rocm`, `vulkan_radv`) run
+the unified ROCmFPX runner with full offload; the `cpu` lane runs the lean
+CPU toolbox with `-ngl 0` and no device flags at all. The default sweep picks
+the lanes for the tier it resolved — `cpu` alone on a GPU-less box, the two GPU
+lanes otherwise. To measure the CPU baseline on a machine that also has a GPU,
+pin the tier: `HAL0_BENCH_TIER=cpu`, or ask for the lane by name with
+`hal0-benchctl sweep <model.gguf> cpu`. Results record the tier they ran on, so
+a CPU number is never published under the iGPU's name.
+
 For unusual passthrough layouts, `HAL0_BENCH_GPU_DEVICES` (or the per-node
 `HAL0_BENCH_KFD_DEVICE` / `HAL0_BENCH_CARD_DEVICE` /
 `HAL0_BENCH_RENDER_DEVICE`), `HAL0_BENCH_GPU_GROUPS`, and `HAL0_BENCH_TIER`

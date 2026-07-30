@@ -67,7 +67,7 @@ Priors from the production `hal0-slot@agent` config: `-b 8192 -ub 2048 -ctk q8_0
 | `-fa` (flash-attn) | speed + memory at depth | usually a win on; verify on this gfx — Vulkan FA support has changed across versions. |
 | `-ctk`/`-ctv` (KV quant) | memory + bandwidth | `q8_0` ≈ big memory save, tiny quality cost; `f16` = baseline quality. Matters most at long context (decode is bandwidth bound). |
 | `-t` (threads) | CPU-side work | sweep around physical cores (16); rarely the bottleneck for GPU offload. |
-| `-ngl` | fixed at 99 (full offload) | only lower to study CPU/GPU split. |
+| `-ngl` | set per lane, not per sweep | 99 (full offload) on `rocm`/`vulkan_radv`, 0 on the `cpu` lane. Only pass your own to study the CPU/GPU split — llama-bench APPENDS it to the lane's value as a second sweep row rather than replacing it. |
 
 Out of llama-bench scope (server-level, tune separately): **draft/MTP speculative decode**
 (`--spec-draft-*`) and `--parallel`/slots — hal0 has `/root/bench_mtp.py` for that.

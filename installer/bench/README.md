@@ -84,9 +84,20 @@ is active; `--exclusive` stops/restarts them for clean numbers (briefly offlines
 
 ## Tuning / extending (operator, edits config.sh)
 
-- Add a backend: entry in `BACKENDS` (`image|bench_bin|ubatch|env`) + `BACKEND_ORDER`.
+- Add a backend: entry in `BACKENDS` (`image|bench_bin|ubatch|env|dev_args`) +
+  `BACKEND_ORDER`, and add the key to `validate_backend` in
+  `installer/wrappers/hal0-benchctl` (the seam rejects anything not on that
+  whitelist, so a matrix-only entry is unreachable through `hal0-benchctl`).
 - Add a context: entry in `CTX_CONFIGS` (`args|reps`, `%UB%` = per-backend ubatch).
-- Curated default model set: `DEFAULT_MODELS`. Common flags: `COMMON_BENCH_ARGS`.
+- Curated default model set: `DEFAULT_MODELS`. Common flags: `COMMON_BENCH_ARGS`
+  (`-fa 1 -mmp 0`). `-ngl` belongs in the lane's `dev_args`, not here —
+  llama-bench appends repeated `-ngl` values into a sweep dimension instead of
+  overriding, so a common one would double every cell of any lane that needs a
+  different value (e.g. `cpu`'s `-ngl 0`).
+- Hardware tiers: `BACKEND_ORDER` defaults to `(cpu)` when the device resolver
+  reports `BENCH_TIER=cpu` and to the two GPU lanes otherwise. Pin a tier with
+  `HAL0_BENCH_TIER=cpu|amd|nvidia` to measure a specific v1.0 baseline on a box
+  that has more hardware than the tier under test.
 
 ## Profile-matrix (seed-profile re-tune)
 

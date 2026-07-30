@@ -131,6 +131,7 @@ else
 fi
 [[ ${#MODELS[@]} -gt 0 ]] || { echo "no models to benchmark" >&2; exit 1; }
 
+echo "Tier     : $BENCH_TIER ($GPU_LABEL)"
 echo "Backends : ${SEL_BACKENDS[*]}"
 echo "Contexts : ${SEL_CONTEXTS[*]}"
 echo "Models   : ${#MODELS[@]}"
@@ -200,8 +201,13 @@ for backend in "${SEL_BACKENDS[@]}"; do
       done
       if [[ $rc -eq 0 ]]; then
         extra_json="$(printf '%s' "$EXTRA" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        # `tier` is the hardware tier the cell actually ran on (amd | nvidia |
+        # cpu, from the device resolver). Without it the aggregator has to
+        # infer the tier from the `gpu` string, and a CPU cell and an iGPU
+        # cell for the same model/backend are indistinguishable once the
+        # per-tier v1.0 baselines are merged.
         cat >"$meta" <<META
-{"backend":"$backend","image":"$image","context":"$ctx","tag":"$TAG","extra":"$extra_json","reps":$reps,"ubatch":$ubatch,"model_rel":"$rel","model_path":"$model_path","host":"$HOST_LABEL","gpu":"$GPU_LABEL","timestamp":"$ts"}
+{"backend":"$backend","image":"$image","context":"$ctx","tag":"$TAG","extra":"$extra_json","reps":$reps,"ubatch":$ubatch,"model_rel":"$rel","model_path":"$model_path","host":"$HOST_LABEL","tier":"$BENCH_TIER","gpu":"$GPU_LABEL","timestamp":"$ts"}
 META
         echo "   -> $(basename "$out")"; ((run_count++))
       else

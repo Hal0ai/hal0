@@ -4,7 +4,7 @@
 # and need /dev/kfd + the images in root's podman store. It delegates exactly
 # the benchmark run/aggregate ops to /usr/lib/hal0/bin/hal0-benchctl, which is
 # the entire privileged surface: the helper validates the model path (must
-# resolve under /mnt/ai-models), the backend (rocm|vulkan_radv), and the
+# resolve under /mnt/ai-models), the backend (rocm|vulkan_radv|cpu), and the
 # llama-bench flag whitelist — no wildcards, no shell, no arbitrary args.
 #
 # Install (as root):
