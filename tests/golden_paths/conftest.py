@@ -29,6 +29,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
+from tests.fixtures.slot_probe import probe_slot_name
 
 
 @pytest.fixture(autouse=True)
@@ -79,8 +80,9 @@ class FakeContainerProvider:
 
     # — probes —
 
-    def is_active(self, slot_name: str) -> bool:
-        return slot_name in self.active
+    def is_active(self, slot: Any) -> bool:
+        # Production passes the slot CONFIG (#1417); this double keys by name.
+        return probe_slot_name(slot) in self.active
 
     async def wait_ready(self, port: int, timeout_s: float | None = None) -> None:
         return None
@@ -90,10 +92,10 @@ class FakeContainerProvider:
 
     # — slot_view enrichment extras —
 
-    def running_image(self, slot_name: str) -> str | None:
+    def running_image(self, slot: Any) -> str | None:
         return None
 
-    def running_argv(self, slot_name: str) -> list[str] | None:
+    def running_argv(self, slot: Any) -> list[str] | None:
         return None
 
     def expected_argv(

@@ -364,6 +364,10 @@ class SlotWatchdog:
 
         Synchronous probe, runs in an executor. Probe errors are coerced
         to False so status()'s drift reconciler runs.
+
+        The **config** is handed to the provider, never the bare name: the unit
+        to probe is keyed by the slot's instance token, which is the durable id
+        on a post-migration box (#1417).
         """
         cfg = await self._host._maybe_load_config(slot_name)
         if not cfg:
@@ -373,7 +377,7 @@ class SlotWatchdog:
 
         try:
             return await asyncio.get_event_loop().run_in_executor(
-                None, container_provider().is_active, slot_name
+                None, container_provider().is_active, cfg
             )
         except Exception as exc:
             # The docstring contract: probe errors coerce to False so the
@@ -443,9 +447,12 @@ class SlotWatchdog:
 
         from hal0.providers.container import container_provider
 
-        # 1) systemctl is-active (synchronous — run in executor)
+        # 1) systemctl is-active (synchronous — run in executor). The config
+        # carries the instance token the unit is actually keyed by (#1417); a
+        # bare name made this gate reject every healthy slot on an id-keyed box
+        # with slot.loading / slot.load_failed.
         active = await asyncio.get_event_loop().run_in_executor(
-            None, container_provider().is_active, slot_name
+            None, container_provider().is_active, cfg
         )
         if not active:
             return False, "inactive"

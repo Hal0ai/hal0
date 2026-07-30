@@ -35,6 +35,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from hal0.api import image_cache
 from hal0.api.deps import DispatcherDep
+from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin
 from hal0.upstreams.filters import apply_filters
 
 log = structlog.get_logger("hal0-v1")
@@ -496,6 +497,17 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
         res = await resolver.resolve(raw_model)
         if res is not None and res.model_id:
             body = {**body, "model": res.model_id}
+            # #1418: the rewrite collapses `hal0/<slot>` to a bare model id, and
+            # a model id says nothing about WHICH slot should serve it — on a box
+            # where two slots bind one model (brain + nano both on
+            # hal0-brain-sft-fpx8) the lane silently landed on the wrong slot.
+            # Carry the matched slot forward as a request-scoped pin so the
+            # backend-aware load and the dispatcher's upstream ordering can
+            # honour the lane the caller actually asked for. Set only when the
+            # resolver matched a LIVE slot in the chain (`fallback=False`), so a
+            # pin never points at a slot that cannot serve.
+            if res.matched_name and not res.fallback:
+                set_lane_pin(request, res.matched_name)
 
     model_id = body.get("model")
     if isinstance(model_id, str) and not _is_remote_model(request, model_id):
@@ -527,6 +539,16 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
     status and corrected via the manual ``/api/slots/{name}/backend``
     control (B3).
 
+    Selection when SEVERAL slots bind one model id (#1418): the reverse lookup
+    used to take the FIRST match in declaration order, so a box with two slots
+    on one model (``brain`` + ``nano`` both on ``hal0-brain-sft-fpx8``) drove
+    the load against whichever was declared first — including an ERROR-parked
+    slot whose load could only fail again, while its healthy sibling was
+    already serving. Candidates are now ranked by
+    :func:`hal0.slots.state.slot_selection_rank` (dispatchable → loading →
+    offline → ERROR last) behind the request's lane pin, with declaration order
+    as the final tiebreak so the single-slot case is bit-for-bit unchanged.
+
     Best-effort: any failure is logged and swallowed so routing still
     proceeds rather than 500ing on this code path.
     """
@@ -542,8 +564,9 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
         alias_to_model = await hal0_chat_slot_alias_map(slot_manager)
     except Exception:
         return
-    # Reverse the alias→model_id map: find the chat slot that owns this model.
-    slot_name = next((slot for slot, mid in alias_to_model.items() if mid == model_id), None)
+    # Reverse the alias→model_id map: every chat slot that owns this model.
+    candidates = [slot for slot, mid in alias_to_model.items() if mid == model_id]
+    slot_name = preferred_slot(slot_manager, candidates, lane_slot=lane_slot_pin(request))
     if slot_name is None:
         # No backing chat slot — nothing to honor.
         return

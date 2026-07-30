@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from hal0.slots.manager import SlotManager
+from tests.fixtures.slot_probe import probe_slot_name
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -70,8 +71,8 @@ class FakeContainerProvider:
 
     # — probes —
 
-    def is_active(self, slot_name: str) -> bool:
-        return slot_name in self.active
+    def is_active(self, slot: Any) -> bool:
+        return probe_slot_name(slot) in self.active
 
     async def wait_ready(self, port: int, timeout_s: float | None = None) -> None:
         return None
@@ -84,11 +85,11 @@ class FakeContainerProvider:
 
     # — slot_view container_enrichment extras —
 
-    def running_image(self, slot_name: str) -> str | None:
+    def running_image(self, slot: Any) -> str | None:
         return None
 
-    def running_argv(self, slot_name: str) -> list[str] | None:
-        return self.running_argv_by_slot.get(slot_name)
+    def running_argv(self, slot: Any) -> list[str] | None:
+        return self.running_argv_by_slot.get(probe_slot_name(slot))
 
     def expected_argv(
         self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
