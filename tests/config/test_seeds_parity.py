@@ -39,10 +39,11 @@ def test_fpx_profiles_keep_logical_tune_and_drop_physical_mtp_flags() -> None:
     dense = seeds.seed_profiles()["dense"]["flags"]
     # Generic moe/dense are model-agnostic and carry no family-specific
     # kv-cache (chadrock-specific -ctk/-ctv moved to chadrock-moe/dense
-    # per spec §4.2). Both still carry batch + context defaults.
+    # per spec §4.2). Both still carry batch defaults; context is slot-owned
+    # (context_size → --ctx-size, §21.7), so -c must never appear.
     assert "-b 2048" in moe
-    assert "-c 32768" in moe
-    assert "-c 131072" in dense
+    assert "-c" not in moe.split()
+    assert "-c" not in dense.split()
     # Chadrock family profiles own the family-specific KV quirks
     chadrock_moe = seeds.seed_profiles()["chadrock-moe"]["flags"]
     chadrock_dense = seeds.seed_profiles()["chadrock-dense"]["flags"]
