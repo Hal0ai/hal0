@@ -2733,6 +2733,21 @@ class SecurityConfig(BaseModel):
         ),
     )
 
+    trust_forwarded_for: bool | None = Field(
+        default=None,
+        description=(
+            "Honour X-Forwarded-For for the login/rotate rate limiter and "
+            "caller-IP attribution instead of the raw TCP peer. None = unset "
+            "→ OFF (the raw peer is used — safe default, since a client can "
+            "forge this header). Only enable when hal0 sits behind a "
+            "reverse proxy known to strip/overwrite any client-supplied "
+            "X-Forwarded-For (Traefik/nginx/Caddy do this by default) — "
+            "otherwise every caller can pick its own rate-limit bucket by "
+            "spoofing the header. Overridden at runtime by the "
+            "HAL0_TRUST_FORWARDED_FOR env var."
+        ),
+    )
+
 
 class RealtimeConfig(BaseModel):
     """``[realtime]`` — the OpenAI-Realtime WebSocket surface (HP-realtime inc-1).
