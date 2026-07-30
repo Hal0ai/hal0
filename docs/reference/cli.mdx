@@ -33,12 +33,13 @@ directly so they work without a running daemon.
 | `hal0 status` | System + slot summary (name, version, slot/upstream counts, slot table). | — |
 | `hal0 system-info` | Read-only host/GPU/NPU/runtime evidence in one pass (hostname, kernel, distro, CPU, memory, every detected GPU, NPU, plus hal0/python/podman versions and the detected platform). Runs the local hardware probe directly, so it works offline before the API is up. Always exits 0. | `--json` |
 | `hal0 probe` | **[Deprecated]** hidden alias for `hal0 config hardware --refresh` — re-runs hardware detection (`POST /api/hardware/probe`) and updates `hardware.json`. | — |
-| `hal0 setup` | First-run (or re-run) provisioning: seed slots, pull starter models, wire extensions. See the section below. | `--auto`, `--storage-dir`, `--no-pull`, `--no-extensions` |
+| `hal0 setup` | First-run (or re-run) provisioning: seed slots, pull starter models, wire extensions. See the section below. | `--auto`, `--storage-dir`, `--no-pull`, `--no-extensions`, `--no-slots`, `--answers`, `--emit-answers`, `--plan`/`--dry-run` |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`), `--port` (default `8080`), `--reload` |
 | `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|preview\|nightly}`, `--target VER`, `--yes`/`-y`, `--restart-slots` |
 | `hal0 update owui` | Repin the OpenWebUI companion image to the latest (or an explicit) digest, pull, and restart. | `--check`, `--tag TAG`, `--target DIGEST`, `--yes`/`-y`, `--force` |
 | `hal0 uninstall` | Uninstall hal0 (wraps `installer/uninstall.sh`). Conservative by default. | `--purge`/`--clean-slate`, `--keep-data`, `--force`/`-f`, `--dev` |
 | `hal0 chat` | Terminal chat REPL over `/v1/chat/completions` (or the hal0-brain steward with `--brain`) — handy for SSH/headless boxes. In-REPL: `/think on\|off\|default`, `/clear`, `/quit` (or Ctrl-D). | `--model` (default `agent`), `--base-url` (default `http://127.0.0.1:8080/v1`), `--no-stream`, `--brain` |
+| `hal0 bench` | Model + hardware benchmarking passthrough (argparse-based). See the section below. | `plan`, `run`, `status`, `worker`, `results`, `history`, `reindex`, `devices`, `publish`, `eval`, `import-v1` |
 | `hal0 ports` | PortAuthority claim map: who owns which port, and any conflicts. | `--json` |
 
 `hal0 update` with no flags checks the configured channel and applies the
@@ -89,15 +90,31 @@ its own prior chain-of-thought back to the model as context bloat.
 | `--storage-dir` | Model storage root (default `/var/lib/hal0/models`). |
 | `--no-pull` | Seed slot configs + sentinel without downloading any models. |
 | `--no-extensions` | Skip extension install/wiring in `--auto` mode. |
+| `--no-slots` | Seed the sentinel + extensions but no model-slot picks at all — a bare-bones run for a box that wants zero slot structure created up front. |
+| `--answers` | Path to a `hal0-setup.yaml` answer file for a fully non-interactive run (see `--emit-answers` below). |
+| `--emit-answers` | Resolve the same choices `--auto` would make, write them to a `hal0-setup.yaml`, and exit without applying anything. |
+| `--plan` / `--dry-run` | Resolve and print the plan; writes nothing (no slots, sentinel, pulls, or extensions). |
 
 `hal0 setup` has no further subcommands — it's a flags-only entry point.
-Without `--auto` it runs an interactive Rich TUI stepping through
-storage → extensions → main slot → agent → NPU → review → install. With
-`--auto` it always provisions an `agent` slot (port 8081) — the chat
-capability's slot, named `agent` per ADR-0023 — unless one already exists,
-adds a `coder` slot (port 8082) only if an agent-kind extension is enabled,
-and seeds capability defaults from the hardware probe — no model pull at
-install time if `--no-pull` is set.
+Without `--auto` (and without `--answers`/`--plan`/`--emit-answers`) it runs
+an interactive Rich TUI stepping through storage → extensions → main slot →
+agent → NPU → review → install. With `--auto` it provisions the capability +
+NPU slot structure (chat/embed/rerank/stt/tts/vision — device, profile, and
+port only, no model pick) plus an `agent` slot (port 8081, the chat
+capability's slot named `agent` per ADR-0023) unless one already exists, and
+a `coder` slot (port 8082) only if an agent-kind extension is enabled. Pass
+`--no-slots` to skip all of that and seed only the sentinel + extensions.
+`installer/install.sh`'s own first-run call is `--auto --no-pull
+--no-extensions` — slots yes, models no — so a fresh install always lands
+with slot structure in place and every model left for the operator to
+choose via the dashboard or a follow-up `hal0 setup`. Capability defaults
+are seeded from the hardware probe; `--no-pull` keeps the whole path
+download-free regardless of what gets scaffolded.
+
+The answer-file workflow lets one machine's resolved choices drive another
+box's non-interactive install: `--emit-answers` writes what `--auto` (or
+`--answers`, if combined) would have chosen without applying it, and a later
+`--answers` run replays that file verbatim.
 
 It runs in-process when the daemon isn't up yet (fresh install), or posts to
 `POST /api/install/apply` when `hal0-api` is already running, so re-running
@@ -107,6 +124,9 @@ setup against a live install registers new slots without a restart.
 hal0 setup                       # interactive TUI
 hal0 setup --auto
 hal0 setup --auto --no-pull --no-extensions
+hal0 setup --auto --emit-answers hal0-setup.yaml   # resolve + save, apply nothing
+hal0 setup --answers hal0-setup.yaml               # replay a saved answer file
+hal0 setup --auto --plan                           # preview only, writes nothing
 ```
 
 ## `hal0 slot` — inference slots
@@ -127,7 +147,7 @@ hal0 setup --auto --no-pull --no-extensions
 | `slot logs <name>` | Print or follow slot logs. | `--follow`/`-f`, `--lines`/`-n` (default 200) |
 | `slot metrics [name]` | Live per-slot runtime metrics (tok/s, KV%, mem, uptime, queue depth). Omit `name` for all slots. | `--json` |
 | `slot capacity` | Per-slot resident memory + the `[slots].max_slots` budget. | `--json` |
-| `slot migrate-id-keying` | One-shot, operator-run: flip every slot artefact from name-keyed to id-keyed on disk. Destructive (backs itself up first); needs hal0 stopped. See the [migration runbook](/docs/operate/slot-id-keying-migration). | `--dry-run`, `--yes`/`-y`, `--stop-services` |
+| `slot migrate-id-keying` | One-shot, operator-run: flip every slot artefact from name-keyed to id-keyed on disk. Dry-run by default; `--apply` writes (backs itself up first) and needs hal0 stopped. See the [migration runbook](/docs/operate/slot-id-keying-migration). | `--apply`, `--yes`/`-y`, `--stop-services` |
 | `slot migrate-hw` | One-shot, operator-run: unwind the flags-fold so hardware sticks to slots (folds model NGL/runner + profile/slot image pins onto each slot's typed HW grid). Dry-run by default; `--apply` writes (backs itself up first) and needs hal0 stopped. | `--apply`, `--yes`/`-y`, `--stop-services` |
 | `slot migrate-caps` | One-shot, operator-run: fold slot-level `mtp`/`enable_thinking`/`vision` onto each slot's bound model defaults (the model owns tuning caps; an existing model opinion wins, divergent slots are reported first-slot-wins) and drop the slot keys. Dry-run by default; `--apply` writes (backs itself up first) and needs hal0 stopped. | `--apply`, `--yes`/`-y`, `--stop-services` |
 | `slot migrate-flags` | One-shot, operator-run: fold each slot's effective launch tune (`[server].extra_args`, `parallel`, per-slot `chat_template`, layered over its profile flags) onto the bound model's `defaults` — the only tier the launch path still reads. Two slots folding divergent tunes onto one model refuse as a group, writing nothing. Dry-run by default; `--apply` writes (backs itself up first) and needs hal0 stopped. | `--apply`, `--yes`/`-y`, `--stop-services` |
@@ -537,6 +557,35 @@ state forward to the current schema. Today it has exactly one subcommand:
 | Command | Purpose | Key options |
 |---|---|---|
 | `migrate model-layout` | Migrate an older model store + registry to the current canonical layout. Dry-run by default. | `--apply`, `--force`/`-f`, `--registry`, `--mount-root`, `--canonical-root` |
+
+## `hal0 bench` — model + hardware benchmarking
+
+`hal0 bench <verb>` is a single passthrough command, not a typer group: the
+bench CLI is argparse-based (stdlib-only, like the rest of the critical
+path), so the raw argv forwards straight to `hal0.bench.cli.main`. Every verb
+accepts `--api` (hal0-api base, default `http://127.0.0.1:8080`) and
+`--no-registry` (skip the registry fetch; plan/run against an empty model
+set) ahead of the verb, e.g. `hal0 bench --no-registry plan --suite ...`.
+
+| Verb | Purpose | Key options |
+|---|---|---|
+| `bench plan --suite <id>` | What's stale and why; no GPU, no writes. | `--suite`, `--json` |
+| `bench run --suite <id>` | Execute the plan (or a slice). | `--suite`, `--budget-min`, `--dry-run`, `--scheduled` |
+| `bench status` | Recent records / session state. | `--json` |
+| `bench worker` | Drain the dashboard run queue (idle until Start). | `--poll` |
+| `bench results` | Current values from `bench.db`. | `--model`, `--since`, `--limit`, `--json` |
+| `bench history` | Trend for a cell/model over time. | `--cell`, `--model`, `--limit`, `--json` |
+| `bench reindex` | Rebuild `bench.db` from `records.jsonl`. | — |
+| `bench devices` | GPU device nodes benchmark containers will use. | `--format {text\|env\|json\|flags}` |
+| `bench publish` | Regenerate `roster.json` (+ `--check` diff without writing). | `--check`, `--site-ts` |
+| `bench eval --models <ids>` | Agentic task eval (quality tier): score a model as a real agent. | `--models`, `--task`, `--api`, `--dry-run`, `--force` |
+| `bench import-v1` | One-time import of hal0 v1 (`server-ab`) results into v2 records. | `--bench-dir` |
+
+```sh
+hal0 bench plan --suite smoke
+hal0 bench run --suite smoke --dry-run
+hal0 bench status --json
+```
 
 ## Related references
 

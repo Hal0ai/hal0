@@ -251,7 +251,7 @@ function MemoryGraphPanel() {
           </span>
         </div>
       )}
-      <SRow k="Enabled" sub="Extract entities/relations from new memories in the background" v={
+      <SRow k="Enabled" sub="Reporting + extraction-slot routing. Hindsight builds its graph natively — this does not stop the daemon extracting" v={
         <input type="checkbox" checked={enabled} disabled={!st} onChange={e => setEnabled(e.target.checked)} style={{accentColor: "var(--accent)"}} />
       } />
       <SRow

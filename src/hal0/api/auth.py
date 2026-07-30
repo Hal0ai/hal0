@@ -196,6 +196,66 @@ def _config_require_auth() -> bool | None:
         return None
 
 
+def trust_forwarded_for_enabled() -> bool:
+    """Should caller-IP attribution (the login/rotate rate limiter) read
+    ``X-Forwarded-For`` instead of the raw TCP peer? (GH #1476)
+
+    Precedence (highest first), mirroring :func:`require_auth_enabled`:
+
+    1. ``HAL0_TRUST_FORWARDED_FOR`` env var — an explicit runtime override.
+    2. The persisted ``[security].trust_forwarded_for`` config toggle.
+    3. **OFF** — the safe default. Behind a reverse proxy every direct
+       peer is the proxy's own IP, so the raw peer collapses every real
+       caller onto one shared rate-limit bucket (one guesser 429-locks
+       everyone out) — but honouring the header unconditionally lets ANY
+       caller pick its own bucket by forging it. This is opt-in only for
+       an operator who has verified their reverse proxy strips/overwrites
+       any client-supplied ``X-Forwarded-For`` (Traefik/nginx/Caddy do
+       this in their default configurations).
+    """
+    raw = os.environ.get("HAL0_TRUST_FORWARDED_FOR", "").strip().lower()
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+
+    persisted = _config_trust_forwarded_for()
+    if persisted is not None:
+        return persisted
+
+    return False
+
+
+# Same cheap live-read-with-mtime-cache pattern as ``_config_require_auth``.
+_trust_forwarded_for_cache: tuple[str, float, bool | None] | None = None
+
+
+def _config_trust_forwarded_for() -> bool | None:
+    """Return the persisted ``[security].trust_forwarded_for`` value, or
+    ``None`` if unset/unreadable. Best-effort — see ``_config_require_auth``."""
+    global _trust_forwarded_for_cache
+    try:
+        from hal0.config import paths
+
+        target = str(paths.hal0_toml())
+        try:
+            mtime = os.stat(target).st_mtime
+        except OSError:
+            return None  # no config file on disk → unset
+
+        cached = _trust_forwarded_for_cache
+        if cached is not None and cached[0] == target and cached[1] == mtime:
+            return cached[2]
+
+        from hal0.config.loader import load_hal0_config
+
+        value = load_hal0_config().security.trust_forwarded_for
+        _trust_forwarded_for_cache = (target, mtime, value)
+        return value
+    except Exception:  # pragma: no cover - defensive; never fail the gate
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Principal resolution (cookie -> bearer -> api_key)
 

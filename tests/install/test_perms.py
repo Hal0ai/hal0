@@ -229,9 +229,12 @@ def test_flip_makes_etc_hal0_service_owned_and_setgid(tmp_hal0_home: str) -> Non
     ):
         assert rows[target].owner == "hal0", target
         assert rows[target].group == "hal0", target
-    # mode warts are NOT touched by the flip (ownership only).
+    # modes are NOT touched by the flip (ownership only) — they are whatever
+    # the table declares. api.env was the last 0644 wart here; #1466 retired it
+    # (it carries provider tokens and, after a rotation, the box's admin key).
     assert rows[paths.hal0_toml()].mode == 0o600
-    assert rows[etc / "api.env"].mode == 0o644
+    assert rows[etc / "api.env"].mode == paths.API_ENV_MODE
+    assert rows[etc / "api.env"].mode == 0o600
 
 
 def test_flip_keeps_agents_and_secrets_root_owned(tmp_hal0_home: str) -> None:
