@@ -130,7 +130,12 @@ test.describe('Model drawer — complete save and compact field help', () => {
       vision: false,
       rope_freq_base: 1_000_000,
     })
-    expect(putBody.defaults).not.toHaveProperty('n_gpu_layers')
+    // n_gpu_layers is the sunset key (spec-hw-slot-ownership §2). It rides as an
+    // explicit `null` rather than an omitted key since #1413: the server merges
+    // `defaults` one level deep now, so an absent key KEEPS the stored value —
+    // omitting it would round-trip the sunset value instead of unsetting it.
+    expect(putBody.defaults).toHaveProperty('n_gpu_layers')
+    expect(putBody.defaults.n_gpu_layers).toBeNull()
 
     await expect(page.locator('.drawer.open')).toHaveCount(0)
     await expect(page.locator('.hal0-toast')).toContainText('Updated Original model name')
