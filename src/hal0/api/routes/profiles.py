@@ -23,7 +23,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
 from hal0.api._audit import record_action
@@ -197,7 +197,7 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
 
 
 @router.post("/import")
-async def import_profile_route(request: Request) -> dict[str, Any]:
+async def import_profile_route(request: Request, response: Response) -> dict[str, Any]:
     """Import a profile from an uploaded ``.hal0profile.json`` envelope.
 
     Body::
@@ -205,8 +205,9 @@ async def import_profile_route(request: Request) -> dict[str, Any]:
         { "envelope": {...}, "name": "name", "dry_run": false }
 
     ``dry_run`` validates the envelope + checksum and reports whether the target
-    name already exists, without creating anything. A commit creates the profile
-    under ``name`` and returns the resolved profile item.
+    name already exists, without creating anything (200). A commit creates the
+    profile under ``name`` and returns the resolved profile item (201 — the
+    same "resource created" status POST /api/profiles uses).
 
     Raises:
         400 profiles.bad_envelope: not a valid hal0.profile envelope.
@@ -253,6 +254,7 @@ async def import_profile_route(request: Request) -> dict[str, Any]:
     ) as rec:
         resolved = import_profile(envelope, name, ProfileCatalog())
         rec.after = {"name": name}
+    response.status_code = 201
     return {"dry_run": False, "profile": resolved.to_dict()}
 
 
