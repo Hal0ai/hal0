@@ -219,10 +219,14 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [{ ...PRIMARY, device: 'gpu-rocm', threads: 0, binary: '', image_pin: null }, EMBED])
 
     await page.goto('/#slots/primary')
+    // Pick the runner while the gpu-rocm device still fits it — the Runner
+    // options are filtered by the device lane (runner_matches predicate);
+    // after the device flips to cpu the pick survives as an out-of-vocab
+    // persisted option.
+    await page.getByTestId('slot-hw-binary').selectOption({ index: 1 })
     await page.getByTestId('slot-hw-device').selectOption('cpu')
     await page.getByTestId('slot-hw-ngl').fill('0')
     await page.getByTestId('slot-hw-threads').fill('8')
-    await page.getByTestId('slot-hw-binary').selectOption({ index: 1 })
     await page.getByTestId('slot-hw-image-pin').fill('ghcr.io/example/runner:test')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
