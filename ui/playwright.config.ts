@@ -13,14 +13,38 @@
  *
  * Workers: 4 (Phase A is mock-only and view-isolated, no shared store).
  * Live-mode collapses to 1 worker — the real backend is single-flight.
+ *
+ * Port: derived per worktree (see `tests/e2e/port.ts`). This repo is worked in
+ * several parallel git worktrees; with a constant port plus
+ * `reuseExistingServer`, the second worktree's run attached to the first's Vite
+ * server and tested the wrong branch. Override with HAL0_E2E_PORT.
  */
+import { fileURLToPath } from 'node:url'
+
 import { defineConfig, devices } from '@playwright/test'
 
+import { resolveE2EPort } from './tests/e2e/port'
+
 const LIVE = process.env.HAL0_E2E_LIVE === '1'
-const PORT = process.env.HAL0_E2E_PORT || '5173'
+// Per-worktree by default so two local checkouts can't share one dev server —
+// `reuseExistingServer` below would otherwise silently attach this run to
+// whatever branch started first, reporting results for code it never checked
+// out (#1399). HAL0_E2E_PORT still wins; CI keeps the fixed port. The full
+// rationale (and a repro) lives in tests/e2e/port.ts.
+const PORT = String(
+  resolveE2EPort({
+    env: process.env,
+    dir: fileURLToPath(new URL('.', import.meta.url)),
+  }),
+)
 
 export default defineConfig({
   testDir: './tests/e2e',
+  // Playwright's default testMatch also globs `*.test.ts`, which would collect
+  // the vitest unit file next to the fixtures (tests/e2e/port.test.ts) and
+  // abort collection for the ENTIRE suite on its `vitest` import. Every e2e
+  // file here is a `.spec.ts`, so pin that explicitly (#1399).
+  testMatch: '**/*.spec.ts',
   timeout: LIVE ? 180_000 : 30_000,
   globalTimeout: LIVE ? 30 * 60_000 : 12 * 60_000,
   expect: { timeout: 5_000 },
