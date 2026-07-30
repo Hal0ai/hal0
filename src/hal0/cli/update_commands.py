@@ -23,6 +23,7 @@ import time
 from enum import StrEnum
 from pathlib import Path
 
+import httpx
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
@@ -102,21 +103,61 @@ def _refuse_if_editable() -> None:
     )
 
 
+#: How long the poll tolerates a completely unreachable API before giving up.
+#: A commit restarts hal0-api underneath us, so connection-refused is the
+#: EXPECTED response for a few seconds mid-update, not a failure (#1540).
+#: Bounded separately from ``timeout_s`` so a genuinely dead API still fails in
+#: seconds rather than sitting out the full 600s job budget.
+_POLL_UNREACHABLE_BUDGET_S = 180.0
+
+
 def _poll_job(
     job_id: str,
     *,
     terminal: tuple[str, ...] = ("applied", "failed"),
     timeout_s: float = 600.0,
 ) -> dict:
-    """Poll /api/updates/status/<id> until it reaches a terminal state."""
+    """Poll /api/updates/status/<id> until it reaches a terminal state.
+
+    Survives the restart window. ``commit`` bounces hal0-api as part of
+    applying, so this poll is talking to a service that is deliberately
+    going away and coming back. Treating the resulting connection error as
+    fatal made every successful update exit 1 (#1540).
+
+    Only *transport* failures are retried. A ``CliApiError`` raised from an
+    HTTP status (a live API answering 4xx/5xx) still dies immediately —
+    blanket-retrying would turn a real commit failure into a long hang.
+    """
     deadline = time.monotonic() + timeout_s
     last_state: str | None = None
+    unreachable_since: float | None = None
+    warned_unreachable = False
     while time.monotonic() < deadline:
         try:
             job = api_get(f"/api/updates/status/{job_id}")
         except CliApiError as exc:
-            die(str(exc))
-            return {}
+            if not isinstance(exc.__cause__, httpx.TransportError):
+                # A live API returned an error status - that is a real
+                # failure, not the restart window.
+                die(str(exc))
+                return {}
+            now = time.monotonic()
+            if unreachable_since is None:
+                unreachable_since = now
+            elif now - unreachable_since > _POLL_UNREACHABLE_BUDGET_S:
+                die(
+                    f"hal0-api stayed unreachable for "
+                    f"{_POLL_UNREACHABLE_BUDGET_S:.0f}s while applying job {job_id}. "
+                    "The update may have completed - check `systemctl status hal0-api` "
+                    "and `hal0 --version`."
+                )
+                return {}
+            if not warned_unreachable:
+                console.print("[dim]· hal0-api restarting, waiting for it to come back…[/dim]")
+                warned_unreachable = True
+            time.sleep(1.0)
+            continue
+        unreachable_since = None
         state = job.get("state")
         if state != last_state:
             console.print(f"[dim]· job {job_id} → {state}[/dim]")

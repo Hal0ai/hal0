@@ -160,3 +160,17 @@ def test_install_sh_runs_the_post_install_seam_assertion() -> None:
 def test_install_sh_requires_visudo_on_a_real_install() -> None:
     text = INSTALL_SH.read_text()
     assert "visudo not found" in text
+
+
+def test_restart_self_queues_the_job_instead_of_blocking() -> None:
+    """`restart-self` must pass --no-block (#1540).
+
+    hal0-api invokes this verb from inside hal0-api.service's own cgroup. A
+    blocking `systemctl restart` waits for the unit to stop — but stopping
+    the unit SIGTERMs that systemctl too, so the caller sees a signal-killed
+    status for a restart that actually succeeded, and any bookkeeping after
+    the call never runs. Queue the job and return.
+    """
+    wrapper = (REPO / "installer" / "wrappers" / "hal0-systemctl").read_text(encoding="utf-8")
+    arm = wrapper.split("restart-self)", 1)[1].split(";;", 1)[0]
+    assert "--no-block" in arm, f"restart-self must use --no-block, got:\n{arm}"

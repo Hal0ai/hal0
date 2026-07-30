@@ -135,7 +135,12 @@ case "$cmd" in
     ;;
 
   restart-self)                # literal-only: restart hal0-api.service, never a variable name
-    exec systemctl restart "$SELF_UNIT"
+    # --no-block: this is invoked BY hal0-api, from inside hal0-api.service's
+    # own cgroup. A blocking `systemctl restart` waits for the unit to stop —
+    # but stopping the unit SIGTERMs this systemctl too, so the caller's
+    # subprocess.run() returns a signal-killed status for a restart that
+    # actually succeeded (#1540). Queue the job and return instead.
+    exec systemctl restart --no-block "$SELF_UNIT"
     ;;
 
   help|"")

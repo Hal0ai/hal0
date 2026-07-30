@@ -12,10 +12,12 @@ from __future__ import annotations
 import inspect
 from typing import get_args
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
 from hal0.cli import update_commands as uc
+from hal0.cli._shared import CliApiError
 from hal0.cli.main import app
 from hal0.release.policy import ReleaseKind
 
@@ -373,3 +375,81 @@ def test_render_notes_none_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """No notes → nothing rendered (older releases without a notes payload)."""
     uc._render_notes(None)
     assert capsys.readouterr().out == ""
+
+
+# ── _poll_job across the restart window (#1540) ───────────────────────────────
+#
+# These are the first tests to exercise _poll_job itself. Every pre-existing
+# test monkeypatches it out, which is exactly why a successful update shipped
+# reporting failure: `commit` restarts hal0-api underneath the poll, and the
+# poll treated the resulting connection-refused as fatal.
+
+
+def _refusing_then(results: list, *, refusals: int):
+    """api_get stub: `refusals` transport failures, then `results` in order."""
+    calls = {"n": 0}
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        calls["n"] += 1
+        if calls["n"] <= refusals:
+            raise CliApiError(
+                f"GET {path} failed: ConnectError: [Errno 111] Connection refused"
+            ) from httpx.ConnectError("[Errno 111] Connection refused")
+        return results[min(calls["n"] - refusals - 1, len(results) - 1)]
+
+    return fake_get, calls
+
+
+def test_poll_job_survives_the_post_restart_connection_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Connection-refused mid-commit is the restart, not a failure (#1540)."""
+    fake_get, calls = _refusing_then([{"id": "c1", "state": "applied"}], refusals=4)
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc.time, "sleep", lambda _s: None)
+
+    job = uc._poll_job("c1", terminal=("applied", "failed"))
+
+    assert job["state"] == "applied"
+    assert calls["n"] == 5, "should have retried through every refusal"
+
+
+def test_poll_job_still_dies_on_a_live_api_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live API answering 4xx/5xx must still fail fast, not be retried.
+
+    Guards the over-broad-retry regression: blanket-retrying every
+    CliApiError would turn a genuine commit failure into a long hang.
+    """
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        raise CliApiError("GET /api/updates/status/c1 failed: HTTP 500: boom")
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc.time, "sleep", lambda _s: None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        uc._poll_job("c1", terminal=("applied", "failed"))
+    assert excinfo.value.code == 1
+
+
+def test_poll_job_gives_up_once_the_unreachable_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanently dead API fails on the unreachable budget, not the 600s one."""
+    fake_get, _calls = _refusing_then([{}], refusals=10_000)
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc.time, "sleep", lambda _s: None)
+
+    clock = {"t": 0.0}
+
+    def fake_monotonic() -> float:
+        clock["t"] += 10.0
+        return clock["t"]
+
+    monkeypatch.setattr(uc.time, "monotonic", fake_monotonic)
+
+    with pytest.raises(SystemExit) as excinfo:
+        uc._poll_job("c1", terminal=("applied", "failed"))
+    assert excinfo.value.code == 1
