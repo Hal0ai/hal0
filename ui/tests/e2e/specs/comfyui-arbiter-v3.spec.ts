@@ -299,4 +299,24 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
     // The "manager ↗" note on the models block header linked to nothing real.
     await expect(pane).not.toContainText('manager ↗')
   })
+
+  // Regression guard for the OTHER door the fabricated inventory came
+  // through. ComfyuiPane falls back to the static COMFYUI_V2_MOCK whenever
+  // `liveStatus` is falsy — which includes every /status poll error, not
+  // just storybook. Carrying real-looking counts in that constant would put
+  // fabricated inventory back on a real operator's screen the moment the
+  // backend hiccups, so COMFYUI_V2_MOCK.inventory must stay null.
+  test('a failing /status poll falls back to the static mock WITHOUT fabricating inventory', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) =>
+      route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }),
+    )
+    await gotoImageTab(page)
+
+    const pane = page.locator('.comfy-v2-pane')
+    // The pane still renders (fail-soft on the static mock)…
+    await expect(pane).toBeVisible()
+    // …but claims nothing about what models are installed.
+    await expect(pane.locator('.activity-extras .inv')).toHaveCount(0)
+    await expect(pane).not.toContainText('checkpoints')
+  })
 })

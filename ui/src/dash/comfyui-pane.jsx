@@ -355,6 +355,15 @@ function ModelsBlock({ inventory }) {
 }
 
 // ── Mock data (handoff demo values) ─────────────────────────────────────────
+//
+// NOTE (#1455): this object is the static fallback the pane falls back to
+// whenever `liveStatus` is falsy — i.e. before the first /status poll lands,
+// and on every poll error. Every field here is therefore reachable on a real
+// screen, not just in storybook. `inventory` is deliberately null: model
+// counts are the one thing the backend verifies by counting weight files on
+// disk (comfyui.py _model_inventory), so a fabricated count would be
+// indistinguishable from truth to the operator. null makes the pane hide the
+// models block until real data arrives, per the fresh-install contract.
 export const COMFYUI_V2_MOCK = {
   engine: {
     name: 'ComfyUI',
@@ -380,7 +389,7 @@ export const COMFYUI_V2_MOCK = {
   gtt: { used: 54, ceil: 80 },
   ram: { used: 61, ceil: 96 },
   stats: { util: 97, temp: 71, clk: 2.7, its: 1.9 },
-  inventory: { checkpoints: 6, diffusion: 4, loras: 11, vae: 3 },
+  inventory: null,
 }
 
 // ── Card header ───────────────────────────────────────────────────────────────
