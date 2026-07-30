@@ -215,15 +215,20 @@ function AgentsOverview() {
   // throughput/ctx from (_derive/_health both tolerate a null slot: status
   // falls back to "ready"/"not installed"/"down" off the AgentRecord alone,
   // health renders "—" placeholders).
-  const piRec = agents.find((a) => a.name === "pi-coder" || a.id === "pi-coder") || null;
-  const { cls: piStatusCls, label: piStatusLabel } = _derive(piRec, null);
+  // #1472: Pi and Turnstone used to look themselves up in GET /api/agents and
+  // run the result through _derive. That lookup can never hit: BUNDLED_AGENTS
+  // is ("hermes",) (src/hal0/agents/manager.py) and POST /api/agents/install
+  // 404s any other name, so no AgentRecord for pi-coder or turnstone is
+  // constructible. _derive(null, null) answers "not installed", which reads as
+  // "installable, just not installed yet" — the one thing that is not true.
+  // Both are roadmap entries; label them the way the legend already labels
+  // roadmap cards, and drop the dead lookup rather than leave wiring that
+  // implies a signal exists. Restore the probe when either is genuinely
+  // installable (Turnstone: loopback :9129 health; Pi: pi-coder driver config).
+  const ROADMAP_STATUS = { cls: "soon", label: "on the roadmap" };
+  const { cls: piStatusCls, label: piStatusLabel } = ROADMAP_STATUS;
   const piHealth = _health(null);
-
-  // Turnstone runs its own server (loopback :9129), not a hal0 backing slot —
-  // like Pi, status comes off the AgentRecord alone and health renders "—".
-  const turnstoneRec =
-    agents.find((a) => a.name === "turnstone" || a.id === "turnstone") || null;
-  const { cls: tsStatusCls, label: tsStatusLabel } = _derive(turnstoneRec, null);
+  const { cls: tsStatusCls, label: tsStatusLabel } = ROADMAP_STATUS;
   const tsHealth = _health(null);
 
   const onRestart = () => {
@@ -250,10 +255,18 @@ function AgentsOverview() {
     <div className="agents-overview" data-testid="agents-overview">
       <div className="ao-head">
         <div className="ao-eye">hal0 · agent library</div>
+        {/* #1472: this claimed Hermes, Pi and Turnstone were all "live —
+            their cards stream real install/endpoint status". Only Hermes can
+            be: BUNDLED_AGENTS is ("hermes",) and POST /api/agents/install
+            404s any other name, so no AgentRecord for pi-coder or turnstone
+            can exist and both cards were permanently "not installed" — which
+            reads as "installable, just not installed yet". They are on the
+            roadmap like the rest; say that instead of contradicting the
+            page's own legend. */}
         <p className="ao-sub">
-          Every agent in the runtime as a collectible card. <b>Hermes</b>, <b>Pi</b>, and
-          <b> Turnstone</b> are live — their cards stream real install/endpoint status and
-          flip to abilities, skills, and quick actions. The rest are on the roadmap.
+          Every agent in the runtime as a collectible card. <b>Hermes</b> is live — its card
+          streams real install/endpoint status and flips to abilities, skills, and quick
+          actions. <b>Pi</b> and <b>Turnstone</b> are on the roadmap alongside the rest.
         </p>
         <div className="ao-legend">
           <span className="ao-lz"><span className="d serving" />Serving <span className="k">· live, wired</span></span>

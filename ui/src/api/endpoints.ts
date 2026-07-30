@@ -45,8 +45,14 @@ export const ENDPOINTS = {
   // untouched; the unit is still name-keyed so the slot must be OFFLINE (409
   // while running) until the live-rename migration lands (rework §11.1).
   slotRename: (name: string) => `/api/slots/${encodeURIComponent(name)}/rename`,
-  slotLogsStream: (name: string) =>
-    `/api/slots/${encodeURIComponent(name)}/logs/stream`,
+  // `backfill` is explicit so a RECONNECT can ask for 0 (#1472): the server
+  // replays its 400-line default on every open, and the slot-log ring
+  // deliberately does not content-dedup (raw journald repeats progress-bar
+  // lines legitimately), so an unqualified reconnect duplicated up to 400
+  // lines. Omitted = the server default, which is what the first connect wants.
+  slotLogsStream: (name: string, backfill?: number) =>
+    `/api/slots/${encodeURIComponent(name)}/logs/stream` +
+    (backfill === undefined ? '' : `?backfill=${encodeURIComponent(String(backfill))}`),
   slotPull: (name: string) =>
     `/api/slots/${encodeURIComponent(name)}/pull`,
   slotPullStream: (name: string) =>

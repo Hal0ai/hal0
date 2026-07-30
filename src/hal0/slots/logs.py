@@ -20,6 +20,10 @@ Interface contract:
         Follow (``journalctl -f``) generator yielding filtered log lines. The
         caller checks :func:`shutil.which` before opening it and formats each
         line as an SSE frame. Cleans up the subprocess on cancel/close.
+    tail_journal_keepalive(unit, ..., keepalive_s) -> AsyncIterator[str | None]
+        Same stream, but yields ``None`` every ``keepalive_s`` of silence so
+        the SSE route can pulse a comment frame and keep proxies from reaping
+        an idle connection (#1472).
 
 The ``asyncio``/``shutil`` modules are referenced module-globally so tests can
 monkeypatch the subprocess spawn.
@@ -92,6 +96,18 @@ async def read_tail(unit: str, lines: int, quiet: bool = True) -> tuple[str, str
     if quiet:
         kept = [ln for ln in text.splitlines() if ln and not is_log_noise(ln)]
         text = "\n".join(kept[-want:])
+    if not text.strip():
+        # #1472: journalctl ran fine and produced nothing — which is exactly
+        # the "unit has never started" case this function's contract promises a
+        # hint for, and the case the route only attaches ``hint`` for. Returning
+        # ``None`` here meant GET /api/slots/{name}/logs answered a bare
+        # ``{"logs": ""}`` and the drawer rendered a blank pane with no reason.
+        # Covers the quiet-filtered-to-empty shape too: the operator sees the
+        # same blank pane either way, so it needs the same explanation.
+        return "", (
+            f"no journal entries for {unit} — the slot may not have started yet, "
+            "or its journal has been rotated away"
+        )
     return text, None
 
 
@@ -137,3 +153,77 @@ async def tail_journal(unit: str, backfill_n: int = 0, quiet: bool = True) -> As
             proc.kill()
         with _suppress_proc():
             await proc.wait()
+
+
+# ── SSE keepalive for the follow stream (#1472) ──────────────────────────────
+#
+# ``tail_journal`` yields only journalctl output, so a quiet slot emits ZERO
+# bytes — verified on the live box, where a 4-second curl against a `warming`
+# slot returned nothing at all. Any proxy idle timeout then reaps the
+# connection while the client still reports ``disconnected=false``, and the
+# client's own reconnect replays the default 400-line backfill into a ring
+# whose content-dedup is deliberately off (raw journald legitimately repeats
+# progress-bar lines), duplicating up to 400 lines per drop. Both sibling SSE
+# routes already pulse at 15 s; this one was the exception.
+
+#: Idle cadence, matched to ``api/routes/journal.py`` so one proxy timeout
+#: value (>15 s) covers every hal0 SSE stream.
+KEEPALIVE_S: float = 15.0
+
+#: Sentinel pushed by the pump when the underlying journal generator ends.
+_PUMP_DONE = object()
+
+
+async def tail_journal_keepalive(
+    unit: str,
+    backfill_n: int = 0,
+    quiet: bool = True,
+    *,
+    keepalive_s: float = KEEPALIVE_S,
+) -> AsyncIterator[str | None]:
+    """:func:`tail_journal`, plus a ``None`` yield every ``keepalive_s`` of silence.
+
+    ``None`` means "nothing to report, emit a keepalive"; the SSE route turns
+    it into a ``: keepalive`` comment frame. Real lines pass through verbatim,
+    so this wrapper is transparent to a chatty stream.
+
+    **Why a queue rather than the obvious ``asyncio.wait_for``.** Wrapping the
+    generator step directly — ``await asyncio.wait_for(agen.__anext__(), t)``
+    — cancels a *half-executed* async-generator frame on every idle tick. An
+    async generator is not re-entrant across a cancelled step: the next
+    ``__anext__`` can raise ``RuntimeError: anext(): asynchronous generator is
+    already running``, or silently lose the value that was in flight. Since
+    idle ticks are the common case on a quiet slot, that failure mode would be
+    the normal path, not an edge case. Pumping into a queue moves the
+    cancellation onto ``Queue.get()``, which is designed for it, and leaves the
+    journal generator advancing on its own task.
+    """
+    queue: asyncio.Queue[str | object] = asyncio.Queue()
+
+    async def _pump() -> None:
+        try:
+            async for line in tail_journal(unit, backfill_n, quiet):
+                await queue.put(line)
+        finally:
+            # Always signal termination — including on cancellation — so a
+            # consumer blocked on get() is never stranded waiting for a
+            # producer that has already gone away.
+            queue.put_nowait(_PUMP_DONE)
+
+    task = asyncio.create_task(_pump())
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=keepalive_s)
+            except TimeoutError:
+                yield None  # idle — caller emits the comment frame
+                continue
+            if item is _PUMP_DONE:
+                return
+            yield item  # type: ignore[misc]
+    finally:
+        # Client disconnect / consumer aclose(): stop the pump, which closes
+        # the journalctl subprocess through tail_journal's own finally block.
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

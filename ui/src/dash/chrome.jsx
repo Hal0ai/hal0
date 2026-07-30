@@ -672,7 +672,6 @@ function Sidebar({ route, param, onGo }) {
 // Journal source → device hue (mirrors the slot device palette).
 const _SRC_HUE = {
   hal0: 'var(--accent)',
-  lemond: 'var(--dev-vulkan)',
   npu: 'var(--dev-npu)',
   openwebui: 'var(--info)',
   comfyui: '#5ea4f9',
