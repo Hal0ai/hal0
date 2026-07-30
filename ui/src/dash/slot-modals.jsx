@@ -119,6 +119,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Delete + rename are owned by their extracted dialogs (D2 decomposition):
 	// dash/slots/DeleteSlotDialog.jsx and dash/slots/RenameSlotDialog.jsx.
 	const [renameOpen, setRenameOpen] = useStateSM(false);
+	// Inline model edit — stacks the reusable ModelDrawer over this drawer
+	// (equal z-index; later DOM order wins) so model-tune edits don't force a
+	// close → Models page → reopen round-trip. The slot drawer and its
+	// unsaved edits stay mounted underneath.
+	const [modelEditOpen, setModelEditOpen] = useStateSM(false);
 	const restartMut = useSlotRestart();
 	const swapMut = useSlotSwap();
 	const profilesQuery = useProfiles();
@@ -345,6 +350,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			setSubmitErr(null);
 			setDiscardOpen(false);
 			setPendingSwap(null);
+			setModelEditOpen(false);
 			setFieldErrs({});
 			// Task 5: re-seed chat_template override from the slot prop.
 			setChatTemplate(normTemplate(slot.chat_template));
@@ -649,6 +655,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		(overrideOpen ? normTemplate(chatTemplate) : "") !==
 			normTemplate(slot.chat_template);
 	const requestClose = () => {
+		// While the ModelDrawer is stacked on top, one Esc press fires BOTH
+		// drawers' document-level keydown listeners — swallow ours so only the
+		// top layer closes (and no spurious discard dialog pops underneath).
+		if (modelEditOpen) return;
 		if (dirty) {
 			setDiscardOpen(true);
 			return;
@@ -1160,41 +1170,55 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										<FieldInfoIcon description={isContainer ? "Swap restarts the container to load the new model" : "Applies immediately"} />
 									</div>
 									<div className="form-ctl">
-										<select
-											className="input mono"
-											value={cur}
-											disabled={saving}
-											aria-label={`Model for ${slot.name}`}
-											onChange={(e) => {
-												const id = e.target.value;
-												if (!id || id === cur) return;
-												const picked = compatible.find((m) => m.id === id);
-												const label = picked?.longName || id;
-												// UI-5: swapping the model on a LIVE container slot cold-restarts
-												// it (~model-load seconds). Confirm through the shared
-												// ConfirmDialog before firing — stashing the pick re-renders the
-												// select back to `cur` (value={cur}), so cancel needs no manual
-												// revert. Mirrors the delete/dirty-close confirm gates.
-												const live = slotButtonPhase(slot) === "running";
-												if (isContainer && live) {
-													setPendingSwap({ id, label });
-													return;
-												}
-												fireSwap(id, label);
-											}}
+										<div
+											style={{ display: "flex", gap: 8, alignItems: "center" }}
 										>
-											{cur && !has && (
-												<option value={cur}>
-													{slot.modelLong || slot.model || cur}
-												</option>
-											)}
-											{!cur && <option value="">—</option>}
-											{compatible.map((m) => (
-												<option key={m.id} value={m.id}>
-													{m.longName || m.id}
-												</option>
-											))}
-										</select>
+											<select
+												className="input mono"
+												style={{ flex: 1 }}
+												value={cur}
+												disabled={saving}
+												aria-label={`Model for ${slot.name}`}
+												onChange={(e) => {
+													const id = e.target.value;
+													if (!id || id === cur) return;
+													const picked = compatible.find((m) => m.id === id);
+													const label = picked?.longName || id;
+													// UI-5: swapping the model on a LIVE container slot cold-restarts
+													// it (~model-load seconds). Confirm through the shared
+													// ConfirmDialog before firing — stashing the pick re-renders the
+													// select back to `cur` (value={cur}), so cancel needs no manual
+													// revert. Mirrors the delete/dirty-close confirm gates.
+													const live = slotButtonPhase(slot) === "running";
+													if (isContainer && live) {
+														setPendingSwap({ id, label });
+														return;
+													}
+													fireSwap(id, label);
+												}}
+											>
+												{cur && !has && (
+													<option value={cur}>
+														{slot.modelLong || slot.model || cur}
+													</option>
+												)}
+												{!cur && <option value="">—</option>}
+												{compatible.map((m) => (
+													<option key={m.id} value={m.id}>
+														{m.longName || m.id}
+													</option>
+												))}
+											</select>
+											<button
+												className="btn ghost sm"
+												data-testid="slot-model-edit-open"
+												disabled={!curModelRow}
+												title="Edit the bound model's tune (flags, template, caps) in place"
+												onClick={() => setModelEditOpen(true)}
+											>
+												Edit model…
+											</button>
+										</div>
 										{swapping && <div className="hint">Swapping…</div>}
 									</div>
 								</div>
@@ -1830,6 +1854,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				open={renameOpen}
 				slot={slot}
 				onClose={() => setRenameOpen(false)}
+			/>
+			{/* Stacked model editor — the reusable ModelDrawer (window-global,
+	        same instance contract as models.jsx). Rendered later in the DOM at
+	        equal z-index so it fully overlays this drawer; its own save path
+	        closes it and returns here with every slot edit intact. */}
+			<ModelDrawer
+				open={modelEditOpen && !!curModelRow}
+				onClose={() => setModelEditOpen(false)}
+				model={curModelRow}
 			/>
 			<ConfirmDialog
 				open={discardOpen}
