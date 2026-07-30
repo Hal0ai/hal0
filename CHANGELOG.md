@@ -21,6 +21,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **Slot drawer Save is no longer silently dead on an NPU slot with a malformed persisted `extra_args`** (#1389). The freeform extra_args field and its error surface live in the Model group, which is unmounted for `device === "npu"` — but the Save validator still computed `extraArgsErr` from the persisted `llamacpp_args`. A slot whose stored override carried an unbalanced quote blocked every Save on the slot with zero feedback: no request fired, no error rendered, the drawer just did nothing. The validator now only vetoes Save when the field is actually mounted; an operator who flips the device off `npu` still sees (and must fix) the error before the field's value can ride a write.
+
 ### Added
 
 - **`hal0 slot migrate-flags` — the flags-fold migrator finally has an operator entry point** (#1396). `hal0.config.migrations.slot_flags_fold` has existed since the flags-ownership lane, but nothing ever exposed it: no CLI, no installer hook, no boot wiring — only tests referenced it. Its sibling folds both had commands (`slot migrate-hw`, `slot migrate-caps`). Meanwhile the launch-side readers were already deleted (`providers.container` drops `profile_flags`/`slot_parallel`/`extra_args`; `resolve_chat_template` no longer consults the slot), so an upgraded box with a bench-tuned slot silently launched **without** that tune and had no supported way to recover it — the exact ordering hazard spec-flags-ownership §5.4 flagged ("readers become expired shims with a sunset"). The new command mirrors `migrate-hw`: dry-run by default, `--apply` takes a timestamped backup and passes the `deploy_window=True` ack, refuses to run while any hal0 unit is live (`--stop-services` to stop them), and is never wired into an automatic path. Divergent-share conflicts (two slots folding different tunes onto one model) are surfaced as a clean non-zero exit listing every conflict — on the dry-run path too, which previously would have raised an unhandled `RuntimeError` at an operator merely *previewing* a conflicted box.

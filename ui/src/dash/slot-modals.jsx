@@ -427,7 +427,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		}
 		// Block Save on malformed extra_args (unbalanced quotes) the same way
 		// numeric fields block — the resolved command can't be built from it.
-		if (extraArgsErr) {
+		// Only when the field is actually mounted (`device !== "npu"` gates the
+		// Model group): a malformed PERSISTED value on an NPU slot must not
+		// veto unrelated saves with the error surface unmounted (#1389).
+		if (extraArgsErr && device !== "npu") {
 			errs.extraArgs = extraArgsErr;
 		}
 		if (Object.keys(errs).length > 0) {
