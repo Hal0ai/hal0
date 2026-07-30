@@ -1178,11 +1178,19 @@ _ARTEFACT_NAME_RE = re.compile(r"""name\s*=\s*["']?\s*([A-Za-z0-9_.\-]+)""")
 
 #: An unterminated `<function=X` opener — the terminated form is already handled
 #: by the shared text-call fallback (`parse_text_tool_calls`).
-_ARTEFACT_FN_RE = re.compile(r"<\s*function\s*=\s*([A-Za-z0-9_.\-]+)")
+_ARTEFACT_FN_RE = re.compile(r"<\s*function\s*=\s*([A-Za-z0-9_.\-]+)", re.IGNORECASE)
 
-#: A stated call in prose: `slot_list(` / `slot_list()`. Requiring the paren
-#: form (and a known tool name) is what keeps ordinary prose from misfiring.
+#: Call-tag syntax of any shape. Reaching this module at all means neither
+#: extractor could make a call out of it, so a surviving `<function` /
+#: `<tool_call` opener is by definition a FAILED call attempt.
+_ARTEFACT_TAG_RE = re.compile(r"<\s*/?\s*(?:function|tool_call)\b", re.IGNORECASE)
+
+#: A stated call in prose: `slot_list(` / `slot_list()`. The paren form is what
+#: separates "I will call X()" from a reply that merely mentions X.
 _CALL_FORM_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_.\-]*)\s*\(")
+
+#: Debris left over once a `name="X"` fragment is lifted out of a mangled tag.
+_TAG_DEBRIS = " \t\r\n<>/\"'="
 
 
 def _tool_intent_artefact(response: dict[str, Any], known_tool_names: frozenset[str]) -> str | None:
@@ -1190,16 +1198,26 @@ def _tool_intent_artefact(response: dict[str, Any], known_tool_names: frozenset[
 
     Called ONLY after both the native and the text-embedded extractors came up
     empty — this is the "the model wanted a tool and produced garbage instead"
-    detector, not a third parser. Returns the tool name so it can be logged.
+    detector, not a third parser. Returns the name it was reaching for (for the
+    log line); ``"(unnamed)"`` when the artefact carries no readable name.
 
-    Two signals, both requiring the name to be a tool actually surfaced this
-    turn (``known_tool_names``), which is what makes a false positive
-    essentially impossible — an unknown identifier is never a reroute trigger:
+    DELIBERATELY NOT GATED ON THE NAME BEING A REAL TOOL. The measured leak was
+    ``<function name="slot_list">`` and there is no ``slot_list`` in the
+    catalogue — the real names are ``list_slots`` / ``slot_state`` — so a
+    membership check would have missed the exact failure this exists to catch.
+    A 1B reaching for a tool it half-remembers is *more* reason to hand the
+    round to the capable model, not less: that model then picks the right tool.
+    ``known_tool_names`` is therefore only the "are any tools surfaced at all"
+    guard (with none, there is nothing to reroute for) and a preference for
+    which name to report.
 
-    (a) a mangled call tag in the VISIBLE text — ``name="slot_list"`` or a bare
-        ``<function=slot_list``. No steward reply contains tag syntax naming one
-        of its own tools; this only ever appears when the tool parser chewed on
-        the completion.
+    Two signals, both narrow enough that ordinary prose cannot trip them:
+
+    (a) call-tag syntax surviving in the VISIBLE text. Either a whole
+        ``<function`` / ``<tool_call`` opener, or the bare ``name="X">``
+        REMNANT the jinja parser leaves after eating the opener — recognised
+        only when the fragment is essentially the entire reply, so a sentence
+        that happens to contain ``name="ops"`` is not an artefact.
 
     (b) a stated call in the reasoning with NOTHING to show for it — the
         no-``--jinja`` shape, where ``content`` is empty and
@@ -1212,20 +1230,34 @@ def _tool_intent_artefact(response: dict[str, Any], known_tool_names: frozenset[
 
     inline_thinking, visible = _split_thinking(_assistant_text(response))
 
-    # (a) a mangled call tag in the visible text.
-    for pattern in (_ARTEFACT_NAME_RE, _ARTEFACT_FN_RE):
-        for m in pattern.finditer(visible):
-            if m.group(1) in known_tool_names:
-                return m.group(1)
+    def _name_in(text: str) -> str | None:
+        """Prefer a real tool name; otherwise report whatever was written."""
+        found = [m.group(1) for p in (_ARTEFACT_FN_RE, _ARTEFACT_NAME_RE) for m in p.finditer(text)]
+        for name in found:
+            if name in known_tool_names:
+                return name
+        return found[0] if found else None
+
+    # (a1) a surviving call-tag opener — unambiguous failed-call syntax.
+    if _ARTEFACT_TAG_RE.search(visible):
+        return _name_in(visible) or "(unnamed)"
+
+    # (a2) the measured remnant: content IS a `name="X">` fragment and little
+    # else. Removing the fragment must leave nothing but tag punctuation.
+    if _ARTEFACT_NAME_RE.search(visible) and not _ARTEFACT_NAME_RE.sub("", visible).strip(
+        _TAG_DEBRIS
+    ):
+        return _name_in(visible) or "(unnamed)"
 
     # (b) stated intent, nothing to show for it. A non-empty reply is a reply.
     if visible.strip():
         return None
     reasoning = "\n".join(t for t in (_assistant_thinking(response), inline_thinking) if t)
-    for m in _CALL_FORM_RE.finditer(reasoning):
-        if m.group(1) in known_tool_names:
-            return m.group(1)
-    return None
+    matches = [m.group(1) for m in _CALL_FORM_RE.finditer(reasoning)]
+    for name in matches:
+        if name in known_tool_names:
+            return name
+    return matches[0] if matches else None
 
 
 def _tool_reroute_unavailable_message(tool_model: str, error: str) -> str:
