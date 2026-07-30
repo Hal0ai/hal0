@@ -64,7 +64,11 @@ export function ImageGenPage() {
 
   const imgDirty = imgModel !== (imgSelection.model || "") || imgEnabled !== !!imgSelection.enabled || imgProvider !== (imgSelection.provider || "");
   const defaultsDirty = !!imgSlotName && (defaultSize !== origSize || defaultSteps !== origSteps || idleRestore !== origIdle);
-  const imgCatalogItems = imgCatalogs.img?.items || imgCatalogs.img?.models || [];
+  // catalogs.img.img is a bare array of picker rows (GET /api/capabilities:
+  // {backends, catalogs, selections} — see mockFixtures.ts
+  // buildCapabilities() for the canonical shape), not an object with an
+  // .items/.models wrapper.
+  const imgCatalogItems = imgCatalogs.img || [];
   const imgStatus = imgSelection.status || "offline";
 
   const doSave = async () => {
