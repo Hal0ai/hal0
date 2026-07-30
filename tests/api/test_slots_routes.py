@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.registry import Upstream
+from tests.fixtures.slot_probe import probe_slot_name
 
 # ── container stub ───────────────────────────────────────────────────────────
 
@@ -65,10 +66,14 @@ def container_stub() -> Iterator[dict[str, Any]]:
     provider.load_sync = MagicMock(side_effect=_load_sync)
     provider.unload_sync = MagicMock(side_effect=_unload_sync)
     provider.wait_ready = AsyncMock(return_value=None)
-    provider.is_active = MagicMock(side_effect=lambda name: name in state["active"])
+    # The probes take the slot CONFIG in production (#1417 — the provider
+    # derives the id-keyed instance token from it); this stub keys by name.
+    provider.is_active = MagicMock(
+        side_effect=lambda slot: probe_slot_name(slot) in state["active"]
+    )
     provider.health = AsyncMock(side_effect=lambda port: {"ok": True, "status": "healthy"})
     provider.running_image = MagicMock(return_value=None)
-    provider.running_argv = MagicMock(side_effect=lambda name: state.get("running_argv"))
+    provider.running_argv = MagicMock(side_effect=lambda slot: state.get("running_argv"))
     provider.expected_argv = MagicMock(
         side_effect=lambda cfg, model_info: state.get("expected_argv")
     )
