@@ -73,20 +73,21 @@ _MANIFEST_SIGNER_ISSUER='https://token.actions.githubusercontent.com'
 # hardening this file exists to provide. Unsupported platform, failed
 # download, or digest mismatch all fail closed with manual-install guidance.
 #
-# ── MAINTENANCE: this pin must be bumped by hand ──────────────────────────
-# There is no automated bump path in this repo: there is no
-# .github/dependabot.yml and no renovate config, and
-# scripts/update-toolbox-digests.sh only refreshes ghcr.io *image* digests in
-# the repo-root manifest.json — it never touches this file. Bump manually
-# when sigstore cuts a release (aim to stay within a release or two):
+# ── MAINTENANCE: bump these three constants with the tool, never by hand ──
+# scripts/update-cosign-pin.sh owns this pin end to end:
 #
-#   V=v3.1.2
-#   curl -fsSL "https://github.com/sigstore/cosign/releases/download/${V}/cosign_checksums.txt" \
-#       | grep -E 'cosign-linux-(amd64|arm64)$'
+#   scripts/update-cosign-pin.sh                   # is the pin current?
+#   scripts/update-cosign-pin.sh --bump            # verify + rewrite below
 #
-# then paste both digests below and update _COSIGN_VERSION. That checksums
-# file is itself keyless-signed (cosign_checksums.txt.sigstore.json on the
-# same release) — verify it with an existing cosign before trusting it.
+# It refuses to write a digest it has not authenticated. The release's
+# cosign_checksums.txt is keyless-signed by sigstore
+# (cosign_checksums.txt.sigstore.json on the same release); the script
+# verifies that bundle with cosign — bootstrapping the verifier from the pin
+# currently in this file when the host has none — before reading a digest
+# out of it, then re-downloads each release binary and sha256sums it against
+# the signed manifest. Any failure exits non-zero with these constants
+# untouched. .github/workflows/cosign-pin.yml runs the check weekly and
+# opens a review PR on drift; nothing auto-merges.
 # tests/installer/test_bootstrap_cosign_fetch.py pins the shape of these
 # constants so a malformed or half-finished bump fails CI.
 _COSIGN_VERSION='v3.1.2'
