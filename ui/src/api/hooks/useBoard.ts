@@ -14,7 +14,7 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
-import { api, apiGet, apiPost, apiPatch, apiPut, apiDelete } from '../client'
+import { api, apiGet, apiPost, apiPatch, apiPut, apiDelete, readErrorEnvelope } from '../client'
 import { ENDPOINTS } from '../endpoints'
 import { normaliseAssignee, normaliseProfile } from './boardActors.js'
 
@@ -1072,6 +1072,13 @@ export interface ChatMessage {
   approval_id?: string
   /** Internal streaming marker: which assistant segment of which turn this bubble is. */
   seg?: string
+  /** True for a bubble surfacing a chat-level failure (pre-stream HTTP error,
+   * network failure, or in-stream SSE `error` frame) — lets the UI offer a
+   * Retry affordance instead of just rendering the message. */
+  error?: boolean
+  /** Set alongside `error`: the operator's original composed text, so Retry
+   * can resend it verbatim instead of making them retype it. */
+  retryText?: string
 }
 
 export interface UseBoardChatResult {
@@ -1228,7 +1235,42 @@ export function useBoardChat(board?: string): UseBoardChatResult {
       signal,
     })
       .then(async (res) => {
-        if (!res.ok || !res.body) {
+        if (!res.ok) {
+          // Pre-stream failure (503 slot.loading while warming, 502 on a
+          // crash-looped backend, 401, gateway down, …). Lift the backend's
+          // structured envelope — same helper client.ts's api() uses — and
+          // surface it exactly like the in-stream SSE `error` frame below,
+          // instead of silently dropping the turn (issue #1452).
+          const err = await readErrorEnvelope(res)
+          const retryAfterS = err.details?.retry_after_s
+          const hint =
+            typeof retryAfterS === 'number' && retryAfterS > 0
+              ? ` — retry in ${retryAfterS}s`
+              : ''
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              body: `⚠ ${err.message}${hint}`,
+              at: new Date().toISOString(),
+              error: true,
+              retryText: text,
+            },
+          ])
+          setStreaming(false)
+          return
+        }
+        if (!res.body) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              body: '⚠ chat response had no stream body',
+              at: new Date().toISOString(),
+              error: true,
+              retryText: text,
+            },
+          ])
           setStreaming(false)
           return
         }
@@ -1433,9 +1475,22 @@ export function useBoardChat(board?: string): UseBoardChatResult {
       .catch((err: unknown) => {
         const isAbort =
           err instanceof Error && err.name === 'AbortError'
-        if (!isAbort) {
-          setStreaming(false)
-        }
+        if (isAbort) return // operator hit Stop — intentional, not a failure
+        // Network-level failure (gateway down, DNS, connection reset, …) —
+        // same treatment as the pre-stream HTTP-error path above (#1452).
+        const message =
+          err instanceof Error && err.message ? err.message : 'chat request failed — network error'
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            body: `⚠ ${message}`,
+            at: new Date().toISOString(),
+            error: true,
+            retryText: text,
+          },
+        ])
+        setStreaming(false)
       })
   }
 
