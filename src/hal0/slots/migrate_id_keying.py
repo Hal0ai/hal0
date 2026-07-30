@@ -281,7 +281,6 @@ def migrate_slot_id_keying(
                 device=device,
                 coresident_group="npu-flm-trio" if device == "npu" else None,
                 is_seed=name in seeded,
-                enabled=bool(slot_tbl.get("enabled", True)),
             )
         slot_id = row.id
 
