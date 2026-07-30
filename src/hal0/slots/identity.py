@@ -61,7 +61,6 @@ class SlotRow:
     runtime: str
     coresident_group: str | None
     is_seed: bool
-    enabled: bool
     created_at: float
     updated_at: float
 
@@ -75,7 +74,6 @@ def _row_to_slot(row: sqlite3.Row) -> SlotRow:
         runtime=row["runtime"] or "container",
         coresident_group=row["coresident_group"],
         is_seed=bool(row["is_seed"]),
-        enabled=bool(row["enabled"]),
         created_at=float(row["created_at"]),
         updated_at=float(row["updated_at"]),
     )
@@ -130,16 +128,22 @@ class SlotIdentityStore:
         runtime: str = "container",
         coresident_group: str | None = None,
         is_seed: bool = False,
-        enabled: bool = True,
         conn: sqlite3.Connection | None = None,
     ) -> SlotRow:
-        """Insert a new slot row and return it (id assigned by SQLite)."""
+        """Insert a new slot row and return it (id assigned by SQLite).
+
+        ``slot.enabled`` is left to its schema default (``1``) — GH #1383
+        dropped the enabled/disabled surface (model-presence is the
+        activation signal since #1369), but the column itself stays
+        (additive schema, no destructive migration) so no INSERT column
+        list touches it.
+        """
         try:
             with self._write(conn) as c:
                 cur = c.execute(
                     "INSERT INTO slot "
-                    "(name, slot_type, device, runtime, coresident_group, is_seed, enabled) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(name, slot_type, device, runtime, coresident_group, is_seed) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         name,
                         slot_type,
@@ -147,7 +151,6 @@ class SlotIdentityStore:
                         runtime,
                         coresident_group,
                         1 if is_seed else 0,
-                        1 if enabled else 0,
                     ),
                 )
                 new_id = int(cur.lastrowid)
@@ -187,17 +190,6 @@ class SlotIdentityStore:
             if cur.rowcount == 0:
                 raise SlotNotFound(f"no slot with id={slot_id}")
 
-    def set_enabled(
-        self, slot_id: int, enabled: bool, *, conn: sqlite3.Connection | None = None
-    ) -> None:
-        with self._write(conn) as c:
-            cur = c.execute(
-                "UPDATE slot SET enabled = ?, updated_at = strftime('%s','now') WHERE id = ?",
-                (1 if enabled else 0, slot_id),
-            )
-            if cur.rowcount == 0:
-                raise SlotNotFound(f"no slot with id={slot_id}")
-
     def delete(self, slot_id: int, *, conn: sqlite3.Connection | None = None) -> None:
         """Drop the slot row. ``slot_link`` children cascade; ``port_claim``
         rows keep their audit trail (``slot_id`` set NULL by the FK)."""
@@ -205,15 +197,12 @@ class SlotIdentityStore:
             c.execute("DELETE FROM slot WHERE id = ?", (slot_id,))
 
     def list_by_type(
-        self, slot_type: str, *, enabled_only: bool = True, conn: sqlite3.Connection | None = None
+        self, slot_type: str, *, conn: sqlite3.Connection | None = None
     ) -> list[SlotRow]:
-        sql = "SELECT * FROM slot WHERE slot_type = ?"
-        params: tuple[object, ...] = (slot_type,)
-        if enabled_only:
-            sql += " AND enabled = 1"
-        sql += " ORDER BY id"
         with self._read(conn) as c:
-            rows = c.execute(sql, params).fetchall()
+            rows = c.execute(
+                "SELECT * FROM slot WHERE slot_type = ? ORDER BY id", (slot_type,)
+            ).fetchall()
         return [_row_to_slot(r) for r in rows]
 
     def list_all(self, *, conn: sqlite3.Connection | None = None) -> list[SlotRow]:
