@@ -86,9 +86,9 @@ You do not need to install cosign yourself and nothing is left on the host.
 
 The bootstrap then fetches the release manifest, SHA-256- and cosign-verifies
 the tarball, then hands off to the installer, which installs podman, builds
-the venv, writes systemd units, runs first-run setup to scaffold empty
-capability slots (no model assigned to any of them), and starts `hal0-api`
-on port `8080`. The installer re-execs itself under `sudo` when piped
+the venv, writes systemd units, scaffolds the capability slots (no model
+assigned to any of them except `brain`, whose steward weights it pulls),
+and starts `hal0-api` on port `8080`. The installer re-execs itself under `sudo` when piped
 through `bash`. See [Install hal0](/docs/getting-started/install/) for the
 full sequence and every environment variable and flag.
 
@@ -134,9 +134,9 @@ and that ports `8080`/`3001` are free. The API and dashboard are at
 
 <CardGrid>
   <LinkCard
-    title="First-run setup"
-    href="/docs/getting-started/setup/"
-    description="Run the hal0 setup TUI to provision slots, models, and extensions."
+    title="What the installer does"
+    href="/docs/getting-started/install/#what-the-installer-does"
+    description="Every step install.sh runs, the two questions it asks, and the one model it pulls."
   />
   <LinkCard
     title="Load your first model"

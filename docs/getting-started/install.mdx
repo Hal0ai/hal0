@@ -1,6 +1,6 @@
 ---
 title: Install hal0
-description: Install hal0 with one command — the bootstrap verifies the signed channel manifest and release artifact, installs podman, scaffolds empty capability slots, and starts the API.
+description: Install hal0 with one command — the bootstrap verifies the signed channel manifest and release artifact, installs podman, scaffolds capability slots, pulls the brain steward model, and starts the API.
 sidebar:
   order: 10
 ---
@@ -14,6 +14,14 @@ it, and hands off to the real installer.
 ```sh
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
+
+<Aside type="tip" title="The installer is the whole setup">
+There is no separate first-run wizard to run afterwards. The installer does
+all of it: it asks where models should live, optionally takes a Hugging Face
+token, creates every capability slot, downloads the hal0 brain steward model,
+and starts the API. When it finishes you open the dashboard and assign models
+to slots.
+</Aside>
 
 To install from the opt-in preview channel instead:
 
@@ -131,15 +139,93 @@ For a full production deployment, use the bootstrap script above.
    fallback is not accepted by the bootstrap. This second signature check is
    defense-in-depth.
 
-5. **Unpack and hand off** to `installer/install.sh`, which runs
-   pre-flight checks, installs podman + the Python venv, builds the
-   dashboard, writes config and systemd units, runs first-run setup
-   (`hal0 setup --auto --no-pull --no-extensions`) to scaffold empty
-   capability slots (`agent`, `embed`, `rerank`, `stt`, `tts`, `vision`,
-   plus `coder` when an agent extension is on) — each wired with a
-   device, profile, and port but no model assigned — and starts the API.
+5. **Unpack and hand off** to `installer/install.sh` — see
+   [What the installer does](#what-the-installer-does) below.
 
 </Steps>
+
+## What the installer does
+
+`installer/install.sh` prints a numbered banner per step. In order, it:
+
+<Steps>
+
+1. **Pre-flight** — architecture, systemd, Python ≥ 3.12, a container
+   runtime, GPU/NPU device visibility, disk space, and port availability.
+   The GPU gate is a hard stop when passthrough is visibly broken (the
+   render device is present but its gid maps to no group in the container),
+   because every slot would otherwise fall back to CPU silently.
+
+2. **Ask for the two things it can't derive** — the model storage
+   directory and, optionally, a Hugging Face token. Both are pre-filled
+   and both are skipped entirely on a non-interactive install; see
+   [Operator input](#operator-input).
+
+3. **Lay down the platform** — the `hal0` system user, the FHS layout under
+   `/usr/lib/hal0`, the Python venv, the dashboard build, `/etc/hal0`
+   config, and the systemd units.
+
+4. **Seed the curated container slots** — `agent`, `brain`, `coder`,
+   `embed`, `flm`, `img`, `qwen3tts`, `rerank`, `tts`, `utility` are copied
+   verbatim from the release's `installer/etc-hal0/slots/`, carrying their
+   hand-tuned profile recipes. An existing file is never overwritten.
+
+5. **Scaffold anything left over** — the remaining capability slots (e.g.
+   `vision`) get a device, profile, and port derived from the hardware
+   probe, with **no model assigned**. Nothing is downloaded here.
+
+6. **Download the brain steward model** — see [The brain slot](#the-brain-slot).
+
+7. **NPU prerequisites, ComfyUI model share, bundled agent skills**, then
+   **start the API**.
+
+</Steps>
+
+## Operator input
+
+The installer asks exactly two questions, and only when stdin is a terminal:
+
+| Question | Pre-filled from | If you press Enter |
+|---|---|---|
+| Where should downloaded models live? | `--models-dir=PATH` / `HAL0_MODELS_DIR` | `/var/lib/hal0/models` |
+| Hugging Face token (input hidden) | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | skipped — open models need none |
+
+A supplied `--models-dir` / `HAL0_MODELS_DIR` is never re-asked. A non-default
+store is written to `/etc/hal0/hal0.toml` as `[models].store`, so pulls, scans,
+and slot container mounts all resolve through the one value. A token is
+validated with `hf auth whoami` (a failure warns, it never aborts the install)
+and persisted to `/var/lib/hal0/secrets/hal0-api.env`, root-only `0600` — not
+into the world-readable `api.env`. You can add or rotate one later from the
+dashboard's **Settings → Secrets** tab, or by re-running the installer with
+`HF_TOKEN` in the environment.
+
+<Aside type="note" title="Piped and headless installs never prompt">
+The gate tests stdin, so `curl -fsSL https://hal0.dev/install.sh | sudo bash`
+(stdin is the script itself) and `ssh host 'sudo bash install.sh'` (no tty at
+all) both run completely unattended on the flag/env values. Only a downloaded,
+directly-invoked `sudo bash install.sh` prompts. `HAL0_NONINTERACTIVE=1` forces
+the unattended path even on a terminal.
+</Aside>
+
+## The brain slot
+
+Every slot the installer creates ships **without** a model — no surprise
+multi-gigabyte download, no container crash-looping against a file that isn't
+there. The `brain` slot is the one exception. It backs the dashboard's sidebar
+steward chat (the virtual model `hal0/brain`), so the installer downloads its
+weights and binds them, and the steward works the moment the install finishes.
+
+Which build it pulls depends on your hardware, and the difference matters: the
+quantised builds use custom tensor types that only hal0's ROCmFPX runner can
+load, so a box without a ROCm/Vulkan device gets the portable F16 build
+instead. The installer picks for you.
+
+If the download can't happen — no network, no disk, an unreachable repo — the
+installer **warns and carries on**. The brain slot is left model-less and the
+install still succeeds; the sidebar chat falls back to the `agent` slot
+meanwhile. An optional model can never fail a platform install.
+
+Set `HAL0_SKIP_BRAIN_MODEL=1` to skip the download entirely.
 
 ## Environment variables and flags
 
@@ -152,7 +238,10 @@ flags:
 | `HAL0_PORT` | `8080` | API bind port |
 | `HAL0_MODELS_DIR` | `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`) | Where Hugging Face pulls land |
 | `HAL0_PYTHON` | `python3` | Python interpreter to build the venv from |
-| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip first-run automatic setup (empty capability-slot scaffolding) |
+| `HAL0_NONINTERACTIVE` | _(unset)_ | Set to `1` to skip the two operator prompts even on a terminal |
+| `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | _(unset)_ | Hugging Face read token; pre-fills the prompt, or supplies it outright on a headless install |
+| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe and the capability-slot scaffolding step |
+| `HAL0_SKIP_BRAIN_MODEL` | _(unset)_ | Set to `1` to skip the brain steward model download |
 | `HAL0_CHANNEL` | `stable` | Bootstrap channel: `stable`, `preview`, or `nightly` |
 | `HAL0_RELEASES_URL` | `https://releases.hal0.dev/<channel>.json` | Full manifest URL override; the exact sibling `.bundle` remains mandatory |
 
@@ -160,12 +249,14 @@ flags:
 |---|---|
 | `--dev` | Local-only editable install under `$PWD/.hal0ai` — no systemd, no host package changes |
 | `--no-start` | Set everything up but do not enable/start the units |
-| `--models-dir=PATH` | Absolute path where pulls land (same as `HAL0_MODELS_DIR`) |
+| `--models-dir=PATH` | Absolute path where pulls land (same as `HAL0_MODELS_DIR`); suppresses the prompt |
 
 <Aside type="tip">
-The model pull directory must be an **absolute** path. When not specified,
-the installer defaults to `/var/lib/hal0/models` non-interactively. You
-can change it later through `hal0 setup`.
+The model store must be an **absolute** path — pulls run as root, so a relative
+path would land somewhere unpredictable. Re-running the installer with a
+different `--models-dir` repoints `[models].store` in `/etc/hal0/hal0.toml`;
+models already on disk are not moved, so add their directory to
+`[models].roots` if you want them to keep being scanned.
 </Aside>
 
 ## Verify the install
@@ -225,12 +316,13 @@ may depend on them.
 
 ## Next steps
 
-First-run setup already scaffolded empty capability slots during install —
-no model is assigned to any of them yet. From here:
+The install created every capability slot and bound a model to `brain`. The
+other slots are grey — configured, but with no model assigned. From here:
 
-- Run the interactive **`hal0 setup`** TUI to pick real models and
-  extensions — see [First-run setup](/docs/getting-started/setup/).
-- Pull a model and assign it to a slot — see
+- **Open the dashboard** at `http://<host>:8080/` and assign models to slots.
+  This is the intended path: it browses the curated catalogue, shows what fits
+  your detected memory, and pulls in the background.
+- Prefer the CLI? Pull a model and bind it — see
   [Load your first model](/docs/getting-started/first-model/).
-- Open the dashboard at `http://<host>:8080/` to manage slots, profiles,
-  and stacks.
+- Chat straight away without leaving the terminal: `hal0 chat --brain` talks to
+  the steward model the installer just pulled.

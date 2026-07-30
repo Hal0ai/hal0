@@ -1,6 +1,6 @@
 ---
 title: Load your first model
-description: Pull a model from Hugging Face into hal0's local registry and assign it to a slot — via the hal0 setup TUI or directly with the hal0 model CLI.
+description: Pull a model from Hugging Face into hal0's local registry and assign it to a slot — from the dashboard or directly with the hal0 model CLI.
 sidebar:
   order: 30
 ---
@@ -8,16 +8,18 @@ sidebar:
 import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
 Models in hal0 live in a local registry, the single source of truth for
-Hugging Face coordinates, SHA-256 digests, and curated filenames. A fresh
-install seeds **zero** model slots — you pick the first model yourself,
-and the fastest path is two commands.
+Hugging Face coordinates, SHA-256 digests, and curated filenames. Apart
+from the `brain` steward the installer pulls for itself, a fresh install
+binds **no** models — you pick the first one yourself, and the fastest
+path is two commands.
 
 ## Starting from zero — no models yet
 
-Every fresh install boots with services up but nothing to serve — first-run
-setup scaffolds slot *structure* only, no model picks (see
-[First-run setup](/docs/getting-started/setup/)). Until you pull one, that
-shows up in a few places:
+Every fresh install boots with services up but nothing to serve. The
+installer scaffolds slot *structure* only — device, profile, port, no model
+picks — with the `brain` slot as the single exception (see
+[The brain slot](/docs/getting-started/install/#the-brain-slot)). Until you
+pull a model of your own, that shows up in a few places:
 
 - The dashboard shows a passive banner — "No models configured yet" —
   whenever the API reports `first_run: true`. It's dismissible and never
@@ -31,20 +33,19 @@ shows up in a few places:
   capability slots the installer scaffolded (structure only — device,
   profile, port) with no model assigned, rather than an empty list: the
   installer creates slot *shape*, never model picks. The one case where
-  these are truly empty is an install that skipped slot scaffolding
-  entirely with `hal0 setup --no-slots`.
+  these are truly empty is an install run with `HAL0_SKIP_SETUP=1`, which
+  skips the scaffolding step entirely.
 - `GET /v1/models` returns an empty list, and a chat request against an
   unconfigured slot has nothing to dispatch to.
 
 `first_run` is computed from two conditions: `/var/lib/hal0/models/` is
 empty **and** the first-run sentinel (`/var/lib/hal0/.first_run_done`)
 doesn't exist yet. Either one flips it to `false` — so pulling or adding
-any model (or the setup TUI writing the sentinel) is enough to clear the
-banner for good in normal use.
+any model (or the installer's first-run seeding step writing the sentinel)
+is enough to clear the banner for good in normal use.
 
 Getting out of this state is the rest of this page: the two-command path
-right below, the dashboard's **Models** view, or the
-[`hal0 setup`](/docs/getting-started/setup/) TUI.
+right below, or the dashboard's **Models** view.
 
 ## The two-command path
 
@@ -61,8 +62,9 @@ against the slot port. That's a working chat endpoint.
 Downloads write to `[models].store` in `hal0.toml` — the single directory
 the pull engine writes to and slot containers bind-mount. It's empty by
 default and falls back to the legacy `pull_root` (`/var/lib/hal0/models`)
-until you set it explicitly with `hal0 setup --storage-dir <path>`
-(first-run setup) or `hal0 model store <path>` (any time — see
+until you set it explicitly — either by answering the installer's model-store
+question (or passing `--models-dir=PATH`), or with `hal0 model store <path>`
+at any time (see
 [Already have the files on disk?](#already-have-the-files-on-disk) below).
 See [Paths and files](/docs/reference/paths-and-files/) for the full
 resolution order.
@@ -89,11 +91,13 @@ If something doesn't show up, `hal0 doctor models` audits the pipeline —
 dangling registry entries, unregistered files, store mismatches — and
 prints the exact fix for each finding.
 
-## Via `hal0 setup`
+## Via the dashboard
 
-Re-run `hal0 setup` any time for the guided TUI: it can provision slots,
-pick curated models sized to your hardware, and kick off the pulls for
-you.
+Open `http://<host>:8080/` → **Models**. The catalogue is filtered to picks
+that fit the memory the hardware probe detected, pulls run in the background
+with live progress, and a pulled model can be bound to a slot from the same
+view. This is the same curated list `hal0 model pull <id>` resolves against —
+the dashboard just shows you the sizes and the fit first.
 
 ## The CLI, step by step
 
