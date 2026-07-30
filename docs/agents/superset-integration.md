@@ -41,6 +41,69 @@ the same items.
 **Work on issue → Custom script** on any Hal0 Linear issue creates a Superset
 workspace on that issue's branch with Claude already working the prompt.
 
+## Workspace lifecycle scripts (`.superset/`)
+
+`.superset/config.json` tells Superset how to build, run, and dismantle a
+workspace. Superset resolves each key from the user override
+(`~/.superset/projects/<repo-path>/config.json`), then the worktree's own
+`.superset/config.json`, then this committed one; a local
+`.superset/config.local.json` merges `before`/`after` around it and is
+gitignored.
+
+| Key | Runs when | Script |
+|---|---|---|
+| `setup` | workspace created | `.superset/setup.sh` |
+| `run` | Run button (restartable from the UI) | `.superset/run.sh` |
+| `teardown` | workspace deleted | `.superset/teardown.sh` |
+
+**`setup.sh`** — `uv sync --frozen --extra dev` (the lockfile path CI uses, so
+a workspace can't skew from it), `npm ci` in `ui/`, the Playwright chromium
+download, and `ui/.env` copied from `$SUPERSET_ROOT_PATH` if the primary
+checkout has one. Warm, it takes a couple of seconds. Skip pieces with
+`HAL0_SETUP_SKIP_UI=1` or `HAL0_SETUP_SKIP_PLAYWRIGHT=1`.
+
+**`run.sh`** — assigns this workspace's ports and hands off to
+`scripts/dev-bootstrap.sh`, which stays the single owner of "start hal0
+locally". OpenWebUI is off by default (`HAL0_DEV_SKIP_OPENWEBUI=1`) because one
+container per concurrent workspace is a lot of memory for something most tasks
+never touch; set it to `0` to get it.
+
+**`teardown.sh`** — stops this workspace's services and container, then removes
+the rebuildable artifacts (`hal0-home`, `.venv`, `ui/node_modules`, caches) so
+`git worktree remove` doesn't trip over untracked files. It **refuses to run**
+if the worktree still holds uncommitted changes or commits that are on no
+remote, which surfaces in Superset as an error toast with a **Delete Anyway**
+button — a speed bump, not a lock. `HAL0_TEARDOWN_FORCE=1` skips the check;
+`HAL0_TEARDOWN_KEEP_DEPS=1` keeps `.venv` and `node_modules`.
+
+### Ports are derived per workspace
+
+Several worktrees are alive at once, so a fixed `8080`/`5173`/`3001` means the
+second workspace attaches to the first one's server and you test a branch you
+never checked out. `.superset/ports.sh` hashes the workspace path into a
+stable, distinct port per service — the same rule `ui/tests/e2e/port.ts`
+already applies to the Playwright suite (#1399), in windows that don't overlap
+it:
+
+| Service | Window | Variable |
+|---|---|---|
+| hal0-api | 18000–18499 | `HAL0_PORT` |
+| UI dev server | 6100–6599 | `UI_PORT` |
+| OpenWebUI | 3300–3799 | `HAL0_OPENWEBUI_PORT` |
+
+`HAL0_HOME` points at `<worktree>/hal0-home` (gitignored) and the OpenWebUI
+container name carries the same hash, so nothing is shared between workspaces.
+`VITE_API_TARGET` is exported to match the derived API port — a Vite config
+file reads `process.env`, and `.env` files never reach it, so this has to be
+set in the shell that runs `npm run dev`.
+
+Setting any of those variables explicitly wins. `setup.sh` writes the
+assignment to `.superset/workspace.env` (gitignored) for use in a shell:
+
+```sh
+source .superset/workspace.env   # or: source .superset/ports.sh
+```
+
 ## MCP: let an agent drive Superset directly
 
 The root `.mcp.json` registers the Superset v2 MCP server. Open this repo in
