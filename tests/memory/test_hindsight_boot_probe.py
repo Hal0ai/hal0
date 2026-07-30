@@ -133,8 +133,13 @@ def test_build_client_raises_when_daemon_is_down(monkeypatch: pytest.MonkeyPatch
 
 
 def test_factory_degrades_when_daemon_is_down(monkeypatch: pytest.MonkeyPatch) -> None:
-    """End of the ladder: a down daemon yields a provider that says so."""
-    from hal0.memory.pgvector_provider import PgVectorProvider
+    """End of the ladder: a down daemon yields a provider that says so.
+
+    The provider is the self-promoting wrapper around the volatile fallback,
+    not the bare fallback — a boot degrade must not be permanent. What it
+    reports while degraded is unchanged.
+    """
+    from hal0.memory.degrade import DegradedMemoryProvider
 
     def _boom(**_kwargs: object) -> None:
         raise HindsightUnreachable("no daemon")
@@ -142,7 +147,7 @@ def test_factory_degrades_when_daemon_is_down(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr("hal0.memory.hindsight_client.probe_health", _boom)
     provider = provider_from_config(_cfg())
 
-    assert isinstance(provider, PgVectorProvider)
+    assert isinstance(provider, DegradedMemoryProvider)
     assert provider.degraded is True
 
 

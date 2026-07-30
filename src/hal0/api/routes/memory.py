@@ -358,6 +358,61 @@ async def _bank_failed_op_ids(client: Any, bank_id: str, *, page: int, cap: int)
     return ids
 
 
+@router.post("/promote")
+async def promote_memory_provider(request: Request) -> dict[str, Any]:
+    """Force an immediate Hindsight re-promotion attempt on a degraded boot.
+
+    hal0 already re-probes on a timer and promotes itself once the daemon
+    answers (see :mod:`hal0.memory.degrade`), so this is not the normal path.
+    It exists for the two cases the timer does not serve: an operator who has
+    just started hindsight-api and does not want to wait out the interval, and
+    a box running with automatic promotion disabled
+    (``HAL0_MEMORY_REPROBE_INTERVAL_S<=0``), where this is the ONLY way back to
+    durable storage short of restarting hal0-api.
+
+    Returns the post-attempt degrade state. ``promoted: false`` means the
+    daemon is still unreachable (or still refusing the replay of volatile
+    rows) — safe to call repeatedly; the underlying attempt is idempotent and
+    never demotes a healthy provider.
+
+    ADMIN-classed via the ``/api/memory`` prefix rule in
+    :mod:`hal0.security.exposure` (enforced only when auth is enabled).
+    """
+    provider = getattr(request.app.state, "memory_provider", None)
+    if provider is None:
+        raise MemoryUnavailable("memory is not enabled on this hal0 instance")
+
+    promote_now = getattr(provider, "promote_now", None)
+    if not callable(promote_now):
+        # A healthy Hindsight provider, or a deliberately-configured pgvector
+        # engine. Neither is a degraded boot, so there is nothing to promote —
+        # report rather than raise, so a dashboard button is safe to press.
+        return {
+            "promoted": not bool(getattr(provider, "degraded", False)),
+            "changed": False,
+            "detail": "provider is not a boot-degraded fallback; nothing to promote",
+        }
+
+    was_promoted = bool(getattr(provider, "promoted", False))
+    async with record_action(
+        request, category="memory", action="memory.provider.promote", target="memory_provider"
+    ):
+        promoted = await promote_now()
+    detail = getattr(provider, "degrade_state", None)
+    payload: dict[str, Any] = {
+        "promoted": bool(promoted),
+        "changed": bool(promoted) and not was_promoted,
+    }
+    if callable(detail):
+        payload["state"] = dict(detail())
+    if not promoted:
+        payload["detail"] = (
+            "Hindsight is still unreachable (or rejected the replay of rows "
+            "written while degraded); memory remains on volatile storage."
+        )
+    return payload
+
+
 @router.post("/graph/retry")
 async def retry_failed_extractions(request: Request) -> dict[str, Any]:
     """Requeue every failed extraction/consolidation operation across banks.

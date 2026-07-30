@@ -37,6 +37,7 @@ from types import SimpleNamespace
 import pytest
 
 from hal0.memory import provider_from_config
+from hal0.memory.degrade import DegradedMemoryProvider
 from hal0.memory.hindsight_provider import HindsightProvider
 from hal0.memory.pgvector_provider import PgVectorProvider
 
@@ -216,5 +217,9 @@ def test_boot_ladder_engages_against_a_real_closed_port(
 
     provider = provider_from_config(_cfg("hindsight"))
 
-    assert isinstance(provider, PgVectorProvider)
+    # The self-promoting wrapper around the volatile fallback: still degraded,
+    # still volatile, but no longer a one-way trip (see
+    # tests/memory/test_degrade_repromotion.py).
+    assert isinstance(provider, DegradedMemoryProvider)
+    assert isinstance(provider._fallback, PgVectorProvider)
     assert provider.degraded is True

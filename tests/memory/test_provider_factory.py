@@ -51,11 +51,15 @@ def test_factory_unknown_engine_falls_back_to_hindsight():
 
 
 def test_factory_degrades_to_pgvector_when_hindsight_unavailable():
-    from hal0.memory.pgvector_provider import PgVectorProvider
+    """The fallback is now WRAPPED so it can re-promote; the volatile-storage
+    contract this test pins is unchanged (see tests/memory/test_degrade_repromotion.py).
+    """
+    from hal0.memory.degrade import DegradedMemoryProvider
 
     with patch("hal0.memory._build_hindsight_client", side_effect=RuntimeError("no daemon")):
         provider = provider_from_config(_cfg("hindsight"))
-        assert isinstance(provider, PgVectorProvider)
+        assert isinstance(provider, DegradedMemoryProvider)
+        assert provider.degraded is True
 
 
 def test_factory_default_engine_is_hindsight_after_cutover():

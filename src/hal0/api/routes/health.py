@@ -70,6 +70,23 @@ def _memory_degraded(request: Request) -> bool | None:
     return bool(getattr(provider, "degraded", False))
 
 
+def _memory_degrade_detail(request: Request) -> dict[str, Any] | None:
+    """Structured detail for a boot-degraded provider, else ``None``.
+
+    Only ``DegradedMemoryProvider`` carries this; a healthy Hindsight
+    provider or an explicitly-configured pgvector engine returns ``None``,
+    so the field's presence is itself the "boot degrade is active" signal.
+    """
+    provider = getattr(request.app.state, "memory_provider", None)
+    state = getattr(provider, "degrade_state", None)
+    if not callable(state):
+        return None
+    try:
+        return dict(state())
+    except Exception:  # pragma: no cover — status must never 500 on detail
+        return None
+
+
 @router.get("/status")
 async def get_status(request: Request) -> dict[str, Any]:
     """Overall liveness + dashboard summary.
@@ -147,6 +164,13 @@ async def get_status(request: Request) -> dict[str, Any]:
         # False → memory is enabled and using a real durable provider.
         # None  → memory is disabled ([memory].enabled=false or init failed).
         "memory_degraded": _memory_degraded(request),
+        # Detail behind the bit, present only while the boot-degrade ladder
+        # is in play: how many rows are sitting in volatile storage right
+        # now, whether hal0 will re-promote itself when Hindsight returns,
+        # and how many attempts it has made. ``memory_degraded`` alone says
+        # "something is wrong" but not "and it is fixing itself" — an
+        # operator staring at a stuck flag needs to know which.
+        "memory_degrade": _memory_degrade_detail(request),
     }
 
 
