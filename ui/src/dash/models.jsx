@@ -594,13 +594,19 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
     );
   }
   const defaults = model.defaults || {};
-  const recipeRows = [
-    ["preferred_profile", defaults.profile],
-    ["context_size", defaults.context_size],
-    ["n_gpu_layers", defaults.n_gpu_layers],
-    ["rope_freq_base", defaults.rope_freq_base],
-    ["extra_args", defaults.extra_args],
-  ].filter(([, v]) => v !== null && v !== undefined && v !== "");
+  // n_gpu_layers + rope_freq_base intentionally dropped from this list
+  // (spec-hw-slot-ownership §2): NGL is slot-owned hardware now (moved off
+  // the model entirely — see model-drawer.jsx's dropped n_gpu_layers input),
+  // and rope_freq_base is deprecated and never emitted. Rendering either here
+  // would just be a dead key surfacing for a legacy row that still carries one.
+  const RECIPE_FIELDS = [
+    { key: "profile", label: "Profile", hint: "runtime profile that seeded this model's launch flags" },
+    { key: "context_size", label: "Context size", hint: "tokens · ⟳ requires the slot to restart to apply" },
+    { key: "extra_args", label: "Launch flags", hint: "the model's tune remainder · ⟳ requires the slot to restart to apply" },
+  ];
+  const recipeRows = RECIPE_FIELDS
+    .map(f => ({ ...f, value: defaults[f.key] }))
+    .filter(f => f.value !== null && f.value !== undefined && f.value !== "");
 
   const onPull = async () => {
     try {
@@ -672,21 +678,22 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
         {(model.labels || model.capabilities || []).map(l => <span key={l} className="chip">{l}</span>)}
       </div>
       <div className="mdl-detail-recipe">
-        <div className="lbl">recipe options</div>
+        <div className="form-section">Recipe options</div>
         {recipeRows.length === 0 ? (
           <div className="mono" style={{fontSize: 12, color: "var(--fg-4)", fontStyle: "italic"}}>
             No defaults set — launcher will use its own.
           </div>
-        ) : recipeRows.map(([k, v]) => (
-          <div key={k} className="ro-row">
-            <span className="k">{k}</span>
-            <span className="v">{String(v)}</span>
+        ) : recipeRows.map(f => (
+          <div key={f.key} className="form-row" data-testid={`mdl-recipe-row-${f.key}`}>
+            <div className="form-lbl">
+              <span>{f.label}</span>
+              <FieldInfoIcon description={f.hint} />
+            </div>
+            <div className="form-ctl">
+              <span>{String(f.value)}</span>
+            </div>
           </div>
         ))}
-        <div style={{marginTop: 10, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)", display: "flex", gap: 6, alignItems: "center"}}>
-          <span style={{color: "var(--warn)"}}>⟳</span>
-          <span>context_size + extra_args require slot restart to apply.</span>
-        </div>
       </div>
       <UsedByPanel model={model} />
       <OnDiskPanel model={model} />
