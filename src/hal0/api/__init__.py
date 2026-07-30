@@ -1423,6 +1423,18 @@ async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
         seeded_slots = await asyncio.to_thread(seed_static_slots, existing_names=existing_names)
         if seeded_slots:
             log.info("slots.startup_seed", names=seeded_slots)
+            # GH #1475: this phase runs AFTER slot_reconcile's fold_identity
+            # (see _boot_slot_reconcile), so a slot just seeded above has no
+            # identity row for the rest of THIS boot — a name-keyed file
+            # sitting beside every other slot's <id>.toml, unregistered
+            # until the next restart. That's the exact state #1422 reports
+            # as duplicate /api/slots entries. Re-fold (idempotent +
+            # additive — no artefact/unit rename, same as the original
+            # call) so the freshly-seeded slot(s) get a row immediately.
+            try:
+                await ctx.slot_manager.fold_identity()
+            except Exception as exc:  # pragma: no cover — defensive
+                log.warning("slots.startup_seed_refold_failed", error=str(exc))
     except Exception as exc:  # seeding must never block startup
         log.warning("slots.startup_seed_failed", error=str(exc))
 
