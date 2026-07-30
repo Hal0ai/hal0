@@ -78,6 +78,91 @@ def test_v1_images_unknown_model_404(
     assert body["error"]["code"] in ("image.model_not_curated", "dispatch.no_route")
 
 
+# ─── curated gate: non-checkpoint entries must not silently render (#1470) ───
+#
+# The gate used to be a bare ``curated.capability != "image"`` check. Six
+# curated entries carry capability="image", but two of them are not actually
+# ComfyUI checkpoint files: esrgan-4x is a RealESRGAN .pth upscaler
+# (comfyui_subdir="upscale_models") and sdxl-lightning is a LoRA that needs
+# the SDXL base checkpoint already loaded (notes say so explicitly) — yet
+# both used to pass the gate, and template_for_model_class's deliberate
+# "never 404 on an unknown class" fallback then rendered them through
+# sdxl_turbo_simple with curated.hf_file (the LoRA/.pth, not a checkpoint)
+# pinned as the checkpoint. That's a ComfyUI node failure or garbage output
+# instead of a clean 4xx.
+
+
+def test_v1_images_esrgan_upscaler_rejected_not_silently_rendered(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """esrgan-4x (comfyui_subdir="upscale_models") must 404, not render."""
+    _seed_img_upstream(client)
+
+    from hal0.providers import get_provider
+
+    # If the gate regresses, this would be called with esrgan-4x's .pth
+    # pinned as the checkpoint — fail loudly so a regression can't slip by
+    # looking like a (bogus) 200.
+    mock_infer = AsyncMock(side_effect=AssertionError("must not reach provider.infer"))
+    monkeypatch.setattr(get_provider("comfyui"), "infer", mock_infer)
+
+    r = client.post(
+        "/v1/images/generations",
+        json={"model": "esrgan-4x", "prompt": "anything"},
+    )
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "image.model_not_curated"
+    mock_infer.assert_not_called()
+
+
+def test_v1_images_sdxl_lightning_lora_rejected_not_silently_rendered(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sdxl-lightning (a LoRA, model_class="image" generic fallback) must 404."""
+    _seed_img_upstream(client)
+
+    from hal0.providers import get_provider
+
+    mock_infer = AsyncMock(side_effect=AssertionError("must not reach provider.infer"))
+    monkeypatch.setattr(get_provider("comfyui"), "infer", mock_infer)
+
+    r = client.post(
+        "/v1/images/generations",
+        json={"model": "sdxl-lightning", "prompt": "anything"},
+    )
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "image.model_not_curated"
+    mock_infer.assert_not_called()
+
+
+def test_v1_images_404_message_lists_curated_builtins_not_hardcoded_pair(
+    client: TestClient,
+) -> None:
+    """The 404 copy must reflect the curated table, not a stale hardcoded pair.
+
+    Before the fix the message always said "sdxl-turbo, sd-1.5-pruned-
+    emaonly" even though the curated table carries more ComfyUI-renderable
+    entries than that (e.g. Flux-2-Klein-9B-GGUF). Assert the message is
+    built from the table: every genuinely renderable id appears, and a
+    rejected non-checkpoint id (esrgan-4x) — which is NOT something the
+    caller could actually pass — does not.
+    """
+    _seed_img_upstream(client)
+    r = client.post(
+        "/v1/images/generations",
+        json={"model": "not-a-real-image-model", "prompt": "anything"},
+    )
+    assert r.status_code == 404
+    message = r.json()["error"]["message"]
+    assert "sdxl-turbo" in message
+    assert "sd-1.5-pruned-emaonly" in message
+    # A curated capability="image" entry that isn't gate-passable must not
+    # be advertised as a pickable built-in.
+    assert "esrgan-4x" not in message
+
+
 def test_v1_images_url_response_format_writes_cache(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

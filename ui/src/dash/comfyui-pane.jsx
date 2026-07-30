@@ -393,7 +393,14 @@ export const COMFYUI_V2_MOCK = {
 }
 
 // ── Card header ───────────────────────────────────────────────────────────────
-function CardHead({ run, pct, onStop, onRestart, onLogs }) {
+// #1470: the header used to also render a "Stop container" button, but
+// nothing wired an onStop handler (the sole call site below never passed
+// one) and no stop mutation exists in useComfyui.ts (only cancel/restart/
+// switchover/pin). A control that silently no-ops on a GPU-exclusive engine
+// is worse than none, so it's removed rather than wired to a speculative
+// endpoint; switching away from generation mode already has a real path via
+// the arbiter switchover (mode=inference).
+function CardHead({ run, pct, onRestart, onLogs }) {
   const hasRun = run != null
   return (
     <div className="engine-h wcard-h">
@@ -417,7 +424,6 @@ function CardHead({ run, pct, onStop, onRestart, onLogs }) {
         </span>
         {/* Container controls — moved up from the footer to the header far right. */}
         <span className="foot-ctrls">
-          <button className="sctrl stop" title="Stop container" onClick={onStop}><Ci name="stop" size={12} /></button>
           <button className="sctrl restart" title="Restart" onClick={onRestart}><Ci name="refresh" size={12} /></button>
           <button className="sctrl" title="Logs" onClick={onLogs}><Ci name="logs" size={12} /></button>
         </span>
@@ -450,6 +456,9 @@ function CardFoot({ engine }) {
 // ── Empty-queue state (in-flow, NO overlay) ───────────────────────────────────
 // CRITICAL: must NOT be position:absolute;inset:0 — see PR #845 lockup.
 // min-height keeps the block in-flow with visible height.
+// #1470: the no-comfyBaseUrl branch used to render a plain <button> with no
+// onClick — a no-op "Open ComfyUI" control. Render nothing instead of a dead
+// button; the link only makes sense once a base URL is resolvable.
 function EmptyQueueState({ comfyBaseUrl }) {
   return (
     <div className="queue-empty-state">
@@ -458,11 +467,7 @@ function EmptyQueueState({ comfyBaseUrl }) {
         <a className="rbtn acc" href={comfyBaseUrl} target="_blank" rel="noopener noreferrer" style={{ marginLeft: 8 }}>
           <Ci name="ext" size={12} /> Open ComfyUI ↗
         </a>
-      ) : (
-        <button className="rbtn acc" style={{ marginLeft: 8 }}>
-          <Ci name="ext" size={12} /> Open ComfyUI ↗
-        </button>
-      )}
+      ) : null}
     </div>
   )
 }
@@ -578,13 +583,14 @@ export function ImageGenCard({
                     </div>
                     <div className="render-actions">
                       <button className="rbtn" onClick={onCancel}><Ci name="stop" size={13} /> Cancel render</button>
+                      {/* #1470: no-comfyBaseUrl branch used to be a plain
+                          <button> with no handler — dead control. Render
+                          nothing until a base URL is resolvable. */}
                       {comfyBaseUrl ? (
                         <a className="rbtn acc" href={comfyBaseUrl} target="_blank" rel="noopener noreferrer">
                           <Ci name="ext" size={13} /> Open ComfyUI ↗
                         </a>
-                      ) : (
-                        <button className="rbtn acc"><Ci name="ext" size={13} /> Open ComfyUI ↗</button>
-                      )}
+                      ) : null}
                     </div>
                   </div>
                 ) : (
@@ -692,7 +698,10 @@ export function ImageGenCard({
                     </span>
                   </div>
                 )}
-                {/* Pending rows */}
+                {/* Pending rows. #1470: per-job "Logs"/"Remove" buttons used
+                    to render here with no onClick at all (no per-job
+                    endpoints exist yet) — dropped until that backend support
+                    lands rather than shipping dead controls. */}
                 {queue.map((j, i) => (
                   <div className="qcard row pending" key={j.name}>
                     <span className="ldot pending" />
@@ -702,10 +711,6 @@ export function ImageGenCard({
                     </span>
                     <span className="grow" />
                     <span className="stat">#{i + 1} · queued</span>
-                    <span className="ctrls">
-                      <button className="sctrl" title="Logs"><Ci name="logs" size={12} /></button>
-                      <button className="sctrl" title="Remove"><Ci name="close" size={12} /></button>
-                    </span>
                   </div>
                 ))}
               </div>
@@ -724,13 +729,21 @@ export function ImageGenCard({
 // Adds .comfy-v2-pane root + .comfy-page scope for blue accent CSS vars.
 //
 // Priority for data source (highest wins):
-//   1. window.__comfyuiV2MockOverride  — e2e seam, set before mount
+//   1. window.__comfyuiV2MockOverride         — e2e seam, set before mount
 //   2. live API poll (useComfyui + transformComfyuiStatus)
-//   3. COMFYUI_V2_MOCK                — static fallback for dev/storybook
+//   3. transformComfyuiStatus(COMFYUI_FALLBACK) — neutral stopped/idle shell
 //
 // The mock override seam bypasses the hook entirely so e2e tests that inject
 // window.__comfyuiV2MockOverride get deterministic rendering without needing
 // to intercept /api/comfyui/status.
+//
+// #1470: this used to fall back to COMFYUI_V2_MOCK — the fictional
+// "72% wan2.2-i2v render, fake queue, fake GTT/temp" handoff-demo data — on
+// first paint and for as long as /api/comfyui/status errors (API down, auth
+// failure). That put a fabricated render on the operator's screen exactly
+// when the engine truth was unknown. COMFYUI_FALLBACK (useComfyui.ts) is the
+// purpose-built neutral shell for this case; COMFYUI_V2_MOCK now renders only
+// when a test or dev harness explicitly opts in via the override seam.
 export function ComfyuiPane() {
   // Mock override seam (e2e / dev)
   const override =
@@ -739,14 +752,14 @@ export function ComfyuiPane() {
   // Live API poll — disabled when the override is set
   const { data: liveStatus } = useComfyui({ active: !override })
 
-  // Derive pane data: override > live transform > static mock
+  // Derive pane data: override > live transform > neutral fallback transform
   let paneData
   if (override) {
     paneData = override
   } else if (liveStatus) {
     paneData = transformComfyuiStatus(liveStatus)
   } else {
-    paneData = COMFYUI_V2_MOCK
+    paneData = transformComfyuiStatus(COMFYUI_FALLBACK)
   }
 
   // Control mutations

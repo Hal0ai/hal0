@@ -8,11 +8,18 @@
 //   PUT /api/slots/{name}/config. /v1/audio/speech injects them at request
 //   time when the body omits the param, so saves apply immediately.
 //   The voice picker prefers the live list from GET /api/slots/tts/voices
-//   (engine /v1/audio/voices proxy) and falls back to the Kokoro seed pack.
+//   (engine /v1/audio/voices proxy) and falls back to the Kokoro seed pack
+//   only when the selected engine's provider actually is kokoro (#1470 —
+//   this used to be a substring match on the model id, which baked Kokoro
+//   facts — af_bella default, 0.5–2.0 clamp, fixed 24 kHz — into the page
+//   even when the live selection was qwen3tts or another engine).
 //
-// Not offered on purpose: STT language hints (moonshine is English-only —
-// the request param is ignored), STT silence thresholds (no such endpoint
-// param exists), TTS sample rate (fixed 24 kHz container constant).
+// Not offered on purpose: STT silence thresholds (no such endpoint param
+// exists). STT language support and TTS sample rate/clamp behavior are
+// engine-specific — moonshine is English-only with the language param
+// ignored, and Kokoro's sample rate is a fixed 24 kHz container constant,
+// but neither fact holds for every provider, so the copy below is keyed on
+// the selection's actual provider rather than stated as blanket truth.
 import { useState, useEffect } from 'react'
 import { useCapabilities, useCapabilityApply } from '@/api/hooks/useCapabilities'
 import { useSlotEdit, useSlotConfig, useSlotVoices } from '@/api/hooks/useSlots'
@@ -93,6 +100,23 @@ export function VoicePage() {
   const sttCatalogItems = voiceCatalogs.stt || [];
   const ttsCatalogItems = voiceCatalogs.tts || [];
 
+  // #1470: both the picker rows and the persisted selection carry a
+  // `provider` field (kokoro / qwen3tts / moonshine / whispercpp / flm —
+  // see hal0.capabilities.catalog._BACKEND_TO_PROVIDER). Prefer the catalog
+  // row for the model id currently being edited (covers an unsaved local
+  // change); fall back to the persisted selection's provider only while the
+  // local model id still matches what's saved. This is what keys the
+  // engine-specific copy below instead of hardcoding Kokoro facts.
+  const sttCatalogRow = sttCatalogItems.find(m => (m.id || m.model_id || m) === sttModel);
+  const sttProvider = sttCatalogRow?.provider
+    || (sttModel && sttModel === sttSelection.model ? sttSelection.provider : "") || "";
+
+  const ttsCatalogRow = ttsCatalogItems.find(m => (m.id || m.model_id || m) === ttsModel);
+  const ttsProvider = ttsCatalogRow?.provider
+    || (ttsModel && ttsModel === ttsSelection.model ? ttsSelection.provider : "") || "";
+  const ttsIsKokoro = ttsProvider === "kokoro";
+  const ttsIsQwen3 = ttsProvider === "qwen3tts";
+
   const doSaveStt = async () => {
     try {
       await applyCapability.mutateAsync({ slot: "voice", child: "stt", body: { model: sttModel, enabled: sttEnabled } });
@@ -159,7 +183,13 @@ export function VoicePage() {
               className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 260}} />
           )
         } sub={sttCatalogItems.length === 0 ? "no installed STT models — install one in the Models view" : undefined} />
-        <SRow k="Language" sub="moonshine is English-only; the /v1/audio/transcriptions language param is accepted but ignored" mono v={<span style={{color: "var(--fg-4)"}}>English</span>} />
+        <SRow k="Language" sub={
+            sttProvider === "moonshine"
+              ? "moonshine is English-only; the /v1/audio/transcriptions language param is accepted but ignored"
+              : sttProvider
+                ? `${sttProvider} — language support is engine-specific; check its docs before relying on the language param`
+                : "select an STT model to see its language support"
+          } mono v={<span style={{color: "var(--fg-4)"}}>{sttProvider === "moonshine" ? "English" : "engine-dependent"}</span>} />
         <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
           {sttDirty && (
             <button className="btn ghost sm" onClick={() => { setSttModel(sttSelection.model || ""); setSttEnabled(!!sttSelection.enabled); }}>Reset</button>
@@ -198,7 +228,13 @@ export function VoicePage() {
             live list gets a free-form voice id input. */}
         {(() => {
           const liveVoices = ttsVoicesQuery.data?.source === "live" ? (ttsVoicesQuery.data.voices || []) : [];
-          const kokoroish = !ttsModel || ttsModel.toLowerCase().includes("kokoro");
+          // #1470: kokoroish used to be `!ttsModel || ttsModel.toLowerCase().
+          // includes("kokoro")` — a substring match on the model id. Keyed
+          // on the resolved provider instead; an unset model still defaults
+          // to the bundled cpu engine (Kokoro) since that's what an empty
+          // selection resolves to on apply (tts_profile_for_device's cpu
+          // fallback).
+          const kokoroish = !ttsModel || ttsIsKokoro;
           const options = liveVoices.length > 0
             ? liveVoices.map(v => {
                 const seed = KOKORO_VOICES.find(k => k.id === v);
@@ -208,12 +244,17 @@ export function VoicePage() {
           const srcNote = liveVoices.length > 0
             ? "voices reported live by the tts slot"
             : (kokoroish ? "bundled voices (Kokoro v1) · slot offline — list is the seed pack" : "model-specific voice id");
+          const defaultVoiceLabel = kokoroish
+            ? "— use engine default (af_bella) —"
+            : ttsIsQwen3
+              ? "— use engine default (Ryan) —"
+              : "— use engine default —";
           return (
             <SRow k="Default voice" sub={`applied when /v1/audio/speech omits the voice param · ${srcNote}`} v={
               options ? (
                 <select value={ttsVoice} onChange={e => setTtsVoice(e.target.value)}
                   style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
-                  <option value="">— use engine default (af_bella) —</option>
+                  <option value="">{defaultVoiceLabel}</option>
                   {/* keep a saved voice selectable even if the live list lost it */}
                   {ttsVoice && !options.some(o => o.id === ttsVoice) && (
                     <option value={ttsVoice}>{ttsVoice} (saved)</option>
@@ -230,7 +271,11 @@ export function VoicePage() {
             } />
           );
         })()}
-        <SRow k="Default speed" sub="applied when the request omits speed · Kokoro clamps to 0.5–2.0 · empty = engine default (1.0)" v={
+        {/* #1470: both bundled engines (Kokoro's upstream server, Qwen3-TTS's
+            qwen3tts_server.py _encode_audio) clamp speed to 0.5–2.0, but that
+            isn't a universal fact — an unrecognized provider gets an honest
+            "engine-specific" hint instead of a hardcoded Kokoro claim. */}
+        <SRow k="Default speed" sub={`applied when the request omits speed · ${(ttsIsKokoro || ttsIsQwen3) ? "the engine clamps to 0.5–2.0" : "clamp range is engine-specific"} · empty = engine default (1.0)`} v={
           <input type="number" min={0.25} max={4} step={0.05} value={ttsSpeed}
             onChange={e => setTtsSpeed(e.target.value)} placeholder="1.0"
             className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: `1px solid ${speedValid ? "var(--line)" : "var(--err)"}`, borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 100}} />
@@ -242,7 +287,16 @@ export function VoicePage() {
             {["mp3", "wav", "opus", "flac", "pcm"].map(f => <option key={f} value={f}>{f}</option>)}
           </select>
         } />
-        <SRow k="Sample rate" sub="fixed by the Kokoro engine — not configurable" mono v={<span style={{color: "var(--fg-4)"}}>24 kHz</span>} />
+        {/* #1470: Kokoro's output is fixed 24 kHz (hal0.realtime.audio.
+            DEFAULT_SAMPLE_RATE / hal0.config.schema comment), but Qwen3-TTS
+            reports whatever the loaded model's codec produces at startup
+            (qwen3tts_server.py _state["sample_rate"] = int(sr) after
+            generate_custom_voice) — asserting 24 kHz for it would be a guess. */}
+        <SRow k="Sample rate" sub={
+            ttsIsKokoro ? "fixed by the Kokoro engine — not configurable"
+              : ttsIsQwen3 ? "set by the loaded Qwen3-TTS model at startup — not configurable"
+              : "not configurable — determined by the active engine"
+          } mono v={<span style={{color: "var(--fg-4)"}}>{ttsIsKokoro ? "24 kHz" : "engine-dependent"}</span>} />
         <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
           {ttsDirty && (
             <button className="btn ghost sm" onClick={() => {
