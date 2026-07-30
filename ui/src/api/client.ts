@@ -33,6 +33,34 @@ export class Hal0Error extends Error {
   }
 }
 
+/**
+ * Lift the backend's `{error:{code,message,details}}` envelope off a
+ * non-2xx `Response` into a `Hal0Error`, tolerating a non-JSON or
+ * FastAPI-default `{detail}` body. Shared by `api()` and by callers that
+ * bypass it for raw fetches (e.g. the board-chat SSE POST in useBoard.ts,
+ * which can't route through `api()` because a 2xx response is a stream,
+ * not JSON).
+ */
+export async function readErrorEnvelope(res: Response): Promise<Hal0Error> {
+  let message = `API error ${res.status}`
+  let code = 'system.unknown'
+  let details: Record<string, unknown> | null = null
+  try {
+    const parsed = await res.json()
+    const env = parsed?.error
+    if (env && typeof env === 'object') {
+      message = env.message || message
+      code = env.code || code
+      details = env.details || null
+    } else if (parsed?.detail) {
+      message = parsed.detail
+    }
+  } catch {
+    // body wasn't parseable — keep generic message
+  }
+  return new Hal0Error(message, { code, status: res.status, details })
+}
+
 export interface ApiOptions extends Omit<RequestInit, 'body'> {
   /** Pre-serialised JSON or a plain object that we stringify for you. */
   body?: BodyInit | Record<string, unknown> | null
@@ -73,23 +101,7 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
   const res = await fetcher(path, init)
 
   if (!res.ok) {
-    let message = `API error ${res.status}`
-    let code = 'system.unknown'
-    let details: Record<string, unknown> | null = null
-    try {
-      const parsed = await res.json()
-      const env = parsed?.error
-      if (env && typeof env === 'object') {
-        message = env.message || message
-        code = env.code || code
-        details = env.details || null
-      } else if (parsed?.detail) {
-        message = parsed.detail
-      }
-    } catch {
-      // body wasn't parseable — keep generic message
-    }
-    throw new Hal0Error(message, { code, status: res.status, details })
+    throw await readErrorEnvelope(res)
   }
 
   if (res.status === 204) return null as T
