@@ -27,7 +27,10 @@ DashLayout schema (v2 — LEGACY, tolerated not rejected):
 v2 is kept accepted so a cached pre-#1061 UI bundle doesn't start 422-ing, and
 so a v2 file already on disk keeps round-tripping under the v2 rules. The
 client's own ``reconcile()`` fail-softs an unrecognised payload to its default
-layout, so an operator holding a legacy file sees defaults rather than an error.
+layout, so an operator holding a pre-#1061 file sees defaults, not an error.
+
+HAL0-SUNSET: v1.2 — drop the v2 branch once no cached pre-#1061 UI bundle can
+still be in a browser. v3 is then the only accepted body.
 
 Unknown CardIds in ``enabled`` or ``order`` are rejected with 422; so is any
 version that is neither 3 nor 2.
@@ -110,7 +113,10 @@ class DashLayoutV3(BaseModel):
 
 
 class DashLayout(BaseModel):
-    """Validated dashboard layout body (v2 — legacy, tolerated)."""
+    """Validated dashboard layout body (v2 — superseded, still tolerated).
+
+    HAL0-SUNSET: v1.2 — see the module docstring.
+    """
 
     v: int
     order: list[str]
@@ -182,7 +188,7 @@ async def get_dashboard_layout(request: Request) -> dict[str, Any]:
     """Return the saved dashboard layout, or ``{}`` when none has been saved.
 
     ``layout_store.reconcile`` dispatches on the STORED payload's own version,
-    so a v3 file comes back as v3 and a legacy v2 file still comes back
+    so a v3 file comes back as v3 and a pre-#1061 v2 file still comes back
     reconciled under the v2 pin/span rules (#1460).
     """
     raw = layout_store.load()
@@ -196,8 +202,8 @@ async def get_dashboard_layout(request: Request) -> dict[str, Any]:
 async def put_dashboard_layout(request: Request) -> Response:
     """Validate, reconcile, and persist the dashboard layout.
 
-    Dispatches on the body's ``v``: 3 is the canonical schema, 2 is tolerated
-    as legacy, anything else is a 422. Returns 204 No Content on success and
+    Dispatches on the body's ``v``: 3 is the canonical schema, 2 is still
+    tolerated, anything else is a 422. Returns 204 No Content on success and
     422 with ``code: "layout.invalid"`` on schema/validation errors.
     """
     try:
