@@ -1626,19 +1626,65 @@ class ContainerProvider(Provider):
         render is byte-identical — so a convergent rerun never rewrites (nor
         rebuilds) an unchanged unit.
         """
-        token = slot_instance_token(slot_cfg)
-        unit_path = self._unit_path(token)
-        if not unit_path.exists():
+        pending = self._pending_unit_rewrite(slot_cfg, model_info)
+        if pending is None:
             return False
-        unit_text = self._render_quadlet_text(slot_cfg, model_info)
-        if unit_path.read_text() == unit_text:
-            return False
+        unit_path, unit_text = pending
         _SYSTEMCTL_SEAM.write_quadlet(unit_path, unit_text)
         log.info(
             "container.unit_rerendered",
-            extra={"slot": token, "unit_path": str(unit_path)},
+            extra={"slot": slot_instance_token(slot_cfg), "unit_path": str(unit_path)},
         )
         return True
+
+    def _pending_unit_rewrite(
+        self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+    ) -> tuple[Path, str] | None:
+        """The unit rewrite this slot config is owed, or None when it is owed none.
+
+        **Reads only.** Renders through :meth:`_render_quadlet_text` — the ONE
+        renderer — and compares against what is on disk, but writes nothing.
+        The caller decides whether to persist the result: :meth:`rerender_unit_sync`
+        does; :meth:`unit_drifted` (the read-only convergence probe) does not.
+        Routing both through here is what keeps the check and the write from
+        ever disagreeing about what "changed" means.
+
+        Returns ``(unit_path, fresh_text)`` when the on-disk unit differs from a
+        fresh render; ``None`` when the slot has no unit on disk (never
+        rendered — an adopted container, or a slot whose first load has not run)
+        or when the render is byte-identical to what is already there.
+        """
+        unit_path = self._unit_path(slot_instance_token(slot_cfg))
+        if not unit_path.exists():
+            return None
+        unit_text = self._render_quadlet_text(slot_cfg, model_info)
+        if unit_path.read_text() == unit_text:
+            return None
+        return unit_path, unit_text
+
+    def unit_drifted(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> bool:
+        """True when the on-disk unit no longer matches what this config renders.
+
+        The read-only half of :meth:`rerender_unit_sync`, and the wide half of
+        the load-time convergence check (:meth:`SlotManager._should_converge`).
+        The argv comparator in :mod:`hal0.slots.drift` only sees the container
+        *command*: a changed runner image (``slot.binary`` / ``image_pin`` /
+        ``RUNNER_IMAGES``), a changed bind mount (e.g. the model-file dir mount
+        the O25 heal adds), and changed ``[server].env`` are all invisible to it,
+        so an operator's edit to any of them used to short-circuit ``slot load``
+        as a no-op and never reach the container. Comparing whole rendered units
+        covers every field the launch path actually depends on.
+
+        **Writes nothing** — deliberately not ``rerender_unit_sync``, whose
+        write-as-a-side-effect-of-a-check would silently mutate the box during
+        what is nominally a read.
+
+        False when the unit matches, and false when the slot has no unit on disk
+        (an adopted container has nothing to converge onto). Raising is left to
+        the caller to absorb: a convergence check must never fail a ``load()``
+        that would otherwise succeed.
+        """
+        return self._pending_unit_rewrite(slot_cfg, model_info) is not None
 
     def daemon_reload(self) -> None:
         """``systemctl daemon-reload`` — public for the unit-rerender sweep."""

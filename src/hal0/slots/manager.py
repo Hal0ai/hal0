@@ -61,6 +61,7 @@ from hal0.slots.config_write import (
 )
 from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
 from hal0.slots.drift import compute_config_drift as _compute_config_drift
+from hal0.slots.drift import compute_unit_drift as _compute_unit_drift
 from hal0.slots.layout import is_id_stem
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
@@ -1510,15 +1511,34 @@ class SlotManager:
     async def _should_converge(self, slot_name: str, cfg: dict[str, Any]) -> bool:
         """True when a live slot's running unit no longer matches its TOML.
 
-        Drives the re-converge branch in :meth:`load` (#1224). Deliberately
-        conservative in both failure directions:
+        Drives the re-converge branch in :meth:`load` (#1224). Two independent
+        comparators, OR'd, because neither alone covers the effective launch
+        config:
+
+        * :func:`~hal0.slots.drift.compute_config_drift` compares the LIVE
+          container's argv against a fresh render. It is the only one of the two
+          that can see a unit whose file was rewritten (by the post-update
+          rerender sweep, which deliberately does not bounce serving) while the
+          container still runs the old command.
+        * :func:`~hal0.slots.drift.compute_unit_drift` compares the ON-DISK unit
+          against a fresh render. The argv comparator watches six flags and
+          cannot watch more: the runner **image**, the **mounts**, and the
+          **env** are not argv at all, so a change to any of them left ``slot
+          load`` a silent no-op and the operator's edit never reached the
+          container — #1224b's bug class through a different field.
+
+        Deliberately conservative in every failure direction:
 
         * an NPU trio shadow has no unit of its own to converge — skip;
+        * a slot with no unit on disk (an adopted container) has nothing to
+          converge onto — the unit comparator reads that as no drift;
         * a comparator that returns ``None`` (provider can't read the running
           or the rendered argv) is *unknown*, not drifted — absence of
           evidence must not bounce a healthy container on every load;
-        * a comparator that raises is likewise treated as "no drift". A
-          convergence check that cannot run is not grounds for a restart.
+        * a comparator that raises — including a render that fails — is
+          likewise treated as "no drift", and independently of the other, so
+          one broken half cannot mask the other. A convergence check must never
+          be able to fail a ``load()`` that would otherwise succeed.
         """
         if is_npu_trio_shadow(cfg):
             return False
@@ -1527,10 +1547,19 @@ class SlotManager:
         except Exception as exc:  # pragma: no cover — defensive
             log.warning(
                 "slot.converge_check_failed",
-                extra={"slot": slot_name, "error": str(exc)},
+                extra={"slot": slot_name, "error": str(exc), "check": "argv"},
+            )
+            drift = None
+        if drift and drift.get("drifted"):
+            return True
+        try:
+            return await _compute_unit_drift(self, slot_name, cfg=cfg, active=True)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning(
+                "slot.converge_check_failed",
+                extra={"slot": slot_name, "error": str(exc), "check": "unit"},
             )
             return False
-        return bool(drift and drift.get("drifted"))
 
     async def unload(self, slot_name: str) -> Slot:
         """Gracefully unload a slot.  Transitions: → unloading → offline."""

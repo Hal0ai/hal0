@@ -51,6 +51,12 @@ class FakeContainerProvider:
         self.fail_load: Exception | None = None
         self.running_argv_by_slot: dict[str, list[str] | None] = {}
         self.expected_argv_by_slot: dict[str, list[str] | None] = {}
+        # Whole-unit drift probe (image/mounts/env — everything argv can't
+        # express). Default False everywhere: no unit on disk, nothing stale.
+        self.unit_drifted_by_slot: dict[str, bool] = {}
+        # When set, ``unit_drifted`` raises it — a render/read failure must
+        # still leave load() a working no-op.
+        self.fail_unit_drifted: Exception | None = None
         # /health probe result. Default True: an active unit is also ready.
         # Set False to simulate a still-loading / wedged model server (unit
         # active but the inference server isn't answering /health yet).
@@ -94,6 +100,11 @@ class FakeContainerProvider:
         self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
     ) -> list[str] | None:
         return self.expected_argv_by_slot.get(str(slot_cfg.get("name")))
+
+    def unit_drifted(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> bool:
+        if self.fail_unit_drifted is not None:
+            raise self.fail_unit_drifted
+        return self.unit_drifted_by_slot.get(str(slot_cfg.get("name")), False)
 
     def image_present(self, image: str) -> bool:
         return False

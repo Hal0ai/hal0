@@ -144,6 +144,83 @@ def _config_drift_values_equal(key: str, running: str | None, rendered: str | No
     return running == rendered
 
 
+async def _launch_model_info(
+    host: DriftHost, cfg: dict[str, Any]
+) -> tuple[dict[str, Any], str | None]:
+    """Resolve ``(model_info, model_default)`` exactly as the launch path would.
+
+    Shared by both comparators below so neither can ask the renderer about a
+    different model than the other — or than ``load()``.
+
+    ``load()`` runs the configured id through ``_resolve_servable_model``
+    (catalog id → the locally-registered id that actually has a file on disk)
+    before spawning, so the container carries the SERVABLE model's path
+    (#1226/#1361). A comparator that used the raw TOML id would, for exactly the
+    slots this matters for — a catalog id that landed locally under a different
+    id — miss the registry lookup, fall back to the bare id, and warn forever.
+    """
+    model_default = _model_default(cfg)
+    if model_default:
+        try:
+            model_default = host._resolve_servable_model(model_default, cfg)
+        except Exception:
+            # Status must never fail because a fallback heuristic raised — fall
+            # back to the raw id and let the comparison proceed as before.
+            model_default = _model_default(cfg)
+    return await host._resolve_model_info(model_default), model_default
+
+
+async def compute_unit_drift(
+    host: DriftHost,
+    slot_name: str,
+    *,
+    cfg: dict[str, Any] | None = None,
+    active: bool | None = None,
+) -> bool:
+    """True when a slot's on-disk unit no longer matches a fresh render.
+
+    The WIDE half of the convergence check. :func:`compute_config_drift` above
+    compares six argv flags; a runner **image** change (``slot.binary`` /
+    ``image_pin`` / ``RUNNER_IMAGES`` resolution), a **mount** change (e.g. the
+    model-file dir mount the O25 heal adds), and an ``[server].env`` change are
+    not argv at all, so that comparator is structurally blind to them and
+    ``slot load`` short-circuited to a no-op while the operator's edit never
+    reached the container.
+
+    Compares whole rendered units instead, which covers every field the launch
+    path depends on. The comparison is sound because ``load_sync`` and
+    ``rerender_unit_sync`` share one renderer and are pinned byte-identical
+    (#1103, ``tests/providers/test_container.py::
+    test_install_and_update_render_byte_identical_units``) — so a unit on disk
+    IS what the current config rendered at write time, and any inequality means
+    the effective launch config moved.
+
+    Conservative in every failure direction, like its sibling: an inactive slot,
+    a missing config, an NPU trio shadow, a provider that does not implement the
+    probe, and anything other than an explicit ``True`` from the probe all read
+    as "no drift". Absence of evidence must not bounce a healthy container.
+    """
+    if active is None:
+        active = await host._is_active(slot_name)
+    if not active:
+        return False
+    if cfg is None:
+        cfg = await host._maybe_load_config(slot_name)
+    if not cfg or is_npu_trio_shadow(cfg):
+        return False
+
+    from hal0.providers.container import container_provider
+
+    probe = getattr(container_provider(), "unit_drifted", None)
+    if not callable(probe):
+        return False
+    model_info, _ = await _launch_model_info(host, cfg)
+    loop = asyncio.get_event_loop()
+    # ``is True``, not ``bool()``: the probe reads a file and runs the renderer,
+    # and only a definite yes is grounds for restarting a serving container.
+    return await loop.run_in_executor(None, probe, cfg, model_info) is True
+
+
 async def compute_config_drift(
     host: DriftHost,
     slot_name: str,
@@ -156,6 +233,9 @@ async def compute_config_drift(
     Returns a structured payload when the comparison is meaningful, or
     None when the slot is inactive, lacks a config, is an NPU trio shadow,
     or the provider cannot read either side of the comparison.
+
+    Sees only the container command. For the fields that are NOT argv — image,
+    mounts, env — see :func:`compute_unit_drift`.
     """
     if active is None:
         active = await host._is_active(slot_name)
@@ -167,23 +247,8 @@ async def compute_config_drift(
         return None
 
     # Resolve the model the SAME way the launch path does before asking the
-    # renderer what it would emit (#1226). ``load()`` runs the configured id
-    # through ``_resolve_servable_model`` (catalog id → the locally-registered
-    # id that actually has a file on disk) before spawning, so the container
-    # carries the SERVABLE model's path. The drift check used the raw TOML id:
-    # for exactly the slots this matters for — a catalog id that landed locally
-    # under a different id — the registry lookup missed, the renderer fell back
-    # to emitting the bare id, and the comparison against the running
-    # container's real ``--model`` warned forever.
-    model_default = _model_default(cfg)
-    if model_default:
-        try:
-            model_default = host._resolve_servable_model(model_default, cfg)
-        except Exception:
-            # Status must never fail because a fallback heuristic raised — fall
-            # back to the raw id and let the comparison proceed as before.
-            model_default = _model_default(cfg)
-    model_info = await host._resolve_model_info(model_default)
+    # renderer what it would emit (#1226) — see :func:`_launch_model_info`.
+    model_info, model_default = await _launch_model_info(host, cfg)
     from hal0.providers.container import container_provider
 
     provider = container_provider()
@@ -218,4 +283,5 @@ __all__ = [
     "_CONFIG_DRIFT_KEYS",
     "DriftHost",
     "compute_config_drift",
+    "compute_unit_drift",
 ]

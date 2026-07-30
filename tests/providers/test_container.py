@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 from hal0.config.schema import (
@@ -975,6 +976,190 @@ class TestLoadSync:
             patch("hal0.providers.container.subprocess.run", return_value=result),
         ):
             assert provider.running_argv("chat") is None
+
+
+class TestUnitDrifted:
+    """The read-only whole-unit convergence probe.
+
+    ``_should_converge`` used to compare six argv flags only, so a changed
+    runner **image**, a changed **mount**, or changed **env** left ``slot load``
+    a silent no-op and the operator's edit never reached the container — the
+    #1224b bug class through a field argv cannot express. ``unit_drifted``
+    compares whole rendered units instead.
+
+    The parallel branch's ``_unit_needs_convergence`` compared the same thing by
+    calling ``rerender_unit_sync``, which WRITES. These tests pin the opposite:
+    the probe answers and leaves the box exactly as it found it.
+    """
+
+    _MODEL_INFO: ClassVar[dict[str, Any]] = {
+        "path": "/mnt/ai-models/model.gguf",
+        "_model_key": "m",
+    }
+
+    def _cfg(self, **overrides: Any) -> dict[str, Any]:
+        cfg: dict[str, Any] = {
+            "name": "converge",
+            "port": 8095,
+            "profile": "rocm",
+            "model": {"default": "m", "context_size": 131072},
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def _render_ctx(
+        self, provider: ContainerProvider, unit_file: Path, seam: Any = None
+    ) -> ExitStack:
+        """The patches every render in this class needs (no podman, no systemd)."""
+        stack = ExitStack()
+        stack.enter_context(
+            patch("hal0.providers.container._resolve_profile", return_value=_moe_profile())
+        )
+        stack.enter_context(
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=["/dev/kfd", "/dev/dri/renderD128"],
+            )
+        )
+        stack.enter_context(patch.object(provider, "_unit_path", return_value=unit_file))
+        if seam is not None:
+            stack.enter_context(patch("hal0.providers.container._SYSTEMCTL_SEAM", seam))
+        return stack
+
+    def _seed(self, provider: ContainerProvider, unit_file: Path, cfg: dict[str, Any]) -> str:
+        """Write the unit the way a load would have, and return its text."""
+        with self._render_ctx(provider, unit_file):
+            text = provider._render_quadlet_text(cfg, self._MODEL_INFO)
+        unit_file.write_text(text)
+        return text
+
+    def _drifted(
+        self, provider: ContainerProvider, unit_file: Path, cfg: dict[str, Any]
+    ) -> tuple[bool, str]:
+        """Run the probe and return ``(answer, on-disk text afterwards)``.
+
+        ``write_quadlet`` is patched to explode: the probe writing ANYTHING is
+        the failure mode this whole approach exists to avoid.
+        """
+        seam = MagicMock()
+        seam.write_quadlet.side_effect = AssertionError(
+            "unit_drifted must not write — it is a read-only check"
+        )
+        seam.remove_quadlet.side_effect = AssertionError("unit_drifted must not remove")
+        with self._render_ctx(provider, unit_file, seam):
+            answer = provider.unit_drifted(cfg, self._MODEL_INFO)
+        return answer, (unit_file.read_text() if unit_file.exists() else "")
+
+    def _argv(self, provider: ContainerProvider, cfg: dict[str, Any]) -> list[str] | None:
+        with patch("hal0.providers.container._resolve_profile", return_value=_moe_profile()):
+            return provider.expected_argv(cfg, self._MODEL_INFO)
+
+    # ── the three argv-invisible fields ──────────────────────────────────────
+
+    def test_changed_runner_image_is_drift(self, tmp_path: Path) -> None:
+        """``image_pin`` moved → the unit's ``Image=`` moved. argv did not."""
+        provider = ContainerProvider()
+        unit_file = tmp_path / "hal0-slot@converge.container"
+        before = self._cfg(image_pin="ghcr.io/hal0ai/toolboxes:rocm-7.2.4-server")
+        after = self._cfg(image_pin="ghcr.io/hal0ai/toolboxes:rocm-8.0.0-server")
+
+        seeded = self._seed(provider, unit_file, before)
+        assert "Image=ghcr.io/hal0ai/toolboxes:rocm-7.2.4-server" in seeded.splitlines()
+
+        # The six-key argv comparator is structurally blind to this: the image
+        # is not a flag, so the old check saw an unchanged slot and no-op'd.
+        assert self._argv(provider, before) == self._argv(provider, after)
+
+        drifted, on_disk = self._drifted(provider, unit_file, after)
+        assert drifted is True
+        assert on_disk == seeded, "the probe must not have rewritten the unit"
+
+    def test_changed_mount_is_drift(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """The model store relocated → different ``Volume=`` lines, same argv.
+
+        This is the O25 mount class: the model file stays where it is (so
+        ``--model`` is byte-identical), but the configured roots move, which
+        changes both the store mounts and whether the model-file dir heal fires.
+        """
+        provider = ContainerProvider()
+        unit_file = tmp_path / "hal0-slot@converge.container"
+        cfg = self._cfg()
+
+        monkeypatch.setattr(
+            "hal0.providers.container.model_mount_roots", lambda: ["/mnt/ai-models"]
+        )
+        seeded = self._seed(provider, unit_file, cfg)
+        assert any(ln.startswith("Volume=/mnt/ai-models:") for ln in seeded.splitlines())
+        argv_before = self._argv(provider, cfg)
+
+        # Operator moved [models].store; the model file is now outside every
+        # configured root, so the heal mounts its directory too.
+        monkeypatch.setattr(
+            "hal0.providers.container.model_mount_roots", lambda: ["/var/lib/hal0/models"]
+        )
+        assert self._argv(provider, cfg) == argv_before, "mounts are not argv"
+
+        drifted, on_disk = self._drifted(provider, unit_file, cfg)
+        assert drifted is True
+        assert on_disk == seeded, "the probe must not have rewritten the unit"
+
+    def test_changed_env_is_drift(self, tmp_path: Path) -> None:
+        """``[server].env`` moved → the unit's ``Environment=`` moved, argv did not."""
+        provider = ContainerProvider()
+        unit_file = tmp_path / "hal0-slot@converge.container"
+        before = self._cfg(server={"env": {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}})
+        after = self._cfg(server={"env": {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}})
+
+        seeded = self._seed(provider, unit_file, before)
+        assert "Environment=HSA_OVERRIDE_GFX_VERSION=11.0.0" in seeded.splitlines()
+
+        assert self._argv(provider, before) == self._argv(provider, after)
+
+        drifted, on_disk = self._drifted(provider, unit_file, after)
+        assert drifted is True
+        assert on_disk == seeded, "the probe must not have rewritten the unit"
+
+    # ── the conservative cases ───────────────────────────────────────────────
+
+    def test_unchanged_config_is_not_drift(self, tmp_path: Path) -> None:
+        provider = ContainerProvider()
+        unit_file = tmp_path / "hal0-slot@converge.container"
+        cfg = self._cfg(server={"env": {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}})
+        seeded = self._seed(provider, unit_file, cfg)
+
+        drifted, on_disk = self._drifted(provider, unit_file, cfg)
+        assert drifted is False
+        assert on_disk == seeded
+
+    def test_no_unit_on_disk_is_not_drift(self, tmp_path: Path) -> None:
+        """An adopted container has no unit to converge onto — stay a no-op,
+        and do NOT create one as a side effect of asking."""
+        provider = ContainerProvider()
+        unit_file = tmp_path / "hal0-slot@converge.container"
+
+        drifted, _ = self._drifted(provider, unit_file, self._cfg())
+        assert drifted is False
+        assert not unit_file.exists()
+
+    def test_probe_and_rerender_agree(self, tmp_path: Path) -> None:
+        """The check and the write must never disagree about "changed" — they
+        share ``_pending_unit_rewrite``. Probe says drifted; the rerender that
+        follows writes; the probe then says clean."""
+        provider = ContainerProvider()
+        unit_file = tmp_path / "hal0-slot@converge.container"
+        self._seed(provider, unit_file, self._cfg(image_pin="ghcr.io/x:old"))
+        after = self._cfg(image_pin="ghcr.io/x:new")
+
+        assert self._drifted(provider, unit_file, after)[0] is True
+
+        written: dict[str, str] = {}
+        seam = MagicMock()
+        seam.write_quadlet.side_effect = lambda p, t: written.update({"p": str(p), "t": t})
+        with self._render_ctx(provider, unit_file, seam):
+            assert provider.rerender_unit_sync(after, self._MODEL_INFO) is True
+        unit_file.write_text(written["t"])  # the seam is what actually persists
+
+        assert self._drifted(provider, unit_file, after)[0] is False
 
 
 class TestImageMismatch:
