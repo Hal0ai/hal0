@@ -1288,6 +1288,42 @@ def _copy_model_files_refcounted(db_path: Any, *, source_id: str, new_id: str) -
     return copied
 
 
+def _strip_denied_flags(flags: str) -> str:
+    """Drop hal0-managed + slot-hardware flags from a profile stamp text.
+
+    The duplicate path persists a profile's flags straight into the new row's
+    ``defaults.extra_args`` without going through :func:`screen_model_write`,
+    so a stale profile still carrying ``-c``/``-ngl`` would mint a row that
+    hard-fails every launch with ``slot.managed_arg_denied``. Silently strip
+    the denied tokens (+ values) instead — the duplicate is a fresh row, not
+    an operator edit, so there is nothing to reject interactively.
+    """
+    import shlex
+
+    from hal0.slots.argv import (
+        MANAGED_ARGS_DENYLIST,
+        SLOT_HARDWARE_FLAGS,
+        strip_managed_flags,
+    )
+
+    if not flags or not flags.strip():
+        return flags
+    try:
+        tokens = shlex.split(flags)
+    except ValueError:
+        return flags  # malformed quoting — leave verbatim for the edit screens
+    clean, removed = strip_managed_flags(
+        tokens, denylist=MANAGED_ARGS_DENYLIST | SLOT_HARDWARE_FLAGS
+    )
+    if not removed:
+        return flags
+    log.warning(
+        "profile stamp carried hal0-owned flag(s); stripped from duplicate",
+        extra={"event": "model.duplicate_flags_sanitized", "flags": removed},
+    )
+    return " ".join(shlex.quote(tok) for tok in clean)
+
+
 def duplicate_model(
     registry: Any,
     *,
@@ -1344,7 +1380,7 @@ def duplicate_model(
             existing_defaults = {}
         existing_defaults = dict(existing_defaults)
         existing_defaults["profile"] = profile
-        existing_defaults["extra_args"] = resolved.flags
+        existing_defaults["extra_args"] = _strip_denied_flags(resolved.flags)
         dumped["defaults"] = existing_defaults
 
     new_model = Model.model_validate(dumped)

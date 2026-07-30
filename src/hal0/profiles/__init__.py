@@ -326,12 +326,12 @@ __all__ = [
 
 
 def _screen_hardware_flags(flags: str) -> None:
-    """Reject physical slot flags before a profile is persisted.
+    """Reject physical slot flags and hal0-managed flags before a profile is persisted.
 
     The HTTP route performs the same check for an early, route-specific error,
     but the catalog is also used by import/CLI paths and is the actual write
     seam. Keeping the guard here prevents those paths from bypassing the
-    model/profile ownership partition.
+    model/profile ownership partition (§5 hardware + §21.7 managed args).
     """
     if not flags.strip():
         return
@@ -339,6 +339,9 @@ def _screen_hardware_flags(flags: str) -> None:
         tokens = shlex.split(flags)
     except ValueError:
         return  # schema/parser owns malformed quoting diagnostics
-    from hal0.slots.argv import _deny_slot_hardware_flags
+    from hal0.slots.argv import _deny_managed_flags, _deny_slot_hardware_flags
 
+    # Hardware first so -ngl (in both sets) gets the "belongs on the slot"
+    # message — mirrors the route/screen_model_write ordering.
     _deny_slot_hardware_flags(tokens, segment="profile flags")
+    _deny_managed_flags(tokens, segment="profile flags")
