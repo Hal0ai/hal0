@@ -17,7 +17,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 from hal0.config.schema import (
@@ -1014,6 +1014,103 @@ def test_resolve_model_path_registry_miss_falls_back_to_bare_id() -> None:
     GGUF path — the C8 deploy precheck enforces this on CT105.
     """
     assert _resolve_model_path({"_model_key": "gemma-4-12b-it"}) == "gemma-4-12b-it"
+
+
+class TestGpuPassthroughGate:
+    """spec-hw-slot-ownership §2 — the /dev/kfd + /dev/dri passthrough gate is
+    decided by the SLOT's ``device`` enum, NEVER by the profile.
+
+    Before the 1.0 fix, ``_resolve_llama_scalars`` read ``profile.device_class``
+    and defaulted it to ``"gpu"`` when unset, so a ``cpu-chat`` profile (all 16
+    seeds leave ``device_class`` unset) on a ``device="cpu"`` slot still
+    requested real GPU device nodes. Both directions are asserted: a cpu/npu
+    slot must get NOTHING, and a gpu slot must NOT be stranded on CPU.
+    """
+
+    _NODES: ClassVar[list[str]] = ["/dev/kfd", "/dev/dri/renderD128"]
+
+    def _spec(self, cfg: dict[str, Any], profile: ProfileConfig):
+        provider = ContainerProvider()
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=list(self._NODES),
+            ),
+            # Existence-filtered at the call site; force present so a CI host
+            # with no /dev/kfd still exercises the gate rather than the filter.
+            patch("hal0.providers.container.os.path.exists", return_value=True),
+            patch("hal0.providers.container.resolve_gpu_group_ids", return_value=[993, 44]),
+        ):
+            return provider.container_spec(cfg, _model_info())
+
+    # ── the headline bug: cpu-chat on a device="cpu" slot ────────────────────
+
+    def test_cpu_slot_with_device_agnostic_profile_gets_no_gpu_nodes(self) -> None:
+        """The exact shipped shape: the ``cpu-chat`` seed leaves ``device_class``
+        unset, so the old ``or "gpu"`` floor mounted /dev/kfd + /dev/dri into a
+        CPU slot's container."""
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        assert cpu_chat.device_class is None, "the cpu-chat seed is device-agnostic"
+        spec = self._spec(_slot_cfg(device="cpu", profile="cpu-chat"), cpu_chat)
+        assert spec.devices == []
+        assert spec.group_add == []
+
+    def test_cpu_slot_ignores_a_profile_that_claims_gpu(self) -> None:
+        """A legacy/imported profile carrying ``device_class="gpu"`` (e.g. the
+        published ``chat-long-context`` artifact) must NOT drag GPU nodes onto a
+        ``device="cpu"`` slot — the hint is inert."""
+        spec = self._spec(
+            _slot_cfg(device="cpu"), ProfileConfig(flags="-fa on", device_class="gpu")
+        )
+        assert spec.devices == []
+        assert spec.group_add == []
+
+    def test_npu_slot_gets_no_gpu_nodes(self) -> None:
+        spec = self._spec(_slot_cfg(device="npu"), ProfileConfig(flags="", device_class="gpu"))
+        assert spec.devices == []
+        assert spec.group_add == []
+
+    # ── the other direction: never strand a real GPU slot on CPU ────────────
+
+    def test_gpu_slot_with_device_agnostic_profile_still_gets_nodes(self) -> None:
+        """All 16 seeds leave ``device_class`` unset — a gpu-rocm slot bound to
+        one must still get real passthrough."""
+        spec = self._spec(_slot_cfg(device="gpu-rocm"), _moe_profile())
+        assert spec.devices == self._NODES
+        assert spec.group_add == ["993", "44"]
+
+    def test_gpu_slot_ignores_a_profile_that_claims_cpu(self) -> None:
+        spec = self._spec(
+            _slot_cfg(device="gpu-vulkan"), ProfileConfig(flags="-fa on", device_class="cpu")
+        )
+        assert spec.devices == self._NODES
+
+    def test_cuda_slot_uses_cdi_from_the_slot_device_not_profile_backend(self) -> None:
+        """NVIDIA is selected by ``device="gpu-cuda"``. CDI names are not paths,
+        so no existence filter and no --group-add."""
+        spec = self._spec(_slot_cfg(device="gpu-cuda"), _moe_profile())
+        assert spec.devices == ["nvidia.com/gpu=all"]
+        assert spec.group_add == []
+
+    def test_rocm_slot_does_not_take_cdi_from_a_profile_backend_cuda(self) -> None:
+        """A profile claiming ``backend="cuda"`` must not flip a gpu-rocm slot
+        onto the CDI path — the vendor comes from the slot's device."""
+        spec = self._spec(
+            _slot_cfg(device="gpu-rocm"), ProfileConfig(flags="-fa on", backend="cuda")
+        )
+        assert spec.devices == self._NODES
+        assert not any("nvidia.com" in d for d in spec.devices)
+
+    # ── back-compat: a hand-built / pre-pivot dict with no device at all ────
+
+    def test_deviceless_slot_cfg_falls_back_to_gpu_not_cpu(self) -> None:
+        """A pre-pivot slot dict with no ``device`` key keeps the historical
+        gpu default rather than silently losing its GPU."""
+        cfg = _slot_cfg()
+        cfg.pop("device")
+        spec = self._spec(cfg, _moe_profile())
+        assert spec.devices == self._NODES
 
 
 class TestContextSizeDerive:

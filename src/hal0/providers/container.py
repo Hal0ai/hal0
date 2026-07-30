@@ -166,24 +166,40 @@ def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any
 def _effective_backend_and_device_class(
     slot_cfg: Mapping[str, Any] | None, profile: Any
 ) -> tuple[str | None, str | None]:
-    """``(backend, device_class)`` for this lane — slot override beats profile."""
-    backend = getattr(profile, "backend", None)
-    device_class = getattr(profile, "device_class", None)
+    """``(backend, device_class)`` for this lane — the SLOT's device decides.
+
+    SINGLE SOURCE for "what hardware class is this launch" (spec-hw-slot-ownership
+    §2/§4.1). Consumed by :func:`_effective_runner` (image/capability resolution)
+    AND by :func:`_resolve_llama_scalars` → :meth:`ContainerProvider.container_spec`
+    (the real ``/dev/kfd`` + ``/dev/dri`` / NVIDIA-CDI passthrough gate), so the
+    image that launches, the capabilities that gate its flags, and the device
+    nodes mounted into it can never disagree.
+
+    A PROFILE carries no hardware placement in 1.0. ``profile.device_class`` /
+    ``profile.backend`` survive on :class:`~hal0.config.schema.ProfileConfig` only
+    as INERT match-only fit hints for :func:`hal0.model_fit.profile_fits_slot`
+    (and for the shipped ``.hal0profile.json`` artifacts whose checksums cover
+    them). They are read here ONLY as the last-resort fallback for a hand-built
+    / pre-pivot ``slot_cfg`` dict that declares no ``device`` at all — every
+    real ``SlotConfig`` has one (``device`` defaults to
+    :data:`~hal0.model_meta.DEFAULT_DEVICE`), so on a real box the profile never
+    contributes.
+    """
     if isinstance(slot_cfg, Mapping):
-        # 1.0 profiles do not select hardware. Derive the runtime backend
-        # from the slot's authoritative device; retain the legacy backend
-        # mirror only for pre-pivot TOMLs that have no device.
+        # 1.0: the slot's ``device`` enum is the authoritative hardware fact.
         device = slot_cfg.get("device")
         if isinstance(device, str) and device:
             from hal0.model_meta import device_to_backend
 
-            _recipe, backend = device_to_backend(device)
-            device_class = "npu" if _recipe == "flm" else ("cpu" if device == "cpu" else "gpu")
-        else:
-            sb = slot_cfg.get("backend")
-            if isinstance(sb, str) and sb:
-                backend = sb
-    return backend, device_class
+            recipe, backend = device_to_backend(device)
+            device_class = "npu" if recipe == "flm" else ("cpu" if device == "cpu" else "gpu")
+            return backend, device_class
+        # No ``device`` at all: a pre-pivot TOML or a hand-built dict. Retain the
+        # legacy slot-level ``backend`` mirror, then the profile's inert hint.
+        sb = slot_cfg.get("backend")
+        if isinstance(sb, str) and sb:
+            return sb, getattr(profile, "device_class", None)
+    return getattr(profile, "backend", None), getattr(profile, "device_class", None)
 
 
 def _binary_runner(slot_cfg: Mapping[str, Any] | None) -> Any | None:
@@ -1110,6 +1126,13 @@ def _resolve_llama_scalars(
     # the mtp/jinja capability gates below, so they can never drift onto two
     # different runners (§7.1a / ML-5).
     runner = _effective_runner(slot_cfg, profile, model_info)
+    # SINGLE SOURCE for "what hardware class is this launch" — the same helper
+    # ``_effective_runner`` uses, so the image and the device-node passthrough
+    # gate in ``container_spec`` can never drift onto two different hardware
+    # classes. Slot-derived; the profile contributes nothing on a real box.
+    effective_backend, effective_device_class = _effective_backend_and_device_class(
+        slot_cfg, profile
+    )
     effective_mtp = _effective_mtp(model_info, runner, log_ineligible=for_launch)
     # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
     # resolving the profile's flags — the profile flag resolver
@@ -1271,10 +1294,19 @@ def _resolve_llama_scalars(
         "slot_threads": slot_threads,
         # slot_parallel stays inert (spec-flags-ownership §2 — sunset).
         "slot_parallel": None,
-        "device_class": str(getattr(profile, "device_class", "gpu") or "gpu"),
-        # GPU vendor discriminator: the profile's declared backend (rocm /
-        # vulkan / cuda / None) — configuration, not host probing.
-        "profile_backend": getattr(profile, "backend", None),
+        # HARDWARE CLASS + GPU-vendor discriminator (spec-hw-slot-ownership §2):
+        # derived from the SLOT's ``device`` enum via the one shared helper, NOT
+        # read off the profile. A profile is a model-tuning bundle and selects no
+        # hardware; before this, a ``cpu-chat`` profile with device_class unset
+        # still fell through ``or "gpu"`` and requested /dev/kfd + /dev/dri on a
+        # ``device="cpu"`` slot. The ``or "gpu"`` floor is retained ONLY for a
+        # slot_cfg that declares no device at all (hand-built dict / pre-pivot
+        # TOML) so a legacy GPU slot is never stranded on CPU.
+        "device_class": str(effective_device_class or "gpu"),
+        "backend": effective_backend,
+        # Back-compat mirror of ``backend`` under its former name; some callers
+        # (and the ``is_nvidia_gpu_device`` parameter) still say "profile".
+        "profile_backend": effective_backend,
         "device": str(slot_cfg.get("device") or ""),
         "gpu_index": gpu_index,
     }
@@ -1330,14 +1362,17 @@ class ContainerProvider(Provider):
         the health-check override are all included, so what loads matches what
         the plan describes (no GPU-special argv assembly elsewhere).
 
-        GPU passthrough branches by VENDOR, decided from the slot's declared
-        device/profile (never by probing at spec-build time):
+        GPU passthrough branches by VENDOR, decided from the SLOT's declared
+        ``device`` enum (never by probing at spec-build time, and never from the
+        profile — spec-hw-slot-ownership §2: a profile is a model-tuning bundle
+        and selects no hardware):
 
-        * AMD/other (default): device nodes + group GIDs are included ONLY
-          for gpu/img profiles and are existence-filtered — a cpu (or npu)
-          ``device_class`` profile gets no ``/dev/kfd`` / ``/dev/dri``
-          passthrough or ``--group-add``.
-        * NVIDIA (``device=gpu-cuda`` or profile ``backend="cuda"``): CDI —
+        * AMD/other (default): device nodes + group GIDs are included ONLY when
+          the slot's device resolves to a gpu/img class, and are
+          existence-filtered — a ``device="cpu"`` (or ``"npu"``) slot gets no
+          ``/dev/kfd`` / ``/dev/dri`` passthrough and no ``--group-add``,
+          whatever its profile says.
+        * NVIDIA (``device=gpu-cuda``): CDI —
           ``--device nvidia.com/gpu=all`` (per-index ``nvidia.com/gpu=<n>``
           when ``gpu_index`` is set). CDI names are not paths, so no
           existence filter and no GID ``--group-add`` (the CDI spec injects
@@ -1352,12 +1387,16 @@ class ContainerProvider(Provider):
         model_path = _resolve_model_path(model_info)
         port = int(slot_cfg.get("port", 0))
 
-        # GPU plumbing gate (#674/CPU-profile fix): only gpu/img profiles get
-        # GPU passthrough. On the AMD path only device paths that actually
-        # exist on this host are passed (podman errors on a non-existent
-        # --device); CDI entries are names, not paths — passed verbatim.
+        # GPU plumbing gate (#674/CPU-profile fix): only a gpu/img-class SLOT
+        # gets GPU passthrough. ``scalars["device_class"]`` is derived from the
+        # slot's ``device`` enum by ``_effective_backend_and_device_class`` — a
+        # profile's inert ``device_class``/``backend`` hint can no longer mount
+        # /dev/kfd + /dev/dri into a ``device="cpu"`` slot's container. On the
+        # AMD path only device paths that actually exist on this host are passed
+        # (podman errors on a non-existent --device); CDI entries are names, not
+        # paths — passed verbatim.
         if scalars["device_class"] in ("gpu", "img"):
-            if is_nvidia_gpu_device(scalars["device"], scalars["profile_backend"]):
+            if is_nvidia_gpu_device(scalars["device"], scalars["backend"]):
                 devices = nvidia_cdi_devices(scalars["gpu_index"])
                 group_ids = []
             else:
