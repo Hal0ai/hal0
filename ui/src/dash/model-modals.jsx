@@ -89,7 +89,21 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
 
   const inspected = inspect.isSuccess && !!inspect.data;
   const sel = variants.find(v => v.id === variant);
-  const canPull = inspected && variant && name && !pullJob.inFlight;
+  // The vision↔mmproj invariant on the CREATE path (#1394) — the exact twin of
+  // the edit drawer's #1380 gate. The message used to render as decoration next
+  // to a live Pull button; it is now folded into the single `canPull` gate so
+  // the modal can't seed a projector-less vision row. Escape hatch: a repo that
+  // ships no mmproj at all can't satisfy "pick one below", so the wording points
+  // at the label instead — the pull itself is fine, only the label is
+  // unsupportable. (The server refuses this shape too, via
+  // `model.vision_requires_mmproj` on POST /pull, so a stale client can't
+  // route around the gate.)
+  const mmprojError = !(labels.vision && !mmproj)
+    ? null
+    : inspected && mmprojChoices.length === 0
+      ? "vision label requires an mmproj file — this repo ships none, so untick vision to pull"
+      : "vision label requires an mmproj file — pick one below";
+  const canPull = inspected && variant && name && !pullJob.inFlight && !mmprojError;
 
   const onPull = async () => {
     if (!canPull) return;
@@ -223,8 +237,14 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
                   <span className="mono">{l}</span>
                 </label>
               ))}
-              {labels.vision && !mmproj && (
-                <div className="err" style={{flexBasis: "100%"}}>vision label requires an mmproj file — pick one below</div>
+              {mmprojError && (
+                <div
+                  className="err"
+                  data-testid="hf-add-mmproj-error"
+                  style={{flexBasis: "100%"}}
+                >
+                  {mmprojError}
+                </div>
               )}
             </div>
           </div>
@@ -236,7 +256,12 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
                 <span className="warn">required for vision-labeled models</span>
               </div>
               <div className="form-ctl">
-                <select className="input mono" value={mmproj} onChange={e => setMmproj(e.target.value)}>
+                <select
+                  className="input mono"
+                  data-testid="hf-add-mmproj-select"
+                  value={mmproj}
+                  onChange={e => setMmproj(e.target.value)}
+                >
                   <option value="">
                     {mmprojChoices.length === 0
                       ? "— no mmproj files in repo —"
