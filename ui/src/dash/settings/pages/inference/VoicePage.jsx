@@ -86,8 +86,12 @@ export function VoicePage() {
   const ttsDirty = ttsModel !== (ttsSelection.model || "") || ttsEnabled !== !!ttsSelection.enabled
     || ttsVoice !== origVoice || ttsSpeed !== origSpeed || ttsFormat !== origFormat;
 
-  const sttCatalogItems = voiceCatalogs.stt?.items || voiceCatalogs.stt?.models || [];
-  const ttsCatalogItems = voiceCatalogs.tts?.items || voiceCatalogs.tts?.models || [];
+  // catalogs.voice.stt / .tts are bare arrays of picker rows (GET
+  // /api/capabilities: {backends, catalogs, selections} — see
+  // mockFixtures.ts buildCapabilities() for the canonical shape), not
+  // objects with an .items/.models wrapper.
+  const sttCatalogItems = voiceCatalogs.stt || [];
+  const ttsCatalogItems = voiceCatalogs.tts || [];
 
   const doSaveStt = async () => {
     try {
