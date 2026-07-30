@@ -511,6 +511,16 @@ function ModelRow({ model, selected, onSelect }) {
         <span className="sub">{model.repo || ""}</span>
       </span>
       <span className="mdl-row-tags">
+        {model.default && (
+          <span
+            className="chip"
+            data-testid="mdl-row-default"
+            title={`Default${model.type ? ` for ${model.type}` : ""} — the model this type falls back to`}
+            style={{color: "var(--ok)", borderColor: "var(--ok)", background: "var(--bg-2)"}}
+          >
+            ✓ default
+          </span>
+        )}
         {model.type && <span className="chip">{model.type}</span>}
         {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
         {backends.map(b => (

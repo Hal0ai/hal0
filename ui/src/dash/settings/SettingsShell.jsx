@@ -5,18 +5,22 @@
 // routing, `SettingsNav` renders the grouped rail (spec (c) target tree),
 // and each section is its own page module under `pages/<group>/`.
 //
-// Routing: kept the original `useState(section)` approach rather than
-// introducing real `/settings/:group/:page` routes — the dashboard's outer
-// router (main.jsx) is still hash-based (`#settings`) and doesn't thread a
-// sub-path into this view beyond the single `param` the old SettingsView
-// already accepted, so real nested routes would mean touching the outer
-// router too. That's more churn than this phase-1 "split settings.jsx into
-// ESM pages, preserve behavior" pass calls for — noted as a deferred
-// follow-up, not a limitation of this shell's design.
+// Routing (GH #1438): `section` is a pure derivation of the `param` prop —
+// no local state. The outer router (main.jsx) keeps `route` at "settings"
+// across every #settings/<section> hash (it only changes on the ROUTE head,
+// not the sub-path), so this component is never remounted when the section
+// changes — only re-rendered with a new `param`. A `useState(initialSection)`
+// seeded once at mount silently ignored every later `param` change: browser
+// back/forward, or any other code writing the hash while already on
+// #settings/*, left the rendered section stuck on whatever showed first.
+// Deriving `section` fresh every render fixes that for free. `onSelect`
+// writes the hash (mirroring every other hash write in main.jsx) instead of
+// local state, so the existing `hashchange` listener there is the single
+// feedback loop for both directions — nav click → hash → re-render, and
+// hash change → re-render, are now the same code path.
 //
-// `param` → initial-section behavior is preserved exactly: an unrecognized
-// or missing param falls back to "general", same as the old SettingsView.
-import { useState } from 'react'
+// `param` → section behavior is preserved exactly: an unrecognized or
+// missing param falls back to "general", same as the old SettingsView.
 import { SettingsNav, VALID_IDS } from './SettingsNav.jsx'
 
 import { GeneralPage } from './pages/server/GeneralPage.jsx'
@@ -41,8 +45,11 @@ import { AboutPage } from './pages/diagnostics/AboutPage.jsx'
 import { SecretsPage } from './pages/integrations/SecretsPage.jsx'
 
 export function SettingsShell({ param }) {
-  const initialSection = param && VALID_IDS.includes(param) ? param : "general";
-  const [section, setSection] = useState(initialSection);
+  const section = param && VALID_IDS.includes(param) ? param : "general";
+
+  const onSelect = (id) => {
+    if (typeof window !== "undefined") window.location.hash = "#settings/" + id;
+  };
 
   const renderPage = () => {
     switch (section) {
@@ -79,7 +86,7 @@ export function SettingsShell({ param }) {
       </div>
 
       <div className="settings-layout">
-        <SettingsNav section={section} onSelect={setSection} />
+        <SettingsNav section={section} onSelect={onSelect} />
         <div className="settings-content">
           {renderPage()}
         </div>
