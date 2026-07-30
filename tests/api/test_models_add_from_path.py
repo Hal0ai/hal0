@@ -189,3 +189,97 @@ def test_add_from_path_rejects_bad_body(
     # Path not a string
     r = client.post("/api/models/add-from-path", json={"path": 42})
     assert r.status_code == 400, r.text
+
+
+# ── #1415: the HF hub cache layout (symlink -> extensionless blob) ───────────
+
+
+def _hub_layout(root: Path, *, repo: str, revision: str, filename: str, body: bytes) -> Path:
+    """Build HuggingFace's on-disk hub cache shape and return the symlink.
+
+    ``blobs/<sha>`` holds the bytes with NO extension; the human-readable
+    name exists only as ``snapshots/<rev>/<name>.gguf -> ../../blobs/<sha>``.
+    This is also the shape of hal0's own ``/mnt/ai-models/local/*`` farm.
+    """
+    import hashlib
+
+    hub = root / f"models--{repo.replace('/', '--')}"
+    blobs = hub / "blobs"
+    snap = hub / "snapshots" / revision
+    blobs.mkdir(parents=True, exist_ok=True)
+    snap.mkdir(parents=True, exist_ok=True)
+    blob = blobs / hashlib.sha256(body).hexdigest()
+    blob.write_bytes(body)
+    link = snap / filename
+    link.symlink_to(blob)
+    return link
+
+
+def test_add_from_path_accepts_gguf_symlink_into_extensionless_blob(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """#1415: the allow-list must apply to the path the operator TYPED.
+
+    Checking ``path.resolve().suffix`` rejected every model in the HF hub
+    cache — hub blobs are sha-named and extensionless — with the nonsense
+    message ``file extension '' not in [models].file_extensions`` for a path
+    that visibly ends in ``.gguf``.
+    """
+    client, drop = add_path_client
+    link = _hub_layout(
+        drop,
+        repo="unsloth/Qwen3.5-0.8B-GGUF",
+        revision="6ab4614",
+        filename="Qwen3.5-0.8B-UD-Q4_K_XL.gguf",
+        body=b"\x00" * 256,
+    )
+    assert link.resolve().suffix == "", "fixture must reproduce the extensionless blob"
+
+    r = client.post("/api/models/add-from-path", json={"path": str(link), "labels": ["chat"]})
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    # The resolved blob is still what gets stored/detected — only the
+    # allow-list check moved to the literal path.
+    assert body["path"] == str(link.resolve())
+    assert body["capabilities"] == ["chat"]
+    # ...and the derived id/name come from the name the operator can see,
+    # not the opaque sha the symlink happens to point at.
+    assert "qwen3" in body["id"].lower()
+    assert link.resolve().name not in body["id"]
+    assert link.resolve().name not in body["name"]
+
+
+def test_add_from_path_symlink_to_disallowed_extension_still_rejected(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """The allow-list still bites: a symlink named ``.json`` is refused, and
+    the error quotes the operator's path rather than the resolved target."""
+    client, drop = add_path_client
+    real = drop / "actual-blob"
+    real.write_bytes(b"{}")
+    link = drop / "tokenizer.json"
+    link.symlink_to(real)
+
+    r = client.post("/api/models/add-from-path", json={"path": str(link)})
+
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.unsupported_format"
+    assert "'.json'" in err["message"]
+    assert err["details"]["path"] == str(link)
+
+
+def test_add_from_path_extensionless_literal_falls_back_to_resolved(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """A literal path with no suffix at all still consults the resolved
+    target, so pointing straight at a hub blob keeps its old behaviour."""
+    client, drop = add_path_client
+    real = drop / "weights.gguf"
+    real.write_bytes(b"\x00" * 32)
+    link = drop / "no-extension-here"
+    link.symlink_to(real)
+
+    r = client.post("/api/models/add-from-path", json={"path": str(link)})
+    assert r.status_code == 201, r.text
