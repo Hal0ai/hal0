@@ -1055,6 +1055,56 @@ _REST_VERB_PAYLOAD_KWARG: dict[str, str] = {
     "PATCH": "json",
 }
 
+#: Fallback code for a REST failure whose body isn't a hal0 envelope — a bare
+#: FastAPI ``{"detail": …}``, a reverse proxy's HTML 502, an empty body. The
+#: HTTP status is still carried separately as ``http_status``; this exists so
+#: ``error.code`` is ALWAYS a branchable string, never absent.
+_REST_FALLBACK_ERROR_CODE = "mcp.rest_error"
+
+
+def _rest_error_payload(body: Any, *, text: str = "") -> dict[str, Any]:
+    """Normalise a failed REST response body into the flat MCP error shape.
+
+    Every hal0 REST failure is ``{"error": {"code", "message", "details"}}``
+    (``api.middleware.error_codes._envelope``, mirrored by ``api.auth._envelope``).
+    Returning that verbatim under this function's own ``error`` key produced
+    ``error.error.code`` — one nesting level deeper than the in-process paths
+    (``mcp.unknown_tool`` / ``mcp.missing_arg`` / the memory dispatcher), so a
+    client or toolloop branching on ``result["error"]["code"]`` read ``None``
+    for every REST-forwarded 4xx/5xx (#1468). This lifts the inner object so
+    both paths answer to one accessor.
+
+    Non-hal0 bodies keep all their diagnostic content under a synthetic
+    ``mcp.rest_error`` code rather than being dropped — a proxy's HTML 502 is
+    often the only evidence of what actually broke.
+    """
+    if isinstance(body, dict):
+        inner = body.get("error")
+        if isinstance(inner, dict) and isinstance(inner.get("code"), str):
+            # The hal0 envelope — lift it verbatim (message/details included).
+            return dict(inner)
+        # A JSON body in some other shape (FastAPI's bare {"detail": …}, an
+        # upstream's own error schema). Preserve it under `details` so nothing
+        # is lost, and synthesise a code so the accessor still works.
+        return {
+            "code": _REST_FALLBACK_ERROR_CODE,
+            "message": str(body.get("detail") or body.get("message") or "REST call failed"),
+            "details": body,
+        }
+    if body is not None:
+        # Valid JSON, but not an object (a bare string/list).
+        return {
+            "code": _REST_FALLBACK_ERROR_CODE,
+            "message": "REST call failed",
+            "details": {"body": body},
+        }
+    # Body wasn't JSON at all.
+    return {
+        "code": _REST_FALLBACK_ERROR_CODE,
+        "message": text or "REST call failed",
+        "details": {"text": text},
+    }
+
 
 async def _call_rest(
     *,
@@ -1069,9 +1119,9 @@ async def _call_rest(
 
     The Bearer header is re-attached unchanged so the REST layer's auth
     middleware sees exactly the credential the agent presented — no
-    privilege elevation. Non-2xx responses raise the body as a typed
-    error dict so the MCP client sees structured failure info instead
-    of a generic "tool failed".
+    privilege elevation. Non-2xx responses come back as the same flat
+    ``{"status": "error", "error": {"code", …}, "http_status": N}`` shape
+    every other dispatch path uses — see :func:`_rest_error_payload` (#1468).
     """
     headers: dict[str, str] = {"Accept": "application/json"}
     if bearer:
@@ -1095,13 +1145,13 @@ async def _call_rest(
 
     if response.status_code >= 400:
         try:
-            body = response.json()
+            body: Any = response.json()
         except json.JSONDecodeError:
-            body = {"text": response.text}
+            body = None
         return {
             "status": "error",
             "http_status": response.status_code,
-            "error": body,
+            "error": _rest_error_payload(body, text=response.text),
         }
     try:
         return response.json()

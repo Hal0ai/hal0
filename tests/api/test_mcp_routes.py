@@ -401,6 +401,104 @@ def test_clients_empty_when_no_audit(client: TestClient) -> None:
     assert response.json() == {"clients": [], "count": 0}
 
 
+# ── #1468: the args signature unpacks the admin server's nested `args` ───────
+#
+# build_server advertises every hal0-admin tool as {args: {<real schema>}} —
+# a deliberate wrapper so FastMCP doesn't drop undeclared body fields. But
+# _args_signature only walked TOP-LEVEL properties, so all 92 admin tools
+# rendered as the opaque "args: object" / "args?: object" in the Connections
+# blast-radius manifest, making the tool-detail feature dead for that surface.
+
+
+def test_args_signature_descends_into_the_admin_args_wrapper() -> None:
+    """The nested wrapper is unwrapped so the real per-tool fields render."""
+    from hal0.api.routes.mcp import _args_signature
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "args": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "tail": {"type": "integer"},
+                },
+                "required": ["name"],
+                "additionalProperties": True,
+            }
+        },
+        "required": ["args"],
+    }
+    sig = _args_signature(schema)
+    assert sig != "args: object"
+    assert "name: string" in sig
+    assert "tail?: integer" in sig
+
+
+def test_args_signature_unwraps_optional_args_wrapper() -> None:
+    """A tool whose inner schema has no required fields wraps as `args?` —
+    the unwrap must handle that shape too (e.g. slot_list)."""
+    from hal0.api.routes.mcp import _args_signature
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "args": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer"}},
+                "required": [],
+            }
+        },
+        "required": [],
+    }
+    sig = _args_signature(schema)
+    assert sig == "limit?: integer"
+
+
+def test_args_signature_leaves_flat_schemas_alone() -> None:
+    """The memory server's typed signatures already render correctly — the
+    unwrap must not disturb a schema that is genuinely flat."""
+    from hal0.api.routes.mcp import _args_signature
+
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+        "required": ["query"],
+    }
+    assert _args_signature(schema) == "query: string, limit?: integer"
+
+
+def test_args_signature_keeps_a_genuine_single_args_field() -> None:
+    """A tool that really does take one object-typed field called `args` (and
+    declares no inner properties) has nothing to unwrap — don't invent one."""
+    from hal0.api.routes.mcp import _args_signature
+
+    schema = {
+        "type": "object",
+        "properties": {"args": {"type": "object"}},
+        "required": ["args"],
+    }
+    assert _args_signature(schema) == "args: object"
+
+
+def test_admin_tool_signatures_are_not_opaque_in_practice() -> None:
+    """End-to-end against the REAL admin schema: the manifest must show fields,
+    not `args: object`. This is the assertion the live lxc105 render failed."""
+    from hal0.api.routes.mcp import _args_signature
+    from hal0.mcp.admin import tool_param_schema
+
+    inner = tool_param_schema("slot_status")
+    advertised = {
+        "type": "object",
+        "properties": {"args": inner},
+        "required": ["args"] if inner["required"] else [],
+    }
+    sig = _args_signature(advertised)
+    assert sig not in ("args: object", "args?: object")
+    # slot_status takes a path arg `name` — it must be visible and required.
+    assert "name: string" in sig
+
+
 # ── GET /api/mcp/catalog ─────────────────────────────────────────────────────
 
 
@@ -409,13 +507,77 @@ def test_catalog_returns_static_items(client: TestClient) -> None:
     assert response.status_code == 200
     body = response.json()
     assert isinstance(body["items"], list)
-    assert len(body["items"]) >= 8
-    # Shape check — first item must carry the keys the dashboard reads.
-    first = body["items"][0]
-    for key in ("name", "author", "verified", "description", "tools", "category"):
-        assert key in first
+    assert body["items"]
+    # Shape check — every item must carry the keys the CLI table reads.
+    for item in body["items"]:
+        for key in ("id", "name", "author", "verified", "description", "category", "spec"):
+            assert key in item, f"{item.get('id')} missing {key}"
     assert isinstance(body["categories"], list)
-    assert "Files" in body["categories"]
+
+
+# ── #1468: the catalog must not ship invented metrics or dead specs ──────────
+#
+# The v0.3-alpha catalog carried fabricated star/tool counts and five
+# `verified: true` entries whose npm specs were, at v1.0 GA, either retired
+# by the modelcontextprotocol project (server-puppeteer/-gdrive/-slack) or
+# absent from the registry entirely (server-sqlite, @linear/mcp-server, plus
+# the unverified homeassistant-mcp). `hal0 mcp catalog install <id>` resolves
+# these through the npm resolver, so every one of them was a guaranteed
+# failed or unsupported install presented to the operator as curated.
+
+
+def test_catalog_carries_no_invented_popularity_metrics(client: TestClient) -> None:
+    """`stars` had no source of truth and `tools` was never probed — a number
+    an operator might weigh a security decision on must not be made up."""
+    body = client.get("/api/mcp/catalog").json()
+    for item in body["items"]:
+        assert "stars" not in item, f"{item['id']} still advertises invented stars"
+        assert "tools" not in item, f"{item['id']} still advertises an unprobed tool count"
+
+
+def test_catalog_drops_the_known_dead_specs(client: TestClient) -> None:
+    """Specs checked against the live npm registry: retired upstream, or 404."""
+    dead = {
+        "npm:@modelcontextprotocol/server-puppeteer",  # retired upstream
+        "npm:@modelcontextprotocol/server-sqlite",  # 404 — never published
+        "npm:@modelcontextprotocol/server-gdrive",  # retired upstream
+        "npm:@modelcontextprotocol/server-slack",  # retired upstream
+        "npm:@linear/mcp-server",  # 404 — wrong package name
+        "npm:homeassistant-mcp",  # 404
+    }
+    specs = {item["spec"] for item in client.get("/api/mcp/catalog").json()["items"]}
+    assert not (specs & dead), f"dead specs still shipped: {sorted(specs & dead)}"
+
+
+def test_catalog_verified_entries_are_first_party(client: TestClient) -> None:
+    """`verified` now means one thing: published by the MCP project itself or
+    by the upstream vendor. It is the only trust signal in the payload, so it
+    must not be decoration."""
+    body = client.get("/api/mcp/catalog").json()
+    verified = [i for i in body["items"] if i["verified"]]
+    assert verified, "the catalog should still offer some first-party servers"
+    for item in verified:
+        assert item["spec"].startswith(("npm:@modelcontextprotocol/", "npm:@playwright/")), (
+            f"{item['id']} is marked verified but is not first-party: {item['spec']}"
+        )
+
+
+def test_catalog_categories_match_item_categories(client: TestClient) -> None:
+    """_CATEGORIES was Title-case while every item's category was lowercase,
+    so an exact-match filter matched nothing. Derive one from the other."""
+    body = client.get("/api/mcp/catalog").json()
+    item_categories = {item["category"] for item in body["items"]}
+    assert item_categories.issubset(set(body["categories"]))
+    for category in body["categories"]:
+        assert category == category.lower(), f"{category} breaks the lowercase contract"
+
+
+def test_catalog_marks_itself_unvetted(client: TestClient) -> None:
+    """The payload carries an explicit advisory so neither the CLI nor a future
+    UI has to invent the caveat that these are third-party, unaudited servers."""
+    body = client.get("/api/mcp/catalog").json()
+    assert isinstance(body.get("advisory"), str)
+    assert body["advisory"]
 
 
 # ── GET /api/mcp/{id}/logs ───────────────────────────────────────────────────
