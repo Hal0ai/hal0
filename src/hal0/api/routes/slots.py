@@ -1176,6 +1176,9 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
         target=name,
         message=f"load {model_id or 'default'}",
     ) as _rec:
+        # Manual load is operator intent — clear the crash-loop breaker
+        # (issue i4) so an ERROR/parked slot always gets a real attempt.
+        sm.reset_load_failures(name)
         snap = await sm.load(name, model_id=model_id)
         _rec.after = {"model_id": model_id, "state": _state_value(snap)}
     return _slot_to_dict(snap, request)

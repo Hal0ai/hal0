@@ -53,7 +53,7 @@ from hal0.dispatcher._capability_resolve import (
 )
 from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
-from hal0.slots.state import SlotState
+from hal0.slots.state import SlotCrashLooping, SlotState
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 if TYPE_CHECKING:
@@ -824,6 +824,12 @@ class Dispatcher:
         # declared device/profile picks the backend.
         try:
             await self._slot_manager.load(slot_name)
+        except SlotCrashLooping:
+            # Crash-loop breaker (issue i4): already a retryable 503 with
+            # Retry-After — surface it as-is. Must NOT fall through to the
+            # ERROR check below, which would re-wrap it into the
+            # non-retryable SlotLoadFailed 502.
+            raise
         except Exception as exc:
             log.warning(
                 "dispatch.backend_aware_load_failed",
