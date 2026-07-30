@@ -305,9 +305,31 @@ def check_ports(slots: Any) -> Check:
     Surfaces the ports hal0's slots currently occupy so a port-collision
     diagnosis has the evidence in the same report. Never fails — a box with no
     slots yet is legal.
+
+    Two distinct non-answers are kept apart (#1501). ``None`` means the fetch
+    itself produced nothing — which covers a genuinely down API *and* a healthy
+    one that simply outran the request budget, so the copy must not assert
+    unreachability. A non-list body means the route answered with a shape this
+    check doesn't understand, which is a contract fault, not a connectivity
+    one. Collapsing both into "unreachable" is what made this row cry wolf on a
+    box serving all 18 slots.
     """
+    if slots is None:
+        return Check(
+            "ports",
+            "Slot ports",
+            _WARN,
+            "no answer from the slots endpoint (down, or slower than the probe budget) "
+            "— run `hal0 doctor ports`",
+        )
     if not isinstance(slots, list):
-        return Check("ports", "Slot ports", _WARN, "slots endpoint unreachable")
+        return Check(
+            "ports",
+            "Slot ports",
+            _WARN,
+            f"unexpected slots payload: {type(slots).__name__}, expected a list "
+            "— run `hal0 doctor ports`",
+        )
     bound = sorted({int(s["port"]) for s in slots if isinstance(s, dict) and s.get("port")})
     if not bound:
         return Check("ports", "Slot ports", _PASS, "no slot ports bound yet")
@@ -316,13 +338,30 @@ def check_ports(slots: Any) -> Check:
 
 # ── orchestration ──────────────────────────────────────────────────────────────
 
+# GET /api/slots is the slowest read-only route hal0 serves: the aggregator
+# merges SlotManager-backed entries with upstream-backed ones and container-
+# probes each, so cost scales with slot count. Measured on lxc105 (18 slots,
+# main @ 5be7f2a5): 11.2-14.6s, against the 10.0s default every other doctor
+# fetch uses — which is exactly how a healthy box got reported unreachable
+# (#1501). The budget is generous because this is a diagnostic: waiting is
+# strictly better than a false negative on the operator's first-line tool.
+#
+# NOTE: this makes `doctor` honest about a slow endpoint; it does not make the
+# endpoint fast. The underlying /api/slots latency is tracked separately — the
+# dashboard polls that same route.
+SLOTS_PROBE_TIMEOUT_S: float = 30.0
 
-def _get_any(path: str, base: str | None) -> Any:
-    """Best-effort GET returning the raw parsed body (dict OR list), else None."""
+
+def _get_any(path: str, base: str | None, *, timeout: float = 10.0) -> Any:
+    """Best-effort GET returning the raw parsed body (dict OR list), else None.
+
+    ``timeout`` is per-call so a slow-but-legitimate route can be given room
+    without loosening the budget for every other probe in the roll-up.
+    """
     from hal0.cli._shared import CliApiError, api_get
 
     try:
-        return api_get(path, base=base)
+        return api_get(path, base=base, timeout=timeout)
     except CliApiError:
         return None
 
@@ -345,7 +384,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_auth_posture(_get_any("/api/auth/status", base)),
         check_model_store(_get_any("/api/models", base)),
         check_migrations(pending_layout_migration()),
-        check_ports(_get_any("/api/slots", base)),
+        check_ports(_get_any("/api/slots", base, timeout=SLOTS_PROBE_TIMEOUT_S)),
         check_hal0_target(),
         check_secret_file_modes(),
         check_seams(),
@@ -428,6 +467,7 @@ def doctor_all_cmd(
 
 
 __all__ = [
+    "SLOTS_PROBE_TIMEOUT_S",
     "build_all_checks",
     "check_auth_posture",
     "check_hal0_target",

@@ -103,6 +103,85 @@ def test_ports_lists_bound() -> None:
     assert "8081" in c.detail and "8082" in c.detail
 
 
+# ── #1501: the row must not cry "unreachable" at a healthy-but-slow box ───────
+#
+# Live repro on lxc105 (main @ 5be7f2a5, hal0-api active and serving all 18
+# slots): GET /api/slots took 11.2-14.6s while `api_get`'s default budget is
+# 10.0s. httpx.TimeoutException subclasses httpx.HTTPError, so _api_request
+# converts it to CliApiError, _get_any swallows that to None, and check_ports
+# rendered None as "slots endpoint unreachable" — a false negative on the
+# operator's first-line diagnostic.
+
+
+def test_ports_fetch_failure_does_not_assert_unreachability() -> None:
+    """A failed fetch must not claim the endpoint is unreachable.
+
+    None only means "we didn't get a usable answer" — a timeout against a
+    perfectly healthy endpoint lands here too, so the copy has to stay honest
+    about which of the two it was.
+    """
+    c = da.check_ports(None)
+    assert c.status == "warn"
+    assert "unreachable" not in c.detail.lower() or "slow" in c.detail.lower()
+
+
+def test_ports_fetch_failure_names_a_followup_command() -> None:
+    """Every other failing row names a drill-down; this one must too (#1501)."""
+    c = da.check_ports(None)
+    assert "hal0 doctor ports" in c.detail
+
+
+def test_ports_unexpected_shape_is_distinct_from_a_fetch_failure() -> None:
+    """A wrong-shaped body is a different fault than no body at all.
+
+    ``check_model_store`` already keeps these apart; ``check_ports`` collapsed
+    both into the same "unreachable" string, which is why a shape regression
+    would have been misreported as a connectivity problem.
+    """
+    unreachable = da.check_ports(None)
+    wrong_shape = da.check_ports({"slots": [{"port": 8081}]})
+    assert wrong_shape.status == "warn"
+    assert wrong_shape.detail != unreachable.detail
+
+
+def test_slots_probe_gets_a_budget_larger_than_the_default() -> None:
+    """The slots aggregator is the slowest read-only route — give it room.
+
+    It merges SlotManager entries with upstream-backed ones and container-probes
+    each, so on a populated box it legitimately outruns the 10s default that
+    every other doctor fetch uses.
+    """
+    seen: dict[str, float | None] = {}
+
+    def fake_api_get(path: str, *, base: str | None = None, timeout: float = 10.0, **kw: object):
+        seen[path] = timeout
+        return []
+
+    import hal0.cli._shared as shared
+
+    orig = shared.api_get
+    shared.api_get = fake_api_get  # type: ignore[assignment]
+    try:
+        da._get_any("/api/slots", None, timeout=da.SLOTS_PROBE_TIMEOUT_S)
+    finally:
+        shared.api_get = orig  # type: ignore[assignment]
+
+    assert seen["/api/slots"] == da.SLOTS_PROBE_TIMEOUT_S
+    assert da.SLOTS_PROBE_TIMEOUT_S > 10.0
+
+
+def test_doctor_ports_subcommand_exists() -> None:
+    """The command the warn row points at has to actually resolve (#1501).
+
+    Before this, `hal0 doctor ports` answered "No such command 'ports'. Did you
+    mean 'perms'?", so the row named a dead end.
+    """
+    from hal0.cli import doctor_commands
+
+    names = {c.name for c in typer.main.get_command(doctor_commands.app).commands.values()}
+    assert "ports" in names
+
+
 # ── check_hal0_target ─────────────────────────────────────────────────────────
 
 
@@ -182,7 +261,9 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         },
     )
 
-    def _fake_get(path: str, base=None):
+    # `timeout` is keyword-only on the real seam (#1501 gave /api/slots its own
+    # budget); accept and ignore it so this stub tracks the signature.
+    def _fake_get(path: str, base=None, *, timeout: float = 10.0):
         return {
             "/api/auth/status": {"auth_required": False, "has_admin_key": False},
             "/api/models": {"models": [{"id": "a", "path": "/m/a"}]},
