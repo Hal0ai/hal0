@@ -22,7 +22,7 @@ import React from 'react'
 import * as ReactDOM from 'react-dom/client'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClient } from './lib/queryClient'
-import { installToastGlobal } from './stores/useToastStore'
+import { installToastGlobal, installToastQueueHook } from './stores/useToastStore'
 
 ;(globalThis as any).React = React
 ;(globalThis as any).ReactDOM = ReactDOM
@@ -30,3 +30,4 @@ import { installToastGlobal } from './stores/useToastStore'
 ;(globalThis as any).Hal0QueryClientProvider = QueryClientProvider
 
 installToastGlobal()
+installToastQueueHook()

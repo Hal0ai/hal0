@@ -154,7 +154,6 @@ function App() {
   const [{ route, param }, setRouteState] = useStateA(parseRoute());
   const [approvalsOpen, setApprovalsOpen] = useStateA(false);
   const [heroDismissed, setHeroDismissed] = useStateA(false);
-  const [toast, setToast] = useStateA(null);
   const [composerState, setComposerState] = useStateA("idle");
   const [footerOpen, setFooterOpen] = useStateA(false);
   const [paletteOpen, setPaletteOpen] = useStateA(false);
@@ -206,6 +205,13 @@ function App() {
   const approveApproval = useApproveApprovalHook ? useApproveApprovalHook() : null;
   const denyApproval = useDenyApprovalHook ? useDenyApprovalHook() : null;
 
+  // Toast queue (GH #1473): useToastStore's push() is already the canonical
+  // window.__hal0Toast (installed by globals-install.ts before React mounts,
+  // so nothing fired before this component exists is dropped). This is the
+  // ONE render-side consumer of that queue — no local toast state here.
+  const useToastQueueHook = (typeof window !== "undefined" && window.__hal0UseToastQueue) || null;
+  const toastQueue = useToastQueueHook ? useToastQueueHook() : { queue: [], dismiss: () => {} };
+
   // Map ApprovalEntry → shape expected by ApprovalModal
   const approvalItems = (approvalQuery.data?.approvals ?? []).map(e => ({
     id: e.id,
@@ -219,18 +225,6 @@ function App() {
     const onHash = () => setRouteState(parseRoute());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
-  }, []);
-
-  // expose a global toast for any view to ping
-  useEffectA(() => {
-    window.__hal0Toast = (msg, kind = "info") => {
-      const id = Date.now() + Math.random();
-      setToast({ msg, kind, id });
-      setTimeout(() => {
-        setToast(t => (t && t.id === id) ? null : t);
-      }, 4000);
-    };
-    return () => { delete window.__hal0Toast; };
   }, []);
 
   useEffectA(() => {
@@ -450,11 +444,15 @@ function App() {
         />
       )}
 
-      {toast && (
-        <div className={"hal0-toast " + (toast.kind || "info")} role="status" aria-live="polite">
-          <span className="toast-dot" />
-          <span className="toast-msg mono">{toast.msg}</span>
-          <button className="toast-close" onClick={() => setToast(null)} aria-label="Dismiss">×</button>
+      {toastQueue.queue.length > 0 && (
+        <div className="hal0-toast-stack">
+          {toastQueue.queue.map((t) => (
+            <div key={t.id} className={"hal0-toast " + (t.kind || "info")} role="status" aria-live="polite">
+              <span className="toast-dot" />
+              <span className="toast-msg mono">{t.msg}</span>
+              <button className="toast-close" onClick={() => toastQueue.dismiss(t.id)} aria-label="Dismiss">×</button>
+            </div>
+          ))}
         </div>
       )}
 

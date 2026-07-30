@@ -2589,11 +2589,21 @@ select.npu-sel {
   padding: 1px 5px;
 }
 /* ─── Toast ────────────────────────────────────────────────────── */
-.hal0-toast {
+/* Fixed-position stack — GH #1473: multiple queued toasts render as
+   siblings now (main.jsx maps the useToastStore queue), so the fixed
+   positioning moved up to this wrapper; individual .hal0-toast items lay
+   out in normal flow inside it (column-reverse so a newly-pushed toast
+   appears at the bottom, growing upward, without reflowing older ones). */
+.hal0-toast-stack {
   position: fixed;
   bottom: calc(var(--footer-h) + 16px);
   right: 20px;
   z-index: 200;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+}
+.hal0-toast {
   display: flex;
   align-items: center;
   gap: 10px;

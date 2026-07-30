@@ -222,6 +222,38 @@ test.describe('ApprovalModal live wiring', () => {
     await page.waitForTimeout(500)
     expect(denyHit).toBe(true)
   })
+
+  // GH #1473: "Deny + remember" called the exact same onDeny(a.id) as plain
+  // Deny — nothing was ever remembered (ApprovalQueue.deny takes no
+  // remember/rule flag), and the capability/policy rows below the argument
+  // were fabricated (a tool-name prefix heuristic that mislabels anything
+  // outside model_/fs_ as "shell-exec", and a hardcoded policy string) —
+  // ApprovalEntry.as_dict() carries no such fields server-side.
+  test('no dead "Deny + remember" control, and no fabricated capability/policy rows', async ({ page }) => {
+    await page.route('**/api/agent/approvals', (route) =>
+      json(route, { approvals: [APPROVAL] })
+    )
+    await page.goto('/#dashboard')
+    await openApprovals(page)
+    await expect(page.locator('.approval-card')).toBeVisible({ timeout: FIVE_S })
+
+    await expect(page.locator('.approval-card', { hasText: 'Deny + remember' })).toHaveCount(0)
+    await expect(page.locator('.approval-card .arg-row .k', { hasText: 'capability' })).toHaveCount(0)
+    await expect(page.locator('.approval-card .arg-row .k', { hasText: 'policy' })).toHaveCount(0)
+    // The one row backed by real data survives.
+    await expect(page.locator('.approval-card .arg-row .k', { hasText: 'argument' })).toBeVisible()
+  })
+
+  test('footer does not point at a non-existent auto-approve-rules surface', async ({ page }) => {
+    await page.route('**/api/agent/approvals', (route) =>
+      json(route, { approvals: [APPROVAL] })
+    )
+    await page.goto('/#dashboard')
+    await openApprovals(page)
+    await expect(page.locator('.approval-card')).toBeVisible({ timeout: FIVE_S })
+
+    await expect(page.locator('.modal-foot')).not.toContainText('Configure auto-approve rules')
+  })
 })
 
 // ─── 6. (removed) memory-tab live-wiring describe — the Agent → Memory fold
