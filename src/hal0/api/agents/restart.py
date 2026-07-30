@@ -61,6 +61,13 @@ _KNOWN_AGENT_IDS: Final[frozenset[str]] = frozenset({"hermes"})
 # enough to fail fast on a broken host.
 SYSTEMCTL_TIMEOUT_SECONDS: Final[float] = 30.0
 
+# Timeout for the read-only ``is-active`` probe. Much tighter than the restart
+# budget above: this one runs on a POLLED route (``GET /api/agents``, 5s from
+# the dashboard), so a wedged systemd bus must degrade to "unknown" fast rather
+# than hold a request open. ``is-active`` needs no polkit authorization and
+# does no unit work, so a healthy host answers in single-digit milliseconds.
+IS_ACTIVE_TIMEOUT_SECONDS: Final[float] = 2.0
+
 
 def _systemctl_path() -> str | None:
     """Resolve ``systemctl`` on PATH.
@@ -79,6 +86,66 @@ def _unit_name(agent_id: str) -> str:
     unit is parameterised by agent id so a future bundled agent is a drop-in.
     """
     return f"hal0-agent@{agent_id}.service"
+
+
+async def unit_is_active(agent_id: str) -> bool | None:
+    """Probe ``systemctl is-active hal0-agent@{agent_id}.service``.
+
+    The liveness half of this module's systemctl seam (#1459).
+    ``AgentManager.list()`` is a filesystem read, so ``GET /api/agents`` could
+    only ever report whether a bundle is *installed*; the dashboard was
+    treating that as "running" and rendering an inactive Hermes as ready.
+
+    Returns:
+        ``True``  — the unit is active.
+        ``False`` — systemctl answered with any other state
+                    (``inactive`` / ``failed`` / ``activating`` / ...).
+        ``None``  — the probe could not run at all: no systemd on the host
+                    (container, CI runner, dev box), a spawn failure, a
+                    timeout, or empty output.
+
+    ``None`` means UNKNOWN and must never be rendered as healthy — it is the
+    honest answer for a host where liveness is unobservable, and the caller is
+    responsible for keeping it distinct from ``True``.
+
+    Read-only and unprivileged: ``is-active`` needs no polkit authorization,
+    which is why this can live on a polled route while ``restart`` cannot.
+    """
+    systemctl = _systemctl_path()
+    if systemctl is None:
+        return None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            systemctl,
+            "is-active",
+            _unit_name(agent_id),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except (OSError, ValueError) as exc:
+        log.warning("agent.is_active.spawn_failed", agent_id=agent_id, error=str(exc))
+        return None
+
+    try:
+        stdout_bytes, _ = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=IS_ACTIVE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        log.warning("agent.is_active.timeout", agent_id=agent_id)
+        return None
+
+    # `is-active` exits non-zero for an inactive unit, so the return code is
+    # not the signal — the state word on stdout is.
+    state = (stdout_bytes or b"").decode("utf-8", errors="replace").strip()
+    if not state:
+        return None
+    return state == "active"
 
 
 def _resolve_actor(request: Request) -> str:
@@ -259,4 +326,4 @@ async def restart_agent(agent_id: str, request: Request) -> dict[str, str]:
 # at module-internals via the underscore name.
 KNOWN_AGENT_IDS = _KNOWN_AGENT_IDS
 
-__all__ = ["KNOWN_AGENT_IDS", "router"]
+__all__ = ["KNOWN_AGENT_IDS", "router", "unit_is_active"]

@@ -9,12 +9,18 @@
 //
 // Schema:  { v: 3, cells: Record<cellId, widgetId>, quickActions: boolean }
 //
-// FAIL-SOFT CONTRACT (unchanged): if the backend endpoint 404s, returns
-// empty {}, an old v:2 payload, or errors for any reason, we silently fall
-// back to DEFAULT_LAYOUT. The dashboard must never block on the endpoint.
+// FAIL-SOFT CONTRACT (read path, unchanged): if the backend endpoint 404s,
+// returns empty {}, an old v:2 payload, or errors for any reason, we silently
+// fall back to DEFAULT_LAYOUT. The dashboard must never block on the endpoint.
+//
+// WRITE path (#1460): fail-soft is scoped to a MISSING route. A 404 stays
+// silent — an older backend simply has nowhere to persist to. Any other
+// failure is surfaced: the optimistic cache update has already shown the
+// operator a change that did not persist, and swallowing the error is how a
+// year of v3 saves 422'd against a v2-only backend without anyone noticing.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, apiGet } from '../client'
+import { api, apiGet, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -158,6 +164,9 @@ export function useDashLayout() {
 
 // ─── useSaveDashLayout ────────────────────────────────────────────────────────
 
+/** dash/main.jsx installs this global; every view pings it the same way. */
+type ToastFn = (msg: string, kind?: string) => void
+
 export function useSaveDashLayout() {
   const qc = useQueryClient()
   return useMutation({
@@ -168,9 +177,18 @@ export function useSaveDashLayout() {
       // immediately even while the PUT is in flight (or 404s).
       qc.setQueryData(LAYOUT_QUERY_KEY, layout)
     },
-    onError: () => {
-      // Backend not yet shipping this endpoint — silently swallow. The view
-      // continues to work in-memory; persistence activates when BE lands.
+    onError: (err) => {
+      // A 404 means the backend doesn't ship the route at all: stay fail-soft,
+      // the view keeps working in memory. Anything else is a real rejection —
+      // tell the operator through the dashboard's existing toast channel
+      // (window.__hal0Toast, installed in dash/main.jsx) and re-read server
+      // truth, so the board stops displaying a customization that was lost.
+      if (err instanceof Hal0Error && err.status === 404) return
+      const message =
+        err instanceof Error && err.message ? err.message : 'dashboard layout was not saved'
+      const toast = (window as unknown as { __hal0Toast?: ToastFn }).__hal0Toast
+      toast?.(`Layout not saved — ${message}`, 'warn')
+      void qc.invalidateQueries({ queryKey: LAYOUT_QUERY_KEY })
     },
   })
 }
