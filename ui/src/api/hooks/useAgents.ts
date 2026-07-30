@@ -41,7 +41,14 @@ import { ENDPOINTS } from '../endpoints'
 export interface AgentRecord {
   name: string
   installed_at: string
+  /** On-disk install state from AgentManager.list() — "installed" / "broken".
+   *  NOT liveness: it says a bundle exists, nothing about the systemd unit. */
   status: string
+  /** systemd unit liveness from `systemctl is-active hal0-agent@{name}`
+   *  (#1459). `true` active, `false` installed-but-down, `null`/absent
+   *  unknown — an older backend, no systemd, or an agent with no template
+   *  unit. Unknown must NEVER be rendered as healthy. */
+  unit_active?: boolean | null
 }
 
 export interface AgentList {
@@ -383,7 +390,7 @@ export function useMcpStatusPip(): UseQueryResult<McpPipRollup> {
 export interface SidebarAgentRollup {
   installed: boolean
   agentId: string | null
-  agentStatus: 'running' | 'broken' | 'unknown' | 'not_installed'
+  agentStatus: 'running' | 'down' | 'broken' | 'unknown' | 'not_installed'
   personaName: string | null
   approvalsPending: number
   skillsCount: number | null
@@ -408,9 +415,14 @@ export function useSidebarAgentRollup(): SidebarAgentRollup {
   const installed = !!first
   let agentStatus: SidebarAgentRollup['agentStatus'] = 'not_installed'
   if (first) {
-    if (first.status === 'installed') agentStatus = 'running'
-    else if (first.status === 'broken') agentStatus = 'broken'
-    else agentStatus = 'unknown'
+    // #1459: `installed` is an on-disk fact. Liveness comes from the unit
+    // probe the route now runs — and an absent/null probe is UNKNOWN, never
+    // "running", so a box where liveness can't be observed can't read green.
+    if (first.status === 'broken') agentStatus = 'broken'
+    else if (first.status === 'installed') {
+      agentStatus =
+        first.unit_active === true ? 'running' : first.unit_active === false ? 'down' : 'unknown'
+    } else agentStatus = 'unknown'
   }
 
   const activeId = personas.data?.active
