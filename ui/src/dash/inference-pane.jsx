@@ -36,6 +36,7 @@ import { useModels } from '@/api/hooks/useModels'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
+import { slotModelRow } from './slots/slot-shared.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the copy this file used to carry (and the verbatim clones in slot-list.jsx
 // and npu-pane.jsx).
@@ -320,7 +321,9 @@ export function slotCtrlPhase(slot) {
 //               for the NPU trio these map to stack-load / modality-toggle).
 //   phase     — overrides the lifecycle phase (NPU coresident roles derive it
 //               from their modality toggle, not the slot's own state).
-export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) {
+//   onEditModel / modelName — inline model-edit affordance. Omit both and the
+//               model row renders exactly as before (the NPU stack does).
+export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit, onEditModel, modelName }) {
   const dot = dotCls(ind)
   const ph = phase || slotCtrlPhase(s)
   // A live-ish card whose /api/slots enrichment hasn't landed yet (bare
@@ -343,7 +346,36 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
         <span className="sport">{s.port ? ':' + s.port : ''}</span>
       </div>
       <div className="scard-b">
-        {modelNode}
+        {/* Inline model edit sits OUTSIDE the model control, never nested in it:
+            the LLM model row is a <select> and the pencil must not compete with
+            that picker's own click/keyboard gesture. `stopPropagation` is
+            belt-and-braces on top of the separate hit area. Disabled when the
+            bound model isn't resolvable to a registry row — ModelDrawer needs
+            the row, not an id, and renders nothing for null. */}
+        {onEditModel ? (
+          <div className="smodel-row">
+            {modelNode}
+            <button
+              className="sctrl scard-model-edit"
+              data-testid={`infer-model-edit-${s.name}`}
+              disabled={!modelName}
+              title={
+                modelName
+                  ? `Edit model ${modelName} — launch flags, chat template, caps`
+                  : 'No model bound — nothing to edit'
+              }
+              aria-label={modelName ? `Edit model ${modelName}` : 'Edit model'}
+              onClick={(e) => {
+                e.stopPropagation()
+                onEditModel()
+              }}
+            >
+              <Ic name="edit" size={13} />
+            </button>
+          </div>
+        ) : (
+          modelNode
+        )}
         {full && (
           <div className="scard-meta">
             <div className="m">
@@ -374,7 +406,7 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
   )
 }
 
-function SlotCards({ rows, full, models, busyName, handlers, loading }) {
+function SlotCards({ rows, full, models, busyName, handlers, loading, modelRows }) {
   if (!rows.length) {
     if (loading)
       return (
@@ -414,6 +446,10 @@ function SlotCards({ rows, full, models, busyName, handlers, loading }) {
             onEdit={() => handlers.onEdit(s)}
           />
         )
+        // The bound registry row, resolved through the shared helper the slot
+        // drawer uses. null = unbound or not in the list yet → the pencil is
+        // disabled rather than opening an empty editor.
+        const modelRow = modelRows ? modelRows(s) : null
         return (
           <SlotScard
             key={s.name}
@@ -423,6 +459,10 @@ function SlotCards({ rows, full, models, busyName, handlers, loading }) {
             modelNode={modelNode}
             controls={controls}
             onEdit={() => handlers.onEdit(s)}
+            onEditModel={
+              handlers.onEditModel ? () => handlers.onEditModel(s) : undefined
+            }
+            modelName={modelRow ? modelRow.longName || modelRow.name || modelRow.id : ''}
           />
         )
       })}
@@ -491,6 +531,12 @@ export function InferencePane() {
   const loadMut = useSlotLoad()
   const swapMut = useSlotSwap()
   const [busyName, setBusyName] = useStateI(null)
+  // Inline model edit — the ModelDrawer is mounted ONCE here (the pane owns the
+  // cards) and driven by the picked registry row, matching how models.jsx
+  // drives it. Row, not id: ModelDrawer renders nothing for a null model.
+  // There is no UI/overlay store in this app; drawer open-state is local
+  // useState in the nearest view owner.
+  const [modelEditRow, setModelEditRow] = useStateI(null)
 
   // The Inference rollup is the iGPU/CPU slot stack. Image generation is its
   // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
@@ -551,7 +597,17 @@ export function InferencePane() {
     onLogs: (s) => {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
     },
+    // Open the model editor for this slot's bound model — no close → Models
+    // page → find the row → reopen round-trip.
+    onEditModel: (s) => {
+      const row = slotModelRow(s, modelsQuery.data)
+      if (row) setModelEditRow(row)
+    },
   }
+
+  // Per-slot bound-row lookup handed to the cards so the pencil can be disabled
+  // (and labelled) without every card re-scanning the list itself.
+  const modelRowFor = (s) => slotModelRow(s, modelsQuery.data)
 
   const newSlot = () => window.dispatchEvent(new CustomEvent('hal0:create-slot'))
   const openLogs = () => {
@@ -559,6 +615,7 @@ export function InferencePane() {
   }
 
   return (
+    <>
     <div className="infer-pane">
       <div className="proto">
         {/* Single NPU-card-style header row — the old two-row stack (sec-label
@@ -612,6 +669,7 @@ export function InferencePane() {
                 full
                 loading={loading}
                 models={modelsQuery.data}
+                modelRows={modelRowFor}
                 busyName={busyName}
                 handlers={handlers}
               />
@@ -656,6 +714,18 @@ export function InferencePane() {
         </div>
       </div>
     </div>
+    {/* Inline model editor for the card pencil — ONE instance for the whole
+        pane, driven by the picked row. Not docked: nothing is stacked beneath
+        it here, so it takes the normal flush-right position and its own dim
+        scrim (contrast the slot edit drawer, which docks it — slot-modals.jsx).
+        Rendered as a sibling of .infer-pane so its `position: fixed` can't be
+        captured by a transformed ancestor. */}
+    <ModelDrawer
+      open={!!modelEditRow}
+      onClose={() => setModelEditRow(null)}
+      model={modelEditRow}
+    />
+    </>
   )
 }
 

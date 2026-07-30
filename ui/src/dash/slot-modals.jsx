@@ -22,6 +22,13 @@ import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
 import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
+import { slotModelRow } from "./slots/slot-shared.js";
+
+// The slot edit drawer's own width, and therefore the offset the stacked model
+// drawer docks at so its right edge lands flush against this drawer's left one.
+// ONE constant: a width that drifted from the dock offset would leave a gap or
+// an overlap with no obvious cause.
+const SLOT_DRAWER_WIDTH = 560;
 
 const {
 	useState: useStateSM,
@@ -471,10 +478,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 	// Bound model row, resolved BEFORE the `!slot` guard below: the effect
 	// that follows must run on every render, and anything after an early
-	// return does not (React counts hooks positionally).
-	const curModelId = slot?.model_id || slot?.model || "";
-	const curModelRow =
-		(modelsQuery.data ?? []).find((m) => m.id === curModelId) || null;
+	// return does not (React counts hooks positionally). slotModelRow is the
+	// shared resolver (dash/slots/slot-shared.js) the slot card uses too.
+	const curModelRow = slotModelRow(slot, modelsQuery.data);
 	// ModelDrawer renders nothing for a null model and never calls onClose in
 	// that path, so a models refetch that drops the bound row would otherwise
 	// leave modelEditOpen stuck true (dead ✕/Esc, and a surprise re-stack when
@@ -624,7 +630,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// drawer in a blocked "Saving…" state for the whole model-load.
 	const saving = editMut.isPending || defaultsMut.isPending;
 
-	// (curModelId / curModelRow are resolved above the `!slot` guard, so the
+	// (curModelRow is resolved above the `!slot` guard, so the
 	// modelEditOpen effect can run on every render.)
 
 	// Device-class token for profile/runner fit filters — mirrors the
@@ -752,7 +758,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				onClose={requestClose}
 				eyebrow={`Slots · /slots/${slot.name}`}
 				title={`Edit ${slot.name}`}
-				width={560}
+				width={SLOT_DRAWER_WIDTH}
 				headRight={
 					<label
 						className="slot-enable-toggle drawer-enable"
@@ -1302,14 +1308,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
 													</option>
 												))}
 											</select>
+											{/* Inline model edit — the app-wide pencil affordance
+											    (Icons.edit), same bare `btn ghost sm` icon-button
+											    convention as the slot card. Opens the model drawer
+											    DOCKED to the left of this one, so the slot's unsaved
+											    edits stay visible and editable underneath. */}
 											<button
 												className="btn ghost sm"
 												data-testid="slot-model-edit-open"
 												disabled={!curModelRow}
 												title="Edit the bound model's tune (flags, template, caps) in place"
-												onClick={() => setModelEditOpen(true)}
+												aria-label={`Edit model ${curModelRow?.longName || curModelRow?.name || ""}`.trim()}
+												onClick={(e) => {
+													e.stopPropagation();
+													setModelEditOpen(true);
+												}}
 											>
-												Edit model…
+												{Icons.edit}
 											</button>
 										</div>
 										{swapping && <div className="hint">Swapping…</div>}
@@ -1710,14 +1725,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				onClose={() => setRenameOpen(false)}
 			/>
 			{/* Stacked model editor — the reusable ModelDrawer (window-global,
-	        same instance contract as models.jsx). Rendered later in the DOM at
-	        equal z-index so it fully overlays this drawer; its own save path
-	        closes it and returns here with every slot edit intact. */}
-			<ModelDrawer
-				open={modelEditOpen && !!curModelRow}
-				onClose={() => setModelEditOpen(false)}
-				model={curModelRow}
-			/>
+	        same instance contract as models.jsx). DrawerDock reaches the
+	        <Drawer> nested inside ModelDrawer through context, docking it
+	        SLOT_DRAWER_WIDTH px inboard so it lands flush against this drawer's
+	        left edge: two panels side by side, both fully visible and
+	        interactive, instead of the model drawer covering this one at equal
+	        z-index. `backdrop="clear"` keeps exactly one dim scrim on the page
+	        (this drawer's) while leaving click-outside dismissing the TOP layer.
+	        Below 1200px there is no room for both, and the CSS falls back to the
+	        overlay stack (see .drawer--docked in dashboard.css). Its own save
+	        path closes it and returns here with every slot edit intact. */}
+			<DrawerDock rightOf={SLOT_DRAWER_WIDTH} backdrop="clear">
+				<ModelDrawer
+					open={modelEditOpen && !!curModelRow}
+					onClose={() => setModelEditOpen(false)}
+					model={curModelRow}
+				/>
+			</DrawerDock>
 			<ConfirmDialog
 				open={discardOpen}
 				onCancel={() => setDiscardOpen(false)}
