@@ -22,6 +22,43 @@ function mtFactColor(t) {
   return (c && c[t]) || 'var(--info)';
 }
 
+// ── Engine-unreachable state (#1539) ────────────────────────────────────────
+//
+// Every panel below reads `query.data?.items || []` and renders an empty-state
+// string when that list is short. A failed query has `data === undefined`, so
+// the fallback fires and an engine outage — 503 memory.unavailable, a dropped
+// connection, hindsight-api restarting — renders as "No documents in this
+// bank." / "No mental models defined." / "No directives.". Indistinguishable
+// from a healthy empty bank, which is exactly what a fresh install has.
+//
+// This is the #1471 defect (the graph explorer) repeated across the bank
+// surface, except here there was no branch to get wrong: none of these panels
+// consulted `isError` at all. They could not be tested either, until #1538
+// made a non-ok response representable under forced-mock at all — which is why
+// nine of these shipped unnoticed.
+//
+// One component so every panel says the same thing, and so a reviewer can see
+// at a glance which panels are covered: each call site sits directly in front
+// of the empty-state it used to be confused with.
+function MtError({ query, what, testid }) {
+  if (!query?.isError) return null;
+  return (
+    <div className="empty mono mt-error" data-testid={testid}>
+      <div>Memory engine unreachable — {query.error?.message || `could not load ${what}`}</div>
+      {query.refetch && (
+        <button
+          className="btn ghost sm"
+          style={{ marginTop: 8 }}
+          data-testid={`${testid}-retry`}
+          onClick={() => query.refetch()}
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── Tool card shell (matches prototype ToolCard) ────────────────────────────────
 
 function MtCard({ title, action, wide, testid, children }) {
@@ -240,7 +277,8 @@ function MemDocuments({ bank }) {
 
   return (
     <MtCard title={`documents · ${total || '—'}`} testid="mem-documents">
-      {items.length === 0 ? (
+      <MtError query={docsQuery} what="documents" testid="mem-documents-error" />
+      {docsQuery.isError ? null : items.length === 0 ? (
         <div className="empty mono">No documents in this bank.</div>
       ) : (
         <>
@@ -394,7 +432,8 @@ function MemMentalModels({ bank }) {
           </div>
         </form>
       )}
-      {items.length === 0 ? (
+      <MtError query={query} what="mental models" testid="mem-models-error" />
+      {query.isError ? null : items.length === 0 ? (
         <div className="empty mono">No mental models defined.</div>
       ) : (
         items.map(m => (
@@ -523,7 +562,8 @@ function MemDirectives({ bank }) {
           </div>
         </form>
       )}
-      {items.length === 0 ? (
+      <MtError query={query} what="directives" testid="mem-directives-error" />
+      {query.isError ? null : items.length === 0 ? (
         <div className="empty mono">No directives.</div>
       ) : (
         items.map(d => (
