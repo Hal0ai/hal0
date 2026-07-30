@@ -135,6 +135,7 @@ from hal0.config.paths import activity_db
 from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
+from hal0.observability import sentry
 from hal0.registry.discover import scan_and_register
 from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.store import ModelRegistry
@@ -1906,6 +1907,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    # First statement in the factory, so an exception raised while BUILDING
+    # the app (router import, middleware construction) is already
+    # reportable. Inert unless HAL0_SENTRY_DSN is set — see
+    # hal0.observability.sentry.
+    sentry.init_sentry("api")
+
     app = FastAPI(
         title="hal0",
         version=__version__,

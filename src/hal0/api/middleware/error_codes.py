@@ -37,6 +37,7 @@ from hal0.errors import (
     Unauthorized,
     UnprocessableEntity,
 )
+from hal0.observability import sentry
 
 log = structlog.get_logger(__name__)
 
@@ -74,6 +75,11 @@ def install(app: FastAPI) -> None:
     @app.exception_handler(Hal0Error)
     async def _hal0_handler(_: Request, exc: Hal0Error) -> JSONResponse:
         log.warning("hal0.error", code=exc.code, message=exc.message, **exc.details)
+        # 4xx Hal0Errors are the contract working as designed (bad request,
+        # not found, ...) and would be pure noise in Sentry. 5xx means hal0
+        # itself failed to hold up its end, which is worth an event.
+        if exc.status >= 500:
+            sentry.capture_exception(exc, component="api")
         # Honor a ``retry_after_s`` hint in details by promoting it to the
         # ``Retry-After`` HTTP header so OpenAI-compatible SDKs back off
         # correctly.  Only applied on 503 responses (RFC 7231 §7.1.3).
@@ -124,6 +130,11 @@ def install(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled_handler(_: Request, exc: Exception) -> JSONResponse:
         log.exception("hal0.unhandled", error=str(exc))
+        # This handler is why hal0 needs an EXPLICIT capture: registering
+        # `@app.exception_handler(Exception)` marks the exception handled,
+        # so Sentry's Starlette integration never sees it. Without this
+        # line every 500 would be invisible in Sentry.
+        sentry.capture_exception(exc, component="api")
         return JSONResponse(
             status_code=500,
             content=_envelope("system.internal", "internal server error"),

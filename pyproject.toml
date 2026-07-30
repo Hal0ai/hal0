@@ -82,6 +82,15 @@ dev = [
   "python-multipart>=0.0.9",
 ]
 
+# Optional error reporting. Deliberately NOT in `dependencies`: hal0 is a
+# self-hosted appliance that phones home to nobody by default, and the
+# absence of the package is a second, physical guarantee of that on top of
+# the "no DSN ⇒ no-op" logic in hal0.observability.sentry. Install with
+# `pip install 'hal0ai[sentry]'` only on boxes you want reporting from.
+sentry = [
+  "sentry-sdk>=2.20",
+]
+
 [project.scripts]
 hal0 = "hal0.cli.main:app"
 # hal0-agent is the small subprocess wrapper invoked by the systemd
