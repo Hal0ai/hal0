@@ -23,7 +23,9 @@ _INSTALL_SH = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
 def test_seed_copy_loop_runs_before_hal0_setup_auto() -> None:
     text = _INSTALL_SH.read_text(encoding="utf-8")
 
-    seed_loop_marker = 'for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do'
+    seed_loop_marker = (
+        "for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do"
+    )
     setup_call_marker = '"${HAL0_BIN}" setup "${_setup_args[@]}"'
 
     seed_loop_pos = text.index(seed_loop_marker)

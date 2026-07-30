@@ -53,9 +53,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls["extra_args"].append(job_id)
         return 0
 
-    monkeypatch.setattr(
-        "hal0.updater.updater._maybe_run_config_migrations", _config_migrations
-    )
+    monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
     monkeypatch.setattr("hal0.updater.updater.ensure_seed_profiles", _seed_profiles)
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
     monkeypatch.setattr("hal0.updater.updater.retag_stale_slot_images", _image_retag)
