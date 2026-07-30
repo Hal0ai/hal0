@@ -8,8 +8,7 @@ hal0 API. The ``graph`` sub-sub-app maps 1:1 to the routes in
     hal0 memory enable                                  → PUT  /api/settings (memory.enabled=true)
     hal0 memory disable                                 → PUT  /api/settings (memory.enabled=false)
     hal0 memory graph status                            → GET  /api/memory/graph/status
-    hal0 memory graph enable [--route ...] [--provider …] [--model …]
-                                                        → PUT  /api/memory/graph (enabled=true …)
+    hal0 memory graph enable [--slot …]                 → PUT  /api/memory/graph (enabled=true …)
     hal0 memory graph disable                           → PUT  /api/memory/graph (enabled=false)
 
 ``hal0 memory enable``/``disable`` replace the old ``HAL0_MEMORY_ENABLED``
@@ -327,9 +326,18 @@ def graph_disable_cmd(
     if json_out:
         typer.echo(jsonlib.dumps(result, indent=2, sort_keys=True))
         return
+    # #1471: this used to claim "In-flight builds cancelled." — it never
+    # cancelled anything. On Hindsight (the only shipping engine) extraction
+    # runs inside the daemon and this flag is a hal0-side label; the daemon
+    # keeps extracting either way, which is why /graph/status keeps reporting
+    # real, rising operation counters after a disable. Say that, rather than
+    # letting an operator believe they just stopped GPU work.
     console.print(
         Panel(
-            "[bold]Graph extraction disabled[/bold]\n[dim]In-flight builds cancelled.[/dim]",
+            "[bold]Graph extraction marked disabled[/bold]\n"
+            "[dim]Labeling only on the Hindsight engine — it builds its graph "
+            "natively and keeps extracting. This flag controls how hal0 reports "
+            "and routes, not whether the daemon runs.[/dim]",
             border_style="yellow",
         )
     )

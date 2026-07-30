@@ -163,7 +163,7 @@ function MemoryGraphPanel() {
       {!enabled && !showSlotPicker && (
         <>
           <p style={{fontSize: 13, color: "var(--fg-2)", margin: "0 0 14px", lineHeight: 1.55}}>
-            Graph extraction is off. Memory still stores + searches vectors; the entity/relation graph powering <span className="mono" style={{color: "var(--fg)"}}>memory_search(mode="graph")</span> isn't built.
+            Graph extraction is marked off. On the Hindsight engine this is a hal0-side label: the daemon builds its graph natively and keeps extracting regardless, so the graph counters below stay live. Turning it on is what points extraction at your chosen slot.
           </p>
           <button className="btn primary sm" onClick={openPanel}>
             Enable graph extraction
