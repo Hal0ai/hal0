@@ -399,6 +399,7 @@ useful when validate reports an error in one of them. The config path honours
 | `doctor models` | Audit the model pipeline: registry entries whose file is gone, unregistered files in the store, FLM/NPU store dir presence + container-uid writability, env-vs-TOML store divergence, and an unmounted external store path. | `--fix` (repair FLM store ownership/mode; needs root + confirmation, `--force`/`-f` skips the prompt), `--json` (`HAL0-MODEL-*` Diagnosis rows; implies audit-only) |
 | `doctor migrations` | Surface a pending v0.1→v0.2 model-layout migration (dry-run of the symlink planner; points at `hal0 migrate model-layout --apply`). | `--json` (`HAL0-MIGRATION-PENDING` Diagnosis rows) |
 | `doctor profiles` | Audit the slot↔profile layer: slots referencing a missing profile (fails), and in-use profile images not pulled locally (advisory). | `--json` (`HAL0-PROFILE-*` Diagnosis rows) |
+| `doctor ports` | Show which port each slot has bound and flag collisions — the drill-down for the `Slot ports` row in `doctor all`. Reads `GET /api/slots` with an enlarged budget, since that route container-probes every slot. | — |
 | `doctor all` | One read-only evidence roll-up: the `doctor verify` report card (API, runners, DNS, capability slots, memory, OpenWebUI, Hermes) plus auth posture, model-store integrity, pending migrations, and bound slot ports. Read-only (no `--fix`). | `--json` |
 | `doctor bundle` | Write a support bundle (system/config/diagnostics/logs evidence in one directory) for attaching to a bug report. Redacts every config dump (SECRET/TOKEN/PASSWORD/API_KEY/PRIVATE_KEY/ENCRYPTION_KEY/SALT-named keys); no upload. | `--out PATH`, `--no-rocm-smi`, `--include-logs auto\|yes\|no` |
 
@@ -407,7 +408,8 @@ code. `doctor toolbox-pull` exits `0` when every image is reachable (digest
 drift is reported but does not fail), `1` if any image is unreachable, and `2`
 when the manifest has no toolbox images. `doctor models` exits `1` on any
 actionable finding; `doctor migrations` exits `1` when links are pending;
-`doctor profiles` exits `1` only when a slot references a missing profile.
+`doctor profiles` exits `1` only when a slot references a missing profile;
+`doctor ports` exits `1` on a port collision or an unreadable slots endpoint.
 `doctor all` exits `0` when clean, `1` on an actionable fail, and `2` on a
 critical failure (API unreachable or zero healthy runners); advisory `warn`
 rows never change the exit code. `doctor bundle` exits `0` clean, `1` when
