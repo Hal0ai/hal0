@@ -5860,7 +5860,7 @@
     "semantic_hash": ""
   },
   "ui/src/api/client.ts": {
-    "mtime": 1785425012.878199,
+    "mtime": 1785426099.0939353,
     "ast_hash": "4287e56964dbe394bfd5f860ed3bfeb5",
     "semantic_hash": ""
   },
@@ -5940,7 +5940,7 @@
     "semantic_hash": ""
   },
   "ui/src/api/hooks/useBoard.ts": {
-    "mtime": 1785425012.8791993,
+    "mtime": 1785426099.0941598,
     "ast_hash": "05c35d17975804c9127f38be42bd9c96",
     "semantic_hash": ""
   },
@@ -6075,8 +6075,8 @@
     "semantic_hash": ""
   },
   "ui/src/api/hooks/useSlots.ts": {
-    "mtime": 1785424259.0179253,
-    "ast_hash": "c6592934a5e2a07cc8357393f2a73168",
+    "mtime": 1785426099.0756733,
+    "ast_hash": "19feda369381fdb31a426bba79289b50",
     "semantic_hash": ""
   },
   "ui/src/api/hooks/useStacks.ts": {
@@ -6120,8 +6120,8 @@
     "semantic_hash": ""
   },
   "ui/src/api/mockFixtures.ts": {
-    "mtime": 1785424259.0179253,
-    "ast_hash": "2457ee4db7dfb1bce83f457ec7312beb",
+    "mtime": 1785426099.0756733,
+    "ast_hash": "453ff3436f87fe325f0d0a4182637089",
     "semantic_hash": ""
   },
   "ui/src/dash/Benchmarks.tsx": {
@@ -6205,7 +6205,7 @@
     "semantic_hash": ""
   },
   "ui/src/dash/board/agent-chat.jsx": {
-    "mtime": 1785425012.8803158,
+    "mtime": 1785426099.0941598,
     "ast_hash": "8a5e113f5c1b635d64681dea432e4480",
     "semantic_hash": ""
   },
@@ -6615,8 +6615,8 @@
     "semantic_hash": ""
   },
   "ui/src/dash/slot-modals.jsx": {
-    "mtime": 1785424259.0289254,
-    "ast_hash": "0f3a5308dd2a6a0df440e866735df216",
+    "mtime": 1785426099.0762784,
+    "ast_hash": "e809d0b6abe4409f197965f4875b08b6",
     "semantic_hash": ""
   },
   "ui/src/dash/slot-status.js": {
@@ -7440,8 +7440,8 @@
     "semantic_hash": ""
   },
   "CHANGELOG.md": {
-    "mtime": 1785425012.876199,
-    "ast_hash": "57716c03d98e8dee0363c2c173f3f13a",
+    "mtime": 1785426099.0939353,
+    "ast_hash": "61438c9bf64e7039d1de33a05b16c954",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -8845,7 +8845,7 @@
     "semantic_hash": ""
   },
   "ui/tests/e2e/specs/board-chat-error-surfacing-v3.spec.ts": {
-    "mtime": 1785425012.8811991,
+    "mtime": 1785426099.0941598,
     "ast_hash": "3bca63ff6e23677d2b2f20123093750d",
     "semantic_hash": ""
   },
@@ -8867,6 +8867,11 @@
   "tests/memory/test_memory_write_degraded.py": {
     "mtime": 1785425012.7591827,
     "ast_hash": "c43218d7c97735de25507dc40ea5b4a6",
+    "semantic_hash": ""
+  },
+  "ui/tests/e2e/specs/slot-drawer-dirty-baseline-v3.spec.ts": {
+    "mtime": 1785426099.0762784,
+    "ast_hash": "9e4f6287f87af4655df66f6881327216",
     "semantic_hash": ""
   }
 }
