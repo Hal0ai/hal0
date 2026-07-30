@@ -481,6 +481,116 @@ function DuplicateModelDialog({ open, onClose, model, profiles }) {
 	);
 }
 
+// ─── Drawer dirty-tracking seam (#1398) ──────────────────────────────────────
+//
+// Same seam the slot drawer got in #1447, for the same reason. This drawer
+// seeds its form ONCE (effect keyed on `[open, model?.id]`) but answered "did
+// this field change?" against the LIVE `model` prop. Both callers hand it a
+// live-polled value — models.jsx does `modelList.find(m => m.id === selId)` off
+// `modelsQuery.data` (`useModels`: 30s poll, plus an invalidation on every
+// model mutation), and the slot drawer's stacked editor does
+// `(modelsQuery.data ?? []).find(m => m.id === curModelId)`. The old comment on
+// `defaultOverride` claiming this prop is "a SNAPSHOT captured when the drawer
+// opened" was true of neither.
+//
+// So the two sides drifted with nothing the operator did, and the drawer read
+// that drift as an edit:
+//   * a concurrent write (another operator, a slot-drawer save, the CLI) moved
+//     `defaults.context_size`; the untouched field went dirty and Save wrote
+//     the drawer's stale seed back over it — a lost update caused by doing
+//     nothing;
+//   * `onSave` starts from `{ ...init }` so the keys this drawer never renders
+//     ride along; read live, they rode along as a mid-edit poll left them
+//     rather than as the operator saw them.
+//
+// Snapshot the model ONCE at open, freeze it, and derive both the dirty
+// aggregate and the save body from it. `caps` is stored already canonicalised
+// so a late `/api/meta/enums` load — which changes `canonicalCapabilities`'
+// output from the fallback table to the real one — cannot fabricate a diff
+// against a form seeded with the earlier answer.
+function modelBaseline(model, enums) {
+	if (!model) return null;
+	const init = model.defaults || {};
+	const split = splitModelTags(model.tags);
+	return {
+		id: model.id,
+		name: model.name || "",
+		types: split.selected,
+		otherTags: split.other,
+		tags: Array.isArray(model.tags) ? model.tags : [],
+		caps: canonicalCapabilities(model.capabilities, enums),
+		backends: Array.isArray(model.backends) ? model.backends : [],
+		mmproj: model.mmproj || "",
+		hfRepo: model.hf_repo || "",
+		hfFilename: model.hf_filename || "",
+		extra: init.extra_args || "",
+		profile: init.profile || "",
+		ctx: init.context_size != null ? String(init.context_size) : "",
+		chatTemplate: init.chat_template ?? "auto",
+		mtp: triFromDefault(init.mtp),
+		thinking: triFromDefault(init.enable_thinking),
+		jinja: triFromDefault(init.jinja),
+		vision: triFromDefault(init.vision),
+		// The whole defaults block as it stood at open. `onSave` starts from THIS
+		// so the keys this drawer doesn't render (rope_freq_base, …) are carried
+		// through as the operator saw them. Reading them live meant an unrelated
+		// save silently shipped a value that landed after the drawer opened.
+		defaults: { ...init },
+	};
+}
+
+// One derived comparison, two consumers — the unsaved-changes guard and the
+// save body both read this, so a predicate can never exist in two places and
+// drift. Returns null without a baseline, in which case the drawer refuses to
+// call anything dirty.
+function deriveModelChanges(baseline, form) {
+	if (!baseline) return null;
+	const trimmedName = form.name.trim();
+	const nextTags = mergeModelTags(baseline.otherTags, form.types);
+	const c = {
+		// Diff on the value alone (#1381): a truthiness guard here once collapsed
+		// "unchanged" and "deliberately emptied" into the same skip branch, so the
+		// name could never be cleared.
+		name: trimmedName !== baseline.name,
+		trimmedName,
+		nextTags,
+		tags: !sameSet(nextTags, baseline.tags),
+		caps: !sameSet(form.caps, baseline.caps),
+		backends: !sameSet(form.backends, baseline.backends),
+		mmproj: form.mmproj.trim() !== baseline.mmproj,
+		trimmedMmproj: form.mmproj.trim(),
+		hfRepo: form.hfRepo.trim() !== baseline.hfRepo,
+		trimmedRepo: form.hfRepo.trim(),
+		hfFilename: form.hfFilename.trim() !== baseline.hfFilename,
+		trimmedFile: form.hfFilename.trim(),
+		extra: form.extra !== baseline.extra,
+		profile: form.profile !== baseline.profile,
+		ctx: form.ctx !== baseline.ctx,
+		chatTemplate: form.chatTemplate !== baseline.chatTemplate,
+		mtp: form.mtp !== baseline.mtp,
+		thinking: form.thinking !== baseline.thinking,
+		jinja: form.jinja !== baseline.jinja,
+		vision: form.vision !== baseline.vision,
+	};
+	c.any =
+		c.name ||
+		c.tags ||
+		c.caps ||
+		c.backends ||
+		c.mmproj ||
+		c.hfRepo ||
+		c.hfFilename ||
+		c.extra ||
+		c.profile ||
+		c.ctx ||
+		c.chatTemplate ||
+		c.mtp ||
+		c.thinking ||
+		c.jinja ||
+		c.vision;
+	return c;
+}
+
 // ─── ModelDrawer ─────────────────────────────────────────────────────────────
 function ModelDrawer({ open, onClose, model }) {
 	const update = useModelUpdate();
@@ -488,12 +598,14 @@ function ModelDrawer({ open, onClose, model }) {
 	const templates = useChatTemplates(open);
 	const profilesQuery = useProfiles();
 	const enums = useMetaEnums();
-	const init = model?.defaults || {};
 
 	// Identity + typed fields (preserve the full RecipeEditor save surface).
 	const [name, setName] = useStateMD("");
 	const [types, setTypes] = useStateMD([]);
-	const [otherTags, setOtherTags] = useStateMD([]);
+	// (Non-curated tags are not editable here; they live on the frozen baseline
+	// as `otherTags` and are re-merged into the write by deriveModelChanges. A
+	// second mutable copy in component state would be exactly the drift this
+	// seam exists to prevent.)
 	const [caps, setCaps] = useStateMD([]);
 	const [backends, setBackends] = useStateMD([]);
 	const [mmproj, setMmproj] = useStateMD("");
@@ -516,33 +628,47 @@ function ModelDrawer({ open, onClose, model }) {
 	// Local UI state.
 	const [dupOpen, setDupOpen] = useStateMD(false);
 	const [confirm, setConfirm] = useStateMD(null); // {title,message,confirmLabel,onConfirm}
-	// Per-type default: `model` is a SNAPSHOT captured when the drawer opened
-	// (models.jsx passes the selected row), so the invalidation-driven list
-	// refetch never reaches this prop. Track the POST response as the local
-	// authority so the badge flips live; null = defer to the snapshot.
+	// Per-type default: the `model` prop is live-polled (see the seam note
+	// above), but the models-query invalidation this POST fires can land after
+	// the drawer has already read the row, so track the POST response as the
+	// local authority and let the badge flip immediately; null = defer to the
+	// baseline snapshot.
 	const [defaultOverride, setDefaultOverride] = useStateMD(null);
+	// The frozen open-time snapshot (see modelBaseline). Every dirty predicate
+	// and the whole save body derive from this, never from the live prop.
+	const [baseline, setBaseline] = useStateMD(null);
+	// Which model id the current baseline belongs to — guards the effect so a
+	// re-render caused by a poll can't re-seed over the operator's edits.
+	const baselineFor = useRefMD(null);
 
+	// Seed the form AND snapshot the baseline in the SAME effect, so the two can
+	// never come from different payloads (which is the whole #1398 class).
 	useEffectMD(() => {
-		if (open && model) {
-			setName(model.name || "");
-			const split = splitModelTags(model.tags);
-			setTypes(split.selected);
-			setOtherTags(split.other);
-			setCaps(canonicalCapabilities(model.capabilities, enums));
-			setBackends(Array.isArray(model.backends) ? model.backends : []);
-			setMmproj(model.mmproj || "");
-			setHfRepo(model.hf_repo || "");
-			setHfFilename(model.hf_filename || "");
-			setExtra(init.extra_args || "");
-			setProfile(init.profile || "");
-			setCtx(init.context_size != null ? String(init.context_size) : "");
-			setChatTemplate(init.chat_template ?? "auto");
-			setMtp(triFromDefault(init.mtp));
-			setThinking(triFromDefault(init.enable_thinking));
-			setJinja(triFromDefault(init.jinja));
-			setVision(triFromDefault(init.vision));
-			setDefaultOverride(null);
+		if (!open || !model) {
+			baselineFor.current = null;
+			setBaseline(null);
+			return;
 		}
+		if (baselineFor.current === model.id) return;
+		baselineFor.current = model.id;
+		const b = modelBaseline(model, enums);
+		setBaseline(b);
+		setName(b.name);
+		setTypes(b.types);
+		setCaps(b.caps);
+		setBackends(b.backends);
+		setMmproj(b.mmproj);
+		setHfRepo(b.hfRepo);
+		setHfFilename(b.hfFilename);
+		setExtra(b.extra);
+		setProfile(b.profile);
+		setCtx(b.ctx);
+		setChatTemplate(b.chatTemplate);
+		setMtp(b.mtp);
+		setThinking(b.thinking);
+		setJinja(b.jinja);
+		setVision(b.vision);
+		setDefaultOverride(null);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, model?.id]);
 
@@ -722,32 +848,44 @@ function ModelDrawer({ open, onClose, model }) {
 		}
 	};
 
-	const dirty =
-		name !== (model.name || "") ||
-		!sameSet(types, splitModelTags(model.tags).selected) ||
-		!sameSet(caps, canonicalCapabilities(model.capabilities, enums)) ||
-		!sameSet(backends, Array.isArray(model.backends) ? model.backends : []) ||
-		mmproj !== (model.mmproj || "") ||
-		hfRepo !== (model.hf_repo || "") ||
-		hfFilename !== (model.hf_filename || "") ||
-		extra !== (init.extra_args || "") ||
-		profile !== (init.profile || "") ||
-		ctx !== (init.context_size != null ? String(init.context_size) : "") ||
-		chatTemplate !== (init.chat_template ?? "auto") ||
-		mtp !== triFromDefault(init.mtp) ||
-		thinking !== triFromDefault(init.enable_thinking) ||
-		jinja !== triFromDefault(init.jinja) ||
-		vision !== triFromDefault(init.vision);
+	// THE comparison — derived once, against the FROZEN baseline, read by both
+	// the unsaved-changes guard and the save body. Nothing below re-derives a
+	// predicate and nothing touches the live `model` prop.
+	const changes = deriveModelChanges(baseline, {
+		name,
+		types,
+		caps,
+		backends,
+		mmproj,
+		hfRepo,
+		hfFilename,
+		extra,
+		profile,
+		ctx,
+		chatTemplate,
+		mtp,
+		thinking,
+		jinja,
+		vision,
+	});
+	const dirty = !!changes && changes.any;
 
 	const onSave = async () => {
 		if (saveBlocked) return; // inline errors block; no PUT fires
+		// #1441: nothing changed ⇒ nothing to write. This used to fire anyway,
+		// and because the whole `defaults` block is rebuilt below it was never
+		// the harmless no-op it looked like — it rewrote context_size,
+		// extra_args, chat_template, profile, n_gpu_layers and all four
+		// tri-state caps. The button is disabled too; this is the belt.
+		if (!changes || !changes.any) return;
 		// Every surfaced key is sent EXPLICITLY — a value to set, or `null` to
 		// clear. The server merges `defaults` one level deep now (#1413), so
 		// absent means "keep the stored value" and only `null` deletes; omitting
-		// an emptied field would silently keep the old one. We still start from
-		// `init` so the keys this drawer doesn't render (rope_freq_base …) ride
-		// along unchanged rather than depending on the merge for survival.
-		const defaults = { ...init };
+		// an emptied field would silently keep the old one. We start from the
+		// FROZEN snapshot's defaults so the keys this drawer doesn't render
+		// (rope_freq_base …) ride along as the operator saw them — reading them
+		// live meant an unrelated save shipped whatever a mid-edit poll left.
+		const defaults = { ...baseline.defaults };
 		// ctxError already guarantees a clean /^\d+$/ integer here, so the only two
 		// outcomes are "write the number" and "empty = clear the override".
 		defaults.context_size = ctx.trim() ? Number(ctx.trim()) : null;
@@ -766,31 +904,16 @@ function ModelDrawer({ open, onClose, model }) {
 		defaults.vision = vision === "on" ? true : vision === "off" ? false : null;
 
 		const body = { defaults };
-		// Diff on the value alone (#1381): a truthiness guard here collapsed
-		// "unchanged" and "deliberately emptied" into the same skip branch, so the
-		// name could never be cleared. `Model.name` is `str` with `default=""` and
-		// normalizeApiModel falls back to `model.id`, so `""` is a valid write —
-		// matching the mmproj / hf_repo / hf_filename fields just below.
-		const trimmedName = name.trim();
-		if (trimmedName !== (model.name || "")) body.name = trimmedName;
-		const nextTags = mergeModelTags(otherTags, types);
-		const prevTags = Array.isArray(model.tags) ? model.tags : [];
-		const sameTags =
-			nextTags.length === prevTags.length &&
-			[...nextTags].sort().join(" ") === [...prevTags].sort().join(" ");
-		if (!sameTags) body.tags = nextTags;
-		if (!sameSet(caps, canonicalCapabilities(model.capabilities, enums)))
-			body.capabilities = caps;
-		if (!sameSet(backends, Array.isArray(model.backends) ? model.backends : []))
-			body.backends = backends;
-		const trimmedMmproj = mmproj.trim();
-		if (trimmedMmproj !== (model.mmproj || ""))
-			body.mmproj = trimmedMmproj || null;
-		const trimmedRepo = hfRepo.trim();
-		if (trimmedRepo !== (model.hf_repo || "")) body.hf_repo = trimmedRepo;
-		const trimmedFile = hfFilename.trim();
-		if (trimmedFile !== (model.hf_filename || ""))
-			body.hf_filename = trimmedFile;
+		// Identity fields ship only when they actually changed, each answered by
+		// the one derived comparison above (`changes`) — the same values the
+		// dirty aggregate and the Save gate read.
+		if (changes.name) body.name = changes.trimmedName;
+		if (changes.tags) body.tags = changes.nextTags;
+		if (changes.caps) body.capabilities = caps;
+		if (changes.backends) body.backends = backends;
+		if (changes.mmproj) body.mmproj = changes.trimmedMmproj || null;
+		if (changes.hfRepo) body.hf_repo = changes.trimmedRepo;
+		if (changes.hfFilename) body.hf_filename = changes.trimmedFile;
 		try {
 			await update.mutateAsync({ id: model.id, body });
 			window.__hal0Toast &&
@@ -834,7 +957,15 @@ function ModelDrawer({ open, onClose, model }) {
 								className="btn sm"
 								data-testid="model-save"
 								onClick={onSave}
-								disabled={update.isPending || saveBlocked}
+								// #1441: gate on the dirty aggregate, like the slot
+								// drawer. With zero edits there is nothing to persist,
+								// and firing anyway rewrote the whole defaults block.
+								disabled={update.isPending || saveBlocked || !dirty}
+								title={
+									!dirty && !saveBlocked && !update.isPending
+										? "No changes to save"
+										: undefined
+								}
 							>
 								{update.isPending ? "Saving…" : "Save model"}
 							</button>

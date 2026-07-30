@@ -1030,6 +1030,81 @@ def _maybe_run_config_migrations(
     return (source, new_version)
 
 
+def run_post_activation_migrations(
+    min_data_version: int = 1,
+    *,
+    job_id: str | None = None,
+) -> tuple[int, int]:
+    """Run every post-activation migration pass hal0 ships, in order.
+
+    The single sequence both :meth:`Updater.commit` (self-update) and
+    ``install.sh``'s repair/upgrade-in-place re-run path call, so the two
+    upgrade paths converge on the same on-disk state (GH #1475). Before
+    this existed, install.sh's venv-python block called only two of these
+    five passes directly (``ensure_seed_profiles``,
+    ``clear_stale_mtp_overrides``) — a box upgraded by re-running
+    install.sh kept a stale ``meta.schema_version``, stale runner-image
+    pins, and unsanitised ``defaults.extra_args``, while a box upgraded
+    via ``hal0 update`` did not. There is no other caller of the
+    ``hal0.toml`` schema-migration chain outside this function and ``hal0
+    config migrate`` (``cli/config_commands.py``).
+
+    ``min_data_version`` defaults to ``1`` — the same floor
+    :func:`_maybe_run_config_migrations` applies internally
+    (``max(min_data_version or 1, latest_version())``), so a caller with
+    no release manifest to read a real value from (install.sh) still
+    migrates all the way to whatever schema version the running code
+    knows about. ``Updater.commit()`` passes the release manifest's
+    ``min_data_version`` explicitly.
+
+    Synchronous by design — a shell caller (install.sh) invokes this
+    directly with no event loop; ``commit()`` wraps the whole call in one
+    ``asyncio.to_thread`` hop instead of one per pass.
+
+    Error handling mirrors ``commit()``'s original inline sequence: the
+    schema migration (first) is NOT swallowed — a hard failure there means
+    the running code and the on-disk schema have diverged, which the
+    caller must treat as fatal (``commit()`` nukes the staged tree and
+    aborts; install.sh's ``set -euo pipefail`` aborts the script on a
+    non-zero exit). The four data-cleanup passes after it are each
+    independently best-effort, exactly as before: one pass's exception is
+    logged and never blocks the others or the caller's activation.
+
+    Returns the ``(source, target)`` schema-version tuple for breadcrumb
+    logging, the same shape ``commit()`` already returned.
+    """
+    migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id)
+
+    try:
+        ensure_seed_profiles(job_id=job_id)
+    except Exception as exc:
+        log.warning("updater.seed_profiles_prune_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: a lingering materialised seed is harmless (the overlay
+        # overwrites it on load); don't abort the update.
+
+    try:
+        clear_stale_mtp_overrides(job_id=job_id)
+    except Exception as exc:
+        log.warning("updater.mtp_migration_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: the affected slot simply fails to load until the
+        # operator flips MTP to Auto/Off in the drawer.
+
+    try:
+        retag_stale_slot_images(job_id=job_id)
+    except Exception as exc:
+        log.warning("updater.image_retag_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: a stale pin just keeps the previous runner image.
+
+    try:
+        sanitize_model_extra_args(job_id=job_id)
+    except Exception as exc:
+        log.warning("updater.extra_args_sanitize_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: an affected model keeps failing to launch until the
+        # operator removes the managed flag in the model drawer.
+
+    return migration_info
+
+
 # ── Filesystem layout (paths-aware) ────────────────────────────────────────────
 
 
@@ -1747,6 +1822,58 @@ def rerender_slot_units(*, job_id: str | None = None) -> int:
     return rewritten
 
 
+async def _rerender_units_after_swap(job_id: str | None) -> None:
+    """Re-render every slot unit through a FRESH interpreter of the
+    just-activated code, so any subsequent start (``systemctl restart``,
+    crash-restart, reboot) uses that version's argv — never bounces
+    serving (write + daemon-reload only).
+
+    Shared by :meth:`Updater.commit` (step 8c) and :meth:`Updater.rollback`
+    (GH #1475: rollback used to stop after the symlink swap + venv re-pip,
+    leaving units carrying argv rendered by the version just rolled AWAY
+    from). Must run in a subprocess, not this process: the caller's own
+    interpreter is still running the PRE-swap code (Python doesn't hot-swap
+    already-imported modules), so calling :func:`rerender_slot_units`
+    in-process here would render outgoing argv, defeating the point — a
+    subprocess of the just-repipped venv executes the NEW module. Non-fatal
+    by design: a failure here leaves stale units with the old flags until
+    the next hal0-level slot restart; the dashboard drift indicator
+    surfaces them either way.
+    """
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            [
+                sys.executable,
+                "-c",
+                "from hal0.updater.updater import rerender_slot_units; "
+                "print(rerender_slot_units())",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if proc.returncode == 0:
+            log.info(
+                "updater.unit_rerender_done",
+                job_id=job_id,
+                rewritten=(proc.stdout or "").strip(),
+            )
+        else:
+            log.warning(
+                "updater.unit_rerender_failed",
+                job_id=job_id,
+                rc=proc.returncode,
+                stderr=(proc.stderr or "")[-500:],
+            )
+    except Exception as exc:
+        log.warning(
+            "updater.unit_rerender_failed",
+            job_id=job_id,
+            error=str(exc),
+        )
+
+
 # ── Updater class ──────────────────────────────────────────────────────────────
 
 
@@ -1987,11 +2114,14 @@ class Updater:
             ) from exc
         log.info("updater.commit_start", job_id=self.job_id, version=target_version)
 
-        # Step 7: config migrations.
+        # Steps 7-7e: config migrations + the four post-swap data-cleanup
+        # passes (seed-profile pruning, stale-MTP clearing, runner-image
+        # retagging, extra_args sanitizing) — one shared sequence with
+        # install.sh's repair/upgrade-in-place path (GH #1475).
         migration_info: tuple[int, int]
         try:
             migration_info = await asyncio.to_thread(
-                _maybe_run_config_migrations,
+                run_post_activation_migrations,
                 manifest.min_data_version,
                 job_id=self.job_id,
             )
@@ -2005,68 +2135,11 @@ class Updater:
                 details={**exc.details, "version": target_version},
             ) from exc
 
-        # Step 7b: virtual-seed migration — prune any materialised seed profiles
-        # from /etc/hal0/profiles.toml (older installs wrote them inline, which
-        # froze stale definitions) so the code overlay wins. Operator edits are
-        # untouched. Runs after migrations so the schema is stable first.
-        try:
-            await asyncio.to_thread(ensure_seed_profiles, job_id=self.job_id)
-        except Exception as exc:
-            log.warning(
-                "updater.seed_profiles_prune_failed",
-                job_id=self.job_id,
-                error=str(exc),
-            )
-            # Non-fatal: a lingering materialised seed is harmless (the overlay
-            # overwrites it on load); don't abort the update.
-
-        # Step 7c: clear crash-only mtp=true slot overrides (a force-on pointing
-        # at a model with no MTP heads makes llama-server exit at load once the
-        # unit re-renders under post-separation code). Loud per-slot log; the
-        # eligible / unresolvable cases are left untouched.
-        try:
-            await asyncio.to_thread(clear_stale_mtp_overrides, job_id=self.job_id)
-        except Exception as exc:
-            log.warning(
-                "updater.mtp_migration_failed",
-                job_id=self.job_id,
-                error=str(exc),
-            )
-            # Non-fatal: the affected slot simply fails to load until the
-            # operator flips MTP to Auto/Off in the drawer.
-
         # spec-hw-slot-ownership §6 one-shot folds are NOT auto-run on update:
         # they are deploy-window gated + dry-run by default and live in the
         # standalone hal0.config.migrations.hw_slot_ownership module, invoked
         # manually via `hal0 slot migrate-hw` (mirrors slot_flags_fold). Auto-
         # running an irreversible hardware re-partition on every update is unsafe.
-
-        # Step 7d: roll stale former-default runner-image pins to the current
-        # DEFAULT_ROCMFPX_IMAGE (runs before the unit re-render below so the
-        # rewritten units carry the new ref; applies on next slot start).
-        try:
-            await asyncio.to_thread(retag_stale_slot_images, job_id=self.job_id)
-        except Exception as exc:
-            log.warning(
-                "updater.image_retag_failed",
-                job_id=self.job_id,
-                error=str(exc),
-            )
-            # Non-fatal: a stale pin just keeps the previous runner image.
-
-        # Step 7e: strip hal0-managed flags (§21.7) from model
-        # defaults.extra_args — rows stamped via the pre-screen duplicate path
-        # carry -c/--port debris that hard-fails every launch. Loud per-row log.
-        try:
-            await asyncio.to_thread(sanitize_model_extra_args, job_id=self.job_id)
-        except Exception as exc:
-            log.warning(
-                "updater.extra_args_sanitize_failed",
-                job_id=self.job_id,
-                error=str(exc),
-            )
-            # Non-fatal: an affected model keeps failing to launch until the
-            # operator removes the managed flag in the model drawer.
 
         # Step 8 + 9: atomic symlink swap + record previous.
         link = _current_symlink()
@@ -2100,47 +2173,10 @@ class Updater:
                         _atomic_symlink_swap(prior, link)
                 raise
 
-        # Step 8c: re-render existing slot units through the NEW code so any
-        # subsequent start (systemctl restart, crash-restart, reboot) uses
-        # current argv — never bounces serving (write + daemon-reload only).
-        # Must run AFTER the 8b venv reinstall and in a FRESH interpreter:
-        # this (still-old) process would render pre-update argv, defeating the
-        # point; a subprocess of the re-pipped venv executes the new module.
+        # Step 8c: re-render existing slot units through the NEW code. Must
+        # run AFTER the 8b venv reinstall (see _rerender_units_after_swap).
         if not _is_editable_install():
-            try:
-                proc = await asyncio.to_thread(
-                    subprocess.run,
-                    [
-                        sys.executable,
-                        "-c",
-                        "from hal0.updater.updater import rerender_slot_units; "
-                        "print(rerender_slot_units())",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
-                if proc.returncode == 0:
-                    log.info(
-                        "updater.unit_rerender_done",
-                        job_id=self.job_id,
-                        rewritten=(proc.stdout or "").strip(),
-                    )
-                else:
-                    log.warning(
-                        "updater.unit_rerender_failed",
-                        job_id=self.job_id,
-                        rc=proc.returncode,
-                        stderr=(proc.stderr or "")[-500:],
-                    )
-            except Exception as exc:
-                log.warning(
-                    "updater.unit_rerender_failed",
-                    job_id=self.job_id,
-                    error=str(exc),
-                )
-                # Non-fatal: stale units keep old flags until a hal0-level slot
-                # restart; the dashboard drift indicator surfaces them.
+            await _rerender_units_after_swap(self.job_id)
 
         if prior is not None:
             _write_atomic_text(_previous_record(), str(prior))
@@ -2194,6 +2230,11 @@ class Updater:
         swapped *forward* again (back to ``current_target``) so the symlink
         and the venv-installed code stay consistent — same failure-recovery
         pattern as ``apply()``.
+
+        Step 8c (non-editable installs only, GH #1475): re-renders every
+        slot unit through the rolled-back code, mirroring ``commit()``'s own
+        step 8c — otherwise the on-disk units keep carrying argv rendered by
+        the version this rollback just left.
 
         Raises:
             UpdateRollbackUnavailable: No previous record on disk.
@@ -2253,6 +2294,14 @@ class Updater:
                         _atomic_symlink_swap(current_target, link)
                 raise
 
+        # Step 8c: re-render existing slot units through the rolled-back
+        # code, mirroring commit()'s same step (GH #1475) — otherwise the
+        # on-disk units keep carrying argv rendered by the version this
+        # rollback just left, and the next start hands the rolled-back
+        # binary flags it may not accept.
+        if not _is_editable_install():
+            await _rerender_units_after_swap(self.job_id)
+
         # Re-record what we just swapped away from so a double-rollback
         # bounces between the two installs (matches haloai semantics).
         if current_target is not None:
@@ -2307,6 +2356,7 @@ __all__ = [
     "ensure_seed_profiles",
     "fetch_release_manifest",
     "releases_url",
+    "run_post_activation_migrations",
     "sanitize_model_extra_args",
     "validate_manifest_for_channel",
 ]

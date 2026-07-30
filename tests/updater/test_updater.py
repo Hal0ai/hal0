@@ -1881,6 +1881,58 @@ def test_rollback_repips_prior_tree_when_not_editable(
     assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
 
 
+def test_rollback_rerenders_slot_units_when_not_editable(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH #1475: rollback re-renders slot units, mirroring commit()'s step 8c.
+
+    commit() re-renders every slot unit through a fresh interpreter after
+    the venv re-pip so a subsequent start (crash-restart, reboot,
+    `systemctl restart`) uses argv from the NEW code — rollback did the
+    symlink swap and the #980 re-pip of the prior tree and then stopped, so
+    a rolled-back box kept units carrying argv rendered by the version it
+    just rolled AWAY from.
+    """
+    asyncio.run(Updater().apply())
+
+    artifacts = tmp_path / "v2"
+    artifacts.mkdir()
+    tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
+    _write_release_manifest(
+        manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
+        tarball=tarball2,
+        version="0.0.2",
+    )
+    asyncio.run(Updater().apply())
+
+    # Capture subprocess.run calls made during rollback (both the re-pip's
+    # own `pip install` call and the re-render's `python -c ...` call go
+    # through this same seam).
+    calls: list[list[str]] = []
+
+    class _OK:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return _OK()
+
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    asyncio.run(Updater().rollback())
+
+    rerender_calls = [c for c in calls if any("rerender_slot_units" in part for part in c)]
+    assert len(rerender_calls) == 1, (
+        f"expected exactly one rerender_slot_units subprocess call during rollback, got: {calls}"
+    )
+
+
 def test_rollback_repip_failure_re_swaps_symlink_forward(
     synthetic_release: dict[str, Any],
     cosign_skip: None,

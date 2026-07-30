@@ -155,16 +155,25 @@ function _primarySlot(slots) {
 }
 
 // Map agent liveness + slot activity → StatusDot cls + a short label.
-// Mirrors useSidebarAgentRollup: an `installed` AgentRecord IS the running
-// state (the agent runs as a systemd unit), `broken` is down. We then upgrade
-// the dot to `serving` (green) when the backing slot is actively generating,
-// and otherwise show `ready` (amber) — never a fake "serving" while idle.
+// Mirrors useSidebarAgentRollup. #1459: an `installed` AgentRecord is an
+// ON-DISK fact, not a running one — the bundle can sit there with
+// `hal0-agent@<name>.service` inactive. Liveness comes from the record's
+// `unit_active` probe:
+//   true  → ready (amber), upgraded to `serving` (green) when the backing slot
+//           is actively generating — never a fake "serving" while idle
+//   false → down (red), and the card's Restart action is the way out
+//   null / absent → unknown (grey). Unobservable is NOT healthy: an older
+//           backend, a host without systemd, or an agent with no template unit
+//           (Pi is a CLI tool, Turnstone runs its own server) all land here.
 function _derive(agentRec, slot) {
   if (!agentRec) return { cls: "offline", label: "not installed" };
   const status = String(agentRec.status || "").toLowerCase();
   if (status === "broken" || /error|fail|crash|down/.test(status)) {
     return { cls: "error", label: "down" };
   }
+  const unitActive = agentRec.unit_active;
+  if (unitActive === false) return { cls: "error", label: "down" };
+  if (unitActive !== true) return { cls: "offline", label: "unknown" };
   const servingNow =
     !!slot && (slot.state === "serving" || (slot.metrics && slot.metrics.toks > 0));
   return servingNow

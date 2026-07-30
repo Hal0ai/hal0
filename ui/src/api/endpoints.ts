@@ -279,8 +279,8 @@ export const ENDPOINTS = {
   // same typed Diagnosis objects (HAL0-* id / severity / evidence /
   // next_steps — src/hal0/diagnostics.py) `hal0 doctor verify --json`
   // prints, over HTTP. ADMIN-classified (aggregates ADMIN-only subsystem
-  // detail). useDiagnoses.ts still synthesises a fallback Diagnosis from
-  // GET /api/system-info pending the hook switching over to this route.
+  // detail). Read by useDiagnoses.ts (#1458); a 404 from an older backend
+  // falls back to a synthesised GET /api/system-info evidence card.
   doctor: '/api/doctor',
 
   // ── System health (honest degraded probe) ───────────────────────
