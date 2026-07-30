@@ -27,7 +27,10 @@ def test_seed_catalog_is_canonical_and_complete() -> None:
 
 
 def test_seed_profiles_are_device_agnostic_and_partition_safe() -> None:
+    # Slot-hardware flags (§5) + hal0-managed args (§21.7) — token-exact, so
+    # --model_path / --threads-batch in the TTS / cpu-chat seeds never trip.
     forbidden = {"-ngl", "--n-gpu-layers", "-dev", "--device", "--threads", "-t"}
+    forbidden |= {"-c", "--ctx-size", "--host", "--port", "--model", "--alias"}
     for name, profile in seeds.seed_profiles().items():
         assert "image" not in profile, name
         assert profile.get("backend") is None, name
