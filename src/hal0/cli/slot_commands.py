@@ -945,6 +945,11 @@ def _migrate_id_keying_dry_run_plan(*, config_dir: Path, identity: Any) -> list[
 
 @app.command("migrate-id-keying")
 def slot_migrate_id_keying(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Actually flip the artefacts. Without it the command is a DRY-RUN preview only.",
+    ),
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the confirmation prompt (for scripted use)."
     ),
@@ -953,14 +958,18 @@ def slot_migrate_id_keying(
         "--stop-services",
         help=(
             "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
-            "then proceed. Without this flag the command only WARNS and refuses to "
-            "run while any of those units is active."
+            "then proceed. Without this flag --apply only WARNS and refuses to run "
+            "while any of those units is active."
         ),
     ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Print the computed name->id plan and exit — no file is moved, no id is minted.",
+        help=(
+            "Deprecated no-op: dry-run is now the bare default (see --apply). "
+            "Kept as a hidden alias so existing scripts keep working."
+        ),
+        hidden=True,
     ),
 ) -> None:
     """One-shot: flip every name-keyed slot artefact to id-keyed (P3-runtime-db §11.1 M5).
@@ -970,11 +979,16 @@ def slot_migrate_id_keying(
     Quadlet unit + podman container rename to match. DESTRUCTIVE and OPERATOR-
     RUN ONLY — never wired into any automatic boot/update path.
 
-    Downtime window required: stop ``hal0-api`` and every ``hal0-slot@*`` unit
-    FIRST (or pass ``--stop-services``). Flipping artefact names under a live
-    runtime is the halo143 split-brain scenario — the running process still
-    resolves the OLD (name) paths while a second reader (a restart, a doctor
-    scan) would see the NEW (id) ones.
+    DRY-RUN by default — prints the computed name->id plan and exits. Pass
+    ``--apply`` to write (GH #1474: matches the sibling migrate-hw/
+    migrate-caps/migrate-flags/migrate-enabled-removal contract instead of
+    inverting it — a bare invocation never surprises with a real migration).
+
+    Downtime window required for ``--apply``: stop ``hal0-api`` and every
+    ``hal0-slot@*`` unit FIRST (or pass ``--stop-services``). Flipping
+    artefact names under a live runtime is the halo143 split-brain scenario —
+    the running process still resolves the OLD (name) paths while a second
+    reader (a restart, a doctor scan) would see the NEW (id) ones.
 
     A timestamped tar backup of ``/etc/hal0/slots``, ``/var/lib/hal0/slots``,
     and ``/var/lib/hal0/hal0.db`` is written to ``/var/lib/hal0/backups/``
@@ -989,6 +1003,17 @@ def slot_migrate_id_keying(
     config_dir = paths.slots_config_dir()
     data_dir = paths.var_lib() / "slots"
     db_file = paths.db_path()
+
+    if not apply:
+        identity = SlotIdentityStore(db_path=db_file)
+        plan = _migrate_id_keying_dry_run_plan(config_dir=config_dir, identity=identity)
+        console.print("[bold]Dry run — no files moved, no ids minted.[/bold]")
+        if not plan:
+            console.print("  [dim](no slot TOMLs found)[/dim]")
+        for line in plan:
+            console.print(f"  {line}")
+        console.print("\n[dim]Re-run with --apply to write (stop hal0 first).[/dim]")
+        return
 
     active = _active_hal0_units()
     if active:
@@ -1008,16 +1033,6 @@ def slot_migrate_id_keying(
                 "--stop-services."
             )
             raise typer.Exit(1)
-
-    if dry_run:
-        identity = SlotIdentityStore(db_path=db_file)
-        plan = _migrate_id_keying_dry_run_plan(config_dir=config_dir, identity=identity)
-        console.print("[bold]Dry run — no files moved, no ids minted.[/bold]")
-        if not plan:
-            console.print("  [dim](no slot TOMLs found)[/dim]")
-        for line in plan:
-            console.print(f"  {line}")
-        return
 
     if not yes:
         typer.confirm(

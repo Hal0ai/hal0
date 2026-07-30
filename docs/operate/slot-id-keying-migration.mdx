@@ -66,13 +66,16 @@ than the one this page ships with.
 1. **(Optional) Preview the plan without touching anything.**
 
    ```bash
-   hal0 slot migrate-id-keying --dry-run
+   hal0 slot migrate-id-keying
    ```
 
-   Prints the computed name→id assignment for every configured slot — no
+   Dry-run by default (matching the other `slot migrate-*` commands) —
+   prints the computed name→id assignment for every configured slot — no
    file is moved, no id is minted. Use this to sanity-check the plan (slot
    count, which ones are already id-keyed from a prior partial run) before
-   committing to downtime.
+   committing to downtime. (`--dry-run` still parses as a no-op alias for
+   older scripts, but it's redundant now — omitting `--apply` already
+   previews.)
 
 2. **Stop hal0 first.** The migration refuses to run while `hal0-api` or any
    `hal0-slot@*` unit is active — flipping artefact names out from under a
@@ -87,7 +90,7 @@ than the one this page ships with.
 3. **Run the migration.**
 
    ```bash
-   hal0 slot migrate-id-keying
+   hal0 slot migrate-id-keying --apply
    ```
 
    - Prints a **backup path first** — a timestamped tar under
