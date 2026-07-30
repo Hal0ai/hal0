@@ -103,6 +103,14 @@ function validateExtraArgs(s) {
 	return null;
 }
 
+// ''/null/'auto' all mean "no chat-template override" — the backend
+// normalizes them to None everywhere (_chat_template_or_none), so a slot
+// TOML that still carries chat_template = "auto" must not render as an
+// active override (and gets cleaned off disk on the next template save).
+function normTemplate(v) {
+	return v && v !== "auto" ? v : "";
+}
+
 function EditSlotDrawer({ open, slot, onClose }) {
 	// Hooks must execute every render — early `return null` would skip
 	// them; render the drawer shell with a sentinel slot instead.
@@ -111,6 +119,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Delete + rename are owned by their extracted dialogs (D2 decomposition):
 	// dash/slots/DeleteSlotDialog.jsx and dash/slots/RenameSlotDialog.jsx.
 	const [renameOpen, setRenameOpen] = useStateSM(false);
+	// Inline model edit — stacks the reusable ModelDrawer over this drawer
+	// (equal z-index; later DOM order wins) so model-tune edits don't force a
+	// close → Models page → reopen round-trip. The slot drawer and its
+	// unsaved edits stay mounted underneath.
+	const [modelEditOpen, setModelEditOpen] = useStateSM(false);
 	const restartMut = useSlotRestart();
 	const swapMut = useSlotSwap();
 	const profilesQuery = useProfiles();
@@ -157,6 +170,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// image_pin — optional escape hatch. Empty = release default
 	// (RUNNER_IMAGES[binary]). A non-default pin is shown on the slot card.
 	const [imagePin, setImagePin] = useStateSM(slot?.image_pin || "");
+	// Runtime profile (SlotConfig.profile) — picks the runtime family,
+	// device-class gating and MTP draft backend. NOT a flags source at launch:
+	// profile flags are copy-on-stamp into model.defaults.extra_args (model
+	// drawer). Rides Save (PUT /config {profile}), restart-required; the
+	// backend's _reconcile_device_profile keeps device/profile coherent.
+	const [profileSel, setProfileSel] = useStateSM(slot?.profile || "");
 	// Continuous batching: --parallel sequence slots. Empty = inherit the
 	// profile (today: 1). Rides the Save button (PUT /config {parallel}),
 	// restart-required. See the concurrency-batching plan.
@@ -184,10 +203,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Per-field validation errors for numeric inputs (#548).
 	const [fieldErrs, setFieldErrs] = useStateSM({});
 	// Task 5: per-slot chat_template override.
-	// chatTemplate seeds from slot.chat_template (empty = no override).
+	// chatTemplate seeds from slot.chat_template (empty/'auto' = no override).
 	// overrideOpen tracks whether the user has clicked [Override] to reveal the select.
-	const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
-	const [overrideOpen, setOverrideOpen] = useStateSM(!!slot?.chat_template);
+	const [chatTemplate, setChatTemplate] = useStateSM(
+		normTemplate(slot?.chat_template),
+	);
+	const [overrideOpen, setOverrideOpen] = useStateSM(
+		!!normTemplate(slot?.chat_template),
+	);
 	// Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
 	// device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
 	// revert-on-error.
@@ -319,6 +342,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			setThreads(slot.threads != null ? String(slot.threads) : "0");
 			setBinary(slot.binary || "");
 			setImagePin(slot.image_pin || "");
+			setProfileSel(slot.profile || "");
 			setParallel(slot.parallel != null ? String(slot.parallel) : "");
 			// #587: re-seed from the slot prop so the drawer tracks the real
 			// on-disk values.
@@ -326,10 +350,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			setSubmitErr(null);
 			setDiscardOpen(false);
 			setPendingSwap(null);
+			setModelEditOpen(false);
 			setFieldErrs({});
 			// Task 5: re-seed chat_template override from the slot prop.
-			setChatTemplate(slot.chat_template || "");
-			setOverrideOpen(!!slot.chat_template);
+			setChatTemplate(normTemplate(slot.chat_template));
+			setOverrideOpen(!!normTemplate(slot.chat_template));
 			setNpuAsr(slot.npu?.asr === true);
 			setNpuEmbed(slot.npu?.embed === true);
 			// Re-seed the chat pill + all three model selects too, so a save +
@@ -399,9 +424,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			return;
 		}
 		setFieldErrs({});
-		// Task 5: include chat_template only when the user has set/changed an override.
-		const chatTemplateChanged =
-			overrideOpen && chatTemplate !== (slot.chat_template || "");
+		// Task 5: normalized baseline-vs-desired comparison so BOTH directions
+		// persist — setting a real override AND clearing one (Clear override
+		// sets overrideOpen=false, desired ""). 'auto' counts as no override.
+		const templateBaseline = normTemplate(slot.chat_template);
+		const templateDesired = overrideOpen ? normTemplate(chatTemplate) : "";
+		const chatTemplateChanged = templateDesired !== templateBaseline;
 		// Per-slot extra_args override — ship only when changed, nested under
 		// [server] so the backend one-level merge preserves sibling server keys.
 		const extraArgsChanged = extraArgs !== extraArgsBaseline;
@@ -419,14 +447,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		const threadsChanged = thrValue !== (slot.threads ?? 0);
 		const binaryChanged = binary !== (slot.binary || "");
 		const imagePinChanged = pinValue !== (slot.image_pin ?? null);
-		// A hardware change (device/NGL/threads/binary/image_pin) needs a cold
-		// restart, same as a chat_template change.
+		const profileChanged = profileSel !== (slot.profile || "");
+		// A hardware change (device/NGL/threads/binary/image_pin/profile) needs
+		// a cold restart, same as a chat_template change.
 		const hwChanged =
 			deviceChanged ||
 			nglChanged ||
 			threadsChanged ||
 			binaryChanged ||
-			imagePinChanged;
+			imagePinChanged ||
+			profileChanged;
 		try {
 			// Two-step: defaults (ctx_size lives under [model]) + slot config for the
 			// top-level keys (device / NGL / threads / binary / image_pin /
@@ -437,8 +467,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			if (threadsChanged) slotBody.threads = thrValue;
 			if (binaryChanged) slotBody.binary = binary;
 			if (imagePinChanged) slotBody.image_pin = pinValue;
+			if (profileChanged) slotBody.profile = profileSel || null;
 			if (chatTemplateChanged) {
-				slotBody.chat_template = chatTemplate;
+				// null rides the backend's None-means-delete merge — clearing an
+				// override (or picking Auto) removes the key from the slot TOML.
+				slotBody.chat_template = templateDesired || null;
 			}
 			if (extraArgsChanged) {
 				slotBody.server = { extra_args: extraArgs };
@@ -524,6 +557,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// drawer in a blocked "Saving…" state for the whole model-load.
 	const saving = editMut.isPending || defaultsMut.isPending;
 
+	// Bound model row — useModels rows are already normalized. Feeds the
+	// Template default, the profile "adopted from model" hint, and the
+	// stacked ModelDrawer.
+	const curModelId = slot.model_id || slot.model || "";
+	const curModelRow =
+		(modelsQuery.data ?? []).find((m) => m.id === curModelId) || null;
+
+	// Device-class token for profile/runner fit filters — mirrors the
+	// backend derivation in profile_adopt (gpu-* → gpu; npu/cpu/img as-is).
+	const deviceClass = device.startsWith("gpu")
+		? "gpu"
+		: ["npu", "cpu", "img"].includes(device)
+			? device
+			: "cpu";
+
 	// Instant-apply pin/unpin for the drawer header toggle (§21.10, #1367).
 	// Fires the PUT, toasts the result, and lets the slots poll re-render from
 	// server truth. `slot.pinned` is the *effective* pin lifted by slot_view
@@ -580,6 +628,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const deviceDirty = device !== (slot.device || "gpu-rocm");
 	const binaryDirty = binary !== (slot.binary || "");
 	const imagePinDirty = (imagePin.trim() || null) !== (slot.image_pin ?? null);
+	const profileDirty = profileSel !== (slot.profile || "");
 
 	// UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields (HW
 	// grid, extra_args, ctx, parallel, chat_template override). The instant-apply
@@ -601,9 +650,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		deviceDirty ||
 		binaryDirty ||
 		imagePinDirty ||
+		profileDirty ||
 		parallelDirty ||
-		(overrideOpen && chatTemplate !== (slot.chat_template || ""));
+		(overrideOpen ? normTemplate(chatTemplate) : "") !==
+			normTemplate(slot.chat_template);
 	const requestClose = () => {
+		// While the ModelDrawer is stacked on top, one Esc press fires BOTH
+		// drawers' document-level keydown listeners — swallow ours so only the
+		// top layer closes (and no spurious discard dialog pops underneath).
+		if (modelEditOpen) return;
 		if (dirty) {
 			setDiscardOpen(true);
 			return;
@@ -817,6 +872,69 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					</div>
 				</FieldGroup>
 
+				{/* Runtime profile — the slot's SlotConfig.profile. Controls the
+	          runtime family, device-class gating and MTP draft backend; profile
+	          FLAGS are copy-on-stamp into the model tune (model drawer), never
+	          read at launch. */}
+				<FieldGroup label="Profile">
+					{(() => {
+						const all = Array.isArray(profilesQuery.data)
+							? profilesQuery.data
+							: [];
+						const devBackend = deviceBackend(device);
+						// Mirror backend profile_fits_slot: slot type supported +
+						// device_class match + backend match (when both declared).
+						const fit = all.filter(
+							(p) =>
+								(!Array.isArray(p.supported_slot_types) ||
+									p.supported_slot_types.includes(slot.type)) &&
+								(!p.device_class || p.device_class === deviceClass) &&
+								(!p.backend || !devBackend || p.backend === devBackend),
+						);
+						const fitNames = fit.map((p) => p.name);
+						const adoptedFromModel =
+							!!profileSel &&
+							profileSel === (curModelRow?.defaults?.profile || "");
+						return (
+							<div className="form-row">
+								<div className="form-lbl">
+									<span>Profile</span>
+									<FieldInfoIcon description="⟳ Runtime profile — picks the runtime family, device-class
+										gating and the MTP draft backend. Flags are NOT read from here
+										at launch; they are stamped into the model's launch flags on
+										the model drawer." />
+								</div>
+								<div className="form-ctl">
+									<select
+										className="input mono"
+										data-testid="slot-profile"
+										value={profileSel}
+										onChange={(e) => setProfileSel(e.target.value)}
+									>
+										{/* keep a none/out-of-vocab persisted profile selectable */}
+										{!slot.profile && <option value="">— none —</option>}
+										{profileSel && !fitNames.includes(profileSel) && (
+											<option value={profileSel}>{profileSel}</option>
+										)}
+										{fit.map((p) => (
+											<option key={p.name} value={p.name} title={p.intent}>
+												{p.name}
+												{p.intent ? ` · ${p.intent}` : ""}
+											</option>
+										))}
+									</select>
+									{adoptedFromModel && (
+										<div className="hint">
+											Adopted from the bound model's preference — swapping the
+											model may change it.
+										</div>
+									)}
+								</div>
+							</div>
+						);
+					})()}
+				</FieldGroup>
+
 				{/* Hardware ownership — changes apply on Save and require a restart. */}
 				<FieldGroup label="Hardware">
 					{(() => {
@@ -826,6 +944,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						const backends = systemInfoQuery.data?.backends ?? {};
 						const binaryKeys = Object.keys(backends);
 						const devBackend = deviceBackend(device);
+						// Runner options filtered by the backend runner_matches predicate
+						// (device_class exact + backend match when both declared) so a
+						// gpu llm slot is no longer offered flm/kokoro/comfyui. An
+						// out-of-vocab persisted value stays selectable below.
+						const fitBinaryKeys = binaryKeys.filter((k) => {
+							const r = backends[k] || {};
+							if (r.device_class && r.device_class !== deviceClass)
+								return false;
+							return !(r.backend && devBackend && r.backend !== devBackend);
+						});
 						// Fit-check (§4): the selected device's backend must be in the chosen
 						// BINARY's supported_backends. WARN at assignment, never block. Only
 						// when a BINARY is explicitly picked (empty = HW-gated default).
@@ -892,7 +1020,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											placeholder={
 												binary && backends[binary]?.image
 													? backends[binary].image
-													: "will resolve from selected profile"
+													: "will resolve from runner (binary)"
 											}
 											spellCheck={false}
 											style={imagePin ? {} : { color: "var(--fg-4)" }}
@@ -907,10 +1035,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Binary</span>
-										<FieldInfoIcon description="⟳ Which runner build to use. Empty = auto-detect from
-											device. (The bound runner shows on the slot card chip —
-											change it by picking a different model.)" />
+										<span>Runner</span>
+										<FieldInfoIcon description="⟳ Which runner build/image executes on the selected
+											device (a RUNNER_IMAGES key, not a profile). Empty = auto
+											from device." />
 									</div>
 									<div className="form-ctl">
 										<select
@@ -921,10 +1049,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										>
 											<option value="">— default (from device) —</option>
 											{/* keep an out-of-vocab persisted binary selectable */}
-											{binary && !binaryKeys.includes(binary) && (
+											{binary && !fitBinaryKeys.includes(binary) && (
 												<option value={binary}>{binary}</option>
 											)}
-											{binaryKeys.map((k) => (
+											{fitBinaryKeys.map((k) => (
 												<option key={k} value={k}>
 													{k}
 													{backends[k]?.backend
@@ -1042,41 +1170,55 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										<FieldInfoIcon description={isContainer ? "Swap restarts the container to load the new model" : "Applies immediately"} />
 									</div>
 									<div className="form-ctl">
-										<select
-											className="input mono"
-											value={cur}
-											disabled={saving}
-											aria-label={`Model for ${slot.name}`}
-											onChange={(e) => {
-												const id = e.target.value;
-												if (!id || id === cur) return;
-												const picked = compatible.find((m) => m.id === id);
-												const label = picked?.longName || id;
-												// UI-5: swapping the model on a LIVE container slot cold-restarts
-												// it (~model-load seconds). Confirm through the shared
-												// ConfirmDialog before firing — stashing the pick re-renders the
-												// select back to `cur` (value={cur}), so cancel needs no manual
-												// revert. Mirrors the delete/dirty-close confirm gates.
-												const live = slotButtonPhase(slot) === "running";
-												if (isContainer && live) {
-													setPendingSwap({ id, label });
-													return;
-												}
-												fireSwap(id, label);
-											}}
+										<div
+											style={{ display: "flex", gap: 8, alignItems: "center" }}
 										>
-											{cur && !has && (
-												<option value={cur}>
-													{slot.modelLong || slot.model || cur}
-												</option>
-											)}
-											{!cur && <option value="">—</option>}
-											{compatible.map((m) => (
-												<option key={m.id} value={m.id}>
-													{m.longName || m.id}
-												</option>
-											))}
-										</select>
+											<select
+												className="input mono"
+												style={{ flex: 1 }}
+												value={cur}
+												disabled={saving}
+												aria-label={`Model for ${slot.name}`}
+												onChange={(e) => {
+													const id = e.target.value;
+													if (!id || id === cur) return;
+													const picked = compatible.find((m) => m.id === id);
+													const label = picked?.longName || id;
+													// UI-5: swapping the model on a LIVE container slot cold-restarts
+													// it (~model-load seconds). Confirm through the shared
+													// ConfirmDialog before firing — stashing the pick re-renders the
+													// select back to `cur` (value={cur}), so cancel needs no manual
+													// revert. Mirrors the delete/dirty-close confirm gates.
+													const live = slotButtonPhase(slot) === "running";
+													if (isContainer && live) {
+														setPendingSwap({ id, label });
+														return;
+													}
+													fireSwap(id, label);
+												}}
+											>
+												{cur && !has && (
+													<option value={cur}>
+														{slot.modelLong || slot.model || cur}
+													</option>
+												)}
+												{!cur && <option value="">—</option>}
+												{compatible.map((m) => (
+													<option key={m.id} value={m.id}>
+														{m.longName || m.id}
+													</option>
+												))}
+											</select>
+											<button
+												className="btn ghost sm"
+												data-testid="slot-model-edit-open"
+												disabled={!curModelRow}
+												title="Edit the bound model's tune (flags, template, caps) in place"
+												onClick={() => setModelEditOpen(true)}
+											>
+												Edit model…
+											</button>
+										</div>
 										{swapping && <div className="hint">Swapping…</div>}
 									</div>
 								</div>
@@ -1116,11 +1258,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
           included in the config PUT only when changed. A template change requires
           a cold restart (it changes llama-server --chat-template arg). */}
 						{(() => {
-							const cur = slot.model_id || slot.model || "";
-							const m = (modelsQuery.data ?? [])
-								.map(normalizeApiModel)
-								.find((x) => x.id === cur);
-							const modelTemplate = m?.defaults?.chat_template || "auto";
+							const modelTemplate =
+								curModelRow?.defaults?.chat_template || "auto";
 							const templates = Array.isArray(chatTemplatesQuery.data)
 								? chatTemplatesQuery.data
 								: [];
@@ -1559,29 +1698,32 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						) {
 							return null;
 						}
-						// Source → display label + CSS variable colour. The backend command
-						// assembler emits MORE segment labels than the original three (new:
-						// model_defaults, chat_template, mmproj, slot_overrides) and may grow
-						// others — metaFor() falls back to a generic neutral badge carrying
-						// the raw label text, so an unknown source renders instead of being
-						// mislabelled "base" or breaking the drawer.
+						// Source → display label + CSS variable colour. These are the
+						// segments the backend argv assembler actually emits today (the
+						// old profile/extra_args segments are gone — profile flags are
+						// copy-on-stamp into model defaults). metaFor() falls back to a
+						// generic neutral badge carrying the raw label text, so a new
+						// backend source renders instead of breaking the drawer.
 						const SOURCE_META = {
 							base: { label: "base", color: "var(--fg-4)" },
-							profile: { label: "profile", color: "var(--info)" },
-							extra_args: { label: "extra_args", color: "var(--accent)" },
+							model_extra_args: {
+								label: "model_extra_args",
+								color: "var(--accent)",
+							},
+							slot_hardware: { label: "slot_hardware", color: "var(--info)" },
+							chat_template: { label: "chat_template", color: "var(--ok)" },
+							mmproj: { label: "mmproj", color: "var(--warn)" },
 						};
 						const metaFor = (source) =>
 							SOURCE_META[source] || {
 								label: String(source || "unknown"),
 								color: "var(--fg-3)",
 							};
-						// Legend: the known trio plus any additional sources actually present
-						// in this slot's provenance (deduped, generic-styled).
+						// Legend: only the sources actually present in this slot's
+						// provenance (deduped) — never a hardcoded trio the backend no
+						// longer emits.
 						const legendSources = [
-							...Object.keys(SOURCE_META),
-							...[
-								...new Set(resolvedData.provenance.map((e) => e.source)),
-							].filter((s) => !SOURCE_META[s]),
+							...new Set(resolvedData.provenance.map((e) => e.source)),
 						];
 						const badgeStyle = (source) => {
 							const meta = metaFor(source);
@@ -1696,8 +1838,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							fontFamily: "var(--jbm)",
 						}}
 					>
-						Real podman argv: profile image + flags, then slot extra_args (slot
-						wins). Restart the slot to run with new flags.
+						Real podman argv: runner image (binary / image_pin) + model tune
+						flags + slot hardware flags. Restart the slot to run with new
+						flags.
 					</div>
 				</details>
 			</Drawer>
@@ -1711,6 +1854,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				open={renameOpen}
 				slot={slot}
 				onClose={() => setRenameOpen(false)}
+			/>
+			{/* Stacked model editor — the reusable ModelDrawer (window-global,
+	        same instance contract as models.jsx). Rendered later in the DOM at
+	        equal z-index so it fully overlays this drawer; its own save path
+	        closes it and returns here with every slot edit intact. */}
+			<ModelDrawer
+				open={modelEditOpen && !!curModelRow}
+				onClose={() => setModelEditOpen(false)}
+				model={curModelRow}
 			/>
 			<ConfirmDialog
 				open={discardOpen}
