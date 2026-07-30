@@ -80,7 +80,11 @@ def extract_structured(section_md: str) -> dict[str, list[str]]:
     no leading indent) are collected — nested/continuation lines are skipped so
     each entry stays a concise one-liner suitable for a CLI callout. Subsection
     headings are matched case-insensitively; any missing subsection yields an
-    empty list. This feeds ``release.json`` (consumed by
+    empty list. A heading repeated within one version section **accumulates**
+    in document order rather than overwriting (#1499) — union-resolving a
+    CHANGELOG merge conflict routinely leaves two ``### Breaking`` blocks in
+    one release, and dropping the earlier one under-reports the update in the
+    operator's confirm banner. This feeds ``release.json`` (consumed by
     ``hal0.updater.updater._read_release_notes`` → the ``hal0 update`` notes
     render). The full markdown section stays the human-facing RELEASE_NOTES.md;
     this is just the machine-readable digest for the breaking/migration banner.
@@ -94,5 +98,7 @@ def extract_structured(section_md: str) -> dict[str, list[str]]:
     for heading, body in zip(pairs, pairs, strict=False):
         key = heading.strip().lower()
         if key in out:
-            out[key] = [line[2:].strip() for line in body.splitlines() if line[:2] in ("- ", "* ")]
+            out[key].extend(
+                line[2:].strip() for line in body.splitlines() if line[:2] in ("- ", "* ")
+            )
     return out
