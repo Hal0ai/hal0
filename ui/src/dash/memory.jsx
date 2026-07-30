@@ -18,6 +18,38 @@ function memToast(msg, kind = 'info') {
   if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind);
 }
 
+// ── Engine-unreachable state (#1539) ────────────────────────────────────────
+//
+// These panels read `query.data?.<list> || []` and render an empty-state when
+// the list is short. A failed query has `data === undefined`, so an engine
+// outage — 503, dropped connection, hindsight-api restarting — renders as
+// "No retain activity in this window." or, for operations, as NOTHING AT ALL
+// (that panel returns null on an empty list, so the whole card vanishes).
+// Neither is distinguishable from a healthy quiet bank.
+//
+// Same defect as #1471 in the graph explorer, repeated here — except these
+// panels had no branch to get wrong: none consulted `isError`. They were also
+// untestable until #1538 made a non-ok response representable under
+// forced-mock, which is why they shipped unnoticed.
+function MemError({ query, what, testid }) {
+  if (!query?.isError) return null;
+  return (
+    <div className="empty mono mem-error" data-testid={testid}>
+      <div>Memory engine unreachable — {query.error?.message || `could not load ${what}`}</div>
+      {query.refetch && (
+        <button
+          className="btn ghost sm"
+          style={{ marginTop: 8 }}
+          data-testid={`${testid}-retry`}
+          onClick={() => query.refetch()}
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
 // Fact-type palette — house tokens, not Hindsight's upstream colors.
 const MEM_FACT_COLORS = {
   world: 'var(--info)',
@@ -231,7 +263,8 @@ function MemTimeseries({ bank, period, setPeriod }) {
       <div className="mo-ts-head mo-card-h">
         <span className="mo-eyebrow" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>memories retained · {bank || '—'}</span>
       </div>
-      {buckets.length === 0 ? (
+      <MemError query={query} what="the retain timeseries" testid="mem-timeseries-error" />
+      {query.isError ? null : buckets.length === 0 ? (
         <div className="empty mono">No retain activity in this window.</div>
       ) : (
         <div className="mo-spark" role="img" aria-label="memories timeseries">
@@ -362,8 +395,13 @@ function MemBankActivity({ bank, active = true, compact = false }) {
 
 function MemBankCard({ bank, selected, onSelect }) {
   const useBankStats = window.__hal0UseBankStats;
-  const stats = (useBankStats ? useBankStats(bank.bank_id) : { data: null }).data;
+  const statsQuery = useBankStats ? useBankStats(bank.bank_id) : { data: null };
+  const stats = statsQuery.data;
   const byType = stats?.nodes_by_fact_type || {};
+  // #1539: a failed /stats left every count reading 0, so an unreachable
+  // engine looked like a bank with nothing in it. One card per bank here, so
+  // a full banner would be noise — a chip carries the distinction instead.
+  const statsFailed = !!statsQuery.isError;
   function onKey(ev) {
     if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onSelect(bank); }
   }
@@ -378,6 +416,15 @@ function MemBankCard({ bank, selected, onSelect }) {
     >
       <div className="mo-bank-head">
         <span className="mono mo-bank-id">{bank.bank_id}</span>
+        {statsFailed && (
+          <span
+            className="chip err"
+            data-testid={`mem-bank-stats-error-${bank.bank_id}`}
+            title={statsQuery.error?.message || 'bank stats unavailable — engine unreachable'}
+          >
+            stats unavailable
+          </span>
+        )}
         <div className="mem-bank-badges">
           <MemBankActivity bank={bank.bank_id} compact />
         </div>
@@ -430,6 +477,11 @@ function MemOperations({ bank }) {
     }
   }
 
+  if (query.isError) {
+    // Was `return null` for an empty list, which also swallowed this case —
+    // the whole operations card silently disappeared on an outage.
+    return <MemError query={query} what="operations" testid="mem-operations-error" />;
+  }
   if (items.length === 0) {
     return null;
   }
