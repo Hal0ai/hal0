@@ -836,7 +836,7 @@ def test_overlay_includes_provider_and_identity_keys() -> None:
     )
     assert keys["model.provider"] == "custom"
     assert keys["mcp_servers.hal0-admin.headers.X-hal0-Agent"] == "hermes-agent"
-    # feat/honcho-memory: memory.graph.* dropped entirely — dead config,
+    # memory.graph.* dropped entirely — dead config,
     # configures hal0's own Hindsight engine, not anything hermes reads.
     assert "memory.graph.enabled" not in keys
     # model.context_length is NEVER set — hermes treats it as a global override

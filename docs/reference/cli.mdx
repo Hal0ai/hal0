@@ -295,12 +295,7 @@ migrated (v0.1.x → v0.2 is a clean break).
 | `memory graph status` | Show graph-extraction state (enabled, extraction slot, available slots, counters). | `--json` |
 | `memory graph enable` | Turn graph extraction on (optionally repoint the extraction slot). | `--slot <name>`, `--json` |
 | `memory graph disable` | Turn graph extraction off (cancels any in-flight build). | `--json` |
-| `memory migrate` | Run the Hindsight&lt;-&gt;Honcho engine migration (requires `--from`/`--to`). | `--from`/`--to hindsight\|honcho`, `--agent`, `--dataset` (repeatable), `--since`, `--resume`, `--dry-run`/`--no-dry-run`, `--json` |
 | `memory migrate unify` | Plan/execute folding one or more source Hindsight banks into a target bank via the document-transfer API, tagging provenance (`agent:<name>`, `visibility:private`). | `--source <bank>` (repeatable), `--target` (default `shared`), `--apply`/`--dry-run` (default), `--add-tag` (repeatable), `--on-conflict {skip,replace,new-id}` (default `skip`), `--skip-observations`, `--json` |
-| `memory sync-graph` | Sync Honcho conclusions -> Hindsight, resuming from the saved watermark (the `hal0-honcho-sync.timer` job). | `--agent`, `--json` |
-| `memory provider list` / `memory provider status` | Show engine health (Hindsight/Honcho) and the live per-agent provider routing. | `--json` |
-| `memory provider set` | Route an agent's memory to `hindsight` or `honcho` and persist it. | `--private`/`--no-private`, `--restart`/`--no-restart`, `--json` |
-| `memory honcho render-env` | Render `/etc/hal0/honcho.env` from `hal0.toml [honcho]` and restart the stack if it changed. | `--restart`/`--no-restart`, `--json` |
 | `memory bank list` | List Hindsight banks with fact counts and last-activity timestamps. | `--json` |
 | `memory bank stats <bank>` | Show detailed stats for a bank (nodes, links, documents, operations). | `--json` |
 | `memory bank profile get <bank>` | Show a bank's profile (name, disposition traits, missions — via `/config`). | `--json` |
@@ -321,9 +316,6 @@ extraction LLM at the named slot (ADR-0023). `<name>` must be an enabled
 `type=llm` slot — the server validates it against the live slot set and restarts
 `hindsight-api` to apply. Omit `--slot` to keep the current slot. The legacy
 `--route`/`--provider`/`--model` options were removed in ADR-0023.
-`memory migrate` requires `--from`/`--to` — it runs the Hindsight&lt;-&gt;Honcho
-backfill/graph-sync engine in-process against the local hal0-api + Honcho REST
-surfaces, defaulting to a live run (`--dry-run` opts into a scan-only report).
 Use `memory migrate unify` to fold per-agent banks into a shared bank.
 
 `memory bank profile get`/`set` both go through `GET`/`PATCH
