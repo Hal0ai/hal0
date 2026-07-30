@@ -54,16 +54,6 @@ import {
   useRetryFailedExtractions,
   useUpdateMemoryGraph,
 } from '@/api/hooks/useMemory'
-// Provider-routing (Hindsight vs Honcho) + Honcho engine/sync stats — back
-// the two-provider-card layout and the per-agent routing strip.
-import {
-  useHonchoStats,
-  useHonchoSync,
-  useHonchoSyncRun,
-  useMemoryProvider,
-  useSetHonchoSync,
-  useSetMemoryProvider,
-} from '@/api/hooks/useHoncho'
 
 Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseMemoryEngine: useMemoryEngine,
@@ -81,12 +71,6 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseOperationCancel: useOperationCancel,
   __hal0UseConsolidate: useConsolidate,
   __hal0UseRetryFailedExtractions: useRetryFailedExtractions,
-  __hal0UseMemoryProvider: useMemoryProvider,
-  __hal0UseSetMemoryProvider: useSetMemoryProvider,
-  __hal0UseHonchoStats: useHonchoStats,
-  __hal0UseHonchoSync: useHonchoSync,
-  __hal0UseSetHonchoSync: useSetHonchoSync,
-  __hal0UseHonchoSyncRun: useHonchoSyncRun,
   __hal0UseBankGraph: useBankGraph,
   __hal0UseBankSubgraph: useBankSubgraph,
   __hal0UseEntityGraph: useEntityGraph,
