@@ -25,6 +25,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from hal0.config import paths
+
 # Every character ``str.splitlines()`` treats as a line boundary. The file
 # is re-read with ``.splitlines()`` (see ``list_env_keys`` / the upsert
 # rewrite), so any of these inside a value could split the stored line into
@@ -54,11 +56,15 @@ def _line_targets_key(line: str, key: str) -> bool:
 
 
 def _atomic_write(api_env: Path, text: str) -> None:
-    """Write ``text`` to ``api_env`` atomically with mode 0600.
+    """Write ``text`` to ``api_env`` atomically at :data:`paths.API_ENV_MODE`.
 
-    tmp-file in the same directory + ``os.replace`` so a concurrent
-    reader never sees a partial file; ``0600`` because this file holds
-    secrets.
+    tmp-file in the same directory + ``os.replace`` so a concurrent reader
+    never sees a partial file; owner-only because this file holds secrets.
+
+    The mode rides on the tmp file and lands with the rename, so this also
+    *repairs* an api.env that a previous installer re-run (or the pre-#1466
+    perms table) left world-readable — the mode is not inherited from the
+    file being replaced.
     """
     api_env.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(
@@ -71,7 +77,7 @@ def _atomic_write(api_env: Path, text: str) -> None:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.chmod(tmp_str, 0o600)
+        os.chmod(tmp_str, paths.API_ENV_MODE)
         os.replace(tmp_str, api_env)
     except BaseException:
         with contextlib.suppress(OSError):

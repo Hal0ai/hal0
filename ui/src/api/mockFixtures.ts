@@ -518,11 +518,18 @@ function buildModelUpdatesCheck() {
 }
 
 function buildSecrets() {
+  // `protected` mirrors the real payload (#1450): api.env holds hal0's own
+  // HAL0_* service config and auth keys alongside operator credentials, and
+  // the route refuses to mutate the former. HAL0_ADMIN_KEY is here so the
+  // forced-mock dashboard renders the locked row rather than a Remove button
+  // the server would 403 — a mock that omits it teaches the UI a shape the
+  // server never sends.
   return {
     secrets: [
-      { name: 'HF_TOKEN', set: true, masked: 'hf_•••••••••••••••••••••' },
-      { name: 'OPENAI_API_KEY', set: false },
-      { name: 'ANTHROPIC_API_KEY', set: false },
+      { name: 'HF_TOKEN', set: true, masked: 'hf_•••••••••••••••••••••', protected: false },
+      { name: 'OPENAI_API_KEY', set: false, protected: false },
+      { name: 'ANTHROPIC_API_KEY', set: false, protected: false },
+      { name: 'HAL0_ADMIN_KEY', set: true, masked: '••••••••', protected: true },
     ],
   }
 }

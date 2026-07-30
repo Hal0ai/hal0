@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 
 from hal0.api import auth as auth_mod
 from hal0.api import create_app
+from hal0.config import paths
 from hal0.service_identity import keys_from_api_env
 
 
@@ -134,9 +135,14 @@ def test_rotate_preserves_non_world_readable_mode(
     rotate_client.post("/api/auth/rotate", json={"tier": "admin"})
 
     mode = stat.S_IMODE(os.stat(_api_env_path(tmp_path)).st_mode)
-    assert mode == 0o640
-    # Never world-readable — the whole point once it holds a live secret.
-    assert not (mode & 0o007)
+    # #1466: was a local 0o640; rotation now shares one constant with the
+    # installer, the dashboard writer and the perms engine — three of which
+    # disagreed, so the strictest always lost.
+    assert mode == paths.API_ENV_MODE
+    # Never group- OR world-readable — the whole point once it holds a live
+    # secret, and a group-readable file stops being "not world-readable" the
+    # moment a second account joins the group.
+    assert not (mode & 0o077)
 
 
 def test_rotate_preserves_other_env_lines(

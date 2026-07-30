@@ -74,6 +74,33 @@ def etc() -> Path:
     return Path("/etc/hal0")
 
 
+#: The one permission mode ``api.env`` is written at, by every writer (#1466).
+#:
+#: ``api.env`` is the systemd ``EnvironmentFile=`` for ``hal0-api``. It carries
+#: provider credentials, operator-set secrets, and — after a rotation — the
+#: ``HAL0_ADMIN_KEY`` / ``HAL0_CLIENT_KEY`` auth keys. It had FOUR writers with
+#: three different opinions (installer 0644, ``_env_store`` 0600,
+#: ``service_identity`` 0640, ``install/perms`` 0644), so on a real box the
+#: strictest one always lost: the perms engine and every installer re-run
+#: flattened it back to world-readable while it held live tokens.
+#:
+#: 0600, not 0640: systemd reads ``EnvironmentFile=`` as the service manager
+#: (root) before dropping privileges, and the CLI reads it as root or as the
+#: service user, so nothing needs the group bit — and a group-readable file
+#: becomes world-readable the moment a second account joins the group.
+API_ENV_MODE = 0o600
+
+
+def api_env() -> Path:
+    """Return the api.env path (/etc/hal0/api.env or the HAL0_HOME sandbox).
+
+    The systemd ``EnvironmentFile=`` for ``hal0-api``. Written at
+    :data:`API_ENV_MODE` by every writer — see that constant for why it had
+    four of them.
+    """
+    return etc() / "api.env"
+
+
 def var_lib() -> Path:
     """Return the hal0 runtime state root (/var/lib/hal0 or $HAL0_HOME/var-lib/hal0).
 

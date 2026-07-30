@@ -195,11 +195,21 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
     # neither spuriously fails.
     monkeypatch.setattr(da.Path, "exists", lambda self: True)
     monkeypatch.setattr(da, "_hal0_target_enabled_probe", lambda: True)
+    # The secret-mode row (#1466) stats real paths; pin it to nothing so this
+    # composition test asserts the row list, not the host's /etc/hal0 modes.
+    monkeypatch.setattr(da, "_SECRET_FILES", ())
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 5 extras.
-    assert keys[-5:] == ["auth", "models", "migrations", "ports", "hal0_target"]
+    # 7 verify rows + 6 extras.
+    assert keys[-6:] == [
+        "auth",
+        "models",
+        "migrations",
+        "ports",
+        "hal0_target",
+        "secret-modes",
+    ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
 
