@@ -206,6 +206,27 @@ def test_extract_structured_case_insensitive_and_skips_nested_bullets():
     assert extract_structured(md)["breaking"] == ["top level", "another top"]
 
 
+def test_extract_structured_accumulates_repeated_headings():
+    """A repeated heading must not discard the earlier block (#1499).
+
+    Union-resolving a CHANGELOG merge conflict routinely leaves two ``###
+    Breaking`` blocks in one version section. Assigning per heading silently
+    kept only the last, so an operator's ``hal0 update`` banner under-reported
+    what the update actually does — a quieter safety callout, not a cosmetic
+    bug. Order follows the document.
+    """
+    md = (
+        "### Breaking\n- first breaking\n\n"
+        "### Fixed\n- unrelated\n\n"
+        "### Breaking\n- second breaking\n\n"
+        "### Migrations\n- first migration\n\n"
+        "### Migrations\n- second migration\n"
+    )
+    s = extract_structured(md)
+    assert s["breaking"] == ["first breaking", "second breaking"]
+    assert s["migrations"] == ["first migration", "second migration"]
+
+
 # ── gen_release_notes.py script (produces the two tarball-root files) ─────────
 
 
