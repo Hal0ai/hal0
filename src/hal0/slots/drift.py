@@ -189,7 +189,11 @@ async def compute_config_drift(
     provider = container_provider()
     loop = asyncio.get_event_loop()
     running, rendered = await asyncio.gather(
-        loop.run_in_executor(None, provider.running_argv, slot_name),
+        # Inspect by CONFIG: the container is named after the slot's instance
+        # token, which is the durable id on a post-migration box (#1417) — a
+        # bare name inspected a container that never existed, so every drift
+        # comparison silently short-circuited to None.
+        loop.run_in_executor(None, provider.running_argv, cfg),
         loop.run_in_executor(None, provider.expected_argv, cfg, model_info),
     )
     if not running or not rendered:
