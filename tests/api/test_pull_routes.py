@@ -401,6 +401,50 @@ def test_pull_curated_mmproj_file_is_wired(
     assert fake_run_pull[0]["mmproj_file"] == "mmproj-F16.gguf"
 
 
+# ── #1394: the vision label needs a projector on the pull path too ───────────
+#
+# The Add-by-HF modal writes its row through POST /pull (seed_registry_from_body),
+# NOT through POST /api/models — so the models-write screen never sees it. The
+# same invariant is enforced here, against the sidecar the pull will install.
+
+
+def test_pull_vision_label_without_mmproj_rejected(
+    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
+) -> None:
+    """Ticking ``vision`` in the Add-by-HF modal with no mmproj file selected
+    seeds a projector-less vision row today. Refuse it on the wire (#1394)."""
+    r = client_isolated.post(
+        "/api/models/user.NoProjector/pull",
+        json={
+            "hf_repo": "org/vision-GGUF",
+            "hf_filename": "vision-Q4_K_M.gguf",
+            "labels": ["chat", "vision"],
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+    # Nothing seeded, nothing scheduled.
+    assert client_isolated.get("/api/models/user.NoProjector").status_code == 404
+    assert fake_run_pull == []
+
+
+def test_pull_non_vision_labels_unaffected(
+    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
+) -> None:
+    """The guard is scoped to the vision label — an ordinary chat pull with no
+    mmproj still goes through."""
+    r = client_isolated.post(
+        "/api/models/user.PlainChat/pull",
+        json={
+            "hf_repo": "org/chat-GGUF",
+            "hf_filename": "chat-Q4_K_M.gguf",
+            "labels": ["chat"],
+        },
+    )
+    assert r.status_code == 202, r.text
+    assert len(fake_run_pull) == 1
+
+
 # ── #626: durable pull-job store ────────────────────────────────────────────
 
 

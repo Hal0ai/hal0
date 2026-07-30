@@ -435,8 +435,9 @@ async def validate_model_write(request: Request) -> dict[str, Any]:
     ``{"ok": true}`` on a clean body; a violation raises the SAME typed envelope
     (``slot.managed_arg_denied`` / ``model.extra_args_unparseable`` /
     ``model.extra_args_json_quoting`` / ``model.unknown_runner`` /
-    ``model.defaults_invalid`` / ``model.context_size_out_of_range``) the create
-    and PUT paths raise, so the drawer renders one error path.
+    ``model.defaults_invalid`` / ``model.context_size_out_of_range`` /
+    ``model.vision_requires_mmproj`` / ``model.mmproj_not_found``) the create and
+    PUT paths raise, so the drawer renders one error path.
     """
     try:
         body = await request.json()
@@ -444,7 +445,17 @@ async def validate_model_write(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
-    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
+    # A dry run of a sparse EDIT needs the stored row for the same reason the PUT
+    # does (#1393) — the drawer sends only changed keys, so a body that adds
+    # ``vision`` must be screened against the persisted ``mmproj``. ``id`` is
+    # optional and unknown ids fall back to a create-shaped screen; the registry
+    # is only READ here (this route never writes).
+    existing: dict[str, Any] | None = None
+    candidate_id = body.get("id")
+    if isinstance(candidate_id, str) and candidate_id:
+        with contextlib.suppress(Exception):
+            existing = request.app.state.model_registry.get(candidate_id).model_dump(mode="python")
+    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES, existing=existing)
     return {"ok": True}
 
 
@@ -626,21 +637,20 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
 
-    # Validate the launch-affecting fields (preferred_runner + defaults.extra_args)
-    # at SAVE time (UI-API-1 items 1/2). Shared with create + /validate so the
-    # three paths never drift; screens preferred_runner against RUNNER_IMAGES and
-    # defaults.extra_args against the managed-arg denylist (fails the write with
-    # the same envelope the launch path raises).
-    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
-
-    # Snapshot the pre-update model so we can diff the field set the
-    # client actually changed (vs the wire-format keys, which may include
-    # unchanged values). Without this the footer's "changed X, Y" toast
-    # would lie whenever the UI sends the full row.
+    # Snapshot the pre-update model FIRST — it feeds two consumers: the
+    # changed-fields diff below, and the write screen, which needs the stored row
+    # to resolve a sparse body (#1393: a PUT that adds ``vision`` without
+    # mentioning ``mmproj`` must be screened against the PERSISTED projector).
     try:
         before = registry.get(model_id).model_dump(mode="python")
     except Exception:
         before = {}
+
+    # Validate the launch-affecting fields (defaults.extra_args + the
+    # vision↔mmproj pairing) at SAVE time (UI-API-1 items 1/2, #1393). Shared
+    # with create + /validate so the three paths never drift; fails the write
+    # with the same envelope the launch path raises.
+    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES, existing=before)
 
     model = registry.update(model_id, body)
 
