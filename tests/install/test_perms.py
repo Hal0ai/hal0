@@ -518,6 +518,40 @@ def test_registry_files_get_explicit_rows_matching_each_writer(tmp_hal0_home: st
     assert db_row.optional is True
 
 
+def test_primary_database_has_an_ownership_row(tmp_hal0_home: str) -> None:
+    """The PRIMARY database — ``paths.db_path()`` — must have a row (#1546).
+
+    The ``registry/hal0.db`` row above covers only the location a
+    ``SqliteModelRegistry(registry_dir=...)`` override puts the file, which
+    is a test/dev-isolation path. Production resolves through
+    ``paths.db_path()`` -> ``var_lib()/"hal0.db"``, which had no row at all:
+    install.sh creates it as root, the ownership pass then reconciled 37
+    paths without touching it, and ``doctor perms`` reported the box clean
+    while the User=hal0 daemon could not write the registry — every model
+    pull downloaded in full and then failed with "attempt to write a
+    readonly database".
+    """
+    table = perms.ownership_table(service_user="hal0")
+    by_target = {r.target: r for r in table}
+
+    db = paths.db_path()
+    assert db in by_target, f"no ownership row for the primary database {db}"
+    db_row = by_target[db]
+    assert (db_row.owner, db_row.group, db_row.mode) == ("hal0", "hal0", 0o644)
+    assert db_row.optional is True
+
+    # WAL journaling (hal0.db.connection switches every connection to WAL)
+    # creates -wal/-shm beside the database. SQLite needs to write those too,
+    # and they are born from whichever process opens the DB first — root
+    # during install. Cover them or the same failure returns by a side door.
+    for suffix in ("-wal", "-shm"):
+        sibling = db.with_name(db.name + suffix)
+        assert sibling in by_target, f"no ownership row for {sibling}"
+        row = by_target[sibling]
+        assert (row.owner, row.group, row.mode) == ("hal0", "hal0", 0o644)
+        assert row.optional is True
+
+
 def test_ownership_table_has_no_rootless_podman_home_rows(tmp_hal0_home: str) -> None:
     """O12: the 9e07c0d3 ``.config``/``.local`` rootless-HOME rows are gone.
 
