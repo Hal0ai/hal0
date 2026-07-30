@@ -206,7 +206,7 @@ function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, he
 // Exported for real ESM consumers (P3-ui split, settings/ pages) in addition
 // to the window-globals publish below, which the not-yet-migrated dash/*.jsx
 // files still rely on.
-export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confirmLabel = "Confirm", cancelLabel = "Cancel", destructive = false, typeToConfirm = null }) {
+export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confirmLabel = "Confirm", cancelLabel = "Cancel", destructive = false, typeToConfirm = null, footerNote = null }) {
   const [typed, setTyped] = useStateP("");
   useEffectP(() => { if (open) setTyped(""); }, [open]);
   const canConfirm = !typeToConfirm || typed === typeToConfirm;
@@ -219,7 +219,7 @@ export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confi
       width={520}
       foot={
         <>
-          <span style={{color: "var(--fg-4)"}}>{destructive ? "This action is permanent." : "You can undo this later."}</span>
+          <span style={{color: "var(--fg-4)"}}>{footerNote ?? (destructive ? "This action is permanent." : "You can undo this later.")}</span>
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onCancel}>{cancelLabel}</button>
             <button

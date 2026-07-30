@@ -192,4 +192,17 @@ test.describe('Model drawer — duplicate for device', () => {
     await expect(page.locator('.hal0-toast')).toContainText('Duplicate failed')
     await expect(dialog(page)).toBeVisible()
   })
+
+  test('D6 — the footer states the real contract, not a fabricated "undo" claim (#1442)', async ({ page }) => {
+    // Duplication has no undo — delete is the (refcounted) inverse. The
+    // shared ConfirmDialog's default non-destructive footer ("You can undo
+    // this later.") is false for this specific action.
+    await stubLookups(page)
+    await openDuplicateDialog(page)
+
+    await expect(dialog(page)).not.toContainText('You can undo this later.')
+    await expect(dialog(page)).toContainText(
+      'The duplicate can be deleted at any time; weights are shared.',
+    )
+  })
 })
