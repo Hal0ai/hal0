@@ -166,6 +166,20 @@ class TestHal0ConfigRoundTrip:
         loaded = load_hal0_config(path=custom)
         assert isinstance(loaded, Hal0Config)
 
+    def test_load_tolerates_dead_brain_chat_tool_model_key(self, tmp_hal0_home: str) -> None:
+        """#1453: `[brain_chat] tool_model` was removed from the schema, which
+        is `extra="forbid"`. A hal0.toml written before the removal (e.g. by
+        an in-place code swap that skips the `hal0 update` migration step —
+        the packaged update path already strips this) must still load
+        instead of hard-failing validation on the next boot."""
+        paths.hal0_toml().parent.mkdir(parents=True, exist_ok=True)
+        paths.hal0_toml().write_text(
+            '[brain_chat]\nmodel = "hal0/npu"\ntool_model = "hal0/agent"\n'
+        )
+        loaded = load_hal0_config()
+        assert loaded.brain_chat.model == "hal0/npu"
+        assert not hasattr(loaded.brain_chat, "tool_model")
+
 
 # ── slot config round-trip ───────────────────────────────────────────────────
 
