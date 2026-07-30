@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from hal0.api import create_app
 from hal0.providers.container import ContainerProvider
+from tests.fixtures.slot_probe import probe_slot_name
 
 # ── Container-provider stub ──────────────────────────────────────────────────
 
@@ -58,8 +59,9 @@ def container_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         state["unload_calls"].append(dict(slot_cfg))
         state["active"].discard(slot_cfg.get("name"))
 
-    def is_active(self: ContainerProvider, slot_name: str) -> bool:
-        return slot_name in state["active"]
+    def is_active(self: ContainerProvider, slot: Any) -> bool:
+        # Production passes the slot CONFIG (#1417); this stub keys by name.
+        return probe_slot_name(slot) in state["active"]
 
     async def health(
         self: ContainerProvider, port: int, slot_cfg: dict[str, Any] | None = None
