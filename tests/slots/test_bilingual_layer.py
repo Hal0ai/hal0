@@ -50,7 +50,6 @@ async def _create(sm: SlotManager, name: str, **over) -> object:
         "type": "llm",
         "device": "gpu-rocm",
         "provider": "llama-server",
-        "enabled": True,
         "model": {"default": "some-model"},
         **over,
     }

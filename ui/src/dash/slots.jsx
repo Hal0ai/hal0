@@ -40,7 +40,7 @@ const { useState: useStateS, useRef, useEffect } = React;
 // user-visible colour vocabulary (per dot-state spec, 2026-05-27):
 //
 //   error / crashed unit                 → "error"   (red)    — investigate
-//   !enabled                             → "offline" (grey)   — operator-disabled
+//   no model bound                       → "offline" (grey)   — unconfigured
 //   pulling / starting …                 → "warming" (amber pulse)
 //   serving + last_used_at fresh         → "serving" (green pulse) — actively processing
 //   serving + last_used_at > 1h          → "stale"   (yellow) — possibly stuck request
@@ -50,10 +50,10 @@ const { useState: useStateS, useRef, useEffect } = React;
 // Colour follows CONTAINER RESIDENCY, not configuration (truthful-
 // display, 2026-06-04): GREEN = actively processing an in-flight
 // request; YELLOW = container running + healthy (awaiting a prompt);
-// GREY = not running — disabled or stopped (auto-reloads on the next
-// request). Stopped vs disabled is a label/tooltip distinction, not a
-// colour one, so the dashboard never paints a not-running slot in a
-// "warm" colour. The 1h timer catches stuck-in-SERVING slots where a
+// GREY = not running — stopped or unconfigured (a configured slot
+// auto-reloads on the next request). Stopped vs unconfigured is a
+// label/tooltip distinction, not a colour one, so the dashboard never paints
+// a not-running slot in a "warm" colour. The 1h timer catches stuck-in-SERVING slots where a
 // request never finished.
 const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h hung-request threshold for serving slots
 
@@ -153,12 +153,13 @@ function SlotCard({
   // (profile picker) rather than a one-click switch. The legacy backend-switch
   // endpoint was removed in WS-5 — changing the profile is the way to switch.
   const declaredBackend = slot.declared_backend || slot.backend || device;
-  // Spec 1 / C3: a slot is enabled unless explicitly off. Disabled slots fade,
-  // hide lifecycle buttons, and sort to the end of the grid (SlotsView).
-  const enabled = slot.enabled !== false;
-  // A disabled slot whose container is still up + healthy stays full-opacity
-  // (slot--live) instead of fading — it's holding GPU / may be serving.
-  const liveWhileDisabled = !enabled && isSlotLive(slot);
+  // Spec 1 / C3, reworked for #1369: a slot is CONFIGURED once a model is
+  // bound. Unconfigured slots fade, hide lifecycle buttons, and sort to the end
+  // of the grid (SlotsView) — the same treatment the removed `enabled = false`
+  // used to get, now keyed off the signal that actually decides whether
+  // anything can run. There is no "faded but live" case any more: a slot with a
+  // running container has a model by construction.
+  const configured = !!(slot.model_default || slot.model || slot.model_id);
   // Lifecycle phase drives which action buttons render (design 2026-06-04):
   // running (container healthy/serving) -> Stop+Restart; off -> Start;
   // transitional (pulling/starting/unloading) -> actions disabled.
@@ -216,7 +217,7 @@ function SlotCard({
   })();
 
   return (
-    <div className={"slot" + statusClass + (swapOpen ? " swap-open" : "") + (enabled ? "" : " slot--disabled") + (liveWhileDisabled ? " slot--live" : "")}>
+    <div className={"slot" + statusClass + (swapOpen ? " swap-open" : "") + (configured ? "" : " slot--unconfigured")}>
       <div className="slot-h">
         <IndicatorDot slot={slot} />
         <div className="slot-name">
@@ -384,10 +385,10 @@ function SlotCard({
       {/* N3: touch-action:manipulation prevents 300ms tap-delay on mobile
           while keeping pan/pinch-to-zoom intact (no `touch-action: none`). */}
       <div className="slot-actions" style={{touchAction: "manipulation"}}>
-        {/* C3: a disabled slot has no running child to Start/Stop/Restart —
-            hide the lifecycle buttons; the card's toggle is the way back on. */}
-        {!enabled ? (
-          <span className="slot-disabled-note mono">disabled</span>
+        {/* C3: an unconfigured slot has nothing to Start/Stop/Restart — hide
+            the lifecycle buttons; binding a model in Edit is the way on. */}
+        {!configured ? (
+          <span className="slot-unconfigured-note mono">no model</span>
         ) : phase === "off" ? (
           <button
             className="btn ghost sm"
@@ -497,13 +498,18 @@ function SlotListRow({ slot, onEdit }) {
           <span style={{fontSize: 11, color: 'var(--fg-2)'}}>
             {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
           </span>
+          {/* #1369: the pill reflects the ANCHOR's [npu] modality toggle
+              (lifted as npu_modality_active by slot_view.config_enrichment),
+              not the shadow's own config. The shadow always carries a
+              placeholder model, so it has no state of its own to show — and
+              the anchor's table is what FLM was actually launched with. */}
           <span style={{
-            background: slot.enabled ? 'var(--dev-npu)' : 'transparent',
+            background: slot.npu_modality_active ? 'var(--dev-npu)' : 'transparent',
             border: '1px solid var(--dev-npu)', borderRadius: 10,
             padding: '1px 10px', fontSize: 11,
-            color: slot.enabled ? '#fff' : 'var(--dev-npu)',
+            color: slot.npu_modality_active ? '#fff' : 'var(--dev-npu)',
           }}>
-            {slot.enabled ? 'ON' : 'OFF'}
+            {slot.npu_modality_active ? 'ON' : 'OFF'}
           </span>
           <button className="btn ghost sm" title="Edit"
             onClick={e => { e.stopPropagation(); goEdit(); }}
@@ -861,15 +867,16 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // only card/list dispatcher, and its "spec"/"list" branches rendered
   // handler-less, inert cards. Removed.)
 
-  // C6: stable-sort enabled slots before disabled ones, preserving the
+  // C6: stable-sort configured slots before unconfigured ones, preserving the
   // existing order within each bucket. Array.prototype.sort is stable, so a
   // 0/1 key keeps the original type/role ordering intact otherwise. Pairs
-  // with the faded card so disabled slots sink to the end of their section.
-  const enabledFirst = (items) =>
-    items.slice().sort((a, b) => (a?.enabled === false ? 1 : 0) - (b?.enabled === false ? 1 : 0));
+  // with the faded card so unconfigured slots sink to the end of their section.
+  const isConfigured = (s) => !!(s?.model_default || s?.model || s?.model_id);
+  const configuredFirst = (items) =>
+    items.slice().sort((a, b) => (isConfigured(a) ? 0 : 1) - (isConfigured(b) ? 0 : 1));
 
   const renderGroup = (label, rawItems, opts = {}) => {
-    const items = enabledFirst(rawItems);
+    const items = configuredFirst(rawItems);
     if (!items.length) return null;
     if (slotVariant === "list") {
       return (

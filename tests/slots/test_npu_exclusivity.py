@@ -1,9 +1,12 @@
 """NPU exclusivity validation in SlotManager (PR-11, plan §5.3, ADR-0008 §5).
 
-The AMDXDNA hardware context admits exactly one ``device=npu, type=llm,
-enabled=true`` slot at a time. SlotManager.create() and update_config()
-both gate on the helper :meth:`_check_npu_exclusivity` — these tests
-pin the contract.
+The AMDXDNA hardware context admits exactly one ``device=npu, type=llm``
+slot **with a model configured** at a time. Since #1369 removed
+``SlotConfig.enabled``, model-presence is the anchor-claim discriminator:
+a model-less NPU LLM slot is inert config and may coexist, while binding a
+second model is the write that gets refused. SlotManager.create() and
+update_config() both gate on the helper :meth:`_check_npu_exclusivity` —
+these tests pin the contract.
 
 Conventions:
   - Tests don't spawn containers (the validation runs before any I/O).
@@ -33,24 +36,28 @@ def _write_slot_toml(home: str, name: str, lines: list[str]) -> Path:
     return path
 
 
-# ── Negative paths: NPU LLM is being created/enabled ────────────────────────
-
-
-async def test_create_rejects_second_enabled_npu_llm(tmp_hal0_home: str) -> None:
-    """A second device=npu, type=llm, enabled=true slot must be rejected."""
-    _write_slot_toml(
-        tmp_hal0_home,
-        "agent",
+def _seed_npu_anchor(home: str, name: str = "agent", *, port: int = 8082) -> Path:
+    """Seed the incumbent NPU LLM anchor: device=npu, type=llm, model bound."""
+    return _write_slot_toml(
+        home,
+        name,
         [
-            'name = "agent"',
-            "port = 8082",
+            f'name = "{name}"',
+            f"port = {port}",
             'device = "npu"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
             'default = "gemma3-1b"',
         ],
     )
+
+
+# ── Negative paths: a second NPU LLM anchor claims a model ──────────────────
+
+
+async def test_create_rejects_second_npu_llm_with_a_model(tmp_hal0_home: str) -> None:
+    """A second device=npu, type=llm slot with a model bound must be rejected."""
+    _seed_npu_anchor(tmp_hal0_home)
     sm = SlotManager()
     with pytest.raises(NpuExclusivityViolation) as exc:
         await sm.create(
@@ -60,7 +67,6 @@ async def test_create_rejects_second_enabled_npu_llm(tmp_hal0_home: str) -> None
                 "port": 8083,
                 "device": "npu",
                 "type": "llm",
-                "enabled": True,
                 "model": {"default": "qwen3-1b"},
             },
         )
@@ -70,22 +76,16 @@ async def test_create_rejects_second_enabled_npu_llm(tmp_hal0_home: str) -> None
     assert not (Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "agent-2.toml").exists()
 
 
-async def test_update_config_rejects_enabling_second_npu_llm(tmp_hal0_home: str) -> None:
-    """Flipping ``enabled=false → true`` on a sibling NPU LLM is blocked."""
-    _write_slot_toml(
-        tmp_hal0_home,
-        "agent",
-        [
-            'name = "agent"',
-            "port = 8082",
-            'device = "npu"',
-            'type = "llm"',
-            "enabled = true",
-            "[model]",
-            'default = "gemma3-1b"',
-        ],
-    )
-    # Seed agent-2 with enabled=false; allowed because it doesn't claim the HW.
+async def test_update_config_rejects_binding_a_model_to_a_second_npu_llm(
+    tmp_hal0_home: str,
+) -> None:
+    """Binding a model to a model-less sibling NPU LLM is blocked.
+
+    This is the #1369 replacement for the old ``enabled=false → true`` flip:
+    the model write IS the activation, so it is the write that must 409.
+    """
+    _seed_npu_anchor(tmp_hal0_home)
+    # Seed agent-2 model-less; allowed because it doesn't claim the HW.
     _write_slot_toml(
         tmp_hal0_home,
         "agent-2",
@@ -94,34 +94,40 @@ async def test_update_config_rejects_enabling_second_npu_llm(tmp_hal0_home: str)
             "port = 8083",
             'device = "npu"',
             'type = "llm"',
-            "enabled = false",
             "[model]",
-            'default = "qwen3-1b"',
+            'default = ""',
         ],
     )
     sm = SlotManager()
     with pytest.raises(NpuExclusivityViolation):
-        await sm.update_config("agent-2", {"enabled": True})
+        await sm.update_config("agent-2", {"model": {"default": "qwen3-1b"}})
+
+
+async def test_violation_message_names_the_model_not_a_toggle(tmp_hal0_home: str) -> None:
+    """The operator-facing text must describe the real remedy: clear the model."""
+    _seed_npu_anchor(tmp_hal0_home)
+    sm = SlotManager()
+    with pytest.raises(NpuExclusivityViolation) as exc:
+        await sm.create(
+            "agent-2",
+            {
+                "name": "agent-2",
+                "port": 8083,
+                "device": "npu",
+                "type": "llm",
+                "model": {"default": "qwen3-1b"},
+            },
+        )
+    assert "model configured" in str(exc.value)
+    assert "model" in exc.value.details["hint"]
 
 
 # ── Positive paths: changes that DON'T violate the constraint ───────────────
 
 
-async def test_create_allows_disabled_second_npu_llm(tmp_hal0_home: str) -> None:
-    """A disabled second NPU LLM slot may coexist with an enabled one."""
-    _write_slot_toml(
-        tmp_hal0_home,
-        "agent",
-        [
-            'name = "agent"',
-            "port = 8082",
-            'device = "npu"',
-            'type = "llm"',
-            "enabled = true",
-            "[model]",
-            'default = "gemma3-1b"',
-        ],
-    )
+async def test_create_allows_model_less_second_npu_llm(tmp_hal0_home: str) -> None:
+    """A model-less second NPU LLM slot may coexist with the bound anchor."""
+    _seed_npu_anchor(tmp_hal0_home)
     sm = SlotManager()
     snap = await sm.create(
         "agent-spare",
@@ -130,29 +136,51 @@ async def test_create_allows_disabled_second_npu_llm(tmp_hal0_home: str) -> None
             "port": 8083,
             "device": "npu",
             "type": "llm",
-            "enabled": False,
-            "model": {"default": "qwen3-1b"},
+            "model": {"default": ""},
         },
     )
     assert snap is not None
     assert (Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "agent-spare.toml").exists()
 
 
-async def test_create_allows_non_npu_slot_alongside_npu_llm(tmp_hal0_home: str) -> None:
-    """device=gpu-rocm slots are unaffected by NPU exclusivity."""
+async def test_model_less_incumbent_does_not_block_a_new_anchor(
+    tmp_hal0_home: str,
+) -> None:
+    """A model-less peer isn't an anchor, so it can't be the conflicting slot.
+
+    The seeded ``flm`` slot ships model-less; before #1369 it also shipped
+    ``enabled = false``, and this is the assertion that the two signals were
+    interchangeable all along.
+    """
     _write_slot_toml(
         tmp_hal0_home,
-        "agent",
+        "flm",
         [
-            'name = "agent"',
-            "port = 8082",
+            'name = "flm"',
+            "port = 8088",
             'device = "npu"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
-            'default = "gemma3-1b"',
+            'default = ""',
         ],
     )
+    sm = SlotManager()
+    snap = await sm.create(
+        "agent",
+        {
+            "name": "agent",
+            "port": 8082,
+            "device": "npu",
+            "type": "llm",
+            "model": {"default": "gemma3-1b"},
+        },
+    )
+    assert snap is not None
+
+
+async def test_create_allows_non_npu_slot_alongside_npu_llm(tmp_hal0_home: str) -> None:
+    """device=gpu-rocm slots are unaffected by NPU exclusivity."""
+    _seed_npu_anchor(tmp_hal0_home)
     sm = SlotManager()
     await sm.create(
         "primary-2",
@@ -161,7 +189,6 @@ async def test_create_allows_non_npu_slot_alongside_npu_llm(tmp_hal0_home: str) 
             "port": 8083,
             "device": "gpu-rocm",
             "type": "llm",
-            "enabled": True,
             "model": {"default": "qwen3-9b"},
         },
     )
@@ -176,19 +203,7 @@ async def test_create_allows_npu_embedding_or_transcription_alongside_npu_llm(
     DO run on the NPU but coresident with the chat anchor, not as
     additional anchors.
     """
-    _write_slot_toml(
-        tmp_hal0_home,
-        "agent",
-        [
-            'name = "agent"',
-            "port = 8082",
-            'device = "npu"',
-            'type = "llm"',
-            "enabled = true",
-            "[model]",
-            'default = "gemma3-1b"',
-        ],
-    )
+    _seed_npu_anchor(tmp_hal0_home)
     sm = SlotManager()
     await sm.create(
         "stt-npu",
@@ -197,7 +212,6 @@ async def test_create_allows_npu_embedding_or_transcription_alongside_npu_llm(
             "port": 8084,
             "device": "npu",
             "type": "transcription",
-            "enabled": True,
             "model": {"default": "whisper-v3"},
         },
     )
@@ -208,7 +222,6 @@ async def test_create_allows_npu_embedding_or_transcription_alongside_npu_llm(
             "port": 8085,
             "device": "npu",
             "type": "embedding",
-            "enabled": True,
             "model": {"default": "embed-gemma"},
         },
     )
@@ -220,21 +233,32 @@ async def test_update_config_self_idempotent_when_no_conflict(tmp_hal0_home: str
     The guard skips the writer's own slot — without that, a routine
     ``swap()`` on the lone NPU LLM would fail every time.
     """
+    _seed_npu_anchor(tmp_hal0_home)
+    sm = SlotManager()
+    await sm.update_config("agent", {"model": {"default": "qwen3-1b"}})
+
+
+async def test_clearing_the_incumbent_model_frees_the_anchor(tmp_hal0_home: str) -> None:
+    """Clearing ``model.default`` releases the anchor for another slot.
+
+    This is the documented remedy in the violation hint, so it has to work.
+    """
+    _seed_npu_anchor(tmp_hal0_home)
     _write_slot_toml(
         tmp_hal0_home,
-        "agent",
+        "agent-2",
         [
-            'name = "agent"',
-            "port = 8082",
+            'name = "agent-2"',
+            "port = 8083",
             'device = "npu"',
             'type = "llm"',
-            "enabled = true",
             "[model]",
-            'default = "gemma3-1b"',
+            'default = ""',
         ],
     )
     sm = SlotManager()
-    await sm.update_config("agent", {"model": {"default": "qwen3-1b"}})
+    await sm.update_config("agent", {"model": {"default": ""}})
+    await sm.update_config("agent-2", {"model": {"default": "qwen3-1b"}})
 
 
 async def test_create_allows_first_npu_llm_in_clean_home(tmp_hal0_home: str) -> None:
@@ -247,7 +271,6 @@ async def test_create_allows_first_npu_llm_in_clean_home(tmp_hal0_home: str) -> 
             "port": 8082,
             "device": "npu",
             "type": "llm",
-            "enabled": True,
             "model": {"default": "gemma3-1b"},
         },
     )

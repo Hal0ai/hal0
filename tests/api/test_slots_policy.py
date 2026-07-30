@@ -29,7 +29,6 @@ def _seed_slot(home: str, name: str, port: int) -> None:
                 f'name = "{name}"',
                 f"port = {port}",
                 'device = "gpu-vulkan"',
-                "enabled = true",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "",

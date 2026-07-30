@@ -411,7 +411,6 @@ def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
         "port": data["port"],
         "device": data["device"],
         "provider": data["provider"],
-        "enabled": data["enabled"],
         "workers": data["workers"],
         "idle_timeout_s": data["idle_timeout_s"],
     }

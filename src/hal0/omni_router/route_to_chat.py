@@ -9,7 +9,7 @@ user message built from the caller's ``prompt`` (plus optional
 
 Guardrails (all four are mandatory per plan §7.4):
 
-  1. ``target`` must be an enabled ``type=llm`` slot.
+  1. ``target`` must be a ``type=llm`` slot with a model bound.
   2. ``target`` must not equal the caller (no self-delegation).
   3. Source and target must not BOTH be ``device=npu`` (would force
      an FLM swap mid-request; the FLM trio context is exclusive).
@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import contextvars
 from typing import Any
+
+from hal0.slots.activation import is_activated
 
 # Recursion guard. A contextvar (not a module-global) so two concurrent
 # requests can't shadow each other's depth, and so a fan-out coroutine
@@ -44,9 +46,9 @@ def _slot_by_name(configs: list[dict[str, Any]], name: str) -> dict[str, Any] | 
 
 
 def _is_chat_slot(cfg: dict[str, Any]) -> bool:
-    """Chat slots are ``type=llm`` and enabled. NPU exclusivity is
-    enforced separately."""
-    return cfg.get("type") == "llm" and bool(cfg.get("enabled", True))
+    """Chat slots are ``type=llm`` with a model bound (#1369 — model-presence
+    is the activation signal). NPU exclusivity is enforced separately."""
+    return cfg.get("type") == "llm" and is_activated(cfg)
 
 
 def _model_of(cfg: dict[str, Any]) -> str:
@@ -158,10 +160,10 @@ def validate_delegation(
     if current_depth >= MAX_DELEGATION_DEPTH:
         return f"route_to_chat refused: maximum delegation depth ({MAX_DELEGATION_DEPTH}) reached"
 
-    # Guardrail 1: target must exist as an enabled chat slot.
+    # Guardrail 1: target must exist as a chat slot with a model bound.
     target_cfg = _slot_by_name(configs, target)
     if target_cfg is None or not _is_chat_slot(target_cfg):
-        return f"slot '{target}' not enabled"
+        return f"slot '{target}' has no model configured"
 
     # Guardrail 2: no self-delegation.
     if target == caller_slot_name:
@@ -194,12 +196,10 @@ def validate_delegation_slots(
     if current_depth >= MAX_DELEGATION_DEPTH:
         return f"route_to_chat refused: maximum delegation depth ({MAX_DELEGATION_DEPTH}) reached"
 
-    if (
-        target_slot is None
-        or getattr(target_slot, "slot_type", None) != "llm"
-        or getattr(target_slot, "enabled", True) is False
-    ):
-        return f"slot '{target}' not enabled"
+    # A LoadedSlot only exists for a slot with a model bound, so its presence
+    # IS the activation check (#1369 removed the redundant ``enabled`` field).
+    if target_slot is None or getattr(target_slot, "slot_type", None) != "llm":
+        return f"slot '{target}' has no model configured"
 
     if target == caller_slot_name:
         return f"route_to_chat refused: cannot delegate to self ('{target}')"

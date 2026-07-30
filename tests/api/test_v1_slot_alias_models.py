@@ -1,8 +1,8 @@
 """GET /v1/models per-slot alias entries (hermes-role-slots).
 
-Each LOADED, enabled chat slot surfaces as one OpenAI ``model`` object
-addressed by its alias (= slot name), carrying a human display name and
-the slot's context length. Unloaded / disabled slots are hidden.
+Each LOADED chat slot with a model bound surfaces as one OpenAI ``model``
+object addressed by its alias (= slot name), carrying a human display name and
+the slot's context length. Unloaded / model-less slots are hidden.
 
 These tests exercise the :func:`hal0.api.hal0_slot_alias_models` helper
 directly with a faked loaded-model set (normally derived from dispatchable
@@ -59,21 +59,18 @@ def _three_chat_slots() -> list[dict[str, Any]]:
         {
             "name": "primary",
             "type": "llm",
-            "enabled": True,
             "port": 8001,
             "model": {"default": "qwen3-coder-next-reap-40b-a3b-q4kxl"},
         },
         {
             "name": "agent-hermes",
             "type": "llm",
-            "enabled": True,
             "port": 8001,
             "model": {"default": "hermes-4-14b-q5km", "ctx_size": 65536},
         },
         {
             "name": "utility",
             "type": "llm",
-            "enabled": True,
             "port": 8081,
             "model": {"default": "qwen3-zero-coder-v2-0.8b-f16", "context_size": 32768},
         },
@@ -81,7 +78,6 @@ def _three_chat_slots() -> list[dict[str, Any]]:
         {
             "name": "embed",
             "type": "embedding",
-            "enabled": True,
             "port": 0,
             "model": {"default": "Qwen3-Embedding-0.6B-GGUF"},
         },
@@ -101,8 +97,8 @@ def _registry() -> _FakeModelRegistry:
 
 
 @pytest.mark.asyncio
-async def test_all_enabled_llm_slots_emit_alias_entries() -> None:
-    """Every enabled chat slot (type=="llm") with a model appears —
+async def test_all_model_bound_llm_slots_emit_alias_entries() -> None:
+    """Every chat slot (type=="llm") with a model appears —
     both warm and cold — because dispatch cold-loads on demand."""
     entries = await hal0_slot_alias_models(
         _FakeSlotManager(_three_chat_slots()), _registry(), now=1000
@@ -136,7 +132,7 @@ async def test_all_enabled_llm_slots_emit_alias_entries() -> None:
     for slot_id in ("primary", "agent-hermes", "utility"):
         assert by_id[slot_id]["max_context_window"] == by_id[slot_id]["context_length"]
 
-    # §21.5: a live, enabled llm slot's model is always local.
+    # §21.5: a live llm slot's model is always local.
     for e in entries:
         assert e["downloaded"] is True
 
@@ -190,8 +186,8 @@ async def test_registry_detail_folds_into_alias_entries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_all_enabled_llm_slots_appear_regardless_of_load_state() -> None:
-    """All enabled llm slots appear even when only a subset are
+async def test_all_model_bound_llm_slots_appear_regardless_of_load_state() -> None:
+    """All model-bound llm slots appear even when only a subset are
     actually loaded — dispatch cold-loads on demand."""
     entries = await hal0_slot_alias_models(
         _FakeSlotManager(_three_chat_slots()), _registry(), now=1000
@@ -200,9 +196,10 @@ async def test_all_enabled_llm_slots_appear_regardless_of_load_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disabled_slots_are_hidden() -> None:
+async def test_model_less_slots_are_hidden() -> None:
+    """#1369: clearing the model is what takes a slot off the alias list."""
     cfgs = _three_chat_slots()
-    cfgs[0]["enabled"] = False  # disable primary
+    cfgs[0]["model"] = {"default": ""}  # clear primary
     entries = await hal0_slot_alias_models(_FakeSlotManager(cfgs), _registry(), now=1000)
     assert "primary" not in {e["id"] for e in entries}
 

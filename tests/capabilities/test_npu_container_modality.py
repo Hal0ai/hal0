@@ -82,13 +82,17 @@ class FakeSlotManager:
 
 
 def _container_anchor(name: str = "npu") -> dict[str, Any]:
-    """Return a slot config dict that is_container_npu_cfg considers container."""
+    """Return a slot config dict that is_container_npu_cfg considers container.
+
+    Needs a bound model: #1369 made model-presence the activation signal, so
+    ``is_container_npu_cfg`` gates on it rather than on the removed ``enabled``.
+    """
     return {
         "name": name,
         "type": "llm",
         "device": "npu",
         "profile": "flm",
-        "enabled": True,
+        "model": {"default": "gemma3:1b"},
     }
 
 
@@ -98,7 +102,7 @@ def _legacy_anchor(name: str = "npu") -> dict[str, Any]:
         "name": name,
         "type": "llm",
         "device": "npu",
-        "enabled": True,
+        "model": {"default": "gemma3:1b"},
         # no profile, no runtime="container"
     }
 

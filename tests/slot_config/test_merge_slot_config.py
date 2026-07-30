@@ -31,7 +31,7 @@ from hal0.slot_config import (
 def test_merge_one_level_deep_keeps_model_siblings() -> None:
     """A partial ``{"model": {...}}`` update merges into the nested table,
     not clobber it — ``[model].default`` survives a ctx-only write."""
-    base = {"model": {"default": "m", "context_size": 4096}, "enabled": True}
+    base = {"model": {"default": "m", "context_size": 4096}, "workers": 1}
     after = merge_slot_config(base, {"model": {"context_size": 8192}})
     assert after["model"] == {"default": "m", "context_size": 8192}
 
@@ -44,18 +44,18 @@ def test_merge_none_deletes_key() -> None:
     (tomli_w) raised ``TypeError: NoneType is not TOML serializable`` → 500,
     leaving no API path back to Auto once an override existed.
     """
-    base = {"mtp": True, "enabled": True}
+    base = {"mtp": True, "workers": 1}
     after = merge_slot_config(base, {"mtp": None})
     assert "mtp" not in after
-    assert after["enabled"] is True
+    assert after["workers"] == 1
     # base untouched (copy-safety)
     assert base["mtp"] is True
 
 
 def test_merge_none_deletes_missing_key_is_noop() -> None:
-    after = merge_slot_config({"enabled": True}, {"mtp": None})
+    after = merge_slot_config({"workers": 1}, {"mtp": None})
     assert "mtp" not in after
-    assert after == {"enabled": True}
+    assert after == {"workers": 1}
 
 
 def test_merge_none_deletes_nested_key() -> None:
@@ -97,15 +97,15 @@ def test_merge_is_copy_safe_when_updates_carry_no_model() -> None:
     """The load-bearing nuance: a pure non-model update (e.g. a disable) that
     still triggers the ctx_size fold on the inherited base ``[model]`` must
     NOT mutate the caller's base dict. Proves the fold copies before pop."""
-    base = {"model": {"default": "m", "ctx_size": 4096}, "enabled": True}
-    after = merge_slot_config(base, {"enabled": False})
+    base = {"model": {"default": "m", "ctx_size": 4096}, "workers": 1}
+    after = merge_slot_config(base, {"workers": 4})
     # The returned copy folded the alias …
     assert after["model"]["context_size"] == 4096
     assert "ctx_size" not in after["model"]
-    assert after["enabled"] is False
+    assert after["workers"] == 4
     # … while the caller's base is untouched (still the legacy alias).
     assert base["model"] == {"default": "m", "ctx_size": 4096}
-    assert base["enabled"] is True
+    assert base["workers"] == 1
 
 
 def test_merge_does_not_alias_base_model_on_merge_path() -> None:
@@ -155,7 +155,6 @@ def _write_embed_slot(home: str, extra_model_lines: list[str]) -> Path:
                 "port = 8082",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
-                "enabled = true",
                 "[model]",
                 'default = "old-model"',
                 *extra_model_lines,
@@ -173,7 +172,10 @@ def test_store_copy_safe_disable_still_writes(tmp_hal0_home: str) -> None:
     helper. The ChangeSet must see ``before != after`` (so commit writes) and
     the folded ``context_size`` must land on disk. A naive extraction that
     reused the in-place ``_normalize_ctx_key`` would fold ``before`` too and
-    could break the diff — this pins that it does not."""
+    could break the diff — this pins that it does not.
+
+    Post-#1369 the disable's own write is ``[model].default = ""``, so the
+    fold has to survive landing in the same sub-table it is clearing."""
     slot_path = _write_embed_slot(tmp_hal0_home, ["ctx_size = 4096"])
     _write_caps_disabled_embed(tmp_hal0_home)
 
@@ -193,8 +195,8 @@ def test_store_copy_safe_disable_still_writes(tmp_hal0_home: str) -> None:
     slot_change = next(fs for fs in cs.after if fs.path == slot_path)
     before_change = next(fs for fs in cs.before if fs.path == slot_path)
     assert slot_change.data is not None
-    # Disable flips enabled=false and folds the inherited ctx_size alias.
-    assert slot_change.data["enabled"] is False
+    # Disable clears the model and folds the inherited ctx_size alias.
+    assert slot_change.data["model"]["default"] == ""
     assert slot_change.data["model"]["context_size"] == 4096
     assert "ctx_size" not in slot_change.data["model"]
     # The before snapshot must remain the un-folded legacy shape (proof the
@@ -207,15 +209,15 @@ def test_store_copy_safe_disable_still_writes(tmp_hal0_home: str) -> None:
     store.commit(cs)
     with open(slot_path, "rb") as f:
         on_disk = tomllib.load(f)
-    assert on_disk["enabled"] is False
+    assert on_disk["model"]["default"] == ""
     assert on_disk["model"]["context_size"] == 4096
     assert "ctx_size" not in on_disk["model"]
 
 
 def test_store_disable_does_not_rewrite_backend_device_model(tmp_hal0_home: str) -> None:
-    """SC-1 parity: a disable selection produces ``enabled=False`` and does
-    NOT rewrite backend/device/model siblings (the store only reconciles those
-    when the selection is enabled)."""
+    """SC-1 parity: a disable selection clears ``[model].default`` and does
+    NOT rewrite the backend/device/provider siblings (the store only
+    reconciles those when the selection is enabled)."""
     slot_path = _write_embed_slot(tmp_hal0_home, [])
     _write_caps_disabled_embed(tmp_hal0_home)
 
@@ -234,8 +236,8 @@ def test_store_disable_does_not_rewrite_backend_device_model(tmp_hal0_home: str)
     cs = store.apply(sel)
     slot_change = next(fs for fs in cs.after if fs.path == slot_path)
     assert slot_change.data is not None
-    assert slot_change.data["enabled"] is False
-    # A disable must NOT rewrite the siblings from the (ignored) selection.
+    assert slot_change.data["model"]["default"] == ""
+    # A disable must NOT rewrite the siblings from the (ignored) selection —
+    # note it does NOT adopt the selection's "new-model" either.
     assert slot_change.data["backend"] == "vulkan"
     assert slot_change.data["provider"] == "llama-server"
-    assert slot_change.data["model"]["default"] == "old-model"

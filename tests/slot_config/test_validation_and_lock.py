@@ -32,7 +32,6 @@ class TestUnknownKeys:
             "device": "gpu-vulkan",
             "provider": "llama-server",
             "runtime": "container",
-            "enabled": True,
             "default": True,
             "lru": True,
             "profile": "vulkan",
@@ -45,6 +44,13 @@ class TestUnknownKeys:
 
     def test_typo_top_level_flagged(self) -> None:
         assert unknown_slot_config_keys({"enabeld": True}) == ["enabeld"]
+
+    def test_removed_enabled_key_is_flagged(self) -> None:
+        """#1369: ``enabled`` is no longer a declared field, so the boundary
+        must flag it rather than let ``extra="allow"`` persist inert debris.
+        The route layer intercepts it first with a migration hint
+        (``reject_removed_slot_keys``); this is the backstop."""
+        assert unknown_slot_config_keys({"enabled": True}) == ["enabled"]
 
     def test_typo_in_subtables_flagged_with_paths(self) -> None:
         payload = {

@@ -43,8 +43,8 @@ def test_installer_slot_load_save_load_is_stable(
 
     NOTE: this deliberately does NOT assert full ``SlotConfig`` equality.
     ``_unflatten_slot_toml`` (loader.py) writes an explicit field whitelist
-    (name/port/device/provider/enabled/workers/idle_timeout_s + model,
-    P2-device: ``backend`` dropped from the whitelist along with the field)
+    (name/port/device/provider/workers/idle_timeout_s + model; P2-device
+    dropped ``backend`` and #1369 dropped ``enabled``, along with the fields)
     and silently drops ``profile``/``runtime``/other declared fields plus
     any pydantic-``extra``-allow attribute not in that whitelist (e.g.
     a shipped slot's top-level ``type = "llm"``) -- a PRE-EXISTING loader
@@ -64,7 +64,6 @@ def test_installer_slot_load_save_load_is_stable(
         "port",
         "device",
         "provider",
-        "enabled",
         "workers",
         "idle_timeout_s",
         "model",

@@ -367,9 +367,9 @@ async def hal0_slot_alias_models(
     *,
     now: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Build OpenAI ``model`` objects for every enabled chat slot, alias-addressed.
+    """Build OpenAI ``model`` objects for every model-bound chat slot, alias-addressed.
 
-    Each enabled chat slot (``type == "llm"``) with a configured model
+    Each chat slot (``type == "llm"``) with a configured model
     surfaces as one model object whose ``id`` is the slot **alias = slot
     name** (e.g. ``chat``, ``agent``, ``utility``). The alias is the stable
     handle: it does not change when the underlying model is swapped, so
@@ -392,7 +392,7 @@ async def hal0_slot_alias_models(
       OpenAI-compat clients probe ``max_context_window`` instead of the
       canonical ``context_length``.
     * ``owned_by`` — ``"hal0"``.
-    * ``downloaded`` — always ``True``: an enabled llm slot's configured
+    * ``downloaded`` — always ``True``: a bound llm slot's configured
       model is, by construction, a real file already resident on this
       host (§21.5).
     * ``labels`` / ``checkpoint`` / ``recipe`` — extra registry-row detail
@@ -412,8 +412,6 @@ async def hal0_slot_alias_models(
     out: list[dict[str, Any]] = []
     for cfg in cfgs:
         if (cfg.get("type") or "").lower() != "llm":
-            continue
-        if cfg.get("enabled") is False:
             continue
         slot_name = str(cfg.get("name") or "").strip()
         if not slot_name:
@@ -441,7 +439,7 @@ async def hal0_slot_alias_models(
             "created": created,
             "owned_by": "hal0",
             "name": f"{slot_name} · {display}",
-            # A live, enabled llm slot's model is always a real local file
+            # A live llm slot's model is always a real local file
             # (§21.5) — unlike the raw upstream-catalog rows below, there's
             # no "advertised but not pulled" state for a slot alias.
             "downloaded": True,
@@ -457,10 +455,10 @@ async def hal0_slot_alias_models(
 
 
 async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
-    """Return ``{slot_alias: model_id}`` for enabled llm slots.
+    """Return ``{slot_alias: model_id}`` for model-bound llm slots.
 
     The slot **alias** is the slot name. ADR-0023: the canonical llm roles
-    are ``agent`` (default anchor) + ``utility`` (helper); any other enabled
+    are ``agent`` (default anchor) + ``utility`` (helper); any other bound
     llm slot is included by its own name (back-compat alias: ``agent-hermes``).
     Used by the ``/v1`` route layer to translate an alias-addressed request
     into the slot's configured model id before routing, so dispatch resolves
@@ -479,8 +477,6 @@ async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
     out: dict[str, str] = {}
     for cfg in cfgs:
         if (cfg.get("type") or "").lower() != "llm":
-            continue
-        if cfg.get("enabled") is False:
             continue
         slot_name = str(cfg.get("name") or "").strip()
         if not slot_name:
@@ -504,7 +500,7 @@ async def hal0_llm_slot_views(
     slot_manager: SlotManager,
     model_registry: ModelRegistry | None = None,
 ) -> list[dict[str, Any]]:
-    """Return one dict per enabled llm slot: {name, device, model_id, context_length}.
+    """Return one dict per model-bound llm slot: {name, device, model_id, context_length}.
 
     Source for normalize.LiveSlotResolver's SlotView list. Mirrors
     hal0_chat_slot_alias_map's iteration but carries device + context (the
@@ -518,8 +514,6 @@ async def hal0_llm_slot_views(
     out: list[dict[str, Any]] = []
     for cfg in cfgs:
         if (cfg.get("type") or "").lower() != "llm":
-            continue
-        if cfg.get("enabled") is False:
             continue
         name = str(cfg.get("name") or "").strip()
         model_id = _slot_model_id(cfg)
@@ -549,7 +543,7 @@ async def hal0_llm_slot_views(
 
 
 async def hal0_chat_slot_model_ids(slot_manager: SlotManager) -> set[str]:
-    """Return the configured model ids of every enabled chat slot.
+    """Return the configured model ids of every model-bound chat slot.
 
     Used by ``GET /v1/models`` to suppress raw chat model-id rows from the
     direct-read composite catalogue so each chat slot is represented exactly
@@ -570,8 +564,6 @@ async def hal0_chat_slot_model_ids(slot_manager: SlotManager) -> set[str]:
     out: set[str] = set()
     for cfg in cfgs:
         if (cfg.get("type") or "").lower() != "llm":
-            continue
-        if cfg.get("enabled") is False:
             continue
         model_id = _slot_model_id(cfg)
         if model_id:
@@ -1140,10 +1132,27 @@ async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
 async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
     """Phase — one-shot slot reconciliation passes + idle-monitor start.
 
-    ORDERING: ``reconcile_unconfigured_slots`` → ``reconcile_npu_trio_slots``
-    → ``fold_identity`` (folds identity for the trio shadows just reconciled)
-    → ``start_idle_monitor``. Preserved exactly from the monolithic boot.
+    ORDERING: ``migrate_slot_dir`` (#1369) → ``reconcile_unconfigured_slots``
+    → ``reconcile_npu_trio_slots`` → ``fold_identity`` (folds identity for the
+    trio shadows just reconciled) → ``start_idle_monitor``. Otherwise preserved
+    exactly from the monolithic boot.
     """
+    # #1369 one-shot sweep, FIRST: every pass below reads ``model.default`` to
+    # decide what is configured, so a slot the operator had switched off with
+    # ``enabled = false`` (whose model is therefore still bound on disk) would
+    # be reconciled as live for one boot. Idempotent — after the first sweep
+    # there is no ``enabled`` key left to find. Best-effort: a config-dir
+    # problem must not block startup.
+    try:
+        from hal0.config import paths as _enabled_sweep_paths
+        from hal0.config.migrations.slot_enabled_removal import migrate_slot_dir
+
+        migrated = migrate_slot_dir(_enabled_sweep_paths.slots_config_dir())
+        if migrated:
+            log.info("slot.enabled_removal_swept", slots=migrated)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("slot.enabled_removal_failed", error=str(exc))
+
     # One-shot reconciliation: clear pre-fix stuck ERROR on slots whose
     # only problem was an empty model.default. After fix(slots): empty
     # default is OFFLINE+CTA, not ERROR; this pass migrates existing

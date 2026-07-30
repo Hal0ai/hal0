@@ -190,7 +190,7 @@ async def test_llm_without_vision_label_does_not_enable_analyze_image() -> None:
 
 @pytest.mark.asyncio
 async def test_peer_chat_slot_enables_route_to_chat() -> None:
-    """``route_to_chat`` requires at least one other enabled llm slot."""
+    """``route_to_chat`` requires at least one other model-bound llm slot."""
     mgr = FakeSlotManager(
         [
             _caller_with_tools_label(),
@@ -210,17 +210,12 @@ async def test_no_peer_chat_slot_disables_route_to_chat() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disabled_peer_chat_slot_does_not_enable_route_to_chat() -> None:
+async def test_model_less_peer_chat_slot_does_not_enable_route_to_chat() -> None:
+    """A peer with no model bound is not a delegation target (#1369)."""
     mgr = FakeSlotManager(
         [
             _caller_with_tools_label(),
-            make_slot(
-                "coder",
-                type="llm",
-                model="qwen-coder",
-                labels=(),
-                enabled=False,
-            ),
+            make_slot("coder", type="llm", model="", labels=()),
         ]
     )
     tools = {t.name for t in await active_tools_for(mgr, "primary")}
@@ -281,17 +276,11 @@ async def test_missing_caller_slot_returns_empty_list() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disabled_image_slot_disables_generate_image() -> None:
+async def test_model_less_image_slot_disables_generate_image() -> None:
     mgr = FakeSlotManager(
         [
             _caller_with_tools_label(),
-            make_slot(
-                "img",
-                type="image",
-                model="sdxl",
-                labels=("image",),
-                enabled=False,
-            ),
+            make_slot("img", type="image", model="", labels=("image",)),
         ]
     )
     tools = {t.name for t in await active_tools_for(mgr, "primary")}
