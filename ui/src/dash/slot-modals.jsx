@@ -217,8 +217,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const [npuAsr, setNpuAsr] = useStateSM(slot?.npu?.asr === true);
 	const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
 	const [npuChat, setNpuChat] = useStateSM(slot?.npu?.chat !== false);
+	// #1388: seed from the CONFIGURED tag ([model].default, lifted by
+	// config_enrichment and normalised to `modelDefault`), not the live
+	// `model_id`. useSlots documents model_id as stale for exactly this slot
+	// class — trio slots never load as their own process, so it never
+	// reconciles off the pre-trio GGUF. Every modality toggle re-sends this
+	// value, so seeding it wrong meant an ASR/Embed flip silently rewrote
+	// [model].default to an unrelated GGUF id and cold-restarted the slot.
+	// Live id stays in the chain as a fallback for a slot with no configured
+	// default on disk.
 	const [npuChatModel, setNpuChatModel] = useStateSM(
-		slot?.model_id || slot?.model || "qwen3:4b",
+		slot?.modelDefault || slot?.model_id || slot?.model || "qwen3:4b",
 	);
 	const [npuPending, setNpuPending] = useStateSM(false);
 	const [npuErr, setNpuErr] = useStateSM(null);
@@ -361,7 +370,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			// refetch keeps the drawer in sync with server truth instead of
 			// drifting until the drawer is remounted.
 			setNpuChat(slot.npu?.chat !== false);
-			setNpuChatModel(slot.model_id || slot.model || "qwen3:4b");
+			setNpuChatModel(
+				slot.modelDefault || slot.model_id || slot.model || "qwen3:4b",
+			);
 			setNpuPending(false);
 			setNpuErr(null);
 		}
