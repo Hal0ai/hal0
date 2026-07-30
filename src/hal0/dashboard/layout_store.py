@@ -8,6 +8,12 @@ Public API:
     load()                              -> dict (empty on missing/corrupt)
     save(layout: dict)                  -> None (atomic write)
     reconcile(layout, slot_names)       -> dict (pure, never raises)
+
+``reconcile`` dispatches on the payload's own ``v`` (#1460): v3 is the current
+fixed-band schema (:mod:`hal0.dashboard.layout_v3`), v2 the legacy free-form
+grid handled here. Dispatching matters on the READ path too — running the v2
+pin/span rules over a stored v3 payload would graft ``order``/``spans``/
+``pinned`` onto it and hand the client a layout it can't parse.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from typing import Any
 import structlog
 
 from hal0.config import paths
+from hal0.dashboard import layout_v3
 
 log: logging.Logger = structlog.get_logger(__name__)
 
@@ -119,7 +126,21 @@ def save(layout: dict[str, Any]) -> None:
 
 
 def reconcile(layout: dict[str, Any], slot_names: list[str]) -> dict[str, Any]:
-    """Return a defensively-normalised copy of *layout*.
+    """Return a defensively-normalised copy of *layout*, per its own version.
+
+    A v3 payload (the current fixed-band schema) is reconciled against the
+    cell whitelists in :mod:`hal0.dashboard.layout_v3`; ``slot_names`` is
+    irrelevant there because v3 has no pinned-slot concept. Anything else
+    falls through to the legacy v2 rules below, which is what a pre-#1061
+    file on disk still needs.
+    """
+    if isinstance(layout, dict) and layout.get("v") == layout_v3.LAYOUT_VERSION:
+        return layout_v3.reconcile(layout)
+    return _reconcile_v2(layout, slot_names)
+
+
+def _reconcile_v2(layout: dict[str, Any], slot_names: list[str]) -> dict[str, Any]:
+    """Return a defensively-normalised copy of a legacy v2 *layout*.
 
     Rules applied (pure — never raises, never mutates the input):
 

@@ -6,14 +6,31 @@ Endpoints:
     GET  /api/user/dashboard-layout  — return the saved layout, or {} if none.
     PUT  /api/user/dashboard-layout  — validate, reconcile, persist; 204.
 
-DashLayout schema (v2):
-    v:        int  — must equal 2
+DashLayout schema (v3 — canonical, #1060/#1061 fixed bands):
+    v:            int   — must equal 3
+    cells:        dict[str, str]  — cellId -> widgetId
+    quickActions: bool            — quick-actions strip on/off
+
+Server-side reconcile runs the SAME whitelist rules the client does
+(:mod:`hal0.dashboard.layout_v3`, mirroring ``useDashLayout.reconcile``):
+every cell must exist and hold a widget from its own ``accepts`` list that is
+actually built, otherwise it falls back to that cell's default. Shape-only
+validation would let a stale client persist a cell the dashboard can't render.
+
+DashLayout schema (v2 — LEGACY, tolerated not rejected):
+    v:        int  — 2
     order:    list[str]          — CardId or "pin:<slotName>" keys
     enabled:  dict[str, bool]    — CardId -> on/off
     spans:    dict[str, int]     — LayoutKey -> column span (clamped [1,12])
     pinned:   list[str]          — pinned slot names
 
-Unknown CardIds in ``enabled`` or ``order`` are rejected with 422.
+v2 is kept accepted so a cached pre-#1061 UI bundle doesn't start 422-ing, and
+so a v2 file already on disk keeps round-tripping under the v2 rules. The
+client's own ``reconcile()`` fail-softs an unrecognised payload to its default
+layout, so an operator holding a legacy file sees defaults rather than an error.
+
+Unknown CardIds in ``enabled`` or ``order`` are rejected with 422; so is any
+version that is neither 3 nor 2.
 """
 
 from __future__ import annotations
@@ -21,10 +38,17 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
-from pydantic import BaseModel, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from hal0.api.middleware.error_codes import Hal0Error
-from hal0.dashboard import layout_store
+from hal0.dashboard import layout_store, layout_v3
 
 router = APIRouter()
 
@@ -57,8 +81,36 @@ def _is_valid_layout_key(key: str) -> bool:
 # ── Pydantic schema ────────────────────────────────────────────────────────────
 
 
+class DashLayoutV3(BaseModel):
+    """Validated dashboard layout body (v3 — the canonical schema).
+
+    Shape only. The whitelist rules (does this cell exist, does it accept this
+    widget, is that widget built) live in :mod:`hal0.dashboard.layout_v3` and
+    run as a reconcile, not a rejection — the same fail-soft the client applies
+    on load, so a widget that ships later can't 422 an operator's saved layout.
+
+    ``quickActions`` keeps the client's camelCase on the wire; the alias lets
+    the attribute stay snake_case in Python.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    v: int
+    cells: dict[str, str] = {}
+    quick_actions: bool = Field(default=True, alias="quickActions")
+
+    @model_validator(mode="after")
+    def _check_version(self) -> DashLayoutV3:
+        if self.v != layout_v3.LAYOUT_VERSION:
+            raise ValueError(f"layout version must be 3, got {self.v!r}")
+        return self
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"v": self.v, "cells": self.cells, "quickActions": self.quick_actions}
+
+
 class DashLayout(BaseModel):
-    """Validated dashboard layout body (v2)."""
+    """Validated dashboard layout body (v2 — legacy, tolerated)."""
 
     v: int
     order: list[str]
@@ -127,7 +179,12 @@ async def _get_slot_names(request: Request) -> list[str]:
 
 @router.get("/dashboard-layout")
 async def get_dashboard_layout(request: Request) -> dict[str, Any]:
-    """Return the saved dashboard layout, or ``{}`` when none has been saved."""
+    """Return the saved dashboard layout, or ``{}`` when none has been saved.
+
+    ``layout_store.reconcile`` dispatches on the STORED payload's own version,
+    so a v3 file comes back as v3 and a legacy v2 file still comes back
+    reconciled under the v2 pin/span rules (#1460).
+    """
     raw = layout_store.load()
     if not raw:
         return {}
@@ -139,8 +196,9 @@ async def get_dashboard_layout(request: Request) -> dict[str, Any]:
 async def put_dashboard_layout(request: Request) -> Response:
     """Validate, reconcile, and persist the dashboard layout.
 
-    Returns 204 No Content on success.
-    Returns 422 with ``code: "layout.invalid"`` on schema/validation errors.
+    Dispatches on the body's ``v``: 3 is the canonical schema, 2 is tolerated
+    as legacy, anything else is a 422. Returns 204 No Content on success and
+    422 with ``code: "layout.invalid"`` on schema/validation errors.
     """
     try:
         body = await request.json()
@@ -152,6 +210,21 @@ async def put_dashboard_layout(request: Request) -> Response:
 
     if not isinstance(body, dict):
         raise Hal0Error("request body must be a JSON object")
+
+    version = body.get("v")
+    if version == layout_v3.LAYOUT_VERSION:
+        try:
+            layout_body = DashLayoutV3.model_validate(body)
+        except ValidationError as exc:
+            raise LayoutInvalidError(
+                "dashboard layout failed schema validation",
+                details=_validation_error_details(exc),
+            ) from exc
+        # Reconcile against the cell whitelists, not just the JSON shape: an
+        # out-of-whitelist or not-yet-built widget falls back to that cell's
+        # default rather than being persisted and handed back on the next GET.
+        layout_store.save(layout_v3.reconcile(layout_body.to_payload()))
+        return Response(status_code=204)
 
     try:
         layout = DashLayout.model_validate(body)
