@@ -3,9 +3,13 @@
  *
  * A generic Diagnosis renderer (Settings → Doctor): every card is the typed
  * shape { id, severity, confidence, summary, evidence[], next_steps[] } from
- * src/hal0/diagnostics.py — the UI never hardcodes a check. Wired to the real
- * data that exists today (GET /api/system-info hardware evidence); the still-
- * missing doctor HTTP feed shows as a stub-with-reason.
+ * src/hal0/diagnostics.py — the UI never hardcodes a check.
+ *
+ * This spec covers the FALLBACK half: the fixture's `/api/` catch-all answers
+ * GET /api/doctor with `{}` (no diagnosis feed), so the hook degrades to
+ * synthesised GET /api/system-info hardware evidence and says so in a
+ * stub-with-reason. The live-feed half lives in
+ * diagnostics-doctor-feed-v3.spec.ts (#1458).
  *
  * /api/system-info is NOT in the in-bundle mock allowlist, so page.route wins.
  */
@@ -58,10 +62,12 @@ test.describe('Diagnostics panel', () => {
     await expect(page.getByTestId('diagnosis-verdict')).toContainText(/all clear/i)
   })
 
-  test('doctor HTTP feed is shown as a stub-with-reason (missing endpoint)', async ({ page }) => {
+  test('an absent doctor feed is shown as a stub-with-reason', async ({ page }) => {
     await mockSystemInfo(page, { platform_label: 'Strix Halo', cpu_name: 'AMD' })
     await openDoctor(page)
-    await expect(page.getByTestId('diagnosis-feed-stub')).toContainText(/API-lane/i)
+    await expect(page.getByTestId('diagnosis-feed-stub')).toContainText(
+      /doctor feed unavailable/i,
+    )
   })
 
   test('degraded probe (no hardware) shows an honest empty state, never a fake pass', async ({ page }) => {

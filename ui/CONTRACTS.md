@@ -99,37 +99,67 @@ Backend `slot.state` enum → dot class/visual (FE maps via the EXISTING `slotIn
 
 ---
 
-## 4. DashLayout schema (FE owns shape; BE validates + persists)
+## 4. DashLayout schema — v3, fixed bands (FE owns shape; BE validates + persists)
+
+The free-form 12-column grid (v2: `order`/`enabled`/`spans`/`pinned`, drag-reorder, resize, card
+library) was replaced by a FIXED-BAND layout in #1061. Rows and cell widths are defined by the
+system. The operator can only (a) swap which widget occupies a swappable cell, from that cell's
+curated whitelist, and (b) toggle the quick-actions strip.
+
 ```ts
-type LayoutKey = string;              // a CardId, or "pin:<slotName>"
+type CellId = string;                 // a fixed cell in the band layout
+type WidgetId = string;               // an entry in WIDGET_DEFS
 interface DashLayout {
-  v: 2;                               // schema version
-  order:   LayoutKey[];               // visual order of all items
-  enabled: Record<CardId, boolean>;   // which library cards are on home
-  spans:   Record<LayoutKey, number>; // per-item column span (1–12)
-  pinned:  string[];                  // pinned slot names
+  v: 3;                               // schema version
+  cells: Record<CellId, WidgetId>;    // which widget occupies each cell
+  quickActions: boolean;              // quick-actions strip on/off
 }
 ```
-- `reconcile(layout, slots)` (run on load, BOTH ends): every `pinned` slot has a `pin:<name>` in `order`
-  (inserted right after `slots`); drop `pin:` keys for slots that no longer exist; clamp spans to [min,12].
-- **Visible items** = `order` filtered to (enabled cards) ∪ (existing `pin:` keys).
-- Constants: `GRID_COLS=12`, `ROW_UNIT=8`, `GRID_GAP=16`.
 
-### Card registry (CardId → defaults)
-| id | span/min | locked | default-on | source |
-|---|---|---|---|---|
-| `slots` | 12/8 | ✅ | ✅ | /api/slots |
-| `memory` | 8/4 | | ✅ | /api/stats/hardware |
-| `throughput` | 4/3 | | ✅ | /api/stats/throughput/history (NEW) |
-| `quickchat` | 6/4 | | ✅ | /v1/chat/completions |
-| `services` | 6/4 | | ✅ | /api/services/health (NEW) + comfyui/status |
-| `utilization` | 4/3 | | ✅ | /api/stats/hardware (gpu+cpu) |
-| `attention` | 4/3 | | ✅ | derived (slots in error/warming + approvals) |
-| `slottrack` | 4/3 | | ⬜ opt-in | throughput/history per_slot |
-| `approvals` | 4/3 | | ⬜ opt-in | /api/agent/approvals |
-| `power` | 4/3 | | ⬜ opt-in | SPIKE §5 — gated until real |
-| `scheduler` | 4/3 | | ⬜ opt-in | SPIKE §5 — gated until real |
-| `pin:<slot>` | 3/3 | | (dynamic) | /api/slots/{name} |
+- Transport: `GET`/`PUT /api/user/dashboard-layout`. GET returns `{}` when nothing is saved.
+- `reconcile(layout)` runs on load AND on write, **both ends**, with the same rules: every cell in
+  the registry is present; a cell keeps its assignment only when the widget is on that cell's own
+  `accepts` list *and* is actually built; anything else falls back to the cell's `defaultWidget`.
+  `quickActions` is true unless explicitly `false`. FE: `ui/src/api/hooks/useDashLayout.ts`.
+  BE: `src/hal0/dashboard/layout_v3.py`. Adding a widget or a cell means editing **both**.
+- Read path is fail-soft: a 404, `{}`, a v2 payload, or any error resolves to `DEFAULT_LAYOUT`.
+  Write path is fail-soft **only on 404** — every other rejection is toasted and the cache
+  re-read, so a save that didn't persist can't look like it did (#1460).
+- v2 is TOLERATED, not emitted: `PUT` still accepts a v2 body (a stale cached bundle must not
+  start 422-ing) and a pre-#1061 file on disk still round-trips under the v2 pin/span reconcile.
+  No shipped UI writes v2.
+
+### Cell registry (CellId → accepts / default)
+| cell | accepts (swap whitelist) | default | locked |
+|---|---|---|---|
+| `memory` | memorybar · memtreemap · memring | `memorybar` | |
+| `a1` | throughput · slottrack · power | `throughput` | |
+| `a2` | utilization · power · gauges | `utilization` | |
+| `a3` | requests · clients | `requests` | |
+| `slots` | slots | `slots` | ✅ |
+| `c1` | activity · heatmap | `activity` | |
+| `c2` | services · quickchat | `services` | |
+| `c3` | attention | `attention` | ✅ |
+
+### Widget registry (`built` gates the swap picker)
+| widget | built | source |
+|---|---|---|
+| `memorybar` | ✅ | /api/stats/hardware |
+| `memtreemap` | ⬜ | — same-family memory visualization, not yet built |
+| `memring` | ⬜ | — same-family memory visualization, not yet built |
+| `throughput` | ✅ | /api/stats/throughput/history |
+| `slottrack` | ✅ | throughput/history per_slot |
+| `power` | ✅ | /api/stats/power |
+| `utilization` | ✅ | /api/stats/hardware (gpu+cpu) |
+| `gauges` | ⬜ | — not yet built |
+| `requests` | ✅ | derived request rollup |
+| `clients` | ⬜ | — not yet built |
+| `slots` | ✅ | /api/slots |
+| `activity` | ✅ | /api/activity |
+| `heatmap` | ⬜ | — not yet built |
+| `services` | ✅ | /api/services/health + comfyui/status |
+| `quickchat` | ✅ | /v1/chat/completions |
+| `attention` | ✅ | derived (error/warming slots + approvals + updates) |
 
 ---
 

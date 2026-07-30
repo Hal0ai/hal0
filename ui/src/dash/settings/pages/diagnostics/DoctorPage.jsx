@@ -1,13 +1,12 @@
-// DIAGNOSTICS ▸ Doctor (D6, post-R3 surface rework).
+// DIAGNOSTICS ▸ Doctor (D6).
 //
 // Was a labelled stub ("no HTTP endpoint with stable diagnosis IDs yet"). D6
-// mounts the generic DiagnosisPanel here: `hal0 doctor` now emits typed
-// diagnoses (HAL0-* id / severity / evidence / next_steps — src/hal0/
-// diagnostics.py), and while there's still no /api/doctor HTTP feed, the panel
-// wires to the real data that DOES exist (GET /api/system-info hardware
-// evidence) and renders it in the exact generic shape the doctor feed will use.
-// The missing verdict feed is shown in-panel as a stub-with-reason (API-lane
-// request: GET /api/doctor), never faked.
+// mounts the generic DiagnosisPanel here: `hal0 doctor` emits typed diagnoses
+// (HAL0-* id / severity / evidence / next_steps — src/hal0/diagnostics.py) and
+// GET /api/doctor serves them over HTTP, so the panel renders the SERVER's
+// verdict rows directly (#1458). On a backend that predates the route the hook
+// degrades to synthesised GET /api/system-info hardware evidence and the panel
+// says so in a stub-with-reason — never a fabricated pass.
 import { DiagnosisPanel } from '../../../diagnostics/DiagnosisPanel.jsx'
 
 export function DoctorPage() {

@@ -26,7 +26,7 @@ import { useMetaEnums } from '@/api/hooks/useMeta'
 import { prettyProfile } from './profile-names'
 import {
   findManagedFlags,
-  findSlotHardwareFlags,
+  findNewSlotHardwareFlags,
   tokenizeFlags,
   MANAGED_FLAG_SOURCE,
 } from './flags-tune.js'
@@ -225,7 +225,7 @@ function hardwareFlagError(offenders) {
   return `${first} is hardware — it belongs on the slot (device · NGL · THREADS grid), not the profile. Remove it.${rest}`;
 }
 
-function validateForm(form, existing) {
+function validateForm(form, existing, storedFlags = '') {
   const errs = {};
   const name = (form.name || '').trim();
   if (!name) errs.name = 'Name is required';
@@ -236,9 +236,14 @@ function validateForm(form, existing) {
   // Flag-ownership screens (§21.7 managed + §5 slot-hardware) — mirror the
   // server hard-reject inline so the save never surfaces the 400. Hardware
   // first so -ngl (in both sets) gets the "belongs on the slot" message.
+  //
+  // `storedFlags` is the profile's own persisted flag text when EDITING (empty
+  // for create/clone). Only newly-introduced hardware flags are rejected, which
+  // is exactly the server's rule since #1411 — a profile authored before §5
+  // shipped carries -dev/--threads and must stay editable.
   const flagsText = form.flags || '';
   const quoteErr = tokenizeFlags(flagsText).error;
-  const hw = quoteErr ? [] : findSlotHardwareFlags(flagsText);
+  const hw = quoteErr ? [] : findNewSlotHardwareFlags(flagsText, storedFlags);
   const managed = quoteErr ? [] : findManagedFlags(flagsText);
   if (quoteErr) errs.flags = quoteErr;
   else if (hw.length) errs.flags = hardwareFlagError(hw);
@@ -279,10 +284,14 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const update = useProfileUpdate();
 
   const taken = existing.filter(n => !(isEdit && n === source.name));
+  // Grandfather baseline (#1411): only an EDIT inherits the profile's stored
+  // flags. A clone is a create — its hardware flags are newly introduced under
+  // the new name, so they stay a hard reject, matching ProfileCatalog.create.
+  const storedFlags = isEdit ? (source.flags || '') : '';
   const f = useForm({
     deriveInitial,
     resetKey: `${mode}:${source?.name ?? ''}`,
-    validate: (v) => validateForm(v, taken),
+    validate: (v) => validateForm(v, taken, storedFlags),
     warn: (v) => warnForm(v),
   });
   const form = f.values;

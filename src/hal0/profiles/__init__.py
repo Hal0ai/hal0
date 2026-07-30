@@ -168,7 +168,9 @@ class ProfileCatalog:
 
     def create(self, name: str, profile: ProfileConfig) -> ResolvedProfile:
         self._validate_name(name)
-        _screen_hardware_flags(profile.flags)
+        # A create has no stored baseline, so §5/§21.7 stay a hard reject here —
+        # only `update` grandfathers (see screen_profile_flags).
+        screen_profile_flags(profile.flags)
         with self._lock:
             catalog = load_profiles_config(self._path)
             if name in catalog.profile:
@@ -183,8 +185,6 @@ class ProfileCatalog:
 
     def update(self, name: str, patch: ProfilePatch) -> ResolvedProfile:
         self._guard_custom(name)
-        if patch.flags is not None:
-            _screen_hardware_flags(patch.flags)
         with self._lock:
             catalog = load_profiles_config(self._path)
             existing = catalog.profile.get(name)
@@ -194,6 +194,12 @@ class ProfileCatalog:
                     code="profiles.not_found",
                     details={"profile": name},
                 )
+            # #1411: screened INSIDE the lock, after `existing` is loaded, so the
+            # profile's own stored hardware flags can be grandfathered. Screening
+            # before the read (as this did) had no baseline to compare against,
+            # which is what made every pre-guard profile un-editable.
+            if patch.flags is not None:
+                screen_profile_flags(patch.flags, grandfathered=existing.flags)
             updated = ProfileConfig(
                 flags=patch.flags if patch.flags is not None else existing.flags,
                 mtp=patch.mtp if patch.mtp is not None else existing.mtp,
@@ -347,24 +353,72 @@ __all__ = [
     "ResolvedProfile",
     "RuntimeFamily",
     "SlotType",
+    "screen_profile_flags",
 ]
 
 
-def _screen_hardware_flags(flags: str) -> None:
+def screen_profile_flags(flags: str | None, *, grandfathered: str | None = None) -> None:
     """Reject physical slot flags and hal0-managed flags before a profile is persisted.
 
-    The HTTP route performs the same check for an early, route-specific error,
-    but the catalog is also used by import/CLI paths and is the actual write
-    seam. Keeping the guard here prevents those paths from bypassing the
-    model/profile ownership partition (§5 hardware + §21.7 managed args).
+    The catalog is the actual write seam — routes, import and CLI paths all
+    funnel through :meth:`ProfileCatalog.create` / :meth:`ProfileCatalog.update`
+    — so the guard lives here and the HTTP layer delegates to it rather than
+    keeping a second copy. Enforces the model/profile ownership partition
+    (§5 hardware flags + §21.7 managed args). Empty/unset ``flags`` is a no-op;
+    malformed quoting is left to the schema layer's own diagnostics.
+
+    ``grandfathered`` is the profile's CURRENTLY STORED flag text on an update
+    (#1411). The §5 screen shipped with no data migration, so every custom
+    profile authored before it carried ``-dev``/``--threads`` and failed its own
+    round-trip: loading it in the drawer and pressing Save — which re-sends the
+    stored text verbatim — 400'd on the profile's own data. On lxc105 that was
+    10 of 10 pre-existing custom profiles, five of them bound to live slots, so
+    the Profiles page saved nothing at all.
+
+    The screen therefore judges what an update INTRODUCES, not what it inherits:
+    a slot-hardware flag already present in ``grandfathered`` passes (logged, not
+    silently ignored), while adding a new one still hard-rejects. That keeps the
+    policy intact going forward, keeps the migration path open (dropping the
+    inherited flag is a normal save, after which re-adding it is a new reach), and —
+    unlike stripping the flags on read — never silently rewrites an operator's
+    working device selection out from under a live slot. Grandfathering covers
+    the §5 hardware set ONLY: #1404's load-path sanitizer already strips the
+    §21.7 managed args from stored profiles, so a managed flag can never be
+    inherited in the first place.
     """
-    if not flags.strip():
+    if not flags or not flags.strip():
         return
     try:
         tokens = shlex.split(flags)
     except ValueError:
         return  # schema/parser owns malformed quoting diagnostics
-    from hal0.slots.argv import _deny_managed_flags, _deny_slot_hardware_flags
+    from hal0.slots.argv import (
+        SLOT_HARDWARE_FLAGS,
+        _canon,
+        _deny_managed_flags,
+        _deny_slot_hardware_flags,
+        strip_managed_flags,
+    )
+
+    inherited: list[str] = []
+    if grandfathered and grandfathered.strip():
+        try:
+            prior_tokens = shlex.split(grandfathered)
+        except ValueError:
+            prior_tokens = []
+        # `strip_managed_flags` doubles as the finder here: its `removed` list is
+        # exactly "which flags from this denylist are present", canonicalised and
+        # in original spelling. Reusing it keeps ONE token-matching implementation.
+        _, inherited = strip_managed_flags(prior_tokens, denylist=SLOT_HARDWARE_FLAGS)
+    if inherited:
+        # Drop the inherited flags (and their values) from what gets screened, so
+        # only the genuinely NEW reaches reach the deny helpers — which keeps
+        # their message and `details.flags` naming exactly the offending subset.
+        tokens, _ = strip_managed_flags(tokens, denylist=frozenset(_canon(f) for f in inherited))
+        log.info(
+            "profile flags carry pre-existing slot-hardware flag(s); grandfathered on update",
+            extra={"event": "profile.hardware_flags_grandfathered", "flags": inherited},
+        )
 
     # Hardware first so -ngl (in both sets) gets the "belongs on the slot"
     # message — mirrors the route/screen_model_write ordering.

@@ -40,7 +40,9 @@ export function useRuntimeRollup(): RuntimeRollup {
   const list = slots.data ?? []
   // #1369: the denominator is the CONFIGURED slots (a model bound), which is
   // what "runtime" means here — a model-less slot has nothing to be ready.
-  const configured = list.filter((s) => !!(s.model || s.model_default))
+  // The typed field is `modelDefault` — `inferSlotShape` camelCases the raw
+  // `model_default` — so the wire name here never type-checked.
+  const configured = list.filter((s) => !!(s.model || s.modelDefault))
   const ready = configured.filter(isSlotReady).length
   return {
     status: slots.isSuccess ? 'up' : slots.isError ? 'down' : 'connecting',
@@ -58,10 +60,16 @@ export function useRuntimeRollup(): RuntimeRollup {
 // and tooltip the failing checks.
 
 export interface HealthCheck {
-  /** Per-check status. Anything other than 'ok' is treated as failing. */
-  status: 'ok' | 'degraded' | 'error' | string
-  /** Optional human detail for the tooltip. */
+  /** Per-check outcome. The backend (routes/health.py health_system) emits a
+   *  BOOLEAN `ok` for every check — disk_state, disk_config, slot_manager,
+   *  event_bus, mcp_mount — and never a per-check `status` string (#1461). */
+  ok: boolean
+  /** Human detail. Present on SOME failure paths only: mcp_mount always sets
+   *  it, slot_manager sets it when `sm.list()` raised or was never wired. */
   detail?: string | null
+  /** slot_manager's failing slot names — the live failure path carries its
+   *  reason here rather than in `detail`, so the tooltip must read both. */
+  errored?: string[]
   [k: string]: unknown
 }
 
@@ -79,12 +87,34 @@ function normalizeHealth(raw: any): HealthSystem {
   return { status, checks }
 }
 
-/** Names of checks not reporting 'ok' — drives the degraded tooltip. */
+/** Every reason a check reports for its own failure, in tooltip order. */
+function checkReasons(c: HealthCheck): string[] {
+  const reasons: string[] = []
+  if (typeof c.detail === 'string' && c.detail.trim()) reasons.push(c.detail.trim())
+  if (Array.isArray(c.errored) && c.errored.length > 0) {
+    reasons.push(`errored: ${c.errored.join(', ')}`)
+  }
+  return reasons
+}
+
+/**
+ * Names of the checks that are actually FAILING — drives the degraded tooltip.
+ *
+ * Reads the real payload shape: a check fails when its boolean `ok` is
+ * explicitly false. The previous `c.status !== 'ok'` filter matched
+ * `undefined !== 'ok'` on every check the backend emits, so a single broken
+ * subsystem listed all five as failing (#1461). Each failing check carries its
+ * own reason — `detail` where the backend sets one, plus slot_manager's
+ * `errored` slot names, which is where the live failure actually reports.
+ */
 export function failingChecks(health: HealthSystem | undefined): string[] {
   if (!health) return []
   return Object.entries(health.checks)
-    .filter(([, c]) => c && c.status !== 'ok')
-    .map(([name, c]) => (c?.detail ? `${name}: ${c.detail}` : name))
+    .filter(([, c]) => c && c.ok === false)
+    .map(([name, c]) => {
+      const reasons = checkReasons(c)
+      return reasons.length > 0 ? `${name}: ${reasons.join(' · ')}` : name
+    })
 }
 
 const HEALTH_POLL_MS = 10_000

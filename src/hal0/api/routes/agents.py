@@ -34,6 +34,7 @@ from hal0.agents import (
 )
 from hal0.agents.manager import BUNDLED_AGENTS
 from hal0.agents.persona import AGENT_SKILLS, PERSONA_TONES, PERSONA_TOOLS
+from hal0.api.agents import restart as agent_restart
 from hal0.errors import BadRequest, Conflict, Hal0Error, MultiStatus, NotFound
 
 router = APIRouter()
@@ -49,11 +50,44 @@ def _manager() -> AgentManager:
 # ── GET /api/agents ───────────────────────────────────────────────────────────
 
 
+async def _unit_active(name: str) -> bool | None:
+    """Unit liveness for *name*, or ``None`` when it isn't observable.
+
+    Delegates to the single systemctl seam in :mod:`hal0.api.agents.restart`
+    (module attribute, not a from-import, so the probe stays patchable in
+    tests). Agents outside that module's registry have no ``hal0-agent@``
+    template unit — Pi is a CLI tool, Turnstone runs its own server — so
+    probing them would answer "inactive" about a unit that was never meant to
+    exist. They report ``None`` (unknown) instead.
+    """
+    if name not in agent_restart.KNOWN_AGENT_IDS:
+        return None
+    return await agent_restart.unit_is_active(name)
+
+
 @router.get("")
 async def list_agents() -> dict[str, object]:
-    """List installed bundled agents (zero or one for v0.2)."""
+    """List installed bundled agents (zero or one for v0.2).
+
+    Each record carries ``unit_active`` alongside the manager's on-disk
+    ``status`` (#1459). ``AgentManager.list()`` is a filesystem read, so
+    ``status="installed"`` says only that a bundle exists — the dashboard was
+    mapping it straight onto liveness and rendering an inactive Hermes as
+    ready. ``unit_active`` is the separate, honest signal: ``True`` active,
+    ``False`` installed-but-down, ``None`` unknown (no systemd, timeout, or an
+    agent with no template unit). ``None`` is NOT healthy.
+
+    The probe is a read-only ``systemctl is-active`` per agent, run
+    concurrently off the event loop with a 2s ceiling. This is a polled route,
+    so it degrades to ``None`` rather than ever holding a request open.
+    """
     mgr = _manager()
-    items = [rec.as_dict() for rec in mgr.list()]
+    records = mgr.list()
+    probes = await asyncio.gather(*(_unit_active(rec.name) for rec in records))
+    items: list[dict[str, object]] = [
+        {**rec.as_dict(), "unit_active": active}
+        for rec, active in zip(records, probes, strict=True)
+    ]
     return {"agents": items, "count": len(items)}
 
 

@@ -3,12 +3,12 @@
 // ONE renderer for the typed Diagnosis shape (src/hal0/diagnostics.py: id,
 // severity, confidence, summary, detail, evidence[], next_steps[], fixable).
 // The UI NEVER hardcodes a specific check — every card is data-driven, so the
-// backend taxonomy and this surface stay aligned: when the doctor HTTP feed
-// lands, its rows render here with zero panel changes.
+// backend taxonomy and this surface stay aligned: the live GET /api/doctor rows
+// render here with zero panel changes (#1458).
 //
-// Depth-2 per the scoping answers: one panel component, wired to the real data
-// that exists today (GET /api/system-info hardware evidence via useDiagnoses),
-// with the still-missing doctor verdict feed shown as a stub-with-reason.
+// Depth-2 per the scoping answers: one panel component, wired to the server's
+// doctor feed via useDiagnoses. A backend without that route degrades to
+// synthesised GET /api/system-info evidence plus a stub-with-reason.
 
 import { useDiagnoses } from '@/api/hooks/useDiagnoses'
 
@@ -125,7 +125,7 @@ export function DiagnosisPanel() {
           <div className="s-row"><span className="mono" style={{ fontSize: 12, color: 'var(--fg-4)' }}>Collecting system evidence…</span></div>
         )}
         {dx.isError && (
-          <div className="s-row"><span className="err">{dx.error?.message || 'Failed to read /api/system-info'}</span></div>
+          <div className="s-row"><span className="err">{dx.error?.message || 'Failed to read the doctor feed'}</span></div>
         )}
         {!dx.isLoading && !dx.isError && dx.diagnoses.length === 0 && (
           <div className="s-row" data-testid="diagnosis-empty">
