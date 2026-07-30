@@ -1,10 +1,4 @@
-"""``hal0 memory migrate`` — Hindsight<->Honcho engine migration + bank unify.
-
-The bare ``hal0 memory migrate --from <engine> --to <engine>`` runs the
-Hindsight<->Honcho bidirectional migration engine in-process against the
-local hal0-api + Honcho REST surfaces. It lives in a Typer sub-app's
-default callback so ``migrate unify`` (cross-bank unify) can nest under the
-same top-level name without colliding with it.
+"""``hal0 memory migrate`` — Hindsight bank unify.
 
 ``migrate unify`` folds one or more source Hindsight banks into a target
 bank by tag, so multiple per-agent private banks can be consolidated under
@@ -45,7 +39,6 @@ from __future__ import annotations
 
 import json as jsonlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
 
 import typer
 from rich.console import Console
@@ -64,7 +57,7 @@ from hal0.cli._shared import (
 )
 
 app = typer.Typer(
-    help="Migrate memory stores (Hindsight<->Honcho engine migration; bank unify).",
+    help="Migrate memory stores (bank unify).",
     invoke_without_command=True,
 )
 console = Console()
@@ -72,7 +65,6 @@ console = Console()
 # in --json's stdout payload (mirrors hal0.cli._shared's error console).
 _progress = Console(stderr=True)
 
-_VALID_MIGRATE_ENGINES = ("hindsight", "honcho")
 _ON_CONFLICT_CHOICES = ("skip", "replace", "new-id")
 _TERMINAL_OP_STATUSES = ("completed", "failed", "cancelled")
 _POLL_INTERVAL_S = 2.0
@@ -81,207 +73,10 @@ _RETAG_MAX_WORKERS = 4
 
 
 @app.callback()
-def migrate_default(
-    ctx: typer.Context,
-    from_: str = typer.Option(
-        None,
-        "--from",
-        help="Source engine for a Hindsight<->Honcho migration: 'hindsight' or 'honcho'.",
-    ),
-    to: str = typer.Option(
-        None,
-        "--to",
-        help="Destination engine for a Hindsight<->Honcho migration: 'hindsight' or 'honcho'.",
-    ),
-    agent: str = typer.Option(
-        "hermes",
-        "--agent",
-        help="Agent id whose memory is being migrated (identity + private-bucket scope).",
-    ),
-    dataset: list[str] = typer.Option(
-        [],
-        "--dataset",
-        help="Hindsight dataset to migrate (repeatable). Default: shared + the agent's "
-        "own private bucket. Only meaningful for --from hindsight.",
-    ),
-    since: str = typer.Option(
-        None,
-        "--since",
-        help="ISO8601 watermark override for --from honcho (defaults to the saved watermark).",
-    ),
-    resume: bool = typer.Option(
-        False,
-        "--resume",
-        help="Resume from the last saved per-dataset cursor instead of rescanning from the start "
-        "(--from hindsight only). Id-level dedupe applies either way.",
-    ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run/--no-dry-run",
-        help="Report the migration plan without writing (default: --no-dry-run for the engine).",
-    ),
-    json_out: bool = typer.Option(
-        False,
-        "--json",
-        help="Emit raw JSON instead of the human-readable panel.",
-    ),
-) -> None:
-    """Migrate memory between engines (Hindsight<->Honcho).
-
-    ``--from hindsight --to honcho`` (or the reverse) runs the
-    Hindsight<->Honcho bidirectional migration engine in-process against the
-    local hal0-api + Honcho REST surfaces. Use ``migrate unify`` to fold
-    per-agent banks into a shared bank.
-    """
-    if ctx.invoked_subcommand is not None:
-        return
-
-    if from_ is None and to is None:
-        die(
-            "pass --from/--to for a Hindsight<->Honcho engine migration "
-            "(e.g. 'migrate --from hindsight --to honcho'), or use 'migrate unify'."
-        )
-        return
-
-    if from_ not in _VALID_MIGRATE_ENGINES or to not in _VALID_MIGRATE_ENGINES or from_ == to:
-        die(
-            "--from/--to must be one of 'hindsight'/'honcho' and differ, "
-            f"got --from={from_!r} --to={to!r}"
-        )
-        return
-
-    cfg = _load_honcho_cli_config()
-    honcho_base = f"http://127.0.0.1:{cfg.honcho.port}"
-    state = _migrate_state()
-
-    if from_ == "hindsight":
-        report = _run_migrate_hindsight_to_honcho(
-            honcho_base=honcho_base,
-            workspace=cfg.honcho.workspace,
-            user_peer=cfg.honcho.user_peer,
-            agent_id=agent,
-            datasets=list(dataset) or None,
-            dry_run=dry_run,
-            resume=resume,
-            state=state,
-            json_out=json_out,
-        )
-    else:
-        report = _run_migrate_honcho_to_hindsight(
-            honcho_base=honcho_base,
-            workspace=cfg.honcho.workspace,
-            agent_id=agent,
-            since=since,
-            dry_run=dry_run,
-            state=state,
-            json_out=json_out,
-        )
-    if not dry_run:
-        state.save()
-    if json_out:
-        typer.echo(jsonlib.dumps(report, indent=2, sort_keys=True))
-
-
-def _load_honcho_cli_config() -> Any:
-    from hal0.config.loader import load_hal0_config
-
-    return load_hal0_config()
-
-
-def _migrate_state() -> Any:
-    from hal0.memory.honcho_migrate import MigrateState
-
-    return MigrateState()
-
-
-def _run_migrate_hindsight_to_honcho(
-    *,
-    honcho_base: str,
-    workspace: str,
-    user_peer: str,
-    agent_id: str,
-    datasets: list[str] | None,
-    dry_run: bool,
-    resume: bool,
-    state: Any,
-    json_out: bool,
-) -> dict[str, Any]:
-    from hal0.memory.honcho_migrate import migrate_hindsight_to_honcho
-
-    def on_progress(msg: str) -> None:
-        if not json_out:
-            console.print(f"[dim]{msg}[/dim]")
-
-    report = migrate_hindsight_to_honcho(
-        hal0_base=_api_base(),
-        honcho_base=honcho_base,
-        workspace=workspace,
-        user_peer=user_peer,
-        agent_id=agent_id,
-        datasets=datasets,
-        dry_run=dry_run,
-        resume=resume,
-        state=state,
-        on_progress=on_progress,
-    )
-    if not json_out:
-        t = Table.grid(padding=(0, 2))
-        t.add_column("k", style="dim")
-        t.add_column("v")
-        for ds, counts in report.items():
-            if ds == "total":
-                continue
-            t.add_row(
-                ds,
-                f"scanned={counts['scanned']} migrated={counts['migrated']} skipped={counts['skipped']}",
-            )
-        total = report["total"]
-        t.add_row(
-            "[bold]total[/bold]",
-            f"scanned={total['scanned']} migrated={total['migrated']} skipped={total['skipped']}",
-        )
-        title = "memory · migrate hindsight→honcho" + (" (dry-run)" if dry_run else "")
-        console.print(Panel(t, title=title, border_style="dim" if dry_run else "green"))
-    return report
-
-
-def _run_migrate_honcho_to_hindsight(
-    *,
-    honcho_base: str,
-    workspace: str,
-    agent_id: str,
-    since: str | None,
-    dry_run: bool,
-    state: Any,
-    json_out: bool,
-) -> dict[str, Any]:
-    from hal0.memory.honcho_migrate import migrate_honcho_to_hindsight
-
-    def on_progress(msg: str) -> None:
-        if not json_out:
-            console.print(f"[dim]{msg}[/dim]")
-
-    report = migrate_honcho_to_hindsight(
-        hal0_base=_api_base(),
-        honcho_base=honcho_base,
-        workspace=workspace,
-        agent_id=agent_id,
-        since=since,
-        dry_run=dry_run,
-        state=state,
-        on_progress=on_progress,
-    )
-    if not json_out:
-        t = Table.grid(padding=(0, 2))
-        t.add_column("k", style="dim")
-        t.add_column("v")
-        t.add_row("Scanned", str(report["scanned"]))
-        t.add_row("Migrated", str(report["migrated"]))
-        t.add_row("Skipped", str(report["skipped"]))
-        t.add_row("Watermark", str(report["watermark"]))
-        title = "memory · migrate honcho→hindsight" + (" (dry-run)" if dry_run else "")
-        console.print(Panel(t, title=title, border_style="dim" if dry_run else "green"))
-    return report
+def migrate_default(ctx: typer.Context) -> None:
+    """Migrate memory stores (``migrate unify`` folds banks together)."""
+    if ctx.invoked_subcommand is None:
+        die("use 'migrate unify' (see 'hal0 memory migrate unify --help').")
 
 
 def _derived_tags(bank_id: str, add_tags: list[str]) -> list[str]:
