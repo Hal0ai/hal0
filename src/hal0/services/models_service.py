@@ -977,13 +977,27 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     # Enforce the same extension allow-list the scan walker uses so
     # accidentally pointing at a tokenizer.json or a README.md fails
     # loudly rather than landing in the registry.
+    #
+    # #1415: check the path the OPERATOR supplied, not the resolved target.
+    # HuggingFace's hub cache stores bytes as extensionless sha-named blobs
+    # and exposes the real filename only as a symlink
+    # (``snapshots/<rev>/<name>.gguf -> ../../blobs/<sha256>``), which is also
+    # the shape of hal0's own ``/mnt/ai-models/local/*`` farm and of anything
+    # the ``hf`` tooling lands. Resolving first made every one of those fail
+    # with ``file extension ''`` for a path that visibly ends in ``.gguf``.
+    # The resolved path is still what gets detected and stored. The scan
+    # walker (``registry.discover.find_candidates``) already tests the
+    # un-resolved walk entry, so it needs no matching change.
     cfg = load_hal0_config()
     allowed_exts = {e.lower() for e in cfg.models.file_extensions}
-    if resolved.suffix.lower() not in allowed_exts:
+    suffix = path.suffix.lower() or resolved.suffix.lower()
+    if suffix not in allowed_exts:
         raise BadRequest(
-            f"file extension {resolved.suffix!r} not in [models].file_extensions",
+            f"file extension {suffix!r} not in [models].file_extensions",
             code="model.unsupported_format",
-            details={"path": str(resolved), "allowed": sorted(allowed_exts)},
+            # Echo the operator's own path — quoting an opaque sha blob they
+            # never typed reads like a hal0 bug rather than a rejected input.
+            details={"path": str(path), "allowed": sorted(allowed_exts)},
         )
 
     detection = detect(resolved)
@@ -999,14 +1013,17 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     else:
         # Prefer the detector's suggested_name (post-GGUF arch+param sniff)
         # falling back to the slug of the stem so two paths to the same
-        # file land on the same id as the auto-scan would.
-        model_id = _normalise_id(detection.suggested_name or resolved.stem)
+        # file land on the same id as the auto-scan would. The stem comes
+        # from the operator's path, not the resolved target — a hub-cache
+        # symlink resolves to a sha-named blob whose stem is 64 hex chars
+        # (#1415).
+        model_id = _normalise_id(detection.suggested_name or path.stem)
 
     raw_name = body.get("name")
     if isinstance(raw_name, str) and raw_name.strip():
         display_name = raw_name.strip()
     else:
-        display_name = detection.suggested_name or resolved.stem
+        display_name = detection.suggested_name or path.stem
 
     overwrite = bool(body.get("overwrite", False))
 
