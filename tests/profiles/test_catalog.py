@@ -86,6 +86,35 @@ def test_delete_profile_in_use_raises_conflict(tmp_hal0_home: str) -> None:
     assert exc.value.details["slots"] == ["chat"]
 
 
+def test_delete_profile_in_use_by_model_defaults_raises_conflict(tmp_hal0_home: str) -> None:
+    """HAL0-41 / GH #1437: a model's ``defaults.profile`` is a live reference too.
+
+    ``slots_using`` only scans slot TOMLs; a model that prefers a profile via
+    ``defaults.profile`` but isn't bound to any slot yet was able to slip past
+    the in-use guard entirely, leaving the model with a dangling reference
+    after delete.
+    """
+    from hal0.registry.model import Model, ModelDefaults
+    from hal0.registry.store import ModelRegistry
+
+    ModelRegistry().add(
+        Model(
+            id="my-model",
+            path="/tmp/my-model.gguf",
+            defaults=ModelDefaults(profile="my-rocm"),
+        )
+    )
+    catalog = ProfileCatalog()
+    catalog.create("my-rocm", ProfileConfig())
+
+    with pytest.raises(Conflict) as exc:
+        catalog.delete("my-rocm")
+
+    assert exc.value.code == "profiles.in_use"
+    assert exc.value.details["models"] == ["my-model"]
+    assert exc.value.details["slots"] == []
+
+
 def test_cloned_from_persists_and_round_trips(tmp_hal0_home: str) -> None:
     catalog = ProfileCatalog()
 
