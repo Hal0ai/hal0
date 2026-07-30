@@ -103,6 +103,14 @@ function validateExtraArgs(s) {
 	return null;
 }
 
+// ''/null/'auto' all mean "no chat-template override" — the backend
+// normalizes them to None everywhere (_chat_template_or_none), so a slot
+// TOML that still carries chat_template = "auto" must not render as an
+// active override (and gets cleaned off disk on the next template save).
+function normTemplate(v) {
+	return v && v !== "auto" ? v : "";
+}
+
 function EditSlotDrawer({ open, slot, onClose }) {
 	// Hooks must execute every render — early `return null` would skip
 	// them; render the drawer shell with a sentinel slot instead.
@@ -184,10 +192,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Per-field validation errors for numeric inputs (#548).
 	const [fieldErrs, setFieldErrs] = useStateSM({});
 	// Task 5: per-slot chat_template override.
-	// chatTemplate seeds from slot.chat_template (empty = no override).
+	// chatTemplate seeds from slot.chat_template (empty/'auto' = no override).
 	// overrideOpen tracks whether the user has clicked [Override] to reveal the select.
-	const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
-	const [overrideOpen, setOverrideOpen] = useStateSM(!!slot?.chat_template);
+	const [chatTemplate, setChatTemplate] = useStateSM(
+		normTemplate(slot?.chat_template),
+	);
+	const [overrideOpen, setOverrideOpen] = useStateSM(
+		!!normTemplate(slot?.chat_template),
+	);
 	// Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
 	// device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
 	// revert-on-error.
@@ -328,8 +340,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			setPendingSwap(null);
 			setFieldErrs({});
 			// Task 5: re-seed chat_template override from the slot prop.
-			setChatTemplate(slot.chat_template || "");
-			setOverrideOpen(!!slot.chat_template);
+			setChatTemplate(normTemplate(slot.chat_template));
+			setOverrideOpen(!!normTemplate(slot.chat_template));
 			setNpuAsr(slot.npu?.asr === true);
 			setNpuEmbed(slot.npu?.embed === true);
 			// Re-seed the chat pill + all three model selects too, so a save +
@@ -399,9 +411,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			return;
 		}
 		setFieldErrs({});
-		// Task 5: include chat_template only when the user has set/changed an override.
-		const chatTemplateChanged =
-			overrideOpen && chatTemplate !== (slot.chat_template || "");
+		// Task 5: normalized baseline-vs-desired comparison so BOTH directions
+		// persist — setting a real override AND clearing one (Clear override
+		// sets overrideOpen=false, desired ""). 'auto' counts as no override.
+		const templateBaseline = normTemplate(slot.chat_template);
+		const templateDesired = overrideOpen ? normTemplate(chatTemplate) : "";
+		const chatTemplateChanged = templateDesired !== templateBaseline;
 		// Per-slot extra_args override — ship only when changed, nested under
 		// [server] so the backend one-level merge preserves sibling server keys.
 		const extraArgsChanged = extraArgs !== extraArgsBaseline;
@@ -438,7 +453,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			if (binaryChanged) slotBody.binary = binary;
 			if (imagePinChanged) slotBody.image_pin = pinValue;
 			if (chatTemplateChanged) {
-				slotBody.chat_template = chatTemplate;
+				// null rides the backend's None-means-delete merge — clearing an
+				// override (or picking Auto) removes the key from the slot TOML.
+				slotBody.chat_template = templateDesired || null;
 			}
 			if (extraArgsChanged) {
 				slotBody.server = { extra_args: extraArgs };
@@ -602,7 +619,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		binaryDirty ||
 		imagePinDirty ||
 		parallelDirty ||
-		(overrideOpen && chatTemplate !== (slot.chat_template || ""));
+		(overrideOpen ? normTemplate(chatTemplate) : "") !==
+			normTemplate(slot.chat_template);
 	const requestClose = () => {
 		if (dirty) {
 			setDiscardOpen(true);
