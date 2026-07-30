@@ -526,29 +526,41 @@ class TestMigrations:
         assert data == original
 
     def test_run_migrations_chained(self) -> None:
-        """Stub: register a fake v2 migration, run 1 → 2, verify chain."""
+        """Stub: register a fake migration one step past the head, verify chain.
+
+        Chains onto ``latest_version() + 1`` rather than hard-coding 2. The old
+        version injected at key 2 and then ``del``'d it, which since v2 became a
+        real migration would have silently DEREGISTERED the production
+        profile-catalog watermark for the rest of the pytest process — an
+        order-dependent way to break the one-shot wipe's gate.
+        """
         from hal0.config import migrations as m
 
+        head = latest_version()
+        step = head + 1
         sentinel_calls: list[int] = []
 
-        def fake_v2(d: dict) -> dict:
-            sentinel_calls.append(2)
+        def fake_next(d: dict) -> dict:
+            sentinel_calls.append(step)
             d = dict(d)
-            d["v2_field"] = "added"
+            d["next_field"] = "added"
             return d
 
         # Inject manually (not via @register) so we don't pollute the
         # production MIGRATIONS dict permanently.
-        m.MIGRATIONS[2] = fake_v2
+        assert step not in m.MIGRATIONS
+        m.MIGRATIONS[step] = fake_next
         try:
-            data = {"meta": {"schema_version": 1}}
-            out, version = run_migrations(data, target_version=2)
-            assert version == 2
-            assert out["meta"]["schema_version"] == 2
-            assert out["v2_field"] == "added"
-            assert sentinel_calls == [2]
+            data = {"meta": {"schema_version": head}}
+            out, version = run_migrations(data, target_version=step)
+            assert version == step
+            assert out["meta"]["schema_version"] == step
+            assert out["next_field"] == "added"
+            assert sentinel_calls == [step]
         finally:
-            del m.MIGRATIONS[2]
+            m.MIGRATIONS.pop(step, None)
+        # The production registry is exactly as we found it.
+        assert latest_version() == head
 
 
 # ── HAL0_HOME isolation ──────────────────────────────────────────────────────
