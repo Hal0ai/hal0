@@ -11,10 +11,15 @@ silently coming back:
 * The handful of *intentionally* undocumented-in-the-grouped-sections
   helpers are listed in ``ALLOWED_MISSING`` with a reason, so the
   exemption is explicit rather than a silent gap.
+* ``hal0 bench`` is an argparse passthrough (design §5), invisible to
+  ``_walk()`` beyond the single top-level ``bench`` command — its own
+  verbs get a dedicated parity check against ``hal0.bench.cli``'s
+  argparse subparsers (GH #1474).
 
-It deliberately does NOT assert the reverse (doc-only commands) beyond
-the curated "Planned" section, because the doc legitimately mentions
-planned-but-unimplemented verbs under a clearly-labelled heading.
+Matching is word-boundary, not substring: a short command name like
+``bench`` must not be satisfied by it appearing inside a longer word like
+``bench-tuned`` (that gap is what let ``hal0 bench`` ship fully
+undocumented while this test still passed — GH #1474).
 
 Issue #1462 added a second, narrower guard: the "Key options" cells of
 the "## Top-level" command table must only ever name real flags. The
@@ -32,6 +37,7 @@ from pathlib import Path
 import click
 import typer
 
+from hal0.bench.cli import build_parser as _bench_build_parser
 from hal0.cli.main import app
 
 # Repo root: tests/cli/this_file.py -> parents[2] is the repo root.
@@ -72,22 +78,68 @@ def _walk(t: typer.Typer, prefix: str = "") -> list[str]:
     return paths
 
 
+def _bench_verbs() -> list[str]:
+    """Return every ``hal0 bench <verb>`` the argparse subparsers expose.
+
+    ``_walk()`` only sees the single typer-registered ``bench`` passthrough
+    command — everything past that is argparse (design §5) and needs its
+    own walk over ``build_parser()``'s subparsers action.
+    """
+    parser = _bench_build_parser()
+    for action in parser._subparsers._group_actions:  # argparse has no public API for this
+        if hasattr(action, "choices"):
+            return sorted(action.choices)
+    return []
+
+
+def _documented(term: str, text: str) -> bool:
+    """Word-boundary containment: ``term`` must appear as its own token.
+
+    A plain ``term in text`` substring check is satisfied by ``bench``
+    appearing inside ``bench-tuned`` — this treats ``-`` (and word chars)
+    as part of the boundary so a short command name can't be satisfied by
+    a longer word that merely contains it.
+    """
+    pattern = re.compile(r"(?<![\w-])" + re.escape(term) + r"(?![\w-])")
+    return bool(pattern.search(text))
+
+
 def test_cli_mdx_documents_every_command() -> None:
     text = _CLI_MDX.read_text(encoding="utf-8")
     missing: list[str] = []
     for path in sorted(set(_walk(app))):
         if path in ALLOWED_MISSING:
             continue
-        # A command is "documented" if its full path appears verbatim in
-        # the mdx. The grouped command blocks print them as
+        # A command is "documented" if its full path appears, word-boundary,
+        # in the mdx. The grouped command blocks print them as
         # ``hal0 slot list`` etc., so match on the bare path too.
-        if path not in text and f"hal0 {path}" not in text:
+        if not _documented(path, text) and not _documented(f"hal0 {path}", text):
             missing.append(path)
     assert not missing, (
         "docs/reference/cli.mdx is missing these real CLI commands: "
         + ", ".join(missing)
         + ". Add a line under the right section (or, for an intentional "
         "omission, add it to ALLOWED_MISSING with a reason)."
+    )
+
+
+def test_cli_mdx_documents_every_bench_verb() -> None:
+    """Parity walk over the argparse-based ``hal0 bench`` surface (GH #1474).
+
+    ``_walk()`` can't see past the single top-level ``bench`` typer
+    command, so the ~11 real verbs (plan/run/status/worker/results/
+    history/reindex/devices/publish/eval/import-v1) need their own check
+    against the doc, or a new verb can ship silently undocumented the same
+    way ``bench`` itself did.
+    """
+    text = _CLI_MDX.read_text(encoding="utf-8")
+    verbs = _bench_verbs()
+    assert verbs, "hal0.bench.cli.build_parser() exposed no verbs — parser wiring changed?"
+    missing = [v for v in verbs if not _documented(f"bench {v}", text)]
+    assert not missing, (
+        "docs/reference/cli.mdx is missing these `hal0 bench` verbs: "
+        + ", ".join(missing)
+        + ". Add a row under the `hal0 bench` section."
     )
 
 
