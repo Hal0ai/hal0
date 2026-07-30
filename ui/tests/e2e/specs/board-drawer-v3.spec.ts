@@ -7,7 +7,7 @@
  *   - triage: specify + decompose buttons visible
  *   - blocked: block_reason shown
  *   - done: run history (board-runs) visible
- *   - running: worker log (board-worklog) shows "worker streaming" or logs
+ *   - running: worker log (board-worklog) shows the "worker active" fallback or logs
  *   - Dependencies: add parent / add child / remove dep chip
  *   - Comment compose: input + submit fires POST /tasks/<id>/comments
  *   - Events log section (board-events) visible
@@ -36,7 +36,7 @@ const FIVE_S = 5_500
 // 3. __hal0UseBoardTaskLog — left LIVE. The drawer now joins worker-log {ts,line}
 //    entries to text instead of rendering the array as a React child (which crashed).
 //    The default /tasks/:id/log mock returns [] so running tasks fall back to the
-//    runs-based "worker streaming" message; the populated-log test below overrides the
+//    runs-based "worker active" message; the populated-log test below overrides the
 //    route to return entries and asserts they render as text.
 //
 // pageerror guard: any uncaught React error on the board surface fails the test.
@@ -158,7 +158,7 @@ test.describe('TaskDrawer — per-status contract', () => {
 
   // ── running ───────────────────────────────────────────────────────────
 
-  test('running task: empty log → runs-based "worker streaming" fallback', async ({ page }) => {
+  test('running task: empty log → runs-based "worker active" fallback', async ({ page }) => {
     // Default /tasks/:id/log mock returns [] → drawer falls back to the active-run
     // streaming message (running task has an active run).
     const task = BOARD_TASKS.find(t => t.status === 'running' && t.runs.some(r => r.state === 'active'))!
@@ -167,7 +167,10 @@ test.describe('TaskDrawer — per-status contract', () => {
 
     const worklog = page.locator('[data-testid="board-worklog"]')
     await expect(worklog).toBeVisible()
-    await expect(worklog).toContainText('worker streaming', { timeout: FIVE_S })
+    // #1472: this placeholder used to name the lemonade `lemond` journal — a
+    // daemon retired in #687 — in operator-facing copy.
+    await expect(worklog).toContainText('worker active', { timeout: FIVE_S })
+    await expect(worklog).not.toContainText('lemond')
   })
 
   test('running task: populated worker log renders {ts,line} entries as text', async ({ page }) => {
@@ -178,7 +181,7 @@ test.describe('TaskDrawer — per-status contract', () => {
     await page.route(/\/api\/board\/tasks\/[^/]+\/log/, (route) =>
       json(route, [
         { ts: '12:00:01', line: 'spawned worker pid=4123' },
-        { ts: '12:00:02', line: 'attached to lemond journal' },
+        { ts: '12:00:02', line: 'attached to the slot journal' },
         { ts: '12:00:03', line: 'probing /var headroom…' },
       ]),
     )
@@ -189,7 +192,7 @@ test.describe('TaskDrawer — per-status contract', () => {
     const worklog = page.locator('[data-testid="board-worklog"]')
     await expect(worklog).toBeVisible()
     await expect(worklog).toContainText('spawned worker pid=4123')
-    await expect(worklog).toContainText('attached to lemond journal')
+    await expect(worklog).toContainText('attached to the slot journal')
     await expect(worklog).toContainText('probing /var headroom')
     // No raw object stringification leaked into the DOM
     await expect(worklog).not.toContainText('[object Object]')

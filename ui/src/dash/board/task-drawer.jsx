@@ -22,7 +22,20 @@ const liveDot = (s) => "kdot" + (s === "running" ? " live" : " glow");
 
 // ─── Task detail drawer ────────────────────────────────────────────────
 function TaskDrawer({ task, byId, onClose, onOpenTask, board }) {
-  const toast = (msg) => { if (window.__hal0Toast) window.__hal0Toast(msg); };
+  const toast = (msg, kind = "info") => { if (window.__hal0Toast) window.__hal0Toast(msg, kind); };
+
+  // #1472: every mutation below used to toast SYNCHRONOUSLY with .mutate(), so
+  // a 4xx/5xx — notably the 409 If-Match conflict board.py documents — still
+  // read as "posted"/"linked"/"queued" while the change silently vanished on
+  // the next refetch. That defeats the one job the toast has: telling the
+  // operator whether it took. Settle first, then say which way it went.
+  const settle = (mutation, vars, okMsg, what) => {
+    if (!mutation) return;
+    mutation.mutate(vars, {
+      onSuccess: () => toast(okMsg),
+      onError: (err) => toast(`${what} failed — ${err?.message || "see logs"}`, "err"),
+    });
+  };
 
   // prefer live hook; fall back to prop. useBoardTask returns a TanStack
   // QueryResult — the task is on `.data`, not the result object itself.
@@ -47,8 +60,7 @@ function TaskDrawer({ task, byId, onClose, onOpenTask, board }) {
 
   const doStatusChange = (status, extra = {}) => {
     if (!updateTask) return;
-    updateTask.mutate({ id: t.id, body: { status, ...extra } });
-    toast(`${t.id} → ${status}`);
+    settle(updateTask, { id: t.id, body: { status, ...extra } }, `${t.id} → ${status}`, "status change");
   };
 
   const doBlock = () => {
@@ -66,41 +78,35 @@ function TaskDrawer({ task, byId, onClose, onOpenTask, board }) {
     // useAddComment's mutationFn takes a bare string body (it wraps it as
     // {body} for the wire). Passing {body} here would double-nest to
     // {body:{body}}. Send the string.
-    addComment.mutate({ id: t.id, body });
+    settle(addComment, { id: t.id, body }, "comment posted", "comment");
     setDraft("");
-    toast("comment posted");
   };
 
   const doAddParent = () => {
     if (!parentSelect || !addLink) return;
-    addLink.mutate({ parent_id: parentSelect, child_id: t.id });
+    settle(addLink, { parent_id: parentSelect, child_id: t.id }, "parent linked", "link");
     setParentSelect("");
-    toast("parent linked");
   };
 
   const doAddChild = () => {
     if (!childSelect || !addLink) return;
-    addLink.mutate({ parent_id: t.id, child_id: childSelect });
+    settle(addLink, { parent_id: t.id, child_id: childSelect }, "child linked", "link");
     setChildSelect("");
-    toast("child linked");
   };
 
   const doRemoveLink = (parent_id, child_id, depId) => {
     if (!removeLink) return;
-    removeLink.mutate({ parent_id, child_id });
-    toast(`dep ${depId} removed`);
+    settle(removeLink, { parent_id, child_id }, `dep ${depId} removed`, "dep removal");
   };
 
   const doSpecify = () => {
     if (!specifyTask) return;
-    specifyTask.mutate({ id: t.id, body: {} });
-    toast("specify queued");
+    settle(specifyTask, { id: t.id, body: {} }, "specify queued", "specify");
   };
 
   const doDecompose = () => {
     if (!decomposeTask) return;
-    decomposeTask.mutate({ id: t.id, body: {} });
-    toast("decompose queued");
+    settle(decomposeTask, { id: t.id, body: {} }, "decompose queued", "decompose");
   };
 
   const status   = t.status;
@@ -313,7 +319,7 @@ function TaskDrawer({ task, byId, onClose, onOpenTask, board }) {
                     .map(e => (typeof e === "string" ? e : (e.line ?? e.msg ?? JSON.stringify(e))))
                     .join("\n")
                 : runs.some(r => r.state === "active")
-                  ? "worker streaming · tail attached to lemond journal"
+                  ? "worker active · no log lines yet — refresh to pull the latest"
                   : "— no worker log yet (task hasn't spawned or log was rotated away) —"}
             </div>
           </div>

@@ -267,9 +267,17 @@ export interface SlotLogRow {
  *
  * Key differences from `useLogsStream`, deliberately:
  *   - **Blind append** into a bounded ring — NOT `logRing.appendEntry`. Raw
- *     journald legitimately repeats identical lines (progress bars), and the
- *     backend backfills once with no replay on reconnect, so content-dedup
- *     would wrongly drop real repeats.
+ *     journald legitimately repeats identical lines (progress bars), so
+ *     content-dedup would wrongly drop real repeats.
+ *
+ *     This rationale used to add "and the backend backfills once with no
+ *     replay on reconnect", which was false (#1472): the server replays its
+ *     400-line default on EVERY open, including the reconnects this hook
+ *     initiates itself, so dedup-free append meant up to 400 duplicated lines
+ *     per drop. The dedup decision stands — it is correct for raw journald —
+ *     but the duplication is now prevented at the source instead: reconnects
+ *     request `backfill=0`, and the stream pulses a keepalive so idle
+ *     connections stop being reaped in the first place.
  *   - Raw lines have no timestamp/level → we stamp client-arrival `ts` and
  *     infer `level` via `parseRawLevel`.
  *   - Surfaces the named `degraded` frame (journalctl unavailable / no unit)
@@ -324,10 +332,22 @@ export function useSlotLogsStream(
       })
     }
 
+    // #1472: the FIRST connect wants the server's backfill (the model-loading
+    // lines are emitted once at container start and are the whole point of
+    // this stream). Every RECONNECT must ask for 0 — the server replays its
+    // 400-line default on every open, and the ring below deliberately does not
+    // content-dedup, so a self-initiated reconnect used to append up to 400
+    // duplicates. Reconnects are now common rather than rare: the stream is
+    // long-lived and a proxy can still drop it between keepalives.
+    let connectCount = 0
+
     const connect = () => {
       if (cancelled) return
+      const isReconnect = connectCount++ > 0
       try {
-        esRef.current = new EventSource(ENDPOINTS.slotLogsStream(slotName))
+        esRef.current = new EventSource(
+          ENDPOINTS.slotLogsStream(slotName, isReconnect ? 0 : undefined),
+        )
       } catch {
         setDisconnected(true)
         return

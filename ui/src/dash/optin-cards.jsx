@@ -5,7 +5,7 @@
 //   SlotTrackCard   — Per-Slot Throughput  (opt-in, per_slot from throughput history)
 //   ApprovalsCard   — Agent Approvals   (opt-in, window bridge mutations)
 //   AttentionCard   — Needs Attention   (DEFAULT-ON, derived from slots + approvals)
-//   SchedulerCard   — Scheduler         (honest "no source" — lemond is stateless)
+//   SchedulerCard   — Scheduler         (honest "no source" — nothing exposes a queue)
 //
 // Import order: after cards-shell.jsx (DCard/StatusDot on window), after
 // services-card.jsx. Listed in main.tsx right after services-card.jsx import.
@@ -323,7 +323,13 @@ function AttentionCardInner({ slots, useApprovalList }) {
 }
 
 // ─── SchedulerCard ───────────────────────────────────────────────────────────
-// STAYS GATED — lemond dispatcher is stateless; no real source.
+// STAYS GATED — but not for the reason this comment used to give (#1472).
+// The rationale named the lemonade `lemond` daemon, retired in #687. The gate
+// survives it on its own merits: hal0's dispatcher (src/hal0/dispatcher/) keeps
+// no scheduler history to render. `/api/stats/requests` is a throughput rollup,
+// not a queue; `single_flight.in_flight_keys()` is in-process and unrouted.
+// Ungating this would mean inventing a telemetry source, which is exactly the
+// fake-stat-tile failure the card exists to refuse.
 // Honest "no source" state — distinct from "source pending" (coming-soon).
 // NO fake stat tiles or dispatches ever.
 
@@ -333,7 +339,7 @@ function SchedulerCard() {
       <div className="sched-no-source">
         <span className="sched-no-source-label mono">no scheduler telemetry</span>
         <span className="sched-no-source-sub mono">
-          lemond dispatcher is stateless — no in-flight/queue history exposed
+          the dispatcher exposes no in-flight or queue history to render
         </span>
       </div>
     </DCard>
