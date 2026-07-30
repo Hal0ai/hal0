@@ -203,7 +203,7 @@ class TestImportCommitIntegrity:
             "/api/profiles/import",
             json={"envelope": env, "name": "forced", "force": True},
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         assert client.get("/api/profiles/forced").status_code == 200
 
     def test_commit_screens_slot_hardware_flags(self, client: TestClient) -> None:
@@ -236,7 +236,7 @@ class TestImportCommitIntegrity:
         """Regression fence: the happy path must not need `force`."""
         env = client.post(f"/api/profiles/{_seed_name()}/export").json()
         r = client.post("/api/profiles/import", json={"envelope": env, "name": "clean-import"})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         assert client.get("/api/profiles/clean-import").status_code == 200
 
 
