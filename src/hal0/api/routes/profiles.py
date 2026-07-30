@@ -127,21 +127,24 @@ def list_profiles() -> list[dict[str, Any]]:
 
 
 def _screen_profile_flags(flags: str | None) -> None:
-    """Reject grid-owned hardware flags in a profile's freeform ``flags`` text.
+    """Reject hal0-owned flags in a profile's freeform ``flags`` text.
 
     spec-hw-slot-ownership §5: a profile is a device-agnostic tune template, so
     its ``flags`` must not carry the slot-hardware flags (``-ngl``/``--device``/
-    ``--threads``). Symmetric to the model ``defaults.extra_args`` guard in
+    ``--threads``). §21.7: nor the managed args hal0 computes per-slot
+    (``--model``/``--host``/``--port``/``--ctx-size``/``--alias``) — a profile
+    that persists ``-c``/``--port`` only explodes later when stamped onto a
+    model. Symmetric to the model ``defaults.extra_args`` guard in
     :func:`hal0.services.models_service.screen_model_write`; raises the same
-    ``slot.hardware_flag_denied`` BadRequest so both surfaces render one path.
-    Empty / unset flags are a no-op; an unparseable flag string is left to the
-    ProfileConfig schema to reject.
+    ``slot.hardware_flag_denied`` / ``slot.managed_arg_denied`` BadRequests so
+    both surfaces render one path. Empty / unset flags are a no-op; an
+    unparseable flag string is left to the ProfileConfig schema to reject.
     """
     if not flags or not flags.strip():
         return
     import shlex
 
-    from hal0.slots.argv import _deny_slot_hardware_flags
+    from hal0.slots.argv import _deny_managed_flags, _deny_slot_hardware_flags
 
     try:
         tokens = shlex.split(flags)
@@ -149,7 +152,10 @@ def _screen_profile_flags(flags: str | None) -> None:
         # Malformed quoting — defer to the pydantic/config layer's own error
         # rather than masking it with a partition message.
         return
+    # Hardware first so -ngl (in both sets) gets the "belongs on the slot"
+    # message — mirrors screen_model_write's ordering.
     _deny_slot_hardware_flags(tokens, segment="profile flags")
+    _deny_managed_flags(tokens, segment="profile flags")
 
 
 @router.post("", status_code=201)
@@ -162,8 +168,10 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
         409 profiles.exists: name already exists (seed or custom).
         422: pydantic validation failure (bad name, …).
         400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
+        400 slot.managed_arg_denied: flags carry a hal0-managed flag.
     """
-    # spec-hw-slot-ownership §5: reject slot-hardware flags before persisting.
+    # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed
+    # flags before persisting.
     _screen_profile_flags(body.flags)
     async with record_action(
         request, category="profile", action="profile.create", target=body.name
@@ -294,8 +302,10 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
         404 profiles.not_found: custom profile not found.
         422: pydantic validation failure.
         400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
+        400 slot.managed_arg_denied: flags carry a hal0-managed flag.
     """
-    # spec-hw-slot-ownership §5: reject slot-hardware flags before persisting.
+    # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed
+    # flags before persisting.
     _screen_profile_flags(body.flags)
     catalog = ProfileCatalog()
     before = None
