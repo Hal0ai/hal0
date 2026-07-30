@@ -1965,6 +1965,80 @@ def doctor_profiles(
     raise typer.Exit(0)
 
 
+# ── hal0 doctor ports — the drill-down the roll-up's Slot ports row names ─────
+
+
+@app.command("ports")
+def doctor_ports() -> None:
+    """Show which port each slot has bound, and flag collisions.
+
+    The drill-down for the ``Slot ports`` row in ``hal0 doctor all`` (#1501).
+    Every other failing row in that table names a follow-up command; this one
+    had none, so an operator who saw it warn had nowhere to go.
+
+    Reads the same ``GET /api/slots`` the roll-up does, with the same enlarged
+    budget — that route container-probes every slot, so on a populated box it
+    legitimately takes longer than a normal API call. A timeout is reported as
+    a timeout here, naming the budget it exceeded, rather than as the endpoint
+    being down.
+    """
+    from hal0.cli._shared import CliApiError, api_get
+    from hal0.cli.doctor_all import SLOTS_PROBE_TIMEOUT_S
+
+    try:
+        slots = api_get("/api/slots", timeout=SLOTS_PROBE_TIMEOUT_S)
+    except CliApiError as exc:
+        console.print(
+            f"[red]✗[/red]  could not read /api/slots within "
+            f"{SLOTS_PROBE_TIMEOUT_S:.0f}s: {exc}\n"
+            "    The API may be down, or the slots aggregator may be slower than the\n"
+            "    budget — check `systemctl status hal0-api` and `hal0 doctor all`."
+        )
+        raise typer.Exit(1) from exc
+
+    if not isinstance(slots, list):
+        console.print(
+            f"[red]✗[/red]  unexpected /api/slots payload: {type(slots).__name__}, expected a list."
+        )
+        raise typer.Exit(1)
+
+    rows = [s for s in slots if isinstance(s, dict)]
+    bound = [(str(s.get("name") or "?"), int(s["port"])) for s in rows if s.get("port")]
+
+    if not bound:
+        console.print(
+            f"[green]✓[/green]  no slot ports bound yet ({len(rows)} slot(s) configured)."
+        )
+        raise typer.Exit(0)
+
+    table = Table(title="Slot ports", box=None, pad_edge=False)
+    table.add_column("slot")
+    table.add_column("port", justify="right")
+
+    by_port: dict[int, list[str]] = {}
+    for name, port in bound:
+        by_port.setdefault(port, []).append(name)
+
+    for name, port in sorted(bound, key=lambda r: r[1]):
+        clash = len(by_port[port]) > 1
+        table.add_row(
+            f"[red]{name}[/red]" if clash else name,
+            f"[red]{port}[/red]" if clash else str(port),
+        )
+    console.print(table)
+
+    collisions = {p: names for p, names in by_port.items() if len(names) > 1}
+    if collisions:
+        for port, names in sorted(collisions.items()):
+            console.print(
+                f"\n[red]✗[/red]  port {port} claimed by {len(names)}: {', '.join(names)}"
+            )
+        raise typer.Exit(1)
+
+    console.print(f"\n[green]✓[/green]  {len(bound)} port(s) bound, no collisions.")
+    raise typer.Exit(0)
+
+
 # ── hal0 doctor all — read-only evidence roll-up (§21.4) ──────────────────────
 #
 # Registered here (not decorated in doctor_all.py) so the aggregate module stays
