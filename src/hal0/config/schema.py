@@ -2659,17 +2659,17 @@ class BrainChatConfig(BaseModel):
 
     Context floor (fresh-box finding, docs/rework/r4-stage-validation.md
     "steward config note"): whichever slot ends up serving the chat --
-    ``model``/``tool_model`` here, the persona's ``preferred_model``, or the
-    ``hal0/brain`` -> ``agent`` resolver fallback -- MUST be loaded with at
-    least 8k tokens of context. The built-in hal0-brain system prompt alone
-    is ~7.3k tokens before any conversation history or tool schemas are
-    added; a smaller context window truncates the prompt and the steward
-    degrades silently (malformed tool calls, prompt-following failures)
-    rather than failing loudly. Separately, a ``model``/``tool_model`` (or
-    resolver fallback) that resolves to NO loaded slot at all 404s the self
-    ``/v1/chat/completions`` call outright -- surfaced by
-    :mod:`hal0.brain.chat` as an actionable SSE ``error`` frame (naming the
-    model tried and how to fix it) rather than the raw transport failure.
+    ``model`` here, the persona's ``preferred_model``, or the ``hal0/brain``
+    -> ``agent`` resolver fallback -- MUST be loaded with at least 8k tokens
+    of context. The built-in hal0-brain system prompt alone is ~7.3k tokens
+    before any conversation history or tool schemas are added; a smaller
+    context window truncates the prompt and the steward degrades silently
+    (malformed tool calls, prompt-following failures) rather than failing
+    loudly. Separately, a ``model`` (or resolver fallback) that resolves to
+    NO loaded slot at all 404s the self ``/v1/chat/completions`` call
+    outright -- surfaced by :mod:`hal0.brain.chat` as an actionable SSE
+    ``error`` frame (naming the model tried and how to fix it) rather than
+    the raw transport failure.
 
     ``extra="forbid"`` (P3-schema Part C): a leaf tunable table. Previously
     had no explicit ``model_config`` (pydantic's default is ``"ignore"``, not
@@ -2692,17 +2692,6 @@ class BrainChatConfig(BaseModel):
     # the steward system prompt alone is ~7.3k tokens — and must actually be
     # LOADED, or the chat 404s (see BrainChatConfig docstring above).
     model: str = ""
-    # Route tool-calling turns to a capable, tool-format-compatible model. The
-    # steward always offers tools, so when set this is the model its tool loop
-    # runs on — the escape hatch for boxes whose ``model`` (e.g. a small 1B
-    # brain slot) can't emit tool calls the local runtime parses natively (it
-    # leaks/500s). Point it at a model that tool-calls cleanly on this runtime
-    # (a capable local slot like ``hal0/agent``, or the fallback provider).
-    # Default "hal0/agent" per spec-p3-brain.final.md §5a + ADR-0023
-    # (always-on anchor every fallback chain ends in). Set to "" to opt back
-    # into routing tool turns to ``model``/persona. An explicit per-request
-    # ``model`` wins over both.
-    tool_model: str = "hal0/agent"
     max_rounds: int = Field(default=8, ge=1, le=100)
     completion_timeout_s: float = Field(default=300.0, gt=0)
 
