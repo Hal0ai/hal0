@@ -610,6 +610,15 @@ function ModelDrawer({ open, onClose, model }) {
 				? managedFlagMessage(managedOffenders)
 				: null;
 
+	// The vision↔mmproj invariant (#1380). A row advertising `vision` with no
+	// projector leaves the launch path no `--mmproj` to load. This used to be a
+	// decorative red div the save ignored, so it now joins flagsError in the one
+	// gate both `onSave` and the Save button consult.
+	const mmprojError =
+		caps.includes("vision") && !mmproj.trim()
+			? "vision capability requires an mmproj sidecar path"
+			: null;
+
 	// Context size validation (#1378). PUT /api/models/{id} merges `defaults`
 	// WHOLESALE (registry/store.py merge_update), so an absent context_size is a
 	// DELETE, not "unchanged" — a lenient parseInt therefore destroyed data twice
@@ -626,6 +635,12 @@ function ModelDrawer({ open, onClose, model }) {
 		if (Number(raw) < 128) return "Must be an integer ≥ 128";
 		return null;
 	}, [ctx]);
+
+	// One gate for every inline error: flags (#1379), the vision↔mmproj
+	// invariant (#1380) and the context-size rules (#1378). Both `onSave` and
+	// the Save button consult this, so a new validation can never be enforced
+	// in one place and forgotten in the other.
+	const saveBlocked = !!flagsError || !!mmprojError || !!ctxError;
 
 	// Return null when closed — matching the Modal contract the old
 	// RecipeEditorModal honoured (Modal returns null when !open). The <Drawer>
@@ -723,7 +738,7 @@ function ModelDrawer({ open, onClose, model }) {
 		vision !== triFromDefault(init.vision);
 
 	const onSave = async () => {
-		if (flagsError || ctxError) return; // inline errors block; no PUT fires
+		if (saveBlocked) return; // inline errors block; no PUT fires
 		// Start from stored defaults; override only surfaced keys (empty = delete).
 		const defaults = { ...init };
 		// ctxError already guarantees a clean /^\d+$/ integer here, so the only two
@@ -755,9 +770,13 @@ function ModelDrawer({ open, onClose, model }) {
 		else delete defaults.vision;
 
 		const body = { defaults };
+		// Diff on the value alone (#1381): a truthiness guard here collapsed
+		// "unchanged" and "deliberately emptied" into the same skip branch, so the
+		// name could never be cleared. `Model.name` is `str` with `default=""` and
+		// normalizeApiModel falls back to `model.id`, so `""` is a valid write —
+		// matching the mmproj / hf_repo / hf_filename fields just below.
 		const trimmedName = name.trim();
-		if (trimmedName && trimmedName !== (model.name || ""))
-			body.name = trimmedName;
+		if (trimmedName !== (model.name || "")) body.name = trimmedName;
 		const nextTags = mergeModelTags(otherTags, types);
 		const prevTags = Array.isArray(model.tags) ? model.tags : [];
 		const sameTags =
@@ -819,7 +838,7 @@ function ModelDrawer({ open, onClose, model }) {
 								className="btn sm"
 								data-testid="model-save"
 								onClick={onSave}
-								disabled={update.isPending || !!flagsError || !!ctxError}
+								disabled={update.isPending || saveBlocked}
 							>
 								{update.isPending ? "Saving…" : "Save model"}
 							</button>
@@ -1323,9 +1342,13 @@ function ModelDrawer({ open, onClose, model }) {
 							value={mmproj}
 							onChange={(e) => setMmproj(e.target.value)}
 						/>
-						{caps.includes("vision") && !mmproj.trim() && (
-							<div className="err" style={{ marginTop: 6 }}>
-								vision capability requires an mmproj sidecar path
+						{mmprojError && (
+							<div
+								className="err"
+								data-testid="model-mmproj-error"
+								style={{ marginTop: 6 }}
+							>
+								{mmprojError}
 							</div>
 						)}
 					</div>
