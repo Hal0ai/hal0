@@ -301,12 +301,14 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
   })
 
   // Regression guard for the OTHER door the fabricated inventory came
-  // through. ComfyuiPane falls back to the static COMFYUI_V2_MOCK whenever
-  // `liveStatus` is falsy — which includes every /status poll error, not
-  // just storybook. Carrying real-looking counts in that constant would put
-  // fabricated inventory back on a real operator's screen the moment the
-  // backend hiccups, so COMFYUI_V2_MOCK.inventory must stay null.
-  test('a failing /status poll falls back to the static mock WITHOUT fabricating inventory', async ({ page }) => {
+  // through. ComfyuiPane falls back to transformComfyuiStatus(COMFYUI_FALLBACK)
+  // whenever `liveStatus` is falsy — which includes every /status poll error,
+  // not just first paint (#1470 replaced the old COMFYUI_V2_MOCK fallback,
+  // a fictional 72%-render/fake-queue mock, with this neutral stopped shell;
+  // COMFYUI_V2_MOCK now renders only via the window.__comfyuiV2MockOverride
+  // e2e seam). COMFYUI_FALLBACK.inventory is null, so a real backend hiccup
+  // must not surface fabricated model counts either.
+  test('a failing /status poll falls back to the neutral shell WITHOUT fabricating inventory', async ({ page }) => {
     await page.route('**/api/comfyui/status', (route: any) =>
       route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }),
     )

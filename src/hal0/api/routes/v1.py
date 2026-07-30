@@ -1372,6 +1372,57 @@ def _seed_tts_defaults(tts_cfg: dict[str, Any], body: dict[str, Any]) -> None:
 # ── /v1/images/generations (ComfyUI provider, hal0-managed translation) ────
 
 
+def _is_comfyui_checkpoint_renderable(curated: Any) -> bool:
+    """True iff ``curated`` is safe to drive through the ComfyUI translator.
+
+    #1470: the old gate was a bare ``curated.capability != "image"`` check.
+    Six curated entries carry capability="image", but two of them are not
+    ComfyUI checkpoint files: ``esrgan-4x`` is a RealESRGAN ``.pth`` upscaler
+    (``comfyui_subdir="upscale_models"``) and ``sdxl-lightning`` is a LoRA
+    that needs the SDXL base checkpoint already loaded — its own notes say
+    so. Both used to pass the old gate because ``template_for_model_class``
+    deliberately falls back to ``sdxl_turbo_simple`` for any unrecognised
+    ``model_class`` (so a curated id never 404s just for lacking a
+    dedicated template) — so the LoRA/.pth got silently pinned in as the
+    workflow *checkpoint*, producing a ComfyUI node failure or garbage
+    output instead of a clean 4xx.
+
+    Require BOTH: the entry is staged as an actual checkpoint file
+    (``comfyui_subdir == "checkpoints"``) AND its ``model_class`` resolves
+    to a real, explicitly-declared template — not the "unknown class"
+    default. Curated entries that intentionally reuse a template as a
+    documented soft-fallback (e.g. ``flux-klein`` → sdxl_turbo_simple, see
+    ``comfyui_workflows.MODEL_CLASS_TO_TEMPLATE``) still pass, since that's
+    a deliberate choice, not an accident of the two placeholder classes
+    (``"image"``, or an untagged class) that ``sdxl-lightning``/``esrgan-4x``
+    fall through on.
+    """
+    from hal0.providers.comfyui_workflows import MODEL_CLASS_TO_TEMPLATE
+
+    if (curated.comfyui_subdir or "") != "checkpoints":
+        return False
+    model_class = (curated.model_class or "").lower()
+    return model_class in MODEL_CLASS_TO_TEMPLATE
+
+
+def _comfyui_renderable_builtin_ids() -> list[str]:
+    """Curated ids the ``/v1/images/generations`` gate actually accepts.
+
+    #1470: the 404 copy used to hardcode "sdxl-turbo, sd-1.5-pruned-
+    emaonly" — accurate the day it was written, but two names baked into a
+    string drift the moment the curated table gains or loses an entry.
+    Derive the list from the same predicate the gate itself uses so the
+    two can never disagree.
+    """
+    from hal0.registry.curated import CURATED_MODELS
+
+    return [
+        m.id
+        for m in CURATED_MODELS
+        if m.capability == "image" and _is_comfyui_checkpoint_renderable(m)
+    ]
+
+
 def _extract_port_from_upstream_url(url: str) -> int | None:
     """Pull the port out of an Upstream.url like ``http://127.0.0.1:8186/v1``.
 
@@ -1488,10 +1539,15 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     #    workflow.
     requested = (body.get("model") or "").strip() or "sdxl-turbo"
     curated = get_curated(requested)
-    if curated is None or curated.capability != "image":
+    if (
+        curated is None
+        or curated.capability != "image"
+        or not _is_comfyui_checkpoint_renderable(curated)
+    ):
+        builtins = ", ".join(_comfyui_renderable_builtin_ids())
         raise _ImageModelNotCurated(
-            f"model {requested!r} is not in the curated image-gen catalogue; "
-            "current built-ins: sdxl-turbo, sd-1.5-pruned-emaonly",
+            f"model {requested!r} is not a ComfyUI-renderable curated image-gen "
+            f"model; current built-ins: {builtins}",
             details={"model": requested},
         )
 

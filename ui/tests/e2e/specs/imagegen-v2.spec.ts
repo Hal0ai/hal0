@@ -115,6 +115,11 @@ test.describe('ImageGen V2 render-hero pane', () => {
     await expect(pending).toHaveCount(2)
     await expect(pending.nth(0)).toContainText('qwen-image')
     await expect(pending.nth(1)).toContainText('sdxl')
+
+    // #1470: pending rows used to render "Logs"/"Remove" buttons with no
+    // onClick at all — no per-job endpoints exist yet. Dropped as dead
+    // controls; pin their absence.
+    await expect(pending.nth(0).locator('.sctrl')).toHaveCount(0)
   })
 
   // ── 3. Telemetry gauge ──────────────────────────────────────────────────
@@ -180,7 +185,11 @@ test.describe('ImageGen V2 render-hero pane', () => {
   // ── 6. Container footer + header controls ────────────────────────────────
   // #1209 moved the stop/restart/logs controls from the footer up into the
   // card header's far right; the container identity row stays in the footer.
-  test('footer identity + header controls render', async ({ page }) => {
+  // #1470: the header's "Stop container" button had no handler and no
+  // backing mutation (only restart/logs are wired) — removed as a dead
+  // control rather than left silently doing nothing on a GPU-exclusive
+  // engine. Pin its absence so it doesn't come back un-wired.
+  test('footer identity + header controls render (no dead Stop button)', async ({ page }) => {
     await gotoImageTab(page)
     const pane = page.locator('.comfy-v2-pane')
 
@@ -188,10 +197,11 @@ test.describe('ImageGen V2 render-hero pane', () => {
     await expect(foot).toBeVisible()
     await expect(foot).toContainText('comfyui')
     await expect(foot).toContainText(':8188')
-    // stop, restart controls — now in the header far right
+    // restart control — still in the header far right
     const head = pane.locator('.wcard-h')
-    await expect(head.locator('.sctrl.stop')).toBeVisible()
     await expect(head.locator('.sctrl.restart')).toBeVisible()
+    // the un-wired "Stop container" button must not be rendered (#1470)
+    await expect(head.locator('.sctrl.stop')).toHaveCount(0)
   })
 
   // ── 7. Empty-queue state: NO click-blocking overlay ─────────────────────
