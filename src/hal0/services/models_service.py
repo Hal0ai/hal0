@@ -1180,7 +1180,89 @@ def screen_extra_args_json(raw: str, *, segment: str = "extra_args") -> None:
             ) from None
 
 
-def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> None:
+# ── vision↔mmproj pairing (#1393, server half of #1380) ───────────────────────
+#
+# Study note: ``vision`` is not self-describing — llama-server only sees images
+# when the launcher passes ``--mmproj <sidecar>``, which it derives from
+# ``Model.mmproj``. A row carrying the capability with no sidecar therefore
+# advertises a modality it can never serve, and the failure surfaces at LAUNCH
+# (or, worse, as a silently text-only "vision" model) rather than at SAVE.
+# #1380 gated this in the model drawer; the wire stayed open, so curl, the CLI
+# and config imports could still mint the same broken row (#1393).
+#
+# The guard is WRITE-scoped, not row-scoped, and that distinction is the whole
+# design: it fires only when the incoming body touches ``capabilities`` or
+# ``mmproj``. An install that already holds a projector-less vision row (born
+# before this landed) stays fully editable on every other field — renaming it,
+# retuning ``defaults``, flipping ``default`` all still work. Only a write that
+# CREATES the bad pair, or PRESERVES it while editing one of the two fields it
+# is made of, is refused. A row-level integrity check would instead brick those
+# legacy rows on unrelated saves, which is why the merge is evaluated here
+# rather than in ``Model``'s validators.
+
+
+def screen_vision_mmproj_pair(
+    body: dict[str, Any],
+    *,
+    existing: dict[str, Any] | None = None,
+) -> None:
+    """Reject a write that leaves ``vision`` capability without an ``mmproj``.
+
+    ``existing`` distinguishes the two body shapes this screens:
+
+    * ``None`` — the body IS the whole row (``POST /api/models``,
+      ``POST /api/models/validate``): both halves are read from ``body``.
+    * a dict — a PARTIAL update (``PUT /api/models/{id}``): each half is read
+      from ``body`` when the key is present, else from the STORED row. Without
+      this merge the guard would both false-negative (a body adding ``vision``
+      without mentioning ``mmproj`` on a projector-less row) and false-positive
+      (a body adding ``vision`` to a row whose sidecar is already set).
+
+    No-op when the body touches neither ``capabilities`` nor ``mmproj`` — see
+    the module comment above on why legacy bad rows must stay editable.
+
+    Raises :class:`~hal0.errors.BadRequest` (``model.vision_requires_mmproj``),
+    the same 400 envelope the drawer already renders inline.
+    """
+    from hal0.errors import BadRequest
+
+    touches_caps = "capabilities" in body
+    touches_mmproj = "mmproj" in body
+    if not (touches_caps or touches_mmproj):
+        return
+
+    base = existing or {}
+    raw_caps = body.get("capabilities") if touches_caps else base.get("capabilities")
+    caps = [str(c) for c in raw_caps] if isinstance(raw_caps, (list, tuple)) else []
+    if "vision" not in caps:
+        return
+
+    raw_mmproj = body.get("mmproj") if touches_mmproj else base.get("mmproj")
+    # A blank/whitespace-only path is not a sidecar — the drawer trims before
+    # sending (``body.mmproj = trimmed || null``), so treat "" like null.
+    if isinstance(raw_mmproj, str) and raw_mmproj.strip():
+        return
+
+    raise BadRequest(
+        "vision capability requires an mmproj sidecar path — set 'mmproj' to the "
+        "projector GGUF beside the model, or drop 'vision' from capabilities",
+        code="model.vision_requires_mmproj",
+        details={
+            "capabilities": caps,
+            "mmproj": raw_mmproj,
+            "touched": sorted(
+                k for k, hit in (("capabilities", touches_caps), ("mmproj", touches_mmproj)) if hit
+            ),
+        },
+    )
+
+
+def screen_model_write(
+    body: dict[str, Any],
+    *,
+    runner_images: Any = None,
+    existing: dict[str, Any] | None = None,
+) -> None:
     """Validate the launch-affecting fields of a model create/update/validate body.
 
     Raises :class:`~hal0.errors.BadRequest` on the first violation, with the same
@@ -1195,6 +1277,11 @@ def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> No
       smuggled ``--model``/``--host``/``--port``/``--ctx-size``/``--alias`` fails
       at SAVE with the same ``slot.managed_arg_denied`` code the launcher raises,
       instead of persisting a row that can never load (or silently rebinds a slot).
+    * ``capabilities``/``mmproj`` — the vision↔projector pairing (#1393, server
+      half of the #1380 drawer gate), via :func:`screen_vision_mmproj_pair`.
+      ``existing`` carries the STORED row for a partial ``PUT`` so a sparse body
+      is screened against the merge, not against absent keys; pass ``None`` when
+      the body is the whole row (create / ``/validate``).
 
     spec-hw-slot-ownership: ``preferred_runner`` is no longer a model field (the
     runner is slot-owned via ``SlotConfig.binary``) — it is neither validated nor
@@ -1232,6 +1319,8 @@ def screen_model_write(body: dict[str, Any], *, runner_images: Any = None) -> No
         # managed-arg one — ``-ngl`` is in both sets.
         _deny_slot_hardware_flags(tokens, segment=seg)
         _deny_managed_flags(tokens, segment=seg)
+
+    screen_vision_mmproj_pair(body, existing=existing)
 
 
 # ── duplicate a model row (UI-API-1 item 3) ───────────────────────────────────

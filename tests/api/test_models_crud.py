@@ -488,6 +488,231 @@ def test_validate_accepts_device_agnostic_tune(crud_client: TestClient) -> None:
     assert r.json()["ok"] is True
 
 
+# ── #1393: server-side vision↔mmproj backstop ─────────────────────────────────
+#
+# #1380 gated the invariant in the model drawer only; these lock the API half so
+# curl / the CLI / a config import can't write a vision row with no projector.
+# The guard is deliberately WRITE-scoped: it fires only when the body touches
+# ``capabilities`` or ``mmproj``, so a pre-existing bad row (registered before
+# the guard landed) stays editable on unrelated fields.
+
+
+def _seed_registry_row(
+    client: TestClient,
+    models_root: Path,
+    model_id: str,
+    **fields: Any,
+) -> Path:
+    """Write a row STRAIGHT to the registry, bypassing the API screens.
+
+    Used to manufacture a legacy ``vision``-without-``mmproj`` row — exactly
+    what an install that predates the #1393 guard can hold on disk.
+    """
+    from hal0.registry.store import Model
+
+    fpath = models_root / f"{model_id}.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    registry = client.app.state.model_registry  # type: ignore[attr-defined]
+    registry.add(Model(id=model_id, name=model_id, path=str(fpath), **fields))
+    return fpath
+
+
+def test_put_adding_vision_without_stored_mmproj_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """(a) A sparse PUT that adds ``vision`` is screened against the STORED
+    ``mmproj`` (null here) — rejected, and the row is left untouched."""
+    fpath = crud_models_root / "vm-a.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "vm-a", "path": str(fpath)})
+
+    r = crud_client.put("/api/models/vm-a", json={"capabilities": ["chat", "vision"]})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+    # Nothing persisted: the row still has no vision capability.
+    row = crud_client.get("/api/models/vm-a").json()
+    assert "vision" not in row["capabilities"]
+    assert not row["mmproj"]
+
+
+def test_put_nulling_mmproj_on_stored_vision_model_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """(b) The mirror case: a body that clears ``mmproj`` is screened against the
+    STORED ``capabilities`` (vision) — rejected, sidecar preserved."""
+    fpath = crud_models_root / "vm-b.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    mm = crud_models_root / "vm-b-mmproj.gguf"
+    mm.write_bytes(b"\x00" * 8)
+    r = crud_client.post(
+        "/api/models",
+        json={
+            "id": "vm-b",
+            "path": str(fpath),
+            "capabilities": ["chat", "vision"],
+            "mmproj": str(mm),
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    r = crud_client.put("/api/models/vm-b", json={"mmproj": None})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+    assert crud_client.get("/api/models/vm-b").json()["mmproj"] == str(mm)
+
+
+def test_put_vision_with_mmproj_together_accepted(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """(c) The valid pair in ONE body passes — the guard must not reject a write
+    that supplies both halves at once."""
+    fpath = crud_models_root / "vm-c.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    mm = crud_models_root / "vm-c-mmproj.gguf"
+    mm.write_bytes(b"\x00" * 8)
+    crud_client.post("/api/models", json={"id": "vm-c", "path": str(fpath)})
+
+    r = crud_client.put(
+        "/api/models/vm-c",
+        json={"capabilities": ["chat", "vision"], "mmproj": str(mm)},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "vision" in body["capabilities"]
+    assert body["mmproj"] == str(mm)
+
+
+def test_put_capabilities_only_passes_when_stored_mmproj_present(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """No false positive: a sparse capabilities-only PUT on a row that already
+    carries a projector is fine (the stored ``mmproj`` satisfies the pair)."""
+    fpath = crud_models_root / "vm-f.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    mm = crud_models_root / "vm-f-mmproj.gguf"
+    mm.write_bytes(b"\x00" * 8)
+    crud_client.post(
+        "/api/models",
+        json={"id": "vm-f", "path": str(fpath), "mmproj": str(mm)},
+    )
+    r = crud_client.put("/api/models/vm-f", json={"capabilities": ["chat", "vision"]})
+    assert r.status_code == 200, r.text
+    assert "vision" in r.json()["capabilities"]
+
+
+def test_put_unrelated_field_on_legacy_bad_row_still_saves(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """(d) A row already stored as vision-without-mmproj must NOT start failing
+    on saves that touch neither half — the guard screens writes, it is not a
+    row-level integrity check that would brick pre-existing rows."""
+    _seed_registry_row(
+        crud_client,
+        crud_models_root,
+        "vm-legacy",
+        capabilities=["chat", "vision"],
+        backends=["cpu"],
+    )
+    r = crud_client.put("/api/models/vm-legacy", json={"name": "Renamed Legacy"})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Renamed Legacy"
+    # Still the same broken pair — untouched, not silently repaired.
+    assert "vision" in r.json()["capabilities"]
+    assert not r.json()["mmproj"]
+
+
+def test_put_touching_capabilities_on_legacy_bad_row_is_rejected(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """…but a write that PRESERVES the bad pair while touching ``capabilities``
+    is rejected — the operator is editing the invariant's own fields."""
+    _seed_registry_row(
+        crud_client,
+        crud_models_root,
+        "vm-legacy2",
+        capabilities=["chat", "vision"],
+        backends=["cpu"],
+    )
+    r = crud_client.put(
+        "/api/models/vm-legacy2",
+        json={"capabilities": ["chat", "vision", "embed"]},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+
+
+def test_create_rejects_vision_without_mmproj(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """(e) POST /api/models inherits the guard — the create path is the other way
+    curl/CLI can mint a projector-less vision row. Nothing is persisted."""
+    fpath = crud_models_root / "vm-new.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={"id": "vm-new", "path": str(fpath), "capabilities": ["chat", "vision"]},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+    assert crud_client.get("/api/models/vm-new").status_code == 404
+
+
+def test_validate_rejects_vision_without_mmproj(crud_client: TestClient) -> None:
+    """The dry-run screen raises the same envelope, so the drawer's inline error
+    and the server rejection are one code path."""
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"capabilities": ["chat", "vision"], "mmproj": None},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+
+
+def test_validate_accepts_vision_with_mmproj(crud_client: TestClient) -> None:
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"capabilities": ["chat", "vision"], "mmproj": "/models/mmproj-F16.gguf"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+
+def test_validate_blank_mmproj_counts_as_missing(crud_client: TestClient) -> None:
+    """A whitespace-only path is not a sidecar — the drawer trims before sending,
+    so the server must treat ``"  "`` exactly like ``null``."""
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"capabilities": ["vision"], "mmproj": "   "},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+
+
+def test_add_from_path_rejects_vision_label_without_mmproj(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """``POST /api/models/add-from-path`` derives capabilities from ``labels`` and
+    never writes an ``mmproj``, so a ``vision`` label there is always a
+    projector-less row — screened with the same envelope."""
+    fpath = crud_models_root / "vm-afp.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models/add-from-path",
+        json={"path": str(fpath), "id": "vm-afp", "labels": ["chat", "vision"]},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "model.vision_requires_mmproj"
+    assert crud_client.get("/api/models/vm-afp").status_code == 404
+
+
 # ── Deliverable 3: duplicate-model endpoint ────────────────────────────────────
 
 
