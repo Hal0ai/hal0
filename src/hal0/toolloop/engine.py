@@ -189,6 +189,103 @@ _FUNCTION_TAG_RE = re.compile(
 )
 _FENCED_JSON_RE = re.compile(r"```(?:json|tool_call)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 
+# ── attribute-style XML dialect (#1419) ────────────────────────────────────
+#
+# ``hal0-brain-sft-fpx8``'s chat template documents its contract as
+# ``<function name="X"><param name="K">V</param></function>``. llama.cpp's
+# ``--jinja`` tool-call parsers don't recognise that shape, so the server
+# returns NO ``tool_calls`` and the markup lands in ``message.content``.
+#
+# The tag openers are OPTIONAL in the token regex on purpose. llama.cpp's
+# partial-tool-call scanner consumes ``<function``/``<param`` before it gives
+# up, so what the live slot actually returned was the *mangled*
+# ``  name="get_weather"> name="city">Paris`` — matching only the well-formed
+# shape would leave the reported failure unfixed on the wire. Without a tag
+# anchor the ``known_names`` gate is the sole safeguard against prose, which
+# is exactly the safeguard this module is already built around: a token whose
+# name is not a surfaced tool never starts a call.
+_XML_ATTR_TOKEN_RE = re.compile(
+    r"(?:<\s*(function|param)\b[^>]*?\s+)?name\s*=\s*\"([^\"]+)\"\s*>", re.IGNORECASE
+)
+_XML_FUNCTION_CLOSE_RE = re.compile(r"</\s*function\s*>", re.IGNORECASE)
+_XML_PARAM_CLOSE_TAIL_RE = re.compile(r"</\s*param\s*>\s*$", re.IGNORECASE)
+_CDATA_RE = re.compile(r"\A<!\[CDATA\[(.*)\]\]>\Z", re.DOTALL)
+
+# The Gemma-4 agentic dialect (#1419 follow-up): pipes INSIDE both delimiters,
+# so it never matched ``_TEXT_TOOLCALL_RE``. Only a JSON argument body is
+# accepted — the template's bespoke ``key:<|"|>value<|"|>`` encoding is left
+# unparsed rather than synthesising a call with silently empty arguments.
+_GEMMA_TOOLCALL_RE = re.compile(
+    r"<\|tool_call>\s*call:\s*([A-Za-z0-9_.\-]+)\s*(\{.*?\})?\s*<tool_call\|>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _xml_param_value(raw: str) -> Any:
+    """Decode one ``<param>`` body: CDATA unwrapped, JSON containers parsed,
+    everything else kept verbatim as a string (the template calls the payload
+    a *param-value*, so ``"007"`` must not silently become ``7``)."""
+    value = _XML_PARAM_CLOSE_TAIL_RE.sub("", raw).strip()
+    cdata = _CDATA_RE.match(value)
+    if cdata:
+        return cdata.group(1)
+    if value[:1] in "{[":
+        try:
+            return json.loads(value)
+        except ValueError:
+            pass
+    return value
+
+
+def _xml_attr_tool_calls(
+    text: str, known_names: frozenset[str]
+) -> list[tuple[str, dict[str, Any], tuple[int, int]]]:
+    """Extract ``(name, arguments, span)`` for every attribute-XML call.
+
+    A token starts a call when it is an explicit ``<function ...>`` opener or
+    — in the mangled, tag-stripped form — when its name is a surfaced tool.
+    Every token between that and the next call opener is a parameter, and its
+    value runs to the following token, the ``</function>`` close, or the end
+    of the text, whichever comes first.
+    """
+    tokens = [
+        (m.start(), m.end(), (m.group(1) or "").lower(), m.group(2))
+        for m in _XML_ATTR_TOKEN_RE.finditer(text)
+    ]
+
+    def _starts_call(kind: str, name: str) -> bool:
+        if kind:
+            return kind == "function"
+        return name in known_names
+
+    out: list[tuple[str, dict[str, Any], tuple[int, int]]] = []
+    total = len(tokens)
+    i = 0
+    while i < total:
+        start, opener_end, kind, name = tokens[i]
+        if not _starts_call(kind, name):
+            i += 1
+            continue
+        nxt = i + 1
+        while nxt < total and not _starts_call(tokens[nxt][2], tokens[nxt][3]):
+            nxt += 1
+        next_call_at = tokens[nxt][0] if nxt < total else len(text)
+        close = _XML_FUNCTION_CLOSE_RE.search(text, opener_end)
+        if close is not None and close.start() <= next_call_at:
+            body_end, span_end = close.start(), close.end()
+        else:
+            body_end = span_end = next_call_at
+        args: dict[str, Any] = {}
+        for k in range(i + 1, nxt):
+            p_start, p_end, _p_kind, p_name = tokens[k]
+            if p_start >= body_end:
+                break
+            following = tokens[k + 1][0] if k + 1 < nxt else body_end
+            args[p_name] = _xml_param_value(text[p_end : min(following, body_end)])
+        out.append((name, args, (start, span_end)))
+        i = nxt
+    return out
+
 
 def _coerce_args(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
@@ -223,6 +320,14 @@ def parse_text_tool_calls(
 ) -> tuple[list[dict[str, Any]], str]:
     """Best-effort extraction of text-embedded tool calls.
 
+    Dialects recognised: ``<tool_call>{json}</tool_call>`` (Hermes/Qwen),
+    ``<function=NAME>{json}</function>``, a fenced ```` ```json ```` block, a
+    whole-content JSON object, the attribute-XML
+    ``<function name="X"><param name="K">V</param></function>`` shape that
+    ``hal0-brain-sft-fpx8`` emits — including llama.cpp's tag-stripped
+    mangling of it — and Gemma-4's ``<|tool_call>call:NAME{json}<tool_call|>``
+    (#1419).
+
     Returns ``(calls, cleaned_text)``. Only calls whose name is in
     ``known_names`` are accepted; matched spans are removed from the
     returned text so the raw tool syntax is never shown to the operator.
@@ -240,7 +345,8 @@ def parse_text_tool_calls(
             calls.append({"id": f"txt-{len(calls)}-{name}", "name": name, "arguments": args})
             spans.append(span)
 
-    # 1) <tool_call>...</tool_call> — JSON body or a nested <function=...> tag.
+    # 1) <tool_call>...</tool_call> — JSON body, a nested <function=...> tag,
+    #    or a nested attribute-XML <function name="..."> element.
     for m in _TEXT_TOOLCALL_RE.finditer(text):
         body = m.group(1).strip()
         fn = _FUNCTION_TAG_RE.search(body)
@@ -253,12 +359,39 @@ def parse_text_tool_calls(
             parsed = None
         if parsed:
             _accept(parsed[0], parsed[1], m.span())
+            continue
+        nested = _xml_attr_tool_calls(body, known_names)
+        if nested:
+            _accept(nested[0][0], nested[0][1], m.span())
 
     # 2) bare <function=NAME>{...}</function> outside a wrapper.
     for m in _FUNCTION_TAG_RE.finditer(text):
         if any(s <= m.start() < e for s, e in spans):
             continue
         _accept(m.group(1), _coerce_args(m.group(2) or "{}"), m.span())
+
+    # 2b) attribute-style XML — <function name="X"><param name="K">V</param>
+    #     </function>, plus llama.cpp's tag-stripped mangling of it (#1419).
+    for name, args, span in _xml_attr_tool_calls(text, known_names):
+        if any(s <= span[0] < e for s, e in spans):
+            continue
+        _accept(name, args, span)
+
+    # 2c) the Gemma-4 agentic dialect — <|tool_call>call:NAME{json}<tool_call|>.
+    for m in _GEMMA_TOOLCALL_RE.finditer(text):
+        if any(s <= m.start() < e for s, e in spans):
+            continue
+        raw_args = m.group(2)
+        if raw_args is not None:
+            try:
+                decoded = json.loads(raw_args)
+            except ValueError:
+                continue  # bespoke non-JSON body — don't invent empty arguments
+            if not isinstance(decoded, dict):
+                continue
+        else:
+            decoded = {}
+        _accept(m.group(1), decoded, m.span())
 
     # 3) fenced ```json {...}``` blocks.
     for m in _FENCED_JSON_RE.finditer(text):
