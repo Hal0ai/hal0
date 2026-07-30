@@ -72,7 +72,7 @@ Autonomous write::
     slot_load, slot_unload, slot_edit, slot_set_defaults,
     settings_reload,
     memory_add,
-    memory_delete (when len(ids) == 1)
+    memory_delete (single id, default/own-namespace dataset only)
 
 Gated (destructive — enqueued for owner approval)::
 
@@ -80,7 +80,7 @@ Gated (destructive — enqueued for owner approval)::
     model_store_set, model_store_migrate, model_update,
     slot_create, slot_delete, slot_restart, slot_rename,
     capability_set, config_write, provider_credential_write,
-    memory_delete (when len(ids) > 1),
+    memory_delete (bulk ids, OR a list/foreign-namespace dataset — #8),
     # Profile CRUD (create/update/import/delete)
     profile_create, profile_update, profile_import, profile_delete,
     # Stack CRUD (create/update/apply/import/export/snapshot/delete)
@@ -146,6 +146,7 @@ import structlog
 from hal0.api._redact import redact_log_line as _redact_log_line
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
+from hal0.memory.namespace import is_known_namespace
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
@@ -364,8 +365,10 @@ AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
         "settings_reload",
         # Memory
         "memory_add",
-        # memory_delete with len(ids) == 1 is autonomous; bulk goes
-        # gated. The dispatch helper applies that rule at call time.
+        # memory_delete with len(ids) == 1 AND a default/own-namespace
+        # dataset is autonomous; bulk ids or a list/foreign-namespace
+        # dataset gate. The dispatch helper applies that rule at call
+        # time (see is_gated, #8).
         "memory_delete",
     }
 )
@@ -427,7 +430,8 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "upstream_create",
         "upstream_update",
         "upstream_delete",
-        # memory_delete with len(ids) > 1 routes here at call time.
+        # memory_delete with len(ids) > 1, or a list/foreign-namespace
+        # dataset even for a single id, routes here at call time (#8).
     }
 )
 
@@ -1215,18 +1219,37 @@ class ToolPolicy:
 # ── Dispatch core ────────────────────────────────────────────────────────────
 
 
-def is_gated(tool: str, args: dict[str, Any]) -> bool:
+def is_gated(tool: str, args: dict[str, Any], *, client_id: str | None = None) -> bool:
     """Classify a tool invocation as gated (needs approval) or autonomous.
 
     ``memory_delete`` is the only tool whose gating depends on args —
     single-id deletes run autonomously, bulk deletes (>1 id) gate. Every
     other tool's classification is static.
+
+    Diagnosis #8 hardening: a single-id delete that also directs the
+    sweep at an explicit ``dataset`` used to run fully autonomously with
+    zero namespace validation — a caller could hand it a guessed/foreign
+    bank string and it would execute unattended. We now gate a single-id
+    delete too when its ``dataset`` is (a) a list (multi-bank sweep,
+    same blast radius as a bulk delete) or (b) a string naming a
+    namespace outside the spec §3 closed set / not the caller's own
+    (``is_known_namespace``). An absent/blank ``dataset`` (the common
+    case — default shared+own-private sweep) stays autonomous.
     """
     if tool in GATED_TOOLS:
         return True
     if tool == "memory_delete":
         ids = args.get("ids") or []
-        return len(ids) > 1
+        if len(ids) > 1:
+            return True
+        requested = args.get("dataset")
+        if requested is None or (isinstance(requested, str) and not requested.strip()):
+            return False
+        if isinstance(requested, list):
+            return True
+        if isinstance(requested, str):
+            return not is_known_namespace(requested, client_id=client_id)
+        return True
     return False
 
 
@@ -1259,7 +1282,7 @@ async def dispatch(
     if tool not in (AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS):
         return {"status": "error", "error": {"code": "mcp.unknown_tool", "tool": tool}}
 
-    gated = is_gated(tool, args)
+    gated = is_gated(tool, args, client_id=client_id)
     if policy is not None:
         verdict = policy.classify(tool, server_gated=gated)
         if verdict == "denied":

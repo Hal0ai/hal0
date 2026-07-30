@@ -606,20 +606,19 @@ export function useSlotConfig(name: string | null | undefined) {
 
 /**
  * Source segment that supplied the surviving value for a flag.
- * Known values: base | profile | extra_args, plus the newer assembler
- * segments (model_defaults | chat_template | mmproj | slot_overrides).
- * Kept open (`string`) — the badge renderer in slot-modals.jsx falls back
- * to a generic style for labels it doesn't recognise, so a new backend
- * segment never breaks the drawer.
+ * The labels the argv assembler emits today (providers/container.py):
+ * base | model_extra_args | slot_hardware | chat_template | mmproj.
+ * There is no 'profile' segment — profile flags are copy-on-stamp into the
+ * model tune. Kept open (`string`) — the badge renderer in slot-modals.jsx
+ * falls back to a generic style for labels it doesn't recognise, so a new
+ * backend segment never breaks the drawer.
  */
 export type ProvenanceSource =
   | 'base'
-  | 'profile'
-  | 'extra_args'
-  | 'model_defaults'
+  | 'model_extra_args'
+  | 'slot_hardware'
   | 'chat_template'
   | 'mmproj'
-  | 'slot_overrides'
   | (string & {})
 
 /** Per-flag provenance entry returned by GET /api/slots/{name}/resolved. */

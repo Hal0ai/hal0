@@ -111,6 +111,28 @@ function normTemplate(v) {
 	return v && v !== "auto" ? v : "";
 }
 
+// Backends a runner image can actually execute — RUNNER_IMAGES.supported_backends
+// (the §4 fit-check list), falling back to its single declared `backend` on an
+// older system-info payload. Empty = backend-agnostic, i.e. never a veto. ONE
+// helper so the Runner select's option filter and the fit-check warning right
+// below it can't disagree (rocmfpx serves rocm AND vulkan).
+function runnerBackends(runner) {
+	const sup = runner?.supported_backends;
+	if (Array.isArray(sup) && sup.length > 0) return sup;
+	return runner?.backend ? [runner.backend] : [];
+}
+
+// Slot types each runner family can serve — mirrors the backend's
+// profiles._supported_slot_types(runtime_family). An unknown/absent family
+// never vetoes (a new backend runtime shows up rather than vanishing).
+const FAMILY_SLOT_TYPES = {
+	"llama-server": ["llm", "embedding", "reranking"],
+	flm: ["llm", "embedding", "transcription"],
+	kokoro: ["tts"],
+	qwen3tts: ["tts"],
+	comfyui: ["image"],
+};
+
 function EditSlotDrawer({ open, slot, onClose }) {
 	// Hooks must execute every render — early `return null` would skip
 	// them; render the drawer shell with a sentinel slot instead.
@@ -378,6 +400,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		}
 	}, [slot?.name]);
 
+	// Bound model row, resolved BEFORE the `!slot` guard below: the effect
+	// that follows must run on every render, and anything after an early
+	// return does not (React counts hooks positionally).
+	const curModelId = slot?.model_id || slot?.model || "";
+	const curModelRow =
+		(modelsQuery.data ?? []).find((m) => m.id === curModelId) || null;
+	// ModelDrawer renders nothing for a null model and never calls onClose in
+	// that path, so a models refetch that drops the bound row would otherwise
+	// leave modelEditOpen stuck true (dead ✕/Esc, and a surprise re-stack when
+	// the row comes back). Clear the flag whenever the stacked editor has
+	// nothing to render — or when this drawer itself closes.
+	useEffectSM(() => {
+		if (!open || !curModelRow) setModelEditOpen(false);
+	}, [open, curModelRow]);
+
 	if (!slot) return null;
 
 	async function onSaveClick() {
@@ -438,12 +475,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			return;
 		}
 		setFieldErrs({});
-		// Task 5: normalized baseline-vs-desired comparison so BOTH directions
-		// persist — setting a real override AND clearing one (Clear override
-		// sets overrideOpen=false, desired ""). 'auto' counts as no override.
-		const templateBaseline = normTemplate(slot.chat_template);
+		// Task 5: baseline-vs-desired comparison so BOTH directions persist —
+		// setting a real override AND clearing one (Clear override sets
+		// overrideOpen=false, desired ""). Two comparisons, deliberately:
+		//   * raw → what the PUT carries, so a stale chat_template = "auto" is
+		//     cleaned off disk instead of lingering as an inert key;
+		//   * normalized → what needs a cold restart, since 'auto' and absent
+		//     produce the identical argv (no --chat-template flag).
 		const templateDesired = overrideOpen ? normTemplate(chatTemplate) : "";
-		const chatTemplateChanged = templateDesired !== templateBaseline;
+		const chatTemplateChanged = templateDesired !== (slot.chat_template ?? "");
+		const templateEffectiveChanged =
+			templateDesired !== normTemplate(slot.chat_template);
 		// Per-slot extra_args override — ship only when changed, nested under
 		// [server] so the backend one-level merge preserves sibling server keys.
 		const extraArgsChanged = extraArgs !== extraArgsBaseline;
@@ -514,10 +556,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			setSubmitErr(err?.message || "save failed");
 			return;
 		}
-		// Non-blocking apply: a hardware or chat_template change requires a cold
-		// restart that can take model-load seconds-to-minutes. Fire it in the
-		// BACKGROUND (do NOT await) and close the drawer immediately.
-		if (hwChanged || chatTemplateChanged) {
+		// Non-blocking apply: a hardware or effective chat_template change
+		// requires a cold restart that can take model-load seconds-to-minutes.
+		// Fire it in the BACKGROUND (do NOT await) and close the drawer
+		// immediately. A pure 'auto' → absent cleanup changes no argv, so it
+		// deliberately does NOT restart.
+		if (hwChanged || templateEffectiveChanged) {
 			restartMut.mutate(slot.name, {
 				onError: (err) =>
 					window.__hal0Toast &&
@@ -571,12 +615,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// drawer in a blocked "Saving…" state for the whole model-load.
 	const saving = editMut.isPending || defaultsMut.isPending;
 
-	// Bound model row — useModels rows are already normalized. Feeds the
-	// Template default, the profile "adopted from model" hint, and the
-	// stacked ModelDrawer.
-	const curModelId = slot.model_id || slot.model || "";
-	const curModelRow =
-		(modelsQuery.data ?? []).find((m) => m.id === curModelId) || null;
+	// (curModelId / curModelRow are resolved above the `!slot` guard, so the
+	// modelEditOpen effect can run on every render.)
 
 	// Device-class token for profile/runner fit filters — mirrors the
 	// backend derivation in profile_adopt (gpu-* → gpu; npu/cpu/img as-is).
@@ -672,7 +712,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// While the ModelDrawer is stacked on top, one Esc press fires BOTH
 		// drawers' document-level keydown listeners — swallow ours so only the
 		// top layer closes (and no spurious discard dialog pops underneath).
-		if (modelEditOpen) return;
+		// The guard mirrors what is ACTUALLY rendered (`modelEditOpen &&
+		// curModelRow`, below): ModelDrawer self-unmounts on a null model
+		// WITHOUT calling onClose, so gating on modelEditOpen alone would wedge
+		// this drawer shut for good the moment a models refetch drops the bound
+		// row (deleted/renamed elsewhere, short registry reload).
+		if (modelEditOpen && curModelRow) return;
 		if (dirty) {
 			setDiscardOpen(true);
 			return;
@@ -909,6 +954,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						const adoptedFromModel =
 							!!profileSel &&
 							profileSel === (curModelRow?.defaults?.profile || "");
+						// The options are filtered against the CURRENT device, but the
+						// device select sits below and can flip afterwards. Saving a
+						// profile+device pair with conflicting backends is a hard
+						// SlotConfigError (_reconcile_device_profile), so warn instead of
+						// silently PUTting the conflict.
+						const profileFitWarn =
+							profileSel && all.length > 0 && !fitNames.includes(profileSel)
+								? `Profile "${profileSel}" does not fit device "${device}" — saving both together is rejected. Pick a listed profile or revert the device.`
+								: null;
 						return (
 							<div className="form-row">
 								<div className="form-lbl">
@@ -943,6 +997,22 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											model may change it.
 										</div>
 									)}
+									{profileFitWarn && (
+										<div
+											className="hint"
+											data-testid="slot-profile-fit-warning"
+											style={{
+												marginTop: 6,
+												padding: "6px 10px",
+												borderRadius: "var(--rad-sm)",
+												color: "var(--warn)",
+												border: "1px solid var(--warn-line)",
+												background: "var(--warn-soft)",
+											}}
+										>
+											⚠ {profileFitWarn}
+										</div>
+									)}
 								</div>
 							</div>
 						);
@@ -958,32 +1028,32 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						const backends = systemInfoQuery.data?.backends ?? {};
 						const binaryKeys = Object.keys(backends);
 						const devBackend = deviceBackend(device);
-						// Runner options filtered by the backend runner_matches predicate
-						// (device_class exact + backend match when both declared) so a
-						// gpu llm slot is no longer offered flm/kokoro/comfyui. An
-						// out-of-vocab persisted value stays selectable below.
+						// Runner options filtered down to the ones that fit this slot:
+						// device_class exact (runner_matches), the family's slot types
+						// (_supported_slot_types — so a gpu llm slot is not offered
+						// qwen3tts/comfyui) and the SAME supported_backends list the
+						// fit-check below warns on. An out-of-vocab persisted value stays
+						// selectable underneath.
 						const fitBinaryKeys = binaryKeys.filter((k) => {
 							const r = backends[k] || {};
 							if (r.device_class && r.device_class !== deviceClass)
 								return false;
-							return !(r.backend && devBackend && r.backend !== devBackend);
+							const types = FAMILY_SLOT_TYPES[r.runtime_family];
+							if (types && slot.type && !types.includes(slot.type))
+								return false;
+							const sup = runnerBackends(r);
+							return !(sup.length > 0 && devBackend && !sup.includes(devBackend));
 						});
 						// Fit-check (§4): the selected device's backend must be in the chosen
 						// BINARY's supported_backends. WARN at assignment, never block. Only
 						// when a BINARY is explicitly picked (empty = HW-gated default).
 						const selRunner = binary ? backends[binary] : null;
-						const supported =
-							selRunner &&
-							Array.isArray(selRunner.supported_backends) &&
-							selRunner.supported_backends.length
-								? selRunner.supported_backends
-								: selRunner && selRunner.backend
-									? [selRunner.backend]
-									: null;
+						const supported = selRunner ? runnerBackends(selRunner) : null;
 						const fitWarn =
 							binary &&
 							devBackend &&
 							supported &&
+							supported.length > 0 &&
 							!supported.includes(devBackend)
 								? `Device backend "${devBackend}" is not in ${binary}'s supported backends (${supported.join(", ")}). The slot may fall back or fail at spawn.`
 								: null;
