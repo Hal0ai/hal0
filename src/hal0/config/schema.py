@@ -1523,6 +1523,17 @@ class UpstreamEntry(BaseModel):
         description="When false the upstream is skipped by routing and /v1/models.",
     )
     model_filters: UpstreamModelFilters | None = Field(default=None)
+    hal0_peer: bool | None = Field(
+        default=None,
+        description=(
+            "Is this upstream another hal0 whose internal dashboard API "
+            "(/api/stats/hardware, /api/slots/metrics) may be polled? "
+            "Unset (null) auto-derives from the URL host: private/loopback "
+            "hosts are treated as peers, public hosts never are, so "
+            "hal0-internal paths are never sent to a third-party provider "
+            "(issue #1425). Set true to opt a public-hostname hal0 peer in."
+        ),
+    )
 
     @field_validator("name")
     @classmethod

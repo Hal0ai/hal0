@@ -242,47 +242,59 @@ async def reprobe_hardware(request: Request) -> dict[str, Any]:
 async def _proxy_upstream_endpoint(
     request: Request, suffix: str, timeout_s: float = 3.0
 ) -> dict[str, dict[str, Any]]:
-    """Fan out ``suffix`` (e.g. ``/api/stats/hardware``) to every *remote*
+    """Fan out ``suffix`` (e.g. ``/api/stats/hardware``) to every hal0 **peer**
     upstream's base host and return ``{upstream_name: payload}``.
 
-    Upstream base URLs end in ``/v1`` by convention; we strip that to hit
-    the upstream's internal API surface (haloai exposes its dashboard
-    endpoints at the bare ``/api/...`` path on the same host:port).
-    Failures are recorded as ``None`` so callers can render "offline" tiles.
+    ``suffix`` is a hal0-internal API path, so the only upstream that can
+    answer it is another hal0 (the haloai-style fanout this feature exists
+    for). Eligibility is decided by :func:`hal0.upstreams.peers.is_hal0_peer`
+    and the URL by :func:`hal0.upstreams.peers.peer_api_url` — see that
+    module for the full rationale. Two classes of upstream are excluded:
 
-    Only ``kind == "remote"`` upstreams are proxied. ``kind == "slot"``
-    upstreams are local slots whose base URL points back at *this*
-    hal0-api host:port. Stripping ``/v1`` and appending ``suffix`` would
-    make the endpoint call itself — under the single-worker async server
-    this recurses until every request in the chain hits its timeout,
-    hanging ``/api/stats/hardware`` and ``/api/slots/metrics`` for tens of
-    seconds and returning an empty body. Slot upstreams have no separate
-    dashboard API anyway — the local probe + ``_local_slot_metrics``
-    already cover them — so we
-    skip them outright.
+      * **Third-party OpenAI-compatible providers** (openrouter.ai,
+        api.minimax.io, api.openai.com, …). They have no ``/api/...``
+        surface; asking them is guaranteed-404 traffic that leaks hal0's
+        internal path structure to a third party and burns provider rate
+        limit (issue #1425 measured ~20 such requests/minute).
+      * **``kind == "slot"`` upstreams**, whose base URL points back at
+        *this* hal0-api host:port. Proxying ``suffix`` to them is a
+        self-call that, under the single-worker async server, recurses
+        until every request in the chain hits its timeout — hanging
+        ``/api/stats/hardware`` and ``/api/slots/metrics`` for tens of
+        seconds and returning an empty body. Slot upstreams have no
+        separate dashboard API anyway; the local probe +
+        ``_local_slot_metrics`` already cover them.
+
+    Peers are probed **concurrently**: this runs inside the ``GET
+    /api/slots`` aggregation, where a serial walk made every unreachable
+    peer add a full ``timeout_s`` to the page (issue #1427). Failures are
+    recorded as ``None`` so callers can render "offline" tiles.
     """
     import httpx
 
-    upstreams = request.app.state.upstreams
+    from hal0.upstreams.peers import hal0_peer_upstreams, peer_api_url
+
+    peers = hal0_peer_upstreams(request.app.state.upstreams)
+    if not peers:
+        return {}
+
     out: dict[str, dict[str, Any]] = {}
     async with httpx.AsyncClient(timeout=timeout_s) as client:
-        for u in upstreams.list():
-            # Skip slot-kind upstreams — they resolve to this same
-            # hal0-api host:port; proxying ``suffix`` to them is a
-            # self-call that deadlocks the worker (see docstring).
-            if getattr(u, "kind", "remote") == "slot":
-                continue
-            base = u.url.rstrip("/")
-            if base.endswith("/v1"):
-                base = base[: -len("/v1")]
+
+        async def _one(u: Any) -> tuple[str, Any]:
             try:
-                resp = await client.get(base + suffix)
-                if resp.status_code == 200:
-                    out[u.name] = resp.json()
-                else:
-                    out[u.name] = None  # type: ignore[assignment]
+                resp = await client.get(peer_api_url(u.url, suffix))
+                return u.name, resp.json() if resp.status_code == 200 else None
             except Exception:
-                out[u.name] = None  # type: ignore[assignment]
+                return u.name, None
+
+        for item in await asyncio.gather(
+            *(_one(u) for u in peers), return_exceptions=True
+        ):
+            if isinstance(item, BaseException):
+                continue
+            name, payload = item
+            out[name] = payload
     return out
 
 

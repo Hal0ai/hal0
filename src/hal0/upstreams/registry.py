@@ -150,6 +150,16 @@ class Upstream:
     model_filters: ModelFilters | None = None
     """Optional /v1/models advertising filters.  Dispatch is unfiltered."""
 
+    hal0_peer: bool | None = None
+    """Is this upstream another hal0 (issue #1425)?
+
+    ``True``/``False`` are an explicit operator declaration; ``None`` (the
+    default) auto-derives from the URL host — see
+    :func:`hal0.upstreams.peers.is_hal0_peer`. Only peers are asked for
+    hal0-internal API paths; a third-party OpenAI-compatible provider never
+    is.
+    """
+
 
 # ── Config-layer ↔ runtime conversion ─────────────────────────────────────────
 
@@ -211,6 +221,7 @@ def upstream_from_entry(entry: UpstreamEntry) -> Upstream:
         advertise_models=entry.advertise_models,
         enabled=entry.enabled,
         model_filters=_filters_to_runtime(entry.model_filters),
+        hal0_peer=entry.hal0_peer,
     )
 
 
