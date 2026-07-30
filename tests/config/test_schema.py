@@ -41,12 +41,21 @@ class TestBrainChatConfig:
         # [brain_chat] read_only=false opt-in.
         assert bc.read_only is True
         assert bc.model == ""
-        assert bc.tool_model == "hal0/agent"
         assert bc.max_rounds == 8
         assert bc.completion_timeout_s == 300.0
 
     def test_present_on_hal0config_by_default(self) -> None:
         assert Hal0Config().brain_chat == BrainChatConfig()
+
+    def test_tool_model_field_is_gone(self) -> None:
+        """#1453: ``tool_model`` was never read anywhere — dropped, not wired.
+
+        ``BrainChatConfig`` is ``extra="forbid"``, so a stray ``tool_model``
+        key must now be rejected rather than silently accepted and ignored.
+        """
+        assert "tool_model" not in BrainChatConfig.model_fields
+        with pytest.raises(ValidationError):
+            BrainChatConfig(tool_model="hal0/agent")
 
     def test_model_override_round_trips(self) -> None:
         cfg = Hal0Config(**tomllib.loads('[brain_chat]\nmodel = "hal0/npu"\n'))
