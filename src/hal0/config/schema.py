@@ -998,7 +998,7 @@ def resolve_default_image(backend: str | None, device_class: str | None = None) 
 
 
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
-#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 20 seed
+#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 16 seed
 #: entries (with their per-profile rationale comments) and
 #: ``hal0.config.seeds.seed_profiles()`` for the loader. ``SEED_PROFILES``
 #: is (re)assigned at the bottom of this module, once every model above
