@@ -100,12 +100,41 @@ def test_resolve_id(tmp_path: Path) -> None:
 def test_list_all_and_by_type(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.create(name="llm1", slot_type="llm")
-    store.create(name="llm2", slot_type="llm", enabled=False)
+    store.create(name="llm2", slot_type="llm")
     store.create(name="emb", slot_type="embedding")
 
     assert [r.name for r in store.list_all()] == ["llm1", "llm2", "emb"]
-    assert [r.name for r in store.list_by_type("llm")] == ["llm1"]  # enabled only
-    assert [r.name for r in store.list_by_type("llm", enabled_only=False)] == ["llm1", "llm2"]
+    assert [r.name for r in store.list_by_type("llm")] == ["llm1", "llm2"]
+
+
+# ── GH #1383: the vestigial ``enabled`` column surface is gone ──────────────
+# model-presence (not a per-slot ``enabled`` flag) is the activation signal
+# since #1369; the SQLite ``slot.enabled`` column may stay on disk (additive
+# schema — no destructive migration), but no code reads or writes it.
+
+
+def test_slot_row_has_no_enabled_field(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    row = store.create(name="a", slot_type="llm")
+    assert not hasattr(row, "enabled")
+
+
+def test_create_rejects_enabled_kwarg(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with pytest.raises(TypeError):
+        store.create(name="a", slot_type="llm", enabled=False)  # type: ignore[call-arg]
+
+
+def test_list_by_type_rejects_enabled_only_kwarg(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.create(name="a", slot_type="llm")
+    with pytest.raises(TypeError):
+        store.list_by_type("llm", enabled_only=False)  # type: ignore[call-arg]
+
+
+def test_set_enabled_is_gone(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    assert not hasattr(store, "set_enabled")
 
 
 def test_seed_ids(tmp_path: Path) -> None:
