@@ -2741,15 +2741,24 @@ class BrainChatConfig(BaseModel):
     # the steward system prompt alone is ~7.3k tokens — and must actually be
     # LOADED, or the chat 404s (see BrainChatConfig docstring above).
     model: str = ""
-    # Route tool-calling turns to a capable, tool-format-compatible model. The
-    # steward always offers tools, so when set this is the model its tool loop
-    # runs on — the escape hatch for boxes whose ``model`` (e.g. a small 1B
-    # brain slot) can't emit tool calls the local runtime parses natively (it
-    # leaks/500s). Point it at a model that tool-calls cleanly on this runtime
-    # (a capable local slot like ``hal0/agent``, or the fallback provider).
-    # Default "hal0/agent" per spec-p3-brain.final.md §5a + ADR-0023
-    # (always-on anchor every fallback chain ends in). An explicit per-request
-    # ``model`` wins over it.
+    # Route tool-calling ROUNDS to a capable, tool-format-compatible model —
+    # the escape hatch for boxes whose ``model`` (the shipped ~1.1B brain slot)
+    # can't emit tool calls the local runtime parses natively (it leaks/500s).
+    # Point it at a model that tool-calls cleanly on this runtime (a capable
+    # local slot like ``hal0/agent``, or the fallback provider). Default
+    # "hal0/agent" per spec-p3-brain.final.md §5a + ADR-0023 (always-on anchor
+    # every fallback chain ends in), resolved through the normal virtual-model
+    # chain (:mod:`hal0.normalize.resolver`).
+    #
+    # PER ROUND, NOT PER CONVERSATION. Plain-chat rounds stay on ``model`` —
+    # that is the whole point of a fast 1B steward — and only a round that
+    # needs a tool reroutes here; once a turn is in a tool chain the tool model
+    # finishes it (it, not the 1B, reads the ``role: tool`` payloads). An
+    # explicit per-request ``model`` sets the CHAT model and does NOT suppress
+    # the reroute: the dashboard sends one on every message, so treating it as
+    # a whole-turn pin would disable this feature in the only UI that uses it.
+    # Implementation + measured failure modes: :func:`hal0.brain.chat
+    # ._tool_routing_llm`.
     #
     # EMPTY STRING IS NOT "DISABLED" — see _normalise_tool_model below. A live
     # box was found with `[brain_chat] tool_model = ""`, which silently

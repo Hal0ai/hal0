@@ -61,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -1102,6 +1103,261 @@ def _unrouteable_model_error(tried_model: str) -> str:
     )
 
 
+# ── tool-round rerouting (ADR-0023 / spec-p3-brain.final.md §5a) ────────────
+#
+# WHY THIS EXISTS. The shipped brain model is a ~1.1B SFT that CANNOT emit tool
+# calls the local runtime parses. Measured on a GPU box against the published
+# `hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf` in the pinned ROCmFPX runner:
+#
+#   * WITH `--jinja` + native OpenAI `tools`: HTTP 200, `finish_reason: stop`,
+#     `tool_calls: null`, and `content` came back as the literal string
+#     ' name="slot_list">'. The model emitted `<function name="slot_list">`;
+#     llama.cpp's jinja tool parser ate the `<function` prefix as a tool-call
+#     start marker, failed to parse the rest, and dumped the REMNANT into
+#     content. That remnant is signal (a) below.
+#   * WITHOUT `--jinja`, using the `hal0-function-xml` contract in the system
+#     prompt: `content` came back EMPTY with `reasoning_content` ending
+#     "I'll call the slot_list() function to retrieve the information." — it
+#     stated intent and stopped. That is signal (b) below.
+#
+# So the 1B genuinely cannot drive tools on this runtime. `[brain_chat]
+# tool_model` (default "hal0/agent") is the documented mitigation, and this is
+# its implementation.
+#
+# ROUTING SEMANTICS — per ROUND, not per conversation.
+#
+#   The brain's own 1B is the steward's VOICE. Keeping plain chat on it is the
+#   entire point of running a 1B, so every turn starts there and a turn that
+#   never needs a tool never touches `tool_model` at all — no extra latency, no
+#   35B wake-up for "hi".
+#
+#   A round becomes a TOOL round in exactly two ways:
+#     1. the brain produced a usable tool call (native `tool_calls`, or a
+#        text-embedded one the shared fallback parses). Nothing is re-run —
+#        that call is dispatched as-is;
+#     2. the brain produced a tool-call ARTEFACT it could not express
+#        (:func:`_tool_intent_artefact`). Its output is DISCARDED and the round
+#        is re-run against `tool_model`, whose reply is what reaches the user.
+#        The user must never see ' name="slot_list">'.
+#
+#   Once a turn has entered a tool chain by either route, every SUBSEQUENT
+#   round of that turn runs on `tool_model` — the tool-capable model continues;
+#   the 1B does NOT summarise tool results back. Four reasons, in order:
+#     * the `role: tool` payloads are raw JSON from an 82-tool admin catalogue.
+#       Reading them is precisely the reasoning the 1B already failed at;
+#     * a chain usually needs a SECOND call (read the slot, then load it).
+#       Handing back to the 1B mid-chain breaks it at the first continuation;
+#     * OpenAI wire semantics: the assistant message carrying `tool_calls` and
+#       its matching `role: tool` replies belong to ONE assistant turn-owner.
+#       Swapping models mid-chain produces shapes strict chat templates reject
+#       (the qwen3.5 `multi_step_tool` guard already bit this module — see
+#       `_frame_messages` / O18);
+#     * consistency: one model owns a tool chain end to end.
+#
+#   The chain is scoped to ONE turn. The next user message re-enters
+#   `_chat_stream` with fresh state and lands back on the 1B, so the steward's
+#   voice returns as soon as the tool work is done. State is tracked LOCALLY
+#   per turn and deliberately NOT inferred from the inbound `messages` — the
+#   dashboard replays prior `role: tool` turns as history (ui/src/api/hooks/
+#   useBoard.ts), so scanning them would pin every later turn to `tool_model`.
+#
+# NOTE ON `model` PRECEDENCE. An explicit per-request `model` sets the turn's
+# CHAT model; it does NOT suppress the reroute. It cannot: the dashboard sends
+# `model: "hal0/brain"` on EVERY send (useBoard.ts BOARD_CHAT_MODEL), so
+# treating a per-request model as "pin the whole turn" would make this feature
+# dead in the only UI that uses it.
+#
+# NOTE ON THE ENGINE. None of this touches `hal0.toolloop.engine`. The engine
+# owns `body` and mutates it in place between rounds; the per-round model hook
+# is just this wrapper writing `body["model"]` before delegating. OmniRouter's
+# use of `run_tool_loop` is therefore untouched by construction.
+
+#: The remnant llama.cpp's jinja tool parser leaves in `content` when it eats a
+#: `<function name="X">` opener it then fails to parse: `name="X"`.
+_ARTEFACT_NAME_RE = re.compile(r"""name\s*=\s*["']?\s*([A-Za-z0-9_.\-]+)""")
+
+#: An unterminated `<function=X` opener — the terminated form is already handled
+#: by the shared text-call fallback (`parse_text_tool_calls`).
+_ARTEFACT_FN_RE = re.compile(r"<\s*function\s*=\s*([A-Za-z0-9_.\-]+)")
+
+#: A stated call in prose: `slot_list(` / `slot_list()`. Requiring the paren
+#: form (and a known tool name) is what keeps ordinary prose from misfiring.
+_CALL_FORM_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_.\-]*)\s*\(")
+
+
+def _tool_intent_artefact(response: dict[str, Any], known_tool_names: frozenset[str]) -> str | None:
+    """The tool the brain *tried* to call but could not express, or ``None``.
+
+    Called ONLY after both the native and the text-embedded extractors came up
+    empty — this is the "the model wanted a tool and produced garbage instead"
+    detector, not a third parser. Returns the tool name so it can be logged.
+
+    Two signals, both requiring the name to be a tool actually surfaced this
+    turn (``known_tool_names``), which is what makes a false positive
+    essentially impossible — an unknown identifier is never a reroute trigger:
+
+    (a) a mangled call tag in the VISIBLE text — ``name="slot_list"`` or a bare
+        ``<function=slot_list``. No steward reply contains tag syntax naming one
+        of its own tools; this only ever appears when the tool parser chewed on
+        the completion.
+
+    (b) a stated call in the reasoning with NOTHING to show for it — the
+        no-``--jinja`` shape, where ``content`` is empty and
+        ``reasoning_content`` says "I'll call the slot_list() function". Gated
+        on the visible text being empty: a real reply is never empty, so this
+        can only fire on a turn that already produced nothing usable.
+    """
+    if not known_tool_names:
+        return None
+
+    inline_thinking, visible = _split_thinking(_assistant_text(response))
+
+    # (a) a mangled call tag in the visible text.
+    for pattern in (_ARTEFACT_NAME_RE, _ARTEFACT_FN_RE):
+        for m in pattern.finditer(visible):
+            if m.group(1) in known_tool_names:
+                return m.group(1)
+
+    # (b) stated intent, nothing to show for it. A non-empty reply is a reply.
+    if visible.strip():
+        return None
+    reasoning = "\n".join(t for t in (_assistant_thinking(response), inline_thinking) if t)
+    for m in _CALL_FORM_RE.finditer(reasoning):
+        if m.group(1) in known_tool_names:
+            return m.group(1)
+    return None
+
+
+def _tool_reroute_unavailable_message(tool_model: str, error: str) -> str:
+    """What the steward SAYS when the reroute target has no model behind it.
+
+    The single most likely real-world path, not an error branch: per the v1.0
+    ruling the agent anchor is an opt-in that DEFAULTS TO SKIP at install time,
+    so on a fresh box ``hal0/agent`` has no model bound and this fires on the
+    operator's first "list my slots". It must read as the steward explaining a
+    gap it can see, with the exact fix — never a stack trace, never a raw
+    dispatch envelope, and above all never an empty reply.
+    """
+    slot = tool_model.split("/", 1)[1] if tool_model.startswith("hal0/") else tool_model
+    return (
+        "I can't run tools right now. I answer chat on the brain model, but it can't "
+        f"emit tool calls on this runtime, so tool turns route to {tool_model!r} — and "
+        "that has no model behind it yet.\n\n"
+        f"To fix it: open the Models page, pull a tool-capable model, bind it to the "
+        f"`{slot}` slot, and load the slot. Alternatively point `[brain_chat] tool_model` "
+        'in hal0.toml at a slot that IS loaded, or set it to "off" if you\'d rather I '
+        "never offer tools.\n\n"
+        f"Plain chat keeps working meanwhile. (Underlying error: {error})"
+    )
+
+
+def _synthetic_reply(text: str) -> dict[str, Any]:
+    """An OpenAI-shaped completion carrying ``text`` as the assistant reply.
+
+    Used to turn a failed reroute into a normal, terminating steward turn: the
+    loop core sees an assistant message with no ``tool_calls``, emits one
+    ``token`` frame and ``done``. No crash, no 500, no empty message.
+    """
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]
+    }
+
+
+def _tool_routing_llm(
+    llm: LlmFn,
+    *,
+    chat_model: str,
+    tool_model: str,
+    known_tool_names: frozenset[str],
+) -> LlmFn:
+    """Wrap ``llm`` so TOOL rounds run on ``tool_model`` and chat stays on the brain.
+
+    The per-round model hook, implemented entirely on this side of the seam:
+    ``body`` is the engine-owned request dict, so setting ``body["model"]``
+    before delegating is all a "route this round elsewhere" hook needs. The
+    shared :func:`hal0.toolloop.engine.run_tool_loop` — and therefore
+    OmniRouter — is not modified.
+
+    An empty ``tool_model`` (the explicit ``"off"``/``"none"``/``"disabled"``
+    spellings, normalised by :meth:`BrainChatConfig._normalise_tool_model`) or a
+    ``tool_model`` equal to the chat model returns ``llm`` behaviourally
+    unchanged: exactly the pre-reroute code path, one call per round.
+
+    See the module comment above this function for the full routing semantics
+    and why the tool-capable model — not the 1B — finishes a tool chain.
+    """
+    # Nothing to reroute TO, or nowhere to reroute FROM. Note this branch is
+    # also what "no reroute" costs: a plain pass-through, not a wrapper that
+    # inspects every response.
+    if not tool_model or tool_model == chat_model:
+
+        async def _plain(body: dict[str, Any]) -> dict[str, Any]:
+            body["model"] = chat_model
+            return await llm(body)
+
+        return _plain
+
+    # Per-TURN, not per-round: once this turn is in a tool chain it stays on
+    # tool_model for the rest of the turn. A new turn builds a new wrapper.
+    in_tool_chain = False
+
+    async def _degrade(response: dict[str, Any]) -> dict[str, Any]:
+        """A tool-model round that failed becomes an honest steward sentence."""
+        if isinstance(response, dict) and response.get("error"):
+            log.warning(
+                "hal0.brain_chat.tool_model_unavailable",
+                tool_model=tool_model,
+                error=str(response["error"]),
+            )
+            return _synthetic_reply(
+                _tool_reroute_unavailable_message(tool_model, str(response["error"]))
+            )
+        return response
+
+    async def _routed(body: dict[str, Any]) -> dict[str, Any]:
+        nonlocal in_tool_chain
+
+        if in_tool_chain:
+            body["model"] = tool_model
+            return await _degrade(await llm(body))
+
+        body["model"] = chat_model
+        response = await llm(body)
+        if not isinstance(response, dict) or response.get("error"):
+            # A BRAIN-side failure keeps its documented contract exactly — the
+            # loop core turns it into the error+done frames tests already pin.
+            return response
+
+        # Usable call? Dispatch it as-is and hand the CONTINUATION to the tool
+        # model. Re-running a round the brain got right would only burn a
+        # second completion for the same answer.
+        calls = _extract_tool_calls(response)
+        if not calls:
+            calls, _cleaned = _parse_text_tool_calls(_assistant_text(response), known_tool_names)
+        if calls:
+            in_tool_chain = True
+            return response
+
+        wanted = _tool_intent_artefact(response, known_tool_names)
+        if wanted is None:
+            return response  # plain chat — the steward's own reply stands.
+
+        # The brain tried and produced garbage. Discard it and re-run THIS
+        # round on the tool-capable model. This is one extra completion inside
+        # one engine round, so `[brain_chat] max_rounds` still bounds the turn.
+        log.info(
+            "hal0.brain_chat.tool_round_rerouted",
+            tool=wanted,
+            chat_model=chat_model,
+            tool_model=tool_model,
+        )
+        in_tool_chain = True
+        body["model"] = tool_model
+        return await _degrade(await llm(body))
+
+    return _routed
+
+
 # ── SSE framing helpers ─────────────────────────────────────────────────────
 
 
@@ -1245,12 +1501,30 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     messages = _frame_messages(payload, system_prompt)
 
     tools = _surfaced_tool_schemas(request)
-    # Model precedence: an explicit per-request model wins; then the
-    # [brain_chat] model override (e.g. hal0/npu); then the persona's
-    # preferred_model / default. Tool turns are NOT rerouted to a second
-    # model — the steward's own model handles them internally, on whatever
-    # it resolves to here.
+    known_tool_names = _surfaced_tool_names(request)
+
+    # CHAT model precedence: an explicit per-request model wins, then the
+    # [brain_chat] model override (e.g. hal0/npu), then the persona's
+    # preferred_model / BRAIN_SLOT_MODEL. This is the model the steward SPEAKS
+    # with, and it is what every plain-chat round runs on.
     model = payload.get("model") or cfg.model or default_model
+
+    # TOOL model: the round that needs a tool reroutes here, because the ~1.1B
+    # brain cannot emit tool calls this runtime parses. Default "hal0/agent"
+    # (ADR-0023's always-on anchor, resolved through the normal virtual-model
+    # chain in hal0.normalize.resolver — no slot lookup is hardcoded here).
+    # Already normalised by BrainChatConfig: "" / whitespace fell back to the
+    # default with a warning, and "off"/"none"/"disabled" arrive here as "",
+    # which _tool_routing_llm treats as no reroute. See the routing-semantics
+    # comment above _tool_intent_artefact.
+    tool_model = (cfg.tool_model or "").strip()
+    llm = _tool_routing_llm(
+        llm,
+        chat_model=model,
+        tool_model=tool_model,
+        known_tool_names=known_tool_names,
+    )
+
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -1279,7 +1553,7 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
             dispatch_fn,
             body=body,
             max_rounds=cfg.max_rounds,
-            known_tool_names=_surfaced_tool_names(request),
+            known_tool_names=known_tool_names,
         ):
             if event.get("type") == "response":
                 continue  # internal marker — never part of the documented SSE contract
@@ -1435,7 +1709,12 @@ __all__ = [
     "_resolve_read_tool",
     "_resolve_tool",
     "_split_thinking",
+    "_surfaced_tool_names",
     "_surfaced_tool_schemas",
+    "_synthetic_reply",
+    "_tool_intent_artefact",
+    "_tool_reroute_unavailable_message",
+    "_tool_routing_llm",
     "_tool_schemas",
     "_unrouteable_model_error",
     "run_board_chat",
