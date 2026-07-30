@@ -206,7 +206,20 @@ def _slot_flag_tokens(slot_cfg: Mapping[str, Any]) -> tuple[list[str], int | Non
     slot_overrides segment). ``extra_tokens`` carries the freeform args plus the
     parallel expansion; ``ngl``/``ctx`` are the typed slot overrides.
     """
+    # `server` may sit top-level (a hand-built dict, as the unit tests use) OR
+    # under `extra["server"]`. The live path hits the second case: SlotConfig's
+    # `_tuck_server_into_extra` model_serializer re-parks the sub-table under
+    # `extra` for TOML round-trip, and `collect_inputs` feeds us exactly that
+    # `model_dump(by_alias=True)`. Reading only the top level silently dropped
+    # every slot's freeform extra_args from the fold — the single value this
+    # migrator exists to preserve — and, because two divergent slots then
+    # folded to an identical tune, it also defeated the divergent-share
+    # refusal. Check both shapes.
     server = slot_cfg.get("server")
+    if not isinstance(server, Mapping):
+        extra_tbl = slot_cfg.get("extra")
+        extra_tbl = extra_tbl if isinstance(extra_tbl, Mapping) else {}
+        server = extra_tbl.get("server")
     server = server if isinstance(server, Mapping) else {}
     extra_args = server.get("extra_args")
     extra_tokens = shlex.split(str(extra_args)) if extra_args and str(extra_args).strip() else []
