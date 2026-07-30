@@ -1,4 +1,4 @@
-// DATA ▸ Storage — model storage path + auto-scan (spec (b) DATA▸Honcho/
+// DATA ▸ Storage — model storage path + auto-scan (spec (b) DATA▸
 // Storage/Offline: models_dir/disk = E+migrate). Extracted verbatim from
 // settings.jsx StorageSection (P3-ui split phase 1). The `id` stays
 // "storage" (unchanged) so #settings/storage deep links keep working.
