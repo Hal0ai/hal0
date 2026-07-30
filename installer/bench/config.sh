@@ -143,11 +143,18 @@ fi
 # GPU label stamped into every result's .meta.json. Probed, so a run on the
 # NVIDIA or CPU tier is never mislabelled as the Strix Halo iGPU (which would
 # silently corrupt the published per-tier baselines).
+#
+# The TIER is checked before the probe label, not after. `hardware.json`
+# describes the BOX, not the run: the normal way the v1.0 CPU baseline gets
+# measured is `HAL0_BENCH_TIER=cpu` on a machine that does have a GPU, and the
+# resolver correctly still reports that GPU's name. Taking the label first
+# would file those CPU numbers under "AMD Radeon 8060S Graphics" — exactly the
+# per-tier corruption this block exists to prevent.
 if [[ -z "${GPU_LABEL:-}" ]]; then
-  if [[ -n "$_BENCH_GPU_LABEL" ]]; then
-    GPU_LABEL="$_BENCH_GPU_LABEL"
-  elif [[ "$BENCH_TIER" == "cpu" ]]; then
+  if [[ "$BENCH_TIER" == "cpu" ]]; then
     GPU_LABEL="CPU (no GPU passthrough)"
+  elif [[ -n "$_BENCH_GPU_LABEL" ]]; then
+    GPU_LABEL="$_BENCH_GPU_LABEL"
   else
     GPU_LABEL="unknown GPU"
   fi
@@ -177,12 +184,39 @@ COMMON_RUN_FLAGS=(
 # stale /usr/local/bin/llama-bench, which LD_LIBRARY_PATH pointed at the
 # new libs — an ABI mismatch that segfaulted ~2/3 of launches. c077206
 # removes the stale install; the /opt path works on every image vintage.)
+#
+# The `cpu` lane is the fourth v1.0 hardware tier (PLAN "Path to v1.0" →
+# Performance: Strix Halo iGPU / AMD dGPU / NVIDIA dGPU / CPU). It runs the
+# LEAN toolbox, not rocmfpx — the same carve-out the production CPU slot
+# makes: hal0.runners.RUNNER_IMAGES["cpu"] resolves to
+# hal0.config.schema.FALLBACK_VULKAN_IMAGE because "the 7.5 GB ROCm-based
+# rocmfpx image is pointless for CPU-only inference", and a CPU-tier box is
+# by definition one that would have to pull it for nothing. Keep this ref in
+# sync with FALLBACK_VULKAN_IMAGE the same way the GPU lanes track
+# DEFAULT_ROCMFPX_IMAGE. That image is the base toolbox, so llama-bench is at
+# the base toolbox path /usr/local/bin/llama-bench (see the ABI note above),
+# not under /opt/rocmfpx.
+#
+# The CPU lane needs no `-dev` pin: on the CPU tier the resolver emits no
+# device flags at all, so the container is handed neither /dev/kfd nor a
+# /dev/dri node and there is physically no backend device to select.
 declare -A BACKENDS=(
-  [rocm]="ghcr.io/hal0ai/hal0-rocmfpx:c077206|/opt/rocmfpx/bin/llama-bench|2048|GGML_HIP_ENABLE_UNIFIED_MEMORY=1|-dev ROCm0"
-  [vulkan_radv]="ghcr.io/hal0ai/hal0-rocmfpx:c077206|/opt/rocmfpx/bin/llama-bench|512||-dev Vulkan0"
+  [rocm]="ghcr.io/hal0ai/hal0-rocmfpx:c077206|/opt/rocmfpx/bin/llama-bench|2048|GGML_HIP_ENABLE_UNIFIED_MEMORY=1|-ngl 99 -dev ROCm0"
+  [vulkan_radv]="ghcr.io/hal0ai/hal0-rocmfpx:c077206|/opt/rocmfpx/bin/llama-bench|512||-ngl 99 -dev Vulkan0"
+  [cpu]="ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server|/usr/local/bin/llama-bench|512||-ngl 0"
 )
-# Order backends are swept in.
-BACKEND_ORDER=(rocm vulkan_radv)
+
+# Order backends are swept in when --backends is not given. TIER-SCOPED, so
+# the default sweep matches the hardware it is running on: the GPU lanes are
+# unrunnable on a CPU-only box (no device to bind, no numbers worth
+# publishing), and conversely a `cpu` cell on the Strix box would add hours of
+# CPU-speed 27B/ctx65k work to every routine GPU sweep. An explicit
+# `--backends cpu` (or `--backends rocm,cpu`) always wins over this default.
+if [[ "$BENCH_TIER" == "cpu" ]]; then
+  BACKEND_ORDER=(cpu)
+else
+  BACKEND_ORDER=(rocm vulkan_radv)
+fi
 
 # --- Context configurations -------------------------------------------------
 # key -> "extra llama-bench args (%UB% = per-backend ubatch) | repetitions"
@@ -195,10 +229,16 @@ declare -A CTX_CONFIGS=(
 CTX_ORDER=(default ctx32k ctx65k)
 
 # --- Common llama-bench args (applied to every cell) ------------------------
-#  -ngl 99  : offload all layers to GPU
 #  -fa 1    : flash attention on
 #  -mmp 0   : no mmap (matches production serving + kyuz0 harness)
-COMMON_BENCH_ARGS=(-ngl 99 -fa 1 -mmp 0)
+#
+# `-ngl` is deliberately NOT here. Layer placement is a per-lane fact, so it
+# lives in each backend's dev_args next to `-dev` (99 on the GPU lanes, 0 on
+# `cpu`). It cannot be both: llama-bench APPENDS repeated `-ngl` values into a
+# sweep dimension rather than overriding, so a common `-ngl 99` plus a
+# lane-local `-ngl 0` would run BOTH and stamp every CPU cell with a phantom
+# n_gpu_layers=99 row.
+COMMON_BENCH_ARGS=(-fa 1 -mmp 0)
 
 # --- Default curated model set (paths relative to MODEL_DIR) ----------------
 # Deliberately small (one per size class) so a default run is quick. Use
