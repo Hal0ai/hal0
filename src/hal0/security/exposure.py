@@ -379,8 +379,28 @@ DESTRUCTIVE_MEMORY_ROUTES: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
+#: The subset of :data:`DESTRUCTIVE_MEMORY_ROUTES` whose blast radius is a
+#: whole bank, and which therefore must carry the #1024 echoed-``?confirm=``
+#: gate + dry-run preview rather than riding the generic passthrough table.
+#:
+#: Classification is not a guard (#1457). ``DELETE
+#: /api/memory/banks/{bank_id}/memories`` was already pinned ADMIN above and
+#: was still a one-call, no-friction wipe of every memory unit in the bank,
+#: because in the default posture (``auth_required=false``) an ADMIN
+#: classification decides nothing. This constant states the *behavioural*
+#: requirement, and ``tests/security/test_memory_bank_wipe_guard.py`` drives
+#: every entry against the live app — so a bank-scoped delete cannot be added
+#: to ``memory_admin._FORWARDS`` and inherit the passthrough by default.
+CONFIRM_GUARDED_MEMORY_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("DELETE", "/api/memory/banks/{bank_id}"),
+        ("DELETE", "/api/memory/banks/{bank_id}/memories"),
+    }
+)
+
 
 __all__ = [
+    "CONFIRM_GUARDED_MEMORY_ROUTES",
     "DESTRUCTIVE_MEMORY_ROUTES",
     "OPEN_ALLOWLIST",
     "RULES",
