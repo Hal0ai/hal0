@@ -127,6 +127,36 @@ def test_update_profile_rejects_slot_hardware_flag(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
 
 
+def test_create_profile_rejects_managed_flag(client: TestClient) -> None:
+    """§21.7: -c/--ctx-size (like --port/--model/--host/--alias) is hal0-managed
+    — a profile that persists it only explodes later when stamped onto a model.
+    The create hard-rejects with slot.managed_arg_denied and persists nothing."""
+    r = client.post(
+        "/api/profiles",
+        json={
+            "name": "ctx-profile",
+            "flags": "-fa on -c 131072",
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+    listed = client.get("/api/profiles").json()
+    assert not any(p["name"] == "ctx-profile" for p in listed)
+
+
+def test_update_profile_rejects_managed_flag(client: TestClient) -> None:
+    """PUT screens the managed denylist too — a clean profile edited to carry
+    --port is rejected."""
+    created = client.post(
+        "/api/profiles",
+        json={"name": "edit-ctx", "flags": "-fa on"},
+    )
+    assert created.status_code == 201, created.text
+    r = client.put("/api/profiles/edit-ctx", json={"flags": "-b 2048 --port 9999"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+
+
 def test_create_profile_accepts_device_agnostic_tune(client: TestClient) -> None:
     """A real tune template (batch/flash-attn/KV-quant, no hardware) is accepted."""
     r = client.post(

@@ -193,7 +193,14 @@ export function useModelUpdate() {
   return useMutation<Model, Hal0Error, { id: string; body: Record<string, unknown> }>({
     mutationFn: ({ id, body }) =>
       apiPut<Model>(ENDPOINTS.model(id), body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['models'] })
+      // Model defaults feed the slot argv assembly (merge_flags), so any
+      // open slot drawer's resolved command goes stale on a model save —
+      // refetch the slot list + every slot-resolved query too.
+      qc.invalidateQueries({ queryKey: ['slots'] })
+      qc.invalidateQueries({ queryKey: ['slot-resolved'] })
+    },
   })
 }
 

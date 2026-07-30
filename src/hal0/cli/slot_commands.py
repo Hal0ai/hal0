@@ -1262,3 +1262,137 @@ def slot_migrate_caps(
     console.print(
         "\n[yellow]Restart hal0-api to pick up the model-owned mtp/reasoning/vision defaults.[/yellow]"
     )
+
+
+# ── migrate-flags (spec-flags-ownership §5 — launch flags stick to models) ────
+#
+# Deploy-window manual trigger for the standalone one-shot fold in
+# hal0.config.migrations.slot_flags_fold. NOT wired into any automatic
+# boot/update path.
+#
+# #1396: the fold module has existed since the flags-ownership lane, but nothing
+# ever exposed it — no CLI, no installer hook, only tests. Meanwhile the launch
+# readers were already deleted (providers.container drops profile_flags /
+# slot_parallel / extra_args; resolve_chat_template no longer consults the
+# slot), so an upgraded box with a tuned slot silently launched WITHOUT that
+# tune and had no supported way to recover it. This is that entry point.
+
+
+@app.command("migrate-flags")
+def slot_migrate_flags(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Actually write the fold. Without it the command is a DRY-RUN preview only.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt (for scripted use)."
+    ),
+    stop_services: bool = typer.Option(
+        False,
+        "--stop-services",
+        help=(
+            "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
+            "then proceed. Without this flag --apply only WARNS and refuses to run "
+            "while any of those units is active."
+        ),
+    ),
+) -> None:
+    """One-shot: fold each slot's flag/tune surface onto its bound MODEL.
+
+    Materializes the effective per-slot tune — ``[server].extra_args``, the
+    ``parallel`` sequence-slot count, and the per-slot ``chat_template``
+    override, layered over the slot's profile flags — into the bound model's
+    ``defaults``, which is the only tier the launch path still reads
+    (spec-flags-ownership §1-§5). Idempotent + re-runnable.
+
+    Two or more slots that fold DIVERGENT tunes onto one model are refused as a
+    group: the command reports every conflict and writes nothing, so the
+    operator resolves them (pick one tune, or split the model row) and re-runs.
+
+    DRY-RUN by default — prints the computed plan and exits. Pass ``--apply`` to
+    write. DESTRUCTIVE + OPERATOR-RUN ONLY (deploy window): a timestamped backup
+    of the slot config/state + registry DB is written BEFORE anything changes;
+    it is never wired into any automatic boot/update path.
+    """
+    from hal0.config import paths
+    from hal0.config.migrations.slot_flags_fold import run_migration
+
+    def _report_refusal(exc: Exception) -> None:
+        # apply_fold_plan raises on divergent shares for BOTH dry-run and
+        # apply, so both paths funnel here — an operator previewing a
+        # conflicted box must get the conflict list, not a traceback.
+        console.print("[red]✗[/red]  refusing to fold — divergent slot tunes share a model:")
+        for part in str(exc).split(" | "):
+            part = part.strip()
+            if part:
+                console.print(f"  {part}")
+        console.print(
+            "\n[dim]Resolve each conflict (pick one tune, or split the model row) and re-run.[/dim]"
+        )
+
+    if not apply:
+        try:
+            lines = run_migration(deploy_window=False, dry_run=True)
+        except RuntimeError as exc:
+            _report_refusal(exc)
+            raise typer.Exit(1) from None
+        console.print("[bold]Dry run — no files written, no registry rows updated.[/bold]")
+        if not lines:
+            console.print("  [dim](nothing to fold)[/dim]")
+        for line in lines:
+            console.print(f"  {line}")
+        console.print("\n[dim]Re-run with --apply to write (stop hal0 first).[/dim]")
+        return
+
+    # --apply: a real deploy-window write. Guard against a live runtime — the
+    # fold rewrites registry rows the running process still resolves.
+    active = _active_hal0_units()
+    if active:
+        console.print(
+            "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
+        )
+        if stop_services:
+            console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
+            for unit in active:
+                subprocess.run(["systemctl", "stop", unit], check=False)
+            active = _active_hal0_units()
+        if active:
+            console.print(
+                "[red]✗[/red]  refusing to fold while hal0 is live — rewriting model "
+                "defaults under a running runtime split-brains it.\n"
+                "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
+                "--stop-services."
+            )
+            raise typer.Exit(1)
+
+    # Surface a divergent-share refusal BEFORE the confirm prompt and the
+    # backup — there is nothing to confirm if the run cannot proceed.
+    try:
+        run_migration(deploy_window=False, dry_run=True)
+    except RuntimeError as exc:
+        _report_refusal(exc)
+        raise typer.Exit(1) from None
+
+    if not yes:
+        typer.confirm(
+            "This rewrites the bound models' defaults from each slot's effective tune "
+            "(a backup is taken first). Proceed?",
+            abort=True,
+        )
+
+    backup_path = _backup_slot_state(
+        config_dir=paths.slots_config_dir(),
+        data_dir=paths.var_lib() / "slots",
+        db_file=paths.db_path(),
+        backup_root=paths.var_lib() / "backups",
+    )
+    console.print(f"[green]✓[/green]  backup written to {backup_path}")
+
+    lines = run_migration(deploy_window=True, dry_run=False)
+    console.print("\n[bold]Applied flags-ownership fold:[/bold]")
+    if not lines:
+        console.print("  [dim](nothing to fold)[/dim]")
+    for line in lines:
+        console.print(f"  {line}")
+    console.print("\n[yellow]Restart hal0-api to pick up the model-owned launch tune.[/yellow]")
