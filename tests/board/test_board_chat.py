@@ -1023,3 +1023,43 @@ def test_explicit_request_model_wins_over_config_override(tmp_path) -> None:
         json={"model": "hal0/utility", "messages": [{"role": "user", "content": "x"}]},
     )
     assert stub.calls[0]["model"] == "hal0/utility"
+
+
+def test_brain_model_keeps_tool_turns_internal_when_tool_model_configured(tmp_path) -> None:
+    # Brain routes board/memory tool turns internally now; a configured tool_model
+    # is still available for lower-level fallback, but it should not override the
+    # steward's own chat model.
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, model="hal0/brain", tool_model="hal0/agent")
+
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert stub.calls[0]["model"] == "hal0/brain"
+
+
+def test_explicit_request_model_wins_over_tool_model(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, tool_model="hal0/agent")
+
+    client.post(
+        "/api/board/chat",
+        json={"model": "hal0/utility", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert stub.calls[0]["model"] == "hal0/utility"
+
+
+def test_no_tool_model_keeps_brain_model(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    # "off" is the explicit no-reroute spelling. An empty string is NOT — it
+    # now normalises back to the "hal0/agent" default with a warning, because a
+    # bare "" on disk is indistinguishable from a key nobody set (see
+    # tests/config/test_brain_tool_model_empty.py).
+    _set_brain_chat_config(app, model="hal0/brain", tool_model="off")
+
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert stub.calls[0]["model"] == "hal0/brain"
