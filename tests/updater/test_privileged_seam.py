@@ -28,6 +28,7 @@ from hal0.updater.updater import (
     UpdatePrivilegeError,
     activate_release,
     assert_release_dir_name,
+    assert_trusted_release_dir,
     discard_release,
     release_dir_name,
 )
@@ -285,33 +286,52 @@ def test_activate_release_refuses_a_missing_tree() -> None:
         activate_release("hal0-9.9.9")
 
 
-def test_activate_release_refuses_a_service_writable_tree_when_root(monkeypatch: Any) -> None:
+def test_root_boundary_refuses_a_service_writable_tree() -> None:
     """`activate` ends in `pip install`, which runs the build backend as root.
 
     A tree the unprivileged service account could write must never reach it —
-    that would turn the narrow grant into arbitrary root code execution.
+    that would turn the narrow grant into arbitrary root code execution. The
+    assertion lives at the ROOT boundary (`main`), not in the shared primitive,
+    and takes an injected euid so it needs neither root nor a global
+    `os.geteuid` patch (which other suites monkeypatch).
     """
     root = _install_root()
     tree = root / "hal0-1.0.0"
     tree.mkdir()
-    root.chmod(0o755)
-    tree.chmod(0o775)  # group-writable — the hal0 group could plant code here
 
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
-    monkeypatch.setattr(Path, "lstat", _lstat_as_root_owned)
-
+    # Group-writable: the hal0 group could plant code here before activation.
+    tree.chmod(0o775)
     with pytest.raises(UpdatePrivilegeError) as exc:
-        activate_release("hal0-1.0.0")
+        assert_trusted_release_dir(tree, euid=0)
     assert "not root-owned" in exc.value.message
+    assert "chown -R root:root" in exc.value.details["hint"]
+
+    # Not root-owned (files here belong to the test user) — refused too.
+    tree.chmod(0o755)
+    with pytest.raises(UpdatePrivilegeError):
+        assert_trusted_release_dir(tree, euid=0)
+
+    # Below euid 0 there is no privilege boundary to protect: never enforced.
+    assert_trusted_release_dir(tree, euid=1000)
 
 
-def _lstat_as_root_owned(self: Path) -> os.stat_result:
-    """Report the real mode but uid/gid 0, so only the MODE decides the test."""
-    st = os.lstat(self)
-    fields = list(st)
-    fields[4] = 0  # st_uid
-    fields[5] = 0  # st_gid
-    return os.stat_result(fields)
+def test_main_activate_runs_the_trust_check_before_touching_the_symlink(
+    monkeypatch: Any,
+) -> None:
+    """The refusal must land at the root boundary, not inside the primitive."""
+    root = _install_root()
+    (root / "hal0-1.0.0").mkdir()
+    called: list[str] = []
+    monkeypatch.setattr(
+        "hal0.updater.privileged.activate_release", lambda *a, **k: called.append("ran") or {}
+    )
+    monkeypatch.setattr(
+        "hal0.updater.privileged.assert_trusted_release_dir",
+        lambda path, **k: (_ for _ in ()).throw(UpdatePrivilegeError("not root-owned")),
+    )
+
+    assert main(["activate", "hal0-1.0.0"]) == 1
+    assert called == []
 
 
 def test_discard_release_is_idempotent_and_bounded() -> None:

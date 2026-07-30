@@ -1101,21 +1101,28 @@ def assert_release_dir_name(name: str) -> str:
     return name
 
 
-def _assert_trusted_release_dir(path: Path) -> None:
+def assert_trusted_release_dir(path: Path, *, euid: int | None = None) -> None:
     """Refuse to activate a tree the ``hal0`` service account could have written.
 
-    ``activate`` runs as root and ends in ``pip install <path>``, which executes
-    the tree's build backend **as root**. If a compromised (unprivileged)
-    hal0-api could write that tree, the seam would be a root-code-execution hole
-    rather than a narrow grant. The trust test is the classic one: the directory
-    and its parent must be owned by uid 0 and not group/other writable, so only
-    root can have produced their contents.
+    Called from the ROOT boundary only (``hal0.updater.privileged.main``), which
+    is the one caller acting on behalf of an unprivileged party. ``activate``
+    ends in ``pip install <path>``, which executes the tree's build backend **as
+    root** — so if a compromised hal0-api could write that tree, the seam would
+    be a root-code-execution hole rather than a narrow grant. The trust test is
+    the classic one: the directory and its parent must be owned by uid 0 and not
+    group/other writable, so only root can have produced their contents.
 
-    Only enforced when we are actually running privileged (``euid == 0``) — on a
-    dev box, in CI, or under ``HAL0_HOME`` there is no privilege boundary to
-    protect and the tree is legitimately owned by the invoking user.
+    No-op below euid 0: an operator running ``sudo hal0 update`` staged the tree
+    themselves, and a dev/CI/``HAL0_HOME`` run has no privilege boundary to
+    protect. ``euid`` is injectable so this is testable without root (and so the
+    predicate does not depend on a process-global ``os.geteuid`` that other
+    suites monkeypatch).
+
+    Residual, stated plainly: the check is top-level, not recursive. On the seam
+    path root staged the tree itself into a root-owned ``<usr_lib>``, so a
+    service-writable subdirectory is not reachable.
     """
-    if os.geteuid() != 0:
+    if (os.geteuid() if euid is None else euid) != 0:
         return
     for candidate in (path.parent, path):
         try:
@@ -1990,8 +1997,9 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     THE single activation primitive — :meth:`Updater.commit` and
     :meth:`Updater.rollback` both go through it, so "swap the symlink, refresh
     the venv, and undo the swap if pip fails" has exactly one implementation.
-    ``dir_name`` is a bare basename (never a path); the tree it names must be
-    root-owned when we run privileged (see :func:`_assert_trusted_release_dir`).
+    ``dir_name`` is a bare basename (never a path). The root boundary
+    (:func:`hal0.updater.privileged.main`) additionally asserts the named tree
+    is root-owned before calling this — see :func:`assert_trusted_release_dir`.
 
     Returns ``{"previous": <prior target or None>, "target": <activated path>}``.
     """
@@ -2009,7 +2017,11 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
             f"nothing to activate at {target} — not a directory",
             details={"dir_name": name, "path": str(target)},
         )
-    _assert_trusted_release_dir(target)
+    # NOTE: the "must be root-owned" trust test is NOT here. It belongs to the
+    # root boundary — hal0.updater.privileged.main — because that is the only
+    # caller acting on behalf of an unprivileged party. An operator running
+    # `sudo hal0 update` staged the tree themselves, and a dev/CI/HAL0_HOME run
+    # has no privilege boundary to protect at all.
 
     link = _current_symlink()
     try:
@@ -2531,6 +2543,7 @@ __all__ = [
     "Updater",
     "activate_release",
     "assert_release_dir_name",
+    "assert_trusted_release_dir",
     "discard_release",
     "ensure_seed_profiles",
     "fetch_release_manifest",

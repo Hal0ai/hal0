@@ -67,6 +67,7 @@ from hal0.updater.updater import (
     _usr_lib_root,
     activate_release,
     assert_release_dir_name,
+    assert_trusted_release_dir,
     discard_release,
     stage_release,
 )
@@ -375,7 +376,12 @@ def main(argv: list[str] | None = None) -> int:
         if verb == "activate":
             if len(rest) != 1:
                 raise UpdateError("activate takes exactly <dir-name>", details={"argv": rest})
-            _emit(activate_release(_validate_dir_name(rest[0])))
+            name = _validate_dir_name(rest[0])
+            # THE root trust boundary: activate ends in `pip install`, which runs
+            # the tree's build backend as root. A tree the unprivileged caller
+            # could have written must never reach it.
+            assert_trusted_release_dir(_usr_lib_root() / name)
+            _emit(activate_release(name))
             return 0
         if verb == "discard":
             if len(rest) != 1:
