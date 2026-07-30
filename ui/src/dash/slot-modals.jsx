@@ -133,6 +133,103 @@ const FAMILY_SLOT_TYPES = {
 	comfyui: ["image"],
 };
 
+// ─── Drawer dirty-tracking seam (#1398) ──────────────────────────
+//
+// The drawer seeds its form ONCE from the slot payload, but `useSlots`
+// re-derives that payload every 5s. Comparing a once-seeded form against a
+// live-polled prop let the two sides drift with no operator input, and the
+// drawer read that drift as "the operator changed this field":
+//
+//   #1390 — the ctx baseline fell back to `slot.metrics.ctx`, a RUNTIME
+//           metric. A slot that started serving under the open drawer made an
+//           untouched Context field dirty, and Save persisted a context window
+//           nobody chose.
+//   #1391 — a dropped `/api/slots` poll degrades the entry to the bare
+//           `/api/status` shape, which carries no config enrichment at all.
+//           For that interval EVERY batched field read dirty, so an idle Save
+//           rewrote chat_template/binary/NGL and — because a hardware key is
+//           in the restart trigger — fired a cold restart.
+//
+// The fix is structural, not two point patches: snapshot the persisted config
+// ONCE from the enriched payload the drawer opened with, freeze it, and derive
+// every dirty predicate AND the Save body from that snapshot. A background
+// poll then has nothing to move.
+//
+// Baseline purity rule: every field below is a PERSISTED config value.
+// `ctxSeed` is the single concession — it mirrors the *display* seed, which
+// may fall back to the live metric when nothing is on disk — but because it is
+// frozen at the same instant as the display value, an untouched field can
+// never become dirty. Nothing here may read a runtime metric at compare time.
+function configBaseline(slot) {
+	if (!slot) return null;
+	return {
+		name: slot.name,
+		// The PERSISTED context window ([model].context_size). null = no
+		// override on disk; the drawer must not invent one.
+		ctxMax: slot.ctx_max ?? null,
+		// Frozen display seed: persisted value → live metric at open → the
+		// backend's 8192 floor. Mirrors the `setCtx` seed exactly.
+		ctxSeed: slot.ctx_max ?? (slot.metrics?.ctx || 8192),
+		// On-disk [server].extra_args, surfaced on the wire as llamacpp_args.
+		extraArgs: slot.llamacpp_args != null ? slot.llamacpp_args : "",
+		device: slot.device || "gpu-rocm",
+		nGpuLayers: slot.n_gpu_layers ?? -1,
+		threads: slot.threads ?? 0,
+		binary: slot.binary || "",
+		imagePin: slot.image_pin ?? null,
+		profile: slot.profile || "",
+		parallel: slot.parallel ?? null,
+		// Tri-valued (string / null / absent) — kept RAW so both comparisons
+		// below can be derived from it (see deriveChanges).
+		chatTemplateRaw: slot.chat_template ?? null,
+	};
+}
+
+// One derived comparison, two consumers — the unsaved-changes guard and the
+// Save body both read THIS. #1372 was a predicate that existed in two places
+// and drifted apart; deriving it once makes that failure unrepresentable
+// (#1398, direction 1). Returns null when there is no trustworthy baseline, in
+// which case the drawer refuses to compute dirtiness at all.
+function deriveChanges(baseline, form) {
+	if (!baseline) return null;
+	// Normalised "unset" seeds: -1 NGL, 0 THREADS, empty parallel/image_pin.
+	const nglRaw = String(form.nGpuLayers).trim();
+	const nglValue = nglRaw === "" ? -1 : Number(nglRaw);
+	const thrRaw = String(form.threads).trim();
+	const thrValue = thrRaw === "" ? 0 : Number(thrRaw);
+	const parRaw = String(form.parallel).trim();
+	const parValue = parRaw === "" ? null : Number(parRaw);
+	const pinValue = (form.imagePin || "").trim() || null;
+	const ctxValue = Number(String(form.ctx).trim());
+	// Task 5: two template comparisons, deliberately —
+	//   * raw → what the PUT carries, so a stale chat_template = "auto" is
+	//     cleaned off disk instead of lingering as an inert key;
+	//   * normalized → what needs a cold restart, since 'auto' and absent
+	//     produce the identical argv (no --chat-template flag).
+	const templateDesired = form.overrideOpen ? normTemplate(form.chatTemplate) : "";
+	return {
+		// Normalised values, so the Save body ships exactly what was compared.
+		nglValue,
+		thrValue,
+		parValue,
+		pinValue,
+		ctxValue,
+		templateDesired,
+		ctx: ctxValue !== Number(baseline.ctxSeed),
+		extraArgs: form.extraArgs !== baseline.extraArgs,
+		device: form.device !== baseline.device,
+		ngl: nglValue !== baseline.nGpuLayers,
+		threads: thrValue !== baseline.threads,
+		binary: form.binary !== baseline.binary,
+		imagePin: pinValue !== baseline.imagePin,
+		profile: form.profile !== baseline.profile,
+		parallel: parValue !== baseline.parallel,
+		chatTemplate: templateDesired !== (baseline.chatTemplateRaw ?? ""),
+		chatTemplateEffective:
+			templateDesired !== normTemplate(baseline.chatTemplateRaw),
+	};
+}
+
 function EditSlotDrawer({ open, slot, onClose }) {
 	// Hooks must execute every render — early `return null` would skip
 	// them; render the drawer shell with a sentinel slot instead.
@@ -205,6 +302,22 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		slot?.parallel != null ? String(slot.parallel) : "",
 	);
 	const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
+	// #1391: does this payload actually carry the TOML-derived config fields, or
+	// is it the bare /api/status shape a dropped /api/slots poll falls back to?
+	// Provenance from useSlots — an absent key can't answer it (see
+	// `Slot._configEnriched`). `undefined` means "not from useSlots", which is
+	// treated as trustworthy so other slot sources keep working.
+	const configEnriched = slot?._configEnriched !== false;
+	// The frozen persisted-config baseline (see configBaseline above). Never
+	// seeded from a degraded payload, never refreshed by a background poll —
+	// only on slot identity change, drawer close, or an explicit save success.
+	const [baseline, setBaseline] = useStateSM(() =>
+		slot && configEnriched ? configBaseline(slot) : null,
+	);
+	// Name the current baseline belongs to. Guards the re-seed effect so a poll
+	// that merely RECOVERS from a degraded interval doesn't wipe the operator's
+	// in-flight edits (the enrichment flag flipping false→true re-runs it).
+	const baselineFor = useRefSM(baseline ? slot.name : null);
 	const [submitErr, setSubmitErr] = useStateSM(null);
 	// Dirty-close confirms through the shared ConfirmDialog (state-driven),
 	// replacing the raw window.confirm. Every dismiss path (Cancel, ✕, Esc,
@@ -362,43 +475,61 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Falls back gracefully when null (non-llama slots) or on error.
 	const resolvedQuery = useSlotResolved(slot?.name, { enabled: !!open });
 
+	// Seed the form AND snapshot the baseline — deliberately the same effect, so
+	// the two can never come from different payloads (which is the #1398 class).
+	// Runs on slot identity change only; a degraded payload is skipped outright
+	// and a recovery from one is a no-op.
 	useEffectSM(() => {
-		if (slot) {
-			setCtx(slot.ctx_max ?? (slot.metrics?.ctx || 8192));
-			// HW grid re-seed from the (possibly-updated) slot prop.
-			setDevice(slot.device || "gpu-rocm");
-			setNGpuLayers(
-				slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1",
-			);
-			setThreads(slot.threads != null ? String(slot.threads) : "0");
-			setBinary(slot.binary || "");
-			setImagePin(slot.image_pin || "");
-			setProfileSel(slot.profile || "");
-			setParallel(slot.parallel != null ? String(slot.parallel) : "");
-			// #587: re-seed from the slot prop so the drawer tracks the real
-			// on-disk values.
-			setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
-			setSubmitErr(null);
-			setDiscardOpen(false);
-			setPendingSwap(null);
-			setModelEditOpen(false);
-			setFieldErrs({});
-			// Task 5: re-seed chat_template override from the slot prop.
-			setChatTemplate(normTemplate(slot.chat_template));
-			setOverrideOpen(!!normTemplate(slot.chat_template));
-			setNpuAsr(slot.npu?.asr === true);
-			setNpuEmbed(slot.npu?.embed === true);
-			// Re-seed the chat pill + all three model selects too, so a save +
-			// refetch keeps the drawer in sync with server truth instead of
-			// drifting until the drawer is remounted.
-			setNpuChat(slot.npu?.chat !== false);
-			setNpuChatModel(
-				slot.modelDefault || slot.model_id || slot.model || "qwen3:4b",
-			);
-			setNpuPending(false);
-			setNpuErr(null);
+		if (!slot) {
+			// Drawer closed — the parent passes slot=undefined. Drop the snapshot
+			// so a reopen re-seeds from a fresh payload.
+			baselineFor.current = null;
+			setBaseline(null);
+			return;
 		}
-	}, [slot?.name]);
+		// #1391: a bare /api/status entry's config fields are
+		// absent-because-missing, not absent-because-unset. Baselining from it
+		// would make every field read dirty. Hold what we have (Save is gated on
+		// `degraded` below) and wait for the next good poll.
+		if (!configEnriched) return;
+		// Already holding this slot's baseline: this run is a degraded→enriched
+		// recovery, not a new slot. Re-seeding here would discard live edits.
+		if (baselineFor.current === slot.name) return;
+		baselineFor.current = slot.name;
+		setBaseline(configBaseline(slot));
+		setCtx(slot.ctx_max ?? (slot.metrics?.ctx || 8192));
+		// HW grid re-seed from the (possibly-updated) slot prop.
+		setDevice(slot.device || "gpu-rocm");
+		setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
+		setThreads(slot.threads != null ? String(slot.threads) : "0");
+		setBinary(slot.binary || "");
+		setImagePin(slot.image_pin || "");
+		setProfileSel(slot.profile || "");
+		setParallel(slot.parallel != null ? String(slot.parallel) : "");
+		// #587: re-seed from the slot prop so the drawer tracks the real
+		// on-disk values.
+		setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
+		setSubmitErr(null);
+		setDiscardOpen(false);
+		setPendingSwap(null);
+		setModelEditOpen(false);
+		setFieldErrs({});
+		// Task 5: re-seed chat_template override from the slot prop.
+		setChatTemplate(normTemplate(slot.chat_template));
+		setOverrideOpen(!!normTemplate(slot.chat_template));
+		setNpuAsr(slot.npu?.asr === true);
+		setNpuEmbed(slot.npu?.embed === true);
+		// Re-seed the chat pill + all three model selects too, so a save +
+		// refetch keeps the drawer in sync with server truth instead of
+		// drifting until the drawer is remounted.
+		setNpuChat(slot.npu?.chat !== false);
+		setNpuChatModel(
+			slot.modelDefault || slot.model_id || slot.model || "qwen3:4b",
+		);
+		setNpuPending(false);
+		setNpuErr(null);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [slot?.name, configEnriched]);
 
 	// Bound model row, resolved BEFORE the `!slot` guard below: the effect
 	// that follows must run on every render, and anything after an early
@@ -419,6 +550,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 	async function onSaveClick() {
 		setSubmitErr(null);
+		// #1391: with no trustworthy baseline there is no honest answer to "what
+		// did the operator change?", so writing anything would be a guess. The
+		// button is already disabled — this is the belt to that brace.
+		if (!changes) return;
 		// Issue #548: validate numeric fields before any network call.
 		// Invalid values surface inline and block Save.
 		const ctxNum = Number(ctx);
@@ -475,71 +610,48 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			return;
 		}
 		setFieldErrs({});
-		// Task 5: baseline-vs-desired comparison so BOTH directions persist —
-		// setting a real override AND clearing one (Clear override sets
-		// overrideOpen=false, desired ""). Two comparisons, deliberately:
-		//   * raw → what the PUT carries, so a stale chat_template = "auto" is
-		//     cleaned off disk instead of lingering as an inert key;
-		//   * normalized → what needs a cold restart, since 'auto' and absent
-		//     produce the identical argv (no --chat-template flag).
-		const templateDesired = overrideOpen ? normTemplate(chatTemplate) : "";
-		const chatTemplateChanged = templateDesired !== (slot.chat_template ?? "");
-		const templateEffectiveChanged =
-			templateDesired !== normTemplate(slot.chat_template);
-		// Per-slot extra_args override — ship only when changed, nested under
-		// [server] so the backend one-level merge preserves sibling server keys.
-		const extraArgsChanged = extraArgs !== extraArgsBaseline;
-		// Only write ctx_size when the operator actually changed it. Gate on the
-		// persisted baseline (ctxBaseline).
-		const ctxChanged = ctxNum !== Number(ctxBaseline);
-		// HW grid dirty-tracking (spec-hw-slot-ownership §2). NGL/THREADS are
-		// top-level slot config ints now (reversing the §5 fold). -1/empty NGL and
-		// 0/empty THREADS normalize to the "unset" defaults.
-		const nglValue = nglRaw === "" ? -1 : nglNum;
-		const thrValue = thrRaw === "" ? 0 : thrNum;
-		const pinValue = pinTrim === "" ? null : pinTrim;
-		const deviceChanged = device !== (slot.device || "gpu-rocm");
-		const nglChanged = nglValue !== (slot.n_gpu_layers ?? -1);
-		const threadsChanged = thrValue !== (slot.threads ?? 0);
-		const binaryChanged = binary !== (slot.binary || "");
-		const imagePinChanged = pinValue !== (slot.image_pin ?? null);
-		const profileChanged = profileSel !== (slot.profile || "");
+		// Every "did this change?" question below is answered by the SAME derived
+		// map the unsaved-changes guard reads (`changes`, built by deriveChanges
+		// from the frozen baseline). Nothing here re-derives a predicate, and
+		// nothing here reads the live `slot` prop — that pairing is the #1398
+		// bug class: a once-seeded form compared against a 5s-polled payload.
+		const templateDesired = changes.templateDesired;
+		const templateEffectiveChanged = changes.chatTemplateEffective;
 		// A hardware change (device/NGL/threads/binary/image_pin/profile) needs
 		// a cold restart, same as a chat_template change.
 		const hwChanged =
-			deviceChanged ||
-			nglChanged ||
-			threadsChanged ||
-			binaryChanged ||
-			imagePinChanged ||
-			profileChanged;
+			changes.device ||
+			changes.ngl ||
+			changes.threads ||
+			changes.binary ||
+			changes.imagePin ||
+			changes.profile;
 		try {
 			// Two-step: defaults (ctx_size lives under [model]) + slot config for the
 			// top-level keys (device / NGL / threads / binary / image_pin /
 			// chat_template / server). These are fast on-disk writes.
 			const slotBody = {};
-			if (deviceChanged) slotBody.device = device;
-			if (nglChanged) slotBody.n_gpu_layers = nglValue;
-			if (threadsChanged) slotBody.threads = thrValue;
-			if (binaryChanged) slotBody.binary = binary;
-			if (imagePinChanged) slotBody.image_pin = pinValue;
-			if (profileChanged) slotBody.profile = profileSel || null;
-			if (chatTemplateChanged) {
+			if (changes.device) slotBody.device = device;
+			if (changes.ngl) slotBody.n_gpu_layers = changes.nglValue;
+			if (changes.threads) slotBody.threads = changes.thrValue;
+			if (changes.binary) slotBody.binary = binary;
+			if (changes.imagePin) slotBody.image_pin = changes.pinValue;
+			if (changes.profile) slotBody.profile = profileSel || null;
+			if (changes.chatTemplate) {
 				// null rides the backend's None-means-delete merge — clearing an
 				// override (or picking Auto) removes the key from the slot TOML.
 				slotBody.chat_template = templateDesired || null;
 			}
-			if (extraArgsChanged) {
+			if (changes.extraArgs) {
 				slotBody.server = { extra_args: extraArgs };
 			}
 			// parallel is a top-level slot field. Empty → null (inherit; the
 			// None-means-delete merge clears any persisted override).
-			const parValue = parRaw === "" ? null : parNum;
-			if (parValue !== (slot.parallel ?? null)) {
-				slotBody.parallel = parValue;
+			if (changes.parallel) {
+				slotBody.parallel = changes.parValue;
 			}
 			const defaultsBody = {};
-			if (ctxChanged) defaultsBody.ctx_size = ctxNum;
+			if (changes.ctx) defaultsBody.ctx_size = ctxNum;
 			if (Object.keys(defaultsBody).length > 0) {
 				await defaultsMut.mutateAsync({
 					name: slot.name,
@@ -587,10 +699,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 	// Regenerate: persist the slot's freeform extra_args overlay (NOT the
 	// profile) and let useSlotEdit's invalidation refetch the slot, which
-	// recomputes resolved_command server-side. The drawer's `slot` prop is
-	// derived live from the slots query, so on refetch the dirty overlay clears
-	// (baseline now equals the typed value) and the fresh command renders. Does
-	// NOT restart — a running slot keeps its old flags until the next restart.
+	// recomputes resolved_command server-side. Does NOT restart — a running slot
+	// keeps its old flags until the next restart.
 	async function onRegenerateClick() {
 		setSubmitErr(null);
 		if (extraArgsErr) return;
@@ -603,6 +713,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			setSubmitErr(err?.message || "regenerate failed");
 			return;
 		}
+		// An explicit save SUCCESS is the one event that legitimately advances the
+		// baseline (the frozen snapshot is otherwise refreshed only on slot
+		// identity change). Advance it from what we just wrote, not from a later
+		// poll — the drawer stays open here, so waiting on the refetch would leave
+		// the stale-command overlay up for an interval.
+		setBaseline((b) => (b ? { ...b, extraArgs } : b));
 		window.__hal0Toast &&
 			window.__hal0Toast(
 				`Slot "${slot.name}" extra_args saved — restart to run with the new flags`,
@@ -656,33 +772,36 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		}
 	};
 
-	// extra_args dirty-tracking: the resolved command is server-computed from the
-	// persisted config, so any unsaved edit makes the displayed command stale.
-	// Baseline is the on-disk value surfaced as `llamacpp_args` (wire key for
-	// [server].extra_args). `validateExtraArgs` is a cheap client guard (balanced
-	// quotes) — the backend shlex parse is the real validator.
-	const extraArgsBaseline =
-		slot.llamacpp_args != null ? slot.llamacpp_args : "";
-	const extraArgsDirty = extraArgs !== extraArgsBaseline;
+	// THE dirty comparison — derived once, against the FROZEN baseline, and read
+	// by every consumer (the unsaved-changes guard, the Save body, the stale-
+	// command overlay). No predicate is re-derived anywhere else, and none of
+	// them touches the live `slot` prop. See configBaseline/deriveChanges above
+	// for why (#1390 · #1391 · #1398).
+	const changes = deriveChanges(baseline, {
+		ctx,
+		extraArgs,
+		device,
+		nGpuLayers,
+		threads,
+		binary,
+		imagePin,
+		profile: profileSel,
+		parallel,
+		chatTemplate,
+		overrideOpen,
+	});
+	// `validateExtraArgs` is a cheap client guard (balanced quotes) — the
+	// backend shlex parse is the real validator.
 	const extraArgsErr = validateExtraArgs(extraArgs);
-	// ctx dirty-tracking baseline: the PERSISTED context window (slot.ctx_max),
-	// mirroring how the seed value is derived. Falls back to the live metric then
-	// the 8192 floor only when nothing is persisted, so an untouched field on a
-	// cold slot is never counted dirty (and never written — see ctxChanged).
-	const ctxBaseline = slot.ctx_max ?? (slot.metrics?.ctx || 8192);
-	// HW grid dirty-tracking (spec-hw-slot-ownership §2). NGL/THREADS normalize
-	// their "unset" seeds (-1 NGL, 0 THREADS) so an untouched field never counts
-	// dirty. Baselines compare against the slot's persisted top-level HW fields.
-	const nglRawNow = String(nGpuLayers).trim();
-	const nglValueNow = nglRawNow === "" ? -1 : Number(nglRawNow);
-	const nglDirty = nglValueNow !== (slot.n_gpu_layers ?? -1);
-	const thrRawNow = String(threads).trim();
-	const thrValueNow = thrRawNow === "" ? 0 : Number(thrRawNow);
-	const threadsDirty = thrValueNow !== (slot.threads ?? 0);
-	const deviceDirty = device !== (slot.device || "gpu-rocm");
-	const binaryDirty = binary !== (slot.binary || "");
-	const imagePinDirty = (imagePin.trim() || null) !== (slot.image_pin ?? null);
-	const profileDirty = profileSel !== (slot.profile || "");
+	// The resolved command is server-computed from the persisted config, so any
+	// unsaved extra_args edit makes the displayed command stale.
+	const extraArgsDirty = !!changes && changes.extraArgs;
+	// #1391: the payload lost its config enrichment (or the drawer opened on one
+	// that never had it), so there is no baseline to compare against. Refuse to
+	// answer "what changed?" rather than guessing — Save is disabled and the
+	// operator is told why. Any in-flight edits and the last good baseline are
+	// kept, so the drawer recovers intact on the next successful poll.
+	const degraded = !configEnriched || !changes;
 
 	// UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields (HW
 	// grid, extra_args, ctx, parallel, chat_template override). The instant-apply
@@ -690,24 +809,20 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// excluded — a flipped toggle is already persisted. (Reasoning/MTP/Vision
 	// were also instant-apply toggles here; they moved to the model drawer —
 	// spec-hw-slot-ownership §1.)
-	// ctx dirty test matches the SAVE path's numeric comparison (ctxChanged in
-	// onSaveClick: Number(ctx) !== Number(ctxBaseline)).
-	const ctxDirty = Number(String(ctx).trim()) !== Number(ctxBaseline);
-	const parRawNow = String(parallel).trim();
-	const parValueNow = parRawNow === "" ? null : Number(parRawNow);
-	const parallelDirty = parValueNow !== (slot.parallel ?? null);
+	// The template leg uses the NORMALIZED comparison: an 'auto' → absent
+	// cleanup changes no argv, so it is not an operator-visible change.
 	const dirty =
-		extraArgsDirty ||
-		ctxDirty ||
-		nglDirty ||
-		threadsDirty ||
-		deviceDirty ||
-		binaryDirty ||
-		imagePinDirty ||
-		profileDirty ||
-		parallelDirty ||
-		(overrideOpen ? normTemplate(chatTemplate) : "") !==
-			normTemplate(slot.chat_template);
+		!!changes &&
+		(changes.extraArgs ||
+			changes.ctx ||
+			changes.ngl ||
+			changes.threads ||
+			changes.device ||
+			changes.binary ||
+			changes.imagePin ||
+			changes.profile ||
+			changes.parallel ||
+			changes.chatTemplateEffective);
 	const requestClose = () => {
 		// While the ModelDrawer is stacked on top, one Esc press fires BOTH
 		// drawers' document-level keydown listeners — swallow ours so only the
@@ -799,12 +914,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									{submitErr}
 								</span>
 							)}
+							{degraded && (
+								<span
+									data-testid="slot-drawer-degraded"
+									title="The /api/slots poll that carries this slot's saved configuration didn't land. Saving now could overwrite settings that aren't currently visible."
+									style={{ color: "var(--warn)", fontSize: 11 }}
+								>
+									Slot data degraded — reconnecting…
+								</span>
+							)}
 							<button className="btn ghost sm" onClick={requestClose}>
 								Cancel
 							</button>
 							<button
 								className="btn sm"
-								disabled={saving}
+								disabled={saving || degraded}
 								onClick={onSaveClick}
 							>
 								{saving ? "Saving…" : "Save"}
@@ -848,7 +972,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					/>
 					<ReadOnlyStrip
 						k="state"
-						v={<span className={stateChipClass(slot)}>{slot.state}</span>}
+						v={
+							<span
+								data-testid="slot-state-readonly"
+								className={stateChipClass(slot)}
+							>
+								{slot.state}
+							</span>
+						}
 					/>
 				</div>
 
