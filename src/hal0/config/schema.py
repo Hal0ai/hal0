@@ -128,10 +128,18 @@ class ModelConfig(BaseModel):
         default=None,
         ge=128,
         description=(
-            "Context window size in tokens. Unset (None) is NOT 4096: the "
-            "load path derives the model's native window (dense-capped) or a "
-            "safe 8192 floor, so a slot never silently inherits llama-server's "
-            "4096 default (chat@4096 incident, 2026-06-15)."
+            "HARDWARE CEILING ONLY — no longer an override. v1.0 ownership "
+            "split: the MODEL owns context size (its "
+            "``defaults.context_size``, else the GGUF-derived native window "
+            "dense-capped, else a safe 8192 floor — never llama-server's "
+            "silent 4096, chat@4096 incident 2026-06-15). This slot-level "
+            "value is honored only as a cap on that resolved window "
+            "(``effective = min(model_window, this)``) because a slot owns "
+            "hardware and the installer writes a VRAM-budget clamp here "
+            "(hal0.hardware.recommend / hal0.install.orchestrate, #1108). It "
+            "can never RAISE the effective window. Unset (None) — the default, "
+            "and what a new slot gets — means 'follow the model'. See "
+            "hal0.providers.container._resolve_context_size."
         ),
     )
     # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).

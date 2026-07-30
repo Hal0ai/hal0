@@ -1052,29 +1052,24 @@ def _profile_runtime_family(slot_cfg: dict[str, Any]) -> str | None:
         return None
 
 
-# Native context-window resolution (chat@4096 incident, 2026-06-15).
+# Context-window resolution (chat@4096 incident, 2026-06-15).
 #
-# A slot whose [model].context_size is unset must NEVER fall through to
-# llama-server's silent 4096 default. We derive the model's native window
-# from the registry (GGUF arch max), cap dense models so an unconfigured
-# slot can't request an impractically large KV cache, and otherwise use a
-# safe floor. Mirrors hal0.hardware.recommend's installer-side policy.
+# A slot must NEVER fall through to llama-server's silent 4096 default. When
+# the model declares no window of its own we derive it from the registry's
+# GGUF arch max, cap dense models so an unconfigured slot can't request an
+# impractically large KV cache, and otherwise use a safe floor. Mirrors
+# hal0.hardware.recommend's installer-side policy.
 _CTX_SAFE_FALLBACK = 8192
 _CTX_DENSE_CAP = 32768
 
 
-def _native_ctx(model_info: dict[str, Any]) -> int | None:
-    """Best-effort native context window for a model, or None if unknown.
+def _model_declared_ctx(model_info: dict[str, Any]) -> int | None:
+    """The MODEL's own explicit context window (``defaults.context_size``).
 
-    GGUF arch max (registry metadata.context_length) is authoritative;
-    a model's own defaults.context_size is the secondary source.
+    This is the authoritative value under the v1.0 ownership split — an
+    operator's deliberate, model-scoped choice made in the model drawer. It is
+    NOT dense-capped: an explicit number means what it says.
     """
-    md = model_info.get("metadata")
-    if isinstance(md, dict) and md.get("context_length"):
-        try:
-            return int(md["context_length"])
-        except (TypeError, ValueError):
-            pass
     defaults = model_info.get("defaults")
     if isinstance(defaults, dict) and defaults.get("context_size"):
         try:
@@ -1084,20 +1079,110 @@ def _native_ctx(model_info: dict[str, Any]) -> int | None:
     return None
 
 
-def _resolve_context_size(explicit: int | None, model_info: dict[str, Any]) -> int:
-    """The slot's effective context window.
+def _native_ctx(model_info: dict[str, Any]) -> int | None:
+    """The model's INTRINSIC native window (registry ``metadata.context_length``).
 
-    The explicit slot value wins when set; otherwise derive the model's
-    native window (dense-capped); otherwise a safe _CTX_SAFE_FALLBACK.
-    Guarantees a non-None int so the slot never silently inherits
-    llama-server's 4096 default.
+    Read straight off the GGUF arch max at import time — still a MODEL fact, but
+    a derived one, so it only applies when nobody made an explicit choice, and it
+    is dense-capped by the caller.
     """
-    if explicit is not None:
-        return int(explicit)
-    native = _native_ctx(model_info)
-    if native:
-        return min(native, _CTX_DENSE_CAP)
-    return _CTX_SAFE_FALLBACK
+    md = model_info.get("metadata")
+    if isinstance(md, dict) and md.get("context_length"):
+        try:
+            return int(md["context_length"])
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _resolve_context_size(
+    slot_ceiling: int | None,
+    model_info: dict[str, Any],
+    *,
+    slot_name: str = "",
+) -> int:
+    """The slot's effective context window — the MODEL is authoritative.
+
+    v1.0 ownership split: **the MODEL owns context size.** Before this, a slot's
+    ``[model].context_size`` won OUTRIGHT over everything, so two drawers
+    (model + slot) each exposed a "Context size" control with no indication that
+    the slot silently overrode the model. Precedence is now, highest first:
+
+    1. ``model_info["defaults"]["context_size"]`` — the model's own explicit
+       window (:func:`_model_declared_ctx`). Authoritative, NOT dense-capped.
+    2. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
+       window (:func:`_native_ctx`), dense-capped at :data:`_CTX_DENSE_CAP`.
+       Still a model fact, but a *derived* one, so an explicit choice outranks
+       it — the reverse of the pre-1.0 order, which let a 262144-token arch max
+       shadow a deliberate ``defaults.context_size``.
+    3. :data:`_CTX_SAFE_FALLBACK` (8192) — never llama-server's silent 4096.
+
+    ``slot_ceiling`` (the on-disk ``[model].context_size``) is NO LONGER an
+    override. It is honored only as a **hardware CEILING**: the slot owns
+    hardware, and a slot-level window written by
+    :func:`hal0.hardware.recommend.recommend_primary_slot` /
+    :mod:`hal0.install.orchestrate` is a VRAM-budget clamp computed for this
+    box's memory (#1108). Dropping it outright would let a model's own larger
+    window reopen the first-warm OOM those clamps exist to prevent. So the
+    resolved value is capped at the slot ceiling but can never be RAISED by it:
+
+        effective = min(model_authoritative, slot_ceiling)
+
+    Net effect on a box that already has a slot-level ``context_size`` on disk:
+    where the clamp was below the model's window (the installer's case) the
+    effective context is UNCHANGED; where the slot was silently inflating the
+    model's window (the dual-ownership bug) it drops to what the model asked
+    for. The effective context can therefore only stay the same or shrink —
+    never grow — so no box gains a KV cache it cannot hold. Every case where
+    the ceiling actually changes the answer is logged, so the change is visible
+    in ``journalctl -u hal0-api`` rather than silent.
+
+    Guarantees a non-None int.
+    """
+    declared = _model_declared_ctx(model_info)
+    if declared is not None:
+        resolved, source = declared, "model.defaults.context_size"
+    else:
+        native = _native_ctx(model_info)
+        if native:
+            resolved, source = min(native, _CTX_DENSE_CAP), "model.metadata.context_length"
+        else:
+            resolved, source = _CTX_SAFE_FALLBACK, "safe_fallback"
+
+    if slot_ceiling is None:
+        return resolved
+
+    ceiling = int(slot_ceiling)
+    if ceiling < resolved:
+        log.info(
+            "slot.context_size_clamped_by_slot",
+            extra={
+                "slot": slot_name,
+                "model_ctx": resolved,
+                "model_ctx_source": source,
+                "slot_ceiling": ceiling,
+                "effective": ceiling,
+                "hint": "the slot's [model].context_size is a hardware ceiling now, "
+                "not an override; raise it (or lower the model's context size) to change "
+                "the effective window",
+            },
+        )
+        return ceiling
+    if ceiling > resolved:
+        log.warning(
+            "slot.context_size_no_longer_overrides",
+            extra={
+                "slot": slot_name,
+                "model_ctx": resolved,
+                "model_ctx_source": source,
+                "slot_context_size": ceiling,
+                "effective": resolved,
+                "hint": "the MODEL owns context size in 1.0; this slot's larger "
+                "[model].context_size no longer wins. Set the window on the model to "
+                "restore it.",
+            },
+        )
+    return resolved
 
 
 def _resolve_llama_scalars(
@@ -1160,7 +1245,13 @@ def _resolve_llama_scalars(
     model_table = slot_cfg.get("model") or {}
     if not isinstance(model_table, dict):
         model_table = {}
-    context_size = _resolve_context_size(model_table.get("context_size"), model_info)
+    # MODEL-authoritative context window; the slot's on-disk [model].context_size
+    # is a hardware ceiling only, never an override (see _resolve_context_size).
+    context_size = _resolve_context_size(
+        model_table.get("context_size"),
+        model_info,
+        slot_name=str(slot_cfg.get("name") or ""),
+    )
 
     server_table = slot_cfg.get("server") or {}
     if not isinstance(server_table, dict):

@@ -42,6 +42,7 @@ from hal0.providers.container import (
     _llama_launch_plan,
     _loopback_fence_command,
     _render_quadlet_from_plan,
+    _resolve_context_size,
     _resolve_model_path,
     resolved_command_for_slot,
 )
@@ -719,10 +720,15 @@ class TestLoadSync:
         assert (tmp_path / "test.service").exists()
 
     def test_load_sync_threads_ctx_size_and_model_tune(self, tmp_path: Path) -> None:
-        """load_sync bakes the slot ``context_size`` (base --ctx-size, still
-        slot-resolved) AND the MODEL's materialized ``defaults.extra_args`` into
-        the rendered unit. FLAGS-own: a slot ``[server].extra_args`` is inert —
-        the model owns the tune, so the override-kv rides ``model_info.defaults``."""
+        """load_sync bakes the resolved context window (base --ctx-size) AND the
+        MODEL's materialized ``defaults.extra_args`` into the rendered unit.
+        FLAGS-own: a slot ``[server].extra_args`` is inert — the model owns the
+        tune, so the override-kv rides ``model_info.defaults``.
+
+        CTX-own (v1.0): the window comes from the MODEL's
+        ``defaults.context_size``. The slot's ``[model].context_size`` is a
+        ceiling only, and here it sits ABOVE the model's window, so it does not
+        move the answer."""
         profile = _moe_profile()
         provider = ContainerProvider()
         unit_file = tmp_path / "test.service"
@@ -752,12 +758,15 @@ class TestLoadSync:
                 {
                     "path": "/mnt/ai-models/model.gguf",
                     "_model_key": "model",
-                    "defaults": {"extra_args": "--override-kv k=bool:false"},
+                    "defaults": {
+                        "extra_args": "--override-kv k=bool:false",
+                        "context_size": 131072,
+                    },
                 },
             )
 
         unit = unit_file.read_text()
-        assert "--ctx-size 131072" in unit  # slot context_size still reaches base
+        assert "--ctx-size 131072" in unit  # the MODEL's window reaches base
         assert "--override-kv k=bool:false" in unit  # model tune reaches launch
         assert "IGNORED=bool:true" not in unit  # slot extra_args inert
 
@@ -862,7 +871,13 @@ class TestLoadSync:
 
     def test_resolved_command_includes_ctx_size(self) -> None:
         """The displayed resolved_command must show --ctx-size so it matches
-        what actually launches."""
+        what actually launches — including the v1.0 ownership rule.
+
+        ``m`` is a registry miss, so the model declares no window and the
+        resolver lands on the 8192 safe floor. The slot's ``context_size``
+        131072 is a CEILING above that floor, so it cannot raise it. Preview and
+        launch share ``_resolve_context_size``, so what an operator sees here is
+        exactly what the unit gets."""
         profile = _moe_profile()
         cfg = {
             "profile": "rocm",
@@ -873,7 +888,8 @@ class TestLoadSync:
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/m.gguf")
         assert argv is not None
         assert "--ctx-size" in argv
-        assert argv[argv.index("--ctx-size") + 1] == "131072"
+        assert argv[argv.index("--ctx-size") + 1] == "8192"
+        assert argv[argv.index("--ctx-size") + 1] != "4096"  # chat@4096 incident
 
     def test_resolved_command_includes_model_alias(self) -> None:
         """resolved_command shows --alias <model id> so it matches the unit."""
@@ -1148,10 +1164,89 @@ class TestContextSizeDerive:
         mi = _model_info(defaults={"context_size": 16384})
         assert self._ctx(self._spec(cfg, mi).command) == "16384"
 
-    def test_explicit_ctx_always_wins_over_native(self) -> None:
-        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
-        mi = _model_info(metadata={"context_length": 262144})
+
+class TestContextSizeOwnership:
+    """v1.0 ownership split — the MODEL owns the context window; the slot's
+    ``[model].context_size`` is a hardware CEILING, never an override.
+
+    Before this, ``_resolve_context_size`` returned the slot value OUTRIGHT
+    whenever it was set, so the model drawer's "Context size" and the slot
+    drawer's "Context size" both claimed the same field and the slot silently
+    won. The invariant now: the effective window can only STAY THE SAME or
+    SHRINK relative to what the model asks for — never grow.
+    """
+
+    def _spec(self, cfg: dict[str, Any], model_info: dict[str, Any]):
+        provider = ContainerProvider()
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            return provider.container_spec(cfg, model_info)
+
+    @staticmethod
+    def _ctx(command: list[str]) -> str | None:
+        return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
+
+    # ── the model is authoritative ───────────────────────────────────────────
+
+    def test_model_declared_ctx_outranks_gguf_native(self) -> None:
+        """An explicit ``defaults.context_size`` is a deliberate operator choice
+        and is NOT dense-capped — the reverse of the pre-1.0 order, which let a
+        262144 arch max shadow it."""
+        cfg = _slot_cfg()
+        mi = _model_info(metadata={"context_length": 262144}, defaults={"context_size": 131072})
         assert self._ctx(self._spec(cfg, mi).command) == "131072"
+
+    def test_slot_ctx_no_longer_raises_the_model_window(self) -> None:
+        """THE HEADLINE FIX. Slot asks for 131072, model says 16384 → the model
+        wins. Pre-1.0 this returned 131072."""
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
+        mi = _model_info(defaults={"context_size": 16384})
+        assert self._ctx(self._spec(cfg, mi).command) == "16384"
+
+    def test_slot_ctx_cannot_inflate_the_safe_fallback(self) -> None:
+        """A slot ceiling above a model with NO declared window resolves to the
+        8192 floor, not the slot's number."""
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
+        mi = _model_info()
+        assert self._ctx(self._spec(cfg, mi).command) == "8192"
+
+    # ── but the slot ceiling still clamps (the installer's VRAM budget) ──────
+
+    def test_slot_ceiling_below_model_window_still_clamps(self) -> None:
+        """#1108: ``hardware.recommend`` writes a VRAM-budget clamp into the
+        slot. Dropping it outright would reopen the first-warm OOM it exists to
+        prevent, so a ceiling BELOW the model's window is still honored."""
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 8192})
+        mi = _model_info(defaults={"context_size": 131072})
+        assert self._ctx(self._spec(cfg, mi).command) == "8192"
+
+    def test_slot_ceiling_clamps_the_gguf_native_window_too(self) -> None:
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 4096})
+        mi = _model_info(metadata={"context_length": 131072})
+        assert self._ctx(self._spec(cfg, mi).command) == "4096"
+
+    def test_equal_ceiling_and_model_window_is_a_no_op(self) -> None:
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 16384})
+        mi = _model_info(defaults={"context_size": 16384})
+        assert self._ctx(self._spec(cfg, mi).command) == "16384"
+
+    # ── the monotonic guarantee, stated directly on the resolver ────────────
+
+    def test_effective_window_never_exceeds_the_model_window(self) -> None:
+        """Property: for any slot ceiling, effective <= what the model asked
+        for. This is what makes the change safe to ship onto existing boxes —
+        no box can gain a KV cache it could not previously hold."""
+        mi = _model_info(defaults={"context_size": 16384})
+        model_window = _resolve_context_size(None, mi)
+        assert model_window == 16384
+        for ceiling in (None, 1024, 8192, 16384, 32768, 131072):
+            assert _resolve_context_size(ceiling, mi) <= model_window
+
+    def test_unset_ceiling_means_follow_the_model(self) -> None:
+        mi = _model_info(defaults={"context_size": 16384})
+        assert _resolve_context_size(None, mi) == 16384
 
 
 class TestFamilyDefaults:
