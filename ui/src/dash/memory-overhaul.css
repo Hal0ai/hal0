@@ -36,7 +36,6 @@
 .mg-meta { font-size: 11px; color: var(--fg-4); margin-bottom: 10px; }
 .mg-meta b { color: var(--fg-2); font-weight: 500; }
 .mg-meta-dir { margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--line); }
-.mg-meta-honcho { margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--line); color: var(--accent); display: inline-flex; align-items: center; gap: 5px; }
 
 /* position:relative makes the host the containing block for the stage's
    absolutely-positioned children, so any empty/loading placeholder stays
@@ -224,7 +223,7 @@
 .mo-graphline { display: flex; align-items: center; justify-content: space-between; padding-top: 12px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--fg-3); flex-wrap: wrap; gap: 8px; }
 .mo-graphline .dot { margin-right: 4px; }
 
-/* ─── Provider cards (Hindsight + Honcho, side by side) ───────────── */
+/* ─── Provider card (Hindsight) ───────────────────────────────────── */
 .mo-providers-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
 .mo-provider { flex: 1 1 360px; min-width: 300px; }
 .mo-provider.dimmed { opacity: 0.6; }
