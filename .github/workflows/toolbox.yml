@@ -48,12 +48,6 @@ jobs:
             context: .
             file: packaging/toolbox/cpu.Dockerfile
             timeout: 45
-          - name: flm
-            image: ghcr.io/hal0ai/hal0-toolbox-flm
-            tag: 0.9.44
-            context: .
-            file: packaging/toolbox/flm.Dockerfile
-            timeout: 60
           - name: qwen3tts
             image: ghcr.io/hal0ai/hal0-toolbox-qwen3tts
             tag: v1
