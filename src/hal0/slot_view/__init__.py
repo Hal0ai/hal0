@@ -424,7 +424,7 @@ def _resolve_container_provider(provider: Any) -> Any:
 #: /health on the slot port, ``podman inspect`` on the container, ``podman
 #: image inspect`` on the declared image). Each has its own inner timeout,
 #: but nothing bounded their SUM, and the whole thing ran serially across
-#: every slot — which is where ``GET /api/slots`` got its measured 17–41 s.
+#: every slot — which is where ``GET /api/slots`` got its measured 17-41 s.
 #: A slot that blows this budget degrades to ``stopped`` / unhealthy for
 #: that poll, exactly as a probe exception already did; the next poll
 #: (2.5 s later) re-probes it.
@@ -466,7 +466,7 @@ async def container_enrichment(
     :data:`_PROBE_CONCURRENCY`) and each slot's probe is bounded by
     :data:`_PROBE_TIMEOUT_S`. Issue #1427: this loop used to run serially,
     so ``GET /api/slots`` paid the sum of every slot's connect timeouts —
-    17–41 s measured on a 19–29 slot box. Concurrency turns that sum into a
+    17-41 s measured on a 19-29 slot box. Concurrency turns that sum into a
     max, and the per-slot deadline bounds the max.
     """
     from hal0.slots.manager import _cfg_port  # type: ignore[attr-defined]
@@ -647,7 +647,7 @@ async def container_enrichment(
         async with sem:
             try:
                 return await asyncio.wait_for(_one(name, cfg), timeout=_PROBE_TIMEOUT_S)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 log.warning("slot_view.container_probe_timeout slot=%s", name)
                 return name, {
                     "container_status": "stopped",

@@ -288,9 +288,7 @@ async def _proxy_upstream_endpoint(
             except Exception:
                 return u.name, None
 
-        for item in await asyncio.gather(
-            *(_one(u) for u in peers), return_exceptions=True
-        ):
+        for item in await asyncio.gather(*(_one(u) for u in peers), return_exceptions=True):
             if isinstance(item, BaseException):
                 continue
             name, payload = item

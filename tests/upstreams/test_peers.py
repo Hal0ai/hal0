@@ -24,20 +24,44 @@ from hal0.upstreams.registry import Upstream, UpstreamRegistry
     ("base", "suffix", "expected"),
     [
         # The canonical hal0 peer shape: /v1 is a sibling of /api.
-        ("http://10.0.1.150:8080/v1", "/api/slots/metrics", "http://10.0.1.150:8080/api/slots/metrics"),
-        ("http://10.0.1.150:8080/v1/", "/api/stats/hardware", "http://10.0.1.150:8080/api/stats/hardware"),
+        (
+            "http://10.0.1.150:8080/v1",
+            "/api/slots/metrics",
+            "http://10.0.1.150:8080/api/slots/metrics",
+        ),
+        (
+            "http://10.0.1.150:8080/v1/",
+            "/api/stats/hardware",
+            "http://10.0.1.150:8080/api/stats/hardware",
+        ),
         # No /v1 at all.
         ("http://peer.lan:8080", "/api/slots/metrics", "http://peer.lan:8080/api/slots/metrics"),
         # THE #1427 BUG: base path already ends in /api, suffix starts with
         # /api/ → the naive concat produced /api/api/slots/metrics.
-        ("https://openrouter.ai/api/v1", "/api/slots/metrics", "https://openrouter.ai/api/slots/metrics"),
-        ("https://openrouter.ai/api", "/api/stats/hardware", "https://openrouter.ai/api/stats/hardware"),
+        (
+            "https://openrouter.ai/api/v1",
+            "/api/slots/metrics",
+            "https://openrouter.ai/api/slots/metrics",
+        ),
+        (
+            "https://openrouter.ai/api",
+            "/api/stats/hardware",
+            "https://openrouter.ai/api/stats/hardware",
+        ),
         # Suffix without a leading slash is still joined correctly.
         ("http://peer.lan:8080/v1", "api/slots/metrics", "http://peer.lan:8080/api/slots/metrics"),
         # Query/fragment on the base URL never leak onto the joined path.
-        ("http://peer.lan:8080/v1?x=1#frag", "/api/slots/metrics", "http://peer.lan:8080/api/slots/metrics"),
+        (
+            "http://peer.lan:8080/v1?x=1#frag",
+            "/api/slots/metrics",
+            "http://peer.lan:8080/api/slots/metrics",
+        ),
         # Surrounding whitespace in hand-authored TOML.
-        ("  http://peer.lan:8080/v1  ", "/api/slots/metrics", "http://peer.lan:8080/api/slots/metrics"),
+        (
+            "  http://peer.lan:8080/v1  ",
+            "/api/slots/metrics",
+            "http://peer.lan:8080/api/slots/metrics",
+        ),
     ],
 )
 def test_peer_api_url_join(base: str, suffix: str, expected: str) -> None:
@@ -165,4 +189,7 @@ def test_hal0_peer_survives_the_config_round_trip() -> None:
     entry = UpstreamEntry(name="peer", url="https://hal0.example.com/v1", hal0_peer=True)
     assert upstream_from_entry(entry).hal0_peer is True
     # Unset stays tri-state None so the auto-derivation runs.
-    assert upstream_from_entry(UpstreamEntry(name="x", url="https://openrouter.ai/api/v1")).hal0_peer is None
+    assert (
+        upstream_from_entry(UpstreamEntry(name="x", url="https://openrouter.ai/api/v1")).hal0_peer
+        is None
+    )

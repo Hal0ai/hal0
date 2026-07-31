@@ -1,6 +1,6 @@
 """``GET /api/slots`` stays bounded with N slots and a slow upstream (#1427).
 
-Measured on lxc105: 17–41 s for 19–29 slots, ~1 s per slot, because
+Measured on lxc105: 17-41 s for 19-29 slots, ~1 s per slot, because
 ``container_enrichment`` walked the slot set serially and each slot paid a
 full connect timeout against a port with nothing listening. These tests pin
 the two properties that fix rests on:

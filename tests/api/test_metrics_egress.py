@@ -42,7 +42,9 @@ class _RecordingClient:
 
 
 def _request_with(upstreams: UpstreamRegistry) -> object:
-    return types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace(upstreams=upstreams)))
+    return types.SimpleNamespace(
+        app=types.SimpleNamespace(state=types.SimpleNamespace(upstreams=upstreams))
+    )
 
 
 def _registry(*upstreams: Upstream) -> UpstreamRegistry:
@@ -60,7 +62,9 @@ SLOT = Upstream(name="agent", kind="slot", url="http://127.0.0.1:8087/v1", slot_
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, calls: list[str], **kw: object) -> None:
     monkeypatch.setattr(
-        httpx, "AsyncClient", lambda *a, **k: _RecordingClient(calls, {"ok": {}}, **kw)  # type: ignore[arg-type]
+        httpx,
+        "AsyncClient",
+        lambda *a, **k: _RecordingClient(calls, {"ok": {}}, **kw),  # type: ignore[arg-type]
     )
 
 
@@ -119,9 +123,7 @@ async def test_no_outbound_url_contains_a_doubled_api_segment(
     _patch_client(monkeypatch, calls)
     weird = Upstream(name="weird", kind="remote", url="https://peer.example/api/v1", hal0_peer=True)
 
-    await hw_mod._proxy_upstream_endpoint(
-        _request_with(_registry(weird)), "/api/slots/metrics"
-    )
+    await hw_mod._proxy_upstream_endpoint(_request_with(_registry(weird)), "/api/slots/metrics")
 
     assert calls == ["https://peer.example/api/slots/metrics"]
     assert not any("/api/api/" in c for c in calls)
@@ -155,9 +157,7 @@ async def test_unreachable_peer_does_not_serialise_the_fanout(
         client = _Client(calls, {"ok": {}}, delay_hosts={"10.0.1.151", "10.0.1.152", "10.0.1.153"})
 
         async def _get(url: str, **kw: object) -> object:
-            return await asyncio.wait_for(
-                _RecordingClient.get(client, url, **kw), timeout=timeout
-            )
+            return await asyncio.wait_for(_RecordingClient.get(client, url, **kw), timeout=timeout)
 
         client.get = _get  # type: ignore[method-assign]
         return client
