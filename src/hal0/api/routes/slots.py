@@ -799,7 +799,9 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
 
     Drives the dashboard's per-slot tok/s row + sparkline. Three layers:
 
-    1. Remote upstreams' /api/slots/metrics (for haloai-style fanouts).
+    1. hal0 *peer* upstreams' /api/slots/metrics (haloai-style fanouts).
+       Third-party OpenAI-compatible providers are NOT asked — see
+       ``hal0.upstreams.peers`` / issue #1425.
     2. Local per-slot tok/s measured on the dispatcher's streaming path.
     3. Local per-slot MEM/UP scraped from systemd + /proc for the
        hal0-slot@<name>.service template instance.
