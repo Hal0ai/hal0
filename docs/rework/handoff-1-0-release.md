@@ -247,6 +247,38 @@ not an actual deprecated code shim. Confirmed by grepping the diff for the ratch
 (`removed in #|DEPRECATED|deprecated|legacy|backward.compat|compat shim`) and reading every hit.
 Don't re-chase this on a future CI run of F unless the count goes up for a *different* reason.
 
+**A's `ci.yml`/`playwright.yml` never triggered — unresolved platform anomaly, not a config issue.**
+CodeQL ran fine on #1554 (twice — once on open, once after a nudge commit), but `gh run list
+--branch feat/install-setup-unify` returns zero rows for CI or Playwright, at any status, before or
+after pushing an empty `chore: nudge CI` commit to force a fresh `synchronize` event. Checked and
+ruled out: no `paths`/`paths-ignore` filter on either workflow, no draft-PR guard, no branch-name
+restriction, Actions are enabled repo-wide (`allowed_actions: all`) — nothing in this repo's config
+explains F (#1553) and the tmpfs-guard PR (#1551) both triggering normally while A (#1554) doesn't.
+Whoever picks this up: check `gh run list --branch feat/install-setup-unify` fresh: if it's still
+empty, this needs a GitHub-side look (webhook delivery log in repo Settings → Webhooks, or just
+close/reopen #1554), not more config spelunking here. **Not blocking** — A's local full-suite run is
+the fallback signal and is further along than F's.
+
+### Local full-suite runs were accidentally duplicated — found and fixed (2026-07-31, ~23:00)
+
+Both F's and A's local full-suite reruns had ended up running **twice each** against the same
+worktree simultaneously — one instance from an earlier relaunch this session, one from a process
+that was already alive when this session picked back up after the `/tmp` → `CLAUDE_CODE_TMPDIR`
+migration and was mistakenly assumed to be a helpful pre-existing relaunch rather than adopted or
+killed. Combined with Stream C's minimax worker running its *own* full suite and an unrelated,
+apparently-hung `rg --hidden --follow` process from a separate session eating >1000% CPU, load
+average hit ~26 on a 16-core box — which is why progress crawled at ~1%/9min instead of a normal
+pace. Killed the duplicate F and A pytest processes (kept one of each); did **not** touch the `rg`
+process since it's parented to a different, apparently-live session, not something safe to kill
+without that session's owner confirming it's dead. **Correct current log paths: `/var/tmp/f-full-
+suite.log` and `/var/tmp/a-full-suite.log`** (no `2` suffix — the survivors were the pre-existing
+processes, not the ones this session explicitly relaunched; the `*2.log` files are from the killed
+duplicates and are stale).
+
+Even post-cleanup this box is not fast for these suites — budget on the order of an hour for a full
+local run here. If you're blocked waiting on it, `gh pr checks 1553`/`1554` (once A's CI gap above
+resolves) is the better signal.
+
 ### Tmp infrastructure note (unrelated to either stream, cost real time)
 
 Running both streams' full suites concurrently filled the 16G `/tmp` tmpfs (`HAL0_HOME=$(mktemp -d)`
