@@ -107,13 +107,36 @@ public one-liner rather than by bypassing the installer's verification guard, be
 `releases.hal0.dev/stable.json` serves exactly 0.9.8 on the public channel. So the baseline is
 byte-identical to what current users run, cosign-verified end to end.
 
-**Correction:** there is **no `baseline-0.9.8` snapshot.** `pct listsnapshot 150` reports only
-`current`. As it stands the update test is **one-shot** — running it destroys the baseline. Take the
-snapshot first:
+**Correction (re-verified 2026-07-31):** there is **no `baseline-0.9.8` snapshot, and a snapshot is
+not currently possible.** `pct snapshot 150 ...` fails with `snapshot feature is not available`.
+Cause: CT150's config carries two raw bind mounts —
 
-```sh
-ssh root@10.0.1.110 'pct snapshot 150 baseline-0.9.8 --description "hal0 0.9.8 public-channel baseline for the 1.0.0 update test"'
 ```
+mp1: /devpool/dev/repos,mp=/mnt/dev/repos,backup=0
+mp2: /devpool/dev/projects,mp=/mnt/projects,backup=0
+```
+
+— pointed at host paths rather than PVE-tracked `storage:volid` entries. `devpool` is itself a zfs
+pool, but these two mountpoints bypass PVE's storage layer entirely (raw bind), and PVE refuses to
+snapshot an LXC that has any unmanaged bind mountpoint attached, regardless of what the rootfs
+storage (`local-zfs`, snapshot-capable) supports on its own.
+
+As it stands the update test is **one-shot** — running it destroys the only known-good 0.9.8 baseline,
+and there is no cheap way to get it back. Options, cheapest first:
+
+1. **Skip the snapshot, accept one-shot.** Re-verify the update test's assertions are complete
+   enough that a single run is sufficient, and re-install 0.9.8 from the public channel again
+   afterward if a second baseline run is ever needed (see the reinstall note above — it's
+   reproducible, just not instant).
+2. **Detach `mp1`/`mp2` for the duration of the test**, snapshot, run the test, and decide whether
+   to reattach and re-snapshot after. Changes the container's mount config — confirm nothing else
+   depends on those paths being present before doing this.
+3. **Clone the container** (`pct clone 150 <new-id> --full`) instead of snapshotting — full clones
+   don't have the same bind-mount restriction, at the cost of a full 500 GB copy.
+
+This wasn't caught in the first handoff pass; the earlier draft's `pct snapshot 150 baseline-0.9.8 ...`
+command does not work as written (`-` is also an invalid character in a PVE snapshot name, on top of
+the bind-mount block) — don't run it verbatim.
 
 ### The missing `profiles.toml` on CT150 is deliberate
 
