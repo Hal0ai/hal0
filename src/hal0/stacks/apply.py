@@ -250,7 +250,7 @@ class StackApplyEngine:
         # are MODEL-owned typed capabilities and are deliberately NOT projected
         # onto the slot. They remain on ``StackSlotEntry`` (back-compat: seed
         # stacks still declare ``mtp = true``, and ``snapshot_live_stack`` still
-        # reads them off legacy slot TOMLs) but a stack apply must not re-land
+        # reads them off pre-partition slot TOMLs) but a stack apply must not re-land
         # the pre-partition on-disk shape that ``PUT /api/slots/{name}/config``
         # 400s on. This is the same exclusion the sibling create path
         # (``api.routes.stacks._create_missing_slots``) makes; the two agree

@@ -337,8 +337,9 @@ def guard_slot_write_payload(updates: dict[str, Any]) -> None:
         freeform ``[server].extra_args``.
 
     Checked against ``updates`` (the write payload), NEVER the merged result:
-    a legacy key already sitting on disk must not block an unrelated legitimate
-    edit to that slot. Converging the old shape is the migration's job
+    an old pre-partition key already sitting on disk must not block an
+    unrelated legitimate edit to that slot. Converging the old shape is the
+    migration's job
     (``config.migrations.model_owned_caps``), not this guard's.
 
     Raises:
