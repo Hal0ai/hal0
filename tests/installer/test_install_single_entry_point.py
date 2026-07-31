@@ -69,7 +69,12 @@ def test_setup_still_works_as_an_internal_entry_point() -> None:
     """Hidden must not mean gone — install.sh invokes ``hal0 setup --auto``.
 
     ``--help`` on the subcommand is the cheapest side-effect-free way to prove
-    it is still routable.
+    it is still routable. Rich colors the flag name's leading ``-`` and
+    ``-auto`` with separate ANSI sequences under a coloring terminal (CI's
+    runner detects one; a local non-tty invocation may not), so the raw
+    ``result.output`` won't reliably contain a contiguous ``--auto``
+    substring — strip ANSI before checking (same technique as
+    ``tests/cli/test_slot_create_flags.py::test_help_lists_new_flags``).
     """
     from typer.testing import CliRunner
 
@@ -77,7 +82,8 @@ def test_setup_still_works_as_an_internal_entry_point() -> None:
 
     result = CliRunner().invoke(app, ["setup", "--help"])
     assert result.exit_code == 0, result.output
-    assert "--auto" in result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--auto" in plain
 
 
 def test_install_banner_does_not_offer_hal0_setup(install_sh_text: str) -> None:
