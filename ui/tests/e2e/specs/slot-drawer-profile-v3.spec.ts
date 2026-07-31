@@ -41,7 +41,9 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
 
-    await expect(page.getByTestId('slot-hw-device')).toBeVisible()
+    // Device has no control in the drawer any more — it rides the model at
+    // creation and is fixed for the slot's lifetime.
+    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
     await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
     await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
     await expect(page.getByTestId('slot-hw-binary')).toBeVisible()
@@ -166,7 +168,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     await page.goto('/#slots/npu')
     await expect(page.locator('.drawer')).toBeVisible()
 
-    await expect(page.getByTestId('slot-hw-device')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
     await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
   })
 
