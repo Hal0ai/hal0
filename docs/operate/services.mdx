@@ -1,0 +1,186 @@
+---
+title: Services
+description: The two systemd units that make up the hal0 platform — hal0-api and hindsight-api. Unit contents, config files, ports, health checks, and how to start/stop/restart/inspect logs for each.
+sidebar:
+  order: 20
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The hal0 platform itself is two systemd units: **`hal0-api`**, the API
+daemon everything else talks to, and **`hindsight-api`**, the memory engine
+it delegates recall/extraction to. Both run as the unprivileged `hal0` system
+user and are managed with plain `systemctl`/`journalctl`.
+
+<Aside type="note">
+This page covers the two platform units. Per-model inference units
+(`hal0-slot@<name>.service`) and companion apps managed through the
+`/api/services` registry (OpenWebUI, ComfyUI, Hermes) each have their own
+lifecycle and aren't covered here.
+</Aside>
+
+## hal0-api.service
+
+The API daemon — serves `/api/*`, `/v1/*`, and the dashboard's static
+assets. Generated at install time by `installer/install.sh` (not a static
+file in the repo):
+
+```ini
+[Unit]
+Description=hal0 API daemon
+Documentation=https://github.com/hal0ai/hal0
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hal0
+Group=hal0
+WorkingDirectory=${API_WORKDIR}
+EnvironmentFile=${API_ENV}
+EnvironmentFile=-${ETC_DIR}/hermes-python.env
+EnvironmentFile=-${HF_SECRETS_ENV}
+ExecStart=${HAL0_BIN} serve --port ${HAL0_PORT}
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hal0-api
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- **User/group** — `hal0:hal0`. Root-only operations (writing per-slot
+  units, `daemon-reload`, restarting itself during an update) go through a
+  narrow `sudo -n` wrapper (`hal0-systemctl`) rather than running the daemon
+  as root.
+- **WorkingDirectory** — the `current` symlink in a production install, so
+  `hal0 update`'s atomic swap moves it without rewriting the unit.
+- **ExecStart** — no `--host` flag. The bind host comes from
+  `HAL0_BIND_HOST` inside `EnvironmentFile`, so the unit and the `hal0 serve`
+  CLI can never disagree about it.
+- **Port** — `8080` by default (`HAL0_PORT` in `api.env`), binds `0.0.0.0`
+  unconditionally.
+
+### Config files it reads
+
+| File | Purpose |
+|---|---|
+| `/etc/hal0/hal0.toml` | Main config — includes the `[security]` table (see [Authentication](/docs/operate/auth)). |
+| `/etc/hal0/api.env` | Required systemd `EnvironmentFile`, mode `0600` — port, log level, network settings, provider tokens, and (post-rotation) `HAL0_ADMIN_KEY`/`HAL0_CLIENT_KEY`. |
+| `/etc/hal0/hermes-python.env` | Optional — Hermes interpreter policy. |
+| `/var/lib/hal0/secrets/hal0-api.env` | Optional, `root:root` `0600` — `HF_TOKEN` and similar secrets. |
+| `/etc/hal0/upstreams.toml` | External LLM upstream definitions. |
+
+### Health endpoints
+
+| Endpoint | Auth | Checks |
+|---|---|---|
+| `GET /api/health` | open | Shallow liveness — returns immediately, no slot/upstream/disk work. What the installer and the systemd watchdog poll. |
+| `GET /api/health/system` | open | Deep health — disk headroom on state/config roots, slot-manager responsiveness, errored-slot detection. Always `200`, with `{"status": "ok"\|"degraded", "checks": {...}}`. |
+| `GET /api/status` | client | Dashboard summary poll (hardware, slots, memory-degraded flag). |
+
+## hindsight-api.service
+
+The memory engine — extraction, consolidation, reflection, and recall. A
+static unit file shipped at `installer/systemd/hindsight-api.service`:
+
+```ini
+[Unit]
+Description=hal0 shared Hindsight memory engine (platform brain)
+After=network-online.target hal0-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hal0
+Group=hal0
+WorkingDirectory=/var/lib/hal0/memory/hindsight
+
+Environment=HOME=/var/lib/hal0/memory/hindsight
+Environment=HF_HOME=/var/lib/hal0/memory/hindsight/hf-cache
+
+Environment=HINDSIGHT_API_LLM_PROVIDER=openai
+Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
+Environment=HINDSIGHT_API_LLM_MODEL=hal0/utility
+Environment=HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth
+Environment=HINDSIGHT_API_LLM_TIMEOUT=300
+Environment=HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
+
+Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU=true
+Environment=HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU=true
+
+ExecStart=/var/lib/hal0/memory/hindsight/.venv/bin/hindsight-api --host 127.0.0.1 --port 9177
+
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- **Port** — `9177`, **loopback only** (`--host 127.0.0.1`). Not LAN-exposed;
+  hal0-api is the thing that talks to it.
+- **Dependency direction is inverted from what the ordering suggests** —
+  `After=... hal0-api.service` is soft ordering only (an unknown unit name is
+  tolerated), but the real dependency runs the other way: hindsight routes
+  its own extraction/consolidation/reflection LLM calls back *to* hal0-api's
+  OpenAI-compatible endpoint (`HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1`).
+  hindsight-api is a consumer of hal0-api, not the reverse.
+- **No TOML config** — every setting is an inline `Environment=` line in the
+  unit itself. An optional operator drop-in,
+  `hindsight-api.service.d/extraction-model.conf`, overrides
+  `HINDSIGHT_API_LLM_MODEL` without editing the installer-owned unit (written
+  by `hal0 memory graph enable --slot <name>` or the Memory dashboard page).
+- **Data root** — embedded Postgres at `/var/lib/hal0/memory/hindsight/.pg0`,
+  pinned via the unit's `HOME=` env (Hindsight has no dedicated data-dir
+  variable of its own).
+
+### Health endpoint
+
+`GET http://127.0.0.1:9177/health` — polled by the installer after start (up
+to 40 × 3s) and by `hal0 doctor --verify`'s memory-engine check. If
+unreachable while the memory feature is enabled, hal0's own health report
+degrades to `WARN "engine enabled but :9177 unreachable"` rather than
+failing hard.
+
+## Starting, stopping, and inspecting
+
+Same commands for both units:
+
+```sh
+systemctl status  hal0-api
+systemctl start   hal0-api
+systemctl stop    hal0-api
+systemctl restart hal0-api
+systemctl enable  hal0-api        # already enabled by the installer
+
+journalctl -u hal0-api -f         # follow
+journalctl -u hal0-api -n 40      # last 40 lines — the recovery recipe install.sh itself uses
+```
+
+Swap `hal0-api` for `hindsight-api` for the memory engine. `hal0-api`'s own
+self-restart path (the updater) shells out to the same `systemctl restart`
+via the `hal0-systemctl` wrapper, so a manual restart and an update-triggered
+one behave identically.
+
+### Log access over HTTP
+
+Both units' logs are also available without shell access, proxied from
+journald with secret-redaction applied:
+
+```
+GET /api/logs?unit=hal0-api&n=200[&since=...&level=...]
+GET /api/logs/stream?unit=hal0-api&level=...     # SSE tail
+```
+
+Swap `unit=hindsight-api` for the memory engine's logs. Both routes are
+admin-tier.
+
+## See also
+
+- [Authentication](/docs/operate/auth) — `/etc/hal0/api.env`, the
+  `EnvironmentFile` `hal0-api.service` loads, is where the admin/client keys
+  described there actually live.
