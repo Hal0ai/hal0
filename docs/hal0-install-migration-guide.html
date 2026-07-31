@@ -4,8 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="theme-color" content="#0a0a0a" />
-<title>hal0 — Install &amp; Migration Guide (v1.0.0-alpha.0 · R5)</title>
-<meta name="description" content="hal0 v1.0.0-alpha.0 — install, first-run, and upgrade/migration guide for new and existing operators. Local AI inference appliance: container-runtime slots, ROCm/Vulkan/NPU, OmniRouter, Hermes agents, Hindsight memory." />
+<title>hal0 — Install &amp; Migration Guide (v1.0.0-rc.1)</title>
+<meta name="description" content="hal0 v1.0.0-rc.1 — install, first-run, and upgrade/migration guide for new and existing operators. Local AI inference appliance: container-runtime slots, ROCm/Vulkan/NPU, OmniRouter, Hermes agents, Hindsight memory." />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -172,8 +172,8 @@ footer .mono{font-family:var(--jbm)}
     <circle cx="12" cy="12" r="3" fill="#FFB000"/>
   </svg>
   <span class="name">hal0</span>
-  <span class="ver">v1.0.0-alpha.0</span>
-  <span class="rel">Install &amp; Migration Guide · R5</span>
+  <span class="ver">v1.0.0-rc.1</span>
+  <span class="rel">Install &amp; Migration Guide</span>
   <span class="spacer"></span>
   <a class="tlink" href="#new">New install</a>
   <a class="tlink" href="#upgrade">Upgrade</a>
@@ -196,7 +196,7 @@ footer .mono{font-family:var(--jbm)}
   <a href="#migrations">Migrations</a>
   <a href="#backcompat">Back-compat &amp; rollback</a>
   <div class="grp">Release</div>
-  <a href="#changelog">What's new (R5)</a>
+  <a href="#changelog">What's new</a>
   <a href="#troubleshoot">Troubleshooting</a>
   <a href="#reference">Reference</a>
 </nav>
@@ -205,7 +205,7 @@ footer .mono{font-family:var(--jbm)}
 
 <div class="hero" id="overview">
   <h1>Set up <span class="halo">hal0</span> — the local AI inference appliance</h1>
-  <p>hal0 runs open models on your own hardware: every inference slot is its own podman container supervised by systemd, with a control-plane dashboard on <code>:8080</code>, OmniRouter, Hermes agents, and Hindsight memory. This guide covers a <strong>fresh install</strong> for new operators and an <strong>in-place upgrade</strong> for existing boxes — plus the full <strong>R5 / v1.0.0-alpha.0</strong> changelog.</p>
+  <p>hal0 runs open models on your own hardware: every inference slot is its own podman container supervised by systemd, with a control-plane dashboard on <code>:8080</code>, OmniRouter, Hermes agents, and Hindsight memory. This guide covers a <strong>fresh install</strong> for new operators and an <strong>in-place upgrade</strong> for existing boxes — plus the full <strong>v1.0.0-rc.1</strong> changelog.</p>
   <div class="cta">
     <a class="btn primary" href="#new">Install hal0 →</a>
     <a class="btn" href="#upgrade">I'm upgrading →</a>
@@ -221,7 +221,7 @@ footer .mono{font-family:var(--jbm)}
 
 <div class="note acc">
   <span class="tag">Validated</span>
-  <p>v1.0.0-alpha.0's installer was live-validated on two substrates — <span class="pill rocm">podman 4.9.3 · privileged</span> and <span class="pill vulkan">podman 5.7 · unprivileged</span> — both a clean fresh install and an in-place upgrade, exit 0, non-destructive.</p>
+  <p>v1.0.0-rc.1's installer was live-validated on two substrates — <span class="pill rocm">podman 4.9 · privileged</span> and <span class="pill vulkan">podman 5.x · unprivileged</span> — both a clean fresh install and an in-place upgrade, exit 0, non-destructive.</p>
 </div>
 
 <hr class="sep"/>
@@ -236,7 +236,7 @@ footer .mono{font-family:var(--jbm)}
       <h4>Host</h4>
       <ul class="tick">
         <li>systemd Linux, <strong>x86_64</strong></li>
-        <li>Python <strong>3.11 – 3.14</strong> on <code>$PATH</code></li>
+        <li>Python <strong>3.12+</strong> on <code>$PATH</code></li>
         <li><strong>podman</strong> (container runtime for slots)</li>
         <li>Disk for models (point at a big volume with <code>--models-dir</code>)</li>
         <li>Free ports: <code>8080</code> (API) + the slot pool</li>
@@ -255,7 +255,7 @@ footer .mono{font-family:var(--jbm)}
 
   <h3>Inference backends</h3>
   <div class="grid c2">
-    <div class="card"><h4><span class="pill vulkan">Vulkan</span> recommended on Strix Halo</h4><p class="k">RADV/Vulkan benchmarked <strong>+40% prefill · +16% gen · −30% TTFT</strong> vs ROCm on the same weights (unified-memory APUs). v1.0.0-alpha.0 standardizes shared APU models on Vulkan.</p></div>
+    <div class="card"><h4><span class="pill vulkan">Vulkan</span> recommended on Strix Halo</h4><p class="k">RADV/Vulkan benchmarked <strong>+40% prefill · +16% gen · −30% TTFT</strong> vs ROCm on the same weights (unified-memory APUs). v1.0.0-rc.1 standardizes shared APU models on Vulkan.</p></div>
     <div class="card"><h4><span class="pill rocm">ROCm</span> · <span class="pill npu">NPU</span> · <span class="pill cpu">CPU</span></h4><p class="k">ROCm/HIP for discrete AMD, AMDXDNA NPU via FastFlowLM, and a fully-supported CPU path. hal0 picks per-model at launch; you can pin a device.</p></div>
   </div>
 
@@ -277,7 +277,7 @@ footer .mono{font-family:var(--jbm)}
 curl -fsSL <span class="str">https://hal0.dev/install.sh</span> | bash</pre>
 
   <h3>From a clone (development / air-gapped)</h3>
-  <pre data-label="shell"><span class="cmt"># Standard install at /opt/hal0</span>
+  <pre data-label="shell"><span class="cmt"># Standard install at /usr/lib/hal0</span>
 sudo bash installer/install.sh
 
 <span class="cmt"># Point model pulls at a larger disk</span>
@@ -293,7 +293,7 @@ sudo bash installer/install.sh <span class="flag">--no-start</span></pre>
   <table>
     <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
     <tbody>
-      <tr><td><code>HAL0_PREFIX</code></td><td><code>/opt/hal0</code></td><td>Install root</td></tr>
+      <tr><td><code>HAL0_PREFIX</code></td><td><code>/usr/lib/hal0</code></td><td>Install root</td></tr>
       <tr><td><code>HAL0_PORT</code></td><td><code>8080</code></td><td>API + dashboard port</td></tr>
       <tr><td><code>HAL0_PYTHON</code></td><td><code>python3</code></td><td>Interpreter</td></tr>
       <tr><td><code>HAL0_NO_PROBE</code></td><td><code>0</code></td><td><code>=1</code> skips the end-of-install hardware probe</td></tr>
@@ -303,7 +303,7 @@ sudo bash installer/install.sh <span class="flag">--no-start</span></pre>
 
   <h3>What the installer does</h3>
   <ol class="steps">
-    <li><strong>Pre-flight</strong> — Python 3.11–3.14, systemd, x86_64, disk, free ports, container-runtime smoke test. Accurate diagnostics on failure (see <a href="#troubleshoot">troubleshooting</a>).</li>
+    <li><strong>Pre-flight</strong> — Python 3.12+, systemd, x86_64, disk, free ports, container-runtime smoke test. Accurate diagnostics on failure (see <a href="#troubleshoot">troubleshooting</a>).</li>
     <li><strong>Layout</strong> — code at <code>/usr/lib/hal0/hal0-&lt;version&gt;</code> behind a <code>current</code> symlink + shared venv; config in <code>/etc/hal0/</code>; state in <code>/var/lib/hal0/{models,registry,slots,cache}</code>. <code>--dev</code> lands everything under <code>$PWD/.hal0ai/</code>.</li>
     <li><strong>Install</strong> — creates the venv, installs the release tree, links <code>/usr/local/bin/hal0</code> + <code>hal0-agent</code>.</li>
     <li><strong>Dashboard UI</strong> — builds <code>ui/dist</code> if missing and <code>npm</code> is present (self-hosted fonts — renders identically offline).</li>
@@ -335,7 +335,7 @@ curl -fsS <span class="str">http://127.0.0.1:8080/api/health</span></pre>
 hal0 model pull <span class="str">&lt;model&gt;</span>
 hal0 slot create <span class="str">my-slot</span> <span class="flag">--model</span> <span class="str">&lt;model&gt;</span> <span class="flag">--provider</span> llama-server
 hal0 chat <span class="flag">--model</span> <span class="str">my-slot</span></pre>
-  <div class="note info"><span class="tag">Note · v1.0.0-alpha.0</span><p>Models own logical behavior such as chat templates. Physical launch facts — device, NGL, threads, binary, profile, and image pin — belong to the slot.</p></div>
+  <div class="note info"><span class="tag">Note · v1.0.0-rc.1</span><p>Models own logical behavior such as chat templates. Physical launch facts — device, NGL, threads, binary, profile, and image pin — belong to the slot.</p></div>
 </section>
 
 <hr class="sep"/>
@@ -352,7 +352,7 @@ sudo hal0 update</pre>
 
   <div class="note ok"><span class="tag">Validated exit 0</span><p>The upgrade path was exercised live on both boxes — a cached in-place upgrade completed in ~22&nbsp;s and even healed a previously-failed slot unit. No data wiped.</p></div>
 
-  <div class="note warn"><span class="tag">Read before upgrading</span><p>The code swap is safe on its own, but R5 ships <strong>one-shot data migrations</strong> that are <em>operator-run at a downtime window</em>, not automatic. Your box keeps working on the old config after the code swap (see <a href="#backcompat">back-compat</a>) — run the migrations deliberately.</p></div>
+  <div class="note warn"><span class="tag">Read before upgrading</span><p>The code swap is safe on its own, but v1.0.0-rc.1 ships <strong>one-shot data migrations</strong> that are <em>operator-run at a downtime window</em>, not automatic. Your box keeps working on the old config after the code swap (see <a href="#backcompat">back-compat</a>) — run the migrations deliberately.</p></div>
 </section>
 
 <section id="migrations">
@@ -472,8 +472,8 @@ systemctl list-units 'hal0-slot@*'</pre>
 
 <!-- ─────────────────────────── CHANGELOG ─────────────────────────── -->
 <section id="changelog">
-  <h2><span class="eyebrow">Release</span>What's new — R5 / v1.0.0-alpha.0</h2>
-  <p class="lead">R5 hardens install and runtime behavior. The current alpha adds workload-oriented profiles, slot-owned hardware, stable slot IDs, a first-class brain route, and clearer slot/model drawers.</p>
+  <h2><span class="eyebrow">Release</span>What's new — v1.0.0-rc.1</h2>
+  <p class="lead">v1.0.0-rc.1 is the release candidate for hal0 1.0. It hardens the container-runtime install, finalizes the slot-owned hardware model, ships the first-class brain route, and removes deprecated Honcho memory.</p>
 
   <h3><span class="pill" style="color:var(--hal0-accent);border-color:var(--accent-line);background:var(--accent-soft)">Current</span> Workload profiles &amp; slot-owned hardware</h3>
   <ul class="tick">
@@ -514,7 +514,7 @@ systemctl list-units 'hal0-slot@*'</pre>
   <h3>Housekeeping (SWEEP)</h3>
   <ul class="tick">
     <li>Deprecated surfaces remain machine-stamped <code>HAL0-SUNSET: v1.0.0</code> until their scheduled removal.</li>
-    <li>Python and UI package manifests now report <code>1.0.0-alpha.0</code> consistently.</li>
+    <li>Python and UI package manifests now report <code>1.0.0-rc.1</code> consistently.</li>
     <li>Boot is split into 14 named, observable phases with a typed <code>BootState</code>.</li>
     <li>The bilingual slot runtime reads both name-keyed and id-keyed layouts; the operator chooses when to flip.</li>
   </ul>
@@ -535,7 +535,7 @@ keyctl clear @s
 sysctl -w kernel.keys.maxbytes=2000000</pre>
 
   <h4><span class="pill rocm">GPU</span> Slot runs but on CPU / GPU access denied</h4>
-  <p>If <code>/dev/dri/renderD128</code> is owned by a group that isn't your host's <code>render</code> group, older builds group-added the wrong GID. v1.0.0-alpha.0 derives the GID from the device node itself. Confirm your <code>hal0</code> user is in the device's owner group:</p>
+  <p>If <code>/dev/dri/renderD128</code> is owned by a group that isn't your host's <code>render</code> group, older builds group-added the wrong GID. v1.0.0-rc.1 derives the GID from the device node itself. Confirm your <code>hal0</code> user is in the device's owner group:</p>
   <pre data-label="check">stat -c '%G %g' /dev/dri/renderD128
 id -nG hal0</pre>
 
@@ -586,7 +586,7 @@ id -nG hal0</pre>
 </div>
 
 <footer>
-  <p><span class="mono">hal0 v1.0.0-alpha.0 · R5</span> — local AI inference appliance. Container-runtime slots · ROCm / Vulkan / NPU · OmniRouter · Hermes agents · Hindsight memory.</p>
+  <p><span class="mono">hal0 v1.0.0-rc.1</span> — local AI inference appliance. Container-runtime slots · ROCm / Vulkan / NPU · OmniRouter · Hermes agents · Hindsight memory.</p>
   <p>Install: <span class="mono">curl -fsSL https://hal0.dev/install.sh | bash</span> &nbsp;·&nbsp; Docs: <a href="https://hal0.dev">hal0.dev</a> &nbsp;·&nbsp; Dashboard: <span class="mono">http://&lt;host&gt;:8080</span></p>
 </footer>
 

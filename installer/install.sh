@@ -2,12 +2,12 @@
 # hal0 installer — idempotent, non-interactive.
 #
 # Usage:
-#   sudo bash install.sh             # standard install at /opt/hal0
+#   sudo bash install.sh             # standard install at /usr/lib/hal0
 #   bash install.sh --dev            # local-only install under $PWD/.hal0ai
 #   sudo bash install.sh --no-start  # set up everything but don't start units
 #
 # Env overrides:
-#   HAL0_PREFIX        installation root (default /opt/hal0)
+#   HAL0_PREFIX        installation root (default /usr/lib/hal0)
 #   HAL0_PORT          API port (default 8080)
 #   HAL0_PYTHON        python interpreter (default python3)
 #   HAL0_NO_PROBE=1    skip the hardware probe at the end
