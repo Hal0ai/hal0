@@ -1,0 +1,143 @@
+---
+title: Speech to text and text to speech
+description: "Enable hal0's voice capability with hal0 capabilities set: transcription via whisper-class models on the XDNA NPU (FLM), synthesis via Kokoro (CPU) or Qwen3-TTS (GPU), then call /v1/audio/transcriptions and /v1/audio/speech."
+sidebar:
+  order: 80
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 exposes two voice directions through OpenAI-compatible endpoints:
+
+- **Speech-to-text** (`POST /v1/audio/transcriptions`) — served by
+  FastFlowLM (FLM) on the XDNA NPU, co-loaded with the chat model in one
+  FLM process (the "NPU trio": chat + STT + embed).
+- **Text-to-speech** (`POST /v1/audio/speech`) — served from the single
+  canonical `tts` slot, which can run **either** engine: Kokoro-82M ONNX
+  on CPU, or Qwen3-TTS on GPU (ROCm, native gfx1151). Choosing a device
+  swaps which provider the `tts` slot runs — there's no separate slot to
+  configure.
+
+Both are children of the **`voice`** capability: `voice.stt` maps to the
+`stt` slot and `voice.tts` maps to the `tts` slot.
+
+## Enable the voice capability
+
+```sh
+hal0 capabilities set voice stt --model <your-stt-model>
+hal0 capabilities set voice tts --model <your-tts-model>
+```
+
+Or over the API, which accepts any subset of `{ backend, provider, model,
+enabled }`:
+
+<Tabs>
+<TabItem label="Speech-to-text (NPU, FLM)">
+
+```sh
+curl -X POST http://localhost:8080/api/capabilities/voice/stt \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "backend": "npu"}'
+```
+
+</TabItem>
+<TabItem label="Text-to-speech (CPU, Kokoro)">
+
+```sh
+curl -X POST http://localhost:8080/api/capabilities/voice/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "backend": "cpu", "provider": "kokoro"}'
+```
+
+</TabItem>
+<TabItem label="Text-to-speech (GPU, Qwen3-TTS)">
+
+```sh
+curl -X POST http://localhost:8080/api/capabilities/voice/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "backend": "gpu-rocm", "provider": "qwen3tts"}'
+```
+
+</TabItem>
+</Tabs>
+
+<Aside type="note">
+STT runs on the XDNA NPU via the FLM container — there is no CPU-only STT
+backend in hal0. TTS runs from the single `tts` slot on either engine:
+Kokoro (CPU, ONNX) or Qwen3-TTS (GPU, ROCm) — picking a device in the
+`voice.tts` picker swaps the engine in place, it does not add a second
+slot.
+</Aside>
+
+### The `voice.tts` engine switch
+
+| Device | Provider | Runs on |
+| --- | --- | --- |
+| `cpu` | `kokoro` | CPU (ONNX) |
+| `gpu-rocm` | `qwen3tts` | Strix Halo iGPU (ROCm, native gfx1151) |
+
+Selecting a device rewrites which provider the `tts` slot loads — the
+slot itself doesn't move. Both engines' weights are operator-staged (not
+pulled through the hal0 registry); the slot mounts a writable cache
+directory for kernel/tokenizer caches.
+
+### How the NPU STT path works
+
+Enabling `voice.stt` with `backend=npu` does **not** spawn a standalone
+process — it drives the FLM trio, one `flm serve` anchor process serving
+chat, transcription, and embeddings together. The orchestrator toggles
+the anchor's `[npu].asr` flag and writes a `type=transcription` slot
+record for dispatch gating. The anchor is **not** auto-restarted — the
+response carries `pending_reload: true`, and the change takes effect once
+you reload the FLM anchor yourself (`hal0 slot restart <anchor-slot>`).
+NPU transcription requires the FLM chat anchor to already be loaded.
+
+## Transcribe audio (speech to text)
+
+```sh
+curl -X POST http://localhost:8080/v1/audio/transcriptions \
+  -F 'file=@recording.wav' \
+  -F 'model=<your-stt-model>'
+```
+
+The `model` form field is **required**; omitting it returns **400**
+(`request.missing_model`).
+
+## Synthesize speech (text to speech)
+
+```sh
+curl -X POST http://localhost:8080/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "<your-tts-model>",
+    "input": "Hello from hal0.",
+    "voice": "<voice-id>"
+  }' \
+  --output speech.wav
+```
+
+`model` is required. `voice`, `speed`, and `response_format` are
+optional — see [request defaults](#tts-request-defaults) below.
+
+### TTS request defaults
+
+The `tts` slot can carry persisted request defaults that
+`/v1/audio/speech` seeds into a request whenever the body omits the
+matching field — an explicit value in the request always wins:
+
+- `default_voice` — voice id injected when the request omits `voice`.
+- `default_speed` — playback speed (`0.25`–`4.0`) injected when the
+  request omits `speed`.
+- `default_response_format` — `mp3` / `wav` / `opus` / `flac` / `pcm`,
+  injected when the request omits `response_format`.
+
+These are set from the dashboard's Settings → Voice panel and take effect
+immediately — no container restart. The dashboard's voice picker reads a
+live voice list from `GET /api/slots/tts/voices`; if the `tts` slot is
+cold or unreachable, it falls back to a built-in seed list.
+
+## See also
+
+- [Manage slots](/docs/guides/manage-slots) — the `stt` and `tts` slots.
+- [Choose models](/docs/guides/choose-models) — model-owned launch
+  defaults now apply to voice models the same as chat models.

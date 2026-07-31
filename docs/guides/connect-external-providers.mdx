@@ -1,0 +1,132 @@
+---
+title: Connect external providers
+description: Wire up OpenAI, Anthropic, OpenRouter, Ollama, or any OpenAI-compatible provider with the hal0 upstream CLI — credentials, testing, and reachability.
+sidebar:
+  order: 40
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 can route requests to **external upstreams** — third-party
+OpenAI-compatible APIs like OpenAI, Anthropic, OpenRouter, Google AI
+Studio, DeepSeek, MiniMax, Ollama, or any custom endpoint. Manage them
+with `hal0 upstream`, a thin client over `/api/upstreams` /
+`/api/providers` backed by a built-in catalogue of provider templates.
+
+## See what's available
+
+```sh
+hal0 upstream list                 # your configured upstreams
+curl http://localhost:8080/api/providers/catalog
+```
+
+The catalogue is a static reference of known provider templates —
+`openai`, `anthropic`, `openrouter`, `google_ai_studio`, `deepseek`,
+`minimax`, `ollama` (local), and a generic `custom` OpenAI-compatible
+entry — each carrying its default base URL, auth style, and models path.
+
+## Create an upstream
+
+```sh
+hal0 upstream create openrouter \
+  --catalog openrouter \
+  --auth-env OPENROUTER_API_KEY \
+  --api-key sk-or-...
+```
+
+<Steps>
+
+1. **`name`** (positional) — a unique id you'll reference everywhere else.
+
+2. **`--catalog`** — the catalogue id to seed defaults from (base URL,
+   auth style). Omit for a fully custom entry and pass `--url` /
+   `--auth-style` yourself.
+
+3. **`--url`** — override the base URL.
+
+4. **`--auth-style`** — `bearer` (`Authorization: Bearer <key>` — the
+   default for most OpenAI-compatible endpoints, including OpenRouter and
+   Ollama), `header` (custom header), or `none` (unauthenticated, e.g. a
+   local Ollama).
+
+5. **`--auth-header`** — the header name, when `--auth-style header`.
+
+6. **`--auth-env`** — the **name** of the environment variable that will
+   hold the secret. The key itself never lands in TOML — only the
+   env-var name does.
+
+7. **`--api-key` / `-k`** — write the credential in the same call. This
+   posts to `/api/providers/{name}/credentials` and binds it to the
+   upstream's declared `auth_value_env`, so you can't accidentally write
+   a key the upstream won't read.
+
+8. **`--timeout`** — request timeout in seconds (default `300`).
+
+9. **`--advertise-models` / `--hide-models`** — whether this upstream's
+   models appear in the aggregated model list.
+
+10. **`--enabled` / `--disabled`**.
+
+</Steps>
+
+<Aside type="caution">
+For Anthropic specifically: its native API speaks `/v1/messages`, not
+OpenAI's `/v1/chat/completions` — route through a compatible proxy rather
+than pointing an upstream straight at `api.anthropic.com`.
+</Aside>
+
+## Update, test, and remove
+
+```sh
+hal0 upstream update openrouter --timeout 120
+hal0 upstream test openrouter
+hal0 upstream show openrouter
+hal0 upstream advertise openrouter    # toggle whether its models are advertised
+hal0 upstream delete openrouter
+```
+
+`test` probes the upstream's `/models` endpoint and returns a
+reachability report: `{ok, status, latency_ms, models_count, error?}`. If
+the declared env var is empty, the probe fails fast without making an
+HTTP call.
+
+## Write a credential without recreating the upstream
+
+```sh
+hal0 upstream update openrouter --api-key sk-or-new-key
+```
+
+Or directly over the API:
+
+```sh
+curl -X POST http://localhost:8080/api/providers/openrouter/credentials \
+  -H 'content-type: application/json' \
+  -d '{"key":"OPENROUTER_API_KEY","value":"sk-or-..."}'
+```
+
+The `key` must match the upstream's declared env-var name exactly. The
+endpoint writes the value atomically to the API's env file with `0600`
+permissions, updates the running process environment immediately, and
+**never echoes the secret back** — the response carries
+`"value": "***REDACTED***"`.
+
+The dashboard's Settings → Secrets panel writes the same file with
+presets for the common providers plus a paired AWS Bedrock entry, but it
+doesn't check the name against any upstream's declared env var — type the
+exact name your upstream expects.
+
+<Aside type="caution">
+There is no built-in authentication on the hal0 API (ADR-0012) — it binds
+to the LAN. The credential file is LAN-writable; treat the host as you
+would any secret-bearing service and reverse-proxy it if it needs to be
+exposed.
+</Aside>
+
+## Picking up changes
+
+Credential writes apply to the running process immediately — no restart
+needed. Structural edits to `upstreams.toml` (adding, removing, or
+retiming an upstream through the CLI) are read once at `hal0-api`
+startup — `hal0 config reload` re-reads `hal0.toml`, **not**
+`upstreams.toml`. Run `hal0 config validate` after a hand-edit, then
+`systemctl restart hal0-api` to pick it up.

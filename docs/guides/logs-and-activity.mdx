@@ -1,0 +1,149 @@
+---
+title: Observe the system
+description: Tail slot and API logs with the hal0 CLI or the dashboard, and query the durable Activity/Audit log of config changes and slot transitions.
+sidebar:
+  order: 120
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 gives you three log/activity surfaces, each with a different
+lifetime and a different CLI verb: per-slot runtime logs, per-agent
+provisioning logs, the API's own systemd journal, and — separately from
+all of those — the durable Activity/Audit log. The dashboard also rolls
+request traffic up live:
+
+![The dashboard Requests widget — per-endpoint request volume with p50 / p95 latency over the last 60 seconds](/screenshots/requests-latency-widget.png)
+
+## Slot logs
+
+```sh
+hal0 slot logs agent               # last 200 lines
+hal0 slot logs agent --follow      # -f, live SSE tail
+hal0 slot logs agent --lines 1000  # -n, more history
+```
+
+Logs come from the slot's `hal0-slot@<name>.service` journal. Equivalent
+raw `journalctl`, if you have shell access on the host:
+
+```sh
+journalctl -u hal0-slot@agent.service -f
+```
+
+## Agent provisioning logs
+
+```sh
+hal0 agent log hermes
+hal0 agent log hermes --phase provision
+```
+
+These are per-phase flat files under the agent's state directory, not a
+systemd journal — a different surface from the agent's own *runtime*
+output, which lives in `hal0-agent@hermes`'s journal via `systemctl` the
+same as any other unit.
+
+## The API's own log tail
+
+```sh
+hal0 doctor logs                          # hal0-api's journal, last 200 lines
+hal0 doctor logs --follow
+hal0 doctor logs --unit hal0-api --level warning --since '5min ago'
+```
+
+This is a thin client over `GET /api/logs` / `/api/logs/stream` — the
+same endpoint the dashboard's Logs panel reads, so the CLI and dashboard
+never disagree.
+
+| Query param | Default | Notes |
+|-------------|---------|-------|
+| `unit`      | —       | Required. The systemd unit, e.g. `hal0-api` or `hal0-slot@agent`. |
+| `n`         | `200`   | Trailing lines, 1–5000. |
+| `since`     | —       | A `journalctl --since` value (ISO timestamp or `'5min ago'`). |
+| `level`     | —       | Filter to this priority **and higher severity**. |
+
+![The hal0 dashboard Logs panel showing live journal output for a slot unit](/screenshots/logs-activity.png)
+*The dashboard Logs panel streams journal output for any hal0 unit in real time.*
+
+On a host without `journalctl` (e.g. CI), the endpoint returns an empty
+`lines` array plus a `hint` rather than erroring.
+
+<Aside type="note">
+**Config-echoing endpoints redact secrets by key name.** Whenever hal0
+returns a config tree, any key matching `SECRET | TOKEN | PASSWORD |
+PASS | API_KEY | PRIVATE_KEY | ENCRYPTION_KEY | SALT` is replaced with
+`{"value": "***REDACTED***", "set": <bool>}`.
+</Aside>
+
+## The dashboard Logs page (unified logs/events)
+
+The dashboard's Logs page reads from two different backends behind one
+**channel** selector — `events` / `slot` / `merged`:
+
+- **`events`** — the structured `GET /api/journal` feed (hal0's internal
+  EventBus: slot state transitions, config changes, and the like), with
+  server-side filters `source`, `slot`, `level` (exact match), `q`
+  (substring), `since` (id cursor), `limit` (1–500, default 200).
+- **`slot`** — the raw per-slot journald tail (`GET
+  /api/slots/{name}/logs[/stream]`, the same data `hal0 slot logs`
+  reads), picked from a slot dropdown. A `quiet` filter (on by default)
+  drops idle heartbeat spam.
+- **`merged`** — both channels together.
+
+## The durable Activity and Audit log
+
+journald is a volatile tail. For a permanent record of **what changed**,
+hal0 keeps a SQLite audit store (`/var/lib/hal0/activity.db`, preserved
+across updates). It records every config-mutating user action and every
+system state change — each with a `before`/`after` snapshot and a
+success/failure `outcome`.
+
+There's no `hal0 activity` CLI verb — this is a dashboard/API-only
+surface:
+
+```sh
+curl 'http://localhost:8080/api/activity?limit=200'
+```
+
+The response is `{"records": [...], "next_since": <id>, "epoch": "..."}`.
+Poll with `?since=<next_since>` to page forward. Server-side filters
+(combine freely):
+
+| Filter     | Values |
+|------------|--------|
+| `since`    | id cursor — return records newer than this id. |
+| `category` | free-form category string. |
+| `action`   | free-form action name. |
+| `severity` | `info`, `warn`, `error`, `ok`. |
+| `outcome`  | `ok`, `error`, `pending`. |
+| `actor`    | the agent / actor that performed the action. |
+| `kind`     | `action` (a user action) or `event` (a system state change). |
+| `search`   | full-text match. |
+| `limit`    | 1–1000 (default 200). |
+
+Stream the durable backfill then a live tail:
+
+```sh
+curl -N 'http://localhost:8080/api/activity/stream?kind=action'
+```
+
+Export the filtered history as a file download:
+
+```sh
+curl 'http://localhost:8080/api/activity/export?fmt=csv' -o hal0-activity.csv
+curl 'http://localhost:8080/api/activity/export?fmt=json' -o hal0-activity.json
+```
+
+<Aside type="note">
+Don't confuse this with `hal0 board` — the agent task kanban (Triage →
+To-do → Scheduled → Ready). That's a work-tracking surface, not a log.
+See [Run agents](/docs/guides/run-agents).
+</Aside>
+
+## See also
+
+- [Manage slots](/docs/guides/manage-slots) — the slot lifecycle whose
+  transitions show up in the activity log.
+- [Edit configuration](/docs/guides/configure) — config changes are
+  audited.
+- [Security](/docs/concepts/security) — the LAN-open posture and what is
+  (and isn't) logged.

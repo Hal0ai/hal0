@@ -1,0 +1,171 @@
+---
+title: Pull and register models
+description: Pull models from Hugging Face into hal0's registry, register files already on disk, check for weight updates, scan for new files, and change the model store with the hal0 model CLI.
+sidebar:
+  order: 20
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 keeps a **local model registry** — a record of every model it knows
+about, where its bytes live, and what it can do. You populate it several
+ways: pull from Hugging Face, register a file you already have on disk,
+or scan a directory.
+
+## Pull from Hugging Face
+
+```sh
+hal0 model pull qwen3-4b
+```
+
+The argument is either a **curated alias** (see
+[Choose models](/docs/guides/choose-models)) or a model id already in the
+registry. The CLI starts a background pull on the daemon, then polls and
+renders a progress bar until the job finishes. Cancel an in-flight pull
+with:
+
+```sh
+hal0 model pull qwen3-4b --cancel
+```
+
+The downloader streams the GGUF into a tempfile, computing SHA-256 as it
+goes, then atomically moves it into place and upserts the registry entry.
+Before it streams a multi-GB file, hal0 runs a disk-space preflight
+against what's still left to fetch, so a resumed pull only needs room for
+the remainder.
+
+<Aside type="note">
+Gated or private repos return `401`/`403`. Set `HF_TOKEN` (or
+`HUGGING_FACE_HUB_TOKEN`) in the API environment and the pull adds the
+`Authorization: Bearer …` header automatically.
+</Aside>
+
+### Resuming an interrupted pull
+
+If a pull is interrupted — network drop, `hal0-api` restart, an OOM kill
+— it leaves a deterministic `.part` file plus a resume sidecar. The next
+pull for that model id picks the partial back up with an HTTP `Range`
+request instead of starting over. If the upstream object changed in the
+meantime, hal0 detects it via the sidecar's ETag and restarts the
+download clean rather than splicing mismatched bytes.
+
+### Pull by Hugging Face coordinates
+
+To pull a file that isn't in the curated catalogue, supply the repo and
+filename in the body:
+
+```sh
+curl -X POST http://localhost:8080/api/models/my-qwen-build/pull \
+  -H 'content-type: application/json' \
+  -d '{"hf_repo":"unsloth/Qwen3.6-27B-GGUF","hf_filename":"Qwen3.6-27B-UD-Q5_K_XL.gguf","labels":["chat"]}'
+```
+
+## Check for and apply weight updates
+
+```sh
+hal0 model update --check           # every model: compares recorded sha256 vs HF Hub, no download
+hal0 model update qwen3-4b --check  # one model
+hal0 model update qwen3-4b          # re-pull that model in place
+hal0 model update --refresh         # force a fresh check, ignoring any cache
+```
+
+## Register a file already on disk
+
+If the bytes are already on the host — say you dropped a GGUF into the
+model store — register it without re-downloading:
+
+```sh
+hal0 model add qwen3-4b-q4_k_m \
+  --path /path/to/qwen3-4b-instruct-q4_k_m.gguf \
+  --name "Qwen3 4B Q4_K_M" \
+  --license Apache-2.0
+```
+
+`hal0 model add` reads the file's header to auto-detect id/capabilities/
+backends. The old `hal0 model register` name is a deprecated alias for
+the same command. The API also exposes a directory scan that registers
+every new file it finds:
+
+```sh
+hal0 model scan
+```
+
+## Change or inspect the model store
+
+```sh
+hal0 model store              # show the current model-store directory
+hal0 model store /mnt/models  # point hal0 at a different directory
+hal0 model store /mnt/models --migrate  # move existing files there too
+```
+
+There's exactly one directory hal0 pulls to, scans, and bind-mounts into
+containers — this is how you point it somewhere with more room.
+
+## List, inspect, and remove
+
+<Tabs>
+<TabItem label="List">
+
+```sh
+hal0 model list
+hal0 model list --json
+```
+
+Aggregates the local registry with everything advertised by configured
+upstreams. Local files win on id collision and are flagged `installed`.
+
+</TabItem>
+<TabItem label="Show">
+
+```sh
+hal0 model show qwen3-4b
+hal0 model show qwen3-4b --json
+```
+
+</TabItem>
+<TabItem label="Remove">
+
+```sh
+hal0 model rm qwen3-4b
+```
+
+Removes the registry row (confirm prompt; `--force` to skip). The bytes
+on disk are never touched — that's your call. If a slot has this model as
+its default, the API cascades: it unloads the slot and clears the
+default.
+
+</TabItem>
+</Tabs>
+
+![Models registry — installed and available models with pull status badges](/screenshots/models-registry.png)
+*The Models tab lists every installed and upstream-advertised model, with pull-state badges for in-flight downloads.*
+
+## One-shot: get a model serving
+
+```sh
+hal0 model run qwen3-4b --slot agent --timeout 120
+```
+
+Assigns the model to a slot, loads it, and polls until it's ready — the
+fastest path from "I have an id" to "it's serving." The old
+`hal0 model assign` name is a deprecated alias for
+`hal0 slot edit --model`, which only sets the slot's default without
+loading it.
+
+## Restore a pre-registry backup
+
+```sh
+hal0 model import-backup /path/to/backup [--dest /mnt/models] [--force]
+```
+
+Disaster-recovery import for a model store captured before hal0's
+registry existed — restores files and re-registers them.
+
+## The registry on disk
+
+Registry entries are metadata records — id, display name, path, size,
+SHA-256, capabilities, and the model's own launch defaults (including an
+optional preferred profile) — see
+[Choose models](/docs/guides/choose-models#launch-flags-now-live-on-the-model-not-the-slot).
+The registry is the source of truth the dispatcher resolves model ids
+against; the actual weights live in your configured model store.

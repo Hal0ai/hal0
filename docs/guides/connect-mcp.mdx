@@ -1,0 +1,173 @@
+---
+title: Connect MCP servers
+description: Install MCP servers into hal0 with the hal0 mcp CLI, and connect an external MCP client to hal0's own bundled hal0-admin and hal0-memory servers.
+sidebar:
+  order: 90
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 talks [Model Context Protocol](https://modelcontextprotocol.io) in
+both directions: it can **install and run MCP servers** for its bundled
+agent to use, and it **exposes its own admin and memory surfaces** as MCP
+servers for any external client.
+
+## Install an MCP server
+
+```sh
+hal0 mcp install oci://ghcr.io/example/some-mcp-server:latest
+hal0 mcp install npm:@example/some-mcp-server
+hal0 mcp install uvx:some-mcp-server
+hal0 mcp install git+https://github.com/example/some-mcp-server
+```
+
+`hal0 mcp install` accepts an OCI image ref, an npm/uvx package
+specifier, a git URL, or a manifest URL. Each installed server persists
+as its own file, `/etc/hal0/mcp-servers/<id>.toml`, mode `0600` — secrets
+live in that server's own `env` block, never in a shared file.
+
+```sh
+hal0 mcp list                # bundled + installed
+hal0 mcp list --json
+hal0 mcp status <id>         # tools, env, connected clients
+hal0 mcp restart <id>
+hal0 mcp uninstall <id>
+hal0 mcp uninstall <id> --force
+```
+
+```sh
+hal0 mcp catalog list        # curated, known-good server catalogue
+hal0 mcp catalog refresh
+```
+
+<Aside type="note">
+`hal0-admin` and `hal0-memory` (below) are bundled and cannot be
+uninstalled — `hal0 mcp uninstall hal0-admin` is rejected with a 409.
+</Aside>
+
+## hal0's own bundled servers
+
+hal0 ships two MCP servers, mounted on the API as Streamable-HTTP
+sub-apps, for any external client (an IDE, Hermes, another agent) to
+connect to directly:
+
+- **`/mcp/memory`** — long-term memory tools (search, add, recall, list,
+  delete). Only mounted when the memory subsystem is initialised.
+- **`/mcp/admin`** — operate hal0: slots, models, capabilities, profiles,
+  stacks, config, hardware probes. Its `memory_*` tools route in-process
+  to the memory server.
+
+<Aside type="caution">
+hal0 has **no built-in network auth** (ADR-0012). The MCP mounts are
+reachable to anything that can reach the API. Run hal0 on a trusted LAN
+or behind your own reverse proxy — do not expose `/mcp/*` to the
+internet.
+</Aside>
+
+### Connect
+
+Point your MCP client at the mount URL on the hal0 host:
+
+```
+http://localhost:8080/mcp/admin
+http://localhost:8080/mcp/memory
+```
+
+### Identify with X-hal0-Agent
+
+Caller identity flows on the **`X-hal0-Agent`** request header. The value
+must match `^[a-zA-Z0-9_-]{1,64}$`. It stamps the audit trail and powers
+the `private:<agent>` memory namespace.
+
+```
+X-hal0-Agent: my-agent
+```
+
+An absent or malformed header falls back to `anonymous`. Add
+`X-hal0-Private: 1` to opt a memory client into its private namespace —
+writes then land in `private:<agent>` instead of the default `shared`
+dataset (or the unified bank, if `[memory].unified_bank` is on — see
+[Enable memory](/docs/guides/enable-memory)).
+
+### Widen the host and origin allowlists
+
+Each mounted server inherits FastMCP's **localhost-only**
+DNS-rebinding protection. A non-localhost client otherwise gets a bare
+**`421 Invalid Host`**. Two environment knobs on hal0-api widen the
+allowlist:
+
+- `HAL0_MCP_ALLOWED_HOSTS` — comma-separated `host` / `host:port` /
+  `host:*` values added to the localhost floor. The single value `*`
+  disables DNS-rebinding protection entirely.
+- `HAL0_MCP_ALLOWED_ORIGINS` — comma-separated browser origins, derived
+  automatically from each added host when unset.
+
+```sh
+HAL0_MCP_ALLOWED_HOSTS=hal0.local:8080,hal0.local:*
+```
+
+See [Edit configuration](/docs/guides/configure) for where these env keys
+live.
+
+### Memory tools (`/mcp/memory`)
+
+![MCP admin tab in dashboard](/screenshots/mcp-tab.png)
+*Dashboard tab showing available MCP tools and their approval status.*
+
+| Tool            | Effect | Notes |
+|-----------------|--------|-------|
+| `memory_add`    | write  | `text` (required), `dataset`, `tags`, `metadata`, `document_id`. Reuse `document_id` to upsert one logical document. |
+| `memory_search` | read   | `query` (required), `limit` (1–200), `dataset`, `tags`, `before`, `after`. |
+| `memory_recall` | read   | Token-budgeted, consolidated recall — preferred over `search`. `query`, `max_tokens` (1–32768), `types`. |
+| `memory_list`   | read   | Paginate: `dataset`, `cursor`, `limit`. |
+| `memory_delete` | delete | `ids` (non-empty list), optional `dataset`. |
+
+### Admin tools (`/mcp/admin`)
+
+Admin tools are classified into three tiers. Read-only and low-blast-radius
+writes run **autonomously**; destructive or wide-reaching tools are
+**gated** — they enqueue for owner approval and return
+`{"status": "pending_approval", "approval_id": "..."}` instead of
+executing.
+
+**Autonomous — read:** `slot_list`, `slot_status`, `model_list`,
+`hardware_probe`, `capability_list`, `provider_list`, `version_info`,
+`stack_list`, `stack_status`, `profile_list`, `profile_status`,
+`profile_export`, `gpu_target_version`, `npu_status`, `env_report`,
+`model_store_probe`.
+
+**Autonomous — write:** `model_swap`, `memory_add`, `memory_search`,
+`memory_list`, and `memory_delete` for a single id. A bulk `memory_delete`
+routes to the gated tier at call time.
+
+**Gated — always require approval:** `model_pull`, `model_delete`,
+`slot_create`, `slot_delete`, `slot_restart`, `capability_set`,
+`config_write`, `provider_credential_write`, `stack_apply`,
+`stack_import`, `stack_delete`, `profile_import`, `profile_delete`, and
+`logs_tail`. `slot_create` and `config_write` here follow the same
+[server].extra_args screening as every other slot write path — see
+[Edit configuration](/docs/guides/configure#server-extra_args-is-screened-everywhere).
+
+### The approval flow
+
+<Steps>
+
+1. The server enqueues the call and returns
+   `{"status": "pending_approval", "approval_id": "..."}`.
+
+2. The owner reviews and approves (or denies) the request from
+   `hal0 agent approvals list` / `approve` / `deny` — the queued call
+   carries the tool name and arguments so the approver sees exactly what
+   will run.
+
+3. On approval, the tool executes with the approved arguments and the
+   real result is recorded; every gated call is written to the audit log.
+
+</Steps>
+
+## See also
+
+- [Enable memory](/docs/guides/enable-memory) — what the memory subsystem powers.
+- [Run agents](/docs/guides/run-agents) — the approvals queue in context.
+- [Edit configuration](/docs/guides/configure) — where per-server env secrets and the extra_args screen live.
+- [Security](/docs/concepts/security) — the LAN-open posture, MCP allowlist, and origin gate.
