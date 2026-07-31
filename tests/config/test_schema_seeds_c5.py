@@ -101,8 +101,11 @@ def test_seed_slot_ports_are_mutually_unique() -> None:
     assert not dupes, f"seed slot port collisions: {dupes}"
 
 
-#: Seeds the clean-seed invariant applies to — every static seed, including
-#: ``brain`` (GH #1475 reverses the #1258 exception below).
+#: Seeds the clean-seed invariant applies to — every operator-facing slot.
+#: ``brain`` is included as of v1.0: it used to be the one exception (#1258
+#: pinned a 1B model so the steward "worked out of the box"). The steward's
+#: readiness now comes from the installer actually pulling the weights — see
+#: test_brain_seed_defers_its_model_to_the_installer.
 _CLEAN_SEED_SLOTS = sorted(set(STATIC_SEED_SLOTS) | {"qwen3tts"})
 
 
@@ -115,17 +118,61 @@ def test_seed_toml_ships_clean(name: str) -> None:
     model pin (the removed gemma-4-12b-it / sdxl-turbo ghosts) is the exact
     #1107 regression this guards. model is a default_factory ModelConfig with
     default=="" so the assertion holds for [model]-less TOMLs.
-
-    ``brain`` used to be the deliberate exception here (#1258: the platform
-    steward "must work out of the box"), but the pinned id
-    (``MiniCPM5-1B-Agentic-Tooluse``) was never in either shipped catalog
-    (GH #1475 v1.0 GA polish audit) — an unresolvable id the operator could
-    not pull from any dashboard surface, and post-#1408 a bound model IS the
-    activation signal, so the slot showed "activated" while unable to
-    actually serve. Strictly worse than the clean-seed grey tile every other
-    seed uses (the steward chat already falls back to the ``agent`` slot
-    until brain has a real model bound — see ``brain.toml``'s own comment).
-    Reversed to the clean-seed default; #1258's exception is retired.
     """
     slot = _load_seed_slot(_SEEDED_SLOTS_DIR / f"{name}.toml")
     assert slot.model.default == ""
+
+
+def test_brain_seed_defers_its_model_to_the_installer() -> None:
+    """The brain steward still ships READY — but the installer, not this TOML,
+    is what makes it ready (v1.0).
+
+    #1258 pinned ``MiniCPM5-1B-Agentic-Tooluse`` here so the dashboard's
+    sidebar steward chat would work on a fresh box. That id is a real,
+    anonymously-pullable model (the public GGUF repack of the upstream
+    tool-use base, ``ewinregirgojr/MiniCPM5-1B-Agentic-Tooluse-GGUF``), so
+    this is NOT a dangling-reference fix. Two things were still wrong with
+    pinning it HERE:
+
+    * the id is absent from the SHIPPED curated catalogue, so a fresh box —
+      the only box this seed file ever lands on first — has no coordinates to
+      resolve it with;
+    * a pin written before any bytes exist on disk is exactly the
+      start-before-model race #1108 closed, because model-presence IS the
+      activation signal (#1369). True of ANY id, pullable or not.
+
+    Moving to the ``Hal0ai/hal0-brain-sft-ROCmFPX-GGUF`` variants is
+    separately an upgrade: hal0's own SFT instead of the upstream base, with
+    a quant matched to the detected hardware instead of F16 for everyone.
+
+    So the seed ships model-less and ``install.sh``'s brain step pulls the
+    weights and stamps ``[model].default`` once they land
+    (:mod:`hal0.install.brain_model`). This test pins BOTH halves of that
+    contract: no id in the seed, and a genuinely pullable curated id for
+    either hardware class the installer can land on.
+    """
+    from hal0.install.brain_model import (
+        BRAIN_MODEL_IDS,
+        BRAIN_MODEL_PORTABLE,
+        BRAIN_MODEL_ROCMFPX,
+    )
+    from hal0.registry.curated import get_curated
+
+    slot = _load_seed_slot(_SEEDED_SLOTS_DIR / "brain.toml")
+    assert slot.model.default == "", (
+        "brain.toml must not pin a model: the installer binds the "
+        "hardware-appropriate variant after its bytes land"
+    )
+    # Both auto-selectable variants must resolve to real HF pull coordinates.
+    for model_id in (BRAIN_MODEL_ROCMFPX, BRAIN_MODEL_PORTABLE):
+        curated = get_curated(model_id)
+        assert curated is not None, f"{model_id!r} has no curated catalogue entry"
+        assert curated.hf_repo and curated.hf_file
+    # Every declared variant lives in the one PUBLIC repo. The base repo
+    # (Hal0ai/hal0-brain-sft) is private and safetensors-only — no chat runner
+    # consumes safetensors, so the installer must never point at it.
+    for model_id in BRAIN_MODEL_IDS:
+        curated = get_curated(model_id)
+        assert curated is not None
+        assert curated.hf_repo == "Hal0ai/hal0-brain-sft-ROCmFPX-GGUF"
+        assert curated.hf_file.endswith(".gguf")

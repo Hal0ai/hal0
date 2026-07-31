@@ -1,12 +1,24 @@
 """Assert install.sh gathers + persists HF_TOKEN to a secrets/ EnvironmentFile.
 
-WS-D (#1106): the HuggingFace token is gathered at install time (pre-filled
-from HF_TOKEN / HUGGING_FACE_HUB_TOKEN in the installer's own env — install.sh
-is non-interactive, see its own header, so there is no TTY prompt) and
-persisted to a root:root 0600 ``secrets/`` EnvironmentFile — deliberately NOT
-``api.env``, which stays 0644/world-readable. ``hal0-api.service`` loads the
-secrets file as an *optional* EnvironmentFile so a fresh box with no token
-still starts cleanly.
+WS-D (#1106): the HuggingFace token is gathered at install time and persisted
+to a root:root 0600 ``secrets/`` EnvironmentFile — deliberately NOT ``api.env``,
+which stays 0644/world-readable. ``hal0-api.service`` loads the secrets file as
+an *optional* EnvironmentFile so a fresh box with no token still starts cleanly.
+
+As of v1.0 the token is handled in TWO places, which is why there are two block
+fixtures below:
+
+* **gather** — the "Operator input" block near the top of install.sh. The env
+  (HF_TOKEN, falling back to HUGGING_FACE_HUB_TOKEN) pre-fills a *silent* TTY
+  prompt shown only on an interactive install; a headless run takes the env
+  value verbatim and never asks.
+* **validate + persist** — much further down, at the first point where the
+  venv's ``hf`` console script exists to validate against.
+
+Before v1.0 both lived in one block headed ``HF_TOKEN gather + persist``.
+Splitting them is what silently broke this module: every fixture-scoped test
+here ERRORED on a regex that no longer matched anything, so the whole
+secret-handling contract went unasserted.
 
 These tests parse ``installer/install.sh`` as text (the same approach
 ``tests/systemd/test_unit_files.py::TestInstallerGatewayWiring`` uses for the
@@ -36,7 +48,19 @@ def install_sh_text() -> str:
 
 @pytest.fixture(scope="module")
 def gather_block(install_sh_text: str) -> str:
-    """The HF_TOKEN gather+persist block, isolated from the rest of the file.
+    """The "Operator input" block, where ``HF_TOKEN_VAL`` is first resolved."""
+    m = re.search(
+        r"# ── Operator input: model store \+ HuggingFace token.*?\ninfo \"Pull destination",
+        install_sh_text,
+        re.DOTALL,
+    )
+    assert m is not None, "the HF_TOKEN gather block was not found in install.sh"
+    return m.group(0)
+
+
+@pytest.fixture(scope="module")
+def persist_block(install_sh_text: str) -> str:
+    """The HF_TOKEN validate+persist block, isolated from the rest of the file.
 
     Scoping assertions to this block (rather than the whole file) keeps the
     tests precise about *which* code path they're checking — e.g. "no die
@@ -44,16 +68,16 @@ def gather_block(install_sh_text: str) -> str:
     the entire 1000+ line script.
     """
     m = re.search(
-        r"# ── HF_TOKEN gather \+ persist \(WS-D, #1106\).*?\nUPSTREAMS_TOML=",
+        r"# ── HF_TOKEN validate \+ persist \(WS-D, #1106\).*?\nUPSTREAMS_TOML=",
         install_sh_text,
         re.DOTALL,
     )
-    assert m is not None, "HF_TOKEN gather+persist block not found in install.sh"
+    assert m is not None, "HF_TOKEN validate+persist block not found in install.sh"
     return m.group(0)
 
 
 class TestGather:
-    """Pre-fill from env; install.sh itself never prompts (non-interactive)."""
+    """Pre-filled from env; the prompt is TTY-only, so headless never blocks."""
 
     def test_reads_hf_token_env_var(self, gather_block: str) -> None:
         assert "HF_TOKEN_VAL=" in gather_block
@@ -64,27 +88,42 @@ class TestGather:
         # (#1094): HF_TOKEN first, HUGGING_FACE_HUB_TOKEN second.
         assert "HUGGING_FACE_HUB_TOKEN" in gather_block
 
-    def test_missing_token_is_a_clean_skip(self, gather_block: str) -> None:
+    def test_the_prompt_is_tty_only(self, gather_block: str) -> None:
+        """A headless install must take the env value without ever asking."""
+        assert "if _interactive; then" in gather_block
+
+    def test_the_prompt_is_silent(self, gather_block: str) -> None:
+        """A secret typed at a prompt must never be echoed into the transcript
+        — ``_tty_read``'s fourth argument is the silent flag."""
+        assert re.search(r'_tty_read _hf_answer .*" 1', gather_block)
+
+    def test_an_env_token_is_not_redisplayed(self, gather_block: str) -> None:
+        """Printing a secret back at the operator is exactly what the 0600
+        secrets file exists to avoid, so an env-supplied token is acknowledged,
+        never re-shown."""
+        assert "taken from the environment" in gather_block
+
+    def test_missing_token_is_a_clean_skip(self, persist_block: str) -> None:
         # The else branch must not die()/exit — just log and move on.
-        m = re.search(r"else\n(.*?)\nfi", gather_block, re.DOTALL)
+        m = re.search(r"else\n(.*?)\nfi", persist_block, re.DOTALL)
         assert m is not None, "no else (skip) branch found"
         skip_branch = m.group(1)
         assert "die" not in skip_branch
         assert "exit" not in skip_branch
-        assert "no HF_TOKEN" in skip_branch
+        assert "no HuggingFace token" in skip_branch
 
 
 class TestWhoamiValidation:
     """Optional `hf auth whoami` validation warns, never hard-fails."""
 
-    def test_whoami_invoked_via_venv_hf_cli(self, gather_block: str) -> None:
-        assert "${VENV_DIR}/bin/hf" in gather_block
-        assert "auth whoami" in gather_block
+    def test_whoami_invoked_via_venv_hf_cli(self, persist_block: str) -> None:
+        assert "${VENV_DIR}/bin/hf" in persist_block
+        assert "auth whoami" in persist_block
 
-    def test_failure_path_warns_not_dies(self, gather_block: str) -> None:
+    def test_failure_path_warns_not_dies(self, persist_block: str) -> None:
         m = re.search(
             r"if HF_TOKEN=.*?auth whoami.*?\n(.*?)\nfi",
-            gather_block,
+            persist_block,
             re.DOTALL,
         )
         assert m is not None, "whoami if/else block not found"
@@ -93,42 +132,42 @@ class TestWhoamiValidation:
         assert "die" not in whoami_block
         assert "exit" not in whoami_block
 
-    def test_whoami_call_is_guarded_not_bare(self, gather_block: str) -> None:
+    def test_whoami_call_is_guarded_not_bare(self, persist_block: str) -> None:
         # A bare (non-conditional) invocation would trip `set -e` on a bad
         # token and abort the whole installer — it must live inside an
         # `if`/`[[ -x ]]` guard.
-        assert re.search(r"if \[\[ -x \"\$\{HF_CLI\}\" \]\]", gather_block)
-        assert re.search(r"if HF_TOKEN=\S+ \"\$\{HF_CLI\}\" auth whoami", gather_block)
+        assert re.search(r"if \[\[ -x \"\$\{HF_CLI\}\" \]\]", persist_block)
+        assert re.search(r"if HF_TOKEN=\S+ \"\$\{HF_CLI\}\" auth whoami", persist_block)
 
 
 class TestPersistence:
     """Root:root 0600 secrets/ EnvironmentFile — never api.env."""
 
-    def test_secrets_dir_under_var_lib_secrets(self, gather_block: str) -> None:
-        assert 'SECRETS_DIR="${VAR_DIR}/secrets"' in gather_block
+    def test_secrets_dir_under_var_lib_secrets(self, persist_block: str) -> None:
+        assert 'SECRETS_DIR="${VAR_DIR}/secrets"' in persist_block
 
-    def test_secrets_file_is_not_api_env(self, gather_block: str) -> None:
-        assert 'HF_SECRETS_ENV="${SECRETS_DIR}/hal0-api.env"' in gather_block
+    def test_secrets_file_is_not_api_env(self, persist_block: str) -> None:
+        assert 'HF_SECRETS_ENV="${SECRETS_DIR}/hal0-api.env"' in persist_block
         # Sanity: the two paths must differ.
         assert "HF_SECRETS_ENV" != "API_ENV"
 
-    def test_written_mode_0600(self, gather_block: str) -> None:
-        assert "chmod 0600" in gather_block
+    def test_written_mode_0600(self, persist_block: str) -> None:
+        assert "chmod 0600" in persist_block
 
-    def test_owned_root_root(self, gather_block: str) -> None:
-        assert "chown root:root" in gather_block
+    def test_owned_root_root(self, persist_block: str) -> None:
+        assert "chown root:root" in persist_block
 
-    def test_written_atomically(self, gather_block: str) -> None:
+    def test_written_atomically(self, persist_block: str) -> None:
         # mktemp + mv, not an in-place redirect — avoids a torn read by a
         # concurrent `systemctl daemon-reload`/restart.
-        assert re.search(r"mktemp \"\$\{HF_SECRETS_ENV\}", gather_block)
-        assert "mv -f" in gather_block
+        assert re.search(r"mktemp \"\$\{HF_SECRETS_ENV\}", persist_block)
+        assert "mv -f" in persist_block
 
-    def test_token_value_written_to_secrets_file_only(self, gather_block: str) -> None:
+    def test_token_value_written_to_secrets_file_only(self, persist_block: str) -> None:
         # HF_TOKEN=${HF_TOKEN_VAL} must appear inside the persistence
         # heredoc (targeting HF_SECRETS_TMP), not assigned anywhere that
         # would land it in api.env.
-        assert "HF_TOKEN=${HF_TOKEN_VAL}" in gather_block
+        assert "HF_TOKEN=${HF_TOKEN_VAL}" in persist_block
 
 
 class TestSystemdWiring:

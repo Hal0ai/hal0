@@ -90,10 +90,14 @@ NO_START=0
 # reverse proxy (Traefik, nginx, Cloudflare Tunnel) — hal0 does not ship
 # an edge terminator. See docs/operate/tls.md for example proxies.
 # Pull destination for `hal0 model pull` and the dashboard's pull buttons.
-# Empty → default to <var-lib>/models (non-interactive; model selection
-# happens via 'hal0 setup'). The chosen path is written to hal0.toml as [models].pull_root
-# and also auto-included in [models].roots so it's scanned at startup.
+# Empty → prompt on an interactive terminal, else default to <var-lib>/models.
+# The chosen path is written to hal0.toml as [models].store (+ the deprecated
+# pull_root) and also auto-included in [models].roots so it's scanned at startup.
 MODELS_DIR="${HAL0_MODELS_DIR:-}"
+# Set when --models-dir / HAL0_MODELS_DIR supplied the value: an EXPLICIT
+# choice is never re-asked at the TTY prompt below.
+MODELS_DIR_EXPLICIT=0
+[[ -n "${MODELS_DIR}" ]] && MODELS_DIR_EXPLICIT=1
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
@@ -107,7 +111,11 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH]
   --models-dir=PATH   absolute path where HuggingFace pulls land
                       (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
-                      Non-interactive; model selection happens via 'hal0 setup'.
+                      Omit it and the installer asks on an interactive terminal;
+                      a piped (\`curl … | bash\`) or headless run takes the default.
+
+Interactive prompts (models dir, HuggingFace token) only run when stdin is a
+terminal. Set HAL0_NONINTERACTIVE=1 to force the flag/env values everywhere.
 EOF
             exit 0
             ;;
@@ -212,9 +220,11 @@ if [[ "${DEV_MODE}" -eq 0 && -e "/opt/hal0/.venv" && "${HAL0_FHS_ROOT}" != "/opt
 fi
 
 # Resolve pull destination: explicit flag / env wins, then the FHS default.
-# The interactive prompt was removed (Task 5.1): model-dir choice moved into
-# `hal0 setup` (interactive post-install). Always absolute — relative paths
-# under sudo would land in /root or wherever the install was launched.
+# On an interactive terminal the operator gets a chance to change it (see the
+# "Operator input" block after the pre-flight gates — it must run AFTER the
+# sudo re-exec, or the answer would be lost and the question asked twice).
+# Always absolute — relative paths under sudo would land in /root or wherever
+# the install was launched.
 DEFAULT_MODELS_DIR="${VAR_DIR}/models"
 if [[ -z "${MODELS_DIR}" ]]; then
     MODELS_DIR="${DEFAULT_MODELS_DIR}"
@@ -222,11 +232,13 @@ fi
 if [[ "${MODELS_DIR}" != /* ]]; then
     die "--models-dir must be an absolute path (got: ${MODELS_DIR})"
 fi
-info "Pull destination: ${MODELS_DIR}"
 
 # Step total. Kept here so editors who add or remove a ui_step bump the
-# visible counter in the same diff.
-UI_STEP_TOTAL=13
+# visible counter in the same diff. Verify with:
+#   grep -c '^ui_step ' installer/install.sh
+# (it drifted to 13-vs-14 before v1.0 — tests/install/test_ui_step_total.py
+# now asserts the two agree).
+UI_STEP_TOTAL=16
 
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
@@ -360,6 +372,55 @@ _confirm_cpu_only() {
     [[ "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
+# ── Interactive-input gate (v1.0) ───────────────────────────────────────────
+# The installer is the single user-facing entry point, so the two answers it
+# genuinely needs from a human — where models live, and a HuggingFace read
+# token — are asked HERE rather than in a post-install wizard.
+#
+# `_interactive` is the ONE predicate that decides whether anything is asked.
+# It tests **stdin**, not /dev/tty, and that distinction is load-bearing:
+#
+#   sudo bash install.sh            stdin = the terminal      → interactive
+#   curl -fsSL … | sudo bash        stdin = the script pipe   → NON-interactive
+#   ssh host 'sudo bash install.sh' stdin = no tty at all     → NON-interactive
+#
+# bootstrap.sh documents that same contract (it forwards stdin so a downloaded
+# `sudo bash install.sh` can prompt, while `curl | bash` "falls back to
+# defaults"), and scripts/fresh-test-ct.sh drives the install over a
+# tty-less ssh. Both therefore stay fully unattended, which is the
+# requirement: an install that blocks on a prompt in CI is a broken install.
+# HAL0_NONINTERACTIVE=1 forces the headless path even on a terminal.
+#
+# The GPU-gate confirm above deliberately keeps its own /dev/tty behaviour —
+# it is a "your box is misconfigured, are you sure?" safety stop, not an
+# input prompt, and it already defaults to the safe answer.
+_interactive() {
+    [[ "${HAL0_NONINTERACTIVE:-0}" != "1" ]] && [[ -t 0 ]] && [[ -r /dev/tty ]]
+}
+
+# Read one line from the controlling terminal, echoing `prompt` first and
+# falling back to `default` on an empty answer or any read failure. Result
+# lands in the caller-named variable (nameref) so the value never travels
+# through a subshell — `$(...)` would swallow the prompt written to /dev/tty
+# on some terminals and cannot be used with `read -s`.
+#   _tty_read <outvar> <prompt> [default] [silent]
+_tty_read() {
+    local -n _out="$1"
+    local prompt="$2" default="${3:-}" silent="${4:-0}" reply=""
+    if [[ -n "${default}" && "${silent}" != "1" ]]; then
+        printf '%s [%s]: ' "${prompt}" "${default}" >/dev/tty 2>/dev/null || { _out="${default}"; return 0; }
+    else
+        printf '%s: ' "${prompt}" >/dev/tty 2>/dev/null || { _out="${default}"; return 0; }
+    fi
+    if [[ "${silent}" == "1" ]]; then
+        IFS= read -rs reply </dev/tty 2>/dev/null || reply=""
+        printf '\n' >/dev/tty 2>/dev/null || true
+    else
+        IFS= read -r reply </dev/tty 2>/dev/null || reply=""
+    fi
+    _out="${reply:-${default}}"
+}
+
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     gpu_rc=0
     HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
@@ -379,6 +440,52 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         fi
     fi
 fi
+
+# ── Operator input: model store + HuggingFace token ─────────────────────────
+# Asked once, here — after the sudo re-exec (so the answers survive) and
+# before preflight_disk measures MODELS_DIR (so it measures the REAL choice).
+# Both questions are pre-filled from the flag/env value, so hitting Enter is
+# always the documented default and a headless run behaves exactly as before.
+#
+# The HF token is only GATHERED here; validation (`hf auth whoami`) and the
+# 0600 persist still happen in the "Configuration" step below, which is the
+# first point where the venv's `hf` console script exists.
+HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+# Pre-declared because `_tty_read` writes through a nameref, which shellcheck
+# cannot follow (SC2154) — and an unset target would trip `set -u` if the
+# helper ever grew an early return.
+_md_answer=""
+_hf_answer=""
+if _interactive; then
+    if [[ "${MODELS_DIR_EXPLICIT}" -eq 1 ]]; then
+        info "model store fixed by --models-dir / HAL0_MODELS_DIR — not asking"
+    else
+        while true; do
+            _tty_read _md_answer "Where should downloaded models live?" "${MODELS_DIR}"
+            if [[ "${_md_answer}" == /* ]]; then
+                MODELS_DIR="${_md_answer}"
+                break
+            fi
+            warn "that must be an absolute path (starts with /) — models are pulled as root, so a relative path would land in an unpredictable directory"
+        done
+    fi
+    # Token prompt: silent (never echoed, never logged). An existing env token
+    # is offered as "keep" rather than redisplayed — printing a secret back at
+    # the operator is exactly what the 0600 secrets file exists to avoid.
+    if [[ -n "${HF_TOKEN_VAL}" ]]; then
+        info "HuggingFace token: taken from the environment (HF_TOKEN / HUGGING_FACE_HUB_TOKEN)"
+    else
+        printf '\n' >/dev/tty 2>/dev/null || true
+        info "A HuggingFace read token lets hal0 pull gated repos. Open models need none — leave it blank to skip."
+        _tty_read _hf_answer "HuggingFace token (input hidden, Enter to skip)" "" 1
+        HF_TOKEN_VAL="${_hf_answer}"
+        unset _hf_answer
+    fi
+fi
+if [[ "${MODELS_DIR}" != /* ]]; then
+    die "model store must be an absolute path (got: ${MODELS_DIR})"
+fi
+info "Pull destination: ${MODELS_DIR}"
 
 # The Hindsight memory engine (installed much later) builds its own venv and
 # pulls litellm, which gates out Python 3.14 via requires-python metadata.
@@ -413,7 +520,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # docs/archive/handoffs/installer-setup-plan-2026-07-05.md): no model has been picked
     # yet at install time, so an undersized store shouldn't hard-block the
     # rest of the platform gate the way a genuinely full root disk should —
-    # `hal0 setup` / the pull gate re-validates before any download lands.
+    # the pull gate re-validates before any download lands.
     preflight_disk "${HAL0_MODELS_DISK_MIN_GB:-20}" "${MODELS_DIR}" \
         || warn "model store ${MODELS_DIR} is low on free space — model pulls may fail until freed"
     # Container-runtime graphroot disk check: same cross-mount blind spot as
@@ -932,15 +1039,16 @@ else
     info "refreshed network vars in ${API_ENV} (0600)"
 fi
 
-# ── HF_TOKEN gather + persist (WS-D, #1106) ─────────────────────────────────
-# Gather: pre-fill from the installer's own env — HF_TOKEN first, falling
-# back to HUGGING_FACE_HUB_TOKEN — the same precedence already used by the
-# `hal0 setup` in-process apply path and the /api/install/* + /api/models
-# pull routes (#1094). install.sh is non-interactive (see the file header),
-# so there is no TTY prompt here; a headless `HF_TOKEN=hf_xxx sudo -E bash
-# install.sh` run IS the "prompt". No token in either var is a clean,
-# silent skip — public model pulls need none.
-HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+# ── HF_TOKEN validate + persist (WS-D, #1106) ───────────────────────────────
+# HF_TOKEN_VAL was GATHERED in the "Operator input" block near the top: the
+# env (HF_TOKEN, falling back to HUGGING_FACE_HUB_TOKEN — the same precedence
+# the in-process apply path and the /api/install/* + /api/models pull routes
+# use, #1094) pre-fills a TTY prompt, and a headless
+# `HF_TOKEN=hf_xxx sudo -E bash install.sh` run supplies it directly. Empty is
+# a clean, silent skip — public model pulls need no token.
+#
+# Only validation + persistence happen here, because this is the first point
+# where the venv's `hf` console script exists to validate against.
 SECRETS_DIR="${VAR_DIR}/secrets"
 HF_SECRETS_ENV="${SECRETS_DIR}/hal0-api.env"
 if [[ -n "${HF_TOKEN_VAL}" ]]; then
@@ -978,7 +1086,8 @@ EOF
     mv -f "${HF_SECRETS_TMP}" "${HF_SECRETS_ENV}"
     info "wrote ${HF_SECRETS_ENV} (0600 root:root — not ${API_ENV})"
 else
-    info "no HF_TOKEN / HUGGING_FACE_HUB_TOKEN in env — skipping (gated model pulls will need one later via the dashboard Settings -> Secrets tab, or rerun install.sh with HF_TOKEN set)"
+    info "no HuggingFace token supplied — skipping (open-model pulls need none)"
+    info "  add one later in the dashboard's Settings -> Secrets tab, or re-run install.sh with HF_TOKEN=hf_… in the environment"
 fi
 
 UPSTREAMS_TOML="${ETC_DIR}/upstreams.toml"
@@ -1523,10 +1632,11 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/n
     ui_spinner_run "Pulling ${OPENWEBUI_IMAGE} in background" sleep 3
 fi
 
+ui_step "Container slot seeds"
+
 # ── Container slot seeds (A10) ────────────────────────────────────────────
-# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img,agent,brain}.toml
-# if absent
-# (the loop below is the single source of truth). Idempotent: never
+# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img,agent,brain,…}.toml
+# if absent (the loop below is the single source of truth). Idempotent: never
 # overwrite an operator-edited file. Each slot is seeded unconditionally so
 # the dashboard can show its tile on any hal0 install; each gates on its own
 # runtime validation at load time. runtime=container + profile=<X> routes
@@ -1540,15 +1650,18 @@ fi
 # rsync to ${PREFIX} (which REPO_ROOT is re-pointed at) has no exclude
 # that touches installer/.
 #
-# GH #1475: this MUST run before `hal0 setup --auto` below. Both write the
-# same slot names (agent/embed/rerank/stt/tts/vision) — setup with generic
-# derived profiles (agent→chat, embed→embedding, ...), these curated seeds
-# with hand-tuned ones (agent.toml's chadrock-moe profile, brain.toml's
-# brain profile, embed.toml's 4096 context, ...). Both sides are
-# never-overwrite, so whichever runs FIRST wins; setup previously ran
-# first, so the curated seeds never reached a fresh box at all — every
-# seed's own docstring already asserted the opposite ordering ("hal0 setup
-# scaffolds the same slot when this seed is absent").
+# ORDERING IS LOAD-BEARING (v1.0). This loop MUST run BEFORE the first-run
+# scaffold pass below. It used to run after it, and the two then fought:
+# the scaffold wrote a generic model-less `agent`/`brain` toml (with a
+# derived profile like plain "vulkan"), and this loop's `[[ -f ]]` guard
+# then said "exists — left alone" and silently discarded the CURATED seeds.
+# Net effect on every fresh box: agent.toml never got `profile =
+# "chadrock-moe"` and brain.toml never got `profile = "brain"` or its
+# `[model].default`. Seeding first inverts it correctly with no special
+# case — `build_auto_selections` already skips any slot whose config exists
+# (`existing_slots`, setup_command.py), so the scaffold pass sees the
+# curated files and leaves them alone, while still scaffolding the slots
+# that have NO static seed (e.g. `vision`).
 for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
@@ -1567,14 +1680,18 @@ done
 ui_step "Hardware probe"
 
 if [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_NO_PROBE:-0}" == "1" ]]; then
-    info "Skipping first-run setup (HAL0_SKIP_SETUP/HAL0_NO_PROBE set)."
+    info "Skipping first-run seeding (HAL0_SKIP_SETUP/HAL0_NO_PROBE set)."
 else
-    info "Running first-run setup (sentinel + wiring + empty capability slots; no model picks, no downloads)"
+    info "First-run seeding (sentinel + wiring + the capability slots the curated seeds above don't cover; no model picks, no downloads)"
+    # `hal0 setup` is an INTERNAL entry point (hidden from `hal0 --help`) that
+    # this installer drives — there is no user-facing first-run wizard in v1.0.
+    #
     # --auto: non-interactive first-run seeding. It scaffolds the capability +
     # NPU slot STRUCTURE (chat/embed/rerank/stt/tts/vision, device+profile+port)
     # with NO model picks — every slot's model is left unset for the operator to
-    # choose later via the dashboard or `hal0 setup`. Pick-free: slots yes,
-    # models no. --no-pull keeps the path download-free regardless (redundant
+    # choose later in the dashboard. Pick-free: slots yes, models no. It skips
+    # every slot the curated seed loop above already wrote (see the ordering
+    # note there). --no-pull keeps the path download-free regardless (redundant
     # with modelless scaffolds, but belt-and-suspenders). --no-extensions:
     # OpenWebUI + Hermes are installed by the dedicated stages below, not here.
     # (Pass --no-slots to seed truly zero slots instead.)
@@ -1586,7 +1703,120 @@ else
     _setup_args=(--auto --no-pull --no-extensions)
     [[ -n "${MODELS_DIR}" ]] && _setup_args+=(--storage-dir "${MODELS_DIR}")
     "${HAL0_BIN}" setup "${_setup_args[@]}" \
-        || warn "first-run setup failed; run 'hal0 setup' after install"
+        || warn "first-run seeding failed — slots can still be created from the dashboard; see the output above"
+fi
+
+# ── hal0 brain model (v1.0) ─────────────────────────────────────────────────
+# The brain is the platform steward: the dashboard's sidebar chat targets the
+# virtual model `hal0/brain`, so unlike every other slot it must WORK out of
+# the box rather than ship as a grey model-less tile. Pull its weights here.
+#
+# Fail-soft by construction (ruling: never hard-fail an install over an
+# optional model pull) — no network, no disk, an unsupported device or a
+# missing venv all end in a warning and a model-less brain slot, exactly like
+# the absent-HF_TOKEN posture above. The heredoc mirrors the three updater
+# migrations below: bare invocation, `|| warn`, never `set -e`-fatal.
+#
+# HAL0_SKIP_BRAIN_MODEL=1 skips it entirely; HAL0_BRAIN_MODEL=<curated-id>
+# forces a specific quant instead of the hardware-derived pick.
+#
+# The AGENT anchor offer below shares this step (no extra ui_step banner, so
+# UI_STEP_TOTAL is unchanged) because it is the second half of one story: the
+# brain pull makes steward CHAT work; the agent pull is what makes steward
+# TOOL CALLS work.
+ui_step "Steward + agent models"
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping the brain model pull (no system writes)"
+elif [[ "${HAL0_SKIP_BRAIN_MODEL:-0}" == "1" || "${HAL0_SKIP_SETUP:-0}" == "1" ]]; then
+    info "Skipping the brain model pull (HAL0_SKIP_BRAIN_MODEL/HAL0_SKIP_SETUP set)."
+else
+    HF_TOKEN="${HF_TOKEN_VAL}" HAL0_BRAIN_MODEL="${HAL0_BRAIN_MODEL:-}" \
+        "${VENV_DIR}/bin/python" -m hal0.install.brain_model \
+        || warn "brain model pull did not complete — the brain slot stays model-less and the install continues; retry later with 'hal0 model pull <id>' or from the dashboard"
+fi
+
+# ── agent anchor model — OPT-IN, size disclosed, default SKIP ───────────────
+# Measured on a GPU box: the 1B brain model does NOT emit tool calls. Given the
+# `hal0-function-xml` contract and an explicit tool request it reasons and
+# returns an empty `content` with no function block — exactly what
+# installer/etc-hal0/slots/brain.toml predicts. Tool turns are therefore routed
+# to `[brain_chat] tool_model`, whose code default is "hal0/agent"
+# (src/hal0/config/schema.py). But agent.toml ships model-less on purpose
+# (#1369: model-presence is the activation signal), so on a fresh box brain
+# tool calling is DEAD until someone binds an agent model.
+#
+# That is what this offer fixes — and the shape of the offer is the whole
+# point. Unlike the brain pull (unconditional, ~1-2 GB) the anchor is 15-31 GB,
+# so:
+#
+#   * it is ASKED, never assumed, and the exact GB figure is printed first;
+#   * the default answer is NO (bare Enter skips);
+#   * it sits behind `_interactive`, so `curl | bash`, a tty-less ssh install
+#     and HAL0_NONINTERACTIVE=1 all skip WITHOUT BLOCKING — a prompt that can
+#     hang CI is a broken install;
+#   * declining, skipping, or failing all leave the slot model-less, print
+#     what that costs, and let the install SUCCEED (ruling 7).
+#
+# The size string comes from `python -m hal0.install.agent_model --plan`, which
+# reads it off the curated row. Bash never hardcodes a GB number, so the figure
+# the operator consents to is the figure that gets downloaded.
+#
+# HAL0_PULL_AGENT_MODEL=1 opts in unattended (automation that wants the bytes);
+# =0 forces the skip even on a terminal. HAL0_AGENT_MODEL=<curated-id> forces a
+# specific rung of the ladder instead of the hardware-derived pick.
+_agent_plan=""
+_agent_id=""
+_agent_desc=""
+_agent_answer=""
+_agent_wanted=0
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    :  # dev mode writes nothing to the system store — no offer, no notice
+elif [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_PULL_AGENT_MODEL:-}" == "0" ]]; then
+    info "Skipping the agent model (HAL0_SKIP_SETUP/HAL0_PULL_AGENT_MODEL=0 set)."
+    info "brain chat works, but TOOL CALLS need an agent model bound to the agent slot ([brain_chat] tool_model, default hal0/agent)."
+else
+    # `|| true`: a plan that cannot be computed is simply no offer. Never fatal.
+    _agent_plan="$(HAL0_AGENT_MODEL="${HAL0_AGENT_MODEL:-}" \
+        "${VENV_DIR}/bin/python" -m hal0.install.agent_model --plan 2>/dev/null || true)"
+    _agent_plan="${_agent_plan%%$'\n'*}"
+    if [[ -z "${_agent_plan}" || "${_agent_plan}" != *$'\t'* ]]; then
+        info "No agent model fits this box (a ROCm/Vulkan device and ~15 GB of pool are the floor) — not offering one."
+    else
+        _agent_id="${_agent_plan%%$'\t'*}"
+        _agent_desc="${_agent_plan#*$'\t'}"
+        if [[ "${HAL0_PULL_AGENT_MODEL:-}" == "1" ]]; then
+            info "Agent model opt-in via HAL0_PULL_AGENT_MODEL=1: ${_agent_desc}"
+            _agent_wanted=1
+        elif _interactive; then
+            printf '\n' >/dev/tty 2>/dev/null || true
+            info "The brain steward can chat now, but it cannot CALL TOOLS on its own — it routes tool turns to the agent slot, which has no model yet."
+            info "Optional download: ${_agent_desc}"
+            _tty_read _agent_answer "Download the agent model now? [y/N]" "n"
+            case "${_agent_answer}" in
+                [Yy]|[Yy][Ee][Ss]) _agent_wanted=1 ;;
+                *) _agent_wanted=0 ;;
+            esac
+            unset _agent_answer
+        else
+            info "Non-interactive install — not pulling the ${_agent_desc%% —*} agent model (set HAL0_PULL_AGENT_MODEL=1 to opt in)."
+        fi
+    fi
+
+    if [[ "${_agent_wanted}" -eq 1 ]]; then
+        if HF_TOKEN="${HF_TOKEN_VAL}" HAL0_AGENT_MODEL="${_agent_id}" \
+            "${VENV_DIR}/bin/python" -m hal0.install.agent_model; then
+            :
+        else
+            warn "agent model pull did not complete — the agent slot stays model-less and the install continues"
+            _agent_wanted=0
+        fi
+    fi
+    if [[ "${_agent_wanted}" -ne 1 ]]; then
+        info "brain chat works, but TOOL CALLS need an agent model: the steward routes tool turns to [brain_chat] tool_model (default hal0/agent) and the agent slot has no model bound."
+        info "Assign one from the dashboard, or 'hal0 model pull <id> && hal0 slot load agent', whenever you like."
+    fi
 fi
 
 # ── NPU prerequisites (FastFlowLM) ─────────────────────────────────────────
@@ -2504,7 +2734,7 @@ fi
 SUMMARY_LINES+=(
     ""
     "$(printf '%sNext steps:%s' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 setup%s          guided first-run: provision slots + choose models' "${BOLD}" "${RST}")"
+    "$(printf '  %sOpen the dashboard%s   assign models to the slots this install created' "${BOLD}" "${RST}")"
     "$(printf '  %shal0 model pull <id>%s download a model (browse with %shal0 model list%s)' "${BOLD}" "${RST}" "${BOLD}" "${RST}")"
     "$(printf '  %shal0 status%s         system + slot + memory summary' "${BOLD}" "${RST}")"
     "$(printf '  %shal0 slot list%s      inspect configured slots' "${BOLD}" "${RST}")"
@@ -2515,39 +2745,16 @@ SUMMARY_LINES+=(
 
 ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
 
-# ── Stage-2 guided setup handoff (issue #1112) ──────────────────────────────
-# Stage-1 (everything above) did system prep + the platform/GPU gate + the
-# --auto slot/sentinel seed. Stage-2 is the INTERACTIVE `hal0 setup` flow
-# (network → store → HF token → slots → NPU → gen → apps → review → apply).
-# On a real terminal, offer to drop the operator straight into it; on a piped
-# / headless (`curl … | bash`) run there is no interactive stdin, so just
-# print the command. Self-contained so later install.sh edits merge around it.
-if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${HAL0_SKIP_SETUP:-0}" != "1" ]]; then
-    _confirm_launch_setup() {
-        # y/N read from the controlling terminal so it works even when stdin is
-        # the piped installer. Default Yes; any read failure (no TTY) → No, and
-        # the caller falls through to just printing the command.
-        local reply=""
-        printf '\n%s' "Launch the guided hal0 setup now? [Y/n] " >/dev/tty 2>/dev/null || return 1
-        IFS= read -r reply </dev/tty 2>/dev/null || return 1
-        [[ -z "${reply}" || "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
-    }
-    if [[ -r /dev/tty ]] && _confirm_launch_setup; then
-        # Redirect stdin to the controlling terminal (the confirm prompt
-        # above already does this for exactly this reason). Without it, a
-        # piped install (`curl … | bash`) run from a real terminal answers
-        # "Y" here but the launched `hal0 setup` inherits the INSTALLER'S
-        # pipe as stdin — sys.stdin.isatty() is False, so setup_command
-        # prints "run it from a terminal" and exits 0 without ever running
-        # the wizard the operator just opted into.
-        HAL0_FORCE_INTERACTIVE=1 "${HAL0_BIN}" setup </dev/tty \
-            || warn "guided setup exited non-zero — re-run '${BOLD}hal0 setup${RST}' anytime"
-    else
-        printf '\n'
-        info "Finish setup any time from a terminal: ${BOLD}hal0 setup${RST}"
-        info "  (guided: network, model store, slots, NPU, image gen, apps)"
-    fi
-fi
+# ── No Stage-2 handoff (v1.0) ───────────────────────────────────────────────
+# There used to be a "Launch the guided hal0 setup now? [Y/n]" prompt here
+# (issue #1112's Stage-2). It is deliberately GONE: install.sh is the single
+# user-facing entry point, and every answer that wizard collected is now
+# either asked by this script (model store + HF token, in the "Operator input"
+# block) or already done by it (slot scaffolding, extensions, NPU probe).
+# Offering it again sent operators through a five-question flow that only
+# re-derived what had just been derived. What is genuinely left after an
+# install is picking models per slot, which is a dashboard job — see the
+# "Next steps" box above. Do NOT reintroduce a post-install CLI wizard here.
 
 # Restore the caller's umask (see the save near the top of the file).
 umask "${_HAL0_ORIG_UMASK}"

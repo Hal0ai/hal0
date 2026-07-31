@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from hal0.config.schema import (
+    BRAIN_TOOL_MODEL_DEFAULT,
     CURRENT_SCHEMA_VERSION,
     BrainChatConfig,
     DispatcherConfig,
@@ -47,15 +48,17 @@ class TestBrainChatConfig:
     def test_present_on_hal0config_by_default(self) -> None:
         assert Hal0Config().brain_chat == BrainChatConfig()
 
-    def test_tool_model_field_is_gone(self) -> None:
-        """#1453: ``tool_model`` was never read anywhere — dropped, not wired.
-
-        ``BrainChatConfig`` is ``extra="forbid"``, so a stray ``tool_model``
-        key must now be rejected rather than silently accepted and ignored.
+    def test_tool_model_field_is_live_again(self) -> None:
+        """#1453 called ``tool_model`` dead ("never read anywhere") and
+        dropped it; it's back as of the tool-call reroute work (Stream G) —
+        the steward's tool-calling turns route to whatever this resolves to
+        when set, defaulting to ``hal0/agent`` (see
+        :data:`BRAIN_TOOL_MODEL_DEFAULT`). See
+        :func:`test_brain_tool_model_empty.py` for the empty-string trap this
+        field's own validator closes.
         """
-        assert "tool_model" not in BrainChatConfig.model_fields
-        with pytest.raises(ValidationError):
-            BrainChatConfig(tool_model="hal0/agent")
+        assert "tool_model" in BrainChatConfig.model_fields
+        assert BrainChatConfig().tool_model == BRAIN_TOOL_MODEL_DEFAULT
 
     def test_model_override_round_trips(self) -> None:
         cfg = Hal0Config(**tomllib.loads('[brain_chat]\nmodel = "hal0/npu"\n'))

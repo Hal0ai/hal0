@@ -9,14 +9,14 @@ import { Steps, Aside, Tabs, TabItem, LinkCard, CardGrid, Card } from '@astrojs/
 
 A fresh hal0 install boots with its services up — the dashboard and
 OpenWebUI on `:3001`, Hermes, and the control-plane API on `:8080` — but
-with **zero models and zero model-serving slots configured**. The
-installer seeds the first-run sentinel and extension wiring only
-(`hal0 setup --auto --no-slots`); it does not select or download a model.
-Every model is something *you* obtain afterward, and this page is the map
+with **no models of your own configured**. The installer creates the
+capability slots and their wiring but selects no models; the single
+exception is the `brain` steward, whose weights it pulls for itself (see
+[The brain slot](/docs/getting-started/install/#the-brain-slot)). Every
+serving model is something *you* obtain afterward, and this page is the map
 for doing that.
 
-If you just want the fastest path from a blank box to a working chat, run
-the [setup TUI](/docs/getting-started/setup/) or follow
+If you just want the fastest path from a blank box to a working chat, follow
 [Load your first model](/docs/getting-started/first-model/). This guide is
 the reference behind those flows: what the registry is, where bytes land,
 and every real way to get a model into it.
@@ -50,7 +50,7 @@ container bind-mounts to find its weights.
 | | |
 |---|---|
 | **Default** | `/var/lib/hal0/models` |
-| **Set at install** | `hal0 setup --storage-dir <path>` |
+| **Set at install** | the installer's model-store prompt, or `install.sh --models-dir=<path>` / `HAL0_MODELS_DIR` |
 | **Show / change at runtime** | `hal0 model store [<path>] [--migrate]` |
 | **Set in config** | `[models].store` in `hal0.toml` (an absolute path, e.g. `/mnt/ai-models`) |
 | **Env override** | `HAL0_MODEL_STORE` |
@@ -397,9 +397,10 @@ falls through to the HF resolver):
 hal0 model pull gemma4-it:e4b
 ```
 
-Provision the NPU slot with [`hal0 setup`](/docs/getting-started/setup/) —
-it opts the NPU in automatically when the hardware is present — then
-assign the FLM model to it and load:
+The [installer](/docs/getting-started/install/) provisions the NPU slot for
+you — it seeds the slot and installs the host FastFlowLM prerequisites, and
+the slot activates once `flm validate` passes on this hardware. Then assign
+the FLM model to it and load:
 
 ```sh
 hal0 model assign gemma4-it:e4b --slot npu

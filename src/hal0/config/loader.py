@@ -152,12 +152,11 @@ def _read_toml(path: Path) -> dict[str, Any]:
 #: first); a plain code swap + service restart hits this too. Dropping the
 #: key here makes every load path forgiving regardless of how the new code
 #: got onto disk.
-#: HAL0-SUNSET: v1.1 — drop this once no box in the field can still be
-#: running a pre-#1453 hal0.toml (one full release cycle through
-#: ``hal0 update`` is enough; that path already writes the key back out).
-_DEAD_KEYS: dict[str, tuple[str, ...]] = {
-    "brain_chat": ("tool_model",),  # #1453: never read anywhere; dropped.
-}
+#: NOTE: ``[brain_chat] tool_model`` (#1453 briefly called it dead) is back
+#: as a real, read field — see ``BrainChatConfig.tool_model`` — routing tool
+#: rounds to a tool-capable model (Stream G, GH #1546-era). No dead keys
+#: tracked here at the moment; kept as the seam for the next one.
+_DEAD_KEYS: dict[str, tuple[str, ...]] = {}
 
 
 def _drop_dead_keys(raw: dict[str, Any]) -> dict[str, Any]:

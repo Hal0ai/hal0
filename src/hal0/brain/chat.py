@@ -38,7 +38,12 @@ different agent backend via chat_proxy WITHOUT any UI change):
 
     SSE events, one JSON object per ``data:`` line:
       {"type": "token",  "text": "..."}            assistant token delta
-      {"type": "thinking", "text": "..."}           model reasoning (never shown inline)
+      {"type": "thinking", "text": "..."}           model reasoning (collapsed detail,
+                                                    never shown inline). The brain
+                                                    model's `reasoning_content` is
+                                                    surfaced HERE, not discarded —
+                                                    see `_completion_budget` for why
+                                                    the completion budget has a floor.
       {"type": "tool_call",   "name": "...", "arguments": {...}, "id": "..."}
       {"type": "tool_result", "name": "...", "id": "...", "result": {...}}
       {"type": "done"}                              end of turn
@@ -120,6 +125,31 @@ _APPROVAL_PING_EVERY_S = 15.0
 # worst-case on the slowest resident model — plenty for a steward reply +
 # tool calls.
 _MAX_COMPLETION_TOKENS = 4096
+
+# Per-round completion FLOOR. The other end of the same dial, and the one that
+# actually bites.
+#
+# The brain model is a thinking model: it splits its output into `content` and
+# `reasoning_content`, and the reasoning is emitted FIRST and drawn from the
+# SAME completion budget. Measured on a GPU box with `max_tokens: 80`: the
+# entire budget went to reasoning, `content` came back as the empty string, and
+# `finish_reason` was "stop" — i.e. a well-formed, successful, COMPLETELY BLANK
+# steward reply. Nothing downstream can recover from that: `run_tool_loop`
+# only emits a `token` frame when the visible text is non-empty
+# (toolloop/engine.py), so the user sees a collapsed "thinking" disclosure and
+# then silence, which reads as the steward being broken.
+#
+# So a caller-supplied `max_tokens` is treated as a REQUEST, not a contract:
+# anything below this floor is raised to it. 512 tokens is enough for a short
+# chain of thought AND a real answer on the shipped brain model, and it is far
+# below `_MAX_COMPLETION_TOKENS`, so this narrows nothing an operator can
+# usefully ask for — it only rules out budgets that can only produce a blank.
+# Raising `max_tokens` still works exactly as before, including above the
+# default cap.
+#
+# Keep this a floor rather than "reserve N tokens for content": llama-server
+# has no split-budget knob, so the only lever available is the total.
+_MIN_COMPLETION_TOKENS = 512
 
 # Pre-flight context estimate: ~4 chars/token (the standard GPT-family rule of
 # thumb) plus a small per-message overhead for the role/formatting tokens the
@@ -828,6 +858,38 @@ def _resolve_tool(
     return None, "", {}, None, None
 
 
+def _completion_budget(requested: Any) -> int:
+    """Resolve one round's ``max_tokens``, never below the blank-reply floor.
+
+    ``requested`` is whatever arrived in the request body — an int, a numeric
+    string, ``None``, or junk. Resolution:
+
+    * absent / zero / negative / unparseable → :data:`_MAX_COMPLETION_TOKENS`
+      (unchanged behaviour: the default cap);
+    * below :data:`_MIN_COMPLETION_TOKENS` → raised to the floor, and logged.
+      The brain model spends its budget on ``reasoning_content`` first, so a
+      tiny budget yields a well-formed, ``finish_reason: stop``, completely
+      EMPTY ``content`` — a blank steward reply. See the constant's comment;
+    * anything else → honoured verbatim, including values above the default
+      cap. A caller asking for MORE room is never second-guessed.
+    """
+    try:
+        n = int(requested)
+    except (TypeError, ValueError):
+        return _MAX_COMPLETION_TOKENS
+    if n <= 0:
+        return _MAX_COMPLETION_TOKENS
+    if n < _MIN_COMPLETION_TOKENS:
+        log.info(
+            "hal0.brain_chat.completion_budget_raised",
+            requested=n,
+            floor=_MIN_COMPLETION_TOKENS,
+            reason="reasoning_content consumes the budget before content is emitted",
+        )
+        return _MIN_COMPLETION_TOKENS
+    return n
+
+
 def _brain_chat_config(request: Request) -> Any:
     """The ``[brain_chat]`` config off app.state, or defaults.
 
@@ -1192,7 +1254,7 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "max_tokens": int(payload.get("max_tokens") or _MAX_COMPLETION_TOKENS),
+        "max_tokens": _completion_budget(payload.get("max_tokens")),
     }
 
     # Pre-flight context guard: if the assembled prompt already exceeds the
@@ -1361,6 +1423,7 @@ __all__ = [
     "_brain_tool_policy",
     "_chat_stream",
     "_compact_board",
+    "_completion_budget",
     "_dispatch_admin_tool",
     "_dispatch_platform_tool",
     "_dispatch_tool",

@@ -44,9 +44,10 @@ are retired. See the [changelog](/changelog) for the exact current version.
 - **Stacks** — named, exportable bundles of slot + profile + model
   assignments (built-in `saber`, `forge`, and `pi`) that you can load,
   clone, and re-apply as a single declarative unit.
-- **First-run terminal setup** — the `hal0 setup` TUI picks a
-  hardware-anchored tier and provisions a coherent set of slots, models,
-  and extensions.
+- **One-command provisioning** — the installer is the whole setup: it
+  creates every capability slot from the hardware probe, pulls the
+  `brain` steward model, and starts the API. There is no separate
+  first-run wizard.
 - **Prewired chat UI** — OpenWebUI on port `3001`, zero config.
 - **Signed self-update** — cosign-verified tarballs with one-flag
   rollback.
@@ -61,11 +62,6 @@ are retired. See the [changelog](/changelog) for the exact current version.
     title="Install hal0"
     href="/docs/getting-started/install/"
     description="One-line install: fetch, verify, unpack, and bring up the API."
-  />
-  <LinkCard
-    title="First-run setup"
-    href="/docs/getting-started/setup/"
-    description="Run the hal0 setup TUI to provision your first slots, models, and extensions."
   />
   <LinkCard
     title="Load your first model"

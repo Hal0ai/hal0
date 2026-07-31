@@ -33,7 +33,6 @@ directly so they work without a running daemon.
 | `hal0 status` | System + slot summary (name, version, slot/upstream counts, slot table). | — |
 | `hal0 system-info` | Read-only host/GPU/NPU/runtime evidence in one pass (hostname, kernel, distro, CPU, memory, every detected GPU, NPU, plus hal0/python/podman versions and the detected platform). Runs the local hardware probe directly, so it works offline before the API is up. Always exits 0. | `--json` |
 | `hal0 probe` | **[Deprecated]** hidden alias for `hal0 config hardware --refresh` — re-runs hardware detection (`POST /api/hardware/probe`) and updates `hardware.json`. | — |
-| `hal0 setup` | First-run (or re-run) provisioning: seed slots, pull starter models, wire extensions. See the section below. | `--auto`, `--storage-dir`, `--no-pull`, `--no-extensions`, `--no-slots`, `--answers`, `--emit-answers`, `--plan`/`--dry-run` |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`), `--port` (default `8080`), `--reload` |
 | `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|preview\|nightly}`, `--target VER`, `--yes`/`-y`, `--restart-slots` |
 | `hal0 update owui` | Repin the OpenWebUI companion image to the latest (or an explicit) digest, pull, and restart. | `--check`, `--tag TAG`, `--target DIGEST`, `--yes`/`-y`, `--force` |
@@ -82,52 +81,15 @@ field) are always split out of the model's reply before it's folded back
 into history, regardless of `/think` state — a long session never re-feeds
 its own prior chain-of-thought back to the model as context bloat.
 
-## `hal0 setup` — first-run setup
+## First-run provisioning
 
-| Flag | Purpose |
-|---|---|
-| `--auto` | Non-interactive: apply recommended defaults instead of the Rich two-column TUI. |
-| `--storage-dir` | Model storage root (default `/var/lib/hal0/models`). |
-| `--no-pull` | Seed slot configs + sentinel without downloading any models. |
-| `--no-extensions` | Skip extension install/wiring in `--auto` mode. |
-| `--no-slots` | Seed the sentinel + extensions but no model-slot picks at all — a bare-bones run for a box that wants zero slot structure created up front. |
-| `--answers` | Path to a `hal0-setup.yaml` answer file for a fully non-interactive run (see `--emit-answers` below). |
-| `--emit-answers` | Resolve the same choices `--auto` would make, write them to a `hal0-setup.yaml`, and exit without applying anything. |
-| `--plan` / `--dry-run` | Resolve and print the plan; writes nothing (no slots, sentinel, pulls, or extensions). |
+There is no first-run CLI command. Provisioning is the installer's job — it
+creates every capability slot, asks where models should live, optionally takes
+a Hugging Face token, and downloads the `brain` steward model. See
+[Install hal0](/docs/getting-started/install/).
 
-`hal0 setup` has no further subcommands — it's a flags-only entry point.
-Without `--auto` (and without `--answers`/`--plan`/`--emit-answers`) it runs
-an interactive Rich TUI stepping through storage → extensions → main slot →
-agent → NPU → review → install. With `--auto` it provisions the capability +
-NPU slot structure (chat/embed/rerank/stt/tts/vision — device, profile, and
-port only, no model pick) plus an `agent` slot (port 8081, the chat
-capability's slot named `agent` per ADR-0023) unless one already exists, and
-a `coder` slot (port 8082) only if an agent-kind extension is enabled. Pass
-`--no-slots` to skip all of that and seed only the sentinel + extensions.
-`installer/install.sh`'s own first-run call is `--auto --no-pull
---no-extensions` — slots yes, models no — so a fresh install always lands
-with slot structure in place and every model left for the operator to
-choose via the dashboard or a follow-up `hal0 setup`. Capability defaults
-are seeded from the hardware probe; `--no-pull` keeps the whole path
-download-free regardless of what gets scaffolded.
-
-The answer-file workflow lets one machine's resolved choices drive another
-box's non-interactive install: `--emit-answers` writes what `--auto` (or
-`--answers`, if combined) would have chosen without applying it, and a later
-`--answers` run replays that file verbatim.
-
-It runs in-process when the daemon isn't up yet (fresh install), or posts to
-`POST /api/install/apply` when `hal0-api` is already running, so re-running
-setup against a live install registers new slots without a restart.
-
-```sh
-hal0 setup                       # interactive TUI
-hal0 setup --auto
-hal0 setup --auto --no-pull --no-extensions
-hal0 setup --auto --emit-answers hal0-setup.yaml   # resolve + save, apply nothing
-hal0 setup --answers hal0-setup.yaml               # replay a saved answer file
-hal0 setup --auto --plan                           # preview only, writes nothing
-```
+After an install, models are assigned per slot from the dashboard, or with
+`hal0 model pull <id>` followed by `hal0 slot load <name> --model <id>`.
 
 ## `hal0 slot` — inference slots
 

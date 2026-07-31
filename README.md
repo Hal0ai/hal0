@@ -24,18 +24,11 @@ control plane — it owns slot state machines, dispatches OpenAI-compatible
 `/v1/*` requests to the right slot port, and serves the dashboard. No
 shared inference daemon; no extra process to babysit.
 
-> **⚡ If you just installed or upgraded, run `hal0 setup`** for the
-> guided interactive setup. It walks you through network binding, model
-> storage, HuggingFace token, capability slots, NPU opt-in, image
-> generation, and extensions — then downloads your chosen models with
-> live progress. Run it anytime:
->
-> ```sh
-> hal0 setup
-> ```
->
-> Non-interactive: `hal0 setup --auto` scaffolds defaults without
-> prompting. Skipped during install? Just run it now.
+> **⚡ The installer is the whole setup.** There is no separate first-run
+> wizard to run afterwards. `install.sh` asks where models should live,
+> optionally takes a HuggingFace token, creates every capability slot,
+> downloads the hal0 brain steward model, and starts the API. When it
+> finishes, open the dashboard and assign models to slots.
 
 ```sh
 curl -fsSL https://hal0.dev/install.sh | bash
@@ -60,9 +53,10 @@ curl -fsSL https://hal0.dev/install.sh | bash
 > virtual (code-defined, self-healing on upgrade) with dedicated
 > embed/rerank lanes and a model×profile×slot MTP decision; models carry
 > a preferred runtime profile, interrupted pulls resume, and voice runs
-> end-to-end (NPU STT + Kokoro or GPU Qwen3-TTS). The one-liner writes the
-> first-run sentinel only — no model picks, no downloads; run `hal0 setup`
-> anytime to configure models, extensions, and NPU interactively. See
+> end-to-end (NPU STT + Kokoro or GPU Qwen3-TTS). The one-liner creates
+> every capability slot and pulls the `brain` steward model; the rest of
+> the slots land model-less, so you assign models from the dashboard (or
+> `hal0 model pull` + `hal0 slot load`) with no surprise downloads. See
 > [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
 
 ## Screenshots
@@ -157,9 +151,9 @@ be evicted out from under a streaming request.
   `tts`, `rerank`, `utility`, `img`) are written to
   `/etc/hal0/slots/<name>.toml` during install (each gates on its own
   runtime validation at load time — the `flm` NPU slot simply stays
-  grey without FastFlowLM hardware); `hal0 setup` scaffolds
-  additional capability slots (chat, coder, embed, stt, vision) with
-  empty model picks for the operator to fill.
+  grey without FastFlowLM hardware); the installer scaffolds the
+  additional capability slots (chat/`agent`, coder, embed, stt, vision)
+  with empty model picks for the operator to fill.
   User-added slots via `hal0 slot create NAME --type TYPE --model MODEL`.
   Slots refer to a **profile** in `/etc/hal0/profiles.toml` that pins
   the container image + flag bundle for that backend.
@@ -168,18 +162,16 @@ be evicted out from under a streaming request.
   control plane; slot containers bind loopback ports (8081–8099 + fixed
   seeds). No shared inference daemon. See
   [docs/concepts/architecture.mdx](./docs/concepts/architecture.mdx).
-- **`hal0 setup` TUI** — after install (or anytime), `hal0 setup`
-  walks you through network binding, model storage, HuggingFace token,
-  capability slot scaffolding, NPU opt-in, image generation, and
-  extensions (Apps + Agents), then applies the plan with live model
-  download progress. Non-interactive: `hal0 setup --auto` scaffolds
-  capability slots without prompting. Other flags: `--storage-dir
-  PATH`, `--no-pull` (seed slots without downloading models),
-  `--no-extensions`, `--plan` (dry-run). Set `HAL0_SKIP_SETUP=1`
-  to skip first-run setup entirely during install.
+- **Provisioning lives in the installer** — `install.sh` is the single
+  user-facing entry point. It asks for model storage and an optional
+  HuggingFace token (on a terminal only), copies the curated slot seeds,
+  scaffolds the remaining capability slots, pulls the `brain` steward
+  model, and starts the API. Set `HAL0_SKIP_SETUP=1` to skip the
+  first-run seeding step, `HAL0_SKIP_BRAIN_MODEL=1` to skip the brain
+  pull, and `HAL0_NONINTERACTIVE=1` to suppress both prompts.
 - **Hardware-aware probe** — detects GPU / NPU / unified memory,
   writes `/etc/hal0/hardware.json`, surfaces VRAM/RAM fit warnings
-  inline in the slot form and during `hal0 setup`.
+  inline in the slot form and during install.
 - **Dispatcher** — registry-aware routing, cold-cache prefetch,
   upstream fallback (OpenRouter, Anthropic, OpenAI, custom OpenAI-shaped
   endpoints). Mix local + remote per-model in one config.
@@ -195,9 +187,9 @@ be evicted out from under a streaming request.
   tab operates the ComfyUI container (live GTT/RAM gauges, queue
   depth, model inventory) with a gated inference ⇄ generation iGPU
   switchover behind a blast-radius confirm.
-- **Extensions** — select multiple Apps (Open WebUI) and Agents (Hermes,
-  Pi) during `hal0 setup`; all checked items are installed and wired
-  into the platform.
+- **Extensions** — Apps (Open WebUI) and Agents (Hermes, Pi) are
+  installed and wired by dedicated installer stages; add or remove them
+  later with `hal0 agent install <name>`.
 - **Companion-service management** — `/api/services` is the declarative
   source of truth for OpenWebUI, Hermes, Hindsight, ComfyUI, and n8n:
   audit-logged systemd lifecycle actions (start/stop/restart/enable/
@@ -216,23 +208,24 @@ be evicted out from under a streaming request.
   `embed_text`, `rerank_documents`, `route_to_chat`. Dispatched
   client-side from chat slots; dynamically filtered per request.
 - **Image generation, day one** — `POST /v1/images/generations` via
-  ComfyUI in the `img` slot container (ROCm). `hal0 setup` lets you
-  select image-gen as part of the initial configuration.
+  ComfyUI in the `img` slot container (ROCm). The installer seeds the
+  `img` slot and its ComfyUI model share as part of the install.
 - **Atomic self-update with rollback** — `hal0 update --channel
   stable|preview|nightly`. Cosign-verified tarballs swap a
   `/usr/lib/hal0/current` symlink; `--rollback` reverts.
 - **One-line install** — `curl -fsSL https://hal0.dev/install.sh | bash`
-  writes the first-run sentinel and wiring automatically — no model picks,
-  no download, no interaction needed. Run `hal0 setup` afterward to choose
-  models and configure apps and agents.
+  creates every capability slot and its wiring automatically. The only
+  model it downloads is the `brain` steward; every other slot lands
+  model-less for you to fill from the dashboard. Piped through `bash`
+  it never prompts.
   (`--models-dir=PATH` or `HAL0_MODELS_DIR=PATH` redirects model pulls
   off `/var/lib/hal0/models`). The bootstrap requires `jq` and `cosign`,
   authenticates the exact channel manifest before strict schema/channel
   parsing, then sha256- and Sigstore-bundle-verifies the tarball before
   handing off to
   [`installer/install.sh`](./installer/install.sh).
-  Rerun `hal0 setup` at any time to add slots, change storage, or
-  install extensions — the provisioning endpoints are idempotent.
+  Re-running `install.sh` at any time is safe — every provisioning step
+  is idempotent and existing slot configs are never overwritten.
 - **One-line Proxmox VE install** — on a Proxmox host, `bash -c "$(curl
   -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"`
   creates an unprivileged Debian 13 LXC and runs the standard bootstrap
@@ -253,8 +246,7 @@ simultaneously: `pi-coder` (CLI shape, installed from `Hal0ai/pi-mono` fork via
 shape, installed via the hal0-owned `hermes` wrapper — `hal0-hermes` is
 kept as a back-compat symlink; connects to
 `hal0-api` via `HAL0_INFERENCE_BASE=http://127.0.0.1:8080`). Select
-one or both during `hal0 setup` (Extensions step) or any time via `hal0 agent
-install <name>`. Capital-D destructive MCP calls
+one or both at any time via `hal0 agent install <name>`. Capital-D destructive MCP calls
 (`model_pull`, `slot_delete`, `config_write`, etc.) gate through a
 header bell + inbox modal in the dashboard, with CLI parity via
 `hal0 agent approvals {list,approve,deny}`. See
@@ -290,8 +282,9 @@ pins the container image and flag bundle for each backend.
 
 The NPU path is opt-in: the installer places a FastFlowLM `.deb` on
 the host for device-sanity probes (`flm validate`); inference runs
-inside the `hal0-toolbox-flm` container image. With FLM present,
-`hal0 setup` surfaces the NPU trio opt-in during setup.
+inside the `hal0-toolbox-flm` container image. With FLM present, the
+installer seeds the `flm` slot; the NPU trio activates once `flm
+validate` passes on the host.
 
 For the container-runtime operator reference — service layout, slot
 TOML fields, profiles, GPU arbiter, and day-2 commands — see
@@ -448,10 +441,10 @@ running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadm
   AMDXDNA hardware context; toggle via `[npu]` in the slot TOML
 - **OmniRouter client-side tool-calling** — 8 tools, dynamic
   per-request filtering, `route_to_chat` cross-slot delegation
-- **`hal0 setup` TUI** — replaces the web FirstRun picker; the installer
-  scaffolds model-less slot structure with no picks and no downloads
-  (`--auto --no-pull --no-extensions`); the interactive
-  post-install flow covers storage, Extensions, models, and NPU opt-in
+- **Installer-owned first-run provisioning** — replaces the web FirstRun
+  picker and the old post-install wizard: `install.sh` scaffolds the
+  model-less slot structure, pulls only the `brain` steward model, and
+  is the single user-facing entry point
 - **`hal0 registry import`** — one-shot v0.1.x → v0.3 registry
   recovery from a backup tarball
 - Carried forward: OpenAI-compatible `/v1/*`, portable hardware

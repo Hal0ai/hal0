@@ -116,7 +116,8 @@ async def _apply_in_process(sel, hw, *, no_pull: bool = False) -> None:
     if no_pull:
         n_slots = sum(1 for s in result.slots if getattr(s, "created", False))
         typer.echo(
-            f"Seeded {n_slots} slot(s); run `hal0 setup` or `hal0 model pull` to download models."
+            f"Seeded {n_slots} slot(s); assign models from the dashboard or with "
+            "`hal0 model pull <id>`."
         )
         return
 

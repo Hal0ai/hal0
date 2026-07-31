@@ -8,7 +8,7 @@
 # GGUF is `gemma-4-12b-it-ud-q4-k-xl` → `unsloth/gemma-4-12b-it-GGUF`). Pinned to
 # the ghost on a box with nothing to fall back to, the slot crash-looped.
 #
-# The operator assigns a model later (dashboard / `hal0 setup`); filling in
+# The operator assigns a model later (from the dashboard); filling in
 # `[model].default` activates it. profile = chat (generic workload template)
 # lets any chat-capable model bind here without needing a family-specific
 # profile pick.

@@ -300,7 +300,7 @@ def mark_first_run_done() -> None:
         tmp.replace(p)  # atomic
     except OSError as exc:
         log.warning(
-            "could not write first-run sentinel %s (%s) — re-run `hal0 setup` "
+            "could not write first-run sentinel %s (%s) — re-run the installer "
             "with sudo/root, or ignore if hal0-api is already up and tracking "
             "first-run state itself",
             p,

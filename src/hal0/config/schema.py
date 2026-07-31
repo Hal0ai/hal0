@@ -2639,6 +2639,19 @@ class ActivityConfig(BaseModel):
     max_rows: int | None = Field(default=50_000, ge=100)
 
 
+#: Where the steward sends TOOL turns when nothing else says otherwise. ADR-0023's
+#: always-on LLM anchor — the model every ``hal0/<slot>`` fallback chain ends in,
+#: and the slot ``installer/etc-hal0/slots/agent.toml`` seeds.
+BRAIN_TOOL_MODEL_DEFAULT = "hal0/agent"
+
+#: The spellings that mean "deliberately route tool turns nowhere". Written out
+#: because the obvious spelling — the empty string — is indistinguishable on
+#: disk from a key nobody set, and silently disabling tool routing is exactly
+#: the failure this vocabulary exists to prevent. See
+#: :meth:`BrainChatConfig._normalise_tool_model`.
+BRAIN_TOOL_MODEL_DISABLED = frozenset({"off", "none", "disabled"})
+
+
 class BrainChatConfig(BaseModel):
     """``[brain_chat]`` — the dashboard's agent-chat steward (hal0-brain).
 
@@ -2692,8 +2705,61 @@ class BrainChatConfig(BaseModel):
     # the steward system prompt alone is ~7.3k tokens — and must actually be
     # LOADED, or the chat 404s (see BrainChatConfig docstring above).
     model: str = ""
+    # Route tool-calling turns to a capable, tool-format-compatible model. The
+    # steward always offers tools, so when set this is the model its tool loop
+    # runs on — the escape hatch for boxes whose ``model`` (e.g. a small 1B
+    # brain slot) can't emit tool calls the local runtime parses natively (it
+    # leaks/500s). Point it at a model that tool-calls cleanly on this runtime
+    # (a capable local slot like ``hal0/agent``, or the fallback provider).
+    # Default "hal0/agent" per spec-p3-brain.final.md §5a + ADR-0023
+    # (always-on anchor every fallback chain ends in). An explicit per-request
+    # ``model`` wins over it.
+    #
+    # EMPTY STRING IS NOT "DISABLED" — see _normalise_tool_model below. A live
+    # box was found with `[brain_chat] tool_model = ""`, which silently
+    # overrode this default; it is now coerced back to the default with a loud
+    # warning. Opting OUT is spelled explicitly: "off" / "none" / "disabled".
+    tool_model: str = BRAIN_TOOL_MODEL_DEFAULT
     max_rounds: int = Field(default=8, ge=1, le=100)
     completion_timeout_s: float = Field(default=300.0, gt=0)
+
+    @field_validator("tool_model", mode="before")
+    @classmethod
+    def _normalise_tool_model(cls, v: Any) -> str:
+        """Coerce an empty ``tool_model`` back to the default, loudly.
+
+        The trap this closes: ``tool_model = ""`` in ``hal0.toml`` is
+        indistinguishable, on disk, from "I never set this". It is *not*
+        indistinguishable to pydantic — an explicit empty string overrides the
+        ``"hal0/agent"`` default — so a config that looks unset silently
+        removes the steward's tool-routing target. There is no error, no
+        warning, and no observable symptom except that tool turns quietly stop
+        going anywhere useful. That is the worst class of config bug: it looks
+        like nothing happened.
+
+        Somebody who genuinely wants no tool routing has to say so out loud,
+        with one of :data:`BRAIN_TOOL_MODEL_DISABLED`, which normalises to the
+        empty string internally. That keeps the "no reroute" behaviour
+        reachable while making it impossible to arrive at by accident.
+        """
+        if v is None:
+            return BRAIN_TOOL_MODEL_DEFAULT
+        if not isinstance(v, str):
+            return v  # let pydantic's own str validation produce the error
+        text = v.strip()
+        if not text:
+            log.warning(
+                "[brain_chat] tool_model is empty — an explicit empty string OVERRIDES the "
+                "%r default and would leave the steward's tool turns with no target. "
+                "Using %r. To genuinely disable tool routing, set tool_model to one of %s.",
+                BRAIN_TOOL_MODEL_DEFAULT,
+                BRAIN_TOOL_MODEL_DEFAULT,
+                sorted(BRAIN_TOOL_MODEL_DISABLED),
+            )
+            return BRAIN_TOOL_MODEL_DEFAULT
+        if text.lower() in BRAIN_TOOL_MODEL_DISABLED:
+            return ""
+        return text
 
 
 class SecurityConfig(BaseModel):
