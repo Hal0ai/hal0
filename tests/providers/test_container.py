@@ -1120,7 +1120,7 @@ class TestGpuPassthroughGate:
             _slot_cfg(device="gpu-rocm"), ProfileConfig(flags="-fa on", backend="cuda")
         )
         assert spec.devices == self._NODES
-        assert not any("nvidia.com" in d for d in spec.devices)
+        assert "nvidia.com/gpu=all" not in spec.devices
 
     # ── back-compat: a hand-built / pre-pivot dict with no device at all ────
 
