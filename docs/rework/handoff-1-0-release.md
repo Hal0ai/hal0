@@ -230,6 +230,23 @@ not; harmless comment drift, not a real gap).
 **No blocking findings against A.** The shellcheck gap and the stale header comment are worth fixing
 before merge but neither is a reason to hold it.
 
+### Draft PRs opened for CI signal (2026-07-31)
+
+The local box's full-suite runs are slow (contended — six heavy jobs ran concurrently during this
+review) and neither stream had ever had CI run against it (`push`/`pull_request`-only triggers, and
+neither branch had a PR). Opened **draft** PRs to get GitHub's runners going independently:
+**#1553 (F)**, **#1554 (A)**. Both note in-body that the branch is still 40 commits behind `main`
+and not to merge from draft.
+
+F's `sunset` check failed on CI — **investigated, not a real finding.** It's the scar-ratchet
+(`scripts/check_sunset.py`), non-required per branch protection, and the exact false-positive
+pattern tracked separately in #1502 ("the scar ratchet counts prose, so accurate documentation trips
+it"): F's diff uses the word "legacy" seven times, every instance in a docstring or test-assertion
+message describing *pre-existing on-disk data* ("the legacy value survives; the guard didn't fire"),
+not an actual deprecated code shim. Confirmed by grepping the diff for the ratchet's own regex
+(`removed in #|DEPRECATED|deprecated|legacy|backward.compat|compat shim`) and reading every hit.
+Don't re-chase this on a future CI run of F unless the count goes up for a *different* reason.
+
 ### Tmp infrastructure note (unrelated to either stream, cost real time)
 
 Running both streams' full suites concurrently filled the 16G `/tmp` tmpfs (`HAL0_HOME=$(mktemp -d)`
@@ -301,12 +318,32 @@ a new `flags-tune.test.ts` (41 tests).
 
 **No blocking findings against E** — the a11y gap is tracked separately (#1552), doesn't block merge.
 
-### Streams C and I — in progress
+### Stream I — metrics egress (`fix/metrics-egress`, 3 commits + uncommitted) — reviewed, clean
 
-C (`fix/profile-tuning-only`) and I (`fix/metrics-egress`, has uncommitted work) are still running
-their MiniMax review workers as of this write (`/var/tmp/mm-review-{C,I}.log`). I's review is
-explicitly scoped to also judge whether its uncommitted latency work looks complete or half-finished
-— check that assessment before assuming I is mergeable as-is.
+Committed work gates hal0-internal metrics/hardware fan-out to actual hal0 peers (excludes
+third-party OpenAI-compatible providers, disabled upstreams, local slot upstreams; adds explicit
+tri-state `hal0_peer` config), adds URL-level egress tests, and adds the concurrent-probe work
+(bounded slot-probe concurrency, per-slot deadline, concurrent container/capacity/metrics
+aggregation).
+
+- Targeted tests (`test_metrics_egress.py`, `test_probe_concurrency.py`, `test_peers.py`):
+  **67 passed.**
+- **Uncommitted working-tree changes are cosmetic only, not half-finished work** — this corrects the
+  earlier read in §1's table (which flagged I as merely "5 modified"). Line-wrapping, ASCII-hyphen
+  cleanup in `slot_view/__init__.py`, and a redundant `(TimeoutError, asyncio.TimeoutError)` tuple
+  collapsed to plain `TimeoutError` (equivalent on the repo's Python 3.12+ floor). Safe to commit
+  as-is.
+- One non-blocking note: `api/routes/hardware.py:287` treats malformed JSON from a 200 peer response
+  like an offline peer without logging why — matches the existing degradation contract, not a new
+  gap.
+
+**No blocking findings against I.**
+
+### Stream C — profiles tuning-only (`fix/profile-tuning-only`) — review in progress
+
+Still running as of this write (`/var/tmp/mm-review-C.log`) — full-suite verification takes longer
+than the targeted-test-only streams. Check that log directly if this section still says "in
+progress" when you pick this up.
 
 ### The `useRuntime.ts` typecheck error, seen independently by both D's and E's reviewers
 
