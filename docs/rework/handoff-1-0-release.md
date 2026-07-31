@@ -1,17 +1,18 @@
 # Handoff — hal0 v1.0.0 release (paste-in brief for a new session)
 
-**Written:** 2026-07-30. **Version in tree:** `1.0.0-rc.1` (`pyproject.toml:13`).
-**`github/main` tip:** `7c9ed3d2` — `fix(updater): tell the truth about what a rollback is actually serving (#1549)`.
+**Written:** 2026-07-30, last updated 2026-07-31. **Version in tree:** `1.0.0-rc.1`
+(`pyproject.toml:13`). **`github/main` tip:** `7c9ed3d2` — `fix(updater): tell the truth about what
+a rollback is actually serving (#1549)`.
 
 > You are picking up the v1.0.0 endgame. Nine parallel build streams are in flight in
-> `/mnt/mintdev/worktrees/hal0-v1/`, plus a release-prep branch. Seven streams are complete
-> with clean trees; three still have uncommitted work. The remaining path is: finish G/H/I →
-> two adversarial reviews → rebase → merge → CHANGELOG fold → tag → install test on CT151 →
-> update test on CT150.
+> `/mnt/mintdev/worktrees/hal0-v1/`, plus a release-prep branch. **Update (2026-07-31): six of
+> nine streams (A, C, D, E, F, I) are now fully reviewed with a PASS verdict — see §6a/§6b.** G and
+> H still need finishing (G has 11 uncommitted files, H has nothing committed at all). The remaining
+> path is: finish G/H → rebase everything onto current `github/main` (§2 — streams are 40 commits
+> behind) → merge in order → CHANGELOG fold → tag → install test on CT151 → update test on CT150.
 >
-> Everything below marked **verified** was re-checked against git and the live boxes on
-> 2026-07-30 before this file was written. Two claims carried in from the previous session did
-> not survive that check — see §4.
+> Everything below marked **verified** was re-checked against git and the live boxes before being
+> written. Two claims carried in from an earlier session did not survive that check — see §4.
 
 ---
 
@@ -167,7 +168,11 @@ re-diagnosed as v1.0.0 regressions:
    a wrong call is either unrecoverable on a user's box or a security hole. Neither should merge on a
    self-review. **DONE (2026-07-31) — both PASS, see §6a.**
 5. **Push, then rebase every stream onto current `github/main`** (§2, §3). Merge order: A (or G,
-   which carries A) → B → C → D → E → F → I → H → release-prep.
+   which carries A) → B → C → D → E → F → I → H → release-prep. **A, C, D, E, F, I are now all
+   reviewed PASS** (§6a/§6b) — B and G's own commits (the 2 on top of A) and H were not in scope for
+   this review pass; give them at least a targeted-test pass before merging if nobody already has.
+   Draft PRs open for CI-signal purposes only, not ready to merge as-is (still 40 commits behind
+   main): #1553 (F), #1554 (A).
 6. **Fold `## [Unreleased]` into `## [1.0.0]`** in `CHANGELOG.md`. Tagged releases bundle the
    matching section as `RELEASE_NOTES.md` and extract `### Highlights` / `### Breaking` /
    `### Migrations` into `release.json`, which `hal0 update` renders as callouts — so a 1.0.0
@@ -392,11 +397,29 @@ aggregation).
 
 **No blocking findings against I.**
 
-### Stream C — profiles tuning-only (`fix/profile-tuning-only`) — review in progress
+### Stream C — profiles tuning-only (`fix/profile-tuning-only`, 7 commits) — reviewed, clean
 
-Still running as of this write (`/var/tmp/mm-review-C.log`) — full-suite verification takes longer
-than the targeted-test-only streams. Check that log directly if this section still says "in
-progress" when you pick this up.
+Its own MiniMax worker stalled (30+ min silent, likely stuck on a second serial full-suite attempt
+after its first hit the 550s timeout at 14%) — killed it and finished the review directly rather
+than wait indefinitely on it.
+
+The stream's real theme is broader than its name: "the model/slot owns a value, the profile becomes
+an inert hint" — carried consistently through context-size ownership (`_resolve_context_size` now
+model-first, slot value a ceiling not an override), GPU device-node passthrough (now decided from
+`slot.device`, not `profile.device_class`/`.backend`, closing a real bug where a `cpu-chat` profile
+on a `device="cpu"` slot still requested real GPU device nodes), an implausible-context-size guard
+on the launch path, and a profile-import checksum-verification gap (`checksum_ok` was computed for
+`dry_run` and never re-checked on commit — same integrity-gap *pattern* as issue #1512, but for
+profiles rather than stacks). All 296 lines touched in `providers/container.py` — the one file that
+looked like scope creep for a "profiles tuning-only" stream at first glance — are the direct,
+necessary consequence of making `profile.device_class`/`.backend` inert: declaring them inert in
+schema/docs without also fixing the one place that still read them as authoritative for hardware
+passthrough would have been a lie with a real correctness bug behind it. No scope creep.
+
+- Full suite (run directly, `pytest-xdist -n 6`, after killing the stalled worker):
+  **7849 passed, 16 skipped, 1 xfailed, 0 failed, in 352.6s.**
+
+**VERDICT: PASS.** No findings against C.
 
 ### The `useRuntime.ts` typecheck error, seen independently by both D's and E's reviewers
 
