@@ -57,6 +57,7 @@ from hal0.slots.config_write import (
     _reconcile_device_profile,
     check_default_uniqueness,
     check_npu_exclusivity,
+    guard_slot_write_payload,
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
 )
@@ -3490,7 +3491,8 @@ class SlotManager:
 # NOTE: _cfg_effective_backend / _base_profile_for_backend /
 # _reconcile_device_profile / _read_slot_toml_dict / _iter_peer_configs /
 # check_npu_exclusivity / check_default_uniqueness / reconcile_slot_updates /
-# reconcile_and_guard_slot_config moved to hal0.slots.config_write
+# reconcile_and_guard_slot_config / guard_slot_write_payload moved to
+# hal0.slots.config_write
 # (P3-slots §1f) — imported + re-exported above (see module docstring's
 # "New in P3-slots" note and __all__ below).
 
@@ -3517,6 +3519,7 @@ __all__ = [
     "_model_default",
     "check_default_uniqueness",
     "check_npu_exclusivity",
+    "guard_slot_write_payload",
     "is_npu_trio_shadow",
     "reconcile_and_guard_slot_config",
     "reconcile_slot_updates",

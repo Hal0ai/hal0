@@ -1100,6 +1100,15 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
         ) from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
+    # Model-owned keys FIRST, on the UNWRAPPED body: ``mtp``/``enable_thinking``
+    # /``vision`` are top-level slot-adjacent keys, so a stray one here is the
+    # operator reaching for a model capability through the wrong endpoint. Left
+    # to the wrapped unknown-key check below it still 400s — but as
+    # ``validation.unknown_keys`` naming ``model.mtp``, which reads like a typo
+    # and sends the operator hunting for a misspelling that doesn't exist.
+    # Same ordering, same ``slot.model_owned_key_denied`` code as the sibling
+    # PUT /config and POST /api/slots boundaries.
+    _reject_model_owned_config_keys(body)
     # Defaults merge into [model] — validate the wrapped shape so unknown
     # keys surface as their real destination path (``model.<key>``).
     _reject_unknown_config_keys({"model": body})

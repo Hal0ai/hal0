@@ -173,6 +173,7 @@ async def _create_missing_slots(
     one bad entry doesn't sink the whole apply. Returns ``(created, errors)``.
     """
     from hal0.api.routes.slots import _normalize_create_body
+    from hal0.slots.config_write import guard_slot_write_payload
 
     created: list[str] = []
     errors: list[dict[str, str]] = []
@@ -181,16 +182,19 @@ async def _create_missing_slots(
             continue
         device = entry.device or "gpu-vulkan"
         profile = entry.profile or DEVICE_TO_DEFAULT_PROFILE.get(device, "")
-        # spec-hw-slot-ownership §1: vision/mtp are model-owned typed
-        # capabilities, so a stack-created slot must not be born carrying
+        # spec-hw-slot-ownership §1: vision/mtp/enable_thinking are model-owned
+        # typed capabilities, so a stack-created slot must not be born carrying
         # them. `reject_model_owned_slot_keys` guards the HTTP surface
         # (create_slot / update_slot_config in api/routes/slots.py), but this
         # path calls `SlotManager.create()` directly in-process and never
         # reaches that handler — so dropping them here is what keeps
         # stack-created slots on the right side of the partition.
-        # `entry.vision`/`entry.mtp` stay on the stack schema for back-compat
-        # but no longer project onto the slot, matching what
-        # `stacks.apply._reconciled_stack_slot` already does.
+        # `entry.vision`/`entry.mtp`/`entry.enable_thinking` stay on the stack
+        # schema for back-compat but no longer project onto the slot; the
+        # sibling UPDATE path (`stacks.apply._reconciled_stack_slot`) makes the
+        # same exclusion and `reconcile_and_guard_slot_config` now enforces it
+        # for both. (It did NOT before: that function declaratively wrote all
+        # three, so create and update disagreed and this comment was false.)
         body: dict[str, Any] = {
             "name": entry.slot,
             "type": "llm",
@@ -201,6 +205,12 @@ async def _create_missing_slots(
         if entry.server_extra_args:
             body["server"] = {"extra_args": entry.server_extra_args}
         try:
+            # `SlotManager.create()` has no write-boundary screen of its own, so
+            # a stack's freeform `[server].extra_args` would otherwise reach
+            # slot TOML carrying hardware / hal0-managed flags. Run the same
+            # in-process partition guard the update path now runs; per-slot
+            # failures are collected below like any other create error.
+            guard_slot_write_payload(body)
             await slot_manager.create(entry.slot, _normalize_create_body(body))
             created.append(entry.slot)
         except Exception as exc:

@@ -21,6 +21,7 @@ from typing import Any
 
 from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
+from hal0.errors import BadRequest
 from hal0.model_meta import canonical_device
 from hal0.slot_config import ChangeSet, FileState, SlotConfigStore
 from hal0.slots.manager import reconcile_and_guard_slot_config
@@ -149,10 +150,14 @@ class StackApplyEngine:
         scope). For every other entry ``after == before``.
 
         Guard violations from the shared write pipeline (incoherent
-        device+profile pair, NPU exclusivity, default uniqueness) never abort
-        the plan: the offending entry keeps ``after == before`` and the
-        violation is recorded per-slot in ``plan.errors`` (mirrored into
-        ``summary``), matching the engine's report-don't-raise philosophy.
+        device+profile pair, NPU exclusivity, default uniqueness, and the
+        ``BadRequest``-flavoured slot/model key partition + freeform-flag
+        screen) never abort the plan: the offending entry keeps
+        ``after == before`` and the violation is recorded per-slot in
+        ``plan.errors`` (mirrored into ``summary``), matching the engine's
+        report-don't-raise philosophy. One malformed stack row therefore
+        degrades to "that slot was skipped, here's why" instead of 400ing an
+        otherwise-valid multi-slot apply.
         """
         befores: list[FileState] = []
         afters: list[FileState] = []
@@ -166,7 +171,7 @@ class StackApplyEngine:
             before = _read_toml_or_none(path)
             try:
                 after = self._reconciled_stack_slot(before, entry)
-            except (SlotConfigError, NpuExclusivityViolation) as exc:
+            except (SlotConfigError, NpuExclusivityViolation, BadRequest) as exc:
                 errors.append((entry.slot, str(exc)))
                 summary.append(f"{entry.slot}: rejected — {exc}")
                 after = before
@@ -216,11 +221,13 @@ class StackApplyEngine:
         the SAME dual write ``SlotConfigStore._reconciled_slot`` performs)
         and then routes it through the shared guarded pipeline
         :func:`hal0.slots.manager.reconcile_and_guard_slot_config`: the
+        slot/model key-space partition + freeform-flag screen, the
         copy-safe one-level ``[model]``/``[server]`` merge, the #585
         ``ctx_size``→``context_size`` fold, device↔profile backend
         coherence, and the NPU-exclusivity / default-uniqueness guards.
         A stack can therefore no longer persist what ``update_config``
-        would refuse (e.g. a vulkan device under a rocm profile) — guard
+        would refuse (e.g. a vulkan device under a rocm profile, or a
+        model-owned ``mtp``/``vision``/``enable_thinking``) — guard
         violations raise and :meth:`plan` records them per-slot. Returns
         ``before`` unchanged when the slot file is absent (creation is out
         of 2a scope).
@@ -239,16 +246,15 @@ class StackApplyEngine:
             updates["provider"] = entry.provider
         if entry.profile is not None:
             updates["profile"] = entry.profile
-        # ``vision`` is a plain bool (no inherit) → declaratively written.
-        updates["vision"] = entry.vision
-        # ``mtp`` is declaratively written INCLUDING None: a stack row set to
-        # Auto (null) must clear any forced true/false already on the slot, or
-        # the stack UI's "Auto" hint disagrees with what actually launches.
-        # merge_slot_config treats None as delete-key, so Auto rows reset the
-        # slot to the derived decision (model eligibility x profile opt-in).
-        updates["mtp"] = entry.mtp
-        if entry.enable_thinking is not None:
-            updates["enable_thinking"] = entry.enable_thinking
+        # spec-hw-slot-ownership §1: ``vision`` / ``mtp`` / ``enable_thinking``
+        # are MODEL-owned typed capabilities and are deliberately NOT projected
+        # onto the slot. They remain on ``StackSlotEntry`` (back-compat: seed
+        # stacks still declare ``mtp = true``, and ``snapshot_live_stack`` still
+        # reads them off pre-partition slot TOMLs) but a stack apply must not re-land
+        # the pre-partition on-disk shape that ``PUT /api/slots/{name}/config``
+        # 400s on. This is the same exclusion the sibling create path
+        # (``api.routes.stacks._create_missing_slots``) makes; the two agree
+        # again. ``reconcile_and_guard_slot_config`` now enforces it for real.
         if entry.server_extra_args is not None:
             updates["server"] = {"extra_args": entry.server_extra_args}
 
