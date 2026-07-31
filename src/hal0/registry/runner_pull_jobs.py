@@ -88,7 +88,12 @@ async def enqueue(request: Request, *, image_id: str) -> dict[str, object]:
     jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
     existing = jobs.get(image_id)
     if existing is not None and existing.state in ("queued", "running"):
-        return {"id": existing.job_id, "image_id": image_id, "state": existing.state, "resumed": True}
+        return {
+            "id": existing.job_id,
+            "image_id": image_id,
+            "state": existing.state,
+            "resumed": True,
+        }
 
     store = request.app.state.runner_image_registry
     entry = store.get(image_id)

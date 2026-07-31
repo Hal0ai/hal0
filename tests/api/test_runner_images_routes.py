@@ -47,7 +47,9 @@ def test_get_unknown_runner_image_404s(client: TestClient) -> None:
     assert resp.json()["error"]["code"] == "runner_image.not_found"
 
 
-def test_sync_route_populates_catalogue(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sync_route_populates_catalogue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     images_json = {
         "schema": "hal0.runner-images.v1",
         "images": [
@@ -116,7 +118,11 @@ def test_pull_lifecycle_start_status_complete(
     store = client.app.state.runner_image_registry
     from hal0.registry.runner_image import RunnerImage
 
-    store.upsert(RunnerImage(id="hal0ai/hal0-toolbox-cpu", image="ghcr.io/hal0ai/hal0-toolbox-cpu", tag="latest"))
+    store.upsert(
+        RunnerImage(
+            id="hal0ai/hal0-toolbox-cpu", image="ghcr.io/hal0ai/hal0-toolbox-cpu", tag="latest"
+        )
+    )
 
     runner_pull_jobs.provider_factory = lambda: _FakeProvider(
         [

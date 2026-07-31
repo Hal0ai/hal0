@@ -78,7 +78,9 @@ def _route_handler(*, images_json: dict | None, ghcr_fail: set[str] | None = Non
 
 @pytest.mark.asyncio
 async def test_fetch_images_json_parses_entries() -> None:
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_route_handler(images_json=_IMAGES_JSON)))
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_route_handler(images_json=_IMAGES_JSON))
+    )
     try:
         entries, err = await fetch_images_json(client)
     finally:
@@ -116,7 +118,9 @@ async def test_fetch_images_json_degrades_on_malformed_body() -> None:
 @pytest.mark.asyncio
 async def test_sync_merges_ghcr_and_images_json(tmp_path: Path) -> None:
     store = RunnerImageStore(db_path=tmp_path / "hal0.db")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(_route_handler(images_json=_IMAGES_JSON)))
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_route_handler(images_json=_IMAGES_JSON))
+    )
     try:
         result = await sync_runner_images(store, client=client)
     finally:

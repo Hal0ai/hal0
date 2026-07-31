@@ -217,7 +217,9 @@ def write_local_marker(image_id: str, image_ref: str) -> Path:
     path = local_marker_path(image_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"image_id": image_id, "image": image_ref, "pulled_at": datetime.now(UTC).isoformat()}),
+        json.dumps(
+            {"image_id": image_id, "image": image_ref, "pulled_at": datetime.now(UTC).isoformat()}
+        ),
         encoding="utf-8",
     )
     return path

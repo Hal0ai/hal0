@@ -116,9 +116,7 @@ class RunnerImageStore:
         """Return one catalogued image by id, or None if absent."""
         with self._connect() as conn:
             self._ensure_migrated(conn)
-            row = conn.execute(
-                "SELECT * FROM runner_image WHERE id = ?", (image_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM runner_image WHERE id = ?", (image_id,)).fetchone()
             return _row_to_runner_image(row) if row is not None else None
 
     def list_downloaded(self) -> list[RunnerImage]:

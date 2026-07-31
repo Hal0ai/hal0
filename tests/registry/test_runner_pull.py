@@ -43,7 +43,11 @@ class _FakeProvider:
 @pytest.fixture
 def store(tmp_path: Path) -> RunnerImageStore:
     s = RunnerImageStore(db_path=tmp_path / "hal0.db")
-    s.upsert(RunnerImage(id="hal0ai/hal0-toolbox-cpu", image="ghcr.io/hal0ai/hal0-toolbox-cpu", tag="latest"))
+    s.upsert(
+        RunnerImage(
+            id="hal0ai/hal0-toolbox-cpu", image="ghcr.io/hal0ai/hal0-toolbox-cpu", tag="latest"
+        )
+    )
     return s
 
 
@@ -130,7 +134,9 @@ class TestFailure:
 
 
 class TestCancel:
-    async def test_cancel_requested_mid_stream_marks_cancelled(self, store: RunnerImageStore) -> None:
+    async def test_cancel_requested_mid_stream_marks_cancelled(
+        self, store: RunnerImageStore
+    ) -> None:
         job = _job()
         provider = _FakeProvider(
             [
