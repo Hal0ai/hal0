@@ -169,3 +169,21 @@ async def test_update_config_sole_default_does_not_self_conflict(slot_root: Path
     _write_slot(slot_root, "a", slot_type="llm", default=True)
     sm = SlotManager()
     await sm.update_config("a", {"model": {"context_size": 4096}})
+
+
+@pytest.mark.asyncio
+async def test_update_config_unrelated_field_not_blocked_by_stale_peer_default(
+    slot_root: Path,
+) -> None:
+    """A pre-existing stale duplicate default must not brick unrelated edits.
+
+    Two ``default=true`` slots of the same type can already be sitting on
+    disk (e.g. seeded outside SlotManager, or left over from before this
+    guard existed). Editing an unrelated field on either one must still
+    succeed — cleanup of the stale duplicate is ``default_slot_for``'s job
+    at routing time, not this write-time guard's (#1500).
+    """
+    _write_slot(slot_root, "a", slot_type="llm", default=True)
+    _write_slot(slot_root, "b", slot_type="llm", default=True)
+    sm = SlotManager()
+    await sm.update_config("a", {"model": {"context_size": 4096}})

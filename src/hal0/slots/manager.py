@@ -2427,8 +2427,11 @@ class SlotManager:
             # only on the pre-existing config) is checked against the merged
             # cfg_dict — the authoritative post-merge state, same as the NPU
             # guard. The peer walk excludes slot_name, so re-persisting the
-            # sole default never self-conflicts.
-            await self._check_default_uniqueness(slot_name, cfg_dict)
+            # sole default never self-conflicts. Gated on changed_keys so an
+            # edit to an unrelated field (e.g. context size) on a slot that
+            # already carries default=true doesn't get blocked by some other
+            # stale duplicate default already sitting on disk (#1500).
+            await self._check_default_uniqueness(slot_name, cfg_dict, changed_keys=set(updates.keys()))
 
             try:
                 write_slot_toml(cfg_path, cfg_dict)
@@ -2676,6 +2679,8 @@ class SlotManager:
         self,
         slot_name: str,
         cfg_dict: dict[str, Any],
+        *,
+        changed_keys: set[str] | None = None,
     ) -> None:
         """Reject a write that would land a second ``default=true`` per type.
 
@@ -2704,9 +2709,13 @@ class SlotManager:
         Thin async wrapper (kept for the public method surface and test
         monkeypatchability) over the module-level sync
         :func:`check_default_uniqueness`, which the stacks apply engine
-        shares so its writes obey the same guard.
+        shares so its writes obey the same guard. ``changed_keys`` is
+        threaded through so an ``update_config()`` PATCH that never
+        touches ``default`` doesn't get blocked by a pre-existing stale
+        duplicate elsewhere on disk (that write-time collision check only
+        fires when this write is the one setting ``default=true``).
         """
-        check_default_uniqueness(slot_name, cfg_dict)
+        check_default_uniqueness(slot_name, cfg_dict, changed_keys=changed_keys)
 
     # ── idle / wake-on-request ───────────────────────────────────────────────
 

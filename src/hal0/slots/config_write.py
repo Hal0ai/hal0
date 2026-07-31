@@ -236,13 +236,26 @@ def check_default_uniqueness(
     cfg_dict: dict[str, Any],
     *,
     slots_dir: Path | None = None,
+    changed_keys: set[str] | None = None,
 ) -> None:
     """Reject a write that would land a second ``default=true`` per type.
 
     Sync core of :meth:`SlotManager._check_default_uniqueness` (see its
     docstring for the full contract), shared with the stacks apply engine.
+
+    ``changed_keys`` is the set of keys the caller's *update* actually
+    touched (``None`` at create time, where every field is new so the
+    merged ``cfg_dict`` is checked unconditionally). A partial update that
+    carries a pre-existing ``default=true`` forward without changing it
+    must not re-trigger this guard just because a stale duplicate already
+    sits on disk — that would permanently brick edits to any field on a
+    slot that already has (possibly duplicate) ``default=true`` state.
+    Retroactive cleanup of stale duplicates is ``default_slot_for``'s job
+    at routing time, not this write-time guard's.
     """
     if cfg_dict.get("default") is not True:
+        return
+    if changed_keys is not None and "default" not in changed_keys:
         return
     type_ = cfg_dict.get("type")
     if not type_:
@@ -296,7 +309,7 @@ def reconcile_and_guard_slot_config(
     """
     merged = reconcile_slot_updates(base, updates)
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
-    check_default_uniqueness(slot_name, merged, slots_dir=slots_dir)
+    check_default_uniqueness(slot_name, merged, slots_dir=slots_dir, changed_keys=set(updates.keys()))
     return merged
 
 
