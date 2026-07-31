@@ -63,6 +63,16 @@ test.describe('Model drawer — stamp & diverge', () => {
     await expect(page.getByTestId('model-provenance-chip')).toHaveText(/seeded from rocm-moe/i)
     // Freshly stamped text equals the profile — no divergence yet.
     await expect(page.getByTestId('model-diverged-chip')).toHaveCount(0)
+
+    // Coverage hole: PROFILE_FLAGS bakes a slot-hardware flag (--threads)
+    // right into the stamp, but none of this file's tests ever checked the
+    // inline error or Save's disabled state — a regression in the
+    // hardware-flag guard (findSlotHardwareFlags) would go completely
+    // uncaught. The stamp must trip it immediately, same as hand-typing it.
+    const err = page.getByTestId('model-flags-error')
+    await expect(err).toBeVisible()
+    await expect(err).toContainText('--threads')
+    await expect(page.getByTestId('model-save')).toBeDisabled()
   })
 
   test('editing stamped flags raises the diverged chip + inline diff', async ({ page }) => {
