@@ -789,7 +789,7 @@ async def rollback_update(request: Request) -> dict[str, Any]:
     channel = _current_channel(request)
     updater = Updater(channel=channel)
     try:
-        await updater.rollback()
+        result = await updater.rollback()
     except Hal0Error:
         # Already-typed updater errors surface as their own envelope.
         raise
@@ -798,7 +798,16 @@ async def rollback_update(request: Request) -> dict[str, Any]:
             f"rollback failed: {exc}",
             details={"channel": channel, "error": str(exc)},
         ) from exc
-    return {"rolled_back": True, "channel": channel}
+    # Pass through what rollback() actually computed instead of discarding it
+    # (#1541). Three fields matter to the caller and none were reaching it:
+    #   * rolled_back_to  — the install tree now active, so the CLI can name
+    #     the version it reverted to rather than just "rolled back".
+    #   * previous_now    — what the retained-previous slot now holds.
+    #   * schema_warning  — flags a forward-only migration that the reverted
+    #     tree may not understand. This was the worst of the three to drop:
+    #     it is a data-hazard warning on an emergency path, and it was being
+    #     discarded before any operator could see it.
+    return {"rolled_back": True, "channel": channel, **result}
 
 
 # ── /channel ───────────────────────────────────────────────────────────────
