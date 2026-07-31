@@ -827,7 +827,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
               );
             })}
           </div>
-          <div className="dash-side">
+          <div className="dash-side dash-side-fill">
             <ActivityLog />
           </div>
         </div>
@@ -868,7 +868,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
               ))}
             </div>
           </div>
-          <div className="dash-side">
+          <div className="dash-side dash-side-fill">
             <ActivityLog />
           </div>
         </div>
@@ -897,7 +897,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
               </div>
             </div>
           </div>
-          <div className="dash-side">
+          <div className="dash-side dash-side-fill">
             <ActivityLog />
           </div>
         </div>
@@ -1063,7 +1063,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
             </>
           )}
         </div>
-        <div className="dash-side">
+        <div className="dash-side dash-side-fill">
           <ActivityLog />
         </div>
       </div>

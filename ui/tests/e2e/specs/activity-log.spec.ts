@@ -181,9 +181,16 @@ test.describe('ActivityLog sidebar pane (#slots)', () => {
     // `''`). `toHaveCSS` re-resolves the locator on every retry, so it
     // settles once the pane stops remounting instead of racing it.
     await expect(body).toHaveCSS('overflow-y', /^(auto|scroll)$/)
-    // A real px cap (not "none") proves the pane is bounded.
-    await expect(body).not.toHaveCSS('max-height', 'none')
-    const maxH = await body.evaluate((el) => getComputedStyle(el).maxHeight)
-    expect(parseFloat(maxH)).toBeGreaterThan(0)
+    // Boundedness is now structural, not a `max-height` px cap: the card is
+    // `height: 100%` of the stretched `.dash-side` grid track and the body is
+    // the `flex: 1 1 auto` child, so the body can never be taller than the
+    // card it lives in — the content scrolls inside instead of growing the
+    // page. (The old 620px cap made the pane stop short of the main column.)
+    const box = await body.evaluate((el) => {
+      const card = el.closest('.act-card') as HTMLElement
+      return { body: el.clientHeight, card: card.clientHeight }
+    })
+    expect(box.body).toBeGreaterThan(0)
+    expect(box.body).toBeLessThanOrEqual(box.card)
   })
 })
