@@ -64,10 +64,20 @@ class SyncResult:
 
 
 def _strip_registry_host(image_ref: str) -> str:
-    """``ghcr.io/hal0ai/hal0-toolbox-cpu`` -> ``hal0ai/hal0-toolbox-cpu``."""
+    """``ghcr.io/hal0ai/hal0-toolbox-cpu`` -> ``hal0ai/hal0-toolbox-cpu``.
+
+    Splits on the first ``/`` and compares the whole leading segment for
+    exact equality with ``ghcr.io`` (not a ``str.startswith``/substring
+    check) — CodeQL's "incomplete URL substring sanitization" query
+    flags prefix/substring probes against host-like strings because they
+    can be spoofed by a crafted string that merely starts with the
+    expected text (e.g. ``ghcr.io.evil.example/...``). An exact segment
+    match has no such bypass.
+    """
     ref = image_ref.strip()
-    if ref.startswith("ghcr.io/"):
-        ref = ref[len("ghcr.io/") :]
+    host, sep, rest = ref.partition("/")
+    if sep and host == "ghcr.io":
+        return rest
     return ref
 
 
