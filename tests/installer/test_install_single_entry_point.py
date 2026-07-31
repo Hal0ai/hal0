@@ -321,16 +321,10 @@ def test_agent_offer_discloses_the_size_from_the_curated_row(agent_block: str) -
     # Comments may discuss sizes; the CODE must not print one it made up. The
     # only GB figure allowed in an executed line is the "~15 GB" floor in the
     # no-offer message, which is a capability statement, not a download size.
-    code = [
-        ln
-        for ln in agent_block.splitlines()
-        if ln.strip() and not ln.lstrip().startswith("#")
-    ]
-    offenders = [
-        ln for ln in code if re.search(r"\d+(\.\d+)?\s*GB", ln) and "~15 GB" not in ln
-    ]
+    code = [ln for ln in agent_block.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    offenders = [ln for ln in code if re.search(r"\d+(\.\d+)?\s*GB", ln) and "~15 GB" not in ln]
     assert not offenders, (
-        "install.sh hardcodes a GB figure — it must come from --plan/curated.py: " f"{offenders}"
+        f"install.sh hardcodes a GB figure — it must come from --plan/curated.py: {offenders}"
     )
 
 
