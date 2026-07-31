@@ -240,8 +240,82 @@ test failures and would have been a false read if not re-verified against pytest
 Separately, the user migrated the whole box's Claude Code tmp dir from `/tmp` to
 `/mnt/mintdev/scratch/claude-tmp` (`CLAUDE_CODE_TMPDIR` in `.claude/settings.json`) mid-review, which
 briefly relocated an in-flight log file to `/var/tmp`. Current reruns write `HAL0_HOME` and
-`--basetemp` under `/var/tmp/hal0-tests-{A,F}-<pid>/`, which has hundreds of GB free — do the same
-for any future full-suite run on this box rather than trusting the tmpfs default.
+`--basetemp` under `/var/tmp/hal0-tests-{A,F}2-<pid>/` (logs: `/var/tmp/{a,f}-full-suite2.log`,
+the first-attempt `*-full-suite.log` files are stale/killed — ignore them), which has hundreds of
+GB free — do the same for any future full-suite run on this box rather than trusting the tmpfs
+default.
+
+**A genuine fix for the root cause is filed as PR #1551** (`fix/pytest-tmpfs-guard`, closes #1490):
+`tmp_path_retention_count = 1` + `tmp_path_retention_policy = "failed"` in `pyproject.toml`, plus an
+`atexit` cleanup for `tests/conftest.py`'s collection-time `HAL0_HOME` scratch dir (which isn't a
+`tmp_path`-family fixture, so the retention setting alone doesn't reach it). Verified: a passed
+test's fixture dir goes to 0 bytes immediately rather than accumulating across generations. Not
+release-blocking, but land it — it directly caused the two false-failure incidents above and will
+keep costing every future session on this box until it merges.
+
+## 6b. Review status — Streams C, D, E, I (2026-07-31, minimax-swarm workers)
+
+Lower-risk than A/F, so delegated to four parallel MiniMax-M3 workers (`~/.claude/helpers/
+mm-worker.sh`) for a read-only diff review + targeted-test pass, per workspace delegation policy
+(UI/tuning/metrics work, not security/architecture-critical). All output reviewed by this session
+before being recorded here — do not treat a worker's raw report as ground truth without that.
+
+### Stream D — slot-drawer UI (`feat/ui-inline-model-edit`, 5 commits) — reviewed, clean
+
+Inline model-edit pencil on every slot card (InferencePane + SlotsView) opening `ModelDrawer`
+side-by-side via a new `DrawerDock` context; drops dead/model-owned fields (`chat_template`,
+`extra_args`, `parallel`, `ctx_size`) from the slot drawer; adds a shared `slotModelRow` resolver so
+the slot card, InferencePane card, and slot drawer can't drift in precedence rules.
+
+- Vitest: **21/21 passed** (4 files).
+- Typecheck: 1 error, **pre-existing on base `34445a25`, not introduced by D** — `useRuntime.ts:43`,
+  `Property 'model_default' does not exist on type 'Slot'`. Already fixed on `github/main` by
+  `dce1c8e3` (release-prep branch) — pure rebase noise, not a real gap. See the note at the end of
+  this section.
+- Findings: a handful of minor aria-label polish items (empty `aria-label="Edit model"` when
+  disabled-but-mounted, a network-error vs. no-model-bound title that both correctly disable the
+  control but say the same thing) — all non-blocking, listed in the worker transcript if wanted
+  later. No swallowed errors, no missing loading states.
+
+**No blocking findings against D.**
+
+### Stream E — model row menu (`feat/ui-model-row-menu`, 4 commits) — reviewed, one real a11y gap
+
+Kebab menu (`Icons.more`) on every model row → "Edit model settings" → opens `ModelDrawer` decoupled
+from catalog selection; sidebar recipe restyle to match drawer form rhythm; a placeholder-text fix;
+a new `flags-tune.test.ts` (41 tests).
+
+- Vitest: **41/41 passed** (4 files).
+- Typecheck: same single pre-existing `useRuntime.ts:43` error as D — confirmed independently by
+  reverting the file to base and reproducing it there too. Not introduced by E; already fixed on
+  `github/main`.
+- **Real finding, filed as issue #1552:** the `Menu` primitive (`primitives.jsx:762`) this stream
+  exercises for the first time (per its own spec header, "the Menu primitive's first real call
+  site") has no Escape-to-close, no arrow-key navigation, no `role="menu"`/`role="menuitem"`, and
+  the backdrop dismiss never returns focus to the trigger button. The primitive predates this
+  stream, but E is what makes the gap user-reachable for the first time. Not release-blocking (no
+  destructive action lives behind it — the only menu item is Edit, which routes through the normal
+  confirmed-safe drawer flow) but should land before or shortly after 1.0.
+- No swallowed errors; the one destructive-adjacent path (delete) is untouched by this stream and
+  still confirms via `DeleteModelDialog`.
+
+**No blocking findings against E** — the a11y gap is tracked separately (#1552), doesn't block merge.
+
+### Streams C and I — in progress
+
+C (`fix/profile-tuning-only`) and I (`fix/metrics-egress`, has uncommitted work) are still running
+their MiniMax review workers as of this write (`/var/tmp/mm-review-{C,I}.log`). I's review is
+explicitly scoped to also judge whether its uncommitted latency work looks complete or half-finished
+— check that assessment before assuming I is mergeable as-is.
+
+### The `useRuntime.ts` typecheck error, seen independently by both D's and E's reviewers
+
+Both workers hit the identical pre-existing typecheck failure and both correctly attributed it to
+base drift rather than their own stream — cross-confirms it's real and not stream-specific. It's
+already fixed on `github/main` (`dce1c8e3`, part of the release-prep branch's `ci(ui): gate
+typecheck, and drop the dead read it was hiding`), introduced by `0aa40d97` sometime between the
+shared stream base (`34445a25`) and current `main`. Every stream will see this error on `ui`
+typecheck until it rebases past `dce1c8e3` — expected, not a new defect to chase.
 
 ## 7. Quick state check for a fresh session
 
