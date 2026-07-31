@@ -1335,12 +1335,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 						<div className="form-row">
 							<div className="form-lbl">
-								<span>Context (override)</span>
-								<FieldInfoIcon description="⟳ ctx_size — context window in tokens, an OVERRIDE of the
-									bound model's own default context_size (set on the model drawer).
-									Slot-owned so the same model can run a bigger/smaller window on
-									different hardware. PATCHes /defaults; takes effect on next
-									request. (~model-load seconds)" />
+								<span>Context (ceiling)</span>
+								<FieldInfoIcon description="⟳ ctx_size — a hardware CEILING in tokens, not an
+									override: the bound model's own default context_size (set on the
+									model drawer) is authoritative, and this only clamps it down for
+									hardware that can't fit the model's full window. Slot-owned so the
+									same model can run capped on lighter hardware elsewhere. PATCHes
+									/defaults; takes effect on next request. (~model-load seconds)" />
 							</div>
 							<div className="form-ctl">
 								<input

@@ -316,13 +316,14 @@ test.describe('Slot edit controls (/slots)', () => {
 
     await page.goto('/#slots/primary')
     // Context is directly visible in the Model group (not inside Advanced).
-    // Label reads "Context (override)" — spec-hw-slot-ownership §1: it is an
-    // explicit override of the bound model's own default context_size.
+    // Label reads "Context (ceiling)": the bound model's own default
+    // context_size is authoritative; this slot value only clamps it down for
+    // lighter hardware, it never overrides it upward.
     const modelGroup = page.locator('.drawer .field-group').filter({
       has: page.locator('.field-group-label', { hasText: /^Model$/ }),
     })
     const contextRow = modelGroup.locator('.form-row').filter({
-      has: page.locator('.form-lbl > span', { hasText: /^Context \(override\)$/ }),
+      has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
     })
     await expect(contextRow).toBeVisible()
     await contextRow.locator('input').fill('16384')

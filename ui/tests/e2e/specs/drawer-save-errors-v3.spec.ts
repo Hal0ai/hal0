@@ -108,7 +108,7 @@ test.describe('Slot drawer — rejected writes', () => {
     })
     await modelGroup
       .locator('.form-row')
-      .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(override\)$/ }) })
+      .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }) })
       .locator('input')
       .fill('16384')
     await page.getByTestId('slot-hw-ngl').fill('24')
