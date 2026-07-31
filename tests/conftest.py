@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -12,10 +14,18 @@ import pytest
 # Test collection must not import the application against the host's FHS
 # config. In particular, /etc/hal0/hal0.toml may be root-only on a deployed
 # machine. Set an isolated root before importing hal0.api below.
+#
+# #1490: unlike every other test's isolation root, this one is NOT a
+# `tmp_path`-family fixture dir, so pytest's own `tmp_path_retention_*`
+# settings never see it — it was leaking one directory per collection
+# forever. It's cheap (import-time scaffolding only, not a fixture that
+# writes model/registry payloads), but a leak is a leak; clean it up
+# ourselves at interpreter exit.
 _collection_hal0_home: str | None = None
 if not os.environ.get("HAL0_HOME") and not os.access("/etc/hal0/hal0.toml", os.R_OK):
     _collection_hal0_home = tempfile.mkdtemp(prefix="hal0-pytest-")
     os.environ["HAL0_HOME"] = _collection_hal0_home
+    atexit.register(shutil.rmtree, _collection_hal0_home, ignore_errors=True)
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
