@@ -444,3 +444,57 @@ for w in A-install-setup B-update-reseed C-profile-tuning D-ui-inline-edit E-ui-
 done
 ssh root@10.0.1.110 'pct listsnapshot 150; pct listsnapshot 151'
 ```
+
+## 8. Parallel workstream — hal0-web docs overhaul (2026-07-31, in progress)
+
+A separate, parallel effort: rewriting the whole user-facing docs site for v1.0 (a fresh rewrite,
+not an edit pass). Tracked as Superset/Linear tasks (`docs(v1.0): rewrite ...`) — check `superset
+tasks list` or Linear for live status rather than assuming this section is current.
+
+**Repo:** `Hal0ai/hal0-web` (cloned to `/mnt/mintdev/repos/hal0-web`, default branch `master`, NOT
+`main`). The `hal0` repo's `docs/*.mdx` are a **read-only mirror** synced from
+`hal0-web/src/content/docs/docs/**` by a `mirror-docs` GitHub Action — never hand-edit them in
+`hal0` directly. The self-contained `docs/hal0-install-migration-guide.html` in the `hal0` repo is
+the one exception — it's hand-maintained in `hal0` itself, not mirrored.
+
+Old content (43 files: concepts, getting-started, guides, operate, reference) archived to
+`alpha-docs/` at the `hal0-web` repo root (out of the Astro build) for factual reference. **Merged
+to master:** Reference (#49), Operate (#47), Guides (#48), Concepts (#50). **Still in flight:**
+Getting Started (workspace `docs-getting-started-v2`, unified Ubuntu/Proxmox-LXC/Bare-Metal
+quickstart — a v1 attempt crashed silently with zero commits, relaunched) and the critical
+`docs/hal0-install-migration-guide.html` rewrite in the `hal0` repo (workspace
+`install-migration-guide-v2`, model=Opus, branch `docs/v1.0-install-migration-guide-v2`, held for
+human review before a PR opens — do not auto-merge this one given the stakes).
+
+### Real mistakes made setting this up — read before spawning more Superset tasks
+
+1. **`hal0-web`'s default branch is `master`, not `main`.** Every task prompt that said "PR against
+   main" was wrong. One agent (Reference, PR #49) opened against the correct branch anyway (gh's
+   own default-branch detection saved it) but then **merged without staying draft** as instructed —
+   nobody reviewed it before it went live. Always verify a repo's actual default branch
+   (`gh repo view --json defaultBranchRef`) before writing it into a task prompt.
+2. **A squash-merged PR breaks naive `git merge`/rebase for sibling branches that share its
+   ancestor commit.** Three sibling task branches (Operate, Guides, Concepts) all forked from the
+   same archive-move commit that Reference's PR also contained. Once Reference squash-merged,
+   `git merge origin/master` into each sibling branch **silently deleted that branch's own new
+   content** (git's rename/delete-vs-recreate heuristic resolved the wrong way, with no conflict
+   flagged — verify test-merges by actually listing directory contents after, not just checking for
+   zero `UU` entries). The fix that worked: `git rebase --onto origin/master <archive-move-commit>`
+   on each branch, dropping the now-redundant archive-move commit from the replay entirely rather
+   than trying to merge/reconcile it.
+3. **`/model opus` is a user-side slash command — an agent cannot invoke it on itself.** The first
+   attempt at the Opus-critical migration-guide task was prompted with "first action: run
+   `/model opus`"; the agent correctly reported it couldn't and the session ended having done
+   nothing, 40+ minutes wasted before this was caught. The actual mechanism: `claude --model opus`
+   is a real CLI flag. Superset's built-in `claude` agent preset has no way to inject extra args via
+   the `workspaces create`/`agents create` CLI — for a specific model, skip the preset and launch
+   `claude --model <name> --dangerously-skip-permissions -p "<prompt>"` directly in the workspace's
+   worktree path (`superset workspaces get <id> -f worktreePath`) instead.
+4. **A spawned workspace can silently die with zero output and no error.** The first Getting
+   Started attempt produced zero commits over 40+ minutes with no live process and no error —
+   only discoverable by checking the Claude session transcript directly under
+   `~/.claude/projects/<sanitized-worktree-path>/*.jsonl`. Don't assume a spawned task is working;
+   check for either commits landing or an active process within the first few minutes.
+
+**If you're picking this up:** before trusting anything above, run `superset tasks list` (or check
+Linear) for current status, and `gh pr list --repo Hal0ai/hal0-web` for what's actually merged.
