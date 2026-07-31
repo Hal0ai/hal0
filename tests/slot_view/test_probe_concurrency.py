@@ -41,7 +41,7 @@ class SlowProvider:
         self._in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self._in_flight)
 
-    def is_active(self, slot_name: str) -> bool:
+    def is_active(self, slot: dict[str, Any] | str) -> bool:
         # Synchronous, exactly like the real provider — the aggregator is
         # responsible for pushing it off the event loop.
         import time
@@ -57,8 +57,11 @@ class SlowProvider:
         finally:
             self._in_flight -= 1
 
-    def running_image(self, slot_name: str) -> str | None:
-        if slot_name in self.wedged:
+    def running_image(self, slot: dict[str, Any] | str) -> str | None:
+        # #1417: the aggregator passes the slot CONFIG, not a bare name — mirror
+        # the real provider's `Mapping[str, Any] | str` contract.
+        name = slot["name"] if isinstance(slot, dict) else slot
+        if name in self.wedged:
             import time
 
             # Long relative to the probe deadline, short enough that the
