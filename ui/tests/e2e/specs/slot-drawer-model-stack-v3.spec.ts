@@ -94,12 +94,15 @@ test.describe('Slot drawer — stacked model editor', () => {
     await seedSlots(page, [PRIMARY])
 
     await page.goto('/#slots/primary')
-    // Icon button, not the old "Edit model…" text button.
+    // Icon button, not the old "Edit model…" text button. Scoped to `button`
+    // rather than the whole `.drawer` — the slot drawer's own launch-tune
+    // hint prose ("edit them with "Edit model…" above", #1508) legitimately
+    // contains this phrase now, so a drawer-wide text filter false-positives.
     const pencil = page.getByTestId('slot-model-edit-open')
     await expect(pencil).toBeVisible()
     await expect(pencil).toBeEnabled()
     await expect(pencil.locator('svg')).toHaveCount(1)
-    await expect(page.locator('.drawer', { hasText: 'Edit model…' })).toHaveCount(0)
+    await expect(page.locator('.drawer button', { hasText: 'Edit model…' })).toHaveCount(0)
     // Nothing is stacked yet.
     await expect(modelDrawer(page)).toHaveCount(0)
 
