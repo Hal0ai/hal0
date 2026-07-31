@@ -1,115 +1,69 @@
 ---
-title: Slot as model
-description: How hal0 maps the OpenAI model field to a slot alias, rewrites it to the backing model id, and loads the slot under its declared backend before dispatch.
+title: Addressing a slot as a model
+description: "How to target a specific slot by name from an OpenAI-compatible request — verified against src/hal0/dispatcher/_capability_resolve.py and src/hal0/api/routes/v1.py in the v1.0 tree."
 sidebar:
-  order: 20
+  order: 30
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-In a standard OpenAI request the `model` field names a specific model. hal0
-extends this: the `model` field may instead name a **slot** (by its name/alias)
-or a **virtual role name**. hal0 rewrites it to the backing model id and
-ensures the right slot is loaded — all before the dispatcher routes the
-request.
+hal0's dispatcher resolves the `model` field of an OpenAI-compatible request primarily
+by **model id**, not by slot name — see
+[OpenAI-compatible API → Model → slot resolution](/docs/reference/api/openai-compat/#model--slot-resolution)
+for the full 5-step resolution order. Direct slot-name addressing exists, but only as
+the last-resort fallback in that chain (`SLOT_ALIASES` direct lookup) — described in
+source as "operator muscle memory," for requesting a slot literally by name.
 
-This lets a client pin a co-resident slot (e.g. always talk to the `agent`
-slot) without knowing or hard-coding which model it currently serves. The alias
-is stable across model swaps.
+## Chat-slot aliases
 
-## Addressing modes
+For `/v1/chat/completions` specifically, the route layer recognizes a small set of
+aliases in the `model` field and rewrites them to the aliased slot's configured model
+id before dispatch even reaches the general resolver:
 
-| `model` value | Resolution |
+| Alias | Resolves to |
 |---|---|
-| A chat-slot **alias** — any `type=llm` slot with a model bound, addressed by its own name (canonically `agent`, the default anchor, and `utility`, the helper role; legacy `agent-hermes` still redirects to `agent`) | Rewritten to the slot's configured model id. |
-| A virtual `hal0/*` role name (`hal0/agent`, `hal0/utility`, `hal0/npu`, or the generalized `hal0/<any-model-bound-llm-slot>`) | Live-resolved to whichever model the role currently maps to. Chat-completions only. |
-| A raw **registry model id** | Used directly; routed to whichever upstream serves it. |
+| `agent` | The configured default chat slot. |
+| `utility` | The configured utility slot. |
+| `agent-hermes` | Legacy alias, still accepted. |
+| any enabled LLM slot name | That slot's configured model. |
+
+`hal0/*`-prefixed virtual model names are resolved separately, against live slot state,
+and set a "lane pin" recording which specific slot the caller meant — relevant when
+more than one slot serves the same underlying model id.
+
+## Omitting `model` entirely
+
+If a request omits `model`, the request **path** decides the default, not a global
+fallback model:
+
+| Path | Default target |
+|---|---|
+| `/embeddings` | `embed` capability slot |
+| `/rerank`, `/rerankings` | `rerank` capability slot |
+| `/audio/speech` | `tts` capability slot |
+| `/images/*` | `img` capability slot |
+| everything else | `agent` |
 
 <Aside type="note">
-ADR-0023 retired the old `chat` and `primary` aliases — the canonical roles
-are `agent` (default anchor) and `utility` (helper). A custom slot named
-`chat` today is just addressed by that name; it isn't a magic alias.
+The default for chat-shaped requests changed from `chat` to `agent` (ADR-0023) —
+if you're carrying forward assumptions from pre-1.0 docs or muscle memory, update any
+reference to a `chat` default.
 </Aside>
 
-## How the rewrite works
+## Capability-based routing fallback
 
-Three steps run before dispatch, all in `routes/v1.py`:
+When neither an alias nor an exact model-id match resolves, the dispatcher falls back
+to capability inference from the request path and model-name hints, in this order:
 
-### 1. Alias rewrite — `_rewrite_chat_slot_alias`
+1. Path fragment → capability slot type (`/embeddings` → `embed`, `/rerankings`/`/rerank`
+   → `rerank`, `/audio/speech` → `tts`, `/images/generations`/`/images/edits`/
+   `/images/variations` → `img` — note the last two paths aren't actually implemented
+   endpoints, but their strings are still recognized here as routing hints).
+2. Model-name substring hints (`embed`, `rerank`).
+3. Image-model-id prefixes (`sdxl`, `sd-1.5`, `sd15`, `flux`).
+4. Direct `SLOT_ALIASES` lookup — the slot-name-as-model fallback.
 
-Runs for every `/v1` request that reaches `_dispatch_and_forward` (chat,
-completions, embeddings, rerankings, audio). The request's `model` is checked
-against the chat-slot alias map (slot name → configured model id, one entry
-per model-bound `type=llm` slot, plus the `agent-hermes` back-compat redirect). On
-a match, hal0:
-
-- replaces `body["model"]` with the slot's model id, and
-- rewrites the request's cached body bytes, so any downstream consumer that
-  re-reads the raw request forwards the rewritten model name — not the bare
-  alias.
-
-It is a no-op when the value isn't a known alias, already equals its own model
-id, the slot manager is absent, or the config read fails (best-effort — it
-never blocks the request).
-
-### 2. Virtual-name live-resolve — `_normalize_chat_body` (chat completions only)
-
-`POST /v1/chat/completions` alone also resolves a `hal0/*` role name against
-the currently-*loaded* slots (`LiveSlotResolver`), before the thinking-policy
-injection. Each virtual name carries an ordered fallback chain — `hal0/agent`
-tries the `agent` role; `hal0/utility` tries `utility` then falls back to
-`agent`; `hal0/npu` tries `npu`, then `utility`, then `agent` — and `hal0/<any
-model-bound llm slot>` resolves to `(<slot>, agent)`. If nothing in the chain is
-loaded yet, resolution falls back to the configured anchor slot so the caller
-can still ensure-load it. This step doesn't run for `/v1/completions`,
-`/v1/embeddings`, or the other non-chat endpoints.
-
-### 3. Backend-aware load — `_ensure_backend_for_model`
-
-After the alias rewrite, hal0 finds the chat slot that owns the resolved model
-id and calls `SlotManager.load(slot)` **before** dispatch. This is idempotent
-and blocks until the slot is `ready`, so the model is already loaded under the
-slot's declared `device` / `profile` whichever routing path dispatch then
-takes. A model with no backing chat slot is left alone and dispatches as-is.
-
-<Aside type="note">
-A slot already loaded under the wrong backend is not corrected mid-request
-(`load` is a no-op on a ready slot). That drift is surfaced by slot status and
-corrected via the slot's backend control, not silently inside a chat call.
-</Aside>
-
-## Slot name vs registry ref
-
-- **Slot name / alias** — addresses *the slot* and follows whatever model the
-  slot is configured to serve. Best for clients that want a stable handle.
-- **Registry model id** — addresses *the model*. The dispatcher checks the
-  registry binding, then warm upstream caches, then a cold-cache prefetch; a
-  known id is routed straight to the upstream serving it.
-
-<Aside type="caution">
-An id none of those steps recognize does **not** 404 outright. It falls
-through to the dispatcher's last-resort capability/path heuristics
-(`resolve_by_capability`), and that step's own final rule is a catch-all: an
-unmatched, non-path-pinned model name is silently dispatched to the `agent`
-slot (ADR-0023's default anchor) with the original model name still in the
-forwarded body — not rewritten to what `agent` actually has loaded. The
-`dispatch.no_route` `NoRouteFound` 404 only surfaces when even that fallback
-target isn't a registered/enabled slot, or when a path-pinned capability
-(`/embeddings`, `/rerankings` or `/rerank`, `/audio/speech`,
-`/images/*`) names a slot with no matching upstream. In practice: a typo'd
-`model` on `/v1/chat/completions` or `/v1/completions` usually reaches the
-`agent` slot instead of failing loudly — don't rely on a bad id 404ing.
-</Aside>
-
-## Interaction with the GPU arbiter
-
-When the GPU is in exclusive image mode, the backend-aware load step refuses to
-lazy-load an LLM back onto the GPU — it raises the structured `gpu.image_mode`
-503 (with a `Retry-After`) rather than fighting the arbiter and resurrecting a
-slot the arbiter just drained.
-
-## Related references
-
-- [OpenAI-compatible API](/docs/reference/api/openai-compat) — the `/v1/*` endpoints.
-- [Slot lifecycle](/docs/reference/slot-lifecycle) — what "loaded under its backend" means.
-- [hal0 CLI](/docs/reference/cli) — `hal0 slot` to create and configure slots.
+See [Providers, profiles & devices](/docs/reference/providers-profiles-devices/) for
+how a slot's `device`/`provider` fields relate to which capability it can serve, and
+[Slot lifecycle](/docs/reference/slot-lifecycle/) for the states a slot must be in
+(`READY`, `SERVING`, or `IDLE`) to be dispatchable at all.

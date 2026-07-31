@@ -1,176 +1,163 @@
 ---
-title: OpenAI-compatible API
-description: Reference for hal0's /v1/* endpoints — models, chat/completions, completions, embeddings, rerankings, audio transcriptions and speech, and image generations.
+title: OpenAI-compatible API reference
+description: "Every /v1/* endpoint hal0 serves, hal0-specific request/response deviations, and model-to-slot resolution — verified against src/hal0/api/routes/v1.py and src/hal0/dispatcher in the v1.0 tree."
 sidebar:
   order: 10
 ---
 
-import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Aside } from '@astrojs/starlight/components';
 
-hal0 exposes an OpenAI-compatible surface under `/v1`, served by `hal0-api` on
-port `8080`. Drop the base URL into any OpenAI-shaped client (OpenWebUI,
-official SDKs, third-party tools) and it works unmodified.
-
-```text
-http://localhost:8080/v1
-```
-
-Each POST endpoint parses the JSON body, resolves an upstream via the
-dispatcher, and forwards the request. Streaming (SSE for chat/completions,
-binary for audio speech) and non-streaming responses are both handled by the
-forwarder.
+hal0-api mounts `/v1/*` in `src/hal0/api/__init__.py`: a `public_router` (no auth
+dependency, so a client can `GET /v1/models` before it has credentials) plus an
+authenticated `router` for everything else, plus a separate realtime WebSocket router.
 
 <Aside type="caution">
-There is no built-in authentication. The server binds open on the
-local network; put it behind your own reverse proxy if you need auth or TLS.
-`GET /v1/models` and `/v1/models/{id}` are deliberately auth-free so SDKs can
-probe the catalog before sending any `Authorization` header.
+The `/v1/*` route module's own comment states auth was removed and the surface is open
+on the local network — this predates or is independent of the `[security].require_auth`
+/ `hal0 auth` machinery documented in [Config schema](/docs/reference/config-schema/#security)
+and [CLI](/docs/reference/cli/#hal0-auth--manage-hal0-api-authentication). Verify
+whether `require_auth` actually gates `/v1/*` routes, `/api/*` routes, or both before
+publishing an unqualified "auth is/isn't enforced" claim.
 </Aside>
 
-## Endpoints
+## Endpoint inventory
 
-| Method | Path | Purpose |
+| Path | Method | Notes |
 |---|---|---|
-| GET | `/v1/models` | List all models advertised across every configured upstream, plus one entry per enabled chat slot addressed by its alias. |
-| GET | `/v1/models/{id}` | Look up one model from the aggregated catalog. |
-| POST | `/v1/chat/completions` | Chat completion. Supports streaming and the optional omni tool-calling loop. |
-| POST | `/v1/completions` | Legacy text completion. |
-| POST | `/v1/embeddings` | Text embeddings (routes to the NPU FLM trio when an embed-NPU slot is targeted). |
-| POST | `/v1/rerankings` | Document reranking. |
-| POST | `/v1/rerank` | Alias of `/v1/rerankings` for llama-server / Jina/Cohere-style clients that call `/rerank` directly. Same dispatch path. |
-| POST | `/v1/audio/transcriptions` | Speech-to-text. Multipart upload; the `model` field is required. |
-| POST | `/v1/audio/speech` | Text-to-speech. The `model` field is required. |
-| POST | `/v1/images/generations` | Image generation via the ComfyUI provider. |
+| `/v1/models` | GET | Aggregated catalog. Hides non-text-modality models (image/tts/stt) by default — pass `?show_all=true` to see them. Supports `X-hal0-Model-Filter` header or `?owned_by=` query param to scope by owner (hal0 extension, not OpenAI-standard). |
+| `/v1/models/{model_id}` | GET | By-id lookup — bypasses the modality filter above. |
+| `/v1/chat/completions` | POST | See [request body deviations](#v1chatcompletions) below. |
+| `/v1/completions` | POST | Pure passthrough — no hal0-specific body handling at the route layer. |
+| `/v1/embeddings` | POST | Standard `{model, input}`. Requests that resolve to the NPU "embed" trio slot bypass the generic dispatcher and post directly to that slot's own `/v1/embeddings`. |
+| `/v1/rerankings` | POST | OpenAI-compat shape name. Rewritten to `/v1/rerank` on the outgoing leg for llama-server upstreams (llama-server only serves native `POST /rerank`). |
+| `/v1/rerank` | POST | Alias, for clients that already speak llama-server's native shape. |
+| `/v1/audio/transcriptions` | POST | multipart/form-data. `model` form field is **required** — 400 `request.missing_model` if absent. See [deviations](#v1audiotranscriptions) below. |
+| `/v1/audio/speech` | POST | JSON body. `model` is **required** (400 `request.missing_model` if missing/blank) — a deliberate deviation from the dispatcher's usual default-model fallback. |
+| `/v1/images/generations` | POST | ComfyUI-backed. **Not** a passthrough — see [Images](#v1imagesgenerations) below. |
+| `/v1/realtime` | WebSocket | Separate module (`realtime.py`) — not covered in depth by this pass. |
 
-![The hal0 dashboard Slots ▸ Endpoints tab listing every local slot's port, model, device, and current status](/screenshots/endpoints-tab.png)
-*Slots ▸ Endpoints tab — the gateway base URL plus a live per-slot port/model/device/tok-s table for everything reachable under `/v1/*`.*
+### Not implemented
 
-## `GET /v1/models`
+Confirmed absent (no route handler — some appear only as internal capability-routing
+path strings, not reachable over HTTP):
 
-Returns the OpenAI listing shape:
+- `/v1/images/edits`, `/v1/images/variations`
+- `/v1/audio/translations`
+- `/v1/moderations`
+- `/v1/assistants`, `/v1/threads`, `/v1/files`, `/v1/fine_tuning/*`, `/v1/batches`
 
-```json
-{ "object": "list", "data": [ /* model objects */ ] }
-```
+## Request body deviations from standard OpenAI shape
 
-The list combines two kinds of entries:
+### `/v1/chat/completions`
 
-- **Per-slot alias entries** — every chat slot (`type == "llm"`) with
-  a configured model appears once, with `id` equal to the slot alias (the slot
-  name, e.g. `agent`, the canonical default/anchor slot per ADR-0023, or
-  `utility`), a human `name`, and the slot's `context_length`. Both warm and
-  cold slots are advertised — dispatch cold-loads a cold slot on demand when a
-  request addresses it by alias. Only disabled slots, or slots with no
-  configured model, are omitted.
-- **Upstream catalog entries** — the raw model ids each `advertise_models`
-  upstream reports, so non-chat models (embed, rerank, image) keep their
-  direct-addressing ids.
+The body is otherwise standard and forwarded largely as-is, with these hal0-specific
+behaviors:
 
-## `POST /v1/chat/completions`
+- **`"omni": true`** — opts into hal0's OmniRouter tool-calling loop. Stripped from
+  the body before forwarding upstream (strict-mode backends reject unknown fields).
+- **`model` may be a chat-slot alias** — `agent`, `utility`, any enabled LLM slot name,
+  or the legacy `agent-hermes` — rewritten to the slot's configured model id before
+  dispatch. A `<tag>-FLM` catalog id (e.g. `gemma4-it-e2b-FLM`) is further normalized
+  to the native FLM-served tag (e.g. `gemma4-it:e2b`), since `flm serve` only
+  advertises the native tag.
+- **`hal0/*` virtual model names** are resolved against live slot state before
+  dispatch, and a "lane pin" records which specific slot the caller meant when
+  multiple slots share one model id.
+- **`enable_thinking` / `chat_template_kwargs`** — a thinking-policy override; if
+  omitted, defaulted server-side from the model registry's `ModelDefaults.enable_thinking`.
+- Multiple `role: system` messages are collapsed into one and hoisted to position 0
+  before dispatch.
 
-The standard OpenAI chat body. hal0 adds two opt-in behaviours:
+### `/v1/audio/transcriptions`
 
-- The `model` field may be a **slot name or alias** instead of a model id — it
-  is rewritten to the backing model before routing. See
-  [Slot as model](/docs/reference/api/slot-as-model).
-- `"omni": true` opts the request into the client-side tool-calling loop when
-  the resolved chat slot's model advertises tool-calling. The field is stripped
-  before forwarding so strict upstreams never see it.
-
-<Tabs>
-<TabItem label="curl (non-streaming)">
-
-```sh
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "agent",
-    "messages": [
-      {"role": "user", "content": "Say hello in one word."}
-    ]
-  }'
-```
-
-</TabItem>
-<TabItem label="curl (streaming)">
-
-```sh
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "agent",
-    "stream": true,
-    "messages": [
-      {"role": "user", "content": "Stream a short greeting."}
-    ]
-  }'
-```
-
-</TabItem>
-</Tabs>
-
-## `POST /v1/embeddings`
-
-Standard OpenAI embeddings body. When the request resolves to an enabled NPU
-embedding slot and the FLM chat anchor is loaded, hal0 posts straight to the
-FLM child's `/v1/embeddings`; otherwise it dispatches normally.
-
-## `POST /v1/audio/transcriptions`
-
-A `multipart/form-data` upload. The `model` form field is **required** —
-omitting it returns a 400 (`request.missing_model`) rather than a confusing
-404. The raw multipart bytes are forwarded verbatim so the upstream's own
-parser reads the audio. NPU `stt-npu` slots route directly to the FLM child.
-
-## `POST /v1/audio/speech`
-
-JSON body: `{"model", "input", "voice", "speed", "response_format"}`. The
-`model` field is required (a missing model returns 400,
-`request.missing_model`). Any of `voice`, `speed`, or `response_format` that
-are **omitted** get filled in from the serving `tts` slot's persisted request
-defaults (Settings → Voice: `default_voice` / `default_speed` /
-`default_response_format`) before dispatch — explicit request params always
-win. The response is the synthesised audio stream.
-
-## `POST /v1/images/generations`
-
-OpenAI-shaped image generation, translated to a ComfyUI workflow by hal0.
-
-Request (honoured subset):
+Raw multipart bytes are forwarded byte-for-byte (not re-encoded); the `model` field is
+extracted via regex over the raw bytes rather than `request.form()`, because Starlette
+can't re-read a form after the body has already been consumed. If a non-2xx upstream
+response would leak internal ffmpeg/subprocess error details, hal0 scrubs it and
+returns a clean envelope instead:
 
 ```json
 {
-  "model": "sdxl-turbo",
-  "prompt": "a cat in a hat",
-  "n": 1,
-  "size": "1024x1024",
-  "response_format": "url"
+  "error": {
+    "code": "audio.unsupported_format",
+    "message": "unsupported audio format; expected wav/mp3/flac/ogg/m4a/webm",
+    "details": { "upstream_status": "..." }
+  }
 }
 ```
+forced to HTTP 415.
 
-`prompt` is required; `model` must be a curated image model (built-ins:
-`sdxl-turbo`, `sd-1.5-pruned-emaonly`). Optional hal0 `extra_body` knobs:
-`seed`, `steps`, `cfg`, `negative_prompt`. An omitted `size` or `extra_body.steps`
-is filled in from the img slot's own `[image]` request defaults (Settings →
-Image-gen → Generation defaults) before dispatch.
+### `/v1/audio/speech`
+
+`{model, input, voice, speed?, response_format?}`. If the client omits `voice`,
+`speed`, or `response_format`, hal0 seeds them from the serving TTS slot's persisted
+Settings → Voice defaults (only filling fields the client didn't send).
+
+### `/v1/images/generations`
+
+The one endpoint that is not a passthrough — it drives `ComfyUIProvider.infer()`
+directly (graph submit + history poll), translating the OpenAI-shape request into a
+ComfyUI workflow.
+
+Request (subset honored): `{"model": <curated id>, "prompt": <required>, "n"?, "size"?, "response_format"?: "url"|"b64_json"}`, plus a hal0 extension `extra_body: {seed?, steps?, cfg?, negative_prompt?}`.
+
+- Missing `prompt` → 422 `image.prompt_required`.
+- `model` must be one of the curated image models (e.g. `sdxl-turbo`,
+  `sd-1.5-pruned-emaonly`) → 404 `image.model_not_curated` otherwise.
 
 Response:
 
 ```json
 {
-  "created": 1716000000,
-  "data": [ { "url": "/api/images/cache/<uuid>.png" } ],
-  "_hal0": { "...": "workflow debug meta" }
+  "created": 1234567890,
+  "data": [{ "url": "/api/images/cache/<uuid>.png" }],
+  "_hal0": { "meta": { "...": "..." }, "prompt_id": "...", "upstream": "...", "model": "..." }
 }
 ```
 
-With `response_format: "b64_json"` each entry carries a `b64_json` field
-instead of a cache `url`. Image generation flips the GPU into exclusive image
-mode via the arbiter (unloading LLM GPU slots), so the first image request may
-take longer while the img slot loads.
+The `_hal0` block is a hal0-specific extra field, not part of the OpenAI response
+shape.
 
-## Related references
+## Response deviations
 
-- [Slot as model](/docs/reference/api/slot-as-model) — addressing slots by name in the `model` field.
-- [hal0 CLI](/docs/reference/cli) — manage the slots these endpoints route to.
-- [First chat](/docs/getting-started/first-chat) — a guided walkthrough.
+- **FLM (NPU) usage extensions** — non-streaming FLM responses may carry
+  `usage.decoding_speed_tps` / `usage.kv_token_occupancy_rate_percentage`, fields not
+  present in llama.cpp responses and not part of the OpenAI shape.
+- **`/v1/models` default filtering** — hides non-text-modality models unless
+  `?show_all=true` is passed; `GET /v1/models/{id}` bypasses the filter.
+
+## Model → slot resolution
+
+`model` in a request body is **not** used as a raw slot address by default — several
+resolution stages run first (chat-only rewrites happen at the route layer; every
+request type goes through the dispatcher):
+
+1. **Route-layer chat rewrites** (chat only) — slot-alias rewrite, FLM tag
+   normalization, virtual `hal0/*` name resolution + lane pin, then a pre-dispatch
+   `SlotManager.load()` call so the model loads under its declared backend/device
+   before the request is forwarded.
+2. **Dispatcher resolution** (`Dispatcher.dispatch`, all request types), in order:
+   1. A loaded container-backed slot that already advertises the model id wins
+      outright (health-ordered).
+   2. Exact registry lookup (`ModelRegistry.route_for`) — includes a check that falls
+      through to a healthy sibling slot if the registered binding points at an
+      `ERROR`-parked slot serving the same model id.
+   3. Passthrough to any upstream whose cached `/v1/models` already lists the id.
+   4. Cold-cache prefetch — a bounded, single-flighted live `/v1/models` fetch against
+      cold remote upstreams, then a re-check of step 3.
+   5. **Capability/path routing** (last resort) — path fragments map to a capability
+      slot (`/embeddings` → `embed`, `/rerankings`/`/rerank` → `rerank`,
+      `/audio/speech` → `tts`, `/images/*` → `img`), then model-name substring hints
+      (`embed`, `rerank`) and image-model-id prefixes (`sdxl`, `sd-1.5`, `sd15`,
+      `flux`), then direct `SLOT_ALIASES` addressing — a caller can request a slot
+      literally by name as a final fallback.
+
+If `model` is omitted entirely, the path decides the default: `/embeddings` → `embed`,
+`/rerank` → `rerank`, `/audio/speech` → `tts`, `/images/*` → `img`, everything else →
+`agent`.
+
+For the full slot-addressing mechanics and how a slot's state gates whether it's
+eligible for dispatch, see [Slot lifecycle](/docs/reference/slot-lifecycle/) and
+[Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
+
+See [Streaming](/docs/reference/api/streaming/) for how `stream: true` is handled.

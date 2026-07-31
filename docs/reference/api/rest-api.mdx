@@ -1,163 +1,60 @@
 ---
 title: REST API index
-description: Index of hal0's HTTP API — /api/* router groups for slots, models, hardware, capabilities, memory, agents, MCP, activity, and updates, one-line summary each.
+description: Index of hal0's HTTP /api/* management surface, router group by router group — verified against src/hal0/api/routes and the tool-to-route map in src/hal0/mcp/admin.py.
 sidebar:
-  order: 40
+  order: 100
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-hal0-api serves the OpenAI-compatible `/v1/*` surface plus a `/api/*`
-management surface that backs the dashboard. This page indexes the `/api/*`
-router groups. For the inference surface see the OpenAI-compat and streaming
-references.
+hal0-api serves an OpenAI-compatible `/v1/*` inference surface plus an `/api/*`
+management surface that backs the dashboard and the `hal0-admin` MCP server. This page
+indexes the `/api/*` router groups that could be verified directly against source for
+this pass — for full request/response schemas for a given route, read the OpenAPI spec
+served live at `/api/openapi.json` (interactive docs at `/api/docs`).
 
-<Aside type="note">
-All endpoints are open on the local network — there's no built-in auth or
-TLS; that's your reverse proxy's job. The OpenAPI spec is served live at
-`/api/openapi.json` (interactive docs at `/api/docs`).
+<Aside type="caution">
+Unlike pre-1.0 docs may claim, auth is **not** unconditionally removed in this tree.
+`[security].require_auth` (overridable via `HAL0_REQUIRE_AUTH`) and the `hal0 auth`
+CLI group (`status`, `rotate`, `require`) are live — see
+[Config schema → [security]](/docs/reference/config-schema/#security) and
+[CLI → hal0 auth](/docs/reference/cli/#hal0-auth--manage-hal0-api-authentication).
+Verify the current default (`require_auth` defaults to `null`, which resolves to off)
+before stating a blanket "no auth" or "auth required" claim.
 </Aside>
 
 ## Router groups
 
-| Prefix                  | Purpose                                                              |
-|-------------------------|---------------------------------------------------------------------|
-| `/api/install`          | First-run wizard endpoints.                                          |
-| `/api/slots`            | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance. |
-| `/api/comfyui`          | ComfyUI generation-engine status + the gated image-gen switchover.  |
-| `/api/models`           | Model registry — list, pull, delete, inspect.                       |
-| `/api/hf`               | Hugging Face Hub discovery (search proxy).                          |
-| `/api/hardware`, `/api/stats/hardware` | Hardware probe + live hardware stats.                |
-| `/api/stats/throughput` | Bucketed throughput history.                                        |
-| `/api/stats/power`      | Power / GPU stats.                                                  |
-| `/api/services`         | Companion-service registry — full detail, lifecycle actions, mDNS discovery/advertisement. See [Services](/docs/operate/services). |
-| `/api/services/health`  | Health of dependent services.                                       |
-| `/api/user/dashboard-layout` | Persisted dashboard layout (file-backed).                      |
-| `/api/logs`             | journald tail for hal0 units.                                       |
-| `/api/settings`         | Read/write `hal0.toml` top-level settings.                          |
-| `/api/secrets`          | Operator secrets store (write-only, persisted to `api.env`).        |
-| `/api/settings/proxmox` | Proxmox integration config.                                        |
-| `/api/memory`           | Memory provider gate/status + Hindsight engine admin (banks, graph, recall). Opt-in. Destructive ops are audit-logged; bank delete requires confirmation. |
-| `/api/providers`        | External LLM provider config.                                       |
-| `/api/updates`          | Update check, apply, rollback (channels + cosign).                  |
-| `/api/capabilities`     | Capability overlay — embed/voice/img children mapped onto slots.    |
-| `/api/backends`         | Backend introspection — status + loaded children per backend.       |
-| `/api/npu`              | NPU trio swap-status.                                               |
-| `/api/board`            | Hermes agent board — chat proxy, WebSocket session, and board-level events. |
-| `/api/status`           | Server status (public).                                              |
-| `/api/config`           | Dashboard URLs discovery (`/api/config/urls`) + models list (public). |
-| `/api/meta`             | Canonical device/backend/capability taxonomy (`/api/meta/enums`), cached. |
-| `/api/profiles`         | Profile catalog (seeds + custom) — CRUD plus portable export/import. |
-| `/api/stacks`           | Stack catalog — CRUD, dry-run/commit apply (config + lifecycle convergence), portable export/import, snapshot-from-live. See [Stacks](/docs/guides/manage-slots#editing-multiple-slots-at-once-stacks). |
-| `/api/chat-templates`   | Chat-template catalog — bundled + operator-added.                   |
-| `/api/events`           | Dashboard footer event stream (SSE).                               |
-| `/api/activity`         | Durable activity / audit surface (config changes + transitions).    |
-| `/api/journal`          | Unified journal panel (events in journal envelope).                 |
-| `/api/images`           | Image cache for generated PNGs.                                     |
-| `/api/agents`           | Bundled-agent lifecycle, personas, budget, restart, memory stats, chat proxy. |
-| `/api/agent/approvals`  | Approval inbox for gated agent/MCP actions.                         |
-| `/api/mcp`              | MCP introspection — hosted servers, clients, catalog, tool-event tail. |
-
-## Recently added endpoints
-
-A few router groups above got new routes worth calling out individually.
-
-### `/api/services`
-
-| Method & path | Purpose |
+| Prefix | Purpose |
 |---|---|
-| `GET /api/services` | Full per-service detail — probe state, systemd unit state + uptime, browser URL, mDNS URL, permitted `actions`. Never 500s. |
-| `POST /api/services/{id}/action` | Run one allow-listed lifecycle verb (`start`/`stop`/`restart`/`enable`/`disable`) against a service's unit. Audit-logged. `400 services.action_not_allowed` / `404 services.unknown`. |
-| `GET /api/services/mdns` | avahi/mDNS discovery status + advertisable services. |
-| `POST /api/services/mdns` | Advertise (`{"advertise": true}`) or withdraw (`{"advertise": false}`) addon mDNS announcements. Audit-logged. |
+| `/api/slots` | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance, metrics, capacity. See [Slot lifecycle](/docs/reference/slot-lifecycle/). |
+| `/api/models` | Model registry — list, pull, delete, inspect, scan, catalogue, update checks. See [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). |
+| `/api/ports` | Port allocation view. |
+| `/api/stats/hardware` | Live hardware probe/stats. See [Hardware matrix](/docs/reference/hardware-matrix/). |
+| `/api/system-info` | Host system info. |
+| `/api/capabilities` | Capability-slot configuration (embed/rerank/stt/tts/vision child slots). |
+| `/api/providers` | Local provider entries (`providers.toml`). See [Providers, profiles & devices](/docs/reference/providers-profiles-devices/). |
+| `/api/upstreams` | Remote/cloud upstream entries (`upstreams.toml`), including credential write and connectivity test. |
+| `/api/stacks` | Stack bundles — list, create, apply, import/export, snapshot. |
+| `/api/profiles` | Backend-tuning profiles — list, create, update, import/export. |
+| `/api/settings` | Root config read/write/reload, JSON schema, apply-plan preview. |
+| `/api/settings/models/store` | Model store path get/set/migrate. |
+| `/api/benchmarks` | Benchmark queue, run status, control. See [Model roster & benchmarks](/docs/reference/model-roster-benchmark/#benchmarks). |
+| `/api/logs` | Secret-redacted log tail. |
+| `/api/status` | Version/build info. |
+| `/api/mcp` | MCP server lifecycle/introspection — **not** tool invocation. See [MCP tools → MCP server management REST API](/docs/reference/mcp-tools/#mcp-server-management-rest-api) for the full endpoint table. |
+| `/api/comfyui` | ComfyUI generation-engine status and image-gen slot control. |
+| `/api/install` | First-run wizard endpoints, including `GET /api/install/curated-models`. |
 
-See [Services](/docs/operate/services) for the operator-facing guide (registry, dashboard page, mDNS behavior).
+Every prefix in this table is backed by at least one route independently confirmed
+either directly in `src/hal0/api/routes/` or via the `hal0-admin` MCP tool-to-route
+map (`hal0.mcp.admin`) — see [MCP tools](/docs/reference/mcp-tools/) for the exact
+verb + path for every admin-tool-backed route.
 
-### `/api/meta`
-
-| Method & path | Purpose |
-|---|---|
-| `GET /api/meta/enums` | The canonical device/backend/capability taxonomy in one document — devices, legacy/selectable backends, device classes, slot types, runtime families, model capabilities + aliases, model backends, curated model tags, and the backend↔device translation maps. Weak version-keyed `ETag` + `If-None-Match` → `304`; `Cache-Control: public, max-age=3600`. |
-
-### `/api/models` — FLM (NPU) repo detection
-
-| Method & path | Purpose |
-|---|---|
-| `POST /api/models/inspect` | Inspect a HuggingFace repo for pullable variants. Now also detects the FastFlowLM (NPU) repo shape — a `config.json` + tokenizer + an `…nx`-suffixed NPU-quant weight directory (e.g. `model.q4nx`) — and surfaces one whole-repo variant flagged `flm`, routed through the `flm pull` path instead of the GGUF/safetensors path. Detection is shape-based (requires the `nx` weight blob), so a plain safetensors/GGUF repo is never misread as FLM. |
-
-### `/api/profiles` — portable export/import
-
-| Method & path | Purpose |
-|---|---|
-| `GET /api/profiles/{name}` | Resolve a single profile. `404 profiles.not_found`. |
-| `POST /api/profiles/{name}/export` | Serialize a profile into a portable `.hal0profile.json` envelope (template only — no secrets, no host paths), stamped with a content checksum and `exported_at`. |
-| `POST /api/profiles/import` | Import a profile envelope. Body: `{"envelope": {...}, "name": "...", "dry_run": bool}`. `dry_run` validates the envelope + checksum and reports name collision without writing; a commit creates the profile under `name` and returns the resolved item. `400 profiles.bad_envelope`, `400 profiles.import_no_name`, `409 profiles.exists` on a name collision. |
-
-### `/api/memory` — hardening
-
-- The whole `/api/memory` surface — reads included — is **ADMIN**-classed in
-  the route exposure table, so once auth is enabled every call needs an admin
-  credential (session cookie or admin bearer); a client/inference key gets
-  `403`. The irreversible subset (every `DELETE` under `/api/memory`, plus the
-  namespace `POST /api/memory/delete`) is additionally pinned by name in
-  `DESTRUCTIVE_MEMORY_ROUTES` and matched by rules that sit *above* the generic
-  prefix rule, so a later decision to open memory reads cannot take the bank
-  wipe with it.
-- Every destructive `/api/memory/*` operation — bank delete, and the
-  memories/config/document/directive/operation/mental-model deletes, plus the
-  namespace `POST /api/memory/delete` — records a durable audit row (actor +
-  target + truthful outcome) via the shared action-recording facility, so a
-  memory wipe is attributable after the fact.
-- `DELETE /api/memory/banks/{bank_id}` requires confirmation that echoes the
-  bank id — `?confirm=<bank_id>` and/or JSON body `{"confirm": "<bank_id>"}` —
-  otherwise `400 memory.confirm_required`.
-- The namespace `POST /api/memory/delete` deletes by id (`{ids: [...], dataset?}`)
-  and is itself audited as a destructive op.
-- The cognition-console passthroughs (`POST /api/memory/banks/{bank_id}/recall`,
-  `POST .../reflect`, `GET .../directives`) validate the load-bearing envelope
-  key (`results` / `text` / `items` respectively). Upstream Hindsight shape
-  drift on a `2xx` response now surfaces as a loud `502 memory.engine_shape`
-  instead of a silently-blank console panel.
-
-### `/api/slots` — resolved argv provenance, voices proxy
-
-| Method & path | Purpose |
-|---|---|
-| `GET /api/slots/{name}/resolved` | The deduped, resolved llama-server argv plus per-flag provenance — which segment (`base` / `profile` / `model_defaults` / `chat_template` / `mmproj` / `slot_overrides` / `extra_args`) set each surviving flag's final value, and how many duplicate flags were collapsed (`removed`). Non-llama slots (no profile) return `{"argv": null, "provenance": [], "removed": 0}` rather than an error. |
-| `GET /api/slots/{name}/voices` | Proxies the slot's own `GET /v1/audio/voices` (Kokoro / qwen3tts containers expose it) so the dashboard's Voice settings default-voice picker lists whatever the running engine actually loaded, not a hardcoded pack. Fail-soft: a cold/unreachable slot or an engine without the route returns `{"name","voices":[],"source":"offline"}` rather than an error; a live slot returns `{"name","voices":[...],"source":"live"}`. 2s timeout. Unknown slot name still 404s. |
-
-### `/api/stacks`
-
-A **stack** is a named, portable bundle of slot assignments + embedded profiles + embedded model metadata (`[stack.<slug>]` in `stacks.toml`) — the declarative alternative to editing slots one at a time. See [Stacks](/docs/concepts/stacks) for the concept (row fields, plan/converge, drift) and [Manage slots](/docs/guides/manage-slots#editing-multiple-slots-at-once-stacks) for the operator-facing guide; there is no `hal0 stack` CLI command, this router is the only way to manage them.
-
-| Method & path | Purpose |
-|---|---|
-| `GET /api/stacks` | List every stack, with an `active` flag and drift status (`clean`/`degraded`/`modified`/`none`) for each. |
-| `POST /api/stacks` | Create a stack (hand-built body, or from a `snapshot` payload). `201`. |
-| `GET /api/stacks/{slug}` | Stack detail, with `active` + drift status. |
-| `PUT /api/stacks/{slug}` | Replace a custom stack. Seed stacks (`saber`, `forge`, `pi`) are immutable — clone under a new name instead. |
-| `DELETE /api/stacks/{slug}` | Delete a custom stack. `204`. |
-| `POST /api/stacks/{slug}/apply?dry_run=` | `dry_run=true` returns a diff preview; otherwise commits the config (guarded through the same device/profile-coherence and NPU-exclusivity checks every slot writer uses) and converges the live slot set — loads/swaps slots named in the stack, applies enabled capability children (embed/rerank/stt/tts), and **unloads every dispatchable slot not mentioned in the stack**. |
-| `POST /api/stacks/{slug}/export` | Serialize a stack into a portable `.hal0stack.json` envelope (no secrets, no host paths), stamped with a content checksum. |
-| `POST /api/stacks/import` | Import a stack envelope. `{dry_run?, slug?, envelope}` — a local profile always wins on a name collision; every referenced model is classified `present`/`pullable`/`unresolvable`. |
-| `POST /api/stacks/snapshot` | Build a stack from the current live slot + capability config. |
-
-## Mounted MCP servers
-
-Two MCP servers are mounted as sub-applications (not `/api/*` routers):
-
-| Mount          | Server      | Surface                                  |
-|----------------|-------------|------------------------------------------|
-| `/mcp/admin`   | hal0-admin  | Full admin tool catalog (slots/models/config/memory). |
-| `/mcp/memory`  | hal0-memory | Focused memory tools only.               |
-
-See [MCP tools](/docs/reference/mcp-tools) for the per-tool catalog and gating.
-
-## See also
-
-- [Streaming (SSE)](/docs/reference/api/streaming) — the `/v1` streaming wire format.
-- [MCP tools](/docs/reference/mcp-tools) — what each MCP tool forwards to here.
-- [Environment variables](/docs/reference/env-vars) — `HAL0_PORT` and the rest.
-- [Services](/docs/operate/services) — the operator guide to the companion-service registry, dashboard page, and mDNS discovery behind `/api/services`.
-- [Manage slots](/docs/guides/manage-slots) — editing individual slots and the **Stacks** view behind `/api/stacks`.
-- [Stacks](/docs/concepts/stacks) — the concept behind `/api/stacks`: plan/converge, drift, and portable export/import.
+<Aside type="note">
+This index was not able to verify the `/v1/*` OpenAI-compatible inference surface, the
+"slot as an OpenAI model" addressing scheme, or SSE streaming response shapes in this
+pass — those need a dedicated read of `src/hal0/api/routes/*` inference-serving code
+before publishing exact request/response schemas. Treat any such claims from prior
+(pre-v1.0) docs as unverified until then.
+</Aside>

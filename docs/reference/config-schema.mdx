@@ -1,375 +1,548 @@
 ---
 title: Config schema reference
-description: The hal0.toml shape and per-slot TOML block — Pydantic-validated config, valid devices and providers, profiles, and the FHS file locations hal0 reads.
+description: "Every config file hal0 reads, every key, type, default, and constraint — verified against src/hal0/config/schema.py in the v1.0 tree."
 sidebar:
   order: 20
 ---
 
-import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Aside } from '@astrojs/starlight/components';
 
-Every TOML file under `/etc/hal0/` is validated against Pydantic v2 models at
-load time. A typo like `device = "gpu-rcom"` raises a `ValidationError` with
-the offending field path rather than failing later at dispatch.
-
-## File locations (FHS)
-
-When `HAL0_HOME` is unset, hal0 uses the standard layout. Setting
-`HAL0_HOME=/some/path` re-roots everything under that prefix (used for dev
-installs and tests).
-
-| File | FHS path | Purpose |
-|---|---|---|
-| `hal0.toml` | `/etc/hal0/hal0.toml` | Top-level config. |
-| `slots/<name>.toml` | `/etc/hal0/slots/<name>.toml` | One file per slot. |
-| `profiles.toml` | `/etc/hal0/profiles.toml` | Profile catalog (optional; seeds used if absent). |
-| `providers.toml` | `/etc/hal0/providers.toml` | External LLM providers. |
-| `upstreams.toml` | `/etc/hal0/upstreams.toml` | Slot + remote upstream catalog. |
-| `capabilities.toml` | `/etc/hal0/capabilities.toml` | Capability-slot selections. |
-| `agents/<name>.toml` | `/etc/hal0/agents/<name>.toml` | One file per bundled/user agent. |
-| `stacks.toml` | `/etc/hal0/stacks.toml` | Named slot+profile+model bundles (optional; see Stacks, below). |
-| `hardware.json` | `/etc/hal0/hardware.json` | Cached hardware probe (written by `hal0 probe`). |
-| `manifest.json` | `/etc/hal0/manifest.json` | Release manifest (pinned toolbox image digests). |
-
-State (registry, models, slot state, memory banks) lives under
-`/var/lib/hal0/`. Config and state are both preserved across updates.
-
-## Valid enums
-
-| Set | Values |
-|---|---|
-| `device` (hardware preference) | `gpu-rocm`, `gpu-vulkan`, `gpu-cuda`, `cpu`, `npu` |
-| `provider` (slot engine label) | `llama-server`, `flm`, `moonshine`, `kokoro`, `qwen3tts`, `comfyui` |
-| slot `type` (dispatch routing) | `llm`, `embedding`, `reranking`, `transcription`, `tts`, `image` |
-| seed profiles | `rocm`, `rocm-dense`, `rocm-moe`, `vulkan`, `vulkan-dense`, `vulkan-moe`, `cuda`, `embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui` |
-
-<Aside type="caution">
-Use `device`, not the legacy `backend` field. `backend` is deprecated: a slot
-TOML that sets `backend` without `device` logs a deprecation warning and the
-loader auto-fills `device`. Set `device` directly.
-</Aside>
+hal0 config lives under `/etc/hal0/` (or `$HAL0_HOME/etc/hal0/` in a dev install — see
+[Environment variables](/docs/reference/env-vars/)). Config files are **TOML**, parsed
+with `tomllib`/validated with Pydantic models in `hal0.config.schema`, except
+`hardware.json` and `manifest.json`, which are **JSON**. All writes go through an
+atomic tempfile-write + `fsync` + `os.replace` (`write_toml_atomic`/`write_env_atomic`),
+so a crash mid-write can't corrupt a config file.
 
 <Aside type="note">
-`gpu-cuda` (NVIDIA) is supported experimentally via the `cuda` seed profile,
-which runs the upstream `ghcr.io/ggml-org/llama.cpp:server-cuda` image
-(not a hal0 toolbox image) and requires the NVIDIA Container Toolkit (CDI)
-on the host. It is not part of the Strix Halo bench matrix and carries no
-published throughput numbers. `POST /api/slots/{name}/backend` still only
-accepts `rocm`, `vulkan`, `cpu`, `auto` — flipping to CUDA is a device +
-profile change, not a backend flip.
+There is no blanket `HAL0_<DOTTED_PATH>` environment override for arbitrary config
+keys. A handful of specific fields have named env-var overrides (documented inline
+below) — see [Environment variables](/docs/reference/env-vars/) for the full list.
 </Aside>
+
+## Files
+
+| File | Format | Purpose |
+|---|---|---|
+| `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[realtime]`. |
+| `/etc/hal0/slots/<name>.toml` | TOML | One file per slot. |
+| `/etc/hal0/providers.toml` | TOML | Local cloud-provider API entries (`[[provider]]`). |
+| `/etc/hal0/upstreams.toml` | TOML | Remote/cloud LLM upstream entries (`[[upstream]]`). |
+| `/etc/hal0/profiles.toml` | TOML | Named backend-tuning profiles. Optional — seeds apply if absent. |
+| `/etc/hal0/stacks.toml` | TOML | Named stack bundles (slot + profile + model sets). Optional. |
+| `/etc/hal0/agents/<name>.toml` | TOML | Per-agent MCP allowlist/config. |
+| `/etc/hal0/hardware.json` | JSON | Hardware probe snapshot, written by `hal0 config hardware --refresh` (formerly `hal0 probe`). |
+| `/etc/hal0/manifest.json` | JSON | Release manifest — toolbox image digest pins. |
+| `/etc/hal0/api.env`, `/etc/hal0/openwebui.env` | env-file (`KEY=value`) | systemd `EnvironmentFile=` — secrets/keys, not part of the Pydantic schema. |
 
 ## `hal0.toml`
 
-The top-level config is assembled from these sections, each with sane
-defaults (an empty file is valid).
+Root model `Hal0Config`, `extra="allow"`.
 
 ### `[meta]`
 
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `schema_version` | int (≥1) | `1` | Bumped by `hal0 config migrate`. |
+`extra="forbid"`.
 
-### `[slots]` — global slot policy
-
-| Key | Type | Default | Notes |
+| Key | Type | Default | Constraints |
 |---|---|---|---|
-| `max_slots` | int (≥0) | `0` | Max concurrent slots; `0` = unlimited. |
-| `port_range_start` | int | `8081` | First port in the auto-allocation pool for new slots. |
-| `port_range_end` | int | `8099` | Last port in the auto-allocation pool (inclusive); must be ≥ start. The pool stops below `8188` so a new slot never claims ComfyUI's port — this only bounds auto-*allocation*, not an individual slot's `port` field, which validates up to `8200` (see `[slot].port` below). |
-| `idle_timeout_s` | int (≥0) | `300` | Default idle-eviction TTL; `0` disables. Per-slot value overrides. |
-| `evict_pressure_mb` | int (≥0) | `8192` | Host free-RAM floor (MiB) for pressure-driven LRU eviction. When host `MemAvailable` drops below this, idle LRU-eligible slots are evicted in least-recently-used order until free RAM recovers; `0` disables pressure eviction. |
-| `publish_host` | str | `"127.0.0.1"` | Address slot containers publish their port on. `0.0.0.0` exposes every slot's raw port directly on the LAN, bypassing the hal0-api/reverse-proxy front door; a specific interface IP binds just that address. Applies on the slot's next (re)start; host-networked slots ignore it. |
+| `schema_version` | int | `1` | `>= 1` |
+
+### `[slots]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `max_slots` | int | `0` (unlimited) | `>= 0` |
+| `port_range_start` | int | `8081` | `1024-65535` |
+| `port_range_end` | int | `8099` | `1024-65535`; must be `>= port_range_start` |
+| `idle_timeout_s` | int | `300` | `>= 0` |
+| `evict_pressure_mb` | int | `8192` | `>= 0` |
+| `preload_evict_enabled` | bool | `true` | — |
+| `preload_evict_headroom_mb` | int | `1024` | `>= 0` |
+| `publish_host` | str | `"127.0.0.1"` | non-empty, no whitespace/`:`/`/` |
+| `network_mode` | str | `""` | must be `""` or `"host"` |
 
 ### `[dispatcher]`
 
-| Key | Type | Default | Notes |
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
 |---|---|---|---|
-| `prefetch_timeout_s` | float (>0) | `8.0` | Cold-cache prefetch timeout. |
-| `prefetch_parallel_cap` | int (≥1) | `4` | Max concurrent upstream prefetches. |
+| `prefetch_timeout_s` | float | `8.0` | `> 0.0` |
+| `direct_read_timeout_s` | float | `300.0` | `30.0-600.0` |
+| `prefetch_parallel_cap` | int | `4` | `>= 1` |
 
 ### `[telemetry]`
 
-| Key | Type | Default | Notes |
+`extra="forbid"`. Opt-in.
+
+| Key | Type | Default | Constraints |
 |---|---|---|---|
-| `enabled` | bool | `false` | Opt-in anonymous telemetry. |
-| `channel` | `"stable"` \| `"preview"` \| `"nightly"` | `"stable"` | Update channel; preview is opt-in. |
+| `enabled` | bool | `false` | — |
+| `channel` | `"stable"\|"preview"\|"nightly"` | `"stable"` | — |
 
-### `[models]` — discovery
+### `[models]`
 
-| Key | Type | Default | Notes |
+`extra="allow"`.
+
+| Key | Type | Default | Constraints |
 |---|---|---|---|
-| `roots` | list[str] | `["/var/lib/hal0/models"]` | Absolute roots scanned for model files. |
-| `auto_scan_on_start` | bool | `true` | Run discovery scan at startup. |
-| `file_extensions` | list[str] | `[".gguf", ".safetensors"]` | Candidate file suffixes. |
-| `store` | str | `""` | Single source of truth for where models are read/written. When set, the pull engine writes here and slot containers bind-mount it. `HAL0_MODEL_STORE` overrides. |
-| `flm_store` | str | `""` | Where FLM (NPU) model weights live. The npu slot bind-mounts it over FLM's hardcoded `~/.config/flm/models` cache; host `flm` probe/pull bookkeeping follows it. `HAL0_FLM_MODELS_DIR` overrides; empty → `/var/lib/hal0/.config/flm/models`. hal0 creates the dir (container-uid writable) before slot start. |
+| `roots` | list[str] | `[models_dir()]` = `["/var/lib/hal0/models"]` | each entry non-empty and absolute |
+| `auto_scan_on_start` | bool | `true` | — |
+| `file_extensions` | list[str] | `[".gguf", ".safetensors"]` | — |
+| `pull_root` | str | `"/var/lib/hal0/models"` | **deprecated**; absolute or empty |
+| `store` | str | `""` | absolute if set, else empty |
+| `flm_store` | str | `""` | absolute if set (NPU/FLM model store) |
 
-<Aside type="note">
-`store` is the canonical model-store field. When empty, hal0 falls back to the
-deprecated `pull_root` (default `/var/lib/hal0/models`). Point `store` at your
-fast disk / network mount to align pulls and slot bind-mounts on one path —
-and `flm_store` at a sibling dir (e.g. `/mnt/ai-models/flm/models`) to keep
-NPU weights off the root filesystem too.
+`effective_store()` resolves to `store` if set, else `pull_root`. `scan_roots()` returns
+`roots` plus the effective store, deduplicated. Env override: `HAL0_MODEL_STORE`
+(precedence: env → `store`/`effective_store()` → `models_dir()` default). NPU store env
+override: `HAL0_FLM_MODELS_DIR`.
+
+### `[memory]`
+
+`extra="allow"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `true` | — |
+| `unified_bank` | bool | `true` | — |
+| `engine` | str | `"hindsight"` | one of `hindsight`, `mem0`, `pgvector` — `"cognee"` is explicitly rejected (retired) |
+| `graph` | table | — | see below |
+| `embedding` | table | — | see below |
+
+#### `[memory.graph]`
+
+`extra="ignore"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `false` | informational only |
+| `extraction_slot` | str | `"utility"` | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
+| `llm_timeout_s` | int | `300` | `30-3600` |
+
+#### `[memory.embedding]`
+
+`extra="ignore"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `rerank_gateway_url` | str | `"http://127.0.0.1:8080"` | non-empty |
+| `rerank_model` | str | `"builtin.jina-reranker-v1-tiny-en-q8"` | non-empty |
+| `rerank_connect_timeout_s` | float | `1.0` | `0.05-10.0` |
+| `rerank_read_timeout_s` | float | `8.0` | `0.05-60.0` |
+
+### `[activity]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `true` | — |
+| `retention_days` | int | `30` | `>= 1` |
+| `max_rows` | int \| null | `50000` | `>= 100`; `null` disables the cap |
+
+### `[brain_chat]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `true` | — |
+| `read_only` | bool | `true` | — |
+| `model` | str | `""` | empty → persona default |
+| `max_rounds` | int | `8` | `1-100` |
+| `completion_timeout_s` | float | `300.0` | `> 0` |
+
+<Aside type="caution">
+`brain_chat.tool_model` was removed from the schema on the v1.0 branch (`#1453`) —
+current source has zero references to it. If you see it in an old config, it's a dead
+key that gets silently stripped on load. Do not document it as a live field.
 </Aside>
 
-### `[memory]` — engine selection
+### `[security]`
 
-| Key | Type | Default | Notes |
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
 |---|---|---|---|
-| `engine` | str | `"hindsight"` | Active memory engine: `hindsight` (default) \| `mem0` \| `pgvector`. `cognee` was **retired in v1.0.0** — the schema now rejects it (the Cognee store has been dark since v0.4). |
+| `require_auth` | bool \| null | `null` (resolves to off) | `HAL0_REQUIRE_AUTH` env wins if set |
+| `trust_forwarded_for` | bool \| null | `null` (resolves to off) | `HAL0_TRUST_FORWARDED_FOR` env wins if set |
+
+### `[realtime]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `true` | — |
+| `sample_rate` | int | `24000` | `8000-48000` |
+| `default_model` | str | `""` | — |
+| `stt_model` | str | `""` | — |
+| `tts_model` | str | `"kokoro"` | — |
+| `tts_voice` | str | `""` | — |
+| `vad_energy_threshold` | float | `0.02` | `0.0-1.0` |
+| `vad_silence_ms` | int | `500` | `50-10000` |
+| `vad_min_speech_ms` | int | `200` | `0-10000` |
+| `vad_window_ms` | int | `20` | `5-100` |
+| `frame_ms` | int | `20` | `5-200` |
+| `approval_wait_s` | float | `20.0` | `> 0, <= 300.0` |
+| `max_buffer_seconds` | float | `30.0` | `> 0, <= 600.0` |
+
+## `slots/<name>.toml`
+
+Root model `SlotConfig`, `extra="allow"`. Both a legacy nested `[slot]` table and flat
+top-level scalars are accepted on load and normalized.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `id` | int \| null | `null` | — | `>= 1` |
+| `name` | str | — | **required** | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
+| `port` | int | — | **required** | `8081-8200` |
+| `device` | str | `"gpu-rocm"` | — | one of `gpu-rocm, gpu-vulkan, gpu-cuda, cpu, npu` |
+| `gpu_index` | int \| null | `null` | — | `>= 0` |
+| `n_gpu_layers` | int | `-1` | — | `-1` = all, `0` = CPU-only |
+| `threads` | int | `0` | — | `>= 0`; `0` = unset |
+| `binary` | str | `""` | — | key into `RUNNER_IMAGES` |
+| `image_pin` | str \| null | `null` | — | escape-hatch image ref override |
+| `provider` | str | `"llama-server"` | — | one of `llama-server, flm, moonshine, kokoro, qwen3tts, comfyui`; **deprecated**, legacy label only — all slots run as podman containers now |
+| `runtime` | `"container"` | `"container"` | — | only value; deprecated field |
+| `profile` | str \| null | `null` | — | references `profiles.toml` |
+| `parallel` | int \| null | `null` | — | `>= 1`; **inert** (sunset) |
+| `chat_template` | str \| null | `null` | — | **inert** (sunset) |
+| `default_voice` | str \| null | `null` | — | TTS slots |
+| `default_speed` | float \| null | `null` | — | `0.25-4.0` |
+| `default_response_format` | str \| null | `null` | — | one of `mp3, wav, opus, flac, pcm` |
+| `workers` | int | `1` | — | `>= 1`; deprecated/inert |
+| `idle_timeout_s` | int | `300` | — | `>= 0`; `0` disables the idle transition |
+| `pinned` | bool | `false` | — | exempts the slot from auto-eviction; blocks manual unload without `force` |
+| `model` | table | — | — | `[model]`, see below |
+| `server` | table | — | — | `[server]`, see below |
+| `npu` | table \| null | `null` | — | `[npu]`, see below |
+| `image` (alias `image_gen`) | table | — | — | `[image]`, see below |
+| `extra` | dict | `{}` | — | catch-all |
+
+There is **no `enabled` field** — a non-empty `model.default` is the activation signal.
 
 <Aside type="note">
-The validator accepts `mem0`, but the Advanced Settings dropdown only offers
-`hindsight`/`pgvector` — the factory silently remaps `mem0` selections to
-`hindsight`, so the dashboard doesn't offer a choice that would lie about
-what actually runs. Hand-editing `hal0.toml` to `mem0` is still accepted at
-the schema level, but resolves to `hindsight` in practice. `cognee` is no
-longer a valid value at all — a `hal0.toml` still carrying it fails config
-validation and must be updated to `hindsight`.
+A legacy `backend` key on a slot is silently promoted to `device` and dropped on load
+— it is never a schema field itself. On the v1.0 branch (Stream C,
+`fix/profile-tuning-only`, not yet merged to `main` at time of writing), profile-level
+`device_class`/`backend` become **inert match-only hints** — the slot's `device` is the
+single authoritative hardware fact. See
+[Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 </Aside>
 
-### `[memory.embedding]` — reranker knobs (Hindsight era)
+### `[model]` (nested under a slot)
 
-Hindsight embeds server-side with its own bundled model, so this table no
-longer pins an embedding model — it only tunes the second-pass reranker
-hal0 runs over cross-bank recall results.
+`extra="allow"`.
 
-| Key | Type | Default | Notes |
+| Key | Type | Default | Constraints |
 |---|---|---|---|
-| `rerank_gateway_url` | str | `"http://127.0.0.1:8080"` | Base URL of the OpenAI-compatible gateway the reranker POSTs `/v1/rerankings` to. Defaults to hal0-api itself. |
-| `rerank_model` | str | `"builtin.jina-reranker-v1-tiny-en-q8"` | Rerank model id sent to the gateway; must resolve to a model the `rerank` slot serves. |
-| `rerank_connect_timeout_s` | float (0.05–10.0) | `1.0` | TCP connect timeout for the rerank call. Kept short so a wedged rerank slot can't stall memory search. |
-| `rerank_read_timeout_s` | float (0.05–60.0) | `8.0` | Read budget for the rerank slot. Failures on either timeout fall through to fused vector ordering, never blocking recall. |
+| `default` | str | `""` | model id from the registry |
+| `context_size` | int \| null | `null` | `>= 128`. On the v1.0 branch this is a **ceiling only** — the model's own context window is authoritative; `effective = min(model_window, slot_value)`, this value never raises it. |
+| `n_gpu_layers` | int | `-1` | **inert** (sunset) |
+| `rope_freq_base` | float | `0.0` | `>= 0.0`; **deprecated**, ignored |
+| `extra` | dict | `{}` | — |
 
-<Aside type="note">
-Cognee-era keys (`model`, `rerank_enabled`, `rerank_url`,
-`rerank_over_fetch_factor`, `rerank_max_candidates`) are silently dropped on
-load — they no longer validate or round-trip.
-</Aside>
+### `[server]` (nested under a slot)
 
-### `[memory.graph]` — graph extraction (ADR-0023)
+`extra="forbid"`.
 
-| Key | Type | Default | Notes |
+| Key | Type | Default | Constraints |
 |---|---|---|---|
-| `enabled` | bool | `false` | Off by default. On the Hindsight engine this is a reporting gate — Hindsight builds its graph natively; vector recall works either way. |
-| `extraction_slot` | str | `"utility"` | The local `type=llm` slot Hindsight uses for graph extraction. Propagated to `hindsight-api` as `HINDSIGHT_API_LLM_MODEL=hal0/<slot>` via a systemd drop-in. Validated against the live model-bound-llm-slot set at set-time. Slot-name grammar (lowercase alnum/`-`/`_`, ≤32, leading alphanumeric). |
-| `llm_timeout_s` | int (30–3600) | `300` | Timeout for the Hindsight daemon's LLM calls — extraction, consolidation, and reflect. Covers cold slot starts and long reflects. Propagated to `hindsight-api` as `HINDSIGHT_API_LLM_TIMEOUT` via the same systemd drop-in as `extraction_slot`; the daemon restarts to pick it up. |
+| `extra_args` | str \| null | `null` | **inert** (sunset) |
+| `env` | dict[str,str] \| null | `null` | keys must match `^[A-Za-z_][A-Za-z0-9_]*$`; values must not contain `\n`/`\r` |
 
-<Aside type="note">
-ADR-0023 replaced the legacy `route` / `upstream` keys (the Cognee-era extraction
-enum) with the single `extraction_slot` knob. A lingering `route` / `upstream`
-key in an old `hal0.toml` is silently dropped on load (it does not fail
-validation), so upgrades don't hard-break.
-</Aside>
+### `[npu]` (nested under a slot)
 
-### `[activity]` — durable audit trail
+`extra="forbid"`.
 
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `enabled` | bool | `true` | Records every config-mutating action and system state change to a SQLite table (`/var/lib/hal0/activity.db`) that survives restarts. |
-| `retention_days` | int (≥1) | `30` | Rows older than this are pruned. `HAL0_ACTIVITY_RETENTION_DAYS` overrides at the env layer. |
-| `max_rows` | int (≥100) \| null | `50000` | Row cap; `null` disables the cap (`retention_days` still applies). |
-
-## Advanced Settings — dashboard parity
-
-The dashboard's **Settings → Advanced** panel is schema-driven, not hand-copied:
-it reads `GET /api/settings/schema` (Pydantic field types/bounds/descriptions)
-and `GET /api/settings/apply-plan` (per-key `apply_class`: live / ⟳ restart a
-service / ⚠ manual restart) and renders a control per key, so the dashboard
-cannot drift out of sync with this page. It groups every key above — except
-`[meta]` and `[models]`, which have their own dedicated General/Storage pages —
-into four panels:
-
-1. **Slots runtime** — `[slots]`: `max_slots`, `port_range_start`,
-   `port_range_end`, `idle_timeout_s`, `evict_pressure_mb`, `publish_host`.
-2. **Dispatcher** — `[dispatcher]`: `prefetch_timeout_s`, `prefetch_parallel_cap`.
-3. **Memory** — `[memory]` engine + reranker (`engine`, the four
-   `[memory.embedding]` keys); a separate **Memory graph extraction** panel
-   right below it drives `[memory.graph]` through its own
-   `GET`/`PUT /api/memory/graph` endpoints instead of the generic settings PUT.
-4. **Activity log** — `[activity]`: `enabled`, `retention_days`, `max_rows`.
-
-A dirty **manual-restart** key gates Save behind a confirm dialog; Save
-batches every dirty key into one deep-merged `PUT /api/settings`. A
-`Restart hal0-api` control sits below the groups for `service-restart`/
-`manual-restart` keys that need it.
-
-## Per-slot TOML (`slots/<name>.toml`)
-
-A slot config has `[slot]`, `[model]`, and optional `[server]` / `[npu]` /
-`[image]` sections. Unknown keys round-trip (the model uses `extra="allow"`).
-
-### `[slot]` section
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `name` | str | required | Lowercase alphanumeric + `-`/`_`, starts alphanumeric, ≤32 chars. |
-| `port` | int | required | Host port in range `8081–8200` (127.0.0.1 only). |
-| `type` | str | `llm` | Dispatch routing: `llm` \| `embedding` \| `reranking` \| `transcription` \| `tts` \| `image`. |
-| `device` | str | `gpu-rocm` | `gpu-rocm` \| `gpu-vulkan` \| `gpu-cuda` \| `cpu` \| `npu`. |
-| `gpu_index` | int \| null (≥0) | `null` | Pins the slot to one GPU on multi-GPU hosts (`HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` on ROCm, `GGML_VK_VISIBLE_DEVICES` on Vulkan, CDI device mapping on CUDA). `null` = all GPUs. No dashboard control yet — TOML/CLI only. |
-| `provider` | str | `llama-server` | Engine label (round-trips for compatibility/UI). |
-| ~~`enabled`~~ | — | — | **Removed (#1369).** A slot is activated by binding `[model].default`; there is no separate flag. A stale key round-trips harmlessly (the schema is `extra="allow"`) until the boot sweep drops it — see `hal0 slot migrate-enabled-removal`. A `PUT /api/slots/{name}/config` carrying it is refused with `slot.removed_key_denied`. |
-| `profile` | str \| null | `null` | Profile name from `profiles.toml` (image + tuned flags). |
-| `image` | str \| null | `null` | Top-level image-ref override. Resolution order: `image` (this field) → `profile.image` → the code-pinned default runner. Wins over the profile's own image without cloning the profile. **Not** the `[image]` table below (that's ComfyUI's image-gen settings) — this is a bare string key named `image` directly under `[slot]`. |
-| `enable_thinking` | bool \| null | `null` | Per-slot reasoning default; overridable per request. |
-| `mtp` | bool \| null | `null` | Tri-state multi-token-prediction override: `true` forces on, `false` forces off, `null` (Auto) enables MTP only when the profile opts in (`profile.mtp`) **and** the model itself ships MTP heads (registry `mtp` tag, or a delimited `mtp` marker in the model id/filename, e.g. `-MTP-`/`_mtp`/`.MTP`). |
-| `chat_template` | str \| null | `null` | Chat-template id override (`auto`/null = GGUF-embedded). |
-| `vision` | bool | `true` | Loads the model's `mmproj` sidecar (`--mmproj`) when present, so the slot accepts images. Set `false` to boot text-only and free the ~0.9 GB resident projector. No effect when the model has no sidecar. |
-| `workers` | int (≥1) | `1` | Parallel request workers. |
-| `idle_timeout_s` | int (≥0) | `300` | Idle TTL for this slot; `0` disables. |
-| `default_voice` | str \| null | `null` | TTS slots only. Voice id injected into `/v1/audio/speech` when the request omits `voice`. `null` = engine default. Set from Settings → Voice. |
-| `default_speed` | float \| null (0.25–4.0) | `null` | TTS slots only. Playback speed injected when the request omits `speed`. Engines clamp further (Kokoro: 0.5–2.0). |
-| `default_response_format` | str \| null | `null` | TTS slots only. One of `mp3` \| `wav` \| `opus` \| `flac` \| `pcm`, injected when the request omits `response_format`. `null` = engine default (mp3). |
-
-<Aside type="note">
-Slot routing is name-based, not role-based (v0.9.5, ADR-0023 §2.1). The legacy
-`role` field is gone — a slot's `name` IS the routing key for `hal0/<slot>`
-aliases (`hal0/agent`, `hal0/utility`, …). One escape hatch: the special name
-`npu` also matches any slot with `device = "npu"`, so a container that names
-its NPU slot something else (`flm`, `npuchat`, …) still answers `hal0/npu`.
-Old slot TOMLs that still set `role` keep loading — the field is parked under
-`extra` (harmless) — but it no longer does anything; remove it when you next
-touch the file.
-</Aside>
-
-<Aside type="note">
-`backend` (deprecated) and `runtime` (always `container`) still round-trip but
-should not be authored. Slots always run as podman containers managed by the
-container provider.
-</Aside>
-
-### `[model]` section
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `default` | str | `""` | Default model id from the registry. |
-| `context_size` | int (≥128) | `null (derived)` | When unset, hal0 derives the context window from the model's native size (capped) or a safe floor; never silently falls back to 4096. |
-| `n_gpu_layers` | int | `-1` | Layers offloaded to GPU; `-1` = all. |
-| `rope_freq_base` | float (≥0) | `0.0` | Deprecated (accepted, ignored) — parsed and round-tripped but never emitted by the container launch path. Set `--rope-freq-base <n>` via `[server].extra_args` instead. |
-
-### `[server]` section
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `extra_args` | str \| null | `null` | Freeform `llama-server` CLI passthrough; tokenised and merged with the profile/model flags — this segment wins last, so it overrides the same flag set anywhere else in the chain. |
-| `env` | dict[str, str] \| null | `null` | Extra environment variables injected into the slot container (`--env K=V`), e.g. `HSA_OVERRIDE_GFX_VERSION`. Keys must match `[A-Za-z_][A-Za-z0-9_]*`; values must not contain newlines. Explicit `env` keys win over any GPU-visibility vars `gpu_index` derives. |
-
-### `[npu]` section (NPU slots)
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `chat` | bool | `true` | Enable chat (LLM) modality on the FLM slot. Default ON — a bare `[npu]` table is chat-ready out of the box. Set `false` for an asr-only or embed-only NPU slot. |
-| `asr` | bool | `false` | Enable ASR via FLM `--asr 1`. |
-| `embed` | bool | `false` | Enable embeddings via FLM `--embed 1`. |
-
-### `[image]` section (img / ComfyUI slot)
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `idle_restore_minutes` | int (≥0) | `60` | Idle minutes before the GPU arbiter restores stopped LLM GPU slots; `0` = never. Hot-reloadable — unlike most slot-TOML values, a change here takes effect without restarting the slot. |
-| `default_size` | str | `"1024x1024"` | Default output size (WxH). |
-| `default_steps` | int (≥0) | `0` | Default sampler steps; `0` = model-class default. |
-
-### Example slot TOML
-
-<Tabs>
-<TabItem label="GPU agent (LLM) slot">
-
-```toml
-[slot]
-name = "agent"
-port = 8081
-device = "gpu-rocm"
-profile = "rocm"
-
-[model]
-default = "qwen3-4b-q4_k_m"
-context_size = 32768
-
-[server]
-extra_args = "-fa on"
-```
-
-</TabItem>
-<TabItem label="NPU embed slot">
-
-```toml
-[slot]
-name = "embed-npu"
-port = 8090
-device = "npu"
-profile = "flm"
-type = "embedding"
-
-[npu]
-embed = true
-
-[model]
-default = ""
-```
-
-</TabItem>
-</Tabs>
-
-## Profiles (`profiles.toml`)
-
-A profile is a reusable backend template: a container image plus a bench-tuned
-flag bundle. Slots reference a profile by name; the profile supplies the image
-and flags, the slot supplies the model, context size, and port.
-
-| Key | Type | Notes |
+| Key | Type | Default |
 |---|---|---|
-| `image` | str | Container image ref (required). |
-| `flags` | str | Bench-tuned `llama-server` flags (no model/port/ctx args). |
-| `mtp` | bool | Profile **opt-in**: when `true`, a slot in Auto mode enables MTP for models that are actually MTP-eligible. It does not unconditionally append the speculation bundle to every model. |
-| `device_class` | `gpu` \| `cpu` \| `npu` \| `img` | Device class the profile targets. |
-| `backend` | `rocm` \| `vulkan` \| `cuda` \| null | GPU runtime (authoritative ROCm/Vulkan/CUDA choice); null for non-GPU profiles. |
-| `cloned_from` | str \| null | Provenance: the profile this one was cloned from (set by the dashboard's Clone / "Edit a copy" flow). Informational only. |
-| `intent` | str | Human label shown in the dashboard. |
-| `quant` | str | Weight quant format shown as a chip — informational only, never read by the runtime. |
+| `asr` | bool | `false` |
+| `embed` | bool | `false` |
+| `chat` | bool | `true` |
 
-<Aside type="note">
-Seed profiles are **virtual**: they ship in code and are overlaid onto whatever
-`profiles.toml` contains every time it's loaded — the code definition always
-wins for a seed-named key, and `hal0 config`/the dashboard never persist seeds
-back to disk. This means a hal0 update can re-tune a seed's flags or image and
-every install picks it up on next load, with no per-install migration step.
-When `profiles.toml` is absent entirely, hal0 serves the seeds from memory.
-Seeds cannot be edited or deleted in place — the dashboard's "Edit a copy" /
-Clone flow forks a `<name>-custom` profile with `cloned_from` set instead.
+### `[image]` (nested under a slot, alias for `image_gen`)
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `idle_restore_minutes` | int | `60` | `>= 0` |
+| `default_size` | str | `"1024x1024"` | — |
+| `default_steps` | int | `0` | `>= 0` |
+
+## `providers.toml`
+
+Root model `ProvidersConfig`, `extra="allow"`: `provider: list[ProviderEntry]` (default `[]`).
+
+### `[[provider]]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `catalog_id` | str | — | **required** | non-empty |
+| `name` | str | `""` | — | display override |
+| `base_url` | str | `""` | — | — |
+| `auth_value_env` | str | `""` | — | name of the env var holding the API key — the key itself is never stored in TOML |
+| `enabled` | bool | `true` | — | — |
+| `models` | list[str] | `[]` | — | — |
+
+## `upstreams.toml`
+
+Root model `UpstreamsConfig`, `extra="allow"`: `upstream: list[UpstreamEntry]`
+(default `[]`); names must be unique.
+
+### `[[upstream]]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `name` | str | — | **required** | non-empty |
+| `kind` | str | `"remote"` | — | `slot` or `remote` |
+| `url` | str | — | **required** | non-empty |
+| `auth_style` | str | `"bearer"` | — | `bearer, anthropic, google_query, header, none` |
+| `auth_header` | str | `""` | — | required if `auth_style = "header"` |
+| `auth_value_env` | str | `""` | — | — |
+| `timeout_seconds` | float | `300.0` | — | `> 0.0` |
+| `slot_name` | str \| null | `null` | — | required if `kind = "slot"` |
+| `warmup_strategy` | str | `"none"` | — | `none, ondemand, always`; aliases `lazy → ondemand`, `eager → always` |
+| `advertise_models` | bool | `true` | — | — |
+| `enabled` | bool | `true` | — | — |
+| `model_filters` | table \| null | `null` | — | see below |
+
+### `[[upstream]].model_filters`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `models` | list[str] | `[]` | exact id list |
+| `include` | list[str] | `[]` | fnmatch globs |
+| `exclude` | list[str] | `[]` | fnmatch globs; always wins over `include` |
+
+## `profiles.toml`
+
+Root model `ProfilesConfig`, `extra="forbid"`: `profile: dict[str, ProfileConfig]` keyed
+by name. Seed profiles are always reapplied from code on load and overlay any on-disk
+copy — they can't be edited or deleted, only cloned.
+
+### `[profile.<name>]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `flags` | str | `""` | bench-tuned llama-server CLI flags |
+| `mtp` | bool | `false` | **informational only** — MTP is model-owned, not profile-owned |
+| `device_class` | `"gpu"\|"cpu"\|"npu"\|"img"` \| null | `null` | `null` = device-agnostic |
+| `backend` | `"rocm"\|"vulkan"\|"cuda"` \| null | `null` | |
+| `cloned_from` | str \| null | `null` | provenance |
+| `intent` | str | `""` | dashboard card headline |
+| `quant` | str | `""` | display chip only — runtime reads quant from the model, not the profile |
+
+<Aside type="caution">
+On the v1.0 branch, `device_class`/`backend` are being rewritten to **inert match-only
+fit hints** — retained on-disk only because published `.hal0profile.json` export
+artifacts carry them and their checksums cover the field. The slot's own `device` enum
+is the single authoritative hardware fact. Verify this has landed on `main` before
+publishing this doc as unqualified fact — see the v1.0 release notes.
 </Aside>
 
-Current seed profiles (14): `rocm`, `rocm-dense`, `rocm-moe`, `vulkan`, `vulkan-dense`, `vulkan-moe` (GPU/ROCm
-and Vulkan chat profiles — `rocm` is the `gpu-rocm` default, MoE/agents, FP4, no
-MTP; `rocm-dense`/`rocm-moe` and their Vulkan counterparts opt into MTP), `cuda` (experimental NVIDIA, upstream
-llama.cpp CUDA image), `embed` and `rerank` (dedicated GPU lanes — these must
-run as separate slots, since combining `--embedding` and `--reranking` on one
-`llama-server` instance yields all-zero scores), `flm` (NPU), `tts` (CPU /
-Kokoro), `tts-qwen3` (GPU / Qwen3-TTS, multilingual), `cpu-llm` (CPU-only
-chat, no MTP), `comfyui` (image generation).
+Profiles no longer carry an `image` field — image resolution is slot-owned
+(`slot.image_pin` or `RUNNER_IMAGES[slot.binary]`).
 
-## Stacks (`stacks.toml`)
+## `stacks.toml`
 
-A **stack** is a named, portable bundle of slot assignments — one
-`[stack.<slug>]` entry holding a list of slot rows (each with `slot`, `model`,
-`profile`, `device`, `role`, `vision`, the `mtp` tri-state, `server_extra_args`,
-and optional embed/rerank/stt/tts/vision capability child rows) plus the
-profile and model metadata those rows reference, embedded so the stack is
-self-contained. `stacks.toml` is optional; three seed stacks (`saber`, `forge`,
-`pi`) ship built in and are immutable like seed profiles — clone under a new
-name to customize one. Applying a stack writes each row through the same
-guarded slot-config pipeline as a manual edit (device/profile coherence, NPU
-exclusivity, default-uniqueness), then converges the runtime: it loads or
-swaps every slot the stack names and **unloads any dispatchable slot the
-stack doesn't mention** — applying a stack is a declarative replace, not a
-merge. Stacks can be exported/imported as a portable `.hal0stack.json`
-envelope, and `POST /api/stacks/snapshot` can capture the live running
-configuration into a new draft stack.
+Root model `StacksConfig`, `extra="forbid"`: `stack: dict[str, StackConfig]` keyed by
+slug. `STACK_SCHEMA_VERSION_CURRENT = 1`.
 
-## Related references
+### `[stack.<slug>]`
 
-- [Slot lifecycle](/docs/reference/slot-lifecycle) — the slot state machine and `state.json`.
-- [hal0 CLI](/docs/reference/cli) — `hal0 config` and `hal0 slot` commands.
-- [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) — the concept behind the schema.
-- [Stacks](/docs/concepts/stacks) — the concept behind `stacks.toml`: plan/converge, drift, and portable export/import.
+`extra="forbid"`.
+
+| Key | Type | Default |
+|---|---|---|
+| `name` | str | `""` |
+| `description` | str | `""` |
+| `author` | str | `""` |
+| `icon` | str | `""` |
+| `tags` | list[str] | `[]` |
+| `schema_version` | int | `1` |
+| `hal0_version` | str | `""` |
+| `slots` | list[table] | `[]` — see `StackSlotEntry` below |
+| `profiles` | dict[str, table] | `{}` — `ProfileConfig` entries |
+| `models` | dict[str, table] | `{}` — see `StackModelMeta` below |
+
+### `StackSlotEntry`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `slot` | str | — | **required** | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
+| `profile` | str \| null | `null` | — | — |
+| `model` | str \| null | `null` | — | — |
+| `device` | str \| null | `null` | — | must be a valid device id if set |
+| `provider` | str \| null | `null` | — | — |
+| `vision` | bool | `false` | — | — |
+| `mtp` | bool \| null | `null` | — | — |
+| `enable_thinking` | bool \| null | `null` | — | — |
+| `server_extra_args` | str \| null | `null` | — | — |
+| `capabilities` | list[table] | `[]` | — | see `StackCapabilityRow` below |
+
+### `StackCapabilityRow`
+
+`extra="forbid"`.
+
+| Key | Type | Req | Constraints |
+|---|---|---|---|
+| `child` | str | **required** | e.g. `embed`, `rerank`, `stt`, `tts`, `vision` |
+| `device` | str | **required** | must be a valid device id |
+| `provider` | str | **required** | — |
+| `model` | str | **required** | — |
+| `enabled` | bool | — | default `true` |
+
+### `StackModelMeta`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Req |
+|---|---|---|---|
+| `id` | str | — | **required**, non-empty |
+| `name` | str | `""` | — |
+| `hf_repo` | str | `""` | — |
+| `hf_filename` | str | `""` | — |
+| `size_bytes` | int | `0` | — |
+| `quant` | str | `""` | — |
+| `capabilities` | list[str] | `[]` | — |
+| `backends` | list[str] | `[]` | — |
+| `mmproj` | str \| null | `null` | — |
+
+## `agents/<name>.toml`
+
+Root model `AgentConfig`, `extra="allow"`. `AGENT_CONFIG_SCHEMA_VERSION = 1`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `schema_version` | int | `1` | — | `>= 1`; future versions rejected |
+| `agent` | table | — | **required** | `[agent]`, see below |
+| `mcp` | table | `{}` | — | `[mcp]`, see below |
+
+### `[agent]`
+
+`extra="allow"`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `name` | str | — | **required** | regex `^[a-z0-9][a-z0-9-]{0,31}$` |
+| `display` | str | `""` | — | — |
+| `workspace` | str | `""` | — | empty → canonical path |
+
+### `[mcp]`
+
+`extra="allow"`: `servers: dict[str, MCPServerConfig]` (default `{}`).
+
+### `[mcp.servers.<name>]`
+
+`extra="allow"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `url` | str \| null | `null` | required unless `builtin = true` |
+| `enabled` | bool | `true` | — |
+| `builtin` | bool | `false` | — |
+| `auth` | table | `{}` | see below |
+| `tools` | table | `{}` | see below |
+
+### `[mcp.servers.<name>.auth]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `kind` | `"none"\|"bearer-from-env"` | `"none"` | — |
+| `env` | str \| null | `null` | required if `kind = "bearer-from-env"` |
+
+### `[mcp.servers.<name>.tools]`
+
+`extra="forbid"`.
+
+| Key | Type | Default |
+|---|---|---|
+| `allow` | list[str] | `[]` |
+| `gated` | list[str] | `[]` |
+| `blocked` | list[str] | `[]` |
+
+`allow`, `gated`, and `blocked` must be disjoint — validation raises naming the
+overlapping tool names.
+
+## `hardware.json`
+
+Root model `HardwareInfo`, `extra="allow"` (JSON, not TOML). Written by
+`hal0 config hardware --refresh`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `hostname` | str | `""` | — |
+| `uptime_s` | int | `0` | `>= 0` |
+| `kernel` | str | `""` | — |
+| `distro` | str | `""` | — |
+| `cpu_model` | str | `""` | — |
+| `cpu_cores` | int | `0` | `>= 0` |
+| `cpu_threads` | int | `0` | `>= 0` |
+| `ram_mb` | int | `0` | `>= 0` |
+| `ram_available_mb` | int | `0` | `>= 0` |
+| `swap_mb` | int | `0` | `>= 0` |
+| `unified_memory_mb` | int | `0` | `>= 0` — the true UMA pool; use this, not `ram_mb + vram_mb`, on unified-memory systems |
+| `gpus` | list[table] | `[]` | see `GPUInfo` below |
+| `gpu_group_gids` | dict[str,int] | `{}` | resolved render/video group ids |
+| `npu` | table | `{}` | see `NPUInfo` below |
+| `disk_free_mb` | int | `0` | `>= 0` |
+| `cgroup_max_mb` | int \| null | `null` | `>= 0` |
+| `probed_at` | str | `""` | ISO-8601 |
+| `platform` | str | `"unknown"` | one of `strix-halo, wsl2, proxmox-kvm, kvm, lxc, bare-metal-amd-gpu, bare-metal-nvidia-gpu, bare-metal-intel-igpu, bare-metal-cpu-only, unknown` |
+| `extra` | dict | `{}` | — |
+
+### `GPUInfo`
+
+`extra="allow"`.
+
+| Key | Type | Default |
+|---|---|---|
+| `vendor` | str | `""` |
+| `index` | int | `0` |
+| `name` | str | `""` |
+| `vram_mb` | int | `0` |
+| `pci_id` | str | `""` |
+| `driver` | str | `""` |
+| `drm_path` | str | `""` |
+| `compute_capable` | bool | `false` |
+| `vulkan_capable` | bool | `false` |
+
+### `NPUInfo`
+
+`extra="allow"`.
+
+| Key | Type | Default |
+|---|---|---|
+| `present` | bool | `false` |
+| `vendor` | str | `""` |
+| `name` | str | `""` |
+| `driver` | str | `""` |
+| `accel_path` | str | `""` |
+| `render_path` | str | `""` |
+| `aie_columns` | int | `0` |
+| `validated` | bool \| null | `null` |
+
+## `manifest.json` / env files
+
+`manifest.json` holds toolbox container image digest pins keyed by backend. `api.env`
+and `openwebui.env` are systemd `EnvironmentFile=`-format `KEY=value` files, not part
+of the Pydantic schema — see [Environment variables](/docs/reference/env-vars/) for
+what lives in `api.env` (admin/client bearer keys, etc).
