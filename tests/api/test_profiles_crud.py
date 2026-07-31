@@ -628,8 +628,7 @@ def _seed_legacy_profiles_toml(home: str, name: str, flags: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     path = root / "profiles.toml"
     path.write_text(
-        f'[profile.{name}]\nflags = "{flags}"\nmtp = false\n'
-        'intent = "Legacy"\nquant = ""\n',
+        f'[profile.{name}]\nflags = "{flags}"\nmtp = false\nintent = "Legacy"\nquant = ""\n',
         encoding="utf-8",
     )
     return path
