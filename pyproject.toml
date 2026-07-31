@@ -122,6 +122,18 @@ quote-style = "double"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers"
+# #1490: the HAL0_HOME/model-registry fixtures that ride pytest's `tmp_path`
+# write multi-GB payloads per run (measured: one generation at 6.3G), and
+# pytest's own default keeps the last 3 generations under
+# <tmpdir>/pytest-of-<user>/. On this project's dev boxes /tmp is routinely a
+# small tmpfs, so three concurrent/recent runs is enough to fill it and
+# ENOSPC every other tool on the host (including test-runner output capture
+# itself). Retain ONLY failed-test tmp_path dirs, and only the latest
+# generation of those — a passed test's fixture tree is disposable the
+# moment it passes; a failed one is exactly what you want left behind to
+# inspect. (pytest >=7.3; this repo pins >=8.3.)
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
 # Environment-dependent markers (P4-tests, pulled forward from R5): tag tests
 # that shell out to a real host facility the *default* pytest run never
 # guarantees (a container runtime, a live systemd/journald, outbound
