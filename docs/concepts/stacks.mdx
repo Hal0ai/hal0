@@ -1,0 +1,164 @@
+---
+title: Stacks
+description: A stack is a named, portable bundle of slot assignments plus the profiles and models they reference — apply one to load, swap, and unload a whole slot lineup as a single declarative unit. hal0's youngest major subsystem — solid, but still hardening.
+sidebar:
+  order: 35
+---
+
+import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+
+Editing slots one at a time works, but swapping an entire lineup — the
+`agent` model, the `utility` model, their profiles, MTP settings, the embed
+and rerank lanes that ride along with them — is tedious to do by hand, and
+easy to leave half-applied. A **stack** is a single named entry that bundles
+a whole set of slot assignments together with the profile and model metadata
+those assignments reference, so the bundle is self-contained and portable to
+another machine. Applying a stack replaces your running slot lineup with
+exactly what the stack describes, in one guarded operation.
+
+![The Stacks tab — a "Daily driver" stack bundling primary, tts, img, and scribe slots, with active state, a missing-model flag, and import / snapshot / re-apply actions](/screenshots/stacks-tab.png)
+
+<Aside type="note">
+**An honest maturity note.** Stacks is hal0's youngest major subsystem —
+real, working, not a stub, but with a track record worth knowing about. The
+guard that stops a stack from writing a slot config a manual edit would be
+refused (the [model-owned-key partition](/docs/concepts/slots#the-hardwaremodel-write-boundary))
+had to be retrofitted into the stacks-apply path more than once, because the
+apply engine originally hand-rolled its own merge instead of routing through
+the same guarded pipeline every other slot writer used. A shared gate
+(`guard_slot_write_payload`) now closes that specific class of gap — but an
+open branch reworking how stack rows key their slot identity is still in
+flight as of this writing, so treat stack-row identity semantics as
+still-settling rather than final. There is also, deliberately, no `hal0
+stack` CLI command — stacks are managed exclusively through the dashboard
+and `/api/stacks`.
+</Aside>
+
+## What's in a stack
+
+A stack is one `[stack.<slug>]` entry in `/etc/hal0/stacks.toml`, managed
+exclusively through the `/api/stacks` router.
+
+At the top level, a stack carries `name`, `description`, `author`, `icon`,
+`tags`, a `schema_version` it was written against, and an `hal0_version`
+provenance stamp. The bulk of a stack is its **slot rows** — one entry per
+slot the stack manages, each shaped like a slot-edit-drawer's worth of
+fields:
+
+| Row field | What it captures |
+|---|---|
+| `slot` | The slot name (existing, or new — created on apply). |
+| `model` / `profile` | References resolved against the stack's own embedded `models`/`profiles` maps. |
+| `device`, `provider`, `role` | Device, provider label, and LLM role — device is slot-owned, same as an ordinary slot. |
+| `vision` | Whether the mmproj sidecar loads for this row (defaults **off** — a stack row opts in explicitly, unlike a raw slot, which defaults it on). Model-owned, same as on an ordinary slot. |
+| `mtp` | The tri-state Auto/On/Off override — `null` defers to model eligibility. Model-owned. |
+| `enable_thinking`, `server_extra_args` | Same knobs as the slot drawer; `enable_thinking` is model-owned. |
+| `capabilities` | Embed/rerank/stt/tts/vision capability children carried by this row, each with its own `device`/`provider`/`model`/`enabled`. |
+
+A stack also embeds a transport-safe copy of every profile and model it
+references, so importing it onto a fresh host doesn't depend on that host
+already having the right profile or registry entry.
+
+## Seed stacks
+
+hal0 ships three built-in stacks tuned to the reference Strix Halo roster,
+each pairing an `agent` and a `utility` slot and carrying dedicated embed and
+rerank rows so memory recall works out of the box:
+
+- **`saber`** — a MoE agent model, MTP on, paired with a fast utility model.
+- **`forge`** — a coding-focused agent/utility pair, both MTP-enabled.
+- **`pi`** — a lightweight-host-oriented pairing.
+
+Like seed profiles, the three seeds are **immutable** — applying a change to
+one is rejected; clone it under a new name to customize it.
+
+## Applying a stack: plan, then converge
+
+Applying a stack runs in two phases, and neither one can leave your platform
+in a state a manual edit couldn't also produce:
+
+<Steps>
+
+1. **Plan and commit.** For every row that names a model against a slot that
+   already exists, hal0 computes the resulting slot config and routes it
+   through the exact same guarded pipeline every other slot writer uses —
+   the model-owned-key partition, NPU exclusivity, default-uniqueness. A row
+   that would fail that pipeline (say, a row trying to smuggle a model-owned
+   key onto the slot) is rejected and reported, but doesn't abort the rest of
+   the apply — one bad row never blocks the others. The result commits
+   atomically.
+
+2. **Converge.** With the config committed, hal0 walks the live slot set and
+   brings it in line: each primary slot is loaded (if offline), swapped (if
+   running the wrong model), or left alone (if already correct) — a slot
+   that's mid-lifecycle (pulling, starting, warming, unloading) is never
+   interrupted. Each enabled capability child (embed, rerank, stt, tts,
+   vision) is applied the same way. Finally, **every dispatchable slot the
+   stack doesn't mention gets unloaded.**
+
+</Steps>
+
+That last step is what makes applying a stack a **declarative replace**, not
+a merge: whatever isn't in the stack goes dark. Any per-slot or
+per-capability failure during convergence is recorded rather than raised, so
+a single runtime hiccup never unwinds the config you already committed.
+
+<Aside type="tip">
+A `dry_run=true` apply returns a diff preview without touching anything —
+the dashboard's Load dialog uses this to warn you when a stack references
+models that aren't pulled locally yet, offering "Pull missing first" or
+"Load anyway."
+</Aside>
+
+## Drift: is the running config still what you applied?
+
+hal0 tracks which stack is active and fingerprints the slot configuration at
+the moment it was applied. Comparing that fingerprint against the live
+config on every read gives one of four states:
+
+| Status | Meaning |
+|---|---|
+| `none` | No stack has ever been applied. |
+| `clean` | The live config still matches what was applied, and convergence reported no errors. |
+| `degraded` | The config still matches, but convergence hit a per-slot runtime error — the plan is honest, the runtime didn't fully come up. |
+| `modified` | A slot was hand-edited since the stack was applied (or the active stack itself was deleted out from under the pointer). |
+
+Drift is a config-level signal, not a liveness probe — hand-editing a stack's
+slot afterward, even correctly, is enough to flip an active stack from
+`clean` to `modified`.
+
+## Portable: export, import, snapshot
+
+A stack can be exported to a self-contained, checksummed `.hal0stack.json`
+envelope — no secrets, no host paths — and imported on another machine.
+Import dry-runs first: it checks the envelope's `schema_version` isn't newer
+than what the running hal0 understands, classifies every referenced model as
+`present` / `pullable` / `unresolvable` against the local registry, and
+reconciles embedded profiles against the local catalog — **a local profile of
+the same name always wins**, so importing a stack never silently overwrites
+a profile you've already tuned.
+
+You can also go the other direction: **snapshot** builds a brand-new stack
+from whatever is actually running right now (live slot TOML plus capability
+selections), so a lineup you assembled by hand one slot at a time can be
+captured, named, and shared without retyping it as a stack from scratch.
+
+## The dashboard's Stacks view
+
+The dashboard's **Stacks** view has two parts: a full-width **Hero** card for
+the currently active stack — one row per slot with its model, device, and
+the clean/modified drift badge, plus Edit, Export, and Re-apply actions —
+and a **Library** grid of every other stack, with Load, Clone, Export, Edit,
+and Delete affordances (Edit and Delete are hidden for the three immutable
+seeds). Editing or creating a stack opens a row-by-row drawer: slot name
+(with a "new slot" chip when it doesn't exist yet), model, device, a profile
+picker, and the same Auto/On/Off MTP control the slot drawer uses — shown
+only when it's actually relevant to the row.
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle and write-boundary partition a stack converges against." />
+  <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="What a stack row's profile and capability children configure." />
+  <LinkCard title="Architecture" href="/docs/concepts/architecture" description="Where stacks sit relative to the dispatcher and slot manager." />
+</CardGrid>
