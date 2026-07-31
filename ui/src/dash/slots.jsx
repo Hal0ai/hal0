@@ -30,6 +30,7 @@ import {
 import { TelemetryHeader } from './telemetry-header.jsx'
 import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive } from './slot-status.js'
 import { prettyProfile } from './profile-names.js'
+import { slotModelRow } from './slots/slot-shared.js'
 
 const { useState: useStateS, useRef, useEffect } = React;
 
@@ -133,6 +134,17 @@ function SlotImagePullBar({ slot }) {
 }
 
 // ─── SlotCard (instrument variant) ───
+//
+// NOTE (2026-07): this grid is currently UNMOUNTED. `renderGroup`/`slotWithState`
+// below have no call site — the standalone Chat + Capabilities SlotCard grids
+// were retired and `InferencePane` (inference-pane.jsx `SlotScard`) is the live
+// per-slot card surface, which is where the inline model-edit pencil actually
+// ships. It is wired here too so the two cards can't diverge if the grid is
+// revived; see slots-v3.spec.ts, which asserts `.slots-grid` has count 0.
+//
+//   modelRow / onEditModel — inline model edit. `modelRow` is the slot's bound
+//   registry row (resolved by SlotsView through slotModelRow); the pencil is
+//   disabled without one because ModelDrawer needs the row, not an id.
 function SlotCard({
   slot,
   onSwap,
@@ -142,6 +154,8 @@ function SlotCard({
   onStart,
   onSwapPick,
   onViewLogs,
+  onEditModel,
+  modelRow,
   swapOpen,
   onCloseSwap,
   errorMsg,
@@ -230,16 +244,37 @@ function SlotCard({
               headRight) now, not on the card. */}
         </div>
       </div>
-      <div className="slot-model mono" onClick={onSwap} style={{position: "relative"}}>
-        <span className="mid">{model}</span>
-        <span className="chev">{Icons.chev}</span>
-        {swapOpen && (
-          <InlineSwapPopover
-            slot={slot}
-            open={swapOpen}
-            onClose={onCloseSwap}
-            onPick={onSwapPick}
-          />
+      {/* The model dropdown and the model-edit pencil are SIBLINGS. The pencil
+          is deliberately NOT nested inside .slot-model: that div is itself the
+          click target that opens InlineSwapPopover, so a nested button would be
+          fighting the swap gesture. stopPropagation is belt-and-braces on top
+          of the separate hit area. */}
+      <div className="slot-model-row">
+        <div className="slot-model mono" onClick={onSwap} style={{position: "relative"}}>
+          <span className="mid">{model}</span>
+          <span className="chev">{Icons.chev}</span>
+          {swapOpen && (
+            <InlineSwapPopover
+              slot={slot}
+              open={swapOpen}
+              onClose={onCloseSwap}
+              onPick={onSwapPick}
+            />
+          )}
+        </div>
+        {onEditModel && (
+          <button
+            className="btn ghost sm slot-model-edit"
+            data-testid={`slot-card-model-edit-${slot.name}`}
+            disabled={!modelRow}
+            title={modelRow
+              ? `Edit model ${modelRow.longName || modelRow.name || modelRow.id} — launch flags, chat template, caps`
+              : "No model bound — nothing to edit"}
+            aria-label={modelRow
+              ? `Edit model ${modelRow.longName || modelRow.name || modelRow.id}`
+              : "Edit model"}
+            onClick={(e) => { e.stopPropagation(); onEditModel(); }}
+          >{Icons.edit}</button>
         )}
       </div>
       <div className="slot-chips">
@@ -537,6 +572,10 @@ function SlotListRow({ slot, onEdit }) {
 // ─── Slots view ───
 function SlotsView({ slotVariant, slotParam, onGo }) {
   const slotsQuery = useSlots();
+  // Model registry, for the slot card's inline model-edit pencil. useModels()
+  // shares the react-query cache key ['models'] with InferencePane's own call,
+  // so this extra consumer costs nothing.
+  const modelsQuery = useModels();
   // Single source of truth: the hook. The Playwright apiMock fixture
   // fulfils /api/slots so mock-mode coverage is symmetric with live runs;
   // we no longer fall back to HAL0_DATA.slots (per slots-wireup brief).
@@ -559,6 +598,10 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   const [swapName, setSwapName] = useStateS(null);
   const [logsForSlot, setLogsForSlot] = useStateS(null);
   const [busyName, setBusyName] = useStateS(null);
+  // ONE ModelDrawer instance for the whole card grid, driven by the picked
+  // registry ROW (ModelDrawer renders nothing for a null model, and needs the
+  // row rather than an id). Local useState — there is no UI/overlay store.
+  const [modelEditRow, setModelEditRow] = useStateS(null);
   // Slots-page tabs: "inference" (chat/embed/voice/npu) vs "image" (the ComfyUI
   // generation engine pane). ComfyUI is one container engine, not per-model
   // slots, and is mutually exclusive with the LLM stack — so it gets its own
@@ -704,12 +747,16 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   ];
   const openCreatePrefilled = (def) => { setCreateDefaults(def); setCreateOpen(true); };
 
-  const slotWithState = (s, errorMsg) => (
+  const slotWithState = (s, errorMsg) => {
+    const modelRow = slotModelRow(s, modelsQuery.data);
+    return (
     <SlotCard
       key={s.name}
       slot={s}
       errorMsg={errorMsg}
       busy={busyName === s.name}
+      modelRow={modelRow}
+      onEditModel={() => { if (modelRow) setModelEditRow(modelRow); }}
       swapOpen={swapName === s.name}
       onSwap={(e) => { e.stopPropagation(); setSwapName(swapName === s.name ? null : s.name); }}
       onCloseSwap={() => setSwapName(null)}
@@ -733,7 +780,8 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
       }
       onViewLogs={() => { setLogsForSlot(s.name); }}
     />
-  );
+    );
+  };
 
   // Skip-path layout: render six seeded empty cards under their default groups.
   if (skipPath) {
@@ -1036,6 +1084,14 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
         open={!!logsSlot}
         slot={logsSlot}
         onClose={() => setLogsForSlot(null)}
+      />
+      {/* Inline model editor for the card-grid pencil. Not docked — nothing is
+          stacked beneath it from this surface (the slot EDIT drawer docks it
+          instead, see slot-modals.jsx). */}
+      <ModelDrawer
+        open={!!modelEditRow}
+        onClose={() => setModelEditRow(null)}
+        model={modelEditRow}
       />
     </div>
   );

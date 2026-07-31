@@ -181,7 +181,7 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
 
-    const ctxRow = rowByLabel(page, /^Context \(override\)$/)
+    const ctxRow = rowByLabel(page, /^Context \(ceiling\)$/)
     await ctxRow.locator('input').fill('16384')
     await page.locator('.drawer button:has-text("Save")').click()
 

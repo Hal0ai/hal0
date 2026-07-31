@@ -1898,6 +1898,11 @@ a { color: inherit; text-decoration: none; }
 .slot-model:hover { border-color: var(--line-strong); }
 .slot-model .mid { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slot-model .chev { color: var(--fg-4); }
+/* Slot-card model row: the swap dropdown plus the inline model-edit pencil as
+   a SIBLING (never nested — .slot-model is itself the popover click target). */
+.slot-model-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.slot-model-row > .slot-model { flex: 1; min-width: 0; }
+.slot-model-row > .slot-model-edit { flex: 0 0 auto; }
 
 .slot-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 
@@ -2859,6 +2864,45 @@ select.npu-sel {
   color: var(--fg-4);
   gap: 12px;
 }
+
+/* ─── Docked drawer (side-by-side stack) ────────────────────────────
+   Consumed by the slot edit drawer, which stacks the model drawer beside
+   itself (see DrawerDock in dash/primitives.jsx). There are no portals here:
+   `.drawer` is `position: fixed; right: 0; z-index: 95`, so a second drawer
+   would otherwise land flush-right at equal z-index and fully cover the first.
+
+   `right` is driven by the --drawer-dock custom property, set inline by the
+   primitive, NOT by an inline `right`. Inline styles beat stylesheet rules only
+   for the properties they actually set, so keeping `right` in the stylesheet is
+   what lets the narrow-viewport fallback below reclaim it. */
+.drawer.drawer--docked {
+  right: var(--drawer-dock, 0px);
+  /* Never push the panel off-canvas to the left: shrink first. */
+  max-width: calc(100vw - var(--drawer-dock, 0px));
+  /* Flush against the drawer it stacks on — a lighter shadow so the seam
+     between the two panels reads as one continuous surface. */
+  box-shadow: -14px 0 40px -18px rgba(0, 0, 0, 0.55);
+}
+/* Closed, a docked drawer must slide fully off-canvas. The base
+   `translateX(100%)` only clears its own width, which would park the panel
+   directly on top of the drawer it is docked beside. */
+.drawer.drawer--docked:not(.open) {
+  transform: translateX(calc(100% + var(--drawer-dock, 0px)));
+}
+/* Below ~1200px there is no room for both panels (the slot drawer is 560 and
+   the model drawer 600 = 1160 plus breathing room), so drop back to the
+   overlay stack instead of squeezing the docked panel into a useless column. */
+@media (max-width: 1199px) {
+  .drawer.drawer--docked {
+    right: 0;
+    max-width: 100vw;
+  }
+  .drawer.drawer--docked:not(.open) { transform: translateX(100%); }
+}
+/* A stacked drawer's own scrim must not double-darken the page — the drawer
+   underneath already painted one. Kept as a click target with no paint so
+   click-outside still dismisses the TOP drawer. */
+.drawer-backdrop.drawer-backdrop--clear { background: transparent; }
 
 /* ─── Banner ───────────────────────────────────────────────────── */
 .view-banners { padding: 20px 28px 0; max-width: 1600px; margin: 0 auto; }
