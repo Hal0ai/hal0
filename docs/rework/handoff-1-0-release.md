@@ -160,11 +160,12 @@ re-diagnosed as v1.0.0 regressions:
 1. **Finish G** — the parser fix that makes brain tool calling work without the 19 GB anchor. Commit
    the 11 loose files.
 2. **Finish H** — slot health / routing. Nothing is committed yet; this is the least-advanced stream.
-3. **Finish I** — latency work (concurrent probe already landed).
+3. **Finish I** — latency work (concurrent probe already landed). Its uncommitted working-tree diff
+   is cosmetic-only per review (§6b) — just commit it, nothing to finish.
 4. **Two adversarial reviews: Stream A and Stream F.** A rewrites the single user-facing entry point
    (`install.sh`, `feat(installer)!`) and F is the write-boundary enforcement — the two places where
    a wrong call is either unrecoverable on a user's box or a security hole. Neither should merge on a
-   self-review. **In progress (2026-07-31) — see §6a.**
+   self-review. **DONE (2026-07-31) — both PASS, see §6a.**
 5. **Push, then rebase every stream onto current `github/main`** (§2, §3). Merge order: A (or G,
    which carries A) → B → C → D → E → F → I → H → release-prep.
 6. **Fold `## [Unreleased]` into `## [1.0.0]`** in `CHANGELOG.md`. Tagged releases bundle the
@@ -176,12 +177,11 @@ re-diagnosed as v1.0.0 regressions:
    CT150** (no snapshot possible as of 2026-07-31 — see §4's correction; seed profiles first
    regardless).
 
-## 6a. Review status — Stream A and Stream F (2026-07-31, in progress)
+## 6a. Review status — Stream A and Stream F (2026-07-31, COMPLETE — both PASS)
 
-Both reviews are diff-read complete and targeted-test-verified; full-suite runs are the remaining
-gate before either can be called clean. This section will be updated with a pass/fail verdict once
-both land — if you're picking this up and the table below still says "pending", the full suites
-never finished; check `/var/tmp/{a,f}-full-suite.log` before trusting anything past this point.
+Both reviews are diff-read complete, targeted-test-verified, and full-suite-verified. **Both PASS.**
+Neither has a blocking finding. Full-suite logs (for reference): `/var/tmp/f-full-suite3.log`,
+`/var/tmp/a-full-suite3.log`.
 
 ### Stream F — write-boundary enforcement
 
@@ -196,10 +196,17 @@ in-process gate every writer runs through. No correctness issues found on read.
 
 - Targeted tests (`test_stacks_routes.py`, `test_slots_routes.py`, `test_write_boundary_guard.py`,
   `test_apply_plan.py`, `test_no_slot_enabled_key.py`): **155 passed.**
-- Full suite: rerunning as of this write (see below) — the first two attempts died to a `/tmp`
-  tmpfs exhaustion unrelated to the code (§ "tmp infrastructure note").
+- **Full suite: 7841 passed, 16 skipped, 1 xfailed, 1 failed, in 411.5s.** The one failure —
+  `tests/slots/test_fail_watcher_warming.py::test_warming_slot_recovers_when_stale` — is a
+  **parallel-execution timing flake, not a real regression**: the test polls a background watchdog
+  task against a hardcoded 5-second wall-clock deadline (`asyncio.get_event_loop().time() + 5.0`),
+  and this run used `pytest-xdist -n 6` under heavy host load (see "duplicate processes" note
+  below) — the watchdog task simply didn't get scheduled in time. Reran in isolation, no xdist, on
+  both this worktree and A's: **8/8 passed on both.** Confirmed not stream-specific (same failure,
+  same isolated-pass, on two independent branches).
 
-**No findings against F.** Clean once the full suite confirms.
+**VERDICT: PASS.** No blocking findings against F. The one full-suite failure is a confirmed
+CPU-contention flake in the test itself, reproduced as passing in isolation on both F and A.
 
 ### Stream A — install/setup unification
 
@@ -225,10 +232,24 @@ not; harmless comment drift, not a real gap).
 - **Minor, non-blocking:** the top-of-file header comment (`installer/install.sh:2`) still reads
   "hal0 installer — idempotent, non-interactive." The whole point of this stream is that it now
   *is* interactive on a TTY. One-line fix, not a behavior issue.
-- Full suite: rerunning as of this write, same tmpfs interruption as F.
+- **Full suite: 7899 passed, 16 skipped, 1 xfailed, 1 failed, in 422.8s.** Same single failure as F
+  (`test_warming_slot_recovers_when_stale`), same root cause (xdist scheduling contention against a
+  hardcoded 5s deadline, not stream-specific), same clean 8/8 pass in isolation. See F's entry above
+  for the full explanation — not duplicating it here.
 
-**No blocking findings against A.** The shellcheck gap and the stale header comment are worth fixing
-before merge but neither is a reason to hold it.
+**VERDICT: PASS.** No blocking findings against A. Two non-blocking follow-ups before merge: run
+`shellcheck installer/install.sh` on a box that has it, and fix the stale header comment. Neither is
+a reason to hold the merge.
+
+### Shared test-infra flake — one line for whoever sees it again
+
+`tests/slots/test_fail_watcher_warming.py::test_warming_slot_recovers_when_stale` uses a real
+wall-clock 5-second deadline against a background asyncio task. It is reliable serial/low-concurrency
+but WILL flake under `pytest-xdist` on a loaded box (confirmed: failed identically on two unrelated
+branches under `-n 6`, passed 8/8 both times in isolation). Not filed as a separate issue — the fix
+(swap the real deadline for a fake clock or raise the timeout) is a five-minute change but out of
+scope for this release-review pass; worth a follow-up ticket if it recurs in CI's own xdist-free
+runs (CI does not currently use xdist, so this shouldn't surface there).
 
 ### Draft PRs opened for CI signal (2026-07-31)
 
