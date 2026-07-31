@@ -31,6 +31,7 @@ import {
   useSlotUnload,
   useSlotLoad,
   useSlotSwap,
+  useSlotEdit,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
@@ -91,6 +92,7 @@ const IIcons = {
   ),
   play: <II d="M5 3.4l8 4.6-8 4.6V3.4z" />,
   edit: <II d="M3 13l3-1 7-7-2-2-7 7-1 3z" />,
+  star: <II d="M8 2.2l1.8 3.7 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4L2.2 6.5l4-.6z" />,
   ext: <II d="M6 3H3v10h10v-3M9 3h4v4M9 9l4-4" />,
 }
 const Ic = ({ name, size = 16 }) =>
@@ -257,7 +259,20 @@ export function ModelPicker({ s, models, disabled, onSwap }) {
 
 // per-slot controls — Start/Stop are mutually exclusive by running state;
 // compact (collapsed) cards get the minimal set (no Logs/Edit).
-export function SlotControls({ phase, busy, compact, onStart, onStop, onRestart, onLogs, onEdit }) {
+export function SlotControls({
+  phase,
+  busy,
+  compact,
+  onStart,
+  onStop,
+  onRestart,
+  onLogs,
+  onEdit,
+  // SC-4: promote this slot to its type's default. Rendered only when
+  // `onSetDefault` is supplied AND the slot isn't already the default — a slot
+  // that already holds the marker has nothing to promote.
+  onSetDefault,
+}) {
   const running = phase !== 'off'
   return (
     <span className="slot-ctrls" onClick={(e) => e.stopPropagation()}>
@@ -285,6 +300,16 @@ export function SlotControls({ phase, busy, compact, onStart, onStop, onRestart,
       {!compact && (
         <button className="sctrl" title="Logs" onClick={onLogs}>
           <Ic name="logs" size={13} />
+        </button>
+      )}
+      {onSetDefault && (
+        <button
+          className="sctrl"
+          title="Set as default for this slot type"
+          disabled={busy}
+          onClick={onSetDefault}
+        >
+          <Ic name="star" size={13} />
         </button>
       )}
       {!compact && (
@@ -444,6 +469,9 @@ function SlotCards({ rows, full, models, busyName, handlers, loading, modelRows 
             onRestart={() => handlers.onRestart(s)}
             onLogs={() => handlers.onLogs(s)}
             onEdit={() => handlers.onEdit(s)}
+            onSetDefault={
+              s.default === true ? undefined : () => handlers.onSetDefault(s)
+            }
           />
         )
         // The bound registry row, resolved through the shared helper the slot
@@ -495,6 +523,9 @@ function MiniCard({ s, ind, busy, handlers }) {
           onRestart={() => handlers.onRestart(s)}
           onLogs={() => handlers.onLogs(s)}
           onEdit={() => handlers.onEdit(s)}
+          onSetDefault={
+            s.default === true ? undefined : () => handlers.onSetDefault(s)
+          }
         />
       </div>
     </div>
@@ -530,6 +561,11 @@ export function InferencePane() {
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
   const swapMut = useSlotSwap()
+  // SC-4 "Set as default" row action — the same PUT /config the drawer's
+  // Pinned toggle uses. check_default_uniqueness REFUSES a second
+  // default=true rather than demoting the incumbent, so `handlers.onSetDefault`
+  // below does the demote-then-promote itself (two PUTs).
+  const editMut = useSlotEdit()
   const [busyName, setBusyName] = useStateI(null)
   // Inline model edit — the ModelDrawer is mounted ONCE here (the pane owns the
   // cards) and driven by the picked registry row, matching how models.jsx
@@ -593,6 +629,35 @@ export function InferencePane() {
       run(s.name, swapMut, { name: s.name, model_id }, `Swapping ${s.name}…`),
     onEdit: (s) => {
       window.location.hash = '#slots/' + s.name
+    },
+    // SC-4 allows exactly one default=true slot per type and REFUSES a write
+    // that would land a second one — it does not silently demote. There is no
+    // atomic promote endpoint, so re-pointing the default is demote-then-
+    // promote. If the promote fails we restore the incumbent rather than
+    // leaving the type with no default at all.
+    onSetDefault: async (s) => {
+      const prev = (allSlots || []).find(
+        (p) => p?.name && p.name !== s.name && p?.type === s.type && p?.default === true,
+      )
+      try {
+        if (prev) await editMut.mutateAsync({ name: prev.name, body: { default: false } })
+        try {
+          await editMut.mutateAsync({ name: s.name, body: { default: true } })
+        } catch (err) {
+          if (prev) {
+            await editMut
+              .mutateAsync({ name: prev.name, body: { default: true } })
+              .catch(() => {})
+          }
+          throw err
+        }
+        toast(`${s.name} is now the default ${s.type || 'slot'}`, 'ok')
+      } catch (err) {
+        toast(
+          err?.message ? `${s.name}: ${err.message}` : `${s.name}: could not set default`,
+          'warn',
+        )
+      }
     },
     onLogs: (s) => {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))

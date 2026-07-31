@@ -53,6 +53,7 @@ from hal0.slots._cfg_helpers import (
 from hal0.slots.config_write import (
     _base_profile_for_backend,
     _cfg_effective_backend,
+    _iter_peer_configs,
     _reconcile_device_profile,
     check_default_uniqueness,
     check_npu_exclusivity,
@@ -2215,6 +2216,20 @@ class SlotManager:
         # operator error and raises.
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
         await self._check_npu_exclusivity(slot_name, cfg_dict)
+        # SC-4, first-of-type: the create modal no longer asks "make this the
+        # default?" — the FIRST slot of a type silently becomes that type's
+        # default (there is nothing yet to conflict with), and re-pointing it
+        # afterwards is the explicit "Set as default" row action on the slot
+        # list. Only fills an absent/false marker: an explicit
+        # ``default=true`` from the caller is left alone and still goes
+        # through the uniqueness guard below.
+        if cfg_dict.get("default") is not True:
+            type_ = cfg_dict.get("type")
+            if type_ and not any(
+                peer.get("type") == type_
+                for _peer_name, peer in _iter_peer_configs(slot_name, None)
+            ):
+                cfg_dict["default"] = True
         # SC-4: refuse a second default=true slot of the same type before
         # the TOML lands on disk (belt to default_slot_for's routing-time
         # suspenders). Fast fast path when this write isn't a new default.
@@ -2428,7 +2443,15 @@ class SlotManager:
             # cfg_dict — the authoritative post-merge state, same as the NPU
             # guard. The peer walk excludes slot_name, so re-persisting the
             # sole default never self-conflicts.
-            await self._check_default_uniqueness(slot_name, cfg_dict)
+            #
+            # ``changed_keys`` is the update's own key set: a PATCH that does
+            # not carry ``default`` skips the check entirely, so an unrelated
+            # edit to a slot caught in a pre-existing two-defaults-on-disk
+            # state is no longer wrongly rejected for a conflict it did not
+            # create. A PATCH that DOES set ``default`` is still fully guarded.
+            await self._check_default_uniqueness(
+                slot_name, cfg_dict, changed_keys=set(updates.keys())
+            )
 
             try:
                 write_slot_toml(cfg_path, cfg_dict)
@@ -2676,6 +2699,8 @@ class SlotManager:
         self,
         slot_name: str,
         cfg_dict: dict[str, Any],
+        *,
+        changed_keys: set[str] | None = None,
     ) -> None:
         """Reject a write that would land a second ``default=true`` per type.
 
@@ -2705,8 +2730,13 @@ class SlotManager:
         monkeypatchability) over the module-level sync
         :func:`check_default_uniqueness`, which the stacks apply engine
         shares so its writes obey the same guard.
+
+        ``changed_keys`` narrows the guard to writes that actually touch
+        ``default`` — see :func:`check_default_uniqueness`. ``None`` (the
+        default) validates the full merged dict, which is what ``create()``
+        wants.
         """
-        check_default_uniqueness(slot_name, cfg_dict)
+        check_default_uniqueness(slot_name, cfg_dict, changed_keys=changed_keys)
 
     # ── idle / wake-on-request ───────────────────────────────────────────────
 

@@ -236,12 +236,26 @@ def check_default_uniqueness(
     cfg_dict: dict[str, Any],
     *,
     slots_dir: Path | None = None,
+    changed_keys: set[str] | None = None,
 ) -> None:
     """Reject a write that would land a second ``default=true`` per type.
 
     Sync core of :meth:`SlotManager._check_default_uniqueness` (see its
     docstring for the full contract), shared with the stacks apply engine.
+
+    ``changed_keys`` is the set of keys this write actually touches. When it is
+    supplied and does NOT contain ``"default"``, the check is skipped outright:
+    the write isn't moving the invariant, so a pre-existing pair of stale
+    ``default=true`` peers on disk is not this write's problem to fix — and
+    must not veto it. (Without this, a plain ``update_config("b",
+    {"n_gpu_layers": 40})`` on a slot that merely *happens* to carry
+    ``default=true`` in an already-violated state gets rejected for a conflict
+    it did not create.) ``None`` — the default — keeps the historical behaviour
+    of validating the full merged dict, which is what ``create()`` wants: there
+    every key is new.
     """
+    if changed_keys is not None and "default" not in changed_keys:
+        return
     if cfg_dict.get("default") is not True:
         return
     type_ = cfg_dict.get("type")
@@ -296,7 +310,15 @@ def reconcile_and_guard_slot_config(
     """
     merged = reconcile_slot_updates(base, updates)
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
-    check_default_uniqueness(slot_name, merged, slots_dir=slots_dir)
+    # Only the keys this apply actually carries drive the SC-4 guard — an
+    # unrelated stack field must not be blocked by a stale duplicate-default
+    # state it neither created nor touches.
+    check_default_uniqueness(
+        slot_name,
+        merged,
+        slots_dir=slots_dir,
+        changed_keys=set(updates.keys()),
+    )
     return merged
 
 
