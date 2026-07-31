@@ -164,7 +164,7 @@ re-diagnosed as v1.0.0 regressions:
 4. **Two adversarial reviews: Stream A and Stream F.** A rewrites the single user-facing entry point
    (`install.sh`, `feat(installer)!`) and F is the write-boundary enforcement — the two places where
    a wrong call is either unrecoverable on a user's box or a security hole. Neither should merge on a
-   self-review.
+   self-review. **In progress (2026-07-31) — see §6a.**
 5. **Push, then rebase every stream onto current `github/main`** (§2, §3). Merge order: A (or G,
    which carries A) → B → C → D → E → F → I → H → release-prep.
 6. **Fold `## [Unreleased]` into `## [1.0.0]`** in `CHANGELOG.md`. Tagged releases bundle the
@@ -173,7 +173,75 @@ re-diagnosed as v1.0.0 regressions:
    section without a `### Breaking` block silently ships a breaking release with no warning.
    Stream A's `feat(installer)!` and any other `!` commits belong there.
 7. **Tag**, then **install test on CT151** (roll back to `pristine` first), then **update test on
-   CT150** (snapshot first, seed profiles first).
+   CT150** (no snapshot possible as of 2026-07-31 — see §4's correction; seed profiles first
+   regardless).
+
+## 6a. Review status — Stream A and Stream F (2026-07-31, in progress)
+
+Both reviews are diff-read complete and targeted-test-verified; full-suite runs are the remaining
+gate before either can be called clean. This section will be updated with a pass/fail verdict once
+both land — if you're picking this up and the table below still says "pending", the full suites
+never finished; check `/var/tmp/{a,f}-full-suite.log` before trusting anything past this point.
+
+### Stream F — write-boundary enforcement
+
+Read in full: `config_write.py` (the new shared guard/merge pipeline — partition, reconcile,
+NPU-exclusivity, default-uniqueness), and every calling-side change (`stacks/apply.py`,
+`api/routes/stacks.py`, `api/routes/slots.py`, `slots/manager.py`). The fix closes a real gap: the
+stacks-apply engine and `SlotManager.create()` both wrote slot TOML in-process without ever passing
+through the HTTP-layer key-partition guard (`reject_model_owned_slot_keys`) or the freeform
+`[server].extra_args` hardware-flag screen — so a stack apply could persist what
+`PUT /api/slots/{name}/config` would 400 on. `guard_slot_write_payload` is now the one shared
+in-process gate every writer runs through. No correctness issues found on read.
+
+- Targeted tests (`test_stacks_routes.py`, `test_slots_routes.py`, `test_write_boundary_guard.py`,
+  `test_apply_plan.py`, `test_no_slot_enabled_key.py`): **155 passed.**
+- Full suite: rerunning as of this write (see below) — the first two attempts died to a `/tmp`
+  tmpfs exhaustion unrelated to the code (§ "tmp infrastructure note").
+
+**No findings against F.** Clean once the full suite confirms.
+
+### Stream A — install/setup unification
+
+Read in full: `installer/install.sh`'s new interactive-input gate (`_interactive`, `_tty_read`,
+the model-store/HF-token prompts, the agent-anchor opt-in offer), `config/schema.py`'s
+`tool_model` empty-string trap fix, `brain/chat.py`'s completion-budget floor, `registry/curated.py`
+and `registry/pull.py`'s new brain/agent model rows and `read_model_meta`, and the `cli/main.py` /
+`cli/setup_command.py` / `cli/setup_install.py` hiding of `hal0 setup`. All well-documented,
+consistent with each other, and `UI_STEP_TOTAL=16` verified to match the actual 16 `ui_step` calls
+in the file (the test that pins this, `tests/installer/test_install_single_entry_point.py:227`,
+exists — the file path a code comment nearby cites, `tests/install/test_ui_step_total.py`, does
+not; harmless comment drift, not a real gap).
+
+- Targeted tests (`tests/install/`, `tests/installer/`, brain/config/systemd tests touched by this
+  stream): **472 passed, 2 skipped** (both skips are `shellcheck not installed` on this box — see
+  below).
+- **Static-analysis gap, not fixed:** no `shellcheck` on this machine and no passwordless `sudo` to
+  install it, so the two shellcheck-gated tests
+  (`test_platform_gate_hardening.py`, `test_hf_token_secrets.py`) skip rather than run. `install.sh`
+  is the highest-risk file in the whole release — a bash lint pass genuinely didn't happen here.
+  Whoever finishes this review on a box with `shellcheck` available should run it before calling A
+  clean: `shellcheck installer/install.sh`.
+- **Minor, non-blocking:** the top-of-file header comment (`installer/install.sh:2`) still reads
+  "hal0 installer — idempotent, non-interactive." The whole point of this stream is that it now
+  *is* interactive on a TTY. One-line fix, not a behavior issue.
+- Full suite: rerunning as of this write, same tmpfs interruption as F.
+
+**No blocking findings against A.** The shellcheck gap and the stale header comment are worth fixing
+before merge but neither is a reason to hold it.
+
+### Tmp infrastructure note (unrelated to either stream, cost real time)
+
+Running both streams' full suites concurrently filled the 16G `/tmp` tmpfs (`HAL0_HOME=$(mktemp -d)`
+and pytest's own `pytest-of-mint` basetemp both land there by default) — a known, previously
+recorded issue on this box. The first two full-suite attempts for both A and F reported "exit 1"
+from a wrapper `tail` rather than from pytest itself (no `pipefail`), which briefly looked like real
+test failures and would have been a false read if not re-verified against pytest's actual exit code.
+Separately, the user migrated the whole box's Claude Code tmp dir from `/tmp` to
+`/mnt/mintdev/scratch/claude-tmp` (`CLAUDE_CODE_TMPDIR` in `.claude/settings.json`) mid-review, which
+briefly relocated an in-flight log file to `/var/tmp`. Current reruns write `HAL0_HOME` and
+`--basetemp` under `/var/tmp/hal0-tests-{A,F}-<pid>/`, which has hundreds of GB free — do the same
+for any future full-suite run on this box rather than trusting the tmpfs default.
 
 ## 7. Quick state check for a fresh session
 
