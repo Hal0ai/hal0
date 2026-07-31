@@ -267,6 +267,13 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # per-slot /config fetch.
         entry["pinned"] = reaper_is_pinned(name, cfg)
 
+        # SC-4 default marker: exactly one slot per ``type`` may carry
+        # ``default = true`` (check_default_uniqueness). Lifted verbatim so the
+        # slot list can render a "Set as default" action only on the slots that
+        # are NOT already their type's default — the create modal no longer
+        # asks, so this is the one place the operator re-points it.
+        entry["default"] = cfg.get("default") is True
+
         # ctx_max: the configured context window. The canonical TOML key is
         # ``[model].context_size`` (the dashboard's ``ctx_size`` alias is
         # folded to it on write — see slots.manager). Surfaced so the

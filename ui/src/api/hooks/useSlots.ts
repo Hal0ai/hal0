@@ -91,6 +91,11 @@ export interface Slot {
    *  null/absent = release default. A non-default pin is shown on the card so
    *  drift is never hidden. Canonical TOML key `image_pin`. */
   image_pin?: string | null
+  /** SC-4 default marker — true iff this slot is its `type`'s default. Exactly
+   *  one slot per type may carry it (check_default_uniqueness). Lifted by
+   *  slot_view so the slot list can offer "Set as default" on the slots that
+   *  are NOT already the default. */
+  default?: boolean
   /** Configured context window ([model].context_size). Surfaced by
    *  config_enrichment so the Inference engine pane can render "ctx
    *  used / max". Absent when the slot configures no context window —
@@ -337,6 +342,9 @@ function normalizeSlot(s: any): Slot {
     threads: s?.threads,
     binary: s?.binary ?? '',
     image_pin: s?.image_pin ?? null,
+    // SC-4 default marker — strict boolean so an absent key reads as "not the
+    // default" rather than undefined (the row action gates on `!== true`).
+    default: s?.default === true,
   }
 }
 

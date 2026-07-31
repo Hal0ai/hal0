@@ -201,9 +201,18 @@ def test_create_slot_with_default_promotes_model(client: TestClient, tmp_hal0_ho
     assert promo["type"] == "llm"
     # The MODEL is now its type's default.
     assert client.get("/api/models/slot-model").json()["default"] is True
-    # And `default` did NOT leak into the slot TOML (it's the model marker).
-    cfg = client.get("/api/slots/myslot/config").json()
-    assert "default" not in cfg
+    # The POST body's `default` is the MODEL marker and never lands on the slot
+    # as such. `myslot` IS the type's default here, but only because it is the
+    # FIRST llm slot on disk (SlotManager.create's first-of-type auto-default),
+    # not because the body said so. A SECOND slot of the type proves it: it gets
+    # the same body flag and still carries no slot-level default marker.
+    r2 = client.post(
+        "/api/slots",
+        json={"name": "myslot2", "type": "llm", "model": "slot-model", "default": True},
+    )
+    assert r2.status_code == 201, r2.text
+    cfg2 = client.get("/api/slots/myslot2/config").json()
+    assert "default" not in cfg2
 
 
 def test_create_slot_default_false_does_not_promote(client: TestClient, tmp_hal0_home: str) -> None:

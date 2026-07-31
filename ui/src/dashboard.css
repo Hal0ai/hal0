@@ -1203,6 +1203,16 @@ a { color: inherit; text-decoration: none; }
 }
 .dash-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .dash-side { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 12px; }
+/* Full-bleed side column (slots page): the ActivityLog spans the same
+   vertical extent as the stacked main-column panes (InferencePane +
+   NpuOccupancyCard) instead of capping itself short. `align-self: stretch`
+   fills the grid track; `position: static` because a stretched, track-height
+   box has nothing left to stick against — sticky and stretch fight. */
+.dash-side.dash-side-fill {
+  align-self: stretch;
+  position: static;
+  min-height: 0;
+}
 
 /* Slots-page tabs — underline style, matching the Agent page's tab bar
    (Inference · Image Gen · Endpoints · Profiles). Borderless buttons with an
@@ -3063,15 +3073,26 @@ select.npu-sel {
   border-bottom: 1px solid var(--line-soft);
 }
 .form-row:last-child { border-bottom: none; }
+/* Row-flow so the (i) info affordance sits INLINE with the field title
+   instead of stacking beneath it. `.sub` keeps its own line via a
+   full-width flex-basis, so the multi-line label fields (model drawer,
+   create-model modal) look exactly as they did before. */
 .form-row .form-lbl {
   font-size: 12.5px;
   color: var(--fg);
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 3px;
 }
 .form-row .form-lbl .req { color: var(--accent); font-family: var(--jbm); font-size: 10px; }
-.form-row .form-lbl .sub { font-size: 11px; color: var(--fg-4); font-weight: 400; }
+.form-row .form-lbl .sub {
+  font-size: 11px;
+  color: var(--fg-4);
+  font-weight: 400;
+  flex: 0 0 100%;
+}
 
 /* Field descriptions are available only through the adjacent info affordance. */
 .field-info-wrap {
