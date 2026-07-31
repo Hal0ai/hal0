@@ -100,6 +100,7 @@ def import_profile(
     catalog: Any,
     *,
     profile_path: Path | None = None,
+    force: bool = False,
 ) -> Any:
     """Validate the envelope and create the profile under ``name``.
 
@@ -126,8 +127,11 @@ def import_profile(
     # A MISSING/empty checksum is still accepted: ``ProfileEnvelope.checksum``
     # defaults to ``""`` and hand-authored envelopes legitimately omit it.
     # Only a checksum that is PRESENT and WRONG is rejected — that is
-    # unambiguously corruption, never an authoring style.
-    if env.checksum and isinstance(data, dict) and not verify_checksum(data):
+    # unambiguously corruption, never an authoring style. ``force`` is the
+    # documented escape hatch for a deliberately hand-edited envelope; it
+    # waives this check ONLY — the flag screen below (via ``catalog.create``)
+    # still applies unconditionally.
+    if not force and env.checksum and isinstance(data, dict) and not verify_checksum(data):
         raise BadRequest(
             "profile envelope checksum does not match its body — the file is "
             "corrupt or was modified after export",

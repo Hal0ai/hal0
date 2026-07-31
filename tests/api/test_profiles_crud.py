@@ -703,12 +703,15 @@ def test_legacy_profile_cannot_gain_a_managed_flag(legacy_client: TestClient) ->
 def test_legacy_profile_edit_keeping_hardware_flags_reports_the_hardware_denial(
     legacy_client: TestClient,
 ) -> None:
-    """Ordering guarantee: when a changed flag string still carries a hardware
-    flag, the operator is told about the hardware flag (the thing that belongs
-    on the slot), not whatever else is wrong."""
+    """Ordering guarantee: when a changed flag string introduces BOTH a new
+    hardware flag and a new managed flag, the operator is told about the
+    hardware flag (the thing that belongs on the slot), not whatever else is
+    wrong. ``-dev`` is already inherited from the legacy value (#1411
+    grandfathering), so this uses ``-ngl`` — a hardware flag with no prior
+    value to inherit — to keep the hardware screen live in this update."""
     r = legacy_client.put(
         "/api/profiles/old-custom",
-        json={"flags": "-fa on -dev Vulkan0 --threads 8 --ctx-size 4096"},
+        json={"flags": "-fa on -dev Vulkan0 --threads 8 -ngl 999 --ctx-size 4096"},
     )
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "slot.hardware_flag_denied"

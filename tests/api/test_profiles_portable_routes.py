@@ -184,7 +184,7 @@ class TestImportCommit:
         env = client.post(f"/api/profiles/{_seed_name()}/export").json()
         env.pop("checksum")
         r = client.post("/api/profiles/import", json={"envelope": env, "name": "no-sum"})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
 
 # ── #1416: commit verifies the checksum + screens the flags ──────────────────

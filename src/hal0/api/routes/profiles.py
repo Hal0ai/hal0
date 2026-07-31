@@ -273,7 +273,10 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
     # for those, and reporting a checksum mismatch for `{"kind": "nope"}` would
     # point the operator at the wrong problem.
     env = parse_envelope(envelope)
-    if isinstance(envelope, dict) and not force and not verify_checksum(envelope):
+    # A missing/empty checksum is not corruption (hand-authored envelopes
+    # legitimately omit it) — only a checksum that is PRESENT and WRONG is
+    # rejected. Mirrors import_profile()'s own check in profiles/portable.py.
+    if isinstance(envelope, dict) and not force and env.checksum and not verify_checksum(envelope):
         raise BadRequest(
             "envelope checksum does not match its profile body — the file was "
             "hand-edited or corrupted in transit. Re-export it, or pass "
@@ -290,7 +293,7 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
     async with record_action(
         request, category="profile", action="profile.import", target=name
     ) as rec:
-        resolved = import_profile(envelope, name, ProfileCatalog())
+        resolved = import_profile(envelope, name, ProfileCatalog(), force=force)
         rec.after = {"name": name}
     response.status_code = 201
     return {"dry_run": False, "profile": resolved.to_dict()}
