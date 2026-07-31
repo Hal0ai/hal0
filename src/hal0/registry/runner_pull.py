@@ -142,7 +142,7 @@ def persist_pull_job(job: RunnerPullJob) -> None:
                 json.dump(job.as_dict(), f)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, path)
+            os.replace(tmp_path, path)  # type: ignore[arg-type]
             tmp_path = None
         finally:
             if tmp_path is not None:

@@ -67,6 +67,18 @@ def schedule_pull_task(
     return task
 
 
+def _default_provider_factory() -> Any:
+    from hal0.providers.container import container_provider
+
+    return container_provider()
+
+
+#: Monkeypatch seam for tests (mirrors ``routes.models._run_pull_with_events``):
+#: point this at a fake ``pull_image_stream``-shaped object instead of the
+#: real podman-backed singleton.
+provider_factory: Any = _default_provider_factory
+
+
 async def enqueue(request: Request, *, image_id: str) -> dict[str, object]:
     """Start a background pull for ``image_id`` and return a job handle.
 
@@ -101,7 +113,7 @@ async def enqueue(request: Request, *, image_id: str) -> dict[str, object]:
             data={"image_id": image_id, "image_ref": image_ref},
         )
 
-    provider = request.app.state.container_provider
+    provider = provider_factory()
 
     async def _run() -> None:
         try:
