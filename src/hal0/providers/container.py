@@ -195,7 +195,7 @@ def _effective_backend_and_device_class(
             device_class = "npu" if recipe == "flm" else ("cpu" if device == "cpu" else "gpu")
             return backend, device_class
         # No ``device`` at all: a pre-pivot TOML or a hand-built dict. Retain the
-        # legacy slot-level ``backend`` mirror, then the profile's inert hint.
+        # pre-pivot slot-level ``backend`` mirror, then the profile's inert hint.
         sb = slot_cfg.get("backend")
         if isinstance(sb, str) and sb:
             return sb, getattr(profile, "device_class", None)
@@ -1440,7 +1440,7 @@ def _resolve_llama_scalars(
         # still fell through ``or "gpu"`` and requested /dev/kfd + /dev/dri on a
         # ``device="cpu"`` slot. The ``or "gpu"`` floor is retained ONLY for a
         # slot_cfg that declares no device at all (hand-built dict / pre-pivot
-        # TOML) so a legacy GPU slot is never stranded on CPU.
+        # TOML) so an old GPU slot is never stranded on CPU.
         "device_class": str(effective_device_class or "gpu"),
         "backend": effective_backend,
         # Back-compat mirror of ``backend`` under its former name; some callers
