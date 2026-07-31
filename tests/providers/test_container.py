@@ -17,8 +17,10 @@ from __future__ import annotations
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from hal0.config.schema import (
     FAMILY_DEFAULTS,
@@ -33,6 +35,8 @@ from hal0.providers import container as _container_mod
 from hal0.providers._gpu import resolve_gpu_group_ids
 from hal0.providers.base import RuntimeLaunchPlan
 from hal0.providers.container import (
+    _CTX_DENSE_CAP,
+    _CTX_SAFE_FALLBACK,
     _MODEL_STORE_MOUNT,
     _UNIT_STOP_TIMEOUT_S,
     ContainerProvider,
@@ -42,6 +46,7 @@ from hal0.providers.container import (
     _llama_launch_plan,
     _loopback_fence_command,
     _render_quadlet_from_plan,
+    _resolve_context_size,
     _resolve_model_path,
     resolved_command_for_slot,
 )
@@ -719,10 +724,15 @@ class TestLoadSync:
         assert (tmp_path / "test.service").exists()
 
     def test_load_sync_threads_ctx_size_and_model_tune(self, tmp_path: Path) -> None:
-        """load_sync bakes the slot ``context_size`` (base --ctx-size, still
-        slot-resolved) AND the MODEL's materialized ``defaults.extra_args`` into
-        the rendered unit. FLAGS-own: a slot ``[server].extra_args`` is inert —
-        the model owns the tune, so the override-kv rides ``model_info.defaults``."""
+        """load_sync bakes the resolved context window (base --ctx-size) AND the
+        MODEL's materialized ``defaults.extra_args`` into the rendered unit.
+        FLAGS-own: a slot ``[server].extra_args`` is inert — the model owns the
+        tune, so the override-kv rides ``model_info.defaults``.
+
+        CTX-own (v1.0): the window comes from the MODEL's
+        ``defaults.context_size``. The slot's ``[model].context_size`` is a
+        ceiling only, and here it sits ABOVE the model's window, so it does not
+        move the answer."""
         profile = _moe_profile()
         provider = ContainerProvider()
         unit_file = tmp_path / "test.service"
@@ -752,12 +762,15 @@ class TestLoadSync:
                 {
                     "path": "/mnt/ai-models/model.gguf",
                     "_model_key": "model",
-                    "defaults": {"extra_args": "--override-kv k=bool:false"},
+                    "defaults": {
+                        "extra_args": "--override-kv k=bool:false",
+                        "context_size": 131072,
+                    },
                 },
             )
 
         unit = unit_file.read_text()
-        assert "--ctx-size 131072" in unit  # slot context_size still reaches base
+        assert "--ctx-size 131072" in unit  # the MODEL's window reaches base
         assert "--override-kv k=bool:false" in unit  # model tune reaches launch
         assert "IGNORED=bool:true" not in unit  # slot extra_args inert
 
@@ -862,7 +875,13 @@ class TestLoadSync:
 
     def test_resolved_command_includes_ctx_size(self) -> None:
         """The displayed resolved_command must show --ctx-size so it matches
-        what actually launches."""
+        what actually launches — including the v1.0 ownership rule.
+
+        ``m`` is a registry miss, so the model declares no window and the
+        resolver lands on the 8192 safe floor. The slot's ``context_size``
+        131072 is a CEILING above that floor, so it cannot raise it. Preview and
+        launch share ``_resolve_context_size``, so what an operator sees here is
+        exactly what the unit gets."""
         profile = _moe_profile()
         cfg = {
             "profile": "rocm",
@@ -873,7 +892,8 @@ class TestLoadSync:
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/m.gguf")
         assert argv is not None
         assert "--ctx-size" in argv
-        assert argv[argv.index("--ctx-size") + 1] == "131072"
+        assert argv[argv.index("--ctx-size") + 1] == "8192"
+        assert argv[argv.index("--ctx-size") + 1] != "4096"  # chat@4096 incident
 
     def test_resolved_command_includes_model_alias(self) -> None:
         """resolved_command shows --alias <model id> so it matches the unit."""
@@ -1016,6 +1036,103 @@ def test_resolve_model_path_registry_miss_falls_back_to_bare_id() -> None:
     assert _resolve_model_path({"_model_key": "gemma-4-12b-it"}) == "gemma-4-12b-it"
 
 
+class TestGpuPassthroughGate:
+    """spec-hw-slot-ownership §2 — the /dev/kfd + /dev/dri passthrough gate is
+    decided by the SLOT's ``device`` enum, NEVER by the profile.
+
+    Before the 1.0 fix, ``_resolve_llama_scalars`` read ``profile.device_class``
+    and defaulted it to ``"gpu"`` when unset, so a ``cpu-chat`` profile (all 16
+    seeds leave ``device_class`` unset) on a ``device="cpu"`` slot still
+    requested real GPU device nodes. Both directions are asserted: a cpu/npu
+    slot must get NOTHING, and a gpu slot must NOT be stranded on CPU.
+    """
+
+    _NODES: ClassVar[list[str]] = ["/dev/kfd", "/dev/dri/renderD128"]
+
+    def _spec(self, cfg: dict[str, Any], profile: ProfileConfig):
+        provider = ContainerProvider()
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=list(self._NODES),
+            ),
+            # Existence-filtered at the call site; force present so a CI host
+            # with no /dev/kfd still exercises the gate rather than the filter.
+            patch("hal0.providers.container.os.path.exists", return_value=True),
+            patch("hal0.providers.container.resolve_gpu_group_ids", return_value=[993, 44]),
+        ):
+            return provider.container_spec(cfg, _model_info())
+
+    # ── the headline bug: cpu-chat on a device="cpu" slot ────────────────────
+
+    def test_cpu_slot_with_device_agnostic_profile_gets_no_gpu_nodes(self) -> None:
+        """The exact shipped shape: the ``cpu-chat`` seed leaves ``device_class``
+        unset, so the old ``or "gpu"`` floor mounted /dev/kfd + /dev/dri into a
+        CPU slot's container."""
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        assert cpu_chat.device_class is None, "the cpu-chat seed is device-agnostic"
+        spec = self._spec(_slot_cfg(device="cpu", profile="cpu-chat"), cpu_chat)
+        assert spec.devices == []
+        assert spec.group_add == []
+
+    def test_cpu_slot_ignores_a_profile_that_claims_gpu(self) -> None:
+        """A legacy/imported profile carrying ``device_class="gpu"`` (e.g. the
+        published ``chat-long-context`` artifact) must NOT drag GPU nodes onto a
+        ``device="cpu"`` slot — the hint is inert."""
+        spec = self._spec(
+            _slot_cfg(device="cpu"), ProfileConfig(flags="-fa on", device_class="gpu")
+        )
+        assert spec.devices == []
+        assert spec.group_add == []
+
+    def test_npu_slot_gets_no_gpu_nodes(self) -> None:
+        spec = self._spec(_slot_cfg(device="npu"), ProfileConfig(flags="", device_class="gpu"))
+        assert spec.devices == []
+        assert spec.group_add == []
+
+    # ── the other direction: never strand a real GPU slot on CPU ────────────
+
+    def test_gpu_slot_with_device_agnostic_profile_still_gets_nodes(self) -> None:
+        """All 16 seeds leave ``device_class`` unset — a gpu-rocm slot bound to
+        one must still get real passthrough."""
+        spec = self._spec(_slot_cfg(device="gpu-rocm"), _moe_profile())
+        assert spec.devices == self._NODES
+        assert spec.group_add == ["993", "44"]
+
+    def test_gpu_slot_ignores_a_profile_that_claims_cpu(self) -> None:
+        spec = self._spec(
+            _slot_cfg(device="gpu-vulkan"), ProfileConfig(flags="-fa on", device_class="cpu")
+        )
+        assert spec.devices == self._NODES
+
+    def test_cuda_slot_uses_cdi_from_the_slot_device_not_profile_backend(self) -> None:
+        """NVIDIA is selected by ``device="gpu-cuda"``. CDI names are not paths,
+        so no existence filter and no --group-add."""
+        spec = self._spec(_slot_cfg(device="gpu-cuda"), _moe_profile())
+        assert spec.devices == ["nvidia.com/gpu=all"]
+        assert spec.group_add == []
+
+    def test_rocm_slot_does_not_take_cdi_from_a_profile_backend_cuda(self) -> None:
+        """A profile claiming ``backend="cuda"`` must not flip a gpu-rocm slot
+        onto the CDI path — the vendor comes from the slot's device."""
+        spec = self._spec(
+            _slot_cfg(device="gpu-rocm"), ProfileConfig(flags="-fa on", backend="cuda")
+        )
+        assert spec.devices == self._NODES
+        assert "nvidia.com/gpu=all" not in spec.devices
+
+    # ── back-compat: a hand-built / pre-pivot dict with no device at all ────
+
+    def test_deviceless_slot_cfg_falls_back_to_gpu_not_cpu(self) -> None:
+        """A pre-pivot slot dict with no ``device`` key keeps the historical
+        gpu default rather than silently losing its GPU."""
+        cfg = _slot_cfg()
+        cfg.pop("device")
+        spec = self._spec(cfg, _moe_profile())
+        assert spec.devices == self._NODES
+
+
 class TestContextSizeDerive:
     """Regression guard for the 2026-06-15 chat@4096 incident: a slot whose
     TOML pins no context_size must NEVER silently inherit llama-server's 4096
@@ -1051,10 +1168,143 @@ class TestContextSizeDerive:
         mi = _model_info(defaults={"context_size": 16384})
         assert self._ctx(self._spec(cfg, mi).command) == "16384"
 
-    def test_explicit_ctx_always_wins_over_native(self) -> None:
-        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
-        mi = _model_info(metadata={"context_length": 262144})
+
+class TestContextSizeOwnership:
+    """v1.0 ownership split — the MODEL owns the context window; the slot's
+    ``[model].context_size`` is a hardware CEILING, never an override.
+
+    Before this, ``_resolve_context_size`` returned the slot value OUTRIGHT
+    whenever it was set, so the model drawer's "Context size" and the slot
+    drawer's "Context size" both claimed the same field and the slot silently
+    won. The invariant now: the effective window can only STAY THE SAME or
+    SHRINK relative to what the model asks for — never grow.
+    """
+
+    def _spec(self, cfg: dict[str, Any], model_info: dict[str, Any]):
+        provider = ContainerProvider()
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            return provider.container_spec(cfg, model_info)
+
+    @staticmethod
+    def _ctx(command: list[str]) -> str | None:
+        return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
+
+    # ── the model is authoritative ───────────────────────────────────────────
+
+    def test_model_declared_ctx_outranks_gguf_native(self) -> None:
+        """An explicit ``defaults.context_size`` is a deliberate operator choice
+        and is NOT dense-capped — the reverse of the pre-1.0 order, which let a
+        262144 arch max shadow it."""
+        cfg = _slot_cfg()
+        mi = _model_info(metadata={"context_length": 262144}, defaults={"context_size": 131072})
         assert self._ctx(self._spec(cfg, mi).command) == "131072"
+
+    def test_slot_ctx_no_longer_raises_the_model_window(self) -> None:
+        """THE HEADLINE FIX. Slot asks for 131072, model says 16384 → the model
+        wins. Pre-1.0 this returned 131072."""
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
+        mi = _model_info(defaults={"context_size": 16384})
+        assert self._ctx(self._spec(cfg, mi).command) == "16384"
+
+    def test_slot_ctx_cannot_inflate_the_safe_fallback(self) -> None:
+        """A slot ceiling above a model with NO declared window resolves to the
+        8192 floor, not the slot's number."""
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
+        mi = _model_info()
+        assert self._ctx(self._spec(cfg, mi).command) == "8192"
+
+    # ── but the slot ceiling still clamps (the installer's VRAM budget) ──────
+
+    def test_slot_ceiling_below_model_window_still_clamps(self) -> None:
+        """#1108: ``hardware.recommend`` writes a VRAM-budget clamp into the
+        slot. Dropping it outright would reopen the first-warm OOM it exists to
+        prevent, so a ceiling BELOW the model's window is still honored."""
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 8192})
+        mi = _model_info(defaults={"context_size": 131072})
+        assert self._ctx(self._spec(cfg, mi).command) == "8192"
+
+    def test_slot_ceiling_clamps_the_gguf_native_window_too(self) -> None:
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 4096})
+        mi = _model_info(metadata={"context_length": 131072})
+        assert self._ctx(self._spec(cfg, mi).command) == "4096"
+
+    def test_equal_ceiling_and_model_window_is_a_no_op(self) -> None:
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 16384})
+        mi = _model_info(defaults={"context_size": 16384})
+        assert self._ctx(self._spec(cfg, mi).command) == "16384"
+
+    # ── the monotonic guarantee, stated directly on the resolver ────────────
+
+    def test_effective_window_never_exceeds_the_model_window(self) -> None:
+        """Property: for any slot ceiling, effective <= what the model asked
+        for. This is what makes the change safe to ship onto existing boxes —
+        no box can gain a KV cache it could not previously hold."""
+        mi = _model_info(defaults={"context_size": 16384})
+        model_window = _resolve_context_size(None, mi)
+        assert model_window == 16384
+        for ceiling in (None, 1024, 8192, 16384, 32768, 131072):
+            assert _resolve_context_size(ceiling, mi) <= model_window
+
+    def test_unset_ceiling_means_follow_the_model(self) -> None:
+        mi = _model_info(defaults={"context_size": 16384})
+        assert _resolve_context_size(None, mi) == 16384
+
+    # ── #1414: making the model authoritative must not entrench a bad row ────
+    #
+    # `PUT /api/models/{id}` accepted 0 / -1 / 99999999 with a 200 and 500'd on
+    # an unparseable value. The write boundary is being tightened separately
+    # (#1432) — but deliberately only for NEW writes, so rows already persisted
+    # stay readable and therefore fixable. Those rows are still on disk and
+    # still reach this resolver.
+    #
+    # Before the ownership flip the damage was masked: the slot's
+    # `[model].context_size` won outright, so a sane slot covered for a garbage
+    # model row. Now the model is authoritative and the value goes straight to
+    # `--ctx-size`. Making the model the owner WITHOUT this guard would have
+    # turned a bad-but-survivable row into a slot that never warms.
+
+    @pytest.mark.parametrize("bad", ["abc", "8k", "", [1], {}, 1.5])
+    def test_unparseable_model_ctx_falls_back_instead_of_launching(self, bad: Any) -> None:
+        """An int() failure yields the native window / safe floor, never a
+        crash and never a garbage `--ctx-size`."""
+        mi = _model_info(defaults={"context_size": bad})
+        assert _resolve_context_size(None, mi) == _CTX_SAFE_FALLBACK
+
+    @pytest.mark.parametrize("bad", [-1, -8192, 1, 127, 2**24 + 1, 99999999])
+    def test_implausible_model_ctx_falls_back_instead_of_launching(self, bad: int) -> None:
+        """Outside [128, 2**24] is ignored, NOT clamped — a half-applied garbage
+        number is harder to diagnose than falling through, and the operator's
+        intent is unrecoverable either way."""
+        mi = _model_info(defaults={"context_size": bad})
+        assert _resolve_context_size(None, mi) == _CTX_SAFE_FALLBACK
+
+    def test_implausible_model_ctx_still_defers_to_the_native_window(self) -> None:
+        """Falling back means falling through the NORMAL chain, so a model with
+        a real GGUF window still gets it rather than the bare floor."""
+        mi = _model_info(metadata={"context_length": 131072}, defaults={"context_size": -1})
+        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
+
+    def test_zero_model_ctx_is_treated_as_unset(self) -> None:
+        """0 was already falsy-skipped; pinned so the new range check does not
+        change that path's answer."""
+        mi = _model_info(metadata={"context_length": 16384}, defaults={"context_size": 0})
+        assert _resolve_context_size(None, mi) == 16384
+
+    @pytest.mark.parametrize("ok", [128, 4096, 131072, 2**24])
+    def test_plausible_boundary_values_are_honored(self, ok: int) -> None:
+        """The guard must not reject legitimate windows, including both bounds."""
+        mi = _model_info(defaults={"context_size": ok})
+        assert _resolve_context_size(None, mi) == ok
+
+    def test_bad_model_ctx_reaches_the_launch_command_as_the_fallback(self) -> None:
+        """End-to-end through `container_spec`: the emitted `--ctx-size` is a
+        usable number, not `-1`."""
+        cfg = _slot_cfg()
+        mi = _model_info(defaults={"context_size": -1})
+        assert self._ctx(self._spec(cfg, mi).command) == str(_CTX_SAFE_FALLBACK)
 
 
 class TestFamilyDefaults:

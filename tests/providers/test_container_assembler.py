@@ -19,10 +19,12 @@ from hal0.config.schema import ProfileConfig
 from hal0.errors import BadRequest
 from hal0.providers.container import (
     ContainerProvider,
+    _llama_argv_segments,
     _llama_launch_plan,
     _render_quadlet_from_plan,
     resolved_command_for_slot,
 )
+from hal0.slots.argv import resolve_argv
 
 
 def _render_from_plan(token, plan, *, runtime_bin=None, publish_host="127.0.0.1"):
@@ -304,3 +306,179 @@ def test_env_empty_when_no_server_env() -> None:
         image="i:1", port=8095, model_path="/m.gguf", flags_str="", devices=[], group_ids=[]
     )
     assert plan.env == {}
+
+
+# ── 6. GOLDEN: the full ordered launch argv, pinned literally ────────────────
+#
+# Everything above (and every other argv test in the tree) asserts SEGMENT
+# MEMBERSHIP — `"-ngl" in command`, `command[command.index("--threads") + 1]`,
+# `set(labels) == {...}`. Membership and index-relative lookups are invariant
+# under a REORDER of `_llama_argv_segments`' return list, so today the entire
+# suite passes if someone swaps `chat_template` and `mmproj`, or hoists
+# `slot_hardware` above `model_extra_args`. That last one silently inverts the
+# documented precedence chain
+#
+#     base < model_extra_args < slot_hardware < chat_template < mmproj
+#
+# and hands a model's `defaults.extra_args` the power to override the slot's
+# typed hardware grid — the exact ownership inversion spec-hw-slot-ownership §2
+# exists to prevent.
+#
+# These tests pin the literal, fully-ordered argv. Any reorder, insertion,
+# removal, or renaming of a segment fails them with a readable diff.
+
+
+#: Every segment populated, with a deliberate cross-segment `--threads`
+#: collision (model says 3, slot says 16). Update this literal ONLY together
+#: with a deliberate, documented change to the launch shape.
+GOLDEN_MAXIMAL_ARGV: list[str] = [
+    # base
+    "--host", "0.0.0.0",
+    "--port", "8081",
+    "--model", "/var/lib/hal0/models/qwen3-4b/model.gguf",
+    "--alias", "hal0/qwen3-4b",
+    "--ctx-size", "32768",
+    # model_extra_args (the model's logical tune; its --threads 3 lost)
+    "-fa", "on",
+    "-b", "2048",
+    "-ub", "512",
+    "--jinja",
+    # slot_hardware (the slot's typed physical grid — wins the collision)
+    "-ngl", "99",
+    "--threads", "16",
+    # chat_template
+    "--chat-template-file", "/etc/hal0/templates/qwen3.jinja",
+    # mmproj
+    "--mmproj", "/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
+]  # fmt: skip
+
+
+def _maximal_segments() -> list[tuple[str, list[str]]]:
+    """Every segment populated. `profile_flags`, `slot_parallel` and
+    `extra_args` are threaded in deliberately: they are inert (deleted at the
+    top of the builder) and must contribute NOTHING to the golden argv."""
+    return _llama_argv_segments(
+        port=8081,
+        model_path="/var/lib/hal0/models/qwen3-4b/model.gguf",
+        model_alias="hal0/qwen3-4b",
+        context_size=32768,
+        model_defaults={"extra_args": "-fa on -b 2048 -ub 512 --threads 3 --jinja"},
+        slot_n_gpu_layers=99,
+        slot_threads=16,
+        chat_template_path="/etc/hal0/templates/qwen3.jinja",
+        mmproj="/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
+        # inert — must not appear anywhere in GOLDEN_MAXIMAL_ARGV
+        profile_flags="-ctk q8_0 -ctv q8_0",
+        slot_parallel=4,
+        extra_args="--no-webui",
+    )
+
+
+def test_golden_full_ordered_launch_argv() -> None:
+    """LITERAL equality on the whole argv — the reorder tripwire."""
+    assert resolve_argv(_maximal_segments()).argv == GOLDEN_MAXIMAL_ARGV
+
+
+def test_golden_segment_order_is_the_documented_precedence_chain() -> None:
+    """The labels, in order. `set()` comparisons elsewhere cannot catch a swap;
+    this is a list comparison."""
+    labels = [label for label, _tokens in _maximal_segments()]
+    assert labels == [
+        "base",
+        "model_extra_args",
+        "slot_hardware",
+        "chat_template",
+        "mmproj",
+    ]
+
+
+def test_golden_provenance_pins_which_segment_won_each_flag() -> None:
+    """The other half of the pin: not just the token order, but WHICH source
+    won every surviving flag. A reorder that happened to preserve token order
+    would still move a winner."""
+    resolved = resolve_argv(_maximal_segments())
+    assert [(p.flag, p.value, p.source) for p in resolved.provenance] == [
+        ("--host", "0.0.0.0", "base"),
+        ("--port", "8081", "base"),
+        ("--model", "/var/lib/hal0/models/qwen3-4b/model.gguf", "base"),
+        ("--alias", "hal0/qwen3-4b", "base"),
+        ("--ctx-size", "32768", "base"),
+        ("-fa", "on", "model_extra_args"),
+        ("-b", "2048", "model_extra_args"),
+        ("-ub", "512", "model_extra_args"),
+        ("--jinja", None, "model_extra_args"),
+        ("-ngl", "99", "slot_hardware"),
+        ("--threads", "16", "slot_hardware"),
+        ("--chat-template-file", "/etc/hal0/templates/qwen3.jinja", "chat_template"),
+        ("--mmproj", "/var/lib/hal0/models/qwen3-4b/mmproj.gguf", "mmproj"),
+    ]
+    # exactly one token pair was dropped: the model's losing `--threads 3`
+    assert resolved.removed == 1
+
+
+def test_golden_launch_plan_command_equals_the_golden_argv() -> None:
+    """The plan the load path actually renders — `_llama_launch_plan` collapses
+    the same segments — carries the identical argv. Pins the plan level too, so
+    a change to how the plan assembles the command cannot drift from the
+    builder."""
+    plan = _llama_launch_plan(
+        image="ghcr.io/hal0ai/hal0-rocmfpx:test",
+        port=8081,
+        model_path="/var/lib/hal0/models/qwen3-4b/model.gguf",
+        flags_str="-ctk q8_0 -ctv q8_0",
+        devices=[],
+        group_ids=[],
+        context_size=32768,
+        extra_args="--no-webui",
+        model_alias="hal0/qwen3-4b",
+        chat_template_path="/etc/hal0/templates/qwen3.jinja",
+        mmproj="/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
+        model_defaults={"extra_args": "-fa on -b 2048 -ub 512 --threads 3 --jinja"},
+        slot_n_gpu_layers=99,
+        slot_threads=16,
+        slot_parallel=4,
+    )
+    assert plan.command == GOLDEN_MAXIMAL_ARGV
+
+
+def test_golden_minimal_argv() -> None:
+    """The floor: nothing but a port and a model path. Pins that no segment
+    leaks a default token in when its input is absent."""
+    argv = resolve_argv(_llama_argv_segments(port=8081, model_path="/m.gguf")).argv
+    assert argv == ["--host", "0.0.0.0", "--port", "8081", "--model", "/m.gguf"]
+
+
+def test_golden_later_segments_beat_a_model_tune_claiming_their_flags() -> None:
+    """Adversarial ordering proof. `--chat-template-file` and `--mmproj` are NOT
+    in `MANAGED_ARGS_DENYLIST`, so a model's `defaults.extra_args` can smuggle
+    them through the screen. They must still lose to the real `chat_template` /
+    `mmproj` segments — which is true only because those segments come LAST.
+    Hoist `model_extra_args` and hal0 loads the wrong projector."""
+    argv = resolve_argv(
+        _llama_argv_segments(
+            port=8081,
+            model_path="/m.gguf",
+            context_size=4096,
+            model_defaults={
+                "extra_args": (
+                    "--chat-template-file /tmp/evil.jinja --mmproj /tmp/evil.gguf --threads 1"
+                )
+            },
+            slot_threads=16,
+            slot_n_gpu_layers=0,
+            chat_template_path="/etc/hal0/templates/real.jinja",
+            mmproj="/models/real-mmproj.gguf",
+        )
+    ).argv
+    assert argv == [
+        "--host", "0.0.0.0",
+        "--port", "8081",
+        "--model", "/m.gguf",
+        "--ctx-size", "4096",
+        "-ngl", "0",
+        "--threads", "16",
+        "--chat-template-file", "/etc/hal0/templates/real.jinja",
+        "--mmproj", "/models/real-mmproj.gguf",
+    ]  # fmt: skip
+    assert "/tmp/evil.jinja" not in argv
+    assert "/tmp/evil.gguf" not in argv

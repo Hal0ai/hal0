@@ -2182,16 +2182,16 @@ class SlotManager:
         # same single fold (:func:`hal0.slot_config.fold_ctx_size_alias`)
         # the merge/update path uses.
         fold_ctx_size_alias(cfg_dict)
-        # Persist a concrete context window when the operator left it unset, so
-        # the TOML, the dashboard, and the running container all agree. The
-        # provider's load-path derive is the belt-and-suspenders fallback; this
-        # makes the chosen window visible at create time (chat@4096 incident).
+        # v1.0: do NOT backfill [model].context_size here. The MODEL owns the
+        # context window (providers.container._resolve_context_size) and a
+        # slot-level value is now only a hardware CEILING. Stamping the model's
+        # current window onto the new slot would freeze that ceiling at
+        # create-time: raising the model's context size later would be silently
+        # clamped back down by a number the operator never chose. Leaving it
+        # unset means the slot follows the model, which is the whole point of the
+        # partition — and the launch path still guarantees a concrete window
+        # (never llama-server's silent 4096, chat@4096 incident).
         model_tbl = cfg_dict.get("model")
-        if isinstance(model_tbl, dict) and model_tbl.get("context_size") is None:
-            from hal0.providers.container import _resolve_context_size
-
-            model_info = await self._resolve_model_info(model_tbl.get("default"))
-            model_tbl["context_size"] = _resolve_context_size(None, model_info)
         # Q1 (model profiles): a new slot bound to a model but with NO explicit
         # profile adopts the model's preferred profile when it fits the slot's
         # device/type. An operator's explicit create-time profile is left

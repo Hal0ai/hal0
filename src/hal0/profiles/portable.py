@@ -100,12 +100,14 @@ def import_profile(
     catalog: Any,
     *,
     profile_path: Path | None = None,
+    force: bool = False,
 ) -> Any:
     """Validate the envelope and create the profile under ``name``.
 
     ``catalog`` is a ProfileCatalog (duck-typed: needs ``create(name, ProfileConfig)``).
-    Raises BadRequest for a bad/too-new envelope; the catalog raises Conflict
-    (``profiles.exists``) on a duplicate name. Returns the created ResolvedProfile.
+    Raises BadRequest for a bad/too-new envelope or a checksum that does not
+    match the body; the catalog raises Conflict (``profiles.exists``) on a
+    duplicate name. Returns the created ResolvedProfile.
     """
     env = parse_envelope(data)
     if env.schema_version > PROFILE_SCHEMA_VERSION_CURRENT:
@@ -114,6 +116,30 @@ def import_profile(
             f"v{PROFILE_SCHEMA_VERSION_CURRENT}",
             code="profiles.envelope_too_new",
             details={"got": env.schema_version, "supported": PROFILE_SCHEMA_VERSION_CURRENT},
+        )
+    # #1416 — the commit path verifies the checksum, not just ``dry_run``.
+    #
+    # ``POST /api/profiles/import`` reported ``checksum_ok`` on a dry run and
+    # then imported without ever checking it again, so a tampered or truncated
+    # envelope committed silently and the dry-run report was advisory theatre.
+    # The checksum is the only integrity signal a portable profile carries.
+    #
+    # A MISSING/empty checksum is still accepted: ``ProfileEnvelope.checksum``
+    # defaults to ``""`` and hand-authored envelopes legitimately omit it.
+    # Only a checksum that is PRESENT and WRONG is rejected — that is
+    # unambiguously corruption, never an authoring style. ``force`` is the
+    # documented escape hatch for a deliberately hand-edited envelope; it
+    # waives this check ONLY — the flag screen below (via ``catalog.create``)
+    # still applies unconditionally.
+    if not force and env.checksum and isinstance(data, dict) and not verify_checksum(data):
+        raise BadRequest(
+            "profile envelope checksum does not match its body — the file is "
+            "corrupt or was modified after export",
+            code="profiles.checksum_mismatch",
+            details={
+                "expected": env.checksum,
+                "actual": _checksum(data.get("profile") or {}),
+            },
         )
     # (forward-compat seam: older schema_version would migrate here; only v1 exists.)
     return catalog.create(name, env.profile)

@@ -567,3 +567,160 @@ def test_create_with_cloned_from_201_and_listed(client: TestClient) -> None:
 def test_seed_profiles_have_null_cloned_from(client: TestClient) -> None:
     listed = client.get("/api/profiles").json()
     assert listed and all(p["cloned_from"] is None for p in listed)
+
+
+# ── 1c: the inert fit hints are not stamped with a hardware claim ─────────────
+
+
+def test_create_without_device_class_leaves_it_unset(client: TestClient) -> None:
+    """`ProfileBody.device_class` defaulted to `"gpu"`, so every profile created
+    without one silently acquired a hardware claim it never asked for — on a
+    field that (before 81e1e206) gated real /dev/kfd passthrough. A tuning-only
+    profile is device-AGNOSTIC; the default is now None, matching ProfileConfig
+    and all 16 seeds."""
+    r = client.post("/api/profiles", json={"name": "agnostic", "flags": "-fa on"})
+    assert r.status_code == 201, r.text
+    assert r.json()["device_class"] is None
+    # and it survives the round-trip through the on-disk catalog
+    listed = client.get("/api/profiles").json()
+    entry = next(p for p in listed if p["name"] == "agnostic")
+    assert entry["device_class"] is None
+
+
+def test_create_with_explicit_device_class_still_honored(client: TestClient) -> None:
+    """The hint is inert, not forbidden — an operator may still declare a fit
+    hint, and the published chat-long-context artifact carries one."""
+    r = client.post(
+        "/api/profiles",
+        json={"name": "gpu-hinted", "flags": "-fa on", "device_class": "gpu"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["device_class"] == "gpu"
+
+
+def test_cuda_backend_accepted_on_create_and_update(client: TestClient) -> None:
+    """`ProfileConfig.backend` accepts rocm|vulkan|cuda but the route DTOs only
+    accepted rocm|vulkan, so a CUDA profile could be imported yet 422'd on every
+    subsequent PUT — un-editable through the API that created it."""
+    r = client.post(
+        "/api/profiles",
+        json={"name": "cuda-tune", "flags": "-fa on", "device_class": "gpu", "backend": "cuda"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["backend"] == "cuda"
+    r2 = client.put("/api/profiles/cuda-tune", json={"backend": "cuda", "intent": "NVIDIA"})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["backend"] == "cuda"
+    assert r2.json()["intent"] == "NVIDIA"
+
+
+# ── #1411: a pre-1.0 custom profile must stay editable ────────────────────────
+
+
+def _seed_legacy_profiles_toml(home: str, name: str, flags: str) -> Path:
+    """Write a custom profile carrying flags that today's §5 screen rejects.
+
+    This is what a 0.9.8 box has on disk: `-dev`/`--threads` were legal on a
+    profile before spec-hw-slot-ownership §5. It must be written directly —
+    the API (correctly) refuses to create one.
+    """
+    root = Path(home) / "etc" / "hal0"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "profiles.toml"
+    path.write_text(
+        f'[profile.{name}]\nflags = "{flags}"\nmtp = false\nintent = "Legacy"\nquant = ""\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.fixture
+def legacy_client(tmp_hal0_home: str) -> Iterator[TestClient]:
+    """Client over a box that already has a pre-1.0 custom profile on disk."""
+    _seed_legacy_profiles_toml(tmp_hal0_home, "old-custom", "-fa on -dev Vulkan0 --threads 8")
+    with TestClient(create_app()) as c:
+        yield c
+
+
+def test_legacy_profile_is_visible(legacy_client: TestClient) -> None:
+    listed = legacy_client.get("/api/profiles").json()
+    entry = next(p for p in listed if p["name"] == "old-custom")
+    assert "-dev Vulkan0" in entry["flags"]
+
+
+def test_legacy_profile_metadata_edit_is_not_blocked_by_its_stored_flags(
+    legacy_client: TestClient,
+) -> None:
+    """#1411 — THE HEADLINE CASE. The dashboard round-trips the whole profile on
+    save, so editing `intent` resubmits the stored `-dev`/`--threads` flags
+    verbatim. Screening an UNCHANGED value rejected a write that changes
+    nothing, making every pre-existing custom profile permanently un-editable
+    after upgrade, with no in-product way to fix it."""
+    r = legacy_client.put(
+        "/api/profiles/old-custom",
+        json={"flags": "-fa on -dev Vulkan0 --threads 8", "intent": "Renamed"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["intent"] == "Renamed"
+    assert r.json()["flags"] == "-fa on -dev Vulkan0 --threads 8"
+
+
+def test_legacy_profile_edit_omitting_flags_also_works(legacy_client: TestClient) -> None:
+    """A client that PATCHes only the field it changed was never broken; pinned
+    so the delta rule does not regress it."""
+    r = legacy_client.put("/api/profiles/old-custom", json={"intent": "Renamed"})
+    assert r.status_code == 200, r.text
+    assert r.json()["intent"] == "Renamed"
+
+
+def test_legacy_profile_cleaning_its_flags_is_allowed(legacy_client: TestClient) -> None:
+    """The migration path: an operator CAN fix the offending flags."""
+    r = legacy_client.put("/api/profiles/old-custom", json={"flags": "-fa on -b 512"})
+    assert r.status_code == 200, r.text
+    assert r.json()["flags"] == "-fa on -b 512"
+
+
+def test_legacy_profile_cannot_gain_a_new_hardware_flag(legacy_client: TestClient) -> None:
+    """The partition is still fully enforced on any ACTUAL change — the
+    exemption is for byte-identical resubmission only, not a general amnesty."""
+    r = legacy_client.put(
+        "/api/profiles/old-custom",
+        json={"flags": "-fa on -dev Vulkan0 --threads 8 -ngl 999"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+
+
+def test_legacy_profile_cannot_gain_a_managed_flag(legacy_client: TestClient) -> None:
+    """Cleaning the legacy hardware flags but smuggling in a managed arg is
+    still rejected — and by the MANAGED screen, since no hardware flag remains
+    to trip the hardware screen that runs first."""
+    r = legacy_client.put("/api/profiles/old-custom", json={"flags": "-fa on --ctx-size 4096"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+
+
+def test_legacy_profile_edit_keeping_hardware_flags_reports_the_hardware_denial(
+    legacy_client: TestClient,
+) -> None:
+    """Ordering guarantee: when a changed flag string introduces BOTH a new
+    hardware flag and a new managed flag, the operator is told about the
+    hardware flag (the thing that belongs on the slot), not whatever else is
+    wrong. ``-dev`` is already inherited from the legacy value (#1411
+    grandfathering), so this uses ``-ngl`` — a hardware flag with no prior
+    value to inherit — to keep the hardware screen live in this update."""
+    r = legacy_client.put(
+        "/api/profiles/old-custom",
+        json={"flags": "-fa on -dev Vulkan0 --threads 8 -ngl 999 --ctx-size 4096"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+
+
+def test_create_is_still_fully_screened(legacy_client: TestClient) -> None:
+    """A NEW profile gets no exemption — there is no legacy value to preserve."""
+    r = legacy_client.post(
+        "/api/profiles", json={"name": "brand-new", "flags": "-fa on --threads 8"}
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"

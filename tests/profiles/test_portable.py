@@ -195,3 +195,192 @@ class TestImportProfile:
         with pytest.raises(BadRequest) as exc:
             import_profile(env, "copied", _catalog(tmp_hal0_home))
         assert exc.value.code == "slot.hardware_flag_denied"
+
+
+# ── #1416: the COMMIT path verifies the checksum, not just dry_run ───────────
+
+
+class TestImportVerifiesChecksum:
+    """``POST /api/profiles/import`` computed ``checksum_ok`` on a dry run and
+    then committed without ever checking it — the integrity signal was advisory
+    only. A tampered envelope imported silently."""
+
+    def test_tampered_body_is_rejected_on_commit(self, tmp_hal0_home: str) -> None:
+        env = export_envelope("orig", _profile(), exported_at="t")
+        env["profile"]["intent"] = "SOMETHING ELSE"  # checksum now stale
+        assert verify_checksum(env) is False
+        with pytest.raises(BadRequest) as exc:
+            import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert exc.value.code == "profiles.checksum_mismatch"
+
+    def test_tampered_flags_are_rejected_before_anything_is_written(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """The rejection must happen BEFORE ``catalog.create`` — otherwise the
+        corrupt profile is already on disk when the error surfaces."""
+        catalog = _catalog(tmp_hal0_home)
+        env = export_envelope("orig", _profile(), exported_at="t")
+        env["profile"]["flags"] = "-fa off"
+        with pytest.raises(BadRequest):
+            import_profile(env, "copied", catalog)
+        assert not any(p.name == "copied" for p in catalog.list())
+
+    def test_wrong_checksum_string_is_rejected(self, tmp_hal0_home: str) -> None:
+        env = export_envelope("orig", _profile(), exported_at="t")
+        env["checksum"] = "sha256:" + "0" * 64
+        with pytest.raises(BadRequest) as exc:
+            import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert exc.value.code == "profiles.checksum_mismatch"
+        assert exc.value.details["expected"] == env["checksum"]
+        assert exc.value.details["actual"] != env["checksum"]
+
+    def test_absent_checksum_is_still_accepted(self, tmp_hal0_home: str) -> None:
+        """A hand-authored envelope legitimately omits the checksum;
+        ``ProfileEnvelope.checksum`` defaults to ``""``. Only a checksum that is
+        PRESENT and WRONG means corruption."""
+        env = export_envelope("orig", _profile(), exported_at="t")
+        del env["checksum"]
+        resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert resolved.name == "copied"
+
+    def test_empty_checksum_is_still_accepted(self, tmp_hal0_home: str) -> None:
+        env = export_envelope("orig", _profile(), exported_at="t")
+        env["checksum"] = ""
+        resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert resolved.name == "copied"
+
+    def test_intact_envelope_still_imports(self, tmp_hal0_home: str) -> None:
+        """Guard against the check being too strict — an untouched export must
+        still import."""
+        env = export_envelope("orig", _profile(), exported_at="t")
+        resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert resolved.name == "copied"
+
+    def test_published_artifact_still_imports_with_its_real_checksum(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """The whole point of 1a: the shipped brain profile carries a real
+        checksum, so tightening import must NOT reject it."""
+        resolved = import_profile(
+            _PUBLISHED_CHAT_LONG_CONTEXT, "brain-long-ctx", _catalog(tmp_hal0_home)
+        )
+        assert resolved.name == "brain-long-ctx"
+
+
+# ── the SHIPPED artifact: exact-checksum round-trip guarantee ────────────────
+
+#: The published brain profile, byte-for-byte as it ships in
+#: ``Hal0ai/hal0-brain-sft-ROCmFPX-GGUF/chat-long-context.hal0profile.json``.
+#: Its ``device_class: "gpu"`` is exactly the field the v1.0 tuning-only rule
+#: neutralised, so this artifact is the canary for that change.
+_PUBLISHED_CHAT_LONG_CONTEXT: dict = {
+    "kind": "hal0.profile",
+    "schema_version": 1,
+    "hal0_version": "1.0.0a1",
+    "name": "chat-long-context",
+    "checksum": "sha256:241af4cd2636ac1da32a8a7ca0d856724445242cfcde88a208b702b155bdee47",
+    "profile": {
+        "flags": (
+            "-fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --no-mmap "
+            "--no-context-shift --poll 100 --poll-batch 1 --metrics --no-webui"
+        ),
+        "mtp": False,
+        "device_class": "gpu",
+        "intent": "Long-context chat",
+        "quant": "",
+    },
+}
+
+
+class TestPublishedBrainProfileRoundTrip:
+    """The shipped ``chat-long-context`` artifact must import and round-trip
+    with a STABLE checksum (SHARED-BRIEF §"The shipped brain profile").
+
+    This is the hard constraint on the v1.0 tuning-only rule. ``device_class``
+    and ``backend`` were neutralised to inert match-only hints, but they could
+    NOT be removed from :class:`ProfileConfig`: ``export_envelope`` checksums
+    ``model_dump(exclude_none=True)``, so deleting a field the artifact carries
+    — or changing which fields serialize — silently changes the checksum and
+    breaks every published profile in the wild. These tests fail loudly if
+    anyone later "cleans up" those fields.
+    """
+
+    def test_published_checksum_verifies(self) -> None:
+        assert verify_checksum(_PUBLISHED_CHAT_LONG_CONTEXT) is True
+
+    def test_reexport_reproduces_the_published_checksum_exactly(self) -> None:
+        """Parse → re-export must land on the same sha256. ``exported_at`` is
+        excluded from the checksum, so a different clock cannot move it."""
+        env = parse_envelope(_PUBLISHED_CHAT_LONG_CONTEXT)
+        again = export_envelope(env.name, env.profile, exported_at="2099-01-01T00:00:00Z")
+        assert again["checksum"] == _PUBLISHED_CHAT_LONG_CONTEXT["checksum"]
+        assert again["profile"] == _PUBLISHED_CHAT_LONG_CONTEXT["profile"]
+
+    def test_device_class_gpu_survives_the_round_trip(self) -> None:
+        """The inert hint is PRESERVED, not stripped — stripping it would change
+        the checksum."""
+        env = parse_envelope(_PUBLISHED_CHAT_LONG_CONTEXT)
+        assert env.profile.device_class == "gpu"
+        body = export_envelope(env.name, env.profile, exported_at="t")["profile"]
+        assert body["device_class"] == "gpu"
+
+    def test_published_artifact_imports_and_is_resolvable(self, tmp_hal0_home: str) -> None:
+        """A real commit-path import: its flags are all genuine model-tuning
+        flags, so it passes the §5 hardware / §21.7 managed screens.
+
+        Imported under a NON-seed name — see
+        ``test_cannot_import_under_its_own_name_because_a_seed_owns_it``."""
+        catalog = _catalog(tmp_hal0_home)
+        resolved = import_profile(_PUBLISHED_CHAT_LONG_CONTEXT, "brain-long-ctx", catalog)
+        assert resolved.name == "brain-long-ctx"
+        assert resolved.device_class == "gpu"
+        assert "--no-webui" in resolved.flags
+
+    def test_cannot_import_under_its_own_name_because_a_seed_owns_it(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """KNOWN LIMITATION, pinned so it is not mistaken for a regression.
+
+        A SEED profile is also named ``chat-long-context``, and it is a
+        DIFFERENT profile — the seed's flags are the short
+        ``-fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift`` with
+        ``device_class`` unset, so it checksums to a different sha256 than the
+        published artifact. Importing the published file under its own name
+        therefore 409s, and even if it did not, ``save_profiles_config`` strips
+        seed-named keys before writing, so it could never persist there. An
+        operator must import it under a different name.
+        """
+        catalog = _catalog(tmp_hal0_home)
+        with pytest.raises(Conflict) as exc:
+            import_profile(_PUBLISHED_CHAT_LONG_CONTEXT, "chat-long-context", catalog)
+        assert exc.value.code == "profiles.exists"
+
+    def test_imported_then_exported_still_matches_published(self, tmp_hal0_home: str) -> None:
+        """Full loop through the on-disk catalog: import → persist → resolve →
+        export reproduces the published checksum. Catches a catalog write that
+        drops or coerces a field."""
+        catalog = _catalog(tmp_hal0_home)
+        import_profile(_PUBLISHED_CHAT_LONG_CONTEXT, "brain-long-ctx", catalog)
+        r = catalog.resolve("brain-long-ctx")
+        again = export_envelope(
+            "brain-long-ctx",
+            ProfileConfig(
+                flags=r.flags,
+                mtp=r.mtp,
+                device_class=r.device_class,
+                backend=r.backend,
+                cloned_from=r.cloned_from,
+                intent=r.intent,
+                quant=r.quant,
+            ),
+            exported_at="t",
+        )
+        assert again["checksum"] == _PUBLISHED_CHAT_LONG_CONTEXT["checksum"]
+
+    def test_published_flags_carry_no_hardware_or_managed_flag(self) -> None:
+        """Why the artifact survives the tuning-only rule at all: every entry in
+        its ``flags`` is a model-tuning flag. Guards against a future seed/screen
+        widening that would strand the shipped profile."""
+        flags = _PUBLISHED_CHAT_LONG_CONTEXT["profile"]["flags"]
+        for banned in ("-ngl", "--device", "--threads", "-dev", "-c ", "--ctx-size", "--port"):
+            assert banned not in flags
