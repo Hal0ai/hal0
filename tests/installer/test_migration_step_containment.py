@@ -144,19 +144,20 @@ def test_migration_heredocs_are_valid_python() -> None:
 def test_installer_runs_the_same_convergence_steps_as_the_updater() -> None:
     """install.sh convergence must not be weaker than `hal0 update` convergence.
 
-    retag_stale_slot_images and sanitize_model_extra_args used to run only from
-    Updater.commit() steps 7d/7e, so an operator converging an old box with
-    `sudo bash install.sh` got neither.
+    ``ensure_seed_profiles``, ``clear_stale_mtp_overrides``,
+    ``retag_stale_slot_images`` and ``sanitize_model_extra_args`` run through
+    the SAME shared ``run_post_activation_migrations`` sequence
+    ``Updater.commit()`` calls (GH #1475), rather than being called
+    separately here — the two upgrade paths can never drift onto different
+    on-disk state, and calling them a second time directly would just re-run
+    the same passes.
     """
     import re
 
     text = INSTALL_SH.read_text(encoding="utf-8")
     for fn in (
-        "ensure_seed_profiles",
-        "clear_stale_mtp_overrides",
+        "run_post_activation_migrations",
         "rerender_slot_units",
-        "retag_stale_slot_images",
-        "sanitize_model_extra_args",
         "sweep_slot_enabled_keys",
         "reset_profile_catalog",
         "convergence_report",
@@ -167,6 +168,4 @@ def test_installer_runs_the_same_convergence_steps_as_the_updater() -> None:
         assert re.search(rf"^from hal0\.[\w.]+ import .*\b{fn}\b", text, re.M), (
             f"install.sh no longer imports {fn}"
         )
-        assert re.search(rf"^\s*(\w+\s*=\s*)?{fn}\(", text, re.M), (
-            f"install.sh imports {fn} but never calls it"
-        )
+        assert re.search(rf"^.*\b{fn}\(", text, re.M), f"install.sh imports {fn} but never calls it"

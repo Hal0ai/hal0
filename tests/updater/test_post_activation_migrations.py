@@ -33,7 +33,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "extra_args": [],
     }
 
-    def _config_migrations(min_data_version, *, job_id=None):
+    def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
         calls["config_migrations"].append((min_data_version, job_id))
         return (1, 2)
 
@@ -104,7 +104,7 @@ def test_schema_migration_failure_propagates(
     install.sh's `set -euo pipefail`) must see it and abort the
     activation rather than proceed on an unmigrated schema."""
 
-    def _boom(min_data_version, *, job_id=None):
+    def _boom(min_data_version, *, job_id=None, ceiling=None):
         raise Hal0Error("schema migration exploded", code="test.boom")
 
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _boom)

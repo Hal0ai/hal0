@@ -309,16 +309,16 @@ def test_the_uneditable_flags_named_in_the_prompt_are_the_ones_actually_screened
     A prompt that lists the wrong flags is worse than none — it teaches an
     operator to look for the wrong thing in their backup.
     """
-    from hal0.api.routes.profiles import _screen_profile_flags
+    from hal0.profiles import screen_profile_flags
 
     for flag, value in (("-dev", "Vulkan0"), ("--threads", "8"), ("-ngl", "99")):
         with pytest.raises(Exception) as ei:
-            _screen_profile_flags(f"-fa on {flag} {value}")
+            screen_profile_flags(f"-fa on {flag} {value}")
         assert "hardware" in str(ei.value).lower() or "slot" in str(ei.value).lower()
 
     # …and a genuinely tuning-only profile still passes, so the test is not
     # merely asserting that everything raises.
-    _screen_profile_flags("-fa on -ctk q8_0 -b 2048 --no-mmap")
+    screen_profile_flags("-fa on -ctk q8_0 -b 2048 --no-mmap")
 
 
 # ── contract coexistence ──────────────────────────────────────────────────────
