@@ -2431,7 +2431,9 @@ class SlotManager:
             # edit to an unrelated field (e.g. context size) on a slot that
             # already carries default=true doesn't get blocked by some other
             # stale duplicate default already sitting on disk (#1500).
-            await self._check_default_uniqueness(slot_name, cfg_dict, changed_keys=set(updates.keys()))
+            await self._check_default_uniqueness(
+                slot_name, cfg_dict, changed_keys=set(updates.keys())
+            )
 
             try:
                 write_slot_toml(cfg_path, cfg_dict)

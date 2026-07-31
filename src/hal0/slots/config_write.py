@@ -309,7 +309,9 @@ def reconcile_and_guard_slot_config(
     """
     merged = reconcile_slot_updates(base, updates)
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
-    check_default_uniqueness(slot_name, merged, slots_dir=slots_dir, changed_keys=set(updates.keys()))
+    check_default_uniqueness(
+        slot_name, merged, slots_dir=slots_dir, changed_keys=set(updates.keys())
+    )
     return merged
 
 
