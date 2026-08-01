@@ -2218,7 +2218,8 @@ else
     info "running post-activation migrations (schema + seed-profile/mtp/image-pin/extra-args)"
     hal0_migration_step "post-activation migrations" <<'PYEOF'
 from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
-from hal0.updater.updater import profile_reset_status, run_post_activation_migrations
+from hal0.updater.updater import run_post_activation_migrations
+from hal0.updater.updater import profile_reset_status
 
 status = profile_reset_status()
 reset_outstanding = bool(status["due"])
