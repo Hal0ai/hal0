@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import pytest
 
 from hal0.api.routes import v1
+from hal0.dispatcher.lane_pin import set_lane_pin
+from hal0.slots.state import SlotState
 
 
 class _SlotManager:
@@ -197,6 +199,132 @@ async def test_omni_path_receives_normalized_body(monkeypatch):
     assert resp.status_code == 200
     assert seen["body"]["model"] == "big"
     assert seen["body"]["chat_template_kwargs"]["enable_thinking"] is False
+
+
+# ── omni caller-slot resolution (#1469) ──────────────────────────────────
+#
+# _maybe_run_omni_loop resolves "which slot is calling" by matching the
+# request's model against configured slots' model.default and taking the
+# FIRST match in declaration order — no health or lane-pin input, the same
+# class of bug #1418 already fixed for _ensure_backend_for_model's
+# backend-aware load (see `preferred_slot`/`lane_slot_pin` in
+# hal0.dispatcher.lane_pin). On a box where two slots bind one model id —
+# exactly lxc105's brain/nano-on-one-checkpoint case — an ERROR-parked slot
+# declared first wins over its healthy sibling declared second.
+
+
+class _RankedSlotManager:
+    """_SlotManager plus `.state()`, so `preferred_slot`'s health ranking has
+    something to rank against."""
+
+    def __init__(self, cfgs, states=None):
+        self._cfgs = cfgs
+        self._states = states or {}
+
+    async def iter_configs(self):
+        return self._cfgs
+
+    def state(self, name):
+        return self._states.get(name, SlotState.OFFLINE)
+
+
+class _FakeOmniRouter:
+    def __init__(self):
+        self.seen_caller_slot_name = None
+
+    async def run_loop(self, *, caller_slot_name, body):
+        self.seen_caller_slot_name = caller_slot_name
+        return {"ok": True}
+
+
+def _make_omni_request(*, cfgs, states, omni_router, lane_slot=""):
+    state = SimpleNamespace(
+        slot_manager=_RankedSlotManager(cfgs, states),
+        omni_router=omni_router,
+    )
+    req = SimpleNamespace(app=SimpleNamespace(state=state), state=SimpleNamespace())
+    if lane_slot:
+        set_lane_pin(req, lane_slot)
+    return req
+
+
+_TWO_SLOTS_ONE_MODEL = [
+    {
+        "name": "brain",
+        "type": "llm",
+        "model": {"default": "hal0-brain-sft-fpx8"},
+    },
+    {
+        "name": "nano",
+        "type": "llm",
+        "model": {"default": "hal0-brain-sft-fpx8"},
+    },
+]
+
+
+@pytest.mark.asyncio
+async def test_omni_caller_slot_prefers_healthy_sibling_over_declaration_order():
+    # "brain" is declared first but ERROR-parked; "nano" (declared second)
+    # is READY. Declaration-order-only resolution picks "brain" and the loop
+    # never runs against a slot that can actually serve.
+    omni = _FakeOmniRouter()
+    req = _make_omni_request(
+        cfgs=_TWO_SLOTS_ONE_MODEL,
+        states={"brain": SlotState.ERROR, "nano": SlotState.READY},
+        omni_router=omni,
+    )
+    resp = await v1._maybe_run_omni_loop(req, {"model": "hal0-brain-sft-fpx8"})
+    assert resp is not None
+    assert resp.status_code == 200
+    assert omni.seen_caller_slot_name == "nano"
+
+
+@pytest.mark.asyncio
+async def test_omni_caller_slot_honours_lane_pin_over_declaration_order():
+    # Both candidates equally healthy, but the request already pinned "nano"
+    # (declared SECOND — e.g. the resolver matched it explicitly upstream).
+    # Declaration-order-only resolution would pick "brain" (declared first)
+    # regardless; the pin must win.
+    omni = _FakeOmniRouter()
+    req = _make_omni_request(
+        cfgs=_TWO_SLOTS_ONE_MODEL,
+        states={"brain": SlotState.READY, "nano": SlotState.READY},
+        omni_router=omni,
+        lane_slot="nano",
+    )
+    resp = await v1._maybe_run_omni_loop(req, {"model": "hal0-brain-sft-fpx8"})
+    assert resp is not None
+    assert omni.seen_caller_slot_name == "nano"
+
+
+class _FailingOmniRouter:
+    """OmniRouter.run_loop's own contract for a loop failure: a plain
+    ``{"error": "<string>"}`` dict (see OmniRouter._chat_completion / the
+    "loop budget exhausted" fallback in router.py) — NOT an exception."""
+
+    async def run_loop(self, *, caller_slot_name, body):
+        return {"error": "chat completion upstream HTTP 503: model overloaded"}
+
+
+@pytest.mark.asyncio
+async def test_omni_loop_failure_raises_structured_error_not_200():
+    # #1469: run_loop's failure contract is a bare {"error": "<string>"} dict,
+    # which _maybe_run_omni_loop used to json-dump straight into a 200
+    # Response — a non-OpenAI body shape on a success status code, instead
+    # of the canonical `{"error": {"code","message","details"}}` envelope
+    # every other /api/* failure uses (hal0.errors.Hal0Error, rendered by
+    # the error_codes middleware).
+    from hal0.errors import Hal0Error
+
+    req = _make_omni_request(
+        cfgs=_TWO_SLOTS_ONE_MODEL,
+        states={"brain": SlotState.READY, "nano": SlotState.OFFLINE},
+        omni_router=_FailingOmniRouter(),
+    )
+    with pytest.raises(Hal0Error) as excinfo:
+        await v1._maybe_run_omni_loop(req, {"model": "hal0-brain-sft-fpx8"})
+    assert excinfo.value.status >= 500
+    assert "model overloaded" in excinfo.value.message
 
 
 # Single-gate invariant: _normalize_chat_body is called in exactly ONE place

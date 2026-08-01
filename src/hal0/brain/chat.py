@@ -1162,10 +1162,12 @@ def _unrouteable_model_error(tried_model: str) -> str:
 #   useBoard.ts), so scanning them would pin every later turn to `tool_model`.
 #
 # NOTE ON `model` PRECEDENCE. An explicit per-request `model` sets the turn's
-# CHAT model; it does NOT suppress the reroute. It cannot: the dashboard sends
-# `model: "hal0/brain"` on EVERY send (useBoard.ts BOARD_CHAT_MODEL), so
-# treating a per-request model as "pin the whole turn" would make this feature
-# dead in the only UI that uses it.
+# CHAT model; it does NOT suppress the reroute. It cannot: the dashboard used
+# to send `model: "hal0/brain"` on EVERY send (useBoard.ts BOARD_CHAT_MODEL,
+# removed by #1469 so `[brain_chat].model` / persona `preferred_model` can
+# actually take effect), so treating a per-request model as "pin the whole
+# turn" would have made this feature dead in the only UI that used it — and
+# any client that still pins a model explicitly must not lose tool calling.
 #
 # NOTE ON THE ENGINE. None of this touches `hal0.toolloop.engine`. The engine
 # owns `body` and mutates it in place between rounds; the per-round model hook

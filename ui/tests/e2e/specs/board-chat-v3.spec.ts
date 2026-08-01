@@ -182,10 +182,14 @@ test.describe('BoardView — agent chat', () => {
     await expect(msgs.nth(1)).toBeVisible({ timeout: FIVE_S })
     await expect(msgs.nth(1)).toContainText('Hello')
 
-    // Board chat embodies the hal0-brain profile — it must run on the brain
-    // slot (falls back to `agent` via the resolver chain) and send OpenAI-style
-    // `messages` (not the legacy `{message}`).
-    expect(postBody.model).toBe('hal0/brain')
+    // GH #1469: the dashboard used to hardcode `model: 'hal0/brain'` on every
+    // turn, which always wins server-side precedence (payload.model beats
+    // [brain_chat].model and the persona's preferred_model — see
+    // src/hal0/brain/chat.py's `model = payload.get("model") or cfg.model or
+    // default_model`), making both config knobs dead for the primary chat
+    // surface. The dashboard must omit `model` and let the server decide, and
+    // must send OpenAI-style `messages` (not the legacy `{message}`).
+    expect(postBody).not.toHaveProperty('model')
     expect(Array.isArray(postBody.messages)).toBe(true)
     expect(postBody.messages.at(-1)).toMatchObject({ role: 'user', content: 'what is blocked?' })
   })
