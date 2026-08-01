@@ -74,7 +74,7 @@ def read_slot_display_name(path: Path) -> str | None:
     """The display name embedded in one slot TOML, or ``None``.
 
     Accepts BOTH on-disk shapes: the flat body the runtime writes (top-level
-    ``name``) and the legacy nested one (``[slot] name``). An unreadable or
+    ``name``) and the older nested one (``[slot] name``). An unreadable or
     unparseable file yields ``None`` rather than raising — a single corrupt
     TOML must never break enumeration for the rest.
 
