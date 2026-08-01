@@ -22,16 +22,26 @@ Wired into every config-echoing endpoint (``/api/settings``,
 ``/api/config/models``, ``/api/upstreams``, …). See
 ``tests/api/test_redact.py`` for the contract.
 
-Also home to :func:`redact_log_line` — the TEXT-scanning counterpart
-used on free-text journald lines (``/api/logs``, ``/api/logs/stream``,
-the MCP ``logs_tail``/``slot_logs`` tools) where there's no key/value
-structure to walk. See that function's docstring for details.
+The TEXT-scanning counterpart — :func:`redact_log_line`, used on free-text
+journald lines (``/api/logs``, ``/api/logs/stream``, the MCP
+``logs_tail``/``slot_logs`` tools), event messages, and durable audit rows —
+now lives in the dependency-free :mod:`hal0.redaction` so layers *below* the
+API package (``hal0.events``, ``hal0.activity``) can reach it without an
+import cycle (#1523). It is re-exported here unchanged, so every existing
+``from hal0.api._redact import redact_log_line`` keeps working.
 """
 
 from __future__ import annotations
 
 import re
 from typing import Any, Final
+
+from hal0.redaction import (
+    LOG_SECRET_RE,
+    MASK,
+    redact_log_line,
+    redact_text_tree,
+)
 
 # Match by key NAME. Case-insensitive. ``(?:...)`` non-capturing group;
 # alternation ordered longest-token-first so e.g. ``PRIVATE_KEY`` wins
@@ -50,9 +60,9 @@ _SENSITIVE_RE: Final[re.Pattern[str]] = re.compile(
     r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT|_KEY$|^KEY$)"
 )
 
-# Plain sentinel for masked values. Exposed via __all__ so a future
-# caller can grep logs / fixtures for the exact token.
-MASK: Final[str] = "***REDACTED***"
+# ``MASK`` is defined once in hal0.redaction and re-exported above — both
+# strategies must mask to the SAME sentinel or a caller grepping for it
+# would find only half the redactions.
 
 
 def is_sensitive_key(key: str) -> bool:
@@ -92,55 +102,6 @@ def redact_value(value: Any) -> dict[str, Any]:
 # ``redact_log_line`` from here so logs_tail and /api/logs share one
 # behaviour (api-logs-redact, surfaced by the SEC-mcp-clientid lane).
 #
-# Compiled once at import time. Each alternative ends with a
-# ``(?P<...>...)`` capture of just the secret token; ``redact_log_line``
-# rewrites that token to :data:`MASK` while leaving the surrounding
-# ``Authorization:``, ``Bearer``, ``HAL0_BEARER_TOKEN=``, ``client_id=``,
-# or ``<NAME>_KEY=``/``KEY=`` prefix in place so an operator reading a
-# redacted log still sees a secret WAS present. Case-insensitive; the
-# explicit alternatives are ordered most-to-least specific so the
-# precise header form wins over the bare ``Bearer`` fallback (Python's
-# ``re`` alternation is leftmost-wins inside a single match).
-#
-# The ``client_id=`` alternative is length-gated (16+ chars) so it
-# doesn't mask the short, non-secret labels client_id legitimately takes
-# (``anonymous``, the 12-hex-char hash). The ``<NAME>_KEY=``/``KEY=``
-# alternative mirrors is_sensitive_key's ``_KEY$``/``^KEY$`` suffix rule
-# so hal0's own admin/client keys (HAL0_ADMIN_KEY, HAL0_CLIENT_KEY, ...)
-# are caught if one is ever stamped into a log line verbatim, not just
-# in structured config — same conservative "over-redact" posture as
-# is_sensitive_key.
-LOG_SECRET_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?P<prefix_auth>Authorization:\s*Bearer\s+)(?P<auth_token>\S+)"
-    r"|(?P<prefix_env>HAL0_BEARER_TOKEN=)(?P<env_token>\S+)"
-    r"|(?P<prefix_bearer>Bearer\s+)(?P<bearer_token>[A-Za-z0-9_\-\.]+)"
-    r"|(?P<prefix_client_id>client_id=)(?P<client_id_token>[A-Za-z0-9_\-\.]{16,})"
-    r"|(?P<prefix_key>\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(?P<key_token>\S+)",
-    re.IGNORECASE,
-)
-
-
-def redact_log_line(line: str) -> str:
-    """Replace Bearer / HAL0_BEARER_TOKEN / long client_id / ``*_KEY=``
-    secrets in ``line`` with :data:`MASK`.
-
-    The prefix is preserved so an operator reading a redacted log still
-    sees that an Authorization header (or client_id / ``*_KEY`` field)
-    was present — only the token body is destroyed. For free-text log
-    lines; contrast with :func:`redact_config`, which walks structured
-    dict/list trees by key name.
-    """
-
-    def _sub(match: re.Match[str]) -> str:
-        groups = match.groupdict()
-        for prefix_group in ("prefix_auth", "prefix_env", "prefix_client_id", "prefix_key"):
-            if groups[prefix_group] is not None:
-                return f"{groups[prefix_group]}{MASK}"
-        return f"{groups['prefix_bearer']}{MASK}"
-
-    return LOG_SECRET_RE.sub(_sub, line)
-
-
 def redact_config(config: Any) -> Any:
     """Recursively scrub sensitive-keyed values from a config tree.
 
@@ -176,5 +137,6 @@ __all__ = [
     "is_sensitive_key",
     "redact_config",
     "redact_log_line",
+    "redact_text_tree",
     "redact_value",
 ]
