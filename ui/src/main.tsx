@@ -22,6 +22,13 @@
 //    evaluation depth-first means imports run fully before the importer's
 //    own statements, so an inline `globalThis.React = React` further down
 //    in this file would execute AFTER the dash imports.
+// 0) Optional error reporting, kicked off before anything else so the SDK is
+//    installing while the dash modules evaluate. No-op unless VITE_SENTRY_DSN
+//    was set at build time — see src/sentry.ts. Fire-and-forget: nothing below
+//    may wait on the network.
+import { initSentry } from './sentry'
+void initSentry()
+
 import './globals-install'
 
 // Self-hosted fonts (package.json shipped these but nothing imported them,

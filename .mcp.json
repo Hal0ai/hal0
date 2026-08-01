@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "superset": {
+      "type": "http",
+      "url": "https://api.superset.sh/api/v2/agent/mcp"
+    }
+  }
+}

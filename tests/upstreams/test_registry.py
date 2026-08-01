@@ -165,7 +165,7 @@ def test_auth_none() -> None:
 
 
 def test_auth_unknown_style_emits_no_header(monkeypatch: pytest.MonkeyPatch) -> None:
-    """"google_query" was retired in #1513 (it emitted no header, so calls
+    """ "google_query" was retired in #1513 (it emitted no header, so calls
     dispatched unauthenticated); an unknown style with a key present still
     falls through to no headers rather than raising here — the schema
     validator is the gate for unknown styles."""
