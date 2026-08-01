@@ -220,7 +220,7 @@ def create_upstream(
     auth_style: str = typer.Option(
         None,
         "--auth-style",
-        help="Auth style: bearer | anthropic | google_query | header | none.",
+        help="Auth style: bearer | anthropic | header | none.",
     ),
     auth_header: str = typer.Option(
         None,
@@ -315,7 +315,7 @@ def update_upstream(
     auth_style: str = typer.Option(
         None,
         "--auth-style",
-        help="Auth style: bearer | anthropic | google_query | header | none.",
+        help="Auth style: bearer | anthropic | header | none.",
     ),
     auth_header: str = typer.Option(
         None, "--auth-header", help="Header NAME when auth-style is 'header'."
