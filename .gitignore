@@ -123,6 +123,13 @@ node_modules
 # superpowers brainstorm/visual-companion scratch (mockups, server state)
 .superpowers/
 
+# Superset workspace state. The lifecycle scripts + config.json are tracked;
+# the per-workspace port assignment, run pidfile, and local config extension
+# are machine-local (docs/agents/superset-integration.md).
+.superset/workspace.env
+.superset/run.pid
+.superset/config.local.json
+
 # Claude Code local settings + Playwright MCP session artifacts (local-only)
 .claude/settings.local.json
 .playwright-mcp/

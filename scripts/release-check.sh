@@ -186,7 +186,11 @@ if command -v shellcheck &>/dev/null; then
 		"${REPO_ROOT}/installer/uninstall.sh" \
 		"${REPO_ROOT}/scripts/dev-bootstrap.sh" \
 		"${REPO_ROOT}/scripts/release-check.sh" \
-		"${REPO_ROOT}/scripts/release-test.sh"; do
+		"${REPO_ROOT}/scripts/release-test.sh" \
+		"${REPO_ROOT}/.superset/ports.sh" \
+		"${REPO_ROOT}/.superset/setup.sh" \
+		"${REPO_ROOT}/.superset/run.sh" \
+		"${REPO_ROOT}/.superset/teardown.sh"; do
 		if [[ -f "${SCRIPT}" ]]; then
 			if shellcheck "${SCRIPT}" 2>&1; then
 				info "shellcheck OK: $(basename "${SCRIPT}")"
