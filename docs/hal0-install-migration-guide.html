@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#0a0a0a" />
+<title>hal0 — Install &amp; Migration Guide (v1.0.0-rc.1)</title>
+<meta name="description" content="hal0 v1.0.0-rc.1 — install, first-run, and upgrade/migration guide for new and existing operators. Local AI inference appliance: container-runtime slots, ROCm/Vulkan/NPU, OmniRouter, Hermes agents, Hindsight memory." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+/* ── hal0 dashboard tokens (ui/src/dashboard.css :root) ───────────────────── */
+:root{
+  --hal0-accent:#FFB000; --hal0-accent-hover:#FFC533; --hal0-accent-muted:#7a5500;
+  --hal0-accent-glow:rgba(255,176,0,.18);
+  --bg:#0a0a0a; --bg-1:#111; --bg-2:#161616; --bg-3:#1c1c1c; --bg-4:#232323; --bg-sunken:#070707;
+  --fg:#f5f5f2; --fg-2:#c8c8c2; --fg-3:#8a8a85; --fg-4:#5c5c58; --fg-5:#3d3d3a;
+  --line:#262626; --line-soft:#1c1c1c; --line-strong:#3a3a3a;
+  --accent:var(--hal0-accent); --accent-soft:rgba(255,176,0,.10); --accent-line:rgba(255,176,0,.34); --accent-bg:#2a1d00;
+  --ok:#6fcf97; --ok-soft:rgba(111,207,151,.10); --ok-line:rgba(111,207,151,.30);
+  --warn:#f2792b; --warn-soft:rgba(242,121,43,.10); --warn-line:rgba(242,121,43,.30);
+  --err:#ef6b6b; --err-soft:rgba(239,107,107,.10); --err-line:rgba(239,107,107,.30);
+  --info:#7fb8ff; --info-soft:rgba(127,184,255,.10); --info-line:rgba(127,184,255,.30);
+  --dev-rocm:#7fb8ff; --dev-vulkan:#f9d884; --dev-cpu:#9c9c95; --dev-npu:#c896ff;
+  --geist:"Geist","Geist Variable",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --jbm:"JetBrains Mono","JetBrains Mono Variable",ui-monospace,"SF Mono",Menlo,monospace;
+  --rad-sm:4px; --rad:6px; --rad-lg:10px; --rad-xl:14px; --rad-pill:999px;
+  --ease:cubic-bezier(.22,1,.36,1); --topbar-h:52px; --sidebar-w:248px;
+  --shadow:0 12px 36px -12px rgba(0,0,0,.6);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:72px}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font-family:var(--geist); font-size:15px; line-height:1.62;
+  -webkit-font-smoothing:antialiased; letter-spacing:.005em;
+}
+/* subtle halo glow at the top */
+body::before{content:"";position:fixed;inset:0 0 auto 0;height:340px;pointer-events:none;z-index:0;
+  background:radial-gradient(680px 300px at 22% -60px,var(--hal0-accent-glow),transparent 70%);}
+a{color:var(--hal0-accent);text-decoration:none}
+a:hover{color:var(--hal0-accent-hover)}
+code,kbd,pre{font-family:var(--jbm)}
+:where(code):not(pre code){background:var(--bg-3);border:1px solid var(--line);border-radius:var(--rad-sm);
+  padding:.08em .38em;font-size:.86em;color:#ffd27a}
+
+/* ── top bar ──────────────────────────────────────────────────────────────── */
+.topbar{position:sticky;top:0;z-index:40;height:var(--topbar-h);display:flex;align-items:center;gap:14px;
+  padding:0 20px;background:rgba(10,10,10,.82);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+.topbar .mark{width:22px;height:22px;flex:0 0 auto}
+.topbar .name{font-weight:700;letter-spacing:-.01em}
+.topbar .ver{font-family:var(--jbm);font-size:12px;color:var(--bg);background:var(--hal0-accent);
+  padding:2px 8px;border-radius:var(--rad-pill);font-weight:600}
+.topbar .rel{color:var(--fg-3);font-size:13px}
+.topbar .spacer{flex:1}
+.topbar .tlink{color:var(--fg-2);font-size:13.5px}
+.topbar .tlink:hover{color:var(--fg)}
+
+/* ── layout ───────────────────────────────────────────────────────────────── */
+.wrap{display:grid;grid-template-columns:var(--sidebar-w) minmax(0,1fr);gap:0;position:relative;z-index:1}
+nav.side{position:sticky;top:var(--topbar-h);align-self:start;height:calc(100vh - var(--topbar-h));
+  overflow:auto;padding:22px 14px 60px;border-right:1px solid var(--line)}
+nav.side .grp{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--fg-4);
+  margin:18px 10px 7px;font-weight:600}
+nav.side a{display:block;color:var(--fg-2);padding:6px 10px;border-radius:var(--rad);font-size:13.5px;border-left:2px solid transparent}
+nav.side a:hover{background:var(--bg-2);color:var(--fg)}
+nav.side a.acc{color:var(--fg-3)}
+main{max-width:900px;padding:36px 40px 120px;margin:0}
+
+/* ── hero ─────────────────────────────────────────────────────────────────── */
+.hero{border:1px solid var(--line);background:linear-gradient(180deg,var(--bg-2),var(--bg-1));
+  border-radius:var(--rad-xl);padding:30px 32px;margin-bottom:30px;position:relative;overflow:hidden}
+.hero::after{content:"";position:absolute;right:-80px;top:-80px;width:280px;height:280px;
+  background:radial-gradient(circle,var(--hal0-accent-glow),transparent 65%);pointer-events:none}
+.hero h1{font-size:30px;line-height:1.15;margin:0 0 8px;letter-spacing:-.02em;font-weight:700}
+.hero h1 .halo{color:var(--hal0-accent)}
+.hero p{color:var(--fg-2);margin:0 0 18px;max-width:64ch;font-size:15.5px}
+.hero .cta{display:flex;gap:10px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:7px;border-radius:var(--rad);padding:9px 15px;font-weight:600;font-size:13.5px;
+  border:1px solid var(--line-strong);background:var(--bg-3);color:var(--fg);cursor:pointer}
+.btn.primary{background:var(--hal0-accent);color:#1a1200;border-color:var(--hal0-accent)}
+.btn.primary:hover{background:var(--hal0-accent-hover)}
+.btn:hover{border-color:var(--fg-4)}
+
+/* ── sections & headings ──────────────────────────────────────────────────── */
+section{margin:38px 0;scroll-margin-top:70px}
+h2{font-size:22px;letter-spacing:-.015em;margin:0 0 4px;padding-top:8px;font-weight:700}
+h2 .eyebrow{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--hal0-accent);
+  font-family:var(--jbm);font-weight:600;margin-bottom:6px}
+h3{font-size:16.5px;margin:26px 0 8px;font-weight:600;letter-spacing:-.01em}
+h4{font-size:14px;margin:18px 0 6px;color:var(--fg-2);font-weight:600}
+p{margin:10px 0}
+hr.sep{border:0;border-top:1px solid var(--line-soft);margin:34px 0}
+.lead{color:var(--fg-2);font-size:16px}
+
+/* ── cards ────────────────────────────────────────────────────────────────── */
+.grid{display:grid;gap:14px;margin:16px 0}
+.grid.c2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.grid.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.card{background:var(--bg-2);border:1px solid var(--line);border-radius:var(--rad-lg);padding:16px 18px}
+.card h4{margin-top:0}
+.card .k{font-family:var(--jbm);font-size:12px;color:var(--fg-3)}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .n{font-size:22px;font-weight:700;font-family:var(--jbm);letter-spacing:-.02em}
+.stat .n.acc{color:var(--hal0-accent)}
+.stat .l{font-size:12px;color:var(--fg-3)}
+
+/* ── code blocks ──────────────────────────────────────────────────────────── */
+pre{background:var(--bg-sunken);border:1px solid var(--line);border-radius:var(--rad-lg);
+  padding:15px 16px;overflow:auto;font-size:13px;line-height:1.65;position:relative;margin:14px 0}
+pre .cmt{color:var(--fg-4)}
+pre .kw{color:var(--hal0-accent)}
+pre .str{color:var(--ok)}
+pre .flag{color:var(--info)}
+pre::before{content:attr(data-label);position:absolute;top:0;right:0;font-size:10px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--fg-4);background:var(--bg-3);padding:2px 8px;border-radius:0 var(--rad-lg) 0 var(--rad-sm);border-left:1px solid var(--line);border-bottom:1px solid var(--line)}
+
+/* ── callouts ─────────────────────────────────────────────────────────────── */
+.note{border-radius:var(--rad-lg);padding:12px 15px 12px 16px;margin:16px 0;border:1px solid;position:relative}
+.note .tag{font-family:var(--jbm);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:3px}
+.note p{margin:2px 0}
+.note.ok{background:var(--ok-soft);border-color:var(--ok-line)} .note.ok .tag{color:var(--ok)}
+.note.warn{background:var(--warn-soft);border-color:var(--warn-line)} .note.warn .tag{color:var(--warn)}
+.note.err{background:var(--err-soft);border-color:var(--err-line)} .note.err .tag{color:var(--err)}
+.note.info{background:var(--info-soft);border-color:var(--info-line)} .note.info .tag{color:var(--info)}
+.note.acc{background:var(--accent-soft);border-color:var(--accent-line)} .note.acc .tag{color:var(--hal0-accent)}
+
+/* ── pills / tags ─────────────────────────────────────────────────────────── */
+.pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--jbm);font-size:11px;font-weight:600;
+  padding:2px 9px;border-radius:var(--rad-pill);border:1px solid var(--line-strong);color:var(--fg-2);white-space:nowrap}
+.pill.rocm{color:var(--dev-rocm);border-color:var(--info-line);background:var(--info-soft)}
+.pill.vulkan{color:var(--dev-vulkan);border-color:rgba(249,216,132,.3);background:rgba(249,216,132,.08)}
+.pill.npu{color:var(--dev-npu);border-color:rgba(200,150,255,.3);background:rgba(200,150,255,.08)}
+.pill.cpu{color:var(--dev-cpu);border-color:var(--line-strong)}
+.pill.ok{color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+
+/* ── tables ───────────────────────────────────────────────────────────────── */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+th{color:var(--fg-3);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--line)}
+td code{font-size:12.5px}
+tr:hover td{background:var(--bg-1)}
+
+/* ── steps ────────────────────────────────────────────────────────────────── */
+ol.steps{counter-reset:s;list-style:none;padding:0;margin:16px 0}
+ol.steps>li{position:relative;padding:2px 0 16px 42px;margin:0;border-left:1px solid var(--line);margin-left:14px}
+ol.steps>li:last-child{border-left-color:transparent}
+ol.steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:-14px;top:-2px;
+  width:28px;height:28px;border-radius:50%;background:var(--bg-3);border:1px solid var(--line-strong);
+  color:var(--hal0-accent);font-family:var(--jbm);font-weight:600;font-size:13px;display:grid;place-items:center}
+ol.steps>li strong{color:var(--fg)}
+ul.tick{list-style:none;padding:0;margin:12px 0}
+ul.tick li{padding:4px 0 4px 24px;position:relative;color:var(--fg-2)}
+ul.tick li::before{content:"›";position:absolute;left:6px;color:var(--hal0-accent);font-weight:700}
+
+footer{border-top:1px solid var(--line);color:var(--fg-4);font-size:12.5px;padding:26px 40px;max-width:900px}
+footer .mono{font-family:var(--jbm)}
+
+@media(max-width:880px){
+  .wrap{grid-template-columns:1fr} nav.side{display:none} main{padding:24px 20px 90px}
+  .grid.c2,.grid.c3{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" stroke="#FFB000" stroke-width="2.4"/>
+    <circle cx="12" cy="12" r="3" fill="#FFB000"/>
+  </svg>
+  <span class="name">hal0</span>
+  <span class="ver">v1.0.0-rc.1</span>
+  <span class="rel">Install &amp; Migration Guide</span>
+  <span class="spacer"></span>
+  <a class="tlink" href="#new">New install</a>
+  <a class="tlink" href="#upgrade">Upgrade</a>
+  <a class="tlink" href="#changelog">What's new</a>
+  <a class="tlink" href="https://hal0.dev">hal0.dev ↗</a>
+</div>
+
+<div class="wrap">
+
+<nav class="side">
+  <div class="grp">Start here</div>
+  <a href="#overview">Overview</a>
+  <a href="#requirements">Requirements</a>
+  <div class="grp">New users</div>
+  <a href="#new">Install</a>
+  <a href="#firstrun">First run</a>
+  <a href="#firstmodel">First model &amp; chat</a>
+  <div class="grp">Existing users</div>
+  <a href="#upgrade">Upgrade in place</a>
+  <a href="#migrations">Migrations</a>
+  <a href="#backcompat">Back-compat &amp; rollback</a>
+  <div class="grp">Release</div>
+  <a href="#changelog">What's new</a>
+  <a href="#troubleshoot">Troubleshooting</a>
+  <a href="#reference">Reference</a>
+</nav>
+
+<main>
+
+<div class="hero" id="overview">
+  <h1>Set up <span class="halo">hal0</span> — the local AI inference appliance</h1>
+  <p>hal0 runs open models on your own hardware: every inference slot is its own podman container supervised by systemd, with a control-plane dashboard on <code>:8080</code>, OmniRouter, Hermes agents, and Hindsight memory. This guide covers a <strong>fresh install</strong> for new operators and an <strong>in-place upgrade</strong> for existing boxes — plus the full <strong>v1.0.0-rc.1</strong> changelog.</p>
+  <div class="cta">
+    <a class="btn primary" href="#new">Install hal0 →</a>
+    <a class="btn" href="#upgrade">I'm upgrading →</a>
+    <a class="btn" href="#changelog">What changed →</a>
+  </div>
+</div>
+
+<div class="grid c3">
+  <div class="card stat"><span class="n acc">1</span><span class="l">command to install</span></div>
+  <div class="card stat"><span class="n">:8080</span><span class="l">dashboard + API</span></div>
+  <div class="card stat"><span class="n">0-downtime</span><span class="l">idempotent upgrade</span></div>
+</div>
+
+<div class="note acc">
+  <span class="tag">Validated</span>
+  <p>v1.0.0-rc.1's installer was live-validated on two substrates — <span class="pill rocm">podman 4.9 · privileged</span> and <span class="pill vulkan">podman 5.x · unprivileged</span> — both a clean fresh install and an in-place upgrade, exit 0, non-destructive.</p>
+</div>
+
+<hr class="sep"/>
+
+<!-- ─────────────────────────── REQUIREMENTS ─────────────────────────── -->
+<section id="requirements">
+  <h2><span class="eyebrow">Prerequisites</span>Requirements</h2>
+  <p class="lead">hal0 runs on any systemd Linux on x86_64. It self-detects your package manager and GPU/NPU backend.</p>
+
+  <div class="grid c2">
+    <div class="card">
+      <h4>Host</h4>
+      <ul class="tick">
+        <li>systemd Linux, <strong>x86_64</strong></li>
+        <li>Python <strong>3.12+</strong> on <code>$PATH</code></li>
+        <li><strong>podman</strong> (container runtime for slots)</li>
+        <li>Disk for models (point at a big volume with <code>--models-dir</code>)</li>
+        <li>Free ports: <code>8080</code> (API) + the slot pool</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Distributions</h4>
+      <p class="k">Package-manager steps route through <code>lib/distro.sh</code>:</p>
+      <ul class="tick">
+        <li>Debian / Ubuntu &nbsp;·&nbsp; Fedora / RHEL</li>
+        <li>Arch &nbsp;·&nbsp; openSUSE &nbsp;·&nbsp; Alpine</li>
+      </ul>
+      <p class="k" style="margin-top:10px">NPU (FastFlowLM) ships an Ubuntu <code>.deb</code> only — on non-apt distros the host NPU probe waits on a manual install; GPU/CPU paths are fully supported everywhere.</p>
+    </div>
+  </div>
+
+  <h3>Inference backends</h3>
+  <div class="grid c2">
+    <div class="card"><h4><span class="pill vulkan">Vulkan</span> recommended on Strix Halo</h4><p class="k">RADV/Vulkan benchmarked <strong>+40% prefill · +16% gen · −30% TTFT</strong> vs ROCm on the same weights (unified-memory APUs). v1.0.0-rc.1 standardizes shared APU models on Vulkan.</p></div>
+    <div class="card"><h4><span class="pill rocm">ROCm</span> · <span class="pill npu">NPU</span> · <span class="pill cpu">CPU</span></h4><p class="k">ROCm/HIP for discrete AMD, AMDXDNA NPU via FastFlowLM, and a fully-supported CPU path. hal0 picks per-model at launch; you can pin a device.</p></div>
+  </div>
+
+  <div class="note info">
+    <span class="tag">Privilege model</span>
+    <p>The installer runs as <code>root</code> (re-execs under <code>sudo</code>). <code>hal0-api</code> runs as root so it can apply updates + manage units. A dedicated <code>hal0</code> system user runs the non-root services (agents, hermes-gateway, hindsight-api). <strong>Model containers (podman) are the sandbox boundary.</strong></p>
+  </div>
+</section>
+
+<hr class="sep"/>
+
+<!-- ─────────────────────────── NEW INSTALL ─────────────────────────── -->
+<section id="new">
+  <h2><span class="eyebrow">New users</span>Install hal0</h2>
+
+  <h3>The one-liner</h3>
+  <pre data-label="shell"><span class="cmt"># Fetches the signed release tarball, cosign-verifies it against the</span>
+<span class="cmt"># workflow OIDC identity, then hands off to install.sh.</span>
+curl -fsSL <span class="str">https://hal0.dev/install.sh</span> | bash</pre>
+
+  <h3>From a clone (development / air-gapped)</h3>
+  <pre data-label="shell"><span class="cmt"># Standard install at /usr/lib/hal0</span>
+sudo bash installer/install.sh
+
+<span class="cmt"># Point model pulls at a larger disk</span>
+sudo bash installer/install.sh <span class="flag">--models-dir</span>=/mnt/ai-models
+
+<span class="cmt"># Local-only dev install under $PWD/.hal0ai (editable, no systemd)</span>
+bash installer/install.sh <span class="flag">--dev</span>
+
+<span class="cmt"># Set everything up but don't start the units yet</span>
+sudo bash installer/install.sh <span class="flag">--no-start</span></pre>
+
+  <h4>Environment overrides</h4>
+  <table>
+    <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>HAL0_PREFIX</code></td><td><code>/usr/lib/hal0</code></td><td>Install root</td></tr>
+      <tr><td><code>HAL0_PORT</code></td><td><code>8080</code></td><td>API + dashboard port</td></tr>
+      <tr><td><code>HAL0_PYTHON</code></td><td><code>python3</code></td><td>Interpreter</td></tr>
+      <tr><td><code>HAL0_NO_PROBE</code></td><td><code>0</code></td><td><code>=1</code> skips the end-of-install hardware probe</td></tr>
+      <tr><td><code>HAL0_TOOLBOX_IMAGE_{VULKAN,ROCM,…}</code></td><td>—</td><td>Override per-backend container image refs</td></tr>
+    </tbody>
+  </table>
+
+  <h3>What the installer does</h3>
+  <ol class="steps">
+    <li><strong>Pre-flight</strong> — Python 3.12+, systemd, x86_64, disk, free ports, container-runtime smoke test. Accurate diagnostics on failure (see <a href="#troubleshoot">troubleshooting</a>).</li>
+    <li><strong>Layout</strong> — code at <code>/usr/lib/hal0/hal0-&lt;version&gt;</code> behind a <code>current</code> symlink + shared venv; config in <code>/etc/hal0/</code>; state in <code>/var/lib/hal0/{models,registry,slots,cache}</code>. <code>--dev</code> lands everything under <code>$PWD/.hal0ai/</code>.</li>
+    <li><strong>Install</strong> — creates the venv, installs the release tree, links <code>/usr/local/bin/hal0</code> + <code>hal0-agent</code>.</li>
+    <li><strong>Dashboard UI</strong> — builds <code>ui/dist</code> if missing and <code>npm</code> is present (self-hosted fonts — renders identically offline).</li>
+    <li><strong>Config defaults</strong> — writes <code>hal0.toml</code>, <code>api.env</code>, <code>upstreams.toml</code>. <code>capabilities.toml</code> ships empty by design → the first-run dashboard renders the bundle picker. <strong>Existing files are never clobbered.</strong></li>
+    <li><strong>systemd</strong> — installs + enables <code>hal0-api</code> + <code>hal0-openwebui</code> and starts them (unless <code>--no-start</code>). Per-slot <code>hal0-slot@&lt;name&gt;.service</code> units are managed by hal0 when slots load.</li>
+    <li><strong>Hardware probe</strong> — sanity-checks GPU/Vulkan/ROCm/NPU device access.</li>
+  </ol>
+</section>
+
+<hr class="sep"/>
+
+<!-- ─────────────────────────── FIRST RUN ─────────────────────────── -->
+<section id="firstrun">
+  <h2><span class="eyebrow">New users</span>First run</h2>
+  <ol class="steps">
+    <li><strong>Open the dashboard</strong> — browse to <code>http://&lt;host&gt;:8080</code>. On first load, <code>capabilities.toml</code> is empty, so the dashboard renders the <strong>bundle picker</strong> / setup.</li>
+    <li><strong>Pick a tier</strong> — choose a hardware-anchored bundle (a curated model collection sized to your RAM) or start empty and add models yourself.</li>
+    <li><strong>Verify health</strong> — <code>hal0 doctor</code> should report all-green; <code>GET :8080/api/health</code> returns <code>200</code>. Services show <span class="pill ok"><span class="dot" style="background:var(--ok)"></span> active</span> in the dashboard.</li>
+  </ol>
+  <pre data-label="shell"><span class="cmt"># Sanity from the CLI</span>
+hal0 doctor verify <span class="flag">--json</span>
+hal0 slot list
+curl -fsS <span class="str">http://127.0.0.1:8080/api/health</span></pre>
+</section>
+
+<section id="firstmodel">
+  <h3>First model &amp; first chat</h3>
+  <pre data-label="shell"><span class="cmt"># Pull a model into the catalog, create a slot, chat</span>
+hal0 model pull <span class="str">&lt;model&gt;</span>
+hal0 slot create <span class="str">my-slot</span> <span class="flag">--model</span> <span class="str">&lt;model&gt;</span> <span class="flag">--provider</span> llama-server
+hal0 chat <span class="flag">--model</span> <span class="str">my-slot</span></pre>
+  <div class="note info"><span class="tag">Note · v1.0.0-rc.1</span><p>Models own logical behavior such as chat templates. Physical launch facts — device, NGL, threads, binary, profile, and image pin — belong to the slot.</p></div>
+</section>
+
+<hr class="sep"/>
+
+<!-- ─────────────────────────── UPGRADE ─────────────────────────── -->
+<section id="upgrade">
+  <h2><span class="eyebrow">Existing users</span>Upgrade in place — no reinstall</h2>
+  <p class="lead">Upgrading from an earlier hal0 is an <strong>idempotent, non-destructive re-run</strong> — not a fresh install. It converges units/services/config through the new code + one <code>daemon-reload</code>, heals prior failed slot units, and <strong>never clobbers your config</strong>.</p>
+
+  <pre data-label="shell"><span class="cmt"># In place — re-run the installer (or `hal0 update`)</span>
+curl -fsSL <span class="str">https://hal0.dev/install.sh</span> | bash
+<span class="cmt"># hal0 update swaps the /current symlink atomically</span>
+sudo hal0 update</pre>
+
+  <div class="note ok"><span class="tag">Validated exit 0</span><p>The upgrade path was exercised live on both boxes — a cached in-place upgrade completed in ~22&nbsp;s and even healed a previously-failed slot unit. No data wiped.</p></div>
+
+  <div class="note warn"><span class="tag">Read before upgrading</span><p>The code swap is safe on its own, but v1.0.0-rc.1 ships <strong>one-shot data migrations</strong> that are <em>operator-run at a downtime window</em>, not automatic. Your box keeps working on the old config after the code swap (see <a href="#backcompat">back-compat</a>) — run the migrations deliberately.</p></div>
+</section>
+
+<section id="migrations">
+  <h3>Migrations (run deliberately, at a window)</h3>
+  <p class="lead">The current CLI ships several one-shot migrations. <strong>None run automatically</strong> on boot or update. Preview each plan, apply it deliberately, then verify the result.</p>
+
+  <h4>The migrate CLI at a glance</h4>
+  <table>
+    <thead><tr><th>Command</th><th>Purpose</th><th>Default</th><th>Key flags</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>hal0 migrate model-layout</code></td>
+        <td>Create the canonical <code>&lt;recipe&gt;/&lt;capability&gt;/</code> symlink tree for a v0.1.x model store. Model files stay in place.</td>
+        <td>dry-run</td>
+        <td><code>--apply</code> · <code>--force</code>/<code>-f</code> · <code>--registry</code> · <code>--mount-root</code> · <code>--canonical-root</code></td>
+      </tr>
+      <tr>
+        <td><code>hal0 slot migrate-hw</code></td>
+        <td>Restore slot-owned hardware values: NGL, runner binary, and deliberate image pins.</td>
+        <td>dry-run</td>
+        <td><code>--apply</code> · <code>--yes</code>/<code>-y</code> · <code>--stop-services</code></td>
+      </tr>
+      <tr>
+        <td><code>hal0 slot migrate-id-keying</code></td>
+        <td>Flip every slot artefact from name-keyed (<code>&lt;name&gt;.toml</code>, <code>hal0-slot@&lt;name&gt;</code>) to id-keyed (<code>&lt;id&gt;.toml</code>, <code>hal0-slot@&lt;id&gt;</code>).</td>
+        <td>apply after confirmation</td>
+        <td><code>--dry-run</code> · <code>--yes</code>/<code>-y</code> · <code>--stop-services</code></td>
+      </tr>
+      <tr>
+        <td>—</td>
+        <td>No command needed. Hindsight is the only memory engine — Honcho was fully removed, and there is no honcho-to-hindsight migration command.</td>
+        <td>—</td>
+        <td>—</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h4><code>hal0 migrate model-layout</code> — end-to-end</h4>
+  <p>Use this for a v0.1.x model store under <code>/mnt/ai-models/</code>. It builds the canonical symlink tree under <code>/var/lib/hal0/models/</code>.</p>
+  <p><strong>Model files are never moved or copied.</strong> The command is dry-run by default and idempotent after a successful apply.</p>
+
+  <p><strong>Standard usage</strong> — plan, apply, verify:</p>
+  <pre data-label="shell"><span class="cmt"># 1. Plan the move. No files written. Read the action table.</span>
+sudo hal0 migrate model-layout
+<span class="cmt"># → table of: action / link / target / source / reason</span>
+<span class="cmt"># → "planned by leaf" rollup</span>
+<span class="cmt"># → "--dry-run — would create N symlink(s); pass --apply to write."</span>
+
+<span class="cmt"># 2. Apply.</span>
+sudo hal0 migrate model-layout --apply
+<span class="cmt"># → "applied N symlink(s) under /var/lib/hal0/models."</span>
+<span class="cmt"># Idempotent — re-running --apply after success is a no-op.</span>
+
+<span class="cmt"># 3. Verify. Exit 0 means current; exit 1 means links are still pending.</span>
+sudo hal0 doctor migrations
+sudo hal0 doctor models
+find /var/lib/hal0/models -type l</pre>
+
+  <div class="note ok"><span class="tag">Source data stays put</span><p>The command writes only symlinks under <code>--canonical-root</code>. It does not modify the source files under <code>--mount-root</code>.</p><p>To roll back, remove only the links listed by the dry-run/apply table. Do not delete model source files.</p></div>
+
+  <div class="note warn"><span class="tag">Flags worth knowing</span><p><code>--force</code> overwrites a differing symlink, but never a non-symlink file. Review every <code>would-overwrite</code> row before using it.</p><p>Use <code>--registry</code>, <code>--mount-root</code>, and <code>--canonical-root</code> only when your paths differ from the FHS defaults.</p></div>
+
+  <h4><code>hal0 slot migrate-hw</code> — end-to-end</h4>
+  <p>This migration restores physical settings to slots: NGL, runner binary, and deliberate image pins. It also clears the folded model hardware columns.</p>
+  <p>The bare command is a dry-run. <code>--apply</code> rewrites slot TOMLs and the registry DB after creating a timestamped backup.</p>
+
+  <pre data-label="shell"><span class="cmt"># 1. Preview the fold (no files written, no columns nulled).</span>
+sudo hal0 slot migrate-hw
+<span class="cmt"># → per-slot list of: set_ngl · set_binary · set_image_pin · drops</span>
+
+<span class="cmt"># 2. Apply. Let the CLI stop active hal0 units.</span>
+sudo hal0 slot migrate-hw --apply --yes --stop-services
+<span class="cmt"># → "backup written to /var/lib/hal0/backups/&lt;timestamped&gt;.tar.gz"</span>
+<span class="cmt"># → "Applied hardware-ownership fold: ..."</span>
+<span class="cmt"># → "Restart hal0-api (and daemon-reload) to pick up the slot HW grid."</span>
+
+sudo systemctl daemon-reload
+sudo systemctl start hal0-api
+hal0 doctor                          <span class="cmt"># expect all-green for slots</span></pre>
+
+  <div class="note err"><span class="tag">Safeguard</span><p><code>--apply</code> refuses while <code>hal0-api</code> or any <code>hal0-slot@*</code> unit is active. Stop them first, or pass <code>--stop-services</code>.</p><p>The bare command is the dry-run; this subcommand has no separate <code>--dry-run</code> flag.</p></div>
+
+  <h4><code>hal0 slot migrate-id-keying</code> — end-to-end</h4>
+  <p>This optional migration changes slot artefacts from mutable-name keys to stable IDs. It renames the TOML, state directory, systemd unit, and podman container.</p>
+  <p>Run it only after upgrading to the bilingual id-keying runtime. See the <a href="https://hal0.dev/docs/operate/slot-id-keying-migration">full runbook</a> before applying.</p>
+
+  <pre data-label="shell"><span class="cmt"># 1. Stop hal0. Even the preview refuses while these units are active.</span>
+sudo systemctl stop 'hal0-slot@*' hal0-api
+
+<span class="cmt"># 2. Preview — prints the computed name→id plan, no file moves.</span>
+sudo hal0 slot migrate-id-keying --dry-run
+
+<span class="cmt"># 3. Apply. The command backs up slots/ + hal0.db, then flips artefacts.</span>
+sudo hal0 slot migrate-id-keying --yes
+
+sudo systemctl daemon-reload
+sudo systemctl start hal0-api
+hal0 slot list                       <span class="cmt"># confirm every slot appears once</span>
+systemctl list-units 'hal0-slot@*'</pre>
+
+  <div class="note err"><span class="tag">Rollback boundary</span><p>The id-keying command has no undo. It writes a timestamped backup under <code>/var/lib/hal0/backups/</code> before moving anything.</p><p>If verification fails, stop hal0 and restore that backup. Use <code>--stop-services</code> instead of the manual stop command when desired.</p></div>
+
+  <h4>Honcho → Hindsight</h4>
+  <p>Honcho was fully removed as a memory engine. Hindsight is the only memory engine now, so there is nothing to migrate and no command to run — Honcho-era boxes and Hindsight-only boxes are both already current.</p>
+</section>
+
+<section id="backcompat">
+  <h3>Why your box keeps working before you migrate</h3>
+  <div class="grid c2">
+    <div class="card"><h4>Tolerant config</h4><p class="k">Legacy slot and model keys load without a boot crash. Dry-run the relevant migrator to see what will change.</p></div>
+    <div class="card"><h4>Nothing automatic</h4><p class="k">Update swaps code, but one-shot migrations remain operator-controlled. Existing layouts continue working until you schedule the migration.</p></div>
+  </div>
+  <div class="note info"><span class="tag">Different rollback models</span><p><code>model-layout</code> adds symlinks without moving source data. The slot migrations rewrite state and therefore create backups first.</p></div>
+</section>
+
+<hr class="sep"/>
+
+<!-- ─────────────────────────── CHANGELOG ─────────────────────────── -->
+<section id="changelog">
+  <h2><span class="eyebrow">Release</span>What's new — v1.0.0-rc.1</h2>
+  <p class="lead">v1.0.0-rc.1 is the release candidate for hal0 1.0. It hardens the container-runtime install, finalizes the slot-owned hardware model, ships the first-class brain route, and removes deprecated Honcho memory.</p>
+
+  <h3><span class="pill" style="color:var(--hal0-accent);border-color:var(--accent-line);background:var(--accent-soft)">Current</span> Workload profiles &amp; slot-owned hardware</h3>
+  <ul class="tick">
+    <li>Seeded profiles are workload-oriented templates rather than hardware identity. Applying one stamps defaults; later model edits do not mutate the profile.</li>
+    <li>Physical launch facts now live on each slot: device, NGL, threads, resolved runner binary, profile, and optional <code>image_pin</code>.</li>
+    <li>Models remain logical and device-agnostic. The slot-purity update moves <code>chat_template</code> to the model and sunsets the old slot tier.</li>
+    <li><code>hal0 slot migrate-hw</code> folds prior model/profile hardware values back onto slots. It is dry-run-first, backup-first, and maintenance-window gated.</li>
+    <li>Slot artefacts can be converted from names to stable IDs with <code>hal0 slot migrate-id-keying</code>; name-keyed boxes remain supported.</li>
+  </ul>
+
+  <h3>Dashboard drawers</h3>
+  <ul class="tick">
+    <li>The slot drawer presents a typed hardware grid: Device, Image, Profile, Threads, and NGL.</li>
+    <li>It shows the resolved runner binary, profile-default image placeholder, and actual running image reference with slot ID.</li>
+    <li>Parallel and Extra Args now sit in the slot's Model section. Reasoning and MTP remain model-owned.</li>
+    <li>The model drawer adds the typed Thinking capability (<code>auto</code>, <code>on</code>, or <code>off</code>) before MTP.</li>
+  </ul>
+
+  <h3>Memory, brain &amp; Hermes</h3>
+  <ul class="tick">
+    <li>Memory tools use the Hindsight surface: <code>hindsight_recall</code>, <code>hindsight_retain</code>, and <code>hindsight_reflect</code>. Honcho is removed.</li>
+    <li>The first-class <code>hal0-brain</code> module now serves the primary <code>POST /api/brain/chat</code> steward route.</li>
+    <li>Hermes persona and brain-profile registration run in the API boot lifespan, so fresh installs, updates, and dev starts share one path.</li>
+    <li><code>hal0 agent install hermes --reset-personas</code> restores canonical personas; <code>--repair</code> remains non-destructive.</li>
+    <li>Hermes uninstall now stops its service before removal, and provisioning accepts both string and <code>Path</code> database paths.</li>
+  </ul>
+
+  <h3>Install &amp; runtime hardening</h3>
+  <ul class="tick">
+    <li>Container-runtime preflight now surfaces the <strong>real</strong> cause on failure (e.g. kernel keyring-quota exhaustion) instead of a misleading nesting/keyctl message.</li>
+    <li>GPU preflight + renderer now derive the render group from the <strong>device node's owner GID</strong> (not the group name) — fixes silent GPU-access loss on hosts where <code>renderD128</code>'s group is misnamed.</li>
+    <li>Slot units emit <code>StartLimit*</code> in <code>[Unit]</code> so restart rate-limiting actually applies.</li>
+    <li>Hermes gateway install runs as the <code>hal0</code> user. Uninstall now stops the Hermes service before removing it.</li>
+    <li><code>hal0 agent status --json</code> emits real JSON; <code>reconcile_listeners</code> wired into <code>/api/ports</code>.</li>
+    <li>Shared APU models standardized on <strong>Vulkan</strong> (benchmark-backed).</li>
+  </ul>
+
+  <h3>Housekeeping (SWEEP)</h3>
+  <ul class="tick">
+    <li>Deprecated surfaces remain machine-stamped <code>HAL0-SUNSET: v1.0.0</code> until their scheduled removal.</li>
+    <li>Python and UI package manifests now report <code>1.0.0-rc.1</code> consistently.</li>
+    <li>Boot is split into 14 named, observable phases with a typed <code>BootState</code>.</li>
+    <li>The bilingual slot runtime reads both name-keyed and id-keyed layouts; the operator chooses when to flip.</li>
+  </ul>
+</section>
+
+<hr class="sep"/>
+
+<!-- ─────────────────────────── TROUBLESHOOTING ─────────────────────────── -->
+<section id="troubleshoot">
+  <h2><span class="eyebrow">Operate</span>Troubleshooting</h2>
+
+  <h4><span class="pill vulkan">unprivileged LXC</span> Install refuses at the container-runtime preflight</h4>
+  <p>Symptom: <code>podman run</code> fails with <code>crun: create keyring: Disk quota exceeded</code>. Cause: the host kernel keyring byte-quota (<code>kernel.keys.maxbytes</code>) is exhausted — usually leaked keyrings from repeated failed healthchecks. hal0 correctly refuses (a real slot couldn't start either).</p>
+  <pre data-label="fix"><span class="cmt"># Clear it, then re-run install</span>
+<span class="cmt"># reboot the container  — or —</span>
+keyctl clear @s
+<span class="cmt"># or raise the quota on the Proxmox / host kernel</span>
+sysctl -w kernel.keys.maxbytes=2000000</pre>
+
+  <h4><span class="pill rocm">GPU</span> Slot runs but on CPU / GPU access denied</h4>
+  <p>If <code>/dev/dri/renderD128</code> is owned by a group that isn't your host's <code>render</code> group, older builds group-added the wrong GID. v1.0.0-rc.1 derives the GID from the device node itself. Confirm your <code>hal0</code> user is in the device's owner group:</p>
+  <pre data-label="check">stat -c '%G %g' /dev/dri/renderD128
+id -nG hal0</pre>
+
+  <h4>Hardened host: permissions look wrong after install</h4>
+  <p>A CIS/STIG umask (<code>0027</code>/<code>0077</code>) leaking into the install can leave the tree <code>0700</code>. The installer normalizes to <code>022</code> for its own body; if you see <code>PermissionError</code> reading <code>/usr/lib/hal0</code> or <code>/etc/hal0/slots</code>, run <code>hal0 doctor perms --fix</code>.</p>
+
+  <div class="note info"><span class="tag">Always start here</span><p><code>hal0 doctor all --json</code> reports health across slots, memory banks, Hermes, and services in one pass. It's the fastest first look for any issue — for a permissions-specific audit, run <code>hal0 doctor perms</code> separately.</p></div>
+</section>
+
+<hr class="sep"/>
+
+<!-- ─────────────────────────── REFERENCE ─────────────────────────── -->
+<section id="reference">
+  <h2><span class="eyebrow">Reference</span>Paths &amp; commands</h2>
+  <div class="grid c2">
+    <div class="card">
+      <h4>Filesystem</h4>
+      <table>
+        <tbody>
+          <tr><td><code>/usr/lib/hal0/current</code></td><td>active code (symlink)</td></tr>
+          <tr><td><code>/etc/hal0/</code></td><td>config (hal0.toml, slots/, api.env)</td></tr>
+          <tr><td><code>/mnt/ai-models</code></td><td>default source model store</td></tr>
+          <tr><td><code>/var/lib/hal0/models</code></td><td>canonical recipe/capability symlink tree</td></tr>
+          <tr><td><code>/var/lib/hal0/hal0.db</code></td><td>model registry + slot identity</td></tr>
+          <tr><td><code>/var/lib/hal0/slots</code></td><td>per-slot runtime state</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h4>Everyday commands</h4>
+      <table>
+        <tbody>
+          <tr><td><code>hal0 doctor</code></td><td>health across the platform</td></tr>
+          <tr><td><code>hal0 slot list / create</code></td><td>manage inference slots</td></tr>
+          <tr><td><code>hal0 model pull / default</code></td><td>manage the catalog + tuning</td></tr>
+          <tr><td><code>hal0 doctor migrations</code></td><td>detect pending model-layout links</td></tr>
+          <tr><td><code>hal0 migrate model-layout</code></td><td>preview/apply canonical model links</td></tr>
+          <tr><td><code>hal0 update</code></td><td>atomic in-place upgrade</td></tr>
+          <tr><td><code>hal0 chat --model &lt;model&gt;</code></td><td>talk to a slot</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="note acc"><span class="tag">Units</span><p><code>hal0-api.service</code> serves the control plane on <code>:8080</code>. Slot units use <code>hal0-slot@&lt;name&gt;</code> before id-keying and <code>hal0-slot@&lt;id&gt;</code> after it.</p><p>Agents, Hermes gateway, and Hindsight run as the non-root <code>hal0</code> user.</p></div>
+</section>
+
+</main>
+</div>
+
+<footer>
+  <p><span class="mono">hal0 v1.0.0-rc.1</span> — local AI inference appliance. Container-runtime slots · ROCm / Vulkan / NPU · OmniRouter · Hermes agents · Hindsight memory.</p>
+  <p>Install: <span class="mono">curl -fsSL https://hal0.dev/install.sh | bash</span> &nbsp;·&nbsp; Docs: <a href="https://hal0.dev">hal0.dev</a> &nbsp;·&nbsp; Dashboard: <span class="mono">http://&lt;host&gt;:8080</span></p>
+</footer>
+
+</body>
+</html>
