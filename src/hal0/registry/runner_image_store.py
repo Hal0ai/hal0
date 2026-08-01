@@ -192,6 +192,33 @@ class RunnerImageStore:
         self._notify_change()
         return self.get(image_id)
 
+    def prune_absent(self, keep_ids: set[str]) -> int:
+        """Delete rows whose id is not in ``keep_ids`` and has no local pull.
+
+        Called by the sync job after a *successful* images.json fetch so
+        removed/renamed manifest entries (e.g. the repo-path ids used
+        before images.json carried per-entry ``id`` short names) don't
+        linger as stale duplicates. Rows with ``local_path`` set are kept —
+        a downloaded image stays visible even if delisted upstream.
+        Returns the number of rows deleted.
+        """
+        with self._connect() as conn:
+            self._ensure_migrated(conn)
+            with tx(conn):
+                if keep_ids:
+                    placeholders = ", ".join("?" for _ in keep_ids)
+                    cur = conn.execute(
+                        f"DELETE FROM runner_image WHERE local_path IS NULL "
+                        f"AND id NOT IN ({placeholders})",
+                        tuple(keep_ids),
+                    )
+                else:
+                    cur = conn.execute("DELETE FROM runner_image WHERE local_path IS NULL")
+                removed = int(cur.rowcount)
+        if removed:
+            self._notify_change()
+        return removed
+
     def reload(self) -> None:
         """No-op — kept for interface symmetry with SqliteModelRegistry."""
         return None

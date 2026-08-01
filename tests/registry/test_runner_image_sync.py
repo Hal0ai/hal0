@@ -23,6 +23,7 @@ _IMAGES_JSON = {
     "schema": "hal0.runner-images.v1",
     "images": [
         {
+            "id": "cpu",
             "image": "ghcr.io/hal0ai/hal0-toolbox-cpu",
             "tag": "latest",
             "manifest_key": "toolbox-cpu",
@@ -32,6 +33,7 @@ _IMAGES_JSON = {
             "notes": "CPU-only toolbox image.",
         },
         {
+            # no "id" — exercises the repo-path fallback
             "image": "ghcr.io/hal0ai/hal0-toolbox-flm",
             "tag": "v2",
             "manifest_key": "toolbox-flm",
@@ -42,9 +44,29 @@ _IMAGES_JSON = {
     ],
 }
 
+#: config 345 + layers 6000 + 6000 — what a size probe should sum to.
+_MANIFEST_BODY = {
+    "schemaVersion": 2,
+    "config": {"size": 345},
+    "layers": [{"size": 6000}, {"size": 6000}],
+}
+_MANIFEST_SIZE = 12345
 
-def _route_handler(*, images_json: dict | None, ghcr_fail: set[str] | None = None):
+
+def _route_handler(
+    *,
+    images_json: dict | None,
+    ghcr_fail: set[str] | None = None,
+    manifest_body: dict | None = None,
+    child_manifests: dict[str, dict] | None = None,
+):
+    """MockTransport handler for raw.githubusercontent.com + ghcr.io.
+
+    ``manifest_body`` overrides the manifest returned for tag refs;
+    ``child_manifests`` maps digest refs to bodies (multi-arch children).
+    """
     ghcr_fail = ghcr_fail or set()
+    child_manifests = child_manifests or {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -59,15 +81,15 @@ def _route_handler(*, images_json: dict | None, ghcr_fail: set[str] | None = Non
                 return httpx.Response(500, content=b"nope")
             return httpx.Response(200, json={"token": f"tok-{repo}"})
         if "/manifests/" in url:
-            repo = url.split("https://ghcr.io/v2/")[1].split("/manifests/")[0]
+            repo, _, ref = url.split("https://ghcr.io/v2/")[1].partition("/manifests/")
             if repo in ghcr_fail:
                 return httpx.Response(500, content=b"nope")
+            if ref in child_manifests:
+                return httpx.Response(200, json=child_manifests[ref])
             return httpx.Response(
                 200,
-                headers={
-                    "docker-content-digest": f"sha256:{repo.replace('/', '-')}",
-                    "content-length": "12345",
-                },
+                headers={"docker-content-digest": f"sha256:{repo.replace('/', '-')}-{ref}"},
+                json=manifest_body if manifest_body is not None else _MANIFEST_BODY,
             )
         if "/tags/list" in url:
             return httpx.Response(200, json={"tags": ["latest"]})
@@ -130,16 +152,17 @@ async def test_sync_merges_ghcr_and_images_json(tmp_path: Path) -> None:
     assert result.probe_errors == {}
     assert len(result.images) == 2
 
-    cpu = store.get("hal0ai/hal0-toolbox-cpu")
+    cpu = store.get("cpu")  # images.json "id" short name wins as row id
     assert cpu is not None
-    assert cpu.digest == "sha256:hal0ai-hal0-toolbox-cpu"
-    assert cpu.size_bytes == 12345
+    assert cpu.image == "ghcr.io/hal0ai/hal0-toolbox-cpu"
+    assert cpu.digest == "sha256:hal0ai-hal0-toolbox-cpu-latest"
+    assert cpu.size_bytes == _MANIFEST_SIZE  # config + layer blob sizes, not doc length
     assert cpu.ownership == "owned"
     assert cpu.publish == "ci"
     assert cpu.notes == "CPU-only toolbox image."
     assert cpu.build == {"context": ".", "dockerfile": "Dockerfile.cpu"}
 
-    flm = store.get("hal0ai/hal0-toolbox-flm")
+    flm = store.get("hal0ai/hal0-toolbox-flm")  # no "id" — repo-path fallback
     assert flm is not None
     assert flm.tag == "v2"
     assert flm.ownership == "referenced"
@@ -175,5 +198,111 @@ async def test_sync_one_bad_package_does_not_abort_the_rest(tmp_path: Path) -> N
         await client.aclose()
 
     assert "hal0ai/hal0-toolbox-flm" in result.probe_errors
-    assert store.get("hal0ai/hal0-toolbox-cpu") is not None
+    assert store.get("cpu") is not None
     assert store.get("hal0ai/hal0-toolbox-flm") is None
+
+
+@pytest.mark.asyncio
+async def test_sync_multiarch_index_size_summed_from_child(tmp_path: Path) -> None:
+    """An OCI index resolves size via its linux/amd64 child manifest."""
+    index = {
+        "schemaVersion": 2,
+        "manifests": [
+            {"digest": "sha256:attest", "platform": {"os": "unknown", "architecture": "unknown"}},
+            {"digest": "sha256:amd64child", "platform": {"os": "linux", "architecture": "amd64"}},
+        ],
+    }
+    child = {"schemaVersion": 2, "config": {"size": 100}, "layers": [{"size": 900}]}
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _route_handler(
+        images_json=_IMAGES_JSON,
+        manifest_body=index,
+        child_manifests={"sha256:amd64child": child},
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu = store.get("cpu")
+    assert cpu is not None
+    assert cpu.size_bytes == 1000
+    # digest stays the top-level (index) one — what a pull-by-digest resolves
+    assert cpu.digest == "sha256:hal0ai-hal0-toolbox-cpu-latest"
+
+
+@pytest.mark.asyncio
+async def test_sync_two_entries_sharing_one_repo_stay_distinct(tmp_path: Path) -> None:
+    """rocmfpx/rocmfpx-hy3 pattern: one GHCR repo, two tags, two rows."""
+    images_json = {
+        "schema": "hal0.runner-images.v1",
+        "images": [
+            {"id": "rocmfpx", "image": "ghcr.io/hal0ai/hal0-rocmfpx", "tag": "c077206"},
+            {"id": "rocmfpx-hy3", "image": "ghcr.io/hal0ai/hal0-rocmfpx", "tag": "ifp2-hyv3"},
+        ],
+    }
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_route_handler(images_json=images_json))
+    )
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    assert len(result.images) == 2
+    base = store.get("rocmfpx")
+    hy3 = store.get("rocmfpx-hy3")
+    assert base is not None and base.tag == "c077206"
+    assert hy3 is not None and hy3.tag == "ifp2-hyv3"
+    assert base.image == hy3.image == "ghcr.io/hal0ai/hal0-rocmfpx"
+
+
+@pytest.mark.asyncio
+async def test_sync_prunes_stale_rows_but_keeps_downloaded(tmp_path: Path) -> None:
+    """Rows delisted from images.json vanish on the next good sync — unless
+    a local pull landed, in which case the row survives."""
+    from hal0.registry.runner_image import RunnerImage
+
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    # Stale pre-rename row (old repo-path id for what is now id "cpu"):
+    store.upsert(RunnerImage(id="hal0ai/hal0-toolbox-cpu", image="ghcr.io/hal0ai/hal0-toolbox-cpu"))
+    # Delisted but locally downloaded — must survive the prune:
+    store.upsert(
+        RunnerImage(
+            id="hal0ai/old-downloaded",
+            image="ghcr.io/hal0ai/old-downloaded",
+            local_path="/var/lib/hal0/runner-images/old-downloaded.json",
+        )
+    )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_route_handler(images_json=_IMAGES_JSON))
+    )
+    try:
+        await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    ids = {i.id for i in store.list()}
+    assert ids == {"cpu", "hal0ai/hal0-toolbox-flm", "hal0ai/old-downloaded"}
+
+
+@pytest.mark.asyncio
+async def test_failed_images_json_never_prunes(tmp_path: Path) -> None:
+    from hal0.registry.runner_image import RunnerImage
+
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    store.upsert(RunnerImage(id="cpu", image="ghcr.io/hal0ai/hal0-toolbox-cpu"))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_route_handler(images_json=None)))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.images_json_ok is False
+    assert store.get("cpu") is not None

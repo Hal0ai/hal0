@@ -1,7 +1,9 @@
 """Runner-image discovery — GHCR anonymous probe + ``images.json`` merge.
 
-Two independent fetches, merged by GHCR repo path (feat/runner-image-catalogue,
-corrected against the original handoff doc — see PR description):
+Two independent fetches, merged per ``images.json`` entry — row id is the
+entry's ``id`` short name, falling back to the GHCR repo path
+(feat/runner-image-catalogue, corrected against the original handoff doc —
+see PR description):
 
 1. **GHCR discovery.** Anonymous-token tag/digest resolution against known
    packages (the same flow already proven out by
@@ -132,12 +134,64 @@ async def _ghcr_list_tags(repo: str, *, token: str, client: httpx.AsyncClient) -
     return [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
 
 
-async def _ghcr_manifest_head(
+def _manifest_content_size(payload: Any) -> int | None:
+    """Sum ``config.size`` + every ``layers[].size`` of one image manifest."""
+    if not isinstance(payload, dict):
+        return None
+    layers = payload.get("layers")
+    if not isinstance(layers, list):
+        return None
+    total = 0
+    config = payload.get("config")
+    if isinstance(config, dict) and isinstance(config.get("size"), int):
+        total += config["size"]
+    for layer in layers:
+        if isinstance(layer, dict) and isinstance(layer.get("size"), int):
+            total += layer["size"]
+    return total or None
+
+
+def _pick_index_manifest(payload: dict[str, Any]) -> str | None:
+    """Pick the linux/amd64 image-manifest digest out of an OCI index.
+
+    Attestation manifests (buildkit provenance, platform ``unknown``) are
+    skipped; falls back to the first non-attestation entry when no
+    linux/amd64 platform is declared.
+    """
+    manifests = payload.get("manifests")
+    if not isinstance(manifests, list):
+        return None
+    fallback: str | None = None
+    for entry in manifests:
+        if not isinstance(entry, dict):
+            continue
+        digest = entry.get("digest")
+        if not isinstance(digest, str):
+            continue
+        platform_raw = entry.get("platform")
+        platform: dict[str, Any] = platform_raw if isinstance(platform_raw, dict) else {}
+        if platform.get("os") == "unknown" or platform.get("architecture") == "unknown":
+            continue  # buildkit attestation, not a runnable image
+        if fallback is None:
+            fallback = digest
+        if platform.get("os") == "linux" and platform.get("architecture") == "amd64":
+            return digest
+    return fallback
+
+
+async def _ghcr_manifest_info(
     repo: str, ref: str, *, token: str, client: httpx.AsyncClient
 ) -> tuple[str | None, int | None]:
-    """Return ``(digest, size_bytes)`` for one tag; either may be None."""
-    resp = await client.request(
-        "HEAD",
+    """Return ``(digest, size_bytes)`` for one tag; either may be None.
+
+    Unlike a bare HEAD (whose ``content-length`` is the size of the manifest
+    *document*, a couple of KB), this GETs the manifest body and sums the
+    config + layer blob sizes — the actual compressed image size, matching
+    what GHCR's package UI reports. Multi-arch indexes are followed one
+    level down to the linux/amd64 image manifest. The digest reported is
+    the top-level one (what ``podman pull repo@digest`` would resolve).
+    """
+    resp = await client.get(
         f"https://ghcr.io/v2/{repo}/manifests/{ref}",
         headers={"Authorization": f"Bearer {token}", "Accept": _OCI_MANIFEST_ACCEPT},
         timeout=_HTTP_TIMEOUT_S,
@@ -145,28 +199,54 @@ async def _ghcr_manifest_head(
     if resp.status_code >= 400:
         raise RuntimeError(f"HTTP {resp.status_code} probing {repo}:{ref}")
     digest = resp.headers.get("docker-content-digest")
-    length = resp.headers.get("content-length")
-    size = int(length) if length and length.isdigit() else None
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = None
+
+    size = _manifest_content_size(payload)
+    if size is None and isinstance(payload, dict):
+        child_digest = _pick_index_manifest(payload)
+        if child_digest:
+            child = await client.get(
+                f"https://ghcr.io/v2/{repo}/manifests/{child_digest}",
+                headers={"Authorization": f"Bearer {token}", "Accept": _OCI_MANIFEST_ACCEPT},
+                timeout=_HTTP_TIMEOUT_S,
+            )
+            if child.status_code < 400:
+                try:
+                    size = _manifest_content_size(child.json())
+                except ValueError:
+                    size = None
+    if size is None:
+        length = resp.headers.get("content-length")
+        size = int(length) if length and length.isdigit() else None
     return digest, size
 
 
 async def probe_ghcr_package(
-    repo: str, *, client: httpx.AsyncClient, tag: str | None = None
+    repo: str,
+    *,
+    client: httpx.AsyncClient,
+    tag: str | None = None,
+    image_id: str | None = None,
 ) -> RunnerImage:
     """Anonymously resolve one GHCR package's latest tag + digest + size.
 
     ``tag`` pins a specific tag (from an ``images.json`` entry); when
     omitted, the newest-looking tag from ``tags/list`` is used, falling
-    back to ``latest``.
+    back to ``latest``. ``image_id`` sets the catalogue row id (the
+    ``images.json`` short name, e.g. ``cpu``); defaults to the repo path
+    for rows with no manifest entry.
     """
     token = await _ghcr_anon_token(repo, client=client)
     resolved_tag = tag
     if resolved_tag is None:
         tags = await _ghcr_list_tags(repo, token=token, client=client)
         resolved_tag = "latest" if "latest" in tags else (tags[-1] if tags else "latest")
-    digest, size = await _ghcr_manifest_head(repo, resolved_tag, token=token, client=client)
+    digest, size = await _ghcr_manifest_info(repo, resolved_tag, token=token, client=client)
     return RunnerImage(
-        id=repo,
+        id=image_id or repo,
         image=f"ghcr.io/{repo}",
         tag=resolved_tag,
         digest=digest,
@@ -208,10 +288,15 @@ async def sync_runner_images(
 
     Source of which GHCR packages to probe: ``images.json``'s entries
     (see module docstring — anonymous org-wide GHCR listing isn't
-    available). A malformed/unreachable ``images.json`` still lets
-    already-catalogued packages keep their existing rows (nothing is
-    deleted on a failed manifest fetch); packages present only via a
-    prior sync are left untouched this run.
+    available). Row id is the entry's ``id`` short name (``cpu``,
+    ``rocmfpx-hy3``, …) so two entries sharing one GHCR repo path under
+    different tags stay distinct rows; entries with no ``id`` fall back
+    to the repo path. A malformed/unreachable ``images.json`` still lets
+    already-catalogued packages keep their existing rows; on a *successful*
+    manifest fetch, catalogue rows whose id no longer appears in
+    ``images.json`` are pruned (unless locally downloaded) so removed or
+    renamed entries don't linger as stale duplicates. A failed per-package
+    probe never deletes anything.
     """
     owns_client = client is None
     client = client or httpx.AsyncClient(follow_redirects=True)
@@ -221,22 +306,32 @@ async def sync_runner_images(
         result.images_json_ok = err is None
         result.images_json_error = err
 
-        by_repo: dict[str, dict[str, Any]] = {}
+        by_id: dict[str, tuple[str, dict[str, Any]]] = {}
         for entry in entries:
-            key = _match_key(entry)
-            if key:
-                by_repo[key] = entry
+            repo = _match_key(entry)
+            if not repo:
+                continue
+            entry_id = entry.get("id")
+            image_id = entry_id.strip() if isinstance(entry_id, str) and entry_id.strip() else repo
+            by_id[image_id] = (repo, entry)
 
-        for repo, entry in by_repo.items():
+        for image_id, (repo, entry) in by_id.items():
             tag = entry.get("tag") if isinstance(entry.get("tag"), str) else None
             try:
-                image = await probe_ghcr_package(repo, client=client, tag=tag)
+                image = await probe_ghcr_package(repo, client=client, tag=tag, image_id=image_id)
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-                result.probe_errors[repo] = str(exc)
-                log.warning("runner_images.probe_failed repo=%s error=%s", repo, exc)
+                result.probe_errors[image_id] = str(exc)
+                log.warning(
+                    "runner_images.probe_failed id=%s repo=%s error=%s", image_id, repo, exc
+                )
                 continue
             image = _apply_manifest_metadata(image, entry)
             result.images.append(store.upsert(image))
+
+        if result.images_json_ok:
+            pruned = store.prune_absent(set(by_id))
+            if pruned:
+                log.info("runner_images.pruned_stale_rows count=%d", pruned)
     finally:
         if owns_client:
             await client.aclose()
