@@ -190,9 +190,11 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     kind: 'info',
     eyebrow: 'FirstRun · just installed',
     heading: 'Welcome to hal0 — {bundleName} is loaded',
-    body: 'Try a message below. primary is your default chat persona. The persona dropdown lets you swap to coder or the NPU agent.',
+    // Kept in lockstep with the primitives.jsx catalog entry (#1477): the old
+    // copy described the chat page + persona dropdown deleted in #439, and
+    // "Take the tour" fired an event with no listener.
+    body: 'Ask the steward anything from the Quick chat card, or open the platform steward from the Board. Your slots and models live under Slots.',
     actions: [
-      { label: 'Take the tour', primary: true },
       { label: 'Dismiss' },
     ],
   },

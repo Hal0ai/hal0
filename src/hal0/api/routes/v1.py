@@ -769,15 +769,22 @@ async def list_models(
 
     Two classes of entries are emitted:
 
-    * **Per-slot alias entries** (``hermes-role-slots``). Every enabled
-      chat slot (``type == "llm"``) that is currently being served
-      surfaces as one model object whose ``id`` is the slot **alias =
-      slot name** (``primary``, ``agent-hermes``, ``utility``), carrying a
-      human ``name`` (``"<slot> · <model display name>"``) and the slot's
+    * **Per-slot alias entries** (``hermes-role-slots``). Every chat slot
+      (``type == "llm"``) **with a bound model** surfaces as one model
+      object whose ``id`` is the slot **alias = slot name** (``primary``,
+      ``agent-hermes``, ``utility``), carrying a human ``name``
+      (``"<slot> · <model display name>"``) and the slot's
       ``context_length``/``max_context_window``. Built by
-      :func:`hal0.api.hal0_slot_alias_models`. Unloaded / disabled slots
-      are omitted. The alias is stable across model swaps so callers can
-      pin a co-resident slot.
+      :func:`hal0.api.hal0_slot_alias_models`. **Both warm and cold slots
+      are advertised** — dispatch cold-loads on demand when a request
+      addresses a cold slot by alias, so restricting discovery to warm
+      slots would hide slots the gateway will happily serve. The alias is
+      stable across model swaps so callers can pin a co-resident slot.
+
+      (This paragraph previously claimed only slots "currently being
+      served" appear and that "unloaded / disabled slots are omitted".
+      Neither was true of the builder, and post-#1369/#1408 there is no
+      ``enabled`` field at all — model-presence is the activation signal.)
     * **Upstream catalog entries** (incl. the direct-read composite
       catalogue below) — the raw model ids each ``advertise_models``
       upstream reports, so non-chat models (embed / rerank / image / …)

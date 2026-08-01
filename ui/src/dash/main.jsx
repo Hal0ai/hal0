@@ -41,8 +41,7 @@ function fmtApprovalTs(v) {
 
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "slotVariant": "instrument",
-  "showHero": true,
-  "personaPlacement": "composer-left"
+  "showHero": true
 }/*EDITMODE-END*/;
 
 // ─── hash routing — supports #slots or #slots/<name> ───
@@ -154,7 +153,6 @@ function App() {
   const [{ route, param }, setRouteState] = useStateA(parseRoute());
   const [approvalsOpen, setApprovalsOpen] = useStateA(false);
   const [heroDismissed, setHeroDismissed] = useStateA(false);
-  const [composerState, setComposerState] = useStateA("idle");
   const [footerOpen, setFooterOpen] = useStateA(false);
   const [paletteOpen, setPaletteOpen] = useStateA(false);
   const [navOpen, setNavOpen] = useStateA(false);
@@ -476,28 +474,11 @@ function App() {
             value={tweaks.showHero}
             onChange={v => setTweak("showHero", v)}
           />
-          <TweakRadio
-            label="Persona placement"
-            value={tweaks.personaPlacement}
-            onChange={v => setTweak("personaPlacement", v)}
-            options={[
-              { value: "composer-left", label: "In composer" },
-              { value: "above",         label: "Above input" },
-            ]}
-          />
-          <TweakSelect
-            label="Composer state"
-            value={composerState}
-            onChange={v => setComposerState(v)}
-            options={[
-              { value: "idle",      label: "Idle (default)" },
-              { value: "sending",   label: "Sending" },
-              { value: "streaming", label: "Streaming" },
-              { value: "swap",      label: "NPU swap in progress" },
-              { value: "no-tools",  label: "No tool-calling LLM" },
-              { value: "offline",   label: "runtime offline" },
-            ]}
-          />
+          {/* "Persona placement" and "Composer state" lived here until #1477.
+              Both drove the chat page deleted in #439 — nothing has read
+              tweaks.personaPlacement or composerState since, so the controls
+              moved state no surface consumed. A knob that visibly does
+              nothing teaches an operator the whole panel is decorative. */}
         </TweakSection>
 
         <TweakSection title="Banners" label="Banners">
