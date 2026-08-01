@@ -1,6 +1,6 @@
 # Handoff — hal0 v1.0.0 release (paste-in brief for a new session)
 
-**Written:** 2026-07-30, last updated 2026-07-31. **Version in tree:** `1.0.0-rc.1`
+**Written:** 2026-07-30, last updated 2026-08-01. **Version in tree:** `1.0.0-rc.1`
 (`pyproject.toml:13`). **`github/main` tip:** `7c9ed3d2` — `fix(updater): tell the truth about what
 a rollback is actually serving (#1549)`.
 
@@ -498,3 +498,14 @@ human review before a PR opens — do not auto-merge this one given the stakes).
 
 **If you're picking this up:** before trusting anything above, run `superset tasks list` (or check
 Linear) for current status, and `gh pr list --repo Hal0ai/hal0-web` for what's actually merged.
+
+## 9. Branch archaeology + salvage — completed (2026-08-01)
+
+The backlog risk described in §3 has been worked off. **44 stale branches pruned** and **8 dirty
+worktrees salvaged as PRs #1566–#1573** — all merged except **#1568**, which is held for the LXC
+install test before it lands. #1555 was closed as superseded; #1556 is landing. Nothing of value
+remains single-copy on RAID0 from that sweep.
+
+Separately, the recurring Proxmox host crashes were **root-caused to a swap-on-zvol ZFS deadlock**
+and fixed: the host now runs swapless, and CT105's memory is capped at 96G. If the host has been
+stable since and you were about to re-investigate a crash, start from that fix, not from scratch.
