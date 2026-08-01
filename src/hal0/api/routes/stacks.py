@@ -39,6 +39,7 @@ from hal0.config.schema import StackConfig
 from hal0.errors import BadRequest
 from hal0.model_meta import DEVICE_TO_DEFAULT_PROFILE
 from hal0.profiles import ProfileCatalog
+from hal0.slots.layout import resolve_slot_stem
 from hal0.stacks import ResolvedStack, StacksCatalog
 from hal0.stacks.apply import StackApplyEngine
 from hal0.stacks.portable import (
@@ -154,7 +155,16 @@ def _registry(request: Request) -> Any:
 
 
 def _slot_toml_exists(slot: str) -> bool:
-    return (paths.slots_config_dir() / f"{slot}.toml").exists()
+    """Does this box already have the slot a stack entry names? (#1510)
+
+    Resolved through the bilingual layout seam, not ``f"{slot}.toml"``: a
+    stack addresses slots by display name, and on an id-keyed box that name
+    lives under a digit stem (``agent`` → ``1.toml``). The raw f-string
+    reported every live slot missing, which made ``_create_missing_slots``
+    clone all sixteen of them alongside the originals — the duplicate-slot
+    state #1422 reports.
+    """
+    return resolve_slot_stem(paths.slots_config_dir(), slot) is not None
 
 
 def _missing_slot_names(cfg: StackConfig) -> list[str]:
@@ -244,14 +254,22 @@ def _known_model_ids(request: Request) -> set[str]:
 
 
 def _diff_rows(plan: Any) -> list[dict[str, Any]]:
-    """Per-slot before→after model summary for the dry-run preview UI."""
+    """Per-slot before→after model summary for the dry-run preview UI.
+
+    ``slot`` is the DISPLAY name from ``plan.slot_names`` (#1510) — labelling
+    rows with ``after.path.stem`` listed an id-keyed box's slots to the
+    operator as ``1`` / ``13`` instead of ``agent`` / ``rerank``.
+    """
     rows: list[dict[str, Any]] = []
-    for before, after in zip(plan.change_set.before, plan.change_set.after, strict=True):
+    names = getattr(plan, "slot_names", ()) or ()
+    for i, (before, after) in enumerate(
+        zip(plan.change_set.before, plan.change_set.after, strict=True)
+    ):
         b_model = (before.data or {}).get("model", {}).get("default") if before.data else None
         a_model = (after.data or {}).get("model", {}).get("default") if after.data else None
         rows.append(
             {
-                "slot": after.path.stem,
+                "slot": names[i] if i < len(names) else after.path.stem,
                 "before_model": b_model,
                 "after_model": a_model,
                 "changed": before.data != after.data,
