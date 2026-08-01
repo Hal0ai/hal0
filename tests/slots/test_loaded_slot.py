@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from hal0.registry.model import Model
+from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import LoadedSlot, SlotManager
 
 
@@ -101,6 +103,83 @@ async def test_resolve_for_request_applies_label_overlay(slot_root: Path) -> Non
     assert slot is not None
     assert slot.name == "vision"
     assert slot.model_id == "vision-chat"
+
+
+# ── #1469: label overlay falls back to registry-derived modality ────────────
+#
+# 7 of the omni router's 8 tools gate on `required_model_labels`, which the
+# overlay above satisfies from the slot TOML's hand-authored `[model].labels`
+# — a field nothing in the installer, the registry import path, or the
+# dashboard ever writes, so every live box carries zero labels and those
+# tools are permanently inert even when a correctly-typed, correctly-capable
+# slot exists. Mirrors the exact fallback shape §7.1d already gave
+# `tool_calling` (registry `capability_flags` first, hand-authored label
+# second): here the source is `hal0.model_meta.modality.derive_modalities_
+# from_model_info`, which is already populated at registration time from
+# real facts (mmproj presence, pooling_type, backend family) — NOT a new
+# field nobody writes. Only labels that fold onto the closed `Modality` enum
+# via `normalize_modality` (vision/tts/asr/embed/rerank/image, and their
+# tool-taxonomy aliases transcription/embeddings/reranking) get this
+# fallback; `edit` has no modality equivalent and is deliberately NOT
+# covered here (see the boundary test below) — inventing a new registry
+# field to distinguish "can edit" from "can generate" is a real design
+# decision, out of scope for this fix.
+
+
+@pytest.mark.asyncio
+async def test_resolve_for_request_label_overlay_falls_back_to_derived_vision_modality(
+    slot_root: Path, tmp_hal0_home: str
+) -> None:
+    ModelRegistry().add(
+        Model(id="vlm-7b", path="/tmp/vlm-7b.gguf", mmproj="/tmp/vlm-7b-mmproj.gguf")
+    )
+    _write_slot(slot_root, "chat", model="plain-chat", default=True)
+    # No `labels=("vision",)` here — the registry's mmproj-derived modality
+    # is the ONLY signal that this slot can serve a vision requirement.
+    _write_slot(slot_root, "vlm", model="vlm-7b")
+
+    slot = await SlotManager().resolve_for_request("llm", required_labels=("vision",))
+
+    assert slot is not None
+    assert slot.name == "vlm"
+
+
+@pytest.mark.asyncio
+async def test_resolve_for_request_label_overlay_falls_back_to_derived_embed_modality(
+    slot_root: Path, tmp_hal0_home: str
+) -> None:
+    # embed_text's tool label is "embeddings" (tool-taxonomy spelling);
+    # MODALITY_ALIASES folds it to the canonical "embed" Modality, which
+    # derives from pooling_type=1 — no TOML label written either.
+    ModelRegistry().add(
+        Model(
+            id="embed-model",
+            path="/tmp/embed-model.gguf",
+            metadata={"pooling_type": 1},
+        )
+    )
+    _write_slot(slot_root, "embedder", slot_type="embedding", model="embed-model")
+
+    slot = await SlotManager().resolve_for_request("embedding", required_labels=("embeddings",))
+
+    assert slot is not None
+    assert slot.name == "embedder"
+
+
+@pytest.mark.asyncio
+async def test_resolve_for_request_label_overlay_has_no_fallback_for_edit(
+    slot_root: Path, tmp_hal0_home: str
+) -> None:
+    """`edit` (edit_image's required label) has no Modality equivalent — a
+    model that derives `image` (comfyui) must NOT be treated as satisfying
+    `edit` just because it's the only image-capable slot. Documents the
+    known, deliberately-unfixed gap rather than silently over-matching."""
+    ModelRegistry().add(Model(id="image-model", path="/tmp/image-model.gguf", backends=["comfyui"]))
+    _write_slot(slot_root, "img", slot_type="image", model="image-model", default=True)
+
+    slot = await SlotManager().resolve_for_request("image", required_labels=("edit",))
+
+    assert slot is None
 
 
 @pytest.mark.asyncio

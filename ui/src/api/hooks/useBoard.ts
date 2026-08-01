@@ -1101,12 +1101,6 @@ export interface UseBoardChatResult {
   setAutoApprove: (on: boolean) => void
 }
 
-// The agent chat embodies the hal0-brain profile, which targets the dedicated
-// `brain` slot by default (hal0/brain falls back to the `agent` slot via the
-// resolver chain when no brain slot is loaded). Sent explicitly so it routes
-// correctly regardless of the backend's default.
-const BOARD_CHAT_MODEL = 'hal0/brain'
-
 // Client-side guard for reasoning models that inline `<think>…</think>` in
 // content: the backend already splits these into `thinking` frames, but an
 // older backend streaming raw think-tags must never show them in the bubble.
@@ -1218,12 +1212,15 @@ export function useBoardChat(board?: string): UseBoardChatResult {
       : ENDPOINTS.boardChat
 
     // Open SSE stream via fetch POST. Contract (see board_chat.py): the body
-    // carries `messages` (OpenAI format), optional `board`, and `model`; the
-    // response is SSE frames `{type: token|tool_call|tool_result|done|error}`.
-    // `model` is sent explicitly so board chat runs on the `agent` slot (the
-    // tool-calling orchestrator model) — board_chat.py honours payload.model
-    // over its default, so this routes correctly without a backend restart.
-    const body: Record<string, unknown> = { messages: outbound, model: BOARD_CHAT_MODEL }
+    // carries `messages` (OpenAI format) and optional `board`; the response
+    // is SSE frames `{type: token|tool_call|tool_result|done|error}`.
+    // `model` is deliberately OMITTED: board_chat.py resolves
+    // `payload.get("model") or cfg.model or default_model`, so an explicit
+    // client-sent model always wins and permanently defeats the
+    // `[brain_chat].model` config override and the persona's
+    // `preferred_model` (GH #1469). Leaving it unset lets that server-side
+    // precedence chain do its job.
+    const body: Record<string, unknown> = { messages: outbound }
     if (board) body.board = board
     fetch(url, {
       method: 'POST',
