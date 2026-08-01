@@ -37,6 +37,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from hal0.redaction import redact_log_line, redact_text_tree
+
 __all__ = ["ActionRecorder", "AuditStore", "audit_action"]
 
 Kind = Literal["action", "event"]
@@ -117,7 +119,12 @@ def _now_iso() -> str:
 
 
 def _redact(value: Any) -> Any:
-    """Recursively replace secret-looking values so they never hit disk."""
+    """Recursively replace secret-looking values so they never hit disk.
+
+    Key-NAME strategy: a value is masked because of what its key is called.
+    Blind to a secret hiding in free text under an innocent key — see
+    :func:`_redact_text` for the complementary pass (#1523).
+    """
     if isinstance(value, dict):
         return {
             k: (_REDACTED if k.lower() in _SECRET_KEYS else _redact(v)) for k, v in value.items()
@@ -127,11 +134,21 @@ def _redact(value: Any) -> Any:
     return value
 
 
+def _redact_text(value: str | None) -> str | None:
+    """Scrub a free-text column, passing ``None`` through unchanged."""
+    return None if value is None else redact_log_line(value)
+
+
 def _dump(value: Any) -> str | None:
-    """JSON-encode a before/after blob (after redaction), or None."""
+    """JSON-encode a before/after blob (after redaction), or None.
+
+    Both strategies run: key-name masking first, then a text scan over what
+    survives. ``{"stderr": "curl -H 'Authorization: Bearer tok…'"}`` has no
+    sensitive KEY, so only the text pass catches it (#1523).
+    """
     if value is None:
         return None
-    return json.dumps(_redact(value), separators=(",", ":"), default=str)
+    return json.dumps(redact_text_tree(_redact(value)), separators=(",", ":"), default=str)
 
 
 @dataclass
@@ -214,10 +231,15 @@ class AuditStore:
                     actor,
                     severity,
                     outcome,
-                    message,
+                    # #1523: scrub free-text at the last moment before it is
+                    # durable. ``record_action`` writes here directly without
+                    # crossing the EventBus, so make_event's seam never sees
+                    # these two columns — and ``error`` is exactly where
+                    # audit_action parks a stringified exception.
+                    _redact_text(message),
                     _dump(before),
                     _dump(after),
-                    error,
+                    _redact_text(error),
                     duration_ms,
                     request_id,
                 ),
