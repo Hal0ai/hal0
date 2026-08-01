@@ -26,10 +26,22 @@ export function UpdatesPage() {
   const [pinVersion, setPinVersion] = useState("");
   const u = stateQuery.data || { hal0: {}, flm: {} };
 
+  // #1539: the page must not present unread state as read state. Everything
+  // below that names a specific version, channel or posture is gated on the
+  // query having actually produced a payload — `data === undefined` covers
+  // the in-flight load and the failed read alike, and neither one licenses a
+  // plausible-looking default. (The Auto-check row has guarded this way since
+  // #1467; the rows around it had not.)
+  const stateKnown = !!stateQuery.data;
+
   // The current channel lives on each per-component envelope (both
   // populated from telemetry.channel in hal0.toml); hal0.channel is
-  // authoritative for the switch's initial value.
-  const currentChannel = u.hal0?.channel || 'stable';
+  // authoritative for the switch's initial value. It used to fall back to
+  // 'stable' — a specific, persisted-looking value the page never read, so a
+  // box on `nightly` was shown `stable` during any outage. Unknown now reads
+  // as unknown and the control is inert until a real value lands.
+  const channelKnown = !!u.hal0?.channel;
+  const currentChannel = channelKnown ? u.hal0.channel : '';
 
   // Track the most recent apply job so the user sees the backend's
   // verdict, not just the 202 ack. Toasts fire once on terminal state.
@@ -57,14 +69,30 @@ export function UpdatesPage() {
       <h2>Updates</h2>
       <p className="desc">Signed self-update. hal0 verifies a Sigstore signature before swapping binaries. Per-channel pins.</p>
       <div className="s-panel">
+        {stateQuery.isError && (
+          <div className="s-row" data-testid="updates-state-error">
+            <div className="k"><span style={{color: "var(--warn)"}}>Update state unavailable</span></div>
+            <div className="v mono" style={{color: "var(--fg-3)"}}>
+              Could not read update state — {stateQuery.error?.message || "the update service is not responding"}.
+              Versions, channel and auto-check below are unknown, not defaults.
+            </div>
+            <div className="ac">
+              <button
+                className="btn ghost sm"
+                data-testid="updates-state-retry"
+                onClick={() => stateQuery.refetch?.()}
+              >Retry</button>
+            </div>
+          </div>
+        )}
         <SRow
           k="hal0"
           sub="Dashboard + API + CLI"
           mono
           v={<>
             {u.hal0?.available
-              ? <><span style={{color: "var(--accent)"}}>{u.hal0.available} available</span> <span style={{color: "var(--fg-4)"}}>· current {u.hal0.current}</span></>
-              : <span>current {u.hal0?.current}</span>}
+              ? <><span style={{color: "var(--accent)"}}>{u.hal0.available} available</span> <span style={{color: "var(--fg-4)"}}>· current <span data-testid="updates-hal0-version">{u.hal0.current}</span></span></>
+              : <span>current <span data-testid="updates-hal0-version">{u.hal0?.current || "—"}</span></span>}
             {jobLabel && <span style={{marginLeft: 8, color: "var(--warn)", fontFamily: "var(--jbm)", fontSize: 11}}>· {jobLabel}</span>}
           </>}
           actions={<>
@@ -96,7 +124,13 @@ export function UpdatesPage() {
             >{checkM.isPending ? "Checking…" : "Check"}</button>
             <button
               className="btn ghost sm"
-              disabled={rollbackM.isPending || !!jobBusy}
+              data-testid="updates-rollback"
+              // Rolling back is the one irreversible control on this page.
+              // Offering it against a version we failed to read is the
+              // actionable half of the lie: the confirm dialog would name no
+              // current version and the operator would be agreeing to swap
+              // away from a baseline the page never established.
+              disabled={rollbackM.isPending || !!jobBusy || !stateKnown}
               onClick={() => setRollbackConfirm(true)}
             >{rollbackM.isPending ? "Rolling back…" : "Roll back"}</button>
             <a className="btn ghost sm" href="https://hal0.dev/changelog" target="_blank" rel="noreferrer">Changelog →</a>
@@ -145,8 +179,13 @@ export function UpdatesPage() {
           v={
             <select
               className="input mono"
+              data-testid="updates-channel"
               value={currentChannel}
-              disabled={setChannelM.isPending}
+              // Inert until a real channel lands. A live-looking picker over
+              // an unknown baseline invites a "switch" that is really a blind
+              // write — and the no-op guard below (`next === currentChannel`)
+              // can't protect against it when currentChannel is ''.
+              disabled={setChannelM.isPending || !channelKnown}
               onChange={(e) => {
                 const next = e.target.value;
                 if (next === 'stable' || next === 'preview' || next === 'nightly') {
@@ -164,6 +203,11 @@ export function UpdatesPage() {
               }}
               style={{maxWidth: 160}}
             >
+              {/* Only present while the channel is unknown, so the select has
+                  a real option to hold the empty value instead of silently
+                  falling back to the first one — which is how 'stable' got
+                  displayed for a box on `nightly` in the first place. */}
+              {!channelKnown && <option value="">—</option>}
               <option value="stable">stable</option>
               <option value="preview">preview</option>
               <option value="nightly">nightly</option>

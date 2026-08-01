@@ -6,9 +6,12 @@ at runtime; user configuration lives in /etc/hal0/upstreams.toml.
 Auth styles:
     "bearer"          → Authorization: Bearer <key>              (most providers)
     "anthropic"       → x-api-key: <key>  +  anthropic-version  (Anthropic only)
-    "google_query"    → ?key=<key> on the URL                    (Google AI Studio)
     "header"          → custom header_name: <key>                ("custom" only)
     "none"            → no auth header                           ("custom" only)
+
+Every style listed here has a branch in UpstreamRegistry.auth_headers();
+"google_query" was listed here for releases without one (#1513). Keep the
+two in lock-step — tests/security/test_upstream_auth_contract.py asserts it.
 
 API keys are NEVER written to TOML.  They live in the slot env file managed
 by hal0.config.env.write_env_atomic; the key's env var name is stored in
@@ -100,8 +103,15 @@ _CATALOG: dict[str, dict[str, Any]] = {
         "id": "google_ai_studio",
         "name": "Google AI Studio",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "auth": "google_query",
-        "auth_header_name": "",
+        # bearer, not the retired "google_query" (#1513). ?key= belongs to
+        # Google's NATIVE generativelanguage API; the OpenAI-compatible
+        # surface pinned above authenticates with a plain bearer header —
+        # Google's own REST example is
+        # `-H "Authorization: Bearer $GEMINI_API_KEY"`. The old style was
+        # declared, validated and offered but implemented nowhere, so every
+        # Gemini call dispatched unauthenticated behind a "key set" chip.
+        "auth": "bearer",
+        "auth_header_name": "Authorization",
         "models_path": "/models",
         "default_models": ["gemini-2.0-flash", "gemini-1.5-pro"],
         "default_model": "gemini-2.0-flash",
@@ -217,7 +227,7 @@ def validate_catalog() -> list[str]:
         if category != "custom" and not entry.get("base_url"):
             problems.append(f"{cid}: missing base_url")
         auth = entry.get("auth", "")
-        if auth not in {"bearer", "anthropic", "google_query", "header", "none"}:
+        if auth not in {"bearer", "anthropic", "header", "none"}:
             problems.append(f"{cid}: invalid auth style {auth!r}")
         caps = entry.get("capabilities", [])
         if not isinstance(caps, list):

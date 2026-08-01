@@ -169,7 +169,7 @@ def _deep_copy_dict(data: dict[str, Any]) -> dict[str, Any]:
 # Import side-effects: each migration module decorates its transform with
 # @register(N), wiring it into MIGRATIONS.
 
-from hal0.config.migrations import v1  # noqa: E402, F401  (registration)
+from hal0.config.migrations import v1, v2  # noqa: E402, F401  (registration)
 
 __all__ = [
     "MIGRATIONS",

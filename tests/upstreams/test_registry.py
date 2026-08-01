@@ -26,6 +26,7 @@ from hal0.upstreams.registry import (
     TIER1_TOTAL_GRACE_S,
     Upstream,
     UpstreamAlreadyExists,
+    UpstreamAuthUnconfigured,
     UpstreamNotFound,
     UpstreamRegistry,
 )
@@ -134,10 +135,13 @@ def test_auth_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_auth_bearer_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A credentialed style with an unset env var raises instead of
+    dispatching unauthenticated (#1513)."""
     monkeypatch.delenv("MY_KEY", raising=False)
     r = UpstreamRegistry()
     u = _remote(auth_style="bearer", auth_value_env="MY_KEY")
-    assert r.auth_headers(u) == {}
+    with pytest.raises(UpstreamAuthUnconfigured):
+        r.auth_headers(u)
 
 
 def test_auth_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,10 +164,14 @@ def test_auth_none() -> None:
     assert r.auth_headers(u) == {}
 
 
-def test_auth_google_query_emits_no_header(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_unknown_style_emits_no_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ "google_query" was retired in #1513 (it emitted no header, so calls
+    dispatched unauthenticated); an unknown style with a key present still
+    falls through to no headers rather than raising here — the schema
+    validator is the gate for unknown styles."""
     monkeypatch.setenv("G_KEY", "foo")
     r = UpstreamRegistry()
-    u = _remote(auth_style="google_query", auth_value_env="G_KEY")
+    u = _remote(auth_style="mystery", auth_value_env="G_KEY")
     assert r.auth_headers(u) == {}
 
 

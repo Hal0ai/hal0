@@ -90,5 +90,12 @@ jobs:
         run: npm ci
       - name: Lint
         run: npm run lint
+      # Runs BEFORE build: `vite build` transpiles per-file and never
+      # type-checks across module boundaries, so a field renamed in one file
+      # and still read in another builds green forever. That is exactly how
+      # useRuntime.ts came to filter on a property the normaliser had already
+      # renamed — a dead condition nothing could have caught here.
+      - name: Typecheck
+        run: npm run typecheck
       - name: Build
         run: npm run build

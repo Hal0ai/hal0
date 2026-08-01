@@ -13,9 +13,9 @@ from hal0.release.policy import ReleasePolicy, ReleaseTagError
 @pytest.mark.parametrize(
     ("tag", "kind", "stage", "targets", "prerelease", "latest", "pypi", "python_version"),
     [
-        ("v1.0.0-alpha.0", "preview", "alpha", ("preview",), True, False, True, "1.0.0a0"),
-        ("v1.0.0-beta.2", "preview", "beta", ("preview",), True, False, True, "1.0.0b2"),
-        ("v1.0.0-rc.1", "preview", "rc", ("preview",), True, False, True, "1.0.0rc1"),
+        ("v1.0.0-alpha.0", "preview", "alpha", ("preview",), True, False, False, "1.0.0a0"),
+        ("v1.0.0-beta.2", "preview", "beta", ("preview",), True, False, False, "1.0.0b2"),
+        ("v1.0.0-rc.1", "preview", "rc", ("preview",), True, False, False, "1.0.0rc1"),
         ("v1.0.0", "stable", None, ("stable", "preview"), False, True, True, "1.0.0"),
         (
             "v1.0.1-nightly.20260721060000",
@@ -78,6 +78,6 @@ def test_github_outputs_are_strings() -> None:
         "manifest_targets": "preview",
         "github_prerelease": "true",
         "github_latest": "false",
-        "publish_pypi": "true",
+        "publish_pypi": "false",
         "retain": "true",
     }

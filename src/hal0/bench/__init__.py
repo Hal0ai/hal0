@@ -17,4 +17,9 @@ $BENCHLAB_STATE). Surfaces: `hal0 bench <verb>` (cli.py) and
 `/api/benchmarks/*` (hal0.api.routes.benchmarks).
 """
 
-__version__ = "0.1.0"
+# No module-local __version__ (#1477). This carried "0.1.0" — inherited from
+# the out-of-tree benchlab repo and never bumped again — and its ONLY consumer
+# was `hal0 bench --version`, which therefore announced 0.1.0 on a hal0
+# 1.0.0-rc.1 box. bench ships inside hal0 and has no independent release
+# cadence, so the CLI reports hal0's version instead of maintaining a second
+# number that can only ever drift.

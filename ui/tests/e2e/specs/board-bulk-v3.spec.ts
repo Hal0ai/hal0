@@ -149,7 +149,14 @@ test.describe('BoardView — bulk actions', () => {
     expect(bulkBodies.some(b => b.update?.status === 'archived')).toBe(true)
   })
 
-  test('bulk → delete: fires DELETE per selected id', async ({ page }) => {
+  // #1535: delete is no longer one-click. The button stages the selection into
+  // a destructive ConfirmDialog (type-to-confirm "delete") and only the
+  // dialog's confirm reaches the wire. The full guard contract — zero DELETEs
+  // before confirming, the cascade blast radius, cancel, and the disabled-until-
+  // matched button — lives in board-bulk-delete-guard-v3.spec.ts. This test
+  // keeps the per-id fan-out contract it always covered, now driven through
+  // the dialog.
+  test('bulk → delete: fires DELETE per selected id (via the confirm)', async ({ page }) => {
     const targets = BOARD_TASKS.filter(t => t.status === 'done').slice(0, 2)
     const deleteUrls: string[] = []
 
@@ -165,9 +172,11 @@ test.describe('BoardView — bulk actions', () => {
     await gotoBoardAndWait(page)
     await selectCards(page, targets.map(t => t.id))
     await page.locator('[data-testid="board-action-delete"]').click()
-    await page.waitForTimeout(300)
+    await expect(page.locator('[data-testid="board-delete-blast"]')).toBeVisible()
+    await page.locator('[role="dialog"] input').fill('delete')
+    await page.locator('[role="dialog"] button', { hasText: /^Delete \d+ card/ }).click()
 
-    expect(deleteUrls.length).toBeGreaterThanOrEqual(2)
+    await expect.poll(() => deleteUrls.length).toBeGreaterThanOrEqual(2)
     for (const t of targets) {
       expect(deleteUrls.some(u => u.includes(t.id))).toBe(true)
     }

@@ -347,6 +347,10 @@ async def _run_prepare_job(
         job["resolved_version"] = result.get("version")
         job["notes"] = result.get("notes")
         job["cosign_skipped"] = result.get("cosign_skipped")
+        # Read-only gate snapshot for the one-shot profile-catalog reset.
+        # commit() runs in this daemon, which has no TTY, so the CLI has to be
+        # told *here* whether a prompt is owed and what it would destroy.
+        job["profile_reset"] = result.get("profile_reset")
         job["state"] = "prepared"
     finally:
         job["updated_at"] = time.time()
@@ -358,6 +362,7 @@ async def _run_commit_job(
     job_id: str,
     channel: str,
     version: str,
+    reset_profiles: bool | None = None,
 ) -> None:
     """Background task that ACTIVATES a prepared version via ``Updater.commit()``.
 
@@ -365,6 +370,15 @@ async def _run_commit_job(
     ``hal0-api.service`` fail-soft (same policy as ``_run_apply_job``). Requires
     that ``/prepare`` staged ``version`` first; ``commit()`` raises otherwise and
     the job goes to ``failed``.
+
+    ``reset_profiles`` carries the operator's answer to the one-shot
+    profile-catalog reset prompt from the CLI (this daemon has no TTY of its
+    own). ``None`` — the default for any caller that does not ask — means "no
+    consent", which leaves operator-authored profiles untouched.
+
+    The commit result's ``convergence`` block is attached to the job so the CLI
+    can refuse to report a clean success on a box that is still on the pre-v1.0
+    slot/model shape.
     """
     job = jobs[job_id]
     job["state"] = "running"
@@ -372,7 +386,7 @@ async def _run_commit_job(
     _persist_job(job)
     try:
         updater = Updater(channel=channel)
-        await updater.commit(version)
+        result = await updater.commit(version, reset_profiles=reset_profiles)
     except Exception as exc:
         job["state"] = "failed"
         job["error"] = str(exc)
@@ -391,6 +405,7 @@ async def _run_commit_job(
         restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
         job["restarted"] = restarted
         job["restart_error"] = restart_error
+        job["convergence"] = (result or {}).get("convergence")
     finally:
         job["updated_at"] = time.time()
         _persist_job(job)
@@ -715,6 +730,12 @@ async def commit_update(request: Request) -> dict[str, Any]:
     by the prepare job. Returns a queued-job snapshot (202); poll
     ``/status/{job_id}`` until ``applied`` | ``failed``. The daemon try-restarts
     hal0-api fail-soft after a successful commit.
+
+    Body (optional): ``{"reset_profiles": true}`` — the operator's explicit
+    consent to the one-shot v1.0 profile-catalog reset that the prepare job
+    reported as due (``profile_reset.needs_consent``). Omitted / false means no
+    consent: operator-authored profiles are left in place and the reset stays
+    outstanding. There is no way to consent implicitly — this daemon has no TTY.
     """
     try:
         body = await request.json()
@@ -733,6 +754,8 @@ async def commit_update(request: Request) -> dict[str, Any]:
             "commit version must be an exact supported release version",
             details={"version": version, "error": str(exc)},
         ) from exc
+    reset_profiles = body.get("reset_profiles") if isinstance(body, dict) else None
+    reset_profiles = True if reset_profiles is True else None
     channel = _current_channel(request)
     jobs = _update_jobs(request)
     job_id = uuid.uuid4().hex[:12]
@@ -742,12 +765,13 @@ async def commit_update(request: Request) -> dict[str, Any]:
         "phase": "commit",
         "channel": channel,
         "version": version,
+        "reset_profiles": reset_profiles,
         "created_at": time.time(),
         "updated_at": time.time(),
         "error": None,
     }
     _persist_job(jobs[job_id])
-    _spawn_update_task(request, _run_commit_job(jobs, job_id, channel, version))
+    _spawn_update_task(request, _run_commit_job(jobs, job_id, channel, version, reset_profiles))
     return dict(jobs[job_id])
 
 

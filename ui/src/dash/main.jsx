@@ -21,6 +21,10 @@ import { AuthGate } from './auth/AuthGate.jsx'
 // index.html), so a box that's live-updated without a UI rebuild still
 // shows its true version.
 import { useUpdateState } from '@/api/hooks/useUpdates'
+// Optional error reporting (src/sentry.ts). Import is always safe: with no
+// VITE_SENTRY_DSN baked in, captureUiException is a no-op and the SDK chunk is
+// never fetched.
+import { captureUiException } from '@/sentry'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -41,8 +45,7 @@ function fmtApprovalTs(v) {
 
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "slotVariant": "instrument",
-  "showHero": true,
-  "personaPlacement": "composer-left"
+  "showHero": true
 }/*EDITMODE-END*/;
 
 // ─── hash routing — supports #slots or #slots/<name> ───
@@ -123,6 +126,11 @@ class ViewErrorBoundary extends React.Component {
   componentDidCatch(err, info) {
     // Surface in the console for diagnosis; never re-throw.
     console.error("view crashed:", err, info && info.componentStack);
+    // This boundary swallows the throw to keep the chrome alive, so the
+    // browser's global error handler never sees it — a black-screened view
+    // would be invisible in Sentry without an explicit capture. No-op when
+    // Sentry is off (the shipped default).
+    captureUiException(err, info && info.componentStack);
   }
   render() {
     if (this.state.err) {
@@ -154,7 +162,6 @@ function App() {
   const [{ route, param }, setRouteState] = useStateA(parseRoute());
   const [approvalsOpen, setApprovalsOpen] = useStateA(false);
   const [heroDismissed, setHeroDismissed] = useStateA(false);
-  const [composerState, setComposerState] = useStateA("idle");
   const [footerOpen, setFooterOpen] = useStateA(false);
   const [paletteOpen, setPaletteOpen] = useStateA(false);
   const [navOpen, setNavOpen] = useStateA(false);
@@ -476,28 +483,11 @@ function App() {
             value={tweaks.showHero}
             onChange={v => setTweak("showHero", v)}
           />
-          <TweakRadio
-            label="Persona placement"
-            value={tweaks.personaPlacement}
-            onChange={v => setTweak("personaPlacement", v)}
-            options={[
-              { value: "composer-left", label: "In composer" },
-              { value: "above",         label: "Above input" },
-            ]}
-          />
-          <TweakSelect
-            label="Composer state"
-            value={composerState}
-            onChange={v => setComposerState(v)}
-            options={[
-              { value: "idle",      label: "Idle (default)" },
-              { value: "sending",   label: "Sending" },
-              { value: "streaming", label: "Streaming" },
-              { value: "swap",      label: "NPU swap in progress" },
-              { value: "no-tools",  label: "No tool-calling LLM" },
-              { value: "offline",   label: "runtime offline" },
-            ]}
-          />
+          {/* "Persona placement" and "Composer state" lived here until #1477.
+              Both drove the chat page deleted in #439 — nothing has read
+              tweaks.personaPlacement or composerState since, so the controls
+              moved state no surface consumed. A knob that visibly does
+              nothing teaches an operator the whole panel is decorative. */}
         </TweakSection>
 
         <TweakSection title="Banners" label="Banners">

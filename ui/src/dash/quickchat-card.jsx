@@ -35,8 +35,14 @@ function openChatStream({ model, messages, onDelta, onDone, onError }) {
 
     if (!res.ok) {
       let msg = `HTTP ${res.status}`
-      try { const j = await res.json(); msg = j?.error?.message ?? j?.detail ?? msg } catch {}
-      onError(msg)
+      let retryAfterS = null
+      try {
+        const j = await res.json()
+        msg = j?.error?.message ?? j?.detail ?? msg
+        const hint = j?.error?.details?.retry_after_s
+        if (typeof hint === 'number' && hint > 0) retryAfterS = hint
+      } catch {}
+      onError(msg, retryAfterS)
       return
     }
 
@@ -152,10 +158,15 @@ export function QuickChatCard() {
   const [phase, setPhase] = useState('idle') // idle | thinking | streaming | done | error
   const [output, setOutput] = useState('')
   const [errorMsg, setErrorMsg] = useState(null)
+  const [retryAfterS, setRetryAfterS] = useState(null)
   const [metrics, setMetrics] = useState(null) // { ttft, toks, tokS }
 
   // Streaming internals
   const abortRef = useRef(null)
+  // #1469: the text that was actually sent, so a failed send can restore it
+  // to the input box (instead of just discarding it) and Retry can resend
+  // it verbatim without the operator retyping.
+  const lastSentRef = useRef('')
   const startTimeRef = useRef(null)
   const firstTokenRef = useRef(null)
   const tokenCountRef = useRef(0)
@@ -182,6 +193,7 @@ export function QuickChatCard() {
     setPhase('thinking')
     setOutput('')
     setErrorMsg(null)
+    setRetryAfterS(null)
     setMetrics(null)
     outputRef.current = ''
     tokenCountRef.current = 0
@@ -220,13 +232,19 @@ export function QuickChatCard() {
         const tokS = elapsed > 0.1 ? Math.round(finalToks / elapsed) : null
         setMetrics({ ttft, toks: finalToks, tokS })
       },
-      onError: (msg) => {
+      onError: (msg, retryAfter) => {
         setPhase('error')
         setErrorMsg(msg)
+        setRetryAfterS(typeof retryAfter === 'number' ? retryAfter : null)
         abortRef.current = null
+        // #1469: a failed send used to leave the operator's message gone
+        // for good (input was already cleared below, optimistically).
+        // Put it back so they don't have to retype it to retry.
+        setInput(lastSentRef.current)
       },
     })
 
+    lastSentRef.current = text
     setInput('')
   }, [input, selectedSlot, phase])
 
@@ -286,6 +304,16 @@ export function QuickChatCard() {
     outputContent = (
       <span className="qc-error">
         stream error: {errorMsg ?? 'unknown'}
+        {retryAfterS != null ? ` — retry in ${retryAfterS}s` : ''}
+        <button
+          type="button"
+          className="qc-retry"
+          onClick={send}
+          disabled={!selectedSlot || !lastSentRef.current}
+          title="Resend the same message"
+        >
+          Retry
+        </button>
       </span>
     )
   }

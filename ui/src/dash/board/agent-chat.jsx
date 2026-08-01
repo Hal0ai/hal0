@@ -189,6 +189,29 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
   const displayMsgs = chatHook ? chatHook.messages : [];
   const isTyping    = chatHook ? chatHook.streaming : false;
 
+  // Steward status dot. The header used to hard-code a green pulsing `live`
+  // dot regardless of backend state, so during a brain-lane outage (#1418) or
+  // while the slot warms, the drawer still signalled a healthy agent — the
+  // only degraded state it ever surfaced was a missing hook bridge.
+  //
+  // There is no cheap dedicated liveness probe for the steward, so this is
+  // derived from the evidence the drawer already holds: the outcome of the
+  // last turn. It defaults to UNKNOWN (neutral, no pulse) rather than green —
+  // "we have not talked to it yet" must not render as "healthy", which is the
+  // same rule the agent-liveness work landed for `unit_active: null` (#1459).
+  const lastAssistant = [...displayMsgs].reverse().find(m => m.role === "assistant");
+  const stewardState = !chatHook          ? "unknown"
+    : isTyping                            ? "busy"
+    : lastAssistant?.error                ? "down"
+    : lastAssistant                       ? "ok"
+    : "unknown";
+  const STEWARD_DOT = {
+    ok:      { cls: "kdot live", st: "var(--ok)",   title: "last turn completed" },
+    busy:    { cls: "kdot live", st: "var(--warn)", title: "responding…" },
+    down:    { cls: "kdot",      st: "var(--bad)",  title: "last turn failed" },
+    unknown: { cls: "kdot",      st: "var(--fg-4)", title: "no turn taken yet — status unknown" },
+  }[stewardState];
+
   const [draft, setDraft] = useState("");
   const threadRef = useRef(null);
 
@@ -219,7 +242,13 @@ function AgentChat({ chat, byId, onClose, onOpenTask }) {
       >
         <div className="b-drawer-h">
           <span className="dh-title">
-            <span className="kdot live" style={{ "--st": "var(--ok)" }} />
+            <span
+              className={STEWARD_DOT.cls}
+              style={{ "--st": STEWARD_DOT.st }}
+              title={STEWARD_DOT.title}
+              data-testid="board-chat-steward-dot"
+              data-state={stewardState}
+            />
             hal0-brain · platform steward
           </span>
           <span className="spacer" />

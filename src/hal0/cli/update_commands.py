@@ -204,6 +204,139 @@ def _render_notes(notes: dict | None) -> None:
         console.print(Markdown(markdown))
 
 
+def _decide_profile_reset(status: dict | None, *, yes: bool) -> bool | None:
+    """Decide whether to consent to the one-shot v1.0 profile-catalog reset.
+
+    v1.0 made profiles tuning-only, so a pre-v1.0 ``/etc/hal0/profiles.toml`` is
+    reset exactly once (backed up first; the built-in catalog is virtual, so the
+    reseed is free). ``commit()`` runs inside hal0-api and has no TTY, so the
+    decision is made here and posted with the commit.
+
+    Policy — deliberately three-way, and biased against destroying operator work:
+
+    * Nothing to lose (fresh box, seeds only, or an unparseable file that is
+      already breaking this install) → converge silently, ``None`` is enough;
+      ``reset_profile_catalog`` proceeds on its own when ``needs_consent`` is
+      false. Nothing is prompted for a no-op.
+    * ``--yes`` → explicit operator consent, wipe.
+    * Interactive TTY → prompt, naming the exact profiles at risk. Defaults to
+      yes: convergence is the point of the upgrade and a timestamped backup is
+      written first, but the operator can decline and keep them.
+    * Headless without ``--yes`` → **skip**. An unattended cron update must
+      never delete operator-authored profiles. The gate stays unstamped and the
+      post-update convergence banner says it is still outstanding.
+
+    Returns True (consent), or None (no consent — never a hard "no", because the
+    reset itself distinguishes "declined" from "nothing to consent to").
+    """
+    if not isinstance(status, dict) or not status.get("due"):
+        return None
+    if not status.get("needs_consent"):
+        return None
+    names = [str(n) for n in (status.get("custom_profiles") or [])]
+    if yes:
+        return True
+    if not _interactive():
+        console.print(
+            "[yellow]![/yellow] the one-shot profile-catalog reset is due but needs consent "
+            f"({len(names)} custom profile(s)); skipping in a non-interactive run.\n"
+            "[dim]  re-run on a terminal, or pass --yes, to converge.[/dim]"
+        )
+        return None
+    console.print(
+        Panel(
+            "[bold]hal0 v1.0 makes profiles tuning-only.[/bold]\n"
+            "Converging this box resets /etc/hal0/profiles.toml. The 16 built-in "
+            "profiles are re-seeded from code automatically, but these "
+            "operator-authored profiles would be deleted:\n\n"
+            + "\n".join(f"  • {n}" for n in names)
+            + "\n\nThis includes any profile the UI currently refuses to save — a stored "
+            "hardware flag (-dev, --threads, -ngl) makes v1.0 reject it on edit (#1411). "
+            "Those are deleted here, not repaired.\n\n"
+            "[dim]A timestamped copy is written to /var/lib/hal0/backups/ first, and it is "
+            "the only way to get any of them back. Slots pointing at a deleted profile fall "
+            "back to their base config.[/dim]",
+            title="Profile catalog reset",
+            border_style="yellow",
+        )
+    )
+    if typer.confirm("Reset the profile catalog now?", default=True):
+        return True
+    console.print("[dim]profile catalog kept — the reset stays due on the next update.[/dim]")
+    return None
+
+
+def _print_convergence(convergence: dict | None) -> bool:
+    """Report how far the updated box is from the v1.0 on-disk shape.
+
+    Returns True when fully converged. A False return is what makes
+    ``hal0 update`` refuse to call the run a clean success — silently handing
+    back a half-migrated box is the failure mode this exists to prevent.
+    """
+    if not isinstance(convergence, dict):
+        return True
+
+    swept = convergence.get("slot_enabled_swept") or []
+    if swept:
+        console.print(
+            f"[green]✓[/green] swept the removed [b]enabled[/b] key off {len(swept)} slot(s): "
+            f"[dim]{', '.join(str(s) for s in swept)}[/dim]"
+        )
+
+    reset = convergence.get("profile_reset") or {}
+    outcome = reset.get("outcome")
+    if outcome == "reset":
+        backup = reset.get("backup")
+        console.print(
+            "[green]✓[/green] profile catalog reset to the v1.0 tuning-only shape"
+            + (f" [dim](backup: {backup})[/dim]" if backup else "")
+        )
+    elif outcome == "declined":
+        console.print(
+            "[yellow]![/yellow] profile catalog NOT reset — "
+            f"{len(reset.get('custom_profiles') or [])} operator profile(s) kept."
+        )
+    elif outcome == "error":
+        console.print(f"[yellow]![/yellow] profile catalog reset failed: {reset.get('error')}")
+
+    ownership = convergence.get("ownership_migrations") or {}
+    pending = list(ownership.get("pending") or [])
+    if not pending:
+        if convergence.get("converged"):
+            console.print("[dim]on-disk config is fully converged to the v1.0 shape.[/dim]")
+        return bool(convergence.get("converged"))
+
+    detail = ownership.get("detail") or {}
+    lines: list[str] = []
+    for key in pending:
+        entry = detail.get(key) or {}
+        lines.append(f"[bold]{key}[/bold] — [cyan]{entry.get('command')}[/cyan]")
+        if entry.get("error"):
+            lines.append(f"    [red]needs manual resolution:[/red] {entry['error']}")
+        for line in list(entry.get("lines") or [])[:8]:
+            lines.append(f"    [dim]{line}[/dim]")
+        extra = len(entry.get("lines") or []) - 8
+        if extra > 0:
+            lines.append(f"    [dim]… and {extra} more[/dim]")
+    console.print(
+        Panel(
+            "[bold yellow]This box is still on the pre-v1.0 slot/model shape.[/bold yellow]\n"
+            "The new code is installed and running, but the migrations below have NOT been\n"
+            "applied — until they are, per-slot launch tune, NGL/runner pins and\n"
+            "mtp/vision/reasoning capabilities stay where the old schema put them and are\n"
+            "no longer read at launch.\n\n"
+            "They are not auto-run because each one refuses to rewrite slot TOMLs while\n"
+            "hal0 is live — and the updater runs inside hal0-api. Stop hal0, then run:\n\n"
+            + "\n".join(lines)
+            + "\n\n[dim]Each is dry-run by default: drop --apply to preview. A timestamped\n"
+            "backup of the slot config + registry DB is taken before any write.[/dim]",
+            title="Convergence incomplete",
+            border_style="yellow",
+        )
+    )
+    return False
+
+
 def _fetch_slot_drift() -> dict:
     """Return the /api/updates/slot-drift payload, or an empty summary on error.
 
@@ -425,8 +558,16 @@ def update(
         )
         return
 
+    # The one-shot v1.0 profile-catalog reset needs a decision from a human, and
+    # this is the only process in the chain that has one. Asked AFTER the apply
+    # confirm so a declined update never prompts about a wipe that will not run.
+    reset_profiles = _decide_profile_reset(prepared.get("profile_reset"), yes=yes)
+
+    commit_body: dict[str, object] = {"version": resolved}
+    if reset_profiles is True:
+        commit_body["reset_profiles"] = True
     try:
-        cjob = api_post("/api/updates/commit", json={"version": resolved})
+        cjob = api_post("/api/updates/commit", json=commit_body)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -439,7 +580,6 @@ def update(
     final = _poll_job(cjob_id, terminal=("applied", "failed"))
     state = final.get("state")
     if state == "applied":
-        console.print(Panel("[green]update applied.[/green]", border_style="green"))
         if final.get("restarted") is False and final.get("restart_error"):
             console.print(
                 f"[yellow]hal0-api restart did not complete:[/yellow] {final['restart_error']}"
@@ -448,6 +588,23 @@ def update(
         # could kill a mid-inference request). Surface which slots are still
         # running the pre-update command so the operator can opt into a restart.
         _print_drift_banner(_fetch_slot_drift())
+        converged = _print_convergence(final.get("convergence"))
+        if converged:
+            console.print(Panel("[green]update applied.[/green]", border_style="green"))
+            return
+        # Refuse to report a clean success while the old on-disk shape survives:
+        # the tree swapped, but the box is not the thing v1.0 promises. Exit 2 is
+        # distinct from a failed update (die() → 1) so a wrapper can tell
+        # "applied but not converged" from "did not apply".
+        console.print(
+            Panel(
+                "[yellow]update applied, but this install is NOT fully converged.[/yellow]\n"
+                "[dim]Run the commands above, then re-run `hal0 update` to re-check. "
+                "(exit 2 = applied, convergence outstanding)[/dim]",
+                border_style="yellow",
+            )
+        )
+        raise typer.Exit(2)
     else:
         err = final.get("error") or "unknown error"
         die(f"update {state}: {err}")

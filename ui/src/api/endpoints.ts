@@ -87,6 +87,25 @@ export const ENDPOINTS = {
   // /api/models?search=… and returns a small typed list.
   hfSearch: '/api/hf/search',
 
+  // ── Runner Image catalogue (subpage of Models) ────────────────────
+  // Mirrors the model-pull surface above: /api/runner-images (list) +
+  // /downloaded (locally-pulled only, for the slot edit drawer's Runner
+  // Image field — owned by fix/slot-edit-drawer-cleanup) + per-id
+  // pull/status/stream/cancel. Catalogue ids are GHCR repo paths
+  // ("hal0ai/hal0-toolbox-cpu") so they're NOT re-encoded per-segment —
+  // encodeURIComponent would turn the id's "/" into "%2F", which the
+  // backend's :path route converter expects decoded, matching how the
+  // browser's fetch/EventSource already send it.
+  runnerImages: '/api/runner-images',
+  runnerImagesDownloaded: '/api/runner-images/downloaded',
+  runnerImagesSync: '/api/runner-images/sync',
+  runnerImagesPulls: '/api/runner-images/pulls/list',
+  runnerImage: (id: string) => `/api/runner-images/${id}`,
+  runnerImagePull: (id: string) => `/api/runner-images/${id}/pull`,
+  runnerImagePullStatus: (id: string) => `/api/runner-images/${id}/pull/status`,
+  runnerImagePullStream: (id: string) => `/api/runner-images/${id}/pull/stream`,
+  runnerImagePullCancel: (id: string) => `/api/runner-images/${id}/pull/cancel`,
+
   // ── Backends ─────────────────────────────────────────────────────
   // There is NO generic install route — the only install-like operations
   // the server exposes are the NPU load/unload pair below

@@ -654,7 +654,28 @@ _DISPATCH: dict[str, Callable[[AgentConfig], int]] = {
 }
 
 
+def _init_sentry() -> None:
+    """Best-effort Sentry init for the shim process.
+
+    Imported HERE rather than at module scope on purpose: this module's
+    contract (see the module docstring) is that importing it pulls in
+    nothing but stdlib, so a hal0 wheel/import drift can never stop
+    ``hal0-agent@<id>.service`` from starting. The whole call is wrapped
+    so a missing package, a broken ``hal0.observability`` or a bad DSN
+    degrades to "no telemetry", never to "agent won't start".
+
+    No-op unless ``HAL0_SENTRY_DSN`` is set.
+    """
+    try:
+        from hal0.observability.sentry import init_sentry
+
+        init_sentry("agent")
+    except Exception:
+        return
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _init_sentry()
     parser = _build_parser()
     args = parser.parse_args(argv)
     cfg = _load_agent_config(args.agent_id)

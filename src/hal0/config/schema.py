@@ -1466,8 +1466,26 @@ def resolve_chat_template(slot_cfg: dict, model_info: dict) -> str | None:
 
 
 _VALID_UPSTREAM_KINDS = frozenset({"slot", "remote"})
-# The full set implemented by UpstreamRegistry.auth_headers().
-_VALID_AUTH_STYLES = frozenset({"bearer", "anthropic", "google_query", "header", "none"})
+# The full set implemented by UpstreamRegistry.auth_headers() — and this
+# comment is now enforced (tests/security/test_upstream_auth_contract.py).
+# "google_query" sat here for releases with no implementation behind it, so
+# Google AI Studio dispatched unauthenticated while the UI showed "key set"
+# (#1513).
+_VALID_AUTH_STYLES = frozenset({"bearer", "anthropic", "header", "none"})
+
+#: Retired auth styles → the style that replaces them on read. Dropping
+#: "google_query" from the enum outright would hard-fail config load on any
+#: box that already has a Google upstream configured; coercing it to "bearer"
+#: both keeps that box booting AND starts authenticating its Gemini calls,
+#: because bearer is what the endpoint it points at actually accepts.
+_AUTH_STYLE_ALIASES: dict[str, str] = {"google_query": "bearer"}
+
+
+def coerce_auth_style(style: str) -> str:
+    """Map a retired auth style onto its replacement; pass others through."""
+    return _AUTH_STYLE_ALIASES.get((style or "").strip().lower(), style)
+
+
 # Canonical vocabulary matches the Upstream dataclass; "lazy"/"eager" were the
 # original schema-only spellings and are still accepted as aliases on read.
 _VALID_WARMUP = frozenset({"none", "ondemand", "always"})
@@ -1561,11 +1579,25 @@ class UpstreamEntry(BaseModel):
     @field_validator("auth_style")
     @classmethod
     def auth_style_valid(cls, v: str) -> str:
-        if v not in _VALID_AUTH_STYLES:
+        # Coerce retired styles before validating (#1513) — an existing box
+        # carrying auth_style = "google_query" must keep booting, and must
+        # start authenticating rather than continue dispatching naked.
+        coerced = coerce_auth_style(v)
+        if coerced != v:
+            # stdlib logging here (this module predates the structlog sweep),
+            # so %-style rather than kwargs.
+            log.warning(
+                "upstream.auth_style_retired: auth_style %r was never "
+                "implemented and dispatched unauthenticated; reading it as "
+                "%r. Update /etc/hal0/upstreams.toml to silence this.",
+                v,
+                coerced,
+            )
+        if coerced not in _VALID_AUTH_STYLES:
             raise ValueError(
                 f"auth_style {v!r} is not valid; choose from {sorted(_VALID_AUTH_STYLES)}"
             )
-        return v
+        return coerced
 
     @field_validator("warmup_strategy")
     @classmethod

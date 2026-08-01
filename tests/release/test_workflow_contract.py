@@ -376,7 +376,10 @@ def test_authorizer_conditionally_checks_exact_pypi_version_with_bounded_retries
     assert "--max-time 20" in run
     assert 'payload["info"]["name"] != "hal0ai"' in run
     assert 'payload["info"]["version"] != expected' in run
-    assert "PyPI publication | not required (nightly policy)" in run
+    # The skip branch names the actual policy kind — both nightly and preview
+    # skip PyPI now, so hardcoding "nightly" would misreport a preview release.
+    assert "PyPI publication | not required (${POLICY_KIND} policy)" in run
+    assert "POLICY_KIND: ${{ needs.resolve.outputs.kind }}" in _workflow_text()
 
 
 def test_evidence_is_appended_only_after_all_remote_checks() -> None:

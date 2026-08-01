@@ -14,6 +14,7 @@ import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded } from '@/dash/model-sort.js'
+import { RunnerImagesView } from '@/dash/runner-images.jsx'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
@@ -60,7 +61,7 @@ function ModelsView() {
   const [sortField, setSortField] = useStateM("name");
   const [sortDir, setSortDir] = useStateM("asc");
   const [q, setQ] = useStateM("");
-  // Tabs: "inference" (default), "image", "upstream"
+  // Tabs: "inference" (default), "image", "upstream", "runner-images"
   const [tab, setTab] = useStateM("inference");
   // Pagination
   const [page, setPage] = useStateM(1);
@@ -294,8 +295,19 @@ function ModelsView() {
           <span>Upstream Models</span>
           <span className="slot-tab-ct num">{upstreamTotal}</span>
         </button>
+        <button
+          role="tab"
+          aria-selected={tab === "runner-images"}
+          className={"slot-tab" + (tab === "runner-images" ? " on" : "")}
+          onClick={() => setTab("runner-images")}
+        >
+          <span>Runner Images</span>
+        </button>
       </div>
 
+      {tab === "runner-images" ? (
+        <RunnerImagesView />
+      ) : (
       <div className="models-layout" style={{marginTop: 18}}>
         {/* ── List (toolbar + rows) ── */}
         <div className="mdl-list">
@@ -424,6 +436,7 @@ function ModelsView() {
           <DownloadsPane />
         </div>
       </div>
+      )}
 
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} initialRepo={searchPick} />
       <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />

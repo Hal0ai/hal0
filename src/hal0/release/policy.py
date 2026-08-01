@@ -71,7 +71,13 @@ class ReleasePolicy:
                 manifest_targets=("preview",),
                 github_prerelease=True,
                 github_latest=False,
-                publish_pypi=True,
+                # Previews do NOT go to PyPI. A PyPI upload is permanent and
+                # undeletable, so burning `1.0.0rcN` on a developer preview
+                # spends a version string we can never reclaim — and anyone
+                # running `pip install hal0ai --pre` would be served it. A
+                # preview's distribution channel is the GitHub prerelease and
+                # the `preview` release manifest; PyPI is reserved for stable.
+                publish_pypi=False,
                 retain=True,
             )
         if match := _FINAL.fullmatch(tag):

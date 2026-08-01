@@ -1,6 +1,7 @@
 /**
- * models-v3 — `#models` route renders the 3-tab catalog (Inference / Image / Upstream)
- * with simplified OR filter chips, pagination, and download-icon installed indicators.
+ * models-v3 — `#models` route renders the 4-tab catalog (Inference / Image / Upstream /
+ * Runner Images) with simplified OR filter chips, pagination, and download-icon
+ * installed indicators.
  *
  * Wireup (#220 brief): the catalog drives off `useModels()` and the
  * AddByHF modal calls `POST /api/models/inspect` → `usePullJob().start()`.
@@ -20,12 +21,14 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.mdl-list')).toBeVisible()
   })
 
-  test('three tabs: Inference, Image/ComfyUI, Upstream', async ({ page }) => {
+  test('four tabs: Inference, Image/ComfyUI, Upstream, Runner Images', async ({ page }) => {
     await page.goto('/#models')
-    await expect(page.locator('.slot-tab[role="tab"]')).toHaveCount(3)
+    await expect(page.locator('.slot-tab[role="tab"]')).toHaveCount(4)
     await expect(page.locator('.slot-tab:has-text("Inference Models")')).toBeVisible()
     await expect(page.locator('.slot-tab:has-text("Image / ComfyUI")')).toBeVisible()
     await expect(page.locator('.slot-tab:has-text("Upstream Models")')).toBeVisible()
+    // Runner Images (feat/runner-image-catalogue) — subpage of Models, not top-level nav.
+    await expect(page.locator('.slot-tab:has-text("Runner Images")')).toBeVisible()
     // Default tab is Inference
     await expect(page.locator('.slot-tab.on:has-text("Inference Models")')).toBeVisible()
   })

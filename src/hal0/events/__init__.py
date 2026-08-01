@@ -52,6 +52,8 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+from hal0.redaction import redact_log_line, redact_text_tree
+
 __all__ = ["EventBus", "Severity", "make_event"]
 
 _log = logging.getLogger("hal0.events")
@@ -81,15 +83,34 @@ def make_event(
     message: str,
     data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the canonical event dict. Exposed for tests + manual injection."""
+    """Build the canonical event dict. Exposed for tests + manual injection.
+
+    Secret redaction happens HERE (#1523) because this is the single choke
+    point every event crosses before it reaches the ring, the subscriber
+    queues, ``/api/events``, ``/api/journal``, or the durable AuditStore
+    sink. Redacting downstream instead would mean four filters that can
+    each drift; redacting here means a producer physically cannot put a
+    bearer token on any of those surfaces.
+
+    The concrete leak this closes: ``hal0.registry.pull`` builds its
+    failure message with ``f"{type(exc).__name__}: {exc}"``, so an httpx
+    error carrying an ``Authorization: Bearer …`` header or an
+    ``HF_TOKEN=…`` query string rode verbatim into ``pull.failed`` and
+    from there into ``activity.db`` — at rest, on an endpoint that is
+    unauthenticated in the shipped LAN posture.
+
+    Only string CONTENT is touched: :func:`redact_text_tree` preserves
+    every key, type, and shape, so consumers routing on ``data["slot"]``
+    or ``data["model"]`` are unaffected.
+    """
     return {
         "id": event_id,
         "ts": _now_iso(),
         "type": type,
         "severity": severity,
         "source": source,
-        "message": message,
-        "data": dict(data) if data else {},
+        "message": redact_log_line(message),
+        "data": redact_text_tree(dict(data)) if data else {},
     }
 
 

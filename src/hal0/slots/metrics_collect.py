@@ -164,6 +164,8 @@ async def llama_metrics(port: int) -> dict[str, Any]:
         return {}
     import httpx
 
+    from hal0.http_client import async_client
+
     metrics_url = f"http://127.0.0.1:{port}/metrics"
     slots_url = f"http://127.0.0.1:{port}/slots"
     timeout = httpx.Timeout(0.5)
@@ -171,7 +173,7 @@ async def llama_metrics(port: int) -> dict[str, Any]:
 
     # Fan the two scrapes out in parallel; either may 404 (older builds,
     # --no-slots, --no-metrics) and we degrade silently per-endpoint.
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with async_client(timeout=timeout) as client:
         try:
             metrics_resp, slots_resp = await asyncio.gather(
                 client.get(metrics_url),
