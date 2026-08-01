@@ -99,9 +99,10 @@ def test_google_query_is_not_a_selectable_value_anywhere() -> None:
 
     assert "google_query" not in _VALID_AUTH_STYLES
     assert all(e["auth"] != "google_query" for e in integrations._CATALOG.values())
-    assert "google_query" not in (integrations.__doc__ or "").split("Auth styles:")[1].split(
-        "Every style"
-    )[0]
+    assert (
+        "google_query"
+        not in (integrations.__doc__ or "").split("Auth styles:")[1].split("Every style")[0]
+    )
 
 
 # ── 2. Google AI Studio authenticates ───────────────────────────────────────
@@ -245,7 +246,9 @@ def test_an_upstream_with_no_env_declared_needs_no_credential(
     """Local slot upstreams declare no auth_value_env; they must not start
     raising."""
     assert registry.auth_headers(_upstream(auth_style="none", auth_value_env=None)) == {}
-    assert registry.auth_headers(_upstream(kind="slot", auth_value_env=None, auth_style="none")) == {}
+    assert (
+        registry.auth_headers(_upstream(kind="slot", auth_value_env=None, auth_style="none")) == {}
+    )
 
 
 # ── 5. the failure surfaces cleanly, not as a 500 ───────────────────────────

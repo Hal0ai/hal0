@@ -344,7 +344,7 @@ class StackApplyEngine:
         if len(plan.slot_names) == len(after):
             return dict(zip(plan.slot_names, (fs.data for fs in after), strict=True))
         # Defensive: a hand-built plan with no slot_names (older callers/tests)
-        # keeps the legacy stem keying rather than silently mis-pairing.
+        # keeps the plain stem keying rather than silently mis-pairing.
         return {fs.path.stem: fs.data for fs in after}
 
     def _projection_live(self, stack: StackConfig) -> dict[str, Any]:
