@@ -819,7 +819,17 @@
       "endedAt": "2026-07-20T17:40:11.947Z",
       "fileCount": 11,
       "toolCallCount": 18
+    },
+    {
+      "id": "pi-ms8vl1hq-7hxgjk",
+      "taskName": "pi-session",
+      "sessionFile": "/home/mint/.pi/agent/sessions/--mnt-mintdev-worktrees-superset-hal0-1bc59c2e-5f50-40fd-9953-e540883c03e8-h0-hal0-68-docsv1.0-rewrite-the-self-contained-inst--/2026-07-31T11-44-20-245Z_019fb7fd-5315-7fa6-acd9-f8b3f9dfd8ba.jsonl",
+      "status": "stopped",
+      "startedAt": "2026-07-31T11:44:54.734Z",
+      "endedAt": "2026-07-31T17:30:23.551Z",
+      "fileCount": 0,
+      "toolCallCount": 0
     }
   ],
-  "updatedAt": "2026-07-20T17:40:11.948Z"
+  "updatedAt": "2026-07-31T17:30:24.297Z"
 }
