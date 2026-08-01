@@ -1,6 +1,6 @@
 ---
 title: Generate images
-description: Run Stable-Diffusion-family image generation on hal0 with ComfyUI — read the generation-engine status, switch the iGPU between inference and generation, and call /v1/images/generations.
+description: Run Stable-Diffusion-family image generation on hal0 with ComfyUI — enable the img capability, read engine status, switch the iGPU between inference and generation, and call /v1/images/generations.
 sidebar:
   order: 70
 ---
@@ -8,10 +8,9 @@ sidebar:
 import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
 
 hal0 generates images through **ComfyUI**, a node-graph Stable-Diffusion
-runtime. It runs as one containerized **generation engine** — a single
-run loads many cooperating models at once — using the
-[kyuz0 Strix Halo ComfyUI image](https://github.com/kyuz0/amd-strix-halo-comfyui)
-(`docker.io/kyuz0/amd-strix-halo-comfyui`), tuned for the AMD iGPU.
+runtime, running as one containerized generation engine tuned for the AMD
+iGPU. Image generation is one of the four capability slots — `embed`,
+`voice`, `img`, `vision` — alongside chat.
 
 Because there is exactly one iGPU, image generation is **mutually
 exclusive** with the LLM stack: only one of them can hold GPU memory at a
@@ -21,19 +20,31 @@ reloaded.
 
 <Aside type="caution">
 Switching the iGPU to generation **stops the LLM stack** (chat bots and
-memory extraction go dark) for as long as generation holds the GPU. The
-switchover write path is gated off by default — see
-[Enable the switchover](#enable-the-switchover).
+memory extraction go dark) for as long as generation holds the GPU.
 </Aside>
 
 ![The hal0 Image-Gen tab showing engine state, GPU memory gauges, and queue counts](/screenshots/image-gen-comfyui.png)
 *The Image-Gen tab: engine state, GPU memory gauges, queue, and switchover controls.*
 
-## Read the generation-engine status
+## Enable the img capability
 
-The dashboard's Image-Gen tab renders from a read-only aggregator that
-folds container state, the LLM-owner check, and ComfyUI's own HTTP API
-into one object:
+```sh
+hal0 capabilities set img img --model sdxl-turbo
+```
+
+This is the same pattern as every other capability — set the child
+(`img`) under its parent (`img`), pointing at an installed image model.
+Pull a curated image checkpoint first with the standard model tooling —
+see [Choose models](/docs/guides/choose-models#embed-rerank-and-image-picks)
+— or bulk-fetch the curated set:
+
+```sh
+hal0 comfyui orchestrate-models
+hal0 comfyui orchestrate-models --dry-run
+hal0 comfyui orchestrate-models --log-dir /var/log/hal0-comfyui
+```
+
+## Read the generation-engine status
 
 ```sh
 curl http://localhost:8080/api/comfyui/status
@@ -51,7 +62,7 @@ Key fields:
 - `memory` — GTT and RAM gauges from ComfyUI's `/system_stats`.
 - `queue` — `{running, pending}` job counts.
 - `switchover` — the in-flight switch tracker (`active`, `target`,
-  `error`) so a poll can render "switching…".
+  `error`).
 
 Every probe degrades to a safe default: a dead engine surfaces as
 `stopped`, never a 500.
@@ -68,9 +79,7 @@ curl -X POST http://localhost:8080/api/comfyui/switchover \
   -d '{"mode": "generation"}'
 ```
 
-To hand it back to inference (frees ComfyUI's models via ComfyUI's own
-free path — the container and web UI stay up — then reloads the saved LLM
-slots):
+To hand it back to inference:
 
 ```sh
 curl -X POST http://localhost:8080/api/comfyui/switchover \
@@ -86,13 +95,11 @@ Body fields:
 | `force` | bool   | Switching to `inference` drops any running/pending render. Without `force`, a busy queue is refused with **409**. |
 | `pin`   | bool   | `generation` only — hold image mode against the arbiter's idle-restore. |
 
-Responses: **202** (`switching`, runs in the background — poll the
-`switchover` block on `/status`), **200** (`noop`, already in the target
-mode), **409** (switch already in flight, or a busy queue without
-`force`), **503** (`comfyui.arbiter_unavailable` — the GPU arbiter is not
-wired on this host).
-
-Pin or unpin image mode independently:
+Responses: **202** (`switching`, poll `/status`), **200** (`noop`,
+already in the target mode), **409** (switch already in flight, or a busy
+queue without `force`), **503**
+(`comfyui.arbiter_unavailable` — the GPU arbiter isn't wired on this
+host; requires a configured `img` slot). Pin or unpin independently:
 
 ```sh
 curl -X POST http://localhost:8080/api/comfyui/pin \
@@ -100,44 +107,16 @@ curl -X POST http://localhost:8080/api/comfyui/pin \
   -d '{"pinned": true}'
 ```
 
-### Enable the switchover
+## The `[image]` slot config
 
-Both write paths (`/switchover` and `/pin`) require the GPU arbiter to be
-wired — that is, hal0-api must be running with a configured `img` slot so
-the slot manager attaches the arbiter at startup. Without it both endpoints
-return **503** (`comfyui.arbiter_unavailable`). See
-[Manage slots](/docs/guides/manage-slots) for how to add and enable the
-`img` slot.
-
-## Image models in the Models view
-
-The dashboard's Models view keeps image-gen models off the
-dispatcher-facing catalog entirely — a segmented toggle switches between
-**Models** (chat/embed/rerank/stt/tts, the models the dispatcher can
-route a request to) and **Image / ComfyUI**. There's no `image` filter
-chip on the Models tab any more; image lives on its own tab instead.
-
-The Image / ComfyUI tab only ever lists **installed** checkpoints — same
-rule as FLM/NPU models, an un-pulled image model is never advertised
-there — grouped by the ComfyUI models-tree subdirectory each one actually
-landed in (`checkpoints`, `loras`, `vae`, `upscale_models`, …), derived
-straight from the on-disk path under `.../comfyui/models/<subdir>/`.
-
-A model registers as ComfyUI (`owned_by: "comfyui"`, `comfyui` tagged
-into `backends`) no matter which path added it — a curated pull, "add by
-path", or a directory scan all tag it consistently. `GET /api/models`
-also self-heals any row an older hal0 build mis-tagged (for example
-`capabilities: ["chat"]` with empty `backends`) by re-deriving its
-ComfyUI category from the path on every list call — the fix isn't
-persisted back to the registry, it just re-applies on read, so no
-migration is needed.
+The `img` slot's `[image]` table carries `idle_restore_minutes` (default
+`60` — how long ComfyUI can sit idle before the GPU arbiter restores LLM
+slots, hot-reloadable with no `hal0-api` restart), `default_size`
+(default `"1024x1024"`), and `default_steps`. Set these from the
+dashboard's Settings → Image-gen panel or edit the slot's TOML directly —
+see [Edit configuration](/docs/guides/configure).
 
 ## Generate an image
-
-The OpenAI-compatible endpoint translates your request into a ComfyUI
-workflow, runs it, and returns the result in OpenAI's shape. The route
-flips the GPU to image mode before dispatching, so a single call also
-performs the switchover when needed.
 
 ```sh
 curl -X POST http://localhost:8080/v1/images/generations \
@@ -151,21 +130,11 @@ curl -X POST http://localhost:8080/v1/images/generations \
   }'
 ```
 
-Request fields honoured:
-
-| Field             | Default       | Notes |
-|-------------------|---------------|-------|
-| `model`           | `sdxl-turbo`  | Must be a model in the **curated image-gen catalogue** — `sdxl-turbo`, `sd-1.5-pruned-emaonly`, and `sdxl-lightning` ship today. |
-| `prompt`          | —             | Required. Empty prompt → **422** (`image.prompt_required`). |
-| `n`               | `1`           | Batch size, capped at 8. |
-| `size`            | slot default  | `WxH`, e.g. `1024x1024`. Falls back to the `img` slot's `[image] default_size`. |
-| `response_format` | `url`         | `url` or `b64_json`. |
-
-A hal0 extension `extra_body` accepts `seed`, `steps`, `cfg`, and
-`negative_prompt`.
-
-A model that isn't in the curated image catalogue returns **404**
-(`image.model_not_curated`).
+The route flips the GPU to image mode before dispatching, so a single
+call also performs the switchover when needed. `model` must be in the
+curated image catalogue — an off-catalogue model returns **404**
+(`image.model_not_curated`). A hal0 extension `extra_body` accepts
+`seed`, `steps`, `cfg`, and `negative_prompt`.
 
 The response is the OpenAI image shape:
 
@@ -174,61 +143,32 @@ The response is the OpenAI image shape:
   "created": 1716000000,
   "data": [
     { "url": "/api/images/cache/<uuid>.png" }
-  ],
-  "_hal0": { "...debug meta from the workflow translator..." }
+  ]
 }
 ```
 
 With `response_format: "b64_json"` each `data` entry carries a base64 PNG
-in `b64_json` instead of a `url`.
+instead of a `url`.
 
-<Aside type="note">
-The first generation after a cold start eats the checkpoint-load cost
-(several seconds on the iGPU for SDXL); from there the model is warm. hal0
-caps a single render at 10 minutes before it gives up.
-</Aside>
-
-To cancel an in-flight or queued render (clears ComfyUI's queue and
-interrupts the current job):
+To cancel an in-flight or queued render:
 
 ```sh
 curl -X POST http://localhost:8080/api/comfyui/render/cancel
 ```
 
-This is best-effort — network hiccups talking to ComfyUI are swallowed, so
-poll `/api/comfyui/status` to confirm the queue actually drained.
-
 ## Quick-launch workflows
 
-The Image-Gen tab also ships a **workflow quick-launch strip**: a row of
-curated chips (text-to-image, image-to-image, a couple of video flows, an
-upscale placeholder) that deep-link straight into ComfyUI's own UI rather
-than going through `/v1/images/generations`. Any workflow JSON an operator
-drops into the bind-mounted workflows directory shows up next to the
-curated chips as a "custom" entry, no rebuild needed.
+The Image-Gen tab ships a **workflow quick-launch strip** — curated chips
+that deep-link straight into ComfyUI's own UI. Any workflow JSON dropped
+into the bind-mounted workflows directory shows up as a "custom" entry:
 
 ```sh
 curl http://localhost:8080/api/comfyui/workflows
-```
-
-Returns `{"workflows": [{"name", "source"}, ...]}` for every `<name>.json`
-found under `/mnt/ai-models/comfyui/workflows` (the bind-mounted primary
-dir) or ComfyUI's own `user/default/workflows` fallback; a name present in
-both wins from the primary dir. Launch one of those custom workflows
-directly — this posts the saved graph straight to ComfyUI's own `/prompt`
-endpoint, independent of the OpenAI-shaped generations route above:
-
-```sh
 curl -X POST http://localhost:8080/api/comfyui/workflows/my-workflow/launch
 ```
-
-Responds **202** with `{"status": "queued", "prompt_id": "..."}`, or
-**404** (`comfyui.workflow_not_found`) if no `<name>.json` exists in either
-directory.
 
 ## See also
 
 - [Manage slots](/docs/guides/manage-slots) — the `img` slot lifecycle.
-- [Configure](/docs/guides/configure) — set `[image]` slot defaults (`default_size`, `default_steps`, `idle_restore_minutes` — the latter is now hot-reloadable, no `hal0-api` restart needed).
-- [Observe the system](/docs/guides/logs-and-activity) — tail `hal0-slot@img`.
-- [Operate: services](/docs/operate/services) — restart the ComfyUI container, view its logs, and advertise it over mDNS from the Services page.
+- [Edit configuration](/docs/guides/configure) — the `[image]` table.
+- [Logs and activity](/docs/guides/logs-and-activity) — tail `hal0-slot@img`.

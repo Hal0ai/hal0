@@ -31,11 +31,13 @@ import {
   useSlotUnload,
   useSlotLoad,
   useSlotSwap,
+  useSlotEdit,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
+import { slotModelRow } from './slots/slot-shared.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the copy this file used to carry (and the verbatim clones in slot-list.jsx
 // and npu-pane.jsx).
@@ -90,6 +92,7 @@ const IIcons = {
   ),
   play: <II d="M5 3.4l8 4.6-8 4.6V3.4z" />,
   edit: <II d="M3 13l3-1 7-7-2-2-7 7-1 3z" />,
+  star: <II d="M8 2.2l1.8 3.7 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4L2.2 6.5l4-.6z" />,
   ext: <II d="M6 3H3v10h10v-3M9 3h4v4M9 9l4-4" />,
 }
 const Ic = ({ name, size = 16 }) =>
@@ -256,7 +259,20 @@ export function ModelPicker({ s, models, disabled, onSwap }) {
 
 // per-slot controls — Start/Stop are mutually exclusive by running state;
 // compact (collapsed) cards get the minimal set (no Logs/Edit).
-export function SlotControls({ phase, busy, compact, onStart, onStop, onRestart, onLogs, onEdit }) {
+export function SlotControls({
+  phase,
+  busy,
+  compact,
+  onStart,
+  onStop,
+  onRestart,
+  onLogs,
+  onEdit,
+  // SC-4: promote this slot to its type's default. Rendered only when
+  // `onSetDefault` is supplied AND the slot isn't already the default — a slot
+  // that already holds the marker has nothing to promote.
+  onSetDefault,
+}) {
   const running = phase !== 'off'
   return (
     <span className="slot-ctrls" onClick={(e) => e.stopPropagation()}>
@@ -284,6 +300,16 @@ export function SlotControls({ phase, busy, compact, onStart, onStop, onRestart,
       {!compact && (
         <button className="sctrl" title="Logs" onClick={onLogs}>
           <Ic name="logs" size={13} />
+        </button>
+      )}
+      {onSetDefault && (
+        <button
+          className="sctrl"
+          title="Set as default for this slot type"
+          disabled={busy}
+          onClick={onSetDefault}
+        >
+          <Ic name="star" size={13} />
         </button>
       )}
       {!compact && (
@@ -320,7 +346,9 @@ export function slotCtrlPhase(slot) {
 //               for the NPU trio these map to stack-load / modality-toggle).
 //   phase     — overrides the lifecycle phase (NPU coresident roles derive it
 //               from their modality toggle, not the slot's own state).
-export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) {
+//   onEditModel / modelName — inline model-edit affordance. Omit both and the
+//               model row renders exactly as before (the NPU stack does).
+export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit, onEditModel, modelName }) {
   const dot = dotCls(ind)
   const ph = phase || slotCtrlPhase(s)
   // A live-ish card whose /api/slots enrichment hasn't landed yet (bare
@@ -343,7 +371,36 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
         <span className="sport">{s.port ? ':' + s.port : ''}</span>
       </div>
       <div className="scard-b">
-        {modelNode}
+        {/* Inline model edit sits OUTSIDE the model control, never nested in it:
+            the LLM model row is a <select> and the pencil must not compete with
+            that picker's own click/keyboard gesture. `stopPropagation` is
+            belt-and-braces on top of the separate hit area. Disabled when the
+            bound model isn't resolvable to a registry row — ModelDrawer needs
+            the row, not an id, and renders nothing for null. */}
+        {onEditModel ? (
+          <div className="smodel-row">
+            {modelNode}
+            <button
+              className="sctrl scard-model-edit"
+              data-testid={`infer-model-edit-${s.name}`}
+              disabled={!modelName}
+              title={
+                modelName
+                  ? `Edit model ${modelName} — launch flags, chat template, caps`
+                  : 'No model bound — nothing to edit'
+              }
+              aria-label={modelName ? `Edit model ${modelName}` : 'Edit model'}
+              onClick={(e) => {
+                e.stopPropagation()
+                onEditModel()
+              }}
+            >
+              <Ic name="edit" size={13} />
+            </button>
+          </div>
+        ) : (
+          modelNode
+        )}
         {full && (
           <div className="scard-meta">
             <div className="m">
@@ -374,7 +431,7 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
   )
 }
 
-function SlotCards({ rows, full, models, busyName, handlers, loading }) {
+function SlotCards({ rows, full, models, busyName, handlers, loading, modelRows }) {
   if (!rows.length) {
     if (loading)
       return (
@@ -412,8 +469,15 @@ function SlotCards({ rows, full, models, busyName, handlers, loading }) {
             onRestart={() => handlers.onRestart(s)}
             onLogs={() => handlers.onLogs(s)}
             onEdit={() => handlers.onEdit(s)}
+            onSetDefault={
+              s.default === true ? undefined : () => handlers.onSetDefault(s)
+            }
           />
         )
+        // The bound registry row, resolved through the shared helper the slot
+        // drawer uses. null = unbound or not in the list yet → the pencil is
+        // disabled rather than opening an empty editor.
+        const modelRow = modelRows ? modelRows(s) : null
         return (
           <SlotScard
             key={s.name}
@@ -423,6 +487,10 @@ function SlotCards({ rows, full, models, busyName, handlers, loading }) {
             modelNode={modelNode}
             controls={controls}
             onEdit={() => handlers.onEdit(s)}
+            onEditModel={
+              handlers.onEditModel ? () => handlers.onEditModel(s) : undefined
+            }
+            modelName={modelRow ? modelRow.longName || modelRow.name || modelRow.id : ''}
           />
         )
       })}
@@ -455,6 +523,9 @@ function MiniCard({ s, ind, busy, handlers }) {
           onRestart={() => handlers.onRestart(s)}
           onLogs={() => handlers.onLogs(s)}
           onEdit={() => handlers.onEdit(s)}
+          onSetDefault={
+            s.default === true ? undefined : () => handlers.onSetDefault(s)
+          }
         />
       </div>
     </div>
@@ -490,7 +561,18 @@ export function InferencePane() {
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
   const swapMut = useSlotSwap()
+  // SC-4 "Set as default" row action — the same PUT /config the drawer's
+  // Pinned toggle uses. check_default_uniqueness REFUSES a second
+  // default=true rather than demoting the incumbent, so `handlers.onSetDefault`
+  // below does the demote-then-promote itself (two PUTs).
+  const editMut = useSlotEdit()
   const [busyName, setBusyName] = useStateI(null)
+  // Inline model edit — the ModelDrawer is mounted ONCE here (the pane owns the
+  // cards) and driven by the picked registry row, matching how models.jsx
+  // drives it. Row, not id: ModelDrawer renders nothing for a null model.
+  // There is no UI/overlay store in this app; drawer open-state is local
+  // useState in the nearest view owner.
+  const [modelEditRow, setModelEditRow] = useStateI(null)
 
   // The Inference rollup is the iGPU/CPU slot stack. Image generation is its
   // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
@@ -548,10 +630,49 @@ export function InferencePane() {
     onEdit: (s) => {
       window.location.hash = '#slots/' + s.name
     },
+    // SC-4 allows exactly one default=true slot per type and REFUSES a write
+    // that would land a second one — it does not silently demote. There is no
+    // atomic promote endpoint, so re-pointing the default is demote-then-
+    // promote. If the promote fails we restore the incumbent rather than
+    // leaving the type with no default at all.
+    onSetDefault: async (s) => {
+      const prev = (allSlots || []).find(
+        (p) => p?.name && p.name !== s.name && p?.type === s.type && p?.default === true,
+      )
+      try {
+        if (prev) await editMut.mutateAsync({ name: prev.name, body: { default: false } })
+        try {
+          await editMut.mutateAsync({ name: s.name, body: { default: true } })
+        } catch (err) {
+          if (prev) {
+            await editMut
+              .mutateAsync({ name: prev.name, body: { default: true } })
+              .catch(() => {})
+          }
+          throw err
+        }
+        toast(`${s.name} is now the default ${s.type || 'slot'}`, 'ok')
+      } catch (err) {
+        toast(
+          err?.message ? `${s.name}: ${err.message}` : `${s.name}: could not set default`,
+          'warn',
+        )
+      }
+    },
     onLogs: (s) => {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
     },
+    // Open the model editor for this slot's bound model — no close → Models
+    // page → find the row → reopen round-trip.
+    onEditModel: (s) => {
+      const row = slotModelRow(s, modelsQuery.data)
+      if (row) setModelEditRow(row)
+    },
   }
+
+  // Per-slot bound-row lookup handed to the cards so the pencil can be disabled
+  // (and labelled) without every card re-scanning the list itself.
+  const modelRowFor = (s) => slotModelRow(s, modelsQuery.data)
 
   const newSlot = () => window.dispatchEvent(new CustomEvent('hal0:create-slot'))
   const openLogs = () => {
@@ -559,6 +680,7 @@ export function InferencePane() {
   }
 
   return (
+    <>
     <div className="infer-pane">
       <div className="proto">
         {/* Single NPU-card-style header row — the old two-row stack (sec-label
@@ -612,6 +734,7 @@ export function InferencePane() {
                 full
                 loading={loading}
                 models={modelsQuery.data}
+                modelRows={modelRowFor}
                 busyName={busyName}
                 handlers={handlers}
               />
@@ -656,6 +779,18 @@ export function InferencePane() {
         </div>
       </div>
     </div>
+    {/* Inline model editor for the card pencil — ONE instance for the whole
+        pane, driven by the picked row. Not docked: nothing is stacked beneath
+        it here, so it takes the normal flush-right position and its own dim
+        scrim (contrast the slot edit drawer, which docks it — slot-modals.jsx).
+        Rendered as a sibling of .infer-pane so its `position: fixed` can't be
+        captured by a transformed ancestor. */}
+    <ModelDrawer
+      open={!!modelEditRow}
+      onClose={() => setModelEditRow(null)}
+      model={modelEditRow}
+    />
+    </>
   )
 }
 

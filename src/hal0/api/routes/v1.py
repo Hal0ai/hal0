@@ -769,15 +769,22 @@ async def list_models(
 
     Two classes of entries are emitted:
 
-    * **Per-slot alias entries** (``hermes-role-slots``). Every enabled
-      chat slot (``type == "llm"``) that is currently being served
-      surfaces as one model object whose ``id`` is the slot **alias =
-      slot name** (``primary``, ``agent-hermes``, ``utility``), carrying a
-      human ``name`` (``"<slot> · <model display name>"``) and the slot's
+    * **Per-slot alias entries** (``hermes-role-slots``). Every chat slot
+      (``type == "llm"``) **with a bound model** surfaces as one model
+      object whose ``id`` is the slot **alias = slot name** (``primary``,
+      ``agent-hermes``, ``utility``), carrying a human ``name``
+      (``"<slot> · <model display name>"``) and the slot's
       ``context_length``/``max_context_window``. Built by
-      :func:`hal0.api.hal0_slot_alias_models`. Unloaded / disabled slots
-      are omitted. The alias is stable across model swaps so callers can
-      pin a co-resident slot.
+      :func:`hal0.api.hal0_slot_alias_models`. **Both warm and cold slots
+      are advertised** — dispatch cold-loads on demand when a request
+      addresses a cold slot by alias, so restricting discovery to warm
+      slots would hide slots the gateway will happily serve. The alias is
+      stable across model swaps so callers can pin a co-resident slot.
+
+      (This paragraph previously claimed only slots "currently being
+      served" appear and that "unloaded / disabled slots are omitted".
+      Neither was true of the builder, and post-#1369/#1408 there is no
+      ``enabled`` field at all — model-presence is the activation signal.)
     * **Upstream catalog entries** (incl. the direct-read composite
       catalogue below) — the raw model ids each ``advertise_models``
       upstream reports, so non-chat models (embed / rerank / image / …)
@@ -1207,10 +1214,15 @@ async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Respon
     omni = getattr(request.app.state, "omni_router", None)
     if omni is None:
         return None
-    # Resolve the caller slot. We look up by the request's ``model``
-    # field against configured slots' ``model.default``. The first
-    # match wins (a match implies a bound model, so no separate
-    # activation check is needed — #1369).
+    # Resolve the caller slot. We look up by the request's ``model`` field
+    # against configured slots' ``model.default`` (a match implies a bound
+    # model, so no separate activation check is needed — #1369). Several
+    # slots can bind the same model id (e.g. two LLM slots sharing one
+    # checkpoint) — ranked by :func:`hal0.dispatcher.lane_pin.preferred_slot`
+    # behind the request's lane pin, same health-ranked selection #1418
+    # already gave `_ensure_backend_for_model`'s backend-aware load, rather
+    # than declaration order picking an ERROR-parked slot over its healthy
+    # sibling (#1469).
     slot_manager = getattr(request.app.state, "slot_manager", None)
     if slot_manager is None:
         return None
@@ -1218,7 +1230,7 @@ async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Respon
     if not isinstance(requested_model, str) or not requested_model:
         return None
     configs = await slot_manager.iter_configs()
-    caller_slot_name: str | None = None
+    candidates: list[str] = []
     for cfg in configs:
         if cfg.get("type") != "llm":
             continue
@@ -1226,11 +1238,36 @@ async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Respon
         if isinstance(model_section, dict):
             default = model_section.get("default", "")
             if isinstance(default, str) and default == requested_model:
-                caller_slot_name = str(cfg.get("name", ""))
-                break
+                candidates.append(str(cfg.get("name", "")))
+    caller_slot_name = preferred_slot(slot_manager, candidates, lane_slot=lane_slot_pin(request))
     if caller_slot_name is None:
         return None
     result = await omni.run_loop(caller_slot_name=caller_slot_name, body=body)
+    # OmniRouter.run_loop's failure contract is a bare {"error": "<string>"}
+    # dict (OmniRouter._chat_completion's transport/HTTP/non-JSON branches,
+    # and the "loop budget exhausted" fallback) — not an exception. Dumping
+    # that straight into a 200 Response used to hand the caller a
+    # non-OpenAI body shape on a SUCCESS status code (#1469): no `choices`,
+    # no HTTP signal that anything went wrong, silent on any client that
+    # checks status before parsing. Surface it through the same structured
+    # `{"error": {"code","message","details"}}` envelope every other
+    # /api/* failure uses.
+    if (
+        isinstance(result, dict)
+        and "error" in result
+        and "choices" not in result
+        and isinstance(result.get("error"), str)
+    ):
+        from hal0.errors import Hal0Error
+
+        class _OmniLoopFailed(Hal0Error):
+            code = "omni.loop_failed"
+            status = 502
+
+        raise _OmniLoopFailed(
+            result["error"],
+            details={"caller_slot": caller_slot_name},
+        )
     return Response(
         content=json.dumps(result).encode("utf-8"),
         status_code=200,

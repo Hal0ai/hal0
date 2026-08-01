@@ -6,6 +6,7 @@ Targeted file run:
 
 from __future__ import annotations
 
+import shlex
 import tomllib
 from pathlib import Path
 
@@ -453,3 +454,52 @@ def test_cpu_default_profile_supports_llm(tmp_path: Path) -> None:
         DEVICE_DEFAULT_PROFILES["cpu"]
     )
     assert "llm" in resolved.supported_slot_types
+
+
+# ── seeds must survive the screens the API enforces on custom profiles ───────
+
+
+def test_every_seed_profile_passes_the_hardware_and_managed_flag_screens() -> None:
+    """Deliverable 3 — the seeds stay tuning-only, enforced not asserted.
+
+    ``test_seed_device_classes`` / ``test_seed_backends`` pin the typed hardware
+    fields, but nothing pinned the freeform ``flags`` string. Seeds are VIRTUAL:
+    ``load_profiles_config`` overlays ``SEED_PROFILES`` over whatever is on disk,
+    so a seed never passes through ``ProfileCatalog.create`` and never meets
+    ``screen_profile_flags``. A seed could therefore acquire ``-ngl`` or
+    ``--ctx-size`` and ship, while a user typing the same flag into the profile
+    editor gets a 400 — the exact inconsistency spec-hw-slot-ownership §5 and
+    §21.7 exist to prevent.
+
+    This runs the real screen (the one the create/update/import seam calls) over
+    every seed, so the seeds are held to the identical standard as user input.
+    """
+    from hal0.config.schema import SEED_PROFILES
+    from hal0.profiles import screen_profile_flags
+
+    for name, profile in SEED_PROFILES.items():
+        flags = profile.get("flags", "")
+        try:
+            screen_profile_flags(flags)
+        except Exception as exc:  # pragma: no cover - only on a regression
+            raise AssertionError(
+                f"seed profile {name!r} carries a slot-hardware or hal0-managed "
+                f"flag and would be rejected by the API: {flags!r} → {exc}"
+            ) from exc
+
+
+def test_no_seed_profile_carries_a_context_or_layer_flag() -> None:
+    """Belt-and-braces on the two that actually corrupt a launch.
+
+    ``-c``/``--ctx-size`` on a profile would fight the model-owned context
+    window (``_resolve_context_size``); ``-ngl``/``--n-gpu-layers`` would fight
+    the slot-owned hardware grid. Spelled out literally so the intent survives a
+    future refactor of the screen internals.
+    """
+    from hal0.config.schema import SEED_PROFILES
+
+    banned = ("-c", "--ctx-size", "-ngl", "--n-gpu-layers", "--device", "-dev", "--threads")
+    for name, profile in SEED_PROFILES.items():
+        tokens = shlex.split(profile.get("flags", ""))
+        for bad in banned:
+            assert bad not in tokens, f"seed {name!r} carries {bad!r}: {profile.get('flags')!r}"

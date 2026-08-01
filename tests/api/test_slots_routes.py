@@ -475,6 +475,125 @@ def test_config_write_rejects_the_removed_enabled_key(
     assert "unload" in body["details"]["hint"]
 
 
+# ── spec-hw-slot-ownership §1: model-owned keys at the HTTP boundary ─────────
+#
+# ``reject_model_owned_slot_keys`` was only ever unit-tested directly, bypassing
+# the routes. These pin the wiring at each of the three slot-config write
+# boundaries, so removing the call from a handler fails a test instead of
+# silently reopening the partition. Mirrors
+# ``test_config_write_rejects_the_removed_enabled_key`` above (the sibling
+# REMOVED_SLOT_KEYS case), which is route-tested and this was not.
+
+
+@pytest.mark.parametrize("key", ["mtp", "enable_thinking", "vision"])
+def test_config_write_rejects_model_owned_keys(
+    key: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """PUT /config 400s a model-owned capability key with the actionable code.
+
+    ``SlotConfig`` is ``extra="allow"``, so without the guard all three would
+    round-trip to slot TOML as inert debris while the caller believed the
+    capability took effect. The code has to be ``slot.model_owned_key_denied``
+    (not the generic ``validation.unknown_keys``) so the UI can point the
+    operator at the model editor.
+    """
+    r = isolated_client.put("/api/slots/chat/config", json={key: True})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.model_owned_key_denied", err
+    assert key in err["message"]
+    assert err["details"]["keys"] == [key]
+    # The slot's TOML is untouched — the guard runs before any write.
+    cfg = isolated_client.get("/api/slots/chat/config").json()
+    assert key not in cfg
+
+
+@pytest.mark.parametrize("key", ["mtp", "enable_thinking", "vision"])
+def test_create_slot_rejects_model_owned_keys(
+    key: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """POST /api/slots refuses to BIRTH a slot carrying a model-owned key."""
+    body = {
+        "name": "owned",
+        "model": "qwen3-4b-q4_k_m",
+        "device": "gpu-vulkan",
+        "profile": "vulkan-radv",
+        key: True,
+    }
+    r = isolated_client.post("/api/slots", json=body)
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.model_owned_key_denied", err
+    assert err["details"]["keys"] == [key]
+    # Nothing was created.
+    assert not (slot_root / "owned.toml").exists()
+
+
+@pytest.mark.parametrize("key", ["mtp", "enable_thinking", "vision"])
+def test_patch_defaults_rejects_model_owned_keys_with_the_right_message(
+    key: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """PATCH /defaults names the PARTITION, not a spelling mistake.
+
+    This path ran only ``_reject_unknown_config_keys({"model": body})``, so a
+    stray model-owned key did 400 — but as ``validation.unknown_keys`` naming
+    ``model.mtp`` with a "check spelling" hint. The key is spelled perfectly;
+    it just belongs on the model, and the message has to say so or the operator
+    hunts for a typo that doesn't exist.
+    """
+    r = isolated_client.patch("/api/slots/chat/defaults", json={key: True})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.model_owned_key_denied", err
+    assert "belong on the model" in err["message"]
+    assert err["details"]["keys"] == [key]
+
+
+def test_patch_defaults_still_rejects_a_real_typo_as_unknown(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """The model-owned check must not swallow the unknown-key check.
+
+    A genuine typo still reports its real destination path (``model.<key>``)
+    under ``validation.unknown_keys`` — the partition check runs first but only
+    claims the three keys it owns.
+    """
+    r = isolated_client.patch("/api/slots/chat/defaults", json={"ctx_sizee": 4096})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "validation.unknown_keys", err
+    assert "model.ctx_sizee" in err["details"]["unknown_keys"]
+
+
+def test_patch_defaults_accepts_a_real_default(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """Sanity floor: the added guard didn't break the happy path.
+
+    ``ctx_size`` is the documented legacy alias and folds to ``context_size``
+    on disk (#585).
+    """
+    r = isolated_client.patch("/api/slots/chat/defaults", json={"ctx_size": 4096})
+    assert r.status_code == 200, r.text
+    cfg = isolated_client.get("/api/slots/chat/config").json()
+    assert cfg["model"]["context_size"] == 4096
+    assert "ctx_size" not in cfg["model"]
+    assert cfg["model"]["default"] == "qwen3-4b-q4_k_m", "sibling [model] keys survive"
+
+
 def test_delete_forwards_force_query_param(
     slot_root: Path,
     container_stub: dict[str, Any],

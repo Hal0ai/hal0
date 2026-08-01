@@ -1,6 +1,6 @@
 ---
 title: Choose models
-description: hal0's curated catalogue of recommended chat, embed, rerank, and image models — sized for unified memory — plus how model fit is evaluated against a slot's type, device, and profile.
+description: hal0's curated catalogue of recommended chat, embed, rerank, and image models, how launch flags now live on the model instead of the slot, and how to edit a model from the dashboard's row menu.
 sidebar:
   order: 30
 ---
@@ -9,174 +9,116 @@ import { Steps, Aside, Tabs, TabItem, Code, CardGrid, Card } from '@astrojs/star
 
 You don't have to guess which model to run. hal0 ships a **curated
 catalogue** — a hand-picked list of good defaults, each pointing at a
-specific GGUF (or safetensors) file in a Hugging Face repo, sized for the
-target's unified-memory pool. Pull any of them by id:
+specific GGUF (or safetensors) file in a Hugging Face repo. Pull any of
+them by id:
 
 ```sh
 hal0 model pull qwen3.6-27b
 ```
 
-The catalogue ships *with* each release (it lives in code, not a remote
-manifest), so you can never land on a stale pick list.
+The catalogue ships *with* each release (`GET /api/models/catalogue`,
+backed by code — not a remote manifest), so you can never land on a stale
+pick list.
 
 ![Models registry view showing the curated catalogue cards with size, license, and memory badges](/screenshots/models-registry.png)
 *The Models view renders each curated entry as a card with size, license, and minimum-memory badges.*
 
 ## Chat picks
 
-These are surfaced first by the FirstRun wizard, ordered roughly largest
-to smallest. Most of the headline picks use Unsloth's UD-Q4_K_XL dynamic
-quant or plain Q4_K_M for the size/quality sweet spot; `qwen3.6-27b` ships
-a ROCmFP4 pre-quantized build tuned specifically for Strix Halo instead.
+Most headline picks use a Q4-class dynamic quant for the size/quality
+sweet spot; sizing is relative — check a card's memory badge against your
+own unified-memory pool before pulling.
 
-| Id | Model | Size | Min memory | License | Notes |
-|---|---|---|---|---|---|
-| `qwen3-coder-next` | Qwen3 Coder Next | ~49 GB | ~56 GB | Apache-2.0 | Frontier coding model; needs the full pool. |
-| `qwen3.6-27b` | Qwen3.6 27B (MTP ROCmFP4) | ~17 GB | ~22 GB | other (see HF repo) | General-purpose default with MTP and vision support; ROCmFP4 build for Strix Halo. |
-| `gpt-oss-20b` | GPT-OSS 20B | ~12 GB | ~16 GB | Apache-2.0 | OpenAI open-weights 20B. |
-| `qwen3.5-9b` | Qwen3.5 9B | ~6 GB | ~8 GB | Apache-2.0 | Lean default; fits alongside embed + voice slots. |
-| `qwen3.5-0.8b` | Qwen3.5 0.8B | ~0.6 GB | ~1 GB | Apache-2.0 | Tiny; sub-second cold start. Doubles as the install smoke test. |
-| `qwen3-4b` | Qwen3 4B Instruct | ~2.5 GB | ~4 GB | Apache-2.0 | Fast all-rounder for a 4–8 GB budget. |
-| `llama32-3b` | Llama 3.2 3B Instruct | ~2 GB | ~3 GB | Llama-3.2-Community | Small and fast; good for low-memory hosts. |
-| `phi3-mini` | Phi-3 Mini 4K Instruct | ~2.4 GB | ~3 GB | MIT | Compact reasoning, MIT-licensed. |
+| Id | Notes |
+|---|---|
+| `qwen3-coder-next` | Frontier coding model; needs a large memory pool. |
+| `qwen3.6-27b` | General-purpose default with MTP and vision support. |
+| `gpt-oss-20b` | OpenAI open-weights 20B. |
+| `qwen3.5-9b` | Lean default; fits alongside embed + voice slots. |
+| `qwen3.5-0.8b` | Tiny; sub-second cold start. |
+| `qwen3-4b` | Fast all-rounder for a small memory budget. |
+| `llama32-3b` | Small and fast; good for low-memory hosts. |
+| `phi3-mini` | Compact reasoning, MIT-licensed. |
 
 <Aside type="tip">
-`qwen3.5-0.8b` is the recommended first pull on a fresh install — it
-verifies the whole slot lifecycle (pull → load → serve) in seconds before
-you commit to downloading a 20+ GB pick.
+`qwen3.5-0.8b` is a good first pull on a fresh install — it verifies the
+whole slot lifecycle (pull → load → serve) in seconds before you commit
+to downloading a much larger pick.
 </Aside>
 
-### Community MTP builds behind the seed Stacks
+## Embed, rerank, and image picks
 
-The catalogue also carries exact HF coordinates for about a dozen
-community MTP builds that don't show up as FirstRun wizard cards. Five of
-them are the agent/utility model pairs baked into hal0's three built-in
-[Stacks](/docs/concepts/stacks) — `saber`, `forge`, and `pi` — so those
-Stacks resolve their models and pull
-them by id instead of failing on a coordinate-less registry row; the rest
-come from the same Strix-Halo bench roster those Stacks were tuned
-against. They're still ordinary catalogue entries — `hal0 model pull <id>`
-works on any of them — just not curated for the first-run experience.
+Embed/rerank picks are llama.cpp-compatible GGUFs that run on
+`gpu-vulkan` / `gpu-rocm` / `gpu-cuda` / `cpu`; assign them to an
+`embedding` or `reranking` slot (`--type reranking` at
+`hal0 slot create` time — see [Manage slots](/docs/guides/manage-slots)).
 
-| Id | Model | Size |
-|---|---|---|
-| `qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean` | Qwen3.6 35B-A3B NSC ACE SABER (ROCmFP4 STRIX) | ~19 GB |
-| `chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean` | CHADROCK3.6 27B Pi-Agent (ROCmFP4 STRIX) | ~14.8 GB |
-| `chadrock3-6-35b-uncensored-mtp-strix-lean` | CHADROCK3.6 35B Uncensored (MTP STRIX) | ~19 GB |
-| `qwen3-6-35b-a3b-halostrix-dyn-mtp-v7` | Qwen3.6 35B-A3B HaloStrix Dyn (MTP v7) | ~22.6 GB |
-| `qwopus3-6-27b-v2-mtp-bf16-to-rocmfp4-strix-lean` | Qwopus3.6 27B v2 (ROCmFP4 STRIX) | ~14.8 GB |
-| `qwopus3-6-27b-coder-mtp-q6-k` | Qwopus3.6 27B Coder (MTP Q6_K) | ~22.4 GB |
-| `qwopus3-5-9b-coder-mtp-q6-k` | Qwopus3.5 9B Coder (MTP Q6_K) | ~7.6 GB |
-| `qwopus3-5-4b-coder-mtp-q6-k` | Qwopus3.5 4B Coder (MTP Q6_K) | ~3.6 GB |
-| `qwen3-5-9b-deepseek-v4-flash-mtp-q6-k` | Qwen3.5 9B DeepSeek V4 Flash (MTP Q6_K) | ~7.6 GB |
-| `gemma-4-12b-it-ud-q4-k-xl` | Gemma 4 12B IT (UD Q4_K_XL) | ~7.4 GB |
+Image picks route through ComfyUI and land in its own models tree rather
+than the per-id model directory — see
+[Generate images](/docs/guides/generate-images) for that surface. Image
+picks span the licensing spectrum on purpose (research-only through
+fully permissive) — read the license before using output commercially.
 
-All ten carry the `mtp` tag. The Gemma pick is also the reason hal0 pins
-any Gemma model on any q8-KV profile back to f16 KV automatically — see
-[`FAMILY_DEFAULTS`](/docs/concepts/capabilities-and-profiles#family_defaults--pinning-quirky-model-architectures)
-for why.
+## Launch flags now live on the model, not the slot
 
-## Embed and rerank picks
+As of v1.0, tuning knobs that used to be per-slot — `extra_args`, `mtp`,
+`jinja`, `enable_thinking`, `vision`, `chat_template`, `context_size`, and
+preferred `profile` — belong to the **model** (`ModelDefaults`), not the
+slot. A slot binds a model and gets its launch behavior *from* that
+model's defaults; the old per-slot fields still round-trip in TOML for
+compatibility but are inert at launch, and a one-shot migrator folds any
+value you had set there into the model.
 
-llama.cpp-compatible GGUFs that fan out to `gpu-vulkan` / `gpu-rocm` /
-`gpu-cuda` / `cpu`. Assign these to an embedding or reranking slot.
+There's no dedicated `hal0 model edit` CLI verb for these fields yet —
+set them via `PUT /api/models/{model_id}` or, more practically, from the
+dashboard's model drawer.
 
-| Id | Model | Capability | Size | License |
-|---|---|---|---|---|
-| `nomic-embed-text-v1.5-q8_0` | Nomic Embed Text v1.5 (Q8_0) | embed | ~0.15 GB | Apache-2.0 |
-| `bge-base-en-v1.5-q4_k_m` | BGE Base EN v1.5 (Q4_K_M) | embed | ~0.07 GB | MIT |
-| `bge-reranker-base-q4_k_m` | BGE Reranker Base (Q4_K_M) | rerank | ~0.26 GB | MIT |
-| `bge-reranker-v2-m3-q4_k_m` | BGE Reranker v2 M3 (Q4_K_M) | rerank | ~0.44 GB | Apache-2.0 |
+## Edit a model from the dashboard
 
-<Aside type="note">
-Embedding quality is brittle under aggressive quantization, so the nomic
-default ships at Q8_0 — the size delta is negligible on a unified pool.
-Rerank slots must be created with `--type reranking` (see [Manage slots](/docs/guides/manage-slots)).
-</Aside>
+Every model row in the **Models** view carries a kebab (⋮) menu. Today it
+has one action, **Edit model settings**, which opens the docked model
+drawer for that row directly — independent of whichever row is currently
+selected in the catalogue list, so you can jump straight from any row to
+its settings without first clicking to select it.
 
-## Image picks
+The same drawer opens from a slot card's pencil icon (see
+[Manage slots](/docs/guides/manage-slots#dashboard-the-inline-model-edit-pencil))
+for whichever model is currently bound to that slot — same drawer, two
+entry points.
 
-Routed through ComfyUI — these land in ComfyUI's `models/checkpoints` tree
-rather than the per-id model directory, so its loaders pick them up
-directly.
+## Preferred profile
 
-| Id | Model | Size | License |
-|---|---|---|---|
-| `sdxl-turbo` | SDXL Turbo | ~6.5 GB | SAI-NC-Research-Community (research only) |
-| `sdxl-lightning` | SDXL Lightning (8-step) | ~6.8 GB | CreativeML-OpenRAIL++ |
-| `sd-1.5-pruned-emaonly` | Stable Diffusion 1.5 | ~4.3 GB | CreativeML-Open-RAIL-M |
+A registry model can declare a **preferred profile** — the runtime
+profile it wants loaded alongside it — under `defaults.profile`:
 
-<Aside type="caution">
-Image picks span the licensing spectrum on purpose — SDXL Turbo is
-research-only, SD 1.5 is RAIL-M. Read the license before using output
-commercially.
-</Aside>
+```sh
+curl -X PUT http://localhost:8080/api/models/qwen3.6-27b \
+  -H 'content-type: application/json' \
+  -d '{"defaults": {"profile": "rocm-moe"}}'
+```
 
-The dashboard's Models view keeps these off the dispatcher-facing
-**Models** tab entirely — they live on their own **Image / ComfyUI** tab,
-grouped by the ComfyUI models-tree subdirectory each one actually lands in
-(`checkpoints`, `loras`, `vae`, `upscale_models`, …). See
-[Generate images](/docs/guides/generate-images) for how that surface
-works.
+A slot adopts this preference automatically: when it's created bound to
+the model with no explicit profile of its own, and again on **every**
+subsequent model swap. The preference is honoured only when it's
+compatible with the slot's existing device and type — an incompatible
+preference is ignored and the slot keeps its current profile; hal0 never
+flips a slot's hardware to satisfy a model's preference.
 
 ## How model fit is evaluated
 
-Before a model is assigned to a slot, hal0 computes a **fit verdict** —
-`allowed`, `degraded`, or `blocked` — with stable reason strings the
-dashboard renders as chips. The check runs three gates in order:
-
-<Steps>
-
-1. **Type match.** The model's classified modality must match the slot
-   type. A chat model maps to an `llm` slot, embed → `embedding`, rerank →
-   `reranking`, stt → `transcription`, tts → `tts`, image → `image`. A
-   mismatch is `blocked` (`model.slot_type_mismatch`).
-
-2. **Resolvability.** The model id must resolve — present in the local
-   registry. An unresolvable id is `blocked` (`model.not_resolvable`).
-
-3. **Profile + device class.** The slot's profile must support the slot
-   type — a mismatch (e.g. a `tts`-only profile on an `llm` slot) is
-   `blocked` (`profile.unsupported_slot_type`) — and the device must agree
-   with the profile's device class (`gpu-rocm`/`gpu-vulkan` → `gpu`,
-   `cpu` → `cpu`, `npu` → `npu`). NPU and image mismatches are hard
-   `blocked` failures (`profile.device_class_mismatch`) — they route to
-   different runtime families. A GPU↔CPU mismatch reports the same reason
-   string but as `degraded` instead: a custom image may still run, but it
-   needs operator attention before launch.
-
-</Steps>
-
-A `degraded` verdict is allowed to proceed; only `blocked` stops the
-assignment. This is why the device you pick for a slot has to be
-consistent with its profile — see
-[Manage slots](/docs/guides/manage-slots) for the `--hardware` flag that
-sets it.
-
-<Aside type="tip">
-Fit-checking runs at *assignment* time. If a slot's already-configured
-default later stops resolving locally — its file was removed, or a seed
-pinned an id that was never actually pulled under that exact name —
-`hal0 slot load` doesn't crash-loop on the missing path. `load()` falls
-back to the best locally-registered model that matches the slot's
-capability, preferring whichever candidate shares the most leading
-name tokens with the configured id (then the largest one on disk), and
-always excluding diffusion/image/video artifacts so a text slot can
-never load one by accident. The substitution is logged
-(`slot.model_default_fallback`) so you can go fix the slot's configured
-default.
-</Aside>
+Before a model is assigned to a slot, hal0 checks that the model's
+classified modality matches the slot type (chat → `llm`, embed →
+`embedding`, and so on), that the model id actually resolves in the local
+registry, and that the slot's device agrees with the profile's device
+class. A hard mismatch blocks the assignment; a soft mismatch (for
+example a custom image on the wrong device class) is allowed through as
+degraded, with the reason surfaced in the dashboard so you know it needs
+attention. This is why the device you pick for a slot has to stay
+consistent with what you assign to it — see
+[Manage slots](/docs/guides/manage-slots) for `--hardware`.
 
 ## Off-catalogue models
 
-Anything not in the catalogue still works — search Hugging Face, inspect a
-repo's variants, and pull by coordinates. See
+Anything not in the catalogue still works — search Hugging Face, inspect
+a repo's variants, and pull by coordinates. See
 [Pull and register models](/docs/guides/pull-and-register-models).
-
-<Aside type="note">
-NPU / FastFlowLM models are a separate case: they aren't part of this
-Hugging Face pull catalogue at all (no HF coordinates), and are obtained by
-family and size tag instead (e.g., `hal0 model pull gemma4-it:e4b`). See
-[Obtain models](/docs/guides/obtain-models/#npu--fastflowlm-models) for the
-full NPU/FLM workflow.
-</Aside>

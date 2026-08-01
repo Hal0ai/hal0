@@ -111,8 +111,17 @@ class LoadedSlot:
     tagged ``tool-calling`` in the registry no longer needs a hand-authored
     mirror in the slot TOML's ``[model].labels`` to actually ship tools.
     ``labels`` stays for the OTHER per-tool label overlays
-    (``required_labels`` — vision/edit/image/tts/embeddings/reranking)
-    which are out of scope for this fix.
+    (``required_labels`` — vision/edit/image/tts/embeddings/reranking).
+    Those were out of scope for the §7.1d fix; #1469 gives them the same
+    treatment as ``tool_calling`` — see ``modalities`` below.
+
+    ``modalities`` (#1469): the registry's already-populated, fact-derived
+    capability signal (:func:`hal0.model_meta.modality.
+    derive_modalities_from_model_info` — mmproj presence, pooling_type,
+    backend family), used as a fallback source for the ``required_labels``
+    overlay when the slot TOML never hand-authored a matching label — which
+    is every slot TOML in practice, since nothing writes ``[model].labels``.
+    Excludes the uninformative ``chat`` default (no tool ever requires it).
     """
 
     name: str
@@ -124,6 +133,7 @@ class LoadedSlot:
     profile: str | None = None
     default: bool = False
     tool_calling: bool = False
+    modalities: frozenset[str] = frozenset()
 
 
 def seeded_slots(*, include_npu: bool | None = None) -> tuple[str, ...]:
@@ -184,6 +194,7 @@ def loaded_slot_from_config(
         return None
 
     from hal0.model_meta import labels_of, model_capabilities_of
+    from hal0.model_meta.modality import Modality, derive_modalities_from_model_info
 
     raw_prompt = cfg.get("system_prompt")
     system_prompt = raw_prompt if isinstance(raw_prompt, str) else ""
@@ -197,6 +208,15 @@ def loaded_slot_from_config(
     tool_calling = model_capabilities_of(model_info).get("tool_calling")
     if tool_calling is None:
         tool_calling = "tool-calling" in labels
+    # #1469: fact-derived fallback for resolve_for_request's required_labels
+    # overlay (see LoadedSlot.modalities docstring). CHAT is dropped — it's
+    # derive_modalities's "nothing else matched" default, not a real signal,
+    # and no tool ever requires it.
+    modalities = frozenset()
+    if model_info:
+        modalities = frozenset(
+            str(m) for m in derive_modalities_from_model_info(model_info) if m is not Modality.CHAT
+        )
     return LoadedSlot(
         name=name,
         model_id=model_id,
@@ -207,6 +227,7 @@ def loaded_slot_from_config(
         profile=profile if isinstance(profile, str) and profile else None,
         default=cfg.get("default") is True,
         tool_calling=bool(tool_calling),
+        modalities=modalities,
     )
 
 
@@ -301,9 +322,16 @@ async def resolve_for_request(
          carries ``default = true``, prefer it.
       2. **Label filter overlay.** When ``required_labels`` is
          non-empty, the chosen slot's model must advertise every
-         required label (sourced from the slot's
-         ``model.labels`` list). The default is dropped if it
-         can't satisfy the overlay.
+         required label — sourced from the slot's hand-authored
+         ``model.labels`` list, falling back to the slot's registry-
+         derived ``modalities`` (#1469; see ``LoadedSlot.modalities``)
+         for any label that folds onto the closed :class:`Modality`
+         taxonomy via :func:`hal0.model_meta.modality.normalize_modality`
+         (``vision``/``tts``/``image``, and the tool-taxonomy aliases
+         ``transcription``/``embeddings``/``reranking``). A label with
+         no modality equivalent (``edit``) only ever matches an explicit
+         TOML label — there is no fact-derived signal for it. The
+         default is dropped if it can't satisfy the overlay.
       3. **Fall-through.** Otherwise pick the first model-bound slot
          of ``slot_type`` in TOML declaration order (still satisfying
          the label overlay if any).
@@ -311,11 +339,20 @@ async def resolve_for_request(
     Returning :class:`LoadedSlot` keeps callers from reopening raw slot
     configs to discover the model id, labels, device, or system prompt.
     """
+    from hal0.model_meta.modality import normalize_modality
 
     def _satisfies(slot: LoadedSlot) -> bool:
         if not required_labels:
             return True
-        return set(required_labels).issubset(slot.labels)
+        if set(required_labels).issubset(slot.labels):
+            return True
+        folded = {normalize_modality(label) for label in required_labels}
+        if None in folded:
+            # At least one required label has no modality equivalent
+            # (e.g. "edit") — only an explicit TOML label can satisfy it,
+            # and the check above already ruled that out.
+            return False
+        return {str(m) for m in folded}.issubset(slot.modalities)
 
     slots: list[LoadedSlot] = []
     for cfg in await host.iter_configs():

@@ -1,133 +1,138 @@
 ---
-title: Paths & files
-description: FHS layout reference for hal0 — config files under /etc/hal0, state paths under /var/lib/hal0, the code and log roots, and how HAL0_HOME remaps them all.
+title: Paths & files reference
+description: "Every filesystem path hal0 creates, reads, or writes — canonical resolver in src/hal0/config/paths.py, verified against the v1.0 tree."
 sidebar:
-  order: 70
+  order: 35
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Nearly every filesystem path hal0 uses flows through one resolver, so the four
-roots below are almost the whole story — the one exception (avahi's service
-directory) is called out further down. Config and state are preserved across
-updates; code is replaced.
+All roots are resolved by `hal0.config.paths` and are `HAL0_HOME`-aware — see
+[Environment variables](/docs/reference/env-vars/). Production layout (with
+`HAL0_HOME` unset) follows the FHS:
 
-## The four roots
+| Root | Path | Purpose |
+|---|---|---|
+| `usr_lib()` | `/usr/lib/hal0/current` | Code — a symlink to the currently active versioned install dir. |
+| `lib()` | `/usr/lib/hal0` | Shipped read-only tree: `bin/` wrappers, `versions/`, hooks. |
+| `etc()` | `/etc/hal0` | User-editable config, preserved across updates. |
+| `var_lib()` | `/var/lib/hal0` | Mutable runtime state, preserved across updates. |
+| `var_log()` | `/var/log/hal0` | Optional supplementary log files — journald is the primary log sink. |
 
-| Root            | FHS path             | Purpose                                            |
-|-----------------|----------------------|----------------------------------------------------|
-| Code            | `/usr/lib/hal0/current` | hal0 code (a symlink to the versioned dir).      |
-| Config          | `/etc/hal0`          | User-editable config. Preserved on update.         |
-| State           | `/var/lib/hal0`      | Mutable runtime state. Preserved on update.        |
-| Logs            | `/var/log/hal0`      | Optional supplementary log files (journald is primary). |
+With `HAL0_HOME=$X` set (dev installs, tests): `usr_lib = $X/usr-lib/hal0/current`,
+`lib = $X/usr-lib/hal0`, `etc = $X/etc/hal0`, `var_lib = $X/var-lib/hal0`,
+`var_log = $X/var-log/hal0`.
 
-## Config files (`/etc/hal0`)
+## `/etc/hal0/` layout
 
-| Path                          | What it holds                                                        |
-|-------------------------------|---------------------------------------------------------------------|
-| `/etc/hal0/hal0.toml`         | Top-level config (`[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[models]`, `[memory]`, `[activity]`, …). |
-| `/etc/hal0/slots/`            | One TOML per slot (`/etc/hal0/slots/<name>.toml`).                   |
-| `/etc/hal0/profiles.toml`     | Profile catalog. **Optional** — the built-in seed profiles are now *virtual*: they overlay from code on every load and are never written back here, so the file only ever holds operator-created (or cloned) profiles. |
-| `/etc/hal0/stacks.toml`       | Stack catalog — portable `[stack.<slug>]` bundles of slot + profile + model rows. **Optional**, empty until an operator saves one. |
-| `/etc/hal0/agents/`           | One TOML per agent (`/etc/hal0/agents/<name>.toml`): workspace, MCP servers, tool tiers. |
-| `/etc/hal0/hardware.json`     | Hardware probe result (written by `hal0 probe`).                     |
-| `/etc/hal0/manifest.json`     | Release manifest — toolbox image digests pinned per release.         |
-| `/etc/hal0/openwebui.env`     | OpenWebUI environment file.                                          |
+```
+/etc/hal0/
+├── hal0.toml                # main config
+├── api.env                  # 0600, systemd EnvironmentFile — secrets/keys
+├── openwebui.env
+├── hardware.json            # probe snapshot
+├── manifest.json            # release manifest, image digest pins
+├── profiles.toml            # optional — seeds apply if absent
+├── stacks.toml               # optional
+├── slots/                   # one <name>.toml per slot
+├── agents/<name>.toml       # per-agent MCP allowlist/config
+└── *.lock                   # advisory RMW lock siblings
+```
 
-<Aside type="note">
-Provider and operator secrets live in `/etc/hal0/api.env` (written by the
-Settings → Secrets surface and the provider-credential writer). It is written
-mode 0600 and its values are write-only — never returned by the API, never
-logged. Upstream catalog config (`upstreams.toml`) and provider config
-(`providers.toml`) also live under `/etc/hal0`.
+`api.env` is written with mode `0600` — it carries the admin/client bearer keys and
+other secrets. See [Config schema](/docs/reference/config-schema/) for every file's
+key layout.
+
+## `/var/lib/hal0/` layout
+
+```
+/var/lib/hal0/
+├── hal0.db                  # primary SQLite — registry, PortAuthority, metrics, runtime state
+├── activity.db(+wal/shm)    # audit trail SQLite
+├── .first-run.lock          # 0600, single-use OTP for first-run claim
+├── .first_run_done          # first-run completion sentinel
+├── .bundle-chosen           # unwired for v1.0 — see caution below
+├── registry/
+│   └── registry.toml(+.lock) # model registry
+├── models/                  # default model cache (unless overridden — see below)
+├── slots/<name>/             # per-slot working dir
+├── agents/
+│   ├── secret.bin            # 0600 HMAC secret for the agent chat proxy
+│   └── <name>/workspace/     # per-agent sandbox root (chroot/bind-mount target)
+├── stacks/state.json         # active-stack pointer + content hash
+├── openwebui/                 # OpenWebUI state
+├── .hermes/runtime.json      # Hermes runtime info (embed token, etc)
+└── .config/flm/models/       # default FLM (NPU) model cache
+```
+
+<Aside type="caution">
+`.bundle-chosen` is a bundle-picker completion marker (JSON: tier + NPU flag +
+timestamp). As of v1.0 the marker is written but the bundle-picker flow that would
+consume it is deferred/unwired — don't document it as an active decision point.
 </Aside>
 
+### Model store resolution
+
+The default model cache is `/var/lib/hal0/models`. Resolution order:
+
+1. `HAL0_MODEL_STORE` env var, if set.
+2. `[models].store` (or the deprecated `[models].pull_root`) in `hal0.toml`, via
+   `effective_store()`.
+3. `/var/lib/hal0/models` (the `models_dir()` default).
+
+`[models].roots` (default: just the effective store) plus the effective store itself,
+deduplicated, form the full scan set (`scan_roots()`).
+
+`DEFAULT_MODEL_STORE = /mnt/ai-models` is a historic convention for an external
+NFS/fast-disk mount used as a slot container bind target — it's not a resolver default,
+just a documented convention some installs still use.
+
+## Other notable paths
+
+| Path | Purpose |
+|---|---|
+| `~/.local/share/hal0/models` | XDG-style per-user model store — a UI display option only, not a resolver default. |
+| `$PWD/.hal0ai` (or `$HAL0_PREFIX`) | Dev-mode install root, used by `hal0 uninstall --dev`. |
+| `$HERMES_HOME` (default `~/.hermes`) | Hermes agent home directory. |
+
+## Lock files
+
+hal0 uses a generic sibling-lock pattern (`hal0.config.locking.file_lock()`):
+`<target>.lock` next to any config file, advisory `fcntl.flock`.
+
+| Pattern | Purpose |
+|---|---|
+| `/etc/hal0/*.lock` | Advisory read-modify-write locks on config writes. |
+| `/var/lib/hal0/*.lock` | Advisory read-modify-write locks on state writes. |
+| `/var/lib/hal0/registry/registry.toml.lock` | Registry cross-process write lock (sidecar file). |
+| `<slots_dir>.lock` | Slot-config directory-level lock. |
+| `<record>.lock` | Per-record lock for MCP `installed.py` read-modify-write. |
+
+## Temp file prefixes (atomic-write pattern)
+
+hal0 writes config and state files via `tempfile.mkstemp` in the same directory,
+`fsync`, then `os.replace` — so readers never see a torn write. Recognizable prefixes:
+
+| Prefix | Used by |
+|---|---|
+| `.hal0-writeprobe-{pid}` | Write-permission probe. |
+| `.hal0-managed` | Marker stamped in a claimed `HERMES_HOME`/agent data dir — gates the unmanaged-directory refusal. |
+| `.hal0-gpu-arbiter-*.tmp` | GPU arbiter state. |
+| `.hal0-state-*.tmp` | Slot state / ID-keying migration. |
+| `.hal0-stack-state-*.tmp` | Stack state. |
+| `.hal0-env-*.tmp` | Atomic env-file writer (`config/env.py`). |
+| `.hal0-build-stamp` | UI prebuild content-hash stamp under the served dist dir. |
+
+## Portable export envelope formats
+
+| Extension | Purpose |
+|---|---|
+| `.hal0profile.json` | Portable profile export/import envelope. |
+| `.hal0stack.json` | Portable stack export/import envelope. |
+
 <Aside type="note">
-When the profile catalog migrates to virtual seeds on an update, the updater
-backs up the pre-migration file **once** to
-`/etc/hal0/profiles.toml.pre-virtual-seeds.bak` (never overwritten on later
-re-runs) before pruning stale seed materializations. Any seed-named entry
-whose on-disk content differs from the code seed — a hand-edited seed table,
-or an operator profile whose name only became a seed in a later release — is
-rescued to `<name>-custom` rather than deleted.
+API keys are **never** stored in TOML config files — `providers.toml`/`upstreams.toml`
+entries only hold the *name* of an environment variable (`auth_value_env`); the actual
+secret value lives in `api.env` (mode `0600`), written atomically via
+`hal0.config.env.write_env_atomic`.
 </Aside>
-
-## State paths (`/var/lib/hal0`)
-
-| Path                                    | What it holds                                                  |
-|-----------------------------------------|---------------------------------------------------------------|
-| `/var/lib/hal0/models/`                 | Default model cache directory.                                 |
-| `/var/lib/hal0/registry/`               | Model registry (`registry.toml` and friends).                 |
-| `/var/lib/hal0/slots/<name>/`           | Per-slot working directory.                                    |
-| `/var/lib/hal0/stacks/state.json`       | Active-stack pointer — which stack is applied, plus a content hash used for drift detection. |
-| `/var/lib/hal0/model-pull-jobs/<id>.json` | Persisted pull-job snapshot, so a restart mid-download still resolves a status poll. |
-| `/var/lib/hal0/activity.db`             | Durable activity / audit store (SQLite, plus `-wal`/`-shm`).   |
-| `/var/lib/hal0/agents/<name>/workspace/`| Per-agent filesystem sandbox root.                            |
-| `/var/lib/hal0/openwebui/`              | OpenWebUI state directory.                                     |
-| `/var/lib/hal0/hal0.previous`           | Rollback breadcrumb written by an update — the prior code-symlink target. |
-| `/var/lib/hal0/cache/<version>/`        | Per-release download cache used by the updater.               |
-| `/var/lib/hal0/.first_run_done`         | First-run completion sentinel (written by the installer/wizard). |
-| `/var/lib/hal0/.first-run.lock`         | First-run claim lockfile (mode 0600, single-use OTP).         |
-| `/var/lib/hal0/.bundle-chosen`          | First-run bundle-picker completion marker.                   |
-
-<Aside type="note">
-`.first_run_done`, `.first-run.lock`, and `.bundle-chosen` all live directly
-under `/var/lib/hal0`, so a single `rm -rf /var/lib/hal0` resets the whole
-first-run state.
-</Aside>
-
-## mDNS service files (outside the four roots)
-
-Companion-service discovery writes avahi service-group XML files directly
-under `/etc/avahi/services` — the one filesystem location hal0 touches
-outside the four roots above, since avahi owns that directory:
-
-| Path                                            | What it holds                                          |
-|--------------------------------------------------|--------------------------------------------------------|
-| `/etc/avahi/services/hal0.service`               | Installer-owned main dashboard mDNS announcement. Never touched by the addon-service writer. |
-| `/etc/avahi/services/hal0-addon-<id>.service`    | One file per advertised companion service (OpenWebUI, ComfyUI), written by `POST /api/services/mdns {"advertise": true}` and removed on withdraw. Only files matching this exact prefix are ever written or removed. |
-
-`HAL0_AVAHI_SERVICES_DIR` overrides the directory (tests); `HAL0_HOSTNAME`
-overrides the `<host>.local` name advertised in each file.
-
-## The model store
-
-The directory slot containers bind-mount for model weights is resolved
-separately from the model cache above, with this precedence:
-
-1. the `HAL0_MODEL_STORE` environment variable,
-2. `[models].store` in `hal0.toml`,
-3. `/mnt/ai-models` — the conventional default model-store mount.
-
-Note that the default stays `/mnt/ai-models`, not `/var/lib/hal0/models`, so an
-install that has never set `[models].store` keeps mounting the same path it
-always has. This is the single source of truth shared by the pull engine and
-the container mounts, so the path the registry hands to the inference server
-can never drift from what the container actually mounts.
-
-A ComfyUI-specific subdirectory of the model store,
-`/mnt/ai-models/comfyui/workflows`, is the primary directory backing the
-dashboard's workflow-strip listing (`GET /api/comfyui/workflows`) — dropping a
-workflow JSON file there makes it appear as a launchable chip without a
-rebuild.
-
-## HAL0_HOME remap
-
-Setting `HAL0_HOME=/some/path` relocates **all four roots** under that prefix —
-used for dev installs and isolated tests:
-
-| Root   | Under `HAL0_HOME`                  |
-|--------|------------------------------------|
-| Code   | `$HAL0_HOME/usr-lib/hal0/current`  |
-| Config | `$HAL0_HOME/etc/hal0`              |
-| State  | `$HAL0_HOME/var-lib/hal0`          |
-| Logs   | `$HAL0_HOME/var-log/hal0`          |
-
-Every derived path (slots dir, registry, `activity.db`, `manifest.json`, …)
-follows automatically because they are built on these roots.
-
-## See also
-
-- [Environment variables](/docs/reference/env-vars) — `HAL0_HOME`, `HAL0_MODEL_STORE`, and the rest.
-- [Config schema](/docs/reference/config-schema) — the field-level reference for `hal0.toml` and slot TOMLs.
-- [Stacks](/docs/concepts/stacks) — what lives in `stacks.toml` and the active-stack pointer.

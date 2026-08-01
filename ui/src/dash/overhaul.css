@@ -1083,6 +1083,18 @@
 }
 @media (prefers-reduced-motion: reduce) { .qc-caret { animation: none; opacity: 1; } }
 .qc-error { color: var(--err, #EF6B6B); font-size: 11px; }
+.qc-retry {
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 10px;
+  color: var(--err, #EF6B6B);
+  background: transparent;
+  border: 1px solid var(--err, #EF6B6B);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.qc-retry:hover:not(:disabled) { background: var(--err, #EF6B6B); color: var(--bg-1, #111); }
+.qc-retry:disabled { opacity: 0.4; cursor: default; }
 
 /* ── Metrics row ──────────────────────────────────────────────────────────── */
 .qc-metrics {

@@ -1,106 +1,89 @@
 ---
-title: Hardware matrix
-description: hal0 hardware reference — AMD GPU (ROCm/Vulkan), NVIDIA GPU (CUDA, experimental), AMD XDNA NPU (FastFlowLM), CPU fallback, multi-GPU pinning, and the backend availability order.
+title: Hardware matrix reference
+description: "How hal0 probes hardware, the canonical device taxonomy, and the backend-selection decision tree — verified against src/hal0/hardware and src/hal0/model_meta in the v1.0 tree."
 sidebar:
   order: 50
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-hal0 targets AMD APU/GPU plus the AMD XDNA NPU, with a CPU fallback that is
-always available. NVIDIA GPUs are also supported via an experimental CUDA
-path (see below). This page lists what runs on each accelerator and the order
-hal0 prefers them in.
-
-## Hardware targets
-
-| Target              | Backend / runtime               | What runs there                                    |
-|---------------------|-----------------------------------|----------------------------------------------------|
-| AMD GPU (ROCm)      | llama.cpp ROCm / Qwen3-TTS         | chat / embed / rerank LLM inference (highest tps); multilingual TTS |
-| AMD GPU (Vulkan)    | llama.cpp Vulkan                  | chat / embed / rerank LLM inference (broad-compat) |
-| NVIDIA GPU (CUDA)   | llama.cpp CUDA — **experimental** | chat / embed / rerank LLM inference                |
-| AMD XDNA NPU        | FastFlowLM (FLM)                  | chat + speech-to-text + embeddings (one process)   |
-| CPU                 | llama.cpp / ONNX                  | fallback LLM inference; Kokoro TTS                 |
-
-The reference platform is AMD Strix Halo: an 8060S-class iGPU, an XDNA NPU, and
-a unified-memory pool the GPU shares with the host via GTT. hal0's profile flags
-are bench-tuned for that target, but the GPU/Vulkan and CPU paths run on any
-modern Linux AMD system.
-
-![Hardware metrics panel showing GPU, NPU, and memory utilization](/screenshots/hardware-metrics.png)
-*Hardware monitoring dashboard for GPU, NPU, and system memory.*
-
-## Backend availability order
-
-hal0 probes the host and advertises the backends it can actually run, in this
-order:
-
-1. **NPU** — only when an XDNA NPU is present *and* the FLM toolbox image is
-   already pulled locally.
-2. **GPU (Vulkan)** — whenever a GPU is detected (every modern Linux GPU has
-   Mesa Vulkan).
-3. **GPU (ROCm)** — only when the detected GPU is an AMD GPU with compute
-   support (`compute_capable`).
-4. **CPU** — always reachable; the guaranteed fallback.
-
-| Backend id   | Label        | Provider       | Multiplex | Advertised when                          |
-|--------------|--------------|----------------|-----------|------------------------------------------|
-| `npu`        | NPU          | `flm`          | yes       | XDNA present + FLM image pulled           |
-| `gpu-vulkan` | GPU (Vulkan) | `llama-server` | no        | any GPU detected                          |
-| `gpu-rocm`   | GPU (ROCm)   | `llama-server` | no        | AMD GPU with ROCm compute support         |
-| `cpu`        | CPU          | `llama-server` | no        | always                                    |
-
-The NPU is **multiplex**: a single `flm serve` process answers chat, STT, and
-embeddings at once, so one NPU slot can back three capabilities.
-
 <Aside type="note">
-`gpu-cuda` is **not** part of this auto-advertised list — `/api/backends`
-(the dashboard's backend-availability footer) doesn't probe for CUDA yet, so
-an NVIDIA GPU still only shows up here as `gpu-vulkan`. `gpu-cuda` is chosen
-by the installer's hardware recommender on NVIDIA hosts where
-`nvidia-container-toolkit` (CDI) is detected, or set explicitly with
-`device = "gpu-cuda"` in a slot TOML.
+hal0 does not hard-block installs below a minimum spec. Backend selection degrades
+gracefully to CPU and the smallest curated model rather than refusing to install.
+There is no single "minimum RAM/VRAM" gate — see the decision tree below.
 </Aside>
 
-![The hal0 Slots view showing iGPU and FLM (NPU) slots in the Inference Engine, above the shared GTT memory carve-out](/screenshots/npu-occupancy.png)
-*The Inference Engine slot inventory — here `4 iGPU · 3 FLM` — with the shared iGPU GTT carve-out above it.*
+## Hardware probe
 
-<Aside type="caution" title="NVIDIA / CUDA is experimental">
-hal0's device enum is `{gpu-rocm, gpu-vulkan, gpu-cuda, cpu, npu}` — `gpu-cuda`
-runs NVIDIA GPUs through the upstream `ghcr.io/ggml-org/llama.cpp:server-cuda`
-image via CDI GPU passthrough (`nvidia-container-toolkit` required). It's
-experimental: unbenched, not part of the AMD Strix Halo toolbox family, and
-not yet part of the `/api/backends` auto-probe above. Without
-`nvidia-container-toolkit`, an NVIDIA GPU still only surfaces through the
-generic Vulkan path (`gpu-vulkan`); there is no ROCm path for NVIDIA hardware.
-hal0 is built and tested on Linux x86_64.
-</Aside>
+`HardwareProbe.probe()` (`hal0.hardware.probe`) writes a snapshot to
+`/etc/hal0/hardware.json` on install, on `hal0 config hardware --refresh` (formerly
+`hal0 probe`), and from the dashboard's re-probe button. All probing is
+subprocess/sysfs-based and never raises.
 
-## Multi-GPU hosts
+| Signal | Source |
+|---|---|
+| CPU model/cores/threads | `/proc/cpuinfo`, with an ARM fallback chain (Hardware/Model/CPU part fields), last-resort `platform.machine()`. |
+| RAM total/available | `/proc/meminfo` (`MemTotal`/`MemAvailable`). |
+| GPU (AMD) | DRM sysfs scan of `/sys/class/drm/card*/device/mem_info_vram_total`. |
+| Hostname | `/proc/sys/kernel/hostname`. |
 
-hal0's hardware probe enumerates every detected GPU additively (index + PCI
-bus id), for both AMD and NVIDIA hosts. A slot can pin itself to one GPU via
-the `gpu_index` field — see [Devices, providers &
-profiles](/docs/reference/providers-profiles-devices#multi-gpu-hosts) for the
-per-backend visibility-env mapping. Leaving `gpu_index` unset exposes all GPUs
-to the slot, unchanged from prior single-GPU behaviour.
+The result is validated against the `HardwareInfo` schema — see
+[Config schema → hardware.json](/docs/reference/config-schema/#hardwarejson) for the
+full field list, including `unified_memory_mb` (the true UMA pool — use this, not
+`ram_mb + vram_mb`, on unified-memory systems like Strix Halo) and `platform`
+(`strix-halo`, `wsl2`, `proxmox-kvm`, `kvm`, `lxc`, `bare-metal-*`, `unknown`).
 
-## NPU host requirements
+## Canonical device taxonomy
 
-The NPU path runs FastFlowLM in a container, but the host must provide the XDNA
-driver and firmware:
+`hal0.model_meta` is the single source of truth for device ids (previously duplicated
+across 5 call sites, now unified). `DEFAULT_DEVICE = "gpu-rocm"`.
 
-- the `amdxdna` kernel driver (in-tree on kernel ≥ 6.14, or via the
-  `amdxdna-dkms` package on kernel ≥ 6.10), and
-- NPU firmware ≥ 1.1.0.0.
+| Device id | Label | Recommended | Default profile | Notes |
+|---|---|---|---|---|
+| `gpu-rocm` | GPU (ROCm) | ✅ | `chat` | Best throughput on Strix Halo — the recommended default. |
+| `gpu-vulkan` | GPU (Vulkan) | — | `chat` | Runs anywhere Mesa Vulkan does; slower than ROCm on Strix Halo — fallback. |
+| `gpu-cuda` | GPU (CUDA) | — | `chat` | NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. |
+| `cpu` | CPU | — | `cpu-chat` | Always available, slow but correct. |
+| `npu` | NPU (FLM) | — | `flm` | AMD XDNA NPU via FastFlowLM — chat/embed/ASR trio on one process. |
 
-<Aside type="note">
-The NPU host driver install is **Ubuntu / apt-only** — the FastFlowLM driver
-ships as a `.deb`. The FLM inference itself runs in the pinned `flm` toolbox
-container; only the host-side driver is distro-specific.
-</Aside>
+`VALID_DEVICES` is the frozenset of these 5 ids. A legacy v0.1 `backend` enum
+(`rocm|vulkan|cuda|cpu|flm|moonshine|kokoro`) is deprecated and round-trips for one
+release; `map_backend_to_device()` maps unknown legacy values to `"cpu"` as a safe
+fallback rather than crashing config load.
+
+## Backend-selection decision tree
+
+`hardware.recommend._backend_for()` — this is the actual logic the installer and
+dashboard use to pick a device for a new slot, given a probed `HardwareInfo`:
+
+1. **AMD**, unified memory ≥ 32 GB, and `vram_mb <= 4096` → **Vulkan** ("AMD UMA /
+   Strix Halo class" — small dedicated VRAM number is a UMA signal, not a real cap).
+2. **AMD**, `compute_capable` (rocm-smi reachable) → **ROCm**.
+3. **AMD**, no ROCm → **Vulkan** (Mesa).
+4. **NVIDIA**, NVIDIA Container Toolkit present (`nvidia-ctk` on `PATH` or a CDI spec
+   under `/etc/cdi`/`/var/run/cdi`) → **CUDA**.
+5. **NVIDIA**, no CDI → **Vulkan** fallback.
+6. **Intel iGPU** / unknown-but-`vulkan_capable` → **Vulkan**.
+7. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
+   correct").
+
+VRAM budget (`_vram_budget_gb()`): AMD UMA → half of the unified pool; discrete GPU →
+`vram_mb`; CPU-only → half of `ram_available_mb`.
+
+## Platform support
+
+`HardwareInfo.platform` enumerates every platform hal0 recognizes during probing:
+`strix-halo`, `wsl2`, `proxmox-kvm`, `kvm`, `lxc`, `bare-metal-amd-gpu`,
+`bare-metal-nvidia-gpu`, `bare-metal-intel-igpu`, `bare-metal-cpu-only`, `unknown`.
+
+For install-target-specific setup (Proxmox LXC, WSL2, bare-metal Ubuntu), see the
+Getting Started guides — this page covers only the hardware-detection and
+backend-selection logic, not per-platform install steps.
 
 ## See also
 
-- [Devices, providers & profiles](/docs/reference/providers-profiles-devices) — the device → profile → image matrix.
-- [NPU & power REST routes](/docs/reference/api/rest-api) — `/api/npu`, `/api/backends`, `/api/stats/hardware`.
+- [Providers, profiles & devices](/docs/reference/providers-profiles-devices/) — how a
+  device selection flows into a slot's `device` field and a profile's (now inert)
+  `device_class`/`backend` hints.
+- [Model roster & benchmarks](/docs/reference/model-roster-benchmark/) — how hardware
+  tier drives the curated primary-slot model recommendation.

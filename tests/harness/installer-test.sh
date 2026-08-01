@@ -137,12 +137,23 @@ else
 fi
 
 # ── ROW: dev-setup-sentinel ─────────────────────────────────────────────────
-# Verify that `hal0 setup --auto --no-pull --no-extensions` (Task 5.1) writes
-# the first-run sentinel (/var/lib/hal0/.first_run_done). A Main slot config
-# (/etc/hal0/slots/chat.toml) is also expected on hardware with a supported
-# GPU; on CI/VM boxes with no compatible GPU the slot creation is skipped by
-# apply_setup (device/profile mismatch) but the sentinel is always written.
-# The dev-install row above skips the setup block via HAL0_NO_PROBE=1; we
+# Exercise the installer's INTERNAL first-run seeding entry point
+# (`hal0 setup --auto --no-pull --no-extensions`, hidden from `hal0 --help`
+# since v1.0 — install.sh is the only user-facing entry point and drives this
+# itself). Verify it writes the first-run sentinel
+# (/var/lib/hal0/.first_run_done) and scaffolds the chat-capability slot.
+#
+# That slot is named `agent`, not `chat` (ADR-0023: `agent` is the LLM anchor
+# every `hal0/<slot>` fallback chain ends in, so first run must seed a slot by
+# that name — see setup_command._SETUP_SLOTS). This row asserted `chat.toml`
+# for a long time, which no code path has written since, so it silently
+# reported the always-true "no compatible GPU" branch on every host.
+#
+# On a box with no usable GPU the slot creation can still be skipped by
+# apply_setup (device/profile coherence, #807) — the sentinel is always
+# written, so that stays the pass criterion and the slot is reported.
+#
+# The dev-install row above skips the seeding block via HAL0_NO_PROBE=1; we
 # exercise it explicitly here against the already-installed binary using
 # HAL0_HOME so paths resolve under the tmp PREFIX (not /etc or /var/lib).
 log_step "Row: dev-setup-sentinel"
@@ -153,28 +164,54 @@ if [[ -x "${HAL0_BIN}" ]]; then
     if HAL0_HOME="${PREFIX}" "${HAL0_BIN}" setup --auto --no-pull --no-extensions \
         --storage-dir "${PREFIX}/var-lib/hal0/models" >"${SETUP_LOG}" 2>&1; then
         SENTINEL="${PREFIX}/var-lib/hal0/.first_run_done"
-        CHAT_TOML="${PREFIX}/etc/hal0/slots/chat.toml"
+        AGENT_TOML="${PREFIX}/etc/hal0/slots/agent.toml"
         if [[ -f "${SENTINEL}" ]]; then
-            # Sentinel written — core requirement met. Report chat.toml status.
-            if [[ -f "${CHAT_TOML}" ]]; then
+            # Sentinel written — core requirement met. Report agent.toml status.
+            if [[ -f "${AGENT_TOML}" ]]; then
                 add_row "dev-setup-sentinel" "pass" "$(since_ms "${start}")" \
-                    "'hal0 setup --auto --no-pull --no-extensions' wrote sentinel + chat.toml"
+                    "internal 'setup --auto --no-pull --no-extensions' wrote sentinel + agent.toml"
             else
-                # No GPU on this host → slot skipped; sentinel still written.
+                # No usable GPU on this host → slot skipped; sentinel still written.
                 add_row "dev-setup-sentinel" "pass" "$(since_ms "${start}")" \
-                    "sentinel written; chat.toml absent (no compatible GPU on this host — expected on CI/VM)"
+                    "sentinel written; agent.toml absent (no compatible GPU on this host — expected on CI/VM)"
             fi
         else
             add_row "dev-setup-sentinel" "fail" "$(since_ms "${start}")" \
-                "setup exited 0 but sentinel missing: ${SENTINEL}"
+                "first-run seeding exited 0 but sentinel missing: ${SENTINEL}"
         fi
     else
         rc=$?
         add_row "dev-setup-sentinel" "fail" "$(since_ms "${start}")" \
-            "hal0 setup --auto --no-pull --no-extensions exit=${rc}; tail: $(tail -n1 "${SETUP_LOG}" 2>/dev/null | tr -d '\n')"
+            "internal 'setup --auto --no-pull --no-extensions' exit=${rc}; tail: $(tail -n1 "${SETUP_LOG}" 2>/dev/null | tr -d '\n')"
     fi
 else
     add_row "dev-setup-sentinel" "skip" "$(since_ms "${start}")" \
+        "hal0 binary not built at ${HAL0_BIN} — earlier row failed"
+fi
+
+# ── ROW: dev-setup-hidden ───────────────────────────────────────────────────
+# The corollary of the row above: the internal verb must NOT be advertised.
+# `hal0 --help` listing `setup` again is the regression that would send
+# operators back into a wizard the docs no longer describe.
+log_step "Row: dev-setup-hidden"
+start=$(start_ms)
+if [[ -x "${HAL0_BIN}" ]]; then
+    HELP_LOG="${PREFIX}/hal0-help.log"
+    if HAL0_HOME="${PREFIX}" "${HAL0_BIN}" --help >"${HELP_LOG}" 2>&1; then
+        if grep -qE '^[[:space:]│]*setup([[:space:]]|$)' "${HELP_LOG}"; then
+            add_row "dev-setup-hidden" "fail" "$(since_ms "${start}")" \
+                "'setup' is advertised in 'hal0 --help' — it must stay hidden (cli/main.py hidden=True)"
+        else
+            add_row "dev-setup-hidden" "pass" "$(since_ms "${start}")" \
+                "'setup' absent from 'hal0 --help' (internal entry point)"
+        fi
+    else
+        rc=$?
+        add_row "dev-setup-hidden" "fail" "$(since_ms "${start}")" \
+            "'hal0 --help' exit=${rc}; tail: $(tail -n1 "${HELP_LOG}" 2>/dev/null | tr -d '\n')"
+    fi
+else
+    add_row "dev-setup-hidden" "skip" "$(since_ms "${start}")" \
         "hal0 binary not built at ${HAL0_BIN} — earlier row failed"
 fi
 

@@ -1,61 +1,244 @@
 ---
-title: Securing hal0
-description: hal0 ships no built-in authentication, user accounts, or TLS. Reference for the threat model, the reverse-proxy-at-edge pattern, and what hal0 does provide (MCP allowlists, agent-chat origin check + session cookie, agent identity).
+title: Authentication
+description: hal0's built-in three-tier auth model — session cookies, admin/client keys, login rate limiting, and the deny-by-default route classification table. Reference for enabling auth, rotating keys, and what still needs a reverse proxy.
 sidebar:
-  order: 85
+  order: 10
 ---
 
-import { Aside, Steps, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
-hal0 has no built-in authentication CLI, no user/password store, and no
-bundled reverse proxy. `hal0-api` binds `0.0.0.0:8080` and every endpoint is
-reachable by anything that can reach that port. This was a deliberate cut —
-earlier betas bundled a password store and a Caddy TLS-terminating proxy,
-and both were removed because they
-duplicated, badly, what a real reverse proxy already does better. There is no
-`--auth=basic` install flag and no `hal0 auth` subcommand.
+hal0 ships built-in login, sessions, and a deny-by-default route classifier
+(`KB-1`). There's no per-user account system — just two credential tiers
+(**admin**, **client**) plus a browser session that's always admin-equivalent
+— but every route in the API is classified and a caller without the right
+tier is rejected before the handler runs.
 
 <Aside type="caution">
-Do not expose hal0-api directly to the public internet. Anyone who can reach
-the port can load models, run inference, drive agents, and read activity.
-Keep it on a trusted network, or put your own reverse proxy in front of it.
+**Auth ships off by default.** A fresh v1.0 install is trusted-LAN-open —
+every route responds to any caller that can reach the port — until an
+operator explicitly enables enforcement (see [Enabling
+auth](#enabling-auth)). This is a deliberate v1.0 decision: an earlier
+auto-on-when-non-loopback design locked operators out of a dashboard that
+shipped no login UI. hal0 still doesn't terminate TLS or manage a user
+directory — for that, put a reverse proxy in front (see [TLS still needs a
+proxy](#tls-still-needs-a-proxy)).
 </Aside>
 
-## Threat model, in short
+## Tiers and credential resolution
 
-hal0 assumes one of two deployment postures:
+Three tiers, in ascending privilege: `anon` → `client` → `admin`. On every
+request, hal0 resolves the caller's tier in this order:
 
-- **Single trusted LAN** — hal0 is reachable only from machines you trust
-  (e.g. your home network), and an open API is an acceptable risk.
-- **Reverse proxy at the edge** — you put a proxy you control (Caddy,
-  Traefik, nginx, a cloud load balancer, a tunnel) in front of hal0, and that
-  proxy — not hal0 — owns TLS termination and authentication.
+<Steps>
 
-There is no third, hal0-managed option. If you want a login prompt, HTTPS, or
-per-request access control, that's a proxy you stand up and run yourself.
+1. **Session cookie** (`hal0_session`) — if present and valid, the caller is
+   **admin**. A session always means "an operator's own browser," never
+   `client`.
+2. **`Authorization: Bearer <key>`** — checked against the configured admin
+   key first, then the client key.
+3. **`?api_key=<key>` query param** — same admin-then-client check, as a
+   fallback for WebSocket upgrades, which can't set headers.
 
-## Reverse proxy at the edge (your proxy, not hal0's)
+</Steps>
 
-Run hal0 bound to `127.0.0.1` (or a private interface) and put a proxy in
-front of it that terminates TLS and enforces auth before forwarding to hal0.
-None of the following is installed, managed, or aware of hal0 — these are
-plain examples of proxies *you* configure and operate.
+There is no client-side login flow — the client tier is Bearer/`api_key`-only,
+meant for programmatic or embedded callers. Only an admin key or an
+already-authenticated browser can call `/api/auth/login`.
+
+## Enabling auth
+
+A fresh install has no admin key and enforcement off. To lock it down:
+
+<Steps>
+
+1. **Get an admin key.** Nothing generates one automatically — set
+   `HAL0_ADMIN_KEY` in `/etc/hal0/api.env` yourself, or rotate one into
+   existence:
+   ```sh
+   hal0 auth rotate admin
+   ```
+   This writes the new key straight to `/etc/hal0/api.env` and prints a
+   fingerprint — never the key itself. Retrieve the value from that file.
+2. **Turn enforcement on:**
+   ```sh
+   hal0 auth require on
+   ```
+   Equivalent to `PUT /api/auth/require` with `{"require_auth": true}`.
+   Takes effect on the very next request — no restart. The server refuses
+   this call with `400 auth.no_admin_key` if no admin key is set yet, so you
+   can't lock yourself out by skipping step 1.
+3. **Log in** from the dashboard with the admin key, or use it directly as a
+   Bearer token against `/api/*`.
+
+</Steps>
+
+To go back to open access: `hal0 auth require off`.
+
+## Endpoints
+
+All under `/api/auth`:
+
+| Method & path | Auth class | Purpose |
+|---|---|---|
+| `POST /api/auth/login` | open | Validate a key, mint a session cookie |
+| `POST /api/auth/logout` | open | Clear the session cookie |
+| `GET /api/auth/status` | open | This caller's resolved tier + posture |
+| `PUT /api/auth/require` | admin | Turn enforcement on/off |
+| `POST /api/auth/rotate` | admin | Rotate the admin or client key |
+| `GET /api/auth/exposure` | admin | Dump the full route classification table |
+
+### `POST /api/auth/login`
+
+Body: `{"key": "<candidate>"}`. Rate-limited per caller IP *before* the key
+is even compared (constant-time `hmac.compare_digest`, so a blocked caller
+never reaches the check). On success, sets an HttpOnly session cookie and
+returns `{"ok": true, "tier": "admin"}`. On a bad key: `401`,
+`code: "auth.invalid_key"`. On a limiter trip: `429`,
+`code: "auth.rate_limited"`, `details: {"retry_after_s": <int>}`.
+
+### `POST /api/auth/rotate`
+
+Body: `{"tier": "admin" | "client"}` (default `"admin"`). Same login-limiter
+gate as `/login`. Response is status-only — **the key value is never
+returned or logged**:
+
+```json
+{
+  "tier": "admin",
+  "key_len": 43,
+  "fingerprint": "a1b2c3d4",
+  "rotated_at": "2026-07-31T12:00:00Z",
+  "applies_live": true,
+  "restart_required": false,
+  "session_preserved": true,
+  "note": "New admin key written to /etc/hal0/api.env — retrieve it there; it is never shown in the dashboard."
+}
+```
+
+`fingerprint` is the first 8 hex characters of `sha256(key)` — enough to
+confirm which key is live without exposing it. An admin's browser session
+survives a rotation (it's HMAC-signed independently); any Bearer/`api_key`
+caller on the old key stops working immediately.
+
+### `GET /api/auth/status`
+
+```json
+{ "auth_required": true, "has_admin_key": true, "tier": "client" }
+```
+
+Never returns secrets — safe for the dashboard to poll unauthenticated.
+
+## Sessions
+
+The session cookie (`hal0_session`) is `<payload>.<hmac>`, base64url-encoded:
+payload is `{session_id, expires_at}`, signature is
+`HMAC-SHA256(secret, payload)`. TTL is **8 hours**. The signing secret is a
+32-byte random value generated on first use at
+`/var/lib/hal0/agents/secret.bin` (mode `0600`) and never leaves the hal0
+service user. The cookie is set `HttpOnly`, `SameSite=Lax`.
+
+## Rate limiting
+
+`POST /api/auth/login` and `POST /api/auth/rotate` share one sliding-window
+limiter, keyed per caller IP: **10 events / 60s** by default. A blocked
+caller isn't recorded again while blocked, so hammering the endpoint doesn't
+extend its own lockout. Tune with `HAL0_LOGIN_RATELIMIT_MAX` and
+`HAL0_LOGIN_RATELIMIT_WINDOW_S`.
+
+By default the raw TCP peer is used as the rate-limit key. Behind a reverse
+proxy, set `HAL0_TRUST_FORWARDED_FOR=true` (or persist
+`[security].trust_forwarded_for` via the Settings page) so the limiter reads
+the real client IP from `X-Forwarded-For` instead of the proxy's own address
+— only do this once you've confirmed your proxy strips/overwrites any
+client-supplied `X-Forwarded-For` (nginx/Traefik/Caddy do this by default);
+otherwise a caller can pick its own rate-limit bucket by forging the header.
+
+## Origin protection
+
+For state-changing HTTP methods (`POST`/`PUT`/`PATCH`/`DELETE`) and all
+WebSocket upgrades, hal0 checks the `Origin` header before tier auth even
+runs: no header → allowed, origin in `HAL0_ALLOWED_ORIGINS` → allowed,
+origin's host matches the request `Host` (same-origin) → allowed, otherwise
+`403 auth.origin_forbidden` (or WS close code `4403`).
+
+## Route classification
+
+Every route falls into one of four classes — **open** (no auth), **bootstrap**
+(open until an admin key exists, then treated as admin), **client**, or
+**admin**. An unclassified path defaults to **admin** — deny-by-default, not
+allow-by-default. The full live table is served at `GET /api/auth/exposure`
+(admin-gated) and backs the dashboard's Settings → Security page.
+
+The open allowlist is intentionally small — model listing, health, metrics,
+and the login/logout/status routes themselves:
+
+```
+GET  /v1/models
+GET  /v1/models/{model_id}
+GET  /api/health
+GET  /api/health/system
+GET  /api/metrics/prometheus
+GET  /api/config/urls
+POST /api/auth/login
+GET  /api/auth/status
+POST /api/auth/logout
+```
+
+Inference (`/v1/*`) and read-only status/list routes are **client**-tier.
+Anything that mutates config, secrets, memory, or services is **admin**-tier.
+A hardened subset of memory-delete routes is pinned to admin regardless of
+how the generic `/api/memory` rule is ever widened, following an earlier
+incident where an unauthenticated bulk-delete call cascaded through memory
+records.
+
+## CLI reference
+
+```sh
+hal0 auth status               # GET  /api/auth/status
+hal0 auth rotate admin|client  # POST /api/auth/rotate (confirms unless --force)
+hal0 auth require on|off       # PUT  /api/auth/require
+```
+
+The CLI itself resolves credentials the same way: `HAL0_ADMIN_KEY` env, then
+`HAL0_CLIENT_KEY` env, then whatever's in `/etc/hal0/api.env` on disk.
+
+## Config and environment variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `HAL0_ADMIN_KEY` | Admin-tier credential; also required before `require_auth` can be turned on | unset |
+| `HAL0_CLIENT_KEY` | Client-tier credential (no login flow — Bearer/`api_key` only) | unset |
+| `HAL0_REQUIRE_AUTH` | Runtime override for enforcement (`1/true/yes/on`, `0/false/no/off`) | unset (falls through to persisted config, then **off**) |
+| `HAL0_TRUST_FORWARDED_FOR` | Trust `X-Forwarded-For` for the login rate-limit key | unset (**off**) |
+| `HAL0_ALLOWED_ORIGINS` | Browser Origin allowlist for state-changing requests and WS upgrades | unset |
+| `HAL0_LOGIN_RATELIMIT_MAX` | Login/rotate limiter budget | `10` |
+| `HAL0_LOGIN_RATELIMIT_WINDOW_S` | Login/rotate limiter window, seconds | `60.0` |
+
+Both `HAL0_ADMIN_KEY`/`HAL0_CLIENT_KEY` live in `/etc/hal0/api.env` (mode
+`0600`, loaded by `hal0-api.service` as a systemd `EnvironmentFile`). A key
+rotation updates that file and the running process's environment in place —
+no restart. `require_auth`/`trust_forwarded_for` can instead be persisted to
+`hal0.toml`'s `[security]` table (what the Settings page writes); the env
+var, when set, always wins over the persisted value.
+
+## TLS still needs a proxy
+
+hal0 doesn't terminate TLS or manage certificates — the admin-key/session
+model above governs *who* can call the API, not *how* the connection is
+encrypted. If you're reaching hal0 over anything other than a trusted LAN,
+put a reverse proxy in front that owns TLS:
 
 <Tabs>
 <TabItem label="Caddy">
 
 ```txt
 hal0.example.com {
-    basic_auth {
-        alice $2a$14$...   # bcrypt hash from `caddy hash-password`
-    }
     reverse_proxy 127.0.0.1:8080
 }
 ```
 
 Caddy obtains and renews the certificate automatically via ACME as long as
-port 80/443 are reachable for the challenge. Generate the bcrypt hash once
-with `caddy hash-password` — Caddy never sees the plaintext password again.
+port 80/443 are reachable for the challenge.
 
 </TabItem>
 <TabItem label="Traefik">
@@ -68,13 +251,6 @@ http:
       service: hal0
       tls:
         certResolver: letsencrypt
-      middlewares:
-        - hal0-auth
-  middlewares:
-    hal0-auth:
-      basicAuth:
-        users:
-          - "alice:$apr1$...htpasswd-hash..."
   services:
     hal0:
       loadBalancer:
@@ -93,9 +269,6 @@ server {
     ssl_certificate     /etc/letsencrypt/live/hal0.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/hal0.example.com/privkey.pem;
 
-    auth_basic           "hal0";
-    auth_basic_user_file /etc/nginx/hal0.htpasswd;
-
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
@@ -104,97 +277,16 @@ server {
 }
 ```
 
-Generate `/etc/nginx/hal0.htpasswd` with `htpasswd -c` and obtain the
-certificate however you already manage certs (certbot, an ACME client, or a
-cert issued by internal infrastructure).
-
 </TabItem>
 </Tabs>
 
-<Steps>
-
-1. **TLS termination** — present a certificate for your chosen hostname and
-   terminate HTTPS at the proxy.
-
-2. **Authentication** — enforce whatever you need (basic auth as shown above,
-   OAuth/OIDC, mTLS, an IP allowlist) before a request is forwarded.
-
-3. **Forwarding** — proxy the authenticated request to hal0-api on
-   `127.0.0.1:8080` (or its LAN address), and bind hal0 itself so only the
-   proxy can reach it.
-
-</Steps>
-
-<Aside type="note">
-The proxy is **your** infrastructure. hal0 ships nothing to configure it,
-generate certificates for it, or manage its user list — the examples above
-are just common patterns, not hal0 features.
-</Aside>
-
-## What hal0 does provide on its own
-
-hal0 doesn't manage user accounts or TLS, but it isn't a bare-open socket
-either. A few narrower gates exist inside hal0 itself:
-
-- **MCP host and origin allowlist** — the admin (`/mcp/admin`) and memory
-  (`/mcp/memory`) MCP mounts default to a localhost-only DNS-rebinding
-  allowlist (`127.0.0.1`, `localhost`, `[::1]`); a non-localhost `Host`
-  header gets a bare `421 Invalid Host header`. Widen it with
-  `HAL0_MCP_ALLOWED_HOSTS` (and, if needed, `HAL0_MCP_ALLOWED_ORIGINS`) to
-  reach `/mcp/*` from another machine or through your proxy. This is a
-  host/origin gate against DNS rebinding, not authentication — see
-  [Security](/docs/concepts/security#mcp-host-and-origin-allowlists).
-- **Agent-chat origin allowlist + session cookie** — the agent-chat
-  WebSocket routes check the browser `Origin` against `HAL0_ALLOWED_ORIGINS`
-  (default covers `http://hal0.local`, `http://localhost:5173`, and
-  `http://127.0.0.1:8080`) on every upgrade, and require an HMAC-SHA256
-  session cookie (`hal0_session`, `HttpOnly`, `SameSite=Lax`, ~8h TTL) that
-  is minted by `GET /api/agents/{id}/session/handshake` and verified on
-  both the WS upgrade and the REST session endpoints. The
-  signing secret is generated on first use at
-  `/var/lib/hal0/agents/secret.bin` (mode `0600`) and never leaves the hal0
-  service user. This stops a drive-by site from WebSocket-ing into the chat
-  proxy using a browser session that's already open to hal0 — it is not a
-  login system.
-- **`X-hal0-Agent` identity header** — every agent/MCP caller identifies
-  itself with the `X-hal0-Agent` header (validated to a bounded
-  `[a-zA-Z0-9_-]{1,64}` id), which stamps the audit log and resolves the
-  `private:<agent>` memory namespace consistently whether the call arrived
-  over REST or MCP. There is no Bearer/API-key surface — this header is an
-  identity claim, not a secret, so it only means something once you've
-  already gated access at the network layer (LAN-only or your proxy).
-- **Gated agent actions** — privileged or destructive agent/MCP actions
-  don't execute immediately; they enqueue onto an approval queue that a
-  human clears from the dashboard, the CLI, or the approvals API. See
-  [Agents](/docs/concepts/agents) for how personas, tool gating, and the
-  approval queue fit together.
-- **Login/rotate brute-force limiter** — every `POST /api/auth/login` and
-  `/api/auth/rotate` attempt is metered by a per-caller sliding-window
-  limiter before the key is checked. Behind a reverse proxy every direct
-  caller is the proxy's own IP by default, so the limiter's shared bucket
-  can lock out every real user after one remote guesser. If your proxy
-  sets `X-Forwarded-For` (nginx does by default in the example above;
-  Caddy and Traefik forward it through their `reverse_proxy`/service
-  unmodified too) and is known to **strip or overwrite** any
-  client-supplied `X-Forwarded-For` before adding its own — true for all
-  three in their default configurations — set
-  `[security].trust_forwarded_for = true` in `hal0.toml` (or
-  `HAL0_TRUST_FORWARDED_FOR=1`) so the limiter keys on the real caller
-  instead. Leave it off (the default) if you're not certain your proxy
-  scrubs the header: a client that can set it directly would otherwise
-  pick its own rate-limit bucket.
-
-None of the above is a substitute for authentication at the edge — they
-narrow specific browser/DNS-rebinding attack surfaces and give you an audit
-trail, but they don't gate who can reach `/api/*` or `/v1/*` in the first
-place. That's still the reverse proxy's job.
+If your proxy forwards `X-Forwarded-For`, set `HAL0_TRUST_FORWARDED_FOR=true`
+(see [Rate limiting](#rate-limiting)) once you've confirmed the proxy itself
+strips any client-supplied value — otherwise treat hal0's own admin-key auth
+as the access control and skip proxy-level basic auth entirely.
 
 ## See also
 
-- [Security](/docs/concepts/security) — the full security posture and threat
-  model this page is a reference companion to.
-- [Connect an MCP client](/docs/guides/connect-mcp) — configuring
-  `HAL0_MCP_ALLOWED_HOSTS`/`HAL0_MCP_ALLOWED_ORIGINS` and the
-  `X-hal0-Agent` header in practice.
-- [Environment variables](/docs/reference/env-vars) — the full env-var
-  reference, including `HAL0_ALLOWED_ORIGINS` and the MCP allowlist knobs.
+- [Companion services](/docs/operate/services) — `/etc/hal0/api.env`, the
+  same file the admin/client keys live in, is also `hal0-api.service`'s
+  systemd `EnvironmentFile`.

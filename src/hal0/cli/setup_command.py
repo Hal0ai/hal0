@@ -1,4 +1,17 @@
-"""`hal0 setup` — first-run configuration TUI (spec §6).
+"""`hal0 setup` — first-run seeding. **Internal entry point** as of v1.0.
+
+`installer/install.sh` is the single user-facing way to provision a box, and it
+drives this command itself (`hal0 setup --auto --no-pull --no-extensions`). The
+registration in `cli/main.py` is therefore `hidden=True`: the verb still works
+for the installer, the install test harness, and support/debug runs, but it is
+deliberately absent from `hal0 --help` and from the docs. Don't re-advertise it,
+and don't reimplement its seeding logic elsewhere.
+
+`run_interactive` below is the five-prompt guided flow. `install.sh` no longer
+offers to launch it (every answer it collects is now either asked by the
+installer or already performed by it), so it survives only as a hand-run
+recovery path — spec §17.8, NOT the "two-column terminal app with curated
+per-model pickers" older docs described. There is no such TUI and never was.
 
 Hybrid execution: in-process ``apply_setup`` when hal0-api is unreachable
 (install time), through ``POST /api/install/apply`` when it is up (so the

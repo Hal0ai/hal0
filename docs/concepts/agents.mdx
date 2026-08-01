@@ -1,66 +1,101 @@
 ---
 title: Agents
-description: "hal0's agent model: Hermes runs as a sandboxed systemd service, shaped by personas that gate its tools, with an approval queue and per-persona spending budgets."
+description: "hal0's agent model: Hermes runs as the sandboxed bundled agent, shaped by personas and a policy-layer MCP client, with the hal0-brain steward driving hal0's own admin tools, an approval queue, and per-persona spending budgets."
 sidebar:
   order: 60
 ---
 
 import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-hal0 doesn't build its own agent runtime — it **bundles** one. The bundled agent
-is **Hermes**, and hal0's job is to run it safely: as a sandboxed service, shaped
-by a persona that controls what it can do, with a human in the loop for risky
-actions and a spending cap for paid calls. The pieces below are how hal0 turns a
-general-purpose agent into a governed component of your platform.
+hal0 doesn't build its own agent runtime — it **bundles** one, and hal0's job
+is to run it safely: as a sandboxed service, shaped by a persona that controls
+what it can do, with a human in the loop for risky actions and a spending cap
+for paid calls. A second, distinct piece — the **hal0-brain steward** — is
+hal0's own small model driving hal0's own admin tool catalog. The two are
+easy to conflate; they aren't the same thing.
 
-## Hermes, the bundled agent
+## Hermes: the bundled agent runtime
 
-Hermes is the agent hal0 ships and provisions today. The agent subsystem is
-single-pick: **only one agent is active at a time**, and installing a second one
-requires an explicit switch, which atomically tears down the existing agent
-before installing the new one. That invariant keeps the platform's behaviour
-unambiguous — there's always exactly one agent answering.
+As of v1.0, **Hermes is the only bundled agent** — `BUNDLED_AGENTS = ("hermes",)`.
+Earlier speculative bundles (pi-coder, opencode) were removed; the codebase
+still carries the machinery to install-by-shelling-out to
+`installer/agents/<name>.sh` the way those did, in case a future bundle is
+added the same way, but nothing currently populates that beyond Hermes.
 
-The agent runs as a systemd template unit, `hal0-agent@<id>.service` (so Hermes
-is `hal0-agent@hermes`). It runs as the unprivileged **`hal0`** system user the
-installer creates, under a tight sandbox: no new privileges, a read-only system
-with only hal0's own directories writable, a private temp dir, and a watchdog.
-Crucially, the agent's secret files stay root-owned and unreadable to the `hal0`
-user, so the agent can't read its own credential store even though it can write
-to hal0's data paths.
+The agent runs as a systemd template unit, `hal0-agent@<id>.service` (so
+Hermes is `hal0-agent@hermes`). It runs as the unprivileged **`hal0`** system
+user the installer creates, under a tight sandbox: no new privileges, a
+read-only system with only hal0's own directories writable, a private temp
+dir, and a watchdog. Crucially, the agent's secret files stay root-owned and
+unreadable to the `hal0` user, so the agent can't read its own credential
+store even though it can write to hal0's data paths.
 
-The agent process binds to **loopback only** (`127.0.0.1:9119`). The browser
-never talks to it directly — hal0-api proxies the chat connection, enforcing an
-origin allowlist and a session cookie on every WebSocket upgrade, and carrying
-the embed token in an `Authorization` header rather than a URL. The agent
-reaches hal0's own inference and admin surfaces through environment hal0 writes
-for it (the API URL and the admin/memory MCP URLs).
+The agent process binds to **loopback only**. The browser never talks to it
+directly — hal0-api proxies the chat connection, enforcing an origin
+allowlist and a session cookie on every WebSocket upgrade, and carrying the
+embed token in an `Authorization` header rather than a URL. The agent reaches
+hal0's own inference and admin surfaces through environment hal0 writes for
+it (the API URL and the admin/memory MCP URLs).
 
 <Aside type="note">
-"Bundle, don't build" is the explicit design stance. hal0 governs and wires the
-agent; it doesn't reimplement one.
+"Bundle, don't build" is the explicit design stance. hal0 governs and wires
+the agent runtime; it doesn't reimplement one.
 </Aside>
+
+## hal0-brain: the steward that drives hal0 itself
+
+Separately from the bundled agent runtime, hal0 runs its own **brain
+steward** — a small, always-available model (tuned via the dedicated `brain`
+profile) whose job is routing tool calls against hal0's own curated
+`hal0-admin` MCP tool catalog, not general-purpose coding or chat. It's the
+mechanism behind features like the Operator Board, and it's deliberately kept
+1:1 with a small model rather than sharing a slot with the general agent's
+model — the steward handles its own tool-call turns, including routing
+specific rounds to a dedicated `tool_model` where that's a better fit than
+the conversational model.
+
+Where Hermes is "a general-purpose agent hal0 governs," hal0-brain is "hal0's
+own operator, wired straight into the admin surface." Both speak MCP and both
+go through the same approval queue for anything gated.
 
 ## Personas: the agent's character and limits
 
-A **persona** is the unit that shapes the agent. It is a small TOML file that
-carries a **system prompt**, a **tool-gating policy**, a memory namespace, a
-preferred upstream/model, and a spending budget. Switching personas changes the
-agent's behaviour on its next turn — without restarting the process.
+A **persona** is the unit that shapes the bundled agent. It is a small TOML
+file that carries a **system prompt**, a **tool-gating policy**, a memory
+namespace, a preferred upstream/model, and a spending budget. Switching
+personas changes the agent's behaviour on its next turn — without restarting
+the process.
 
-The tool-gating policy is what makes a persona a safety boundary. Each persona
-declares a default policy (`ask`, `auto-approve`, or `never`) plus glob lists for
-which tools to auto-approve and which to always require approval for. The seed
-defaults are conservative: read-style tools (memory reads, searches, slot reads)
-auto-approve, while file, shell, and admin tools require approval. hal0 composes
-the persona's system prompt together with a description of the available hal0 MCP
-tools and the active approval policy, so the agent always knows both what it can
-do and what will need sign-off.
+The tool-gating policy is what makes a persona a safety boundary. It's a
+three-tier `ToolPolicy` — `allow`, `gated`, `never` (block) — expressed as
+glob lists per tool, and the three lists are **hard-validated as disjoint at
+load time**: a tool pattern can't simultaneously be allowed and blocked, so a
+misconfigured persona fails to load rather than silently picking one
+behaviour. The seed defaults are conservative: read-style tools (memory
+reads, searches, slot reads) auto-approve, while file, shell, and admin tools
+require approval.
+
+### The MCP policy layer
+
+hal0 doesn't reimplement the MCP wire protocol for its bundled agent — Hermes
+does that wire work itself. What hal0 adds is a client-side **policy layer**
+(`AgentMCPClient`) sitting in front of it:
+
+- `classify(server, tool)` → `allow | gated | blocked | unknown_server |
+  unknown_tool`, checking `blocked` first for defense in depth even though
+  the schema validator above already enforces the lists are disjoint.
+- `guard(server, tool)` raises a hard error on a rejected call before it ever
+  reaches the wire.
+- Bearer tokens for outbound MCP calls are resolved from environment or a
+  systemd credential at process start — **never** from TOML on disk.
+- A filesystem-MCP path guard rejects any `../` or absolute-outside-workspace
+  path before the call goes out, closing a sandbox-escape class of bug at the
+  client rather than trusting the server alone.
 
 ## The approval queue: a human in the loop
 
-Privileged actions don't just execute. The MCP admin server classifies its tools
-into autonomous and **gated** sets — gated tools include model pulls and
+Privileged actions don't just execute. The MCP admin server classifies its
+tools into autonomous and **gated** sets — gated tools include model pulls and
 deletes, slot create/delete/restart, capability changes, config writes,
 credential writes, and applying/importing/deleting a stack or profile (those
 last four reconfigure the whole inference surface or drop a saved catalog
@@ -83,72 +118,6 @@ Gating is per-action, not all-or-nothing. A persona can auto-approve safe reads
 while still routing anything destructive through a human.
 </Aside>
 
-## The hal0-brain steward: driving the platform from chat
-
-The bundled Hermes agent above is a full service. hal0 also ships a lighter,
-**built-in** operator: **hal0-brain**, a persona wired directly to the
-dashboard's top-bar agent chat. There's nothing to install — it's always there,
-and its job is narrow and concrete: *run the platform for you*. Ask it to
-"download and set up a coding model" or "benchmark the model on the NPU slot"
-and it drives the same admin surfaces you'd otherwise click through.
-
-Under the hood the steward is a tool-calling loop over the **full 74-tool
-`hal0-admin` MCP catalog** — models, slots, stacks, profiles, settings,
-upstreams, and benchmarks. Each turn hal0 hands the model the catalog as
-structured tool schemas; the model emits a tool call; hal0 dispatches it through
-the same admin core the CLI and MCP clients use; the result streams back as a
-folded **tool card**, and the loop continues until the task is done (reasoning is
-split out of the reply and rendered as a foldable "thinking" block). Gated tools
-— pulls, deletes, slot/stack/config writes — don't just run: the turn **pauses**
-and an approval card appears inline, resolving through the same
-[approval queue](#the-approval-queue-a-human-in-the-loop) as the service agent. A
-`[brain_chat]` config block adds a hard kill switch, a read-only mode, a
-per-round token cap, and a round budget (`max_rounds`) enforced server-side,
-independent of the persona — a persona edit can loosen the persona, never these.
-
-### Why it runs on a 1B model
-
-The steward is deliberately designed so a **very small local model** — one
-billion parameters — can drive the whole platform. The trick is that the model
-is never asked to *reason its way* to an answer; it's asked to *pick a tool and
-fill in its arguments*. hal0 moves the intelligence out of the weights and into
-the scaffolding around them:
-
-- **Real tool schemas, not guesswork.** Every high-traffic admin tool ships an
-  explicit argument schema and description, so the model fills a small
-  structured form (`model_pull(model_id=…)`) instead of inventing an API. This
-  alone turned "the small model 400s and 405s on every call" into reliable
-  dispatch.
-- **Tool-history replay.** The model sees its *own* prior tool calls and their
-  results in context on every turn. Without that, a small model quickly "forgets"
-  it has tools and starts narrating imaginary results; with it, it keeps calling
-  tools across a long, multi-step task.
-- **Many small steps, not one big leap.** A per-round `max_tokens` cap plus a
-  generous round budget mean the model takes lots of cheap, bounded steps rather
-  than one brittle mega-completion — exactly the shape a 1B model is good at.
-- **The guardrails are external.** Because the per-persona tool policy and a
-  `POLICY_NO_LOOSEN` floor gate every destructive tool *at the platform*, you
-  don't have to trust the model's judgment: a weak model simply **cannot** delete
-  a slot or write a credential without your sign-off. That's what makes it safe
-  to hand the keys to a 1B model in the first place.
-
-The net effect: the model is the *hands*, hal0 is the *rails*. A 1B model is
-plenty to read a request, choose the right admin tool, and fill its arguments —
-and anything that could go wrong is caught by the schema, the replayed history,
-or the approval floor, rather than by the model needing to be clever.
-
-<Aside type="tip" title="Recommended steward model: MiniCPM5-1B">
-The reference steward model is **MiniCPM5-1B** — a one-billion-parameter dense
-model with unusually strong tool-calling for its size, small enough to stay
-resident and answer in well under a second on Strix Halo. Run it through the
-**VKFPX DENSE no-jinja** profile: it's a base model with a baked-in chat
-template, so it needs no Jinja templating and loads FP-accelerated on the iGPU.
-Register the `minicpm5-1b-fable5-q8` (quality) or `-q4` (fastest) build and point
-the `brain` slot at it — or, if you'd rather not dedicate a slot, set a **slot
-override** under *Settings → Agents / Brain* to run the steward on any slot you
-already have warm.
-</Aside>
-
 ## Spending budgets
 
 For agents that can make paid calls (such as routing to an external provider —
@@ -163,16 +132,25 @@ unbounded bill.
 
 ## Agent memory
 
-When the [memory subsystem](/docs/concepts/memory) is enabled, the agent gets a
-per-agent memory namespace (e.g. `private:hermes`) it reads and writes through
-MCP. Because memory is opt-in, the agent's memory surface degrades cleanly when
-it's off: the per-agent memory stats simply report as unavailable rather than
-erroring, so an install without memory still runs the agent normally.
+When the [memory subsystem](/docs/concepts/memory) is enabled, the agent gets
+a per-agent memory namespace (e.g. `private:hermes`) it reads and writes
+through MCP — five tools: `memory_add`, `memory_search`, `memory_list`,
+`memory_delete`, and `memory_recall`. Because memory is opt-in, the agent's
+memory surface degrades cleanly when it's off: the per-agent memory stats
+simply report as unavailable rather than erroring, so an install without
+memory still runs the agent normally.
+
+<Aside type="note">
+Don't confuse this with a bundled agent runtime's own native project memory
+(a coding-agent's project-scoped markdown memory, for instance) — that's
+untouched by hal0. hal0's memory subsystem is the separate, cross-session/
+cross-agent brain described in [Memory](/docs/concepts/memory).
+</Aside>
 
 ## Where to go next
 
 <CardGrid>
   <LinkCard title="Memory" href="/docs/concepts/memory" description="The opt-in brain the agent reads and writes." />
-  <LinkCard title="Security" href="/docs/concepts/security" description="Identity, gating, and the network posture." />
+  <LinkCard title="Security" href="/docs/concepts/security" description="Identity, gating, and the auth layer." />
   <LinkCard title="Architecture" href="/docs/concepts/architecture" description="Where the agent surfaces sit under the API." />
 </CardGrid>

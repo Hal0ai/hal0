@@ -53,9 +53,11 @@ from hal0.slots._cfg_helpers import (
 from hal0.slots.config_write import (
     _base_profile_for_backend,
     _cfg_effective_backend,
+    _iter_peer_configs,
     _reconcile_device_profile,
     check_default_uniqueness,
     check_npu_exclusivity,
+    guard_slot_write_payload,
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
 )
@@ -2182,16 +2184,16 @@ class SlotManager:
         # same single fold (:func:`hal0.slot_config.fold_ctx_size_alias`)
         # the merge/update path uses.
         fold_ctx_size_alias(cfg_dict)
-        # Persist a concrete context window when the operator left it unset, so
-        # the TOML, the dashboard, and the running container all agree. The
-        # provider's load-path derive is the belt-and-suspenders fallback; this
-        # makes the chosen window visible at create time (chat@4096 incident).
+        # v1.0: do NOT backfill [model].context_size here. The MODEL owns the
+        # context window (providers.container._resolve_context_size) and a
+        # slot-level value is now only a hardware CEILING. Stamping the model's
+        # current window onto the new slot would freeze that ceiling at
+        # create-time: raising the model's context size later would be silently
+        # clamped back down by a number the operator never chose. Leaving it
+        # unset means the slot follows the model, which is the whole point of the
+        # partition — and the launch path still guarantees a concrete window
+        # (never llama-server's silent 4096, chat@4096 incident).
         model_tbl = cfg_dict.get("model")
-        if isinstance(model_tbl, dict) and model_tbl.get("context_size") is None:
-            from hal0.providers.container import _resolve_context_size
-
-            model_info = await self._resolve_model_info(model_tbl.get("default"))
-            model_tbl["context_size"] = _resolve_context_size(None, model_info)
         # Q1 (model profiles): a new slot bound to a model but with NO explicit
         # profile adopts the model's preferred profile when it fits the slot's
         # device/type. An operator's explicit create-time profile is left
@@ -2215,6 +2217,20 @@ class SlotManager:
         # operator error and raises.
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
         await self._check_npu_exclusivity(slot_name, cfg_dict)
+        # SC-4, first-of-type: the create modal no longer asks "make this the
+        # default?" — the FIRST slot of a type silently becomes that type's
+        # default (there is nothing yet to conflict with), and re-pointing it
+        # afterwards is the explicit "Set as default" row action on the slot
+        # list. Only fills an absent/false marker: an explicit
+        # ``default=true`` from the caller is left alone and still goes
+        # through the uniqueness guard below.
+        if cfg_dict.get("default") is not True:
+            type_ = cfg_dict.get("type")
+            if type_ and not any(
+                peer.get("type") == type_
+                for _peer_name, peer in _iter_peer_configs(slot_name, None)
+            ):
+                cfg_dict["default"] = True
         # SC-4: refuse a second default=true slot of the same type before
         # the TOML lands on disk (belt to default_slot_for's routing-time
         # suspenders). Fast fast path when this write isn't a new default.
@@ -2428,7 +2444,15 @@ class SlotManager:
             # cfg_dict — the authoritative post-merge state, same as the NPU
             # guard. The peer walk excludes slot_name, so re-persisting the
             # sole default never self-conflicts.
-            await self._check_default_uniqueness(slot_name, cfg_dict)
+            #
+            # ``changed_keys`` is the update's own key set: a PATCH that does
+            # not carry ``default`` skips the check entirely, so an unrelated
+            # edit to a slot caught in a pre-existing two-defaults-on-disk
+            # state is no longer wrongly rejected for a conflict it did not
+            # create. A PATCH that DOES set ``default`` is still fully guarded.
+            await self._check_default_uniqueness(
+                slot_name, cfg_dict, changed_keys=set(updates.keys())
+            )
 
             try:
                 write_slot_toml(cfg_path, cfg_dict)
@@ -2676,6 +2700,8 @@ class SlotManager:
         self,
         slot_name: str,
         cfg_dict: dict[str, Any],
+        *,
+        changed_keys: set[str] | None = None,
     ) -> None:
         """Reject a write that would land a second ``default=true`` per type.
 
@@ -2705,8 +2731,13 @@ class SlotManager:
         monkeypatchability) over the module-level sync
         :func:`check_default_uniqueness`, which the stacks apply engine
         shares so its writes obey the same guard.
+
+        ``changed_keys`` narrows the guard to writes that actually touch
+        ``default`` — see :func:`check_default_uniqueness`. ``None`` (the
+        default) validates the full merged dict, which is what ``create()``
+        wants.
         """
-        check_default_uniqueness(slot_name, cfg_dict)
+        check_default_uniqueness(slot_name, cfg_dict, changed_keys=changed_keys)
 
     # ── idle / wake-on-request ───────────────────────────────────────────────
 
@@ -3460,7 +3491,8 @@ class SlotManager:
 # NOTE: _cfg_effective_backend / _base_profile_for_backend /
 # _reconcile_device_profile / _read_slot_toml_dict / _iter_peer_configs /
 # check_npu_exclusivity / check_default_uniqueness / reconcile_slot_updates /
-# reconcile_and_guard_slot_config moved to hal0.slots.config_write
+# reconcile_and_guard_slot_config / guard_slot_write_payload moved to
+# hal0.slots.config_write
 # (P3-slots §1f) — imported + re-exported above (see module docstring's
 # "New in P3-slots" note and __all__ below).
 
@@ -3487,6 +3519,7 @@ __all__ = [
     "_model_default",
     "check_default_uniqueness",
     "check_npu_exclusivity",
+    "guard_slot_write_payload",
     "is_npu_trio_shadow",
     "reconcile_and_guard_slot_config",
     "reconcile_slot_updates",

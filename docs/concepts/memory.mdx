@@ -1,6 +1,6 @@
 ---
 title: Memory
-description: hal0's memory subsystem — a Hindsight-backed brain that operators and agents share. Gated by [memory].enabled in hal0.toml (on by default) and degrades cleanly to a no-op when off.
+description: hal0's memory subsystem — a Hindsight-backed brain that operators and agents share. Gated by [memory].enabled in hal0.toml (on by default on a fresh install) and degrades cleanly to a no-op when off.
 sidebar:
   order: 50
 ---
@@ -9,46 +9,50 @@ import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 hal0 can give your platform a persistent **memory** — a store of facts that both
 the operator surfaces and the bundled agent can write to and recall from. It's a
-deliberate, gated subsystem behind a single config flag: powerful when it's on,
-and completely absent when it's off. It ships **on by default**; it stays
-a conscious, revertible choice (`hal0 memory disable`) rather than something
-that silently accumulates data you didn't ask for.
+deliberate, gated subsystem behind a single config flag: powerful when it's on, and
+completely absent when it's off. A fresh install turns it on for you; it stays
+a conscious, revertible choice rather than something that silently accumulates
+data on an existing box.
 
 ## What memory is
 
 The memory subsystem is an engine-neutral layer behind two surfaces: the
 `/api/memory/*` REST routes (which the dashboard's Memory view uses) and the
-`/mcp/memory` MCP server (which agents and external tools use). Both speak to the
-same provider, so a fact written by an agent over MCP is the same fact the
-dashboard shows.
+`/mcp/memory` MCP server — five tools (`memory_add`, `memory_search`,
+`memory_list`, `memory_delete`, `memory_recall`) that agents and external
+tools use. Both speak to the same provider, so a fact written by an agent over
+MCP is the same fact the dashboard shows.
 
 ![Memory interface showing stored facts and recall](/screenshots/memory-view.png)
 *Memory view in the hal0 dashboard*
 
 The engine is **Hindsight** — a memory service that powers the shared operator
-and agent "brain." (Cognee, the prior engine, was fully removed in
-v0.8.0-beta.3; `hal0 memory migrate` remains for boxes still carrying a
-Cognee-era store.) When configured, hal0 builds a Hindsight client and wraps
-it with a reranker so recall surfaces the most relevant facts. If the
-Hindsight daemon is unavailable at boot, hal0 degrades to an in-memory
-PgVector fallback rather than failing — the subsystem stays usable, but that
-fallback is volatile (writes don't survive a restart) and exists to keep the
-tools answering, not as a durable substitute.
+and agent "brain." (Cognee, the prior engine, was fully removed; `hal0 memory
+migrate` remains only for boxes still carrying a Cognee-era store.) When
+configured, hal0 builds a Hindsight client and wraps it with a reranker so
+recall surfaces the most relevant facts. If the Hindsight daemon is
+unavailable at boot, hal0 degrades to an in-memory PgVector fallback rather
+than failing — the subsystem stays usable, but that fallback is volatile
+(writes don't survive a restart) and exists to keep the tools answering, not
+as a durable substitute.
 
 ![Memory graph visualization showing relationships between facts](/screenshots/memory-graph.png)
 *Fact relationships in the knowledge graph*
 
 <Aside type="note">
-The memory layer is engine-neutral by design. Hindsight is the default, but the
-provider is selected from config, so the surfaces (REST + MCP) stay the same
-regardless of which engine backs them.
+The memory layer is engine-neutral by design — a `MemoryProvider` interface is
+the explicit anti-lock-in seam. Hindsight is the default, but the provider is
+selected from config, so the surfaces (REST + MCP) stay the same regardless of
+which engine backs them.
 </Aside>
 
 ## Memory is gated by one config flag
 
 This is the most important thing to know: hal0 only constructs a memory
-provider when `[memory].enabled` in `hal0.toml` is `true` — the default.
-When it's `false`:
+provider when `[memory].enabled` is set in `hal0.toml`. This replaces the
+older `HAL0_MEMORY_ENABLED` environment variable — the toggle is now a
+persisted config value, editable from the dashboard settings without an env
+edit. When it's off:
 
 - No memory provider is built.
 - Every downstream caller degrades to a no-op or a clean error — the
@@ -57,19 +61,33 @@ When it's `false`:
 - The dashboard hides the Memory navigation.
 
 Flipping the flag is the *entire* toggle — no code change required either way.
-Toggle it with `hal0 memory enable` / `hal0 memory disable` (or by hand-editing
-`hal0.toml`); either way the value is consumed once at `hal0-api` startup, so
-follow up with `systemctl restart hal0-api` to apply it. A fresh install has
-memory **on out of the box** and stands up the local Hindsight daemon for you;
-an operator who wants it off runs `hal0 memory disable && systemctl restart
-hal0-api`. It's a conscious, revertible choice, not something that quietly
-starts accumulating data you didn't ask for.
+A fresh install turns memory on for you and stands up the local Hindsight
+daemon automatically. An upgrade never rewrites an existing config, so a box
+that was installed before memory shipped on by default, or that had it turned
+off by hand, stays off until you set it yourself. Either way it's a conscious,
+revertible choice, not something that quietly starts accumulating data you
+didn't ask for.
 
 <Aside type="caution">
-The flag is the whole toggle. Until `[memory].enabled=true` (the default, or
-set via `hal0 memory enable`) and the API is restarted, the memory surfaces
-are inert.
+The flag is the whole toggle. Until `[memory].enabled` is set (by the
+installer or by hand) and the API is restarted, the memory surfaces are inert.
 </Aside>
+
+## Namespaces: who a fact belongs to
+
+Every memory operation is scoped to a namespace, and the grammar is a closed
+set: `shared`, `agents`, `project:<id>`, or the caller's own
+`private:<client_id>`. A write with no explicit namespace defaults to
+`shared`. Passing `--private` promotes the write to `private:<client_id>` and
+**wins over an explicit `dataset` field in the request body** — so a
+private-mode client can't smuggle data into `shared` by naming it directly in
+the payload. An unknown namespace on write raises an error; on read it
+silently drops (fail-open-empty), so a typoed namespace can't leak data but
+also won't crash a caller mid-conversation.
+
+Callers identify themselves via the `X-hal0-Agent` header, and the same
+identity resolves the same memory namespace whether it arrives over REST or
+MCP.
 
 ## What memory powers
 
@@ -77,14 +95,12 @@ When enabled, memory becomes the shared brain that ties the platform together:
 
 <CardGrid>
   <Card title="Hermes's durable memory, by default" icon="comment">
-    Since v0.8.1-beta.1, provisioning a fresh Hermes wires it straight to this
-    subsystem (`memory.provider=hal0-memory`) with no manual config: a
-    `private:hermes` bank for its own facts and a `shared` bank every agent on
-    the host can read, both backed by Hindsight via the hal0-api REST front
-    door. Reads union both banks; recalled context is injected automatically
-    every turn, and the agent can also call `hal0_memory_search` /
-    `hal0_memory_recall` / `hal0_memory_add` directly (`shared=true` writes
-    the shared bank).
+    Provisioning a fresh bundled agent wires it straight to this subsystem
+    with no manual config: a `private:hermes` bank for its own facts and a
+    `shared` bank every agent on the host can read, both backed by Hindsight
+    via the hal0-api REST front door. Reads union both banks; recalled context
+    is injected automatically every turn, and the agent can also call the MCP
+    tools directly.
   </Card>
   <Card title="Operator memory" icon="document">
     The dashboard Memory view and the `/api/memory/*` routes let you add,
@@ -93,27 +109,21 @@ When enabled, memory becomes the shared brain that ties the platform together:
   </Card>
   <Card title="Namespaced writes" icon="setting">
     Callers identify themselves (via the `X-hal0-Agent` header), so private
-    writes land in the right per-agent namespace rather than a shared pool. The
-    header is self-asserted — `private:` isolates cooperating agents from each
-    other, it does not defend against a hostile caller. See
-    [Security](/docs/concepts/security#what-x-hal0-agent-is-and-is-not).
+    writes land in the right per-agent namespace rather than a shared pool.
   </Card>
-  <Card title="Destructive ops are audited and gated" icon="approve-check">
+  <Card title="Destructive ops are audited" icon="approve-check">
     Bank deletes and every memories / config / document / directive /
     operation / mental-model delete record a durable audit row — actor,
     target, and outcome — so a wipe is attributable after the fact. Deleting
-    more than one item in a single call is a **bulk delete**: it enqueues for
-    human approval on both `/mcp/admin` and `/mcp/memory` instead of running.
-    Deleting an entire bank additionally requires the caller to echo the bank id
-    back via `?confirm=<bank_id>`.
+    an entire bank additionally requires the caller to echo the bank id back
+    via `?confirm=<bank_id>`.
   </Card>
 </CardGrid>
 
 ## Where to go next
 
 <CardGrid>
-  <LinkCard title="Enable memory" href="/docs/guides/enable-memory" description="Flip the flag, control graph extraction, migrate a legacy store." />
   <LinkCard title="Agents" href="/docs/concepts/agents" description="The agent that uses memory as its brain." />
-  <LinkCard title="Security" href="/docs/concepts/security" description="Identity, namespaces, and the MCP allowlist." />
+  <LinkCard title="Security" href="/docs/concepts/security" description="Identity, namespaces, and the auth layer." />
   <LinkCard title="Architecture" href="/docs/concepts/architecture" description="Where the memory surfaces sit in the API." />
 </CardGrid>

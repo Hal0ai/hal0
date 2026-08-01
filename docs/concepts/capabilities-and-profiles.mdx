@@ -1,17 +1,18 @@
 ---
 title: Capabilities & profiles
-description: How hal0 separates what a slot does (capabilities) from how it runs (profiles) and where it runs (device) — device-to-profile defaults and the NPU trio.
+description: How hal0 separates what a slot does (capabilities), how it's tuned (profiles), and where it runs (the slot's own hardware grid) — and why that last split changed in v1.0.
 sidebar:
   order: 30
 ---
 
 import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Three distinct ideas shape every slot in hal0, and keeping them separate is what
-makes the system tractable: **capabilities** describe what you want a slot to
-do, **profiles** describe how it runs, and the **device** describes where it
-runs. They compose — a capability points at a slot, the slot picks a profile,
-and the profile is keyed to a device.
+Three distinct ideas shape every slot in hal0: **capabilities** describe what
+you want a slot to do, **profiles** describe the model-behavior tune it runs
+with, and the **slot itself** describes where it runs and how big its context
+window is. That last split is new in v1.0 — profiles used to carry hardware
+intent too. Getting the boundary right matters, because it's now enforced,
+not just a naming convention.
 
 ## Capabilities: what a slot does
 
@@ -35,7 +36,7 @@ change, the orchestrator computes one atomic change set across both
 `capabilities.toml` and the affected slot TOML — they're written together so the
 two can never drift mid-apply — and only then drives the slot lifecycle:
 turning a capability on loads its slot, turning it off unloads it, and changing
-the model or backend swaps it. On first boot, hal0 seeds `capabilities.toml`
+the model or device swaps it. On first boot, hal0 seeds `capabilities.toml`
 from whatever the slots already declare, so the overlay reflects reality
 immediately.
 
@@ -45,44 +46,43 @@ capability resolves to an ordinary [slot](/docs/concepts/slots) that the
 SlotManager runs as a podman container.
 </Aside>
 
-## Profiles: how a slot runs
+## Profiles: how a slot is tuned
 
-A **profile** is a reusable container-runtime template. It bundles the container
-**image**, a set of bench-tuned launch **flags**, and an MTP (speculative
-decoding) toggle. A slot references a profile by name; the profile supplies
-everything about *how* to run except the model, context size, and port — those
-belong to the slot. This split means many slots can share one tuned profile, and
-you can re-tune a profile once for every slot that uses it.
+A **profile** is a reusable, **device-agnostic** tune template. It bundles
+model-behavior flags — sampler settings, KV-cache type and quantization,
+batch/ubatch size, reasoning mode, jinja/chat-template behavior — and nothing
+about hardware. As of v1.0, a profile carries **no container image and no
+placement information at all**: no device, no GPU index, no thread count, no
+`-c`/`--ctx-size` (that flag is on hal0's own managed-args denylist and can
+never appear in a profile's flags). All of that lives on the
+[slot](/docs/concepts/slots#the-hardwaremodel-write-boundary).
 
-hal0 ships seed profiles so a fresh install is immediately usable:
+This is a genuine v1.0 change, not a renaming exercise: pre-1.0 profiles were
+identity-bound to a backend (`rocm`, `vulkan`, `cuda`) and carried an image.
+The 1.0 seed catalog is organized by **workload** instead, so the same profile
+works regardless of which device a slot targets:
 
-| Profile | Targets | Purpose |
-|---|---|---|
-| `rocm` | GPU (ROCm) | Basic general-purpose ROCm profile, no MTP — the `gpu-rocm` default |
-| `rocm-dense` | GPU (ROCm) | ROCmFPX DENSE weights with MTP — sustained-decode win on Strix Halo |
-| `rocm-moe` | GPU (ROCm) | ROCmFPX MoE weights with MTP — prefill-bound `-dev ROCm0` opt-in |
-| `vulkan-dense` | GPU (Vulkan) | ROCmFPX DENSE weights with MTP via Vulkan0 — prefill win (~+24% PP) |
-| `vulkan-moe` | GPU (Vulkan) | ROCmFPX MoE weights with MTP via Vulkan0 — best sustained-decode throughput (the validated Tool-Eval card) |
-| `vulkan` | GPU (Vulkan) | Basic general-purpose Vulkan (RADV) profile, no MTP, no KV quant (defaults to f16) — the broad-compatibility fallback |
-| `cuda` | GPU (CUDA) | NVIDIA GPUs via upstream llama.cpp CUDA — **experimental**, the `gpu-cuda` default |
-| `embed` | GPU (ROCm) | Dedicated embeddings lane (`--embedding`, wide ubatch for long inputs) |
-| `rerank` | GPU (ROCm) | Dedicated reranking lane (`--reranking`) — always a separate instance from `embed` |
-| `flm` | NPU | FLM inference on the NPU |
-| `tts` | CPU | Text-to-speech (Kokoro) |
-| `tts-qwen3` | GPU (ROCm) | Text-to-speech (Qwen3-TTS) — the GPU engine behind the `voice.tts` capability switch |
-| `cpu-llm` | CPU | CPU-only chat/coder — the `cpu` device default |
-| `comfyui` | image | Image generation (ComfyUI) |
+| Profile | Purpose |
+|---|---|
+| `chat` | Minimal generic chat — fallback for unknown models |
+| `chat-long-context` | Long-context chat variant (~128K ctx) |
+| `dense` | Generic dense workload (~128K ctx); family quirks live in a dedicated variant, e.g. `chadrock-dense` |
+| `moe` | Generic MoE workload (~32K ctx); family quirks in e.g. `chadrock-moe` |
+| `embedding` | Pooled embeddings (`--embedding`, wide ubatch) |
+| `reranking` | Reranking (`--reranking`) — always a separate instance from `embedding` |
+| `cpu-chat` | CPU-safe chat |
+| `flm` | FLM inference on the NPU (chat/embed/STT) |
+| `kokoro` | Text-to-speech (Kokoro), CPU |
+| `qwen3-tts` | Text-to-speech (Qwen3-TTS), GPU |
+| `comfyui` | Image generation (ComfyUI) |
+| `brain` | The hal0-brain steward workload (small tool-routing model) |
+| `chadrock-dense` / `chadrock-moe` | Family-tuned recipes for specific dense/MoE model cards (ROCmFP4, MTP, mmproj) |
+| `thinking` | Reasoning-ON workload for reasoning-capable models |
+| `coding` | Code-gen tuned workload |
 
-`embed` and `rerank` are deliberately separate profiles/slots rather than one
-server handling both — combining `--embedding` and `--reranking` on a single
-llama-server instance produces all-zero scores.
-
-The four ROCmFPX runner profiles (`rocm-dense`, `rocm-moe`, `vulkan-dense`,
-`vulkan-moe`) all reference the same canonical runner image,
-`ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`; a slot can override the image
-per-slot via a top-level `image` field in its TOML, which wins over the
-profile's image (resolution order: `slot.image` → `profile.image` → the
-default).
+`embedding` and `reranking` are deliberately separate profiles/slots rather than
+one server handling both — combining `--embedding` and `--reranking` on a
+single llama-server instance produces all-zero scores.
 
 ### Seed profiles are virtual
 
@@ -92,51 +92,63 @@ disk — the code definition always wins, even over a stale on-disk copy — and
 if `profiles.toml` is absent entirely, the seeds are still returned in memory,
 so the profile catalog is never empty. Saving the catalog back out strips
 every seed-named key before writing, so a seed can never accidentally get
-pinned to a stale on-disk copy. The payoff: a bench re-tune to a seed (new
-flags, a bumped toolbox image digest) reaches every existing install
-automatically on the next load — no reinstall and no per-install
-re-materialization step.
+pinned to a stale on-disk copy.
 
 Seed profiles are immutable through the API too — updating or deleting a
 profile whose name matches a seed is rejected outright. **The only way to
 customise one is to clone it**: the dashboard's Profiles tab turns "Edit" into
 "Edit a copy" for a seed, forking a `<seed>-custom` profile (with
 `cloned_from` recording the original) that you're then free to tune; Delete
-stays disabled on the seed itself. Under the hood this is an ordinary
-`POST /api/profiles` under the new name.
-
-<Aside type="note">
-Upgrading from an older installer that used to materialise every seed inline
-into `profiles.toml` runs a one-time **`-custom` rescue migration**. Each
-on-disk entry whose name matches a current seed is compared byte-for-byte
-against the code definition: an identical copy is pruned silently (it was
-just a stale materialization). A copy that differs — because you hand-edited
-a seed table, or because it predates a name that only became a seed later
-(`embed`/`rerank` are the common case) — is rescued to `<name>-custom` (or
-`-custom2`, `-custom3`, …) instead of being discarded, and slots referencing
-the original name keep resolving to the new code seed. The pre-migration file
-is backed up once to `profiles.toml.pre-virtual-seeds.bak`.
-</Aside>
+stays disabled on the seed itself.
 
 Each profile is also classified into a runtime family (llama-server, FLM,
-Kokoro, Qwen3-TTS, or ComfyUI) that determines which slot types it can serve.
+Kokoro, Qwen3-TTS, or ComfyUI) that determines which slot types it can serve,
+and profiles are portable: any profile can be exported to a self-contained,
+checksummed `.hal0profile.json` envelope and imported on another host — the
+same sharing model [stacks](/docs/concepts/stacks) use.
 
-Profiles are also **portable**: any profile can be exported to a
-self-contained, checksummed `.hal0profile.json` envelope and imported on
-another host — the same sharing model [stacks](/docs/concepts/stacks) use.
-See [Devices, providers &
-profiles](/docs/reference/providers-profiles-devices#portable-profiles-exportimport)
-for the routes and MCP tools.
+## Where hardware placement actually lives now: the slot
 
-A registry model can also carry a **preferred profile** (`defaults.profile`)
-that a slot adopts automatically on creation and on every model swap, gated on
-device/type compatibility — see [Devices, providers &
-profiles](/docs/reference/providers-profiles-devices#model-preferred-profile)
-for the exact rule.
+This is the section that changed most in v1.0, so it's worth stating
+precisely, since a plausible-but-wrong reading — "profiles are entirely
+inert" — undersells one real nuance below.
 
-![The Profiles tab in the hal0 dashboard showing seed profile cards for rocm, rocm-dnse, rocm-moe, vulkan, cuda, embed, rerank, flm, tts, tts-qwen3, cpu-llm, and comfyui with bench metrics and device class chips](/screenshots/profiles-tab.png)
+A slot carries its own **device** field — `gpu-rocm`, `gpu-vulkan`,
+`gpu-cuda`, `cpu`, or `npu` — plus `gpu_index`, `n_gpu_layers`, `threads`, and
+`binary` (which selects a runner/container image family; `image_pin` is the
+escape hatch for a full image override). This "hardware grid" is what the
+slot owns exclusively, validated at config-load time so a typo fails fast.
+Legacy configs that still set the old overloaded `backend` field are
+auto-promoted to `device` on load, so old slot TOMLs keep working.
 
-*The Profiles tab — seed profile cards with bench metrics, device class chips, and the clone affordance for creating custom profiles.*
+A `ProfileConfig` still carries two optional fields, `device_class` and
+`backend`, for back-compat — but as of v1.0 they are **inert match-only fit
+hints**, not a source of runtime configuration:
+
+- None of the 16 shipped seed profiles set either field — they're
+  device-agnostic by construction.
+- When set (on a hand-authored or pre-1.0 profile), `device_class` is
+  consulted only as a **fit-check** signal (surfacing a
+  `profile.device_class_mismatch` warning if it disagrees with the slot's
+  actual device) and `backend` is consulted only as a **fallback** when a
+  slot has no `device` set at all — the normal 1.0 case (a slot with a real
+  `device`) always overrides both fields with `device_to_backend(slot.device)`.
+- GPU device-node passthrough — which physical GPU nodes actually get mapped
+  into the container — is decided from the slot's `device` alone, not from a
+  profile's fields. Earlier code paths that still read the profile here have
+  been fixed; a CPU-targeted slot no longer requests real GPU device nodes
+  just because its profile happened to carry a stale `device_class`.
+
+<Aside type="tip">
+If you're auditing a config: the slot's `device` is authoritative. A
+profile's `device_class`/`backend`, if present at all, only matter when the
+slot itself has nothing set — treat them as legacy fallback plumbing, not as
+something you'd deliberately configure on a new install.
+</Aside>
+
+![The Profiles tab in the hal0 dashboard showing seed profile cards with bench metrics and intent chips](/screenshots/profiles-tab.png)
+
+*The Profiles tab — seed profile cards with bench metrics, intent labels, and the clone affordance for creating custom profiles.*
 
 ## Flag precedence: how a launch command is assembled
 
@@ -147,15 +159,17 @@ concatenated in a fixed order and then deduplicated **last-wins** per flag
 the same key; `--lora`, `--draft-model`, and `--override-kv` are appended,
 never deduped, since llama-server treats repeats of those additively):
 
-1. **base** — `--host`/`--port`/`--model`/`--alias`/`--ctx-size`, always present.
-2. **profile** — the profile's `flags` (with the MTP bundle merged in, see below).
+1. **base** — `--host`/`--port`/`--model`/`--alias`/`--ctx-size`, always
+   present. Context size here is the model's resolved window, capped by the
+   slot's own ceiling — see [Slots](/docs/concepts/slots#context-size-is-a-ceiling-not-an-override).
+2. **profile** — the profile's `flags`.
 3. **model defaults** — the registry model's `defaults.extra_args` (plus
-   `-ngl` from `defaults.n_gpu_layers`), with the model's **family default**
-   (next section) prepended — so a family override beats the profile, but the
-   model's own `extra_args` still wins over the family within this same layer.
+   `-ngl` from the slot, not the model), with the model's **family default**
+   (next section) prepended.
 4. **chat template / mmproj** — `--chat-template-file`, `--mmproj`, resolved
-   from the slot and model.
-5. **slot overrides** — currently just a slot-level `n_gpu_layers`.
+   from the model.
+5. **slot's own hardware grid** — `device`/`n_gpu_layers`/`threads`, always
+   slot-owned, always applied here.
 6. **`[server].extra_args`** — hand-authored on the slot itself, always wins last.
 
 The slot Edit drawer's **resolved command** panel shows the fully assembled
@@ -176,97 +190,44 @@ gemma → -ctk f16 -ctv f16 --cache-reuse 0
 ```
 
 Gemma's interleaved sliding-window attention regresses under quantized KV
-cache, so **any** Gemma model on **any** q8-KV profile — including a custom
-profile you clone with q8 KV flags — is pinned back to f16 KV with
-cache-reuse disabled automatically, no per-slot opt-in needed. None of the
-seed profiles ship q8 KV by default today (`rocm` and `vulkan` both leave KV
-quant unset, defaulting to f16), so the guard's day-to-day job is protecting
-any q8-KV profile you tune yourself.
+cache, so **any** Gemma model on **any** q8-KV profile is pinned back to f16
+KV with cache-reuse disabled automatically — no per-slot opt-in needed.
 
-## MTP: a model × profile × slot decision
+## MTP: a model × slot decision
 
-MTP (multi-token prediction / speculative decoding) is decided by three
-independent signals, not a single flag:
+MTP (multi-token prediction / speculative decoding) is a **model capability**
+as of v1.0, not something a profile turns on. It's resolved from two
+independent signals:
 
 1. **Model eligibility** — a model is MTP-eligible if the registry `mtp` tag
    is set, or an `MTP` marker appears in its id/filename as a delimited token
-   (e.g. `...-mtp-...`), not buried inside an unrelated word.
-2. **Profile opt-in** — `profile.mtp: true` means "enable MTP *for eligible
-   models*" (the `rocm-dense`, `rocm-moe`, `vulkan-dense`, and `vulkan-moe`
-   seed profiles opt in) — it does **not** mean "always append the spec-draft
-   bundle" regardless of the model.
-3. **Slot override** — a slot's `mtp` field is a tri-state: `true` forces MTP
-   on, `false` forces it off, and unset (Auto) lets the first two decide.
+   (e.g. `...-mtp-...`), gated by the launching runner's declared MTP support.
+2. **Slot override** — a slot's `mtp` field is a tri-state: `true` forces MTP
+   on, `false` forces it off, and unset (Auto) defers to model eligibility.
+
+A profile's own `mtp` field still exists on disk for API/round-trip
+back-compat, but it is **informational only** — it is not read by
+`resolve_profile_flags()` or the launch path at all. Two seed profiles happen
+to be tuned for MTP-capable model families (`chadrock-dense`,
+`chadrock-moe`), but that's a property of what model you'd pair with them, not
+something the profile itself switches on.
 
 Resolution: an explicit slot override always wins. Under Auto, MTP is enabled
-only when the profile opts in **and** the model is eligible. A non-MTP model
-sitting on an MTP profile (e.g. a plain chat GGUF on `rocm-moe`) no longer
-launches with dead `--spec-draft-*` flags under Auto — if a model's MTP
-capability isn't picked up by the eligibility heuristic, force the slot's
-override to On explicitly rather than relying on Auto (forcing MTP on a model
-with no MTP layers at all makes llama-server refuse to start, so only use the
-override for models you know are genuinely MTP-capable).
+only when the model is eligible. Forcing MTP on a model with no MTP layers at
+all makes llama-server refuse to start, so only use the override for models
+you know are genuinely MTP-capable.
 
 <Aside type="tip">
 When MTP is effectively on, hal0 merges a tuned speculative-decoding flag
-bundle into the profile's flags — as **defaults only**. Any `--spec-draft-*`
-flag the profile pins explicitly wins over the bundle; the bundle just fills
-in what the profile left unset (fixed in v0.8.2b2 — it used to be appended
-verbatim and could clobber a profile's own tuning). The bundle's draft device
-tracks the profile's own backend (`ROCm0`/`Vulkan0`/`CUDA0`) rather than a
-hardcoded value.
+bundle into the launch command as **defaults only** — any `--spec-draft-*`
+flag set explicitly upstream of it wins over the bundle. The bundle's draft
+device tracks the slot's own device rather than a hardcoded value.
 </Aside>
 
 In the dashboard, the slot Edit drawer (and each stack row) exposes this as a
-three-way Auto/On/Off control with a live "Auto · active/inactive" hint that
-explains which of the two Auto conditions — model eligibility or profile
-opt-in — is failing when MTP isn't active.
+three-way Auto/On/Off control with a live "Auto · active/inactive" hint.
 
-![The per-slot MTP control — Auto follows the model and profile, or force it On/Off; the reason line explains why the current state applies](/screenshots/mtp-control.png)
-
-## Device and backend: where a slot runs
-
-The **device** is a slot's hardware-preference field. It carries hardware
-intent only — not a provider choice — and is validated at config-load time so a
-typo fails fast. The valid devices are:
-
-- `gpu-rocm` — the AMD iGPU via ROCm.
-- `gpu-vulkan` — a GPU via Vulkan (the broad-compatibility path).
-- `gpu-cuda` — an NVIDIA GPU via CUDA (**experimental**).
-- `cpu` — CPU-only execution.
-- `npu` — the AMD XDNA NPU via FastFlowLM.
-
-<Aside type="caution">
-NVIDIA/CUDA support is **experimental**. `gpu-cuda` runs an NVIDIA GPU through
-the upstream `llama.cpp` CUDA image via CDI passthrough (requires
-`nvidia-container-toolkit`); it isn't part of the bench-tuned AMD Strix Halo
-profile family and isn't yet auto-advertised by the dashboard's
-backend-availability probe. Without `nvidia-container-toolkit`, an NVIDIA GPU
-still only surfaces through the generic Vulkan path.
-</Aside>
-
-`device` replaced an older overloaded `backend` field that mixed hardware and
-provider identity. Legacy configs that still set `backend` are auto-promoted to
-a `device` on load (with a deprecation warning), so old slot TOMLs keep working.
-
-### Device-to-profile defaults and coherence
-
-Each device has a default profile, used by the create-slot picker and by
-migration:
-
-| Device | Default profile |
-|---|---|
-| `gpu-rocm` | `rocm` |
-| `gpu-vulkan` | `vulkan` |
-| `gpu-cuda` | `cuda` |
-| `cpu` | `cpu-llm` |
-| `npu` | `flm` |
-
-Because a slot carries both a `device` and a `profile`, the two must stay
-coherent — a `gpu-vulkan` device paired with a ROCm profile would be a
-contradiction. hal0 reconciles them when a slot is created or updated so the
-reported backend follows the device, and the seed profiles above are the
-starting point that keeps a fresh slot consistent.
+![The per-slot MTP control — Auto follows model eligibility, or force it On/Off; the reason line explains why the current state applies](/screenshots/mtp-control.png)
 
 ## The NPU trio
 
@@ -277,16 +238,9 @@ chat, speech-to-text, and embeddings. hal0 calls this the **NPU trio**.
 There is one containerized NPU slot. Its chat role routes through the slot's
 upstream like any other slot. The other two modalities ride as **shadow slots**
 — `stt` and `embed` — whose requests are posted straight to the same
-container's port when the anchor's `[npu]` modality toggle is on. There's no second process
+container's port when their slot records are enabled. There's no second process
 and no separate model server: the three endpoints are the same FLM process
 answering on one static port.
-
-The NPU slot is chat-first by default: `NpuConfig.chat` defaults to `true`, so
-a bare `[npu]` section in a slot TOML is already chat-ready with no extra
-config — the seeded `installer/etc-hal0/slots/flm.toml` ships exactly that,
-with no model pinned yet. Operators opt into the other two modalities by
-adding `asr = true` and/or `embed = true` under `[npu]`, or opt out of chat
-with `chat = false` for an asr/embed-only NPU slot.
 
 Because the XDNA hardware context admits only one NPU LLM at a time, hal0
 enforces NPU exclusivity: you can't enable a second `device=npu` chat slot. When
@@ -296,7 +250,7 @@ the NPU container isn't dispatchable, trio requests degrade with a clear
 ## Where to go next
 
 <CardGrid>
-  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle these profiles and devices configure." />
+  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle these profiles configure, and the write-boundary partition in full." />
   <LinkCard title="Stacks" href="/docs/concepts/stacks" description="Bundling slot + profile + model picks into one portable, applyable unit." />
   <LinkCard title="Strix Halo" href="/docs/concepts/strix-halo" description="The iGPU + NPU + unified memory behind the devices." />
   <LinkCard title="Architecture" href="/docs/concepts/architecture" description="How the orchestrator fits under the API." />

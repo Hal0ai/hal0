@@ -1,37 +1,34 @@
 ---
 title: Edit configuration
-description: "Manage hal0's TOML config under /etc/hal0: hal0.toml, api.env, upstreams, profiles, and per-slot files. Validate, reload, and migrate with the hal0 config CLI."
+description: "Manage hal0's TOML config under /etc/hal0: hal0.toml, upstreams, providers, profiles, stacks, and per-slot files. Validate, reload, and migrate with the hal0 config CLI."
 sidebar:
   order: 100
 ---
 
 import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
 
-hal0's configuration lives as plain TOML (plus one env file) under
-**`/etc/hal0`**. The directory is **preserved across updates** — the
-updater only swaps code, never your config. The `hal0 config` CLI is a
-thin layer over the same files and the running daemon.
-
-<Aside type="note">
-Paths assume a standard install. If you set `HAL0_HOME=/some/path`, the
-config root moves to `$HAL0_HOME/etc/hal0` and everything below shifts
-with it.
-</Aside>
+hal0's configuration lives as plain TOML under **`/etc/hal0`** (or
+`$HAL0_HOME/etc/hal0` if you set `HAL0_HOME`). The directory is
+**preserved across updates** — the updater only swaps code, never your
+config. The `hal0 config` CLI is a thin layer over the same files and the
+running daemon; most subcommands are simple wrappers over
+`GET`/`POST /api/settings/*`.
 
 ## The files under `/etc/hal0`
 
 | File | What it holds |
 |------|---------------|
-| `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots]` (port range, `idle_timeout_s`, `evict_pressure_mb`, `publish_host`), `[dispatcher]` prefetch tuning, `[models]` roots/store, `[memory]` engine + `[memory.graph]` extraction, `[activity]` audit-log retention, `[telemetry] channel`. |
-| `api.env` | Environment for the hal0-api service (systemd `EnvironmentFile`) — provider secrets plus env knobs like `HAL0_MODEL_STORE`, `HAL0_MCP_ALLOWED_HOSTS`, and the `HAL0_*_PUBLIC_URL` reverse-proxy overrides. |
-| `upstreams.toml` | External / upstream provider routing. |
-| `providers.toml` | Provider credential references (key **names**, never plaintext secrets). |
-| `profiles.toml` | Optional custom profile catalogue. The built-in seed profiles (`rocm`, `rocm-dense`, `rocm-moe`, `vulkan-dense`, `vulkan-moe`, `vulkan`, `cuda`, `embed`, `rerank`, `flm`, `tts`, `tts-qwen3`, `cpu-llm`, `comfyui`) are always overlaid from code on load and are never written back here, even if the file exists. |
-| `capabilities.toml` | Persisted capability selections (embed / voice / img / vision). Carries its own `schema_version`. |
-| `slots/<name>.toml` | One file per slot — `name`, `port`, `device` (`gpu-rocm`\|`gpu-vulkan`\|`gpu-cuda`\|`cpu`\|`npu`), `gpu_index` (multi-GPU pinning), `profile`, `image` (optional per-slot container-image override — see [Manage slots](/docs/guides/manage-slots)), `mtp` (tri-state Auto/on/off), `vision` (mmproj toggle), the TTS request-default trio (`default_voice`/`default_speed`/`default_response_format`), plus nested `[model]`, `[server]`, `[npu]` (`asr`/`embed`), and — on the `img` slot only — `[image]`. |
+| `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots]` policy, `[dispatcher]` prefetch tuning, `[models]` roots/store, `[memory]` engine + `[memory.graph]` extraction, `[telemetry] channel`. |
+| `upstreams.toml` | External/upstream provider routing — one `[[upstream]]` block per remote or local endpoint. |
+| `providers.toml` | Provider credential *references* — env-var **names**, never plaintext secrets. |
+| `profiles.toml` | Optional reusable backend/flag templates. Built-in seed profiles are always overlaid from code on load and never written back here, even if the file exists. |
+| `stacks.toml` | The stack catalogue — bundles of slot configs you can apply as one unit. Managed via the dashboard/`/api/stacks`, not `config show`/`edit`. |
+| `slots/<name>.toml` | One file per slot — port, `device` (`gpu-rocm`\|`gpu-vulkan`\|`gpu-cuda`\|`cpu`\|`npu`), the slot's hardware grid (`n_gpu_layers`, `threads`, `binary`, `image_pin`), `profile` reference, `[model]`, `[server]`, `[npu]`, and (on the `img` slot) `[image]`. |
+| `mcp-servers/<id>.toml` | One file per MCP server you've installed with `hal0 mcp install`. Mode `0600` — secrets live in its `env` block. |
 
 Other files the runtime drops here: `hardware.json` (cached hardware
-probe), `manifest.json` (release image pins), `openwebui.env`.
+probe), `manifest.json` (release image pins), `capabilities.toml`
+(persisted capability-slot selections).
 
 <Aside type="caution">
 Never hand-edit a file with sloppy string splicing — malformed TOML can
@@ -39,25 +36,29 @@ poison the config cache. Use `hal0 config edit` (which seeds a valid
 skeleton) and `hal0 config validate` before reloading.
 </Aside>
 
-## Show the current config
+## Show and edit
 
 ```sh
-hal0 config show
+hal0 config show            # hal0.toml (default)
+hal0 config show upstreams
+hal0 config show providers
 ```
 
-Prints `hal0.toml` as it is on disk. If the file is root-owned and you run
-as a non-root user, the command tells you to re-run with `sudo` (or to
-`chmod` the config tree once) instead of crashing.
-
-## Edit the config
+Prints the file as it is on disk. Edit the same three files in `$EDITOR`
+(falling back to `$VISUAL`, then `vi`) — if the file doesn't exist yet,
+it's created with a valid skeleton first:
 
 ```sh
 hal0 config edit
+hal0 config edit upstreams
 ```
 
-Opens `hal0.toml` in `$EDITOR` (falling back to `$VISUAL`, then `vi`). If
-the file doesn't exist yet, it's created with a valid skeleton
-(`[meta] schema_version`, `[slots]` port range).
+<Aside type="note">
+`profiles.toml`, `stacks.toml`, and per-slot/per-MCP-server files aren't in
+the `config show`/`edit` set — manage those through the dashboard, the
+`/api/profiles`, `/api/stacks`, and `/api/mcp` endpoints, or `hal0 slot
+edit` / `hal0 mcp install`.
+</Aside>
 
 ## Validate before you reload
 
@@ -67,8 +68,7 @@ hal0 config validate
 
 Loads and validates `hal0.toml`, `upstreams.toml`, and `providers.toml`
 against the current Pydantic schema. It prints each problem and exits
-non-zero on any failure, or `✓ All configs pass schema validation.` when
-clean.
+non-zero on any failure.
 
 ## Reload a running daemon
 
@@ -79,87 +79,77 @@ restart:
 hal0 config reload
 ```
 
-This hits `POST /api/settings/reload` on the local API. If the daemon is
-down, the command exits non-zero — start hal0-api first.
+This hits `POST /api/settings/reload`. Structural edits to
+`upstreams.toml` still need a full `hal0-api` restart — see
+[Connect external providers](/docs/guides/connect-external-providers).
 
 ![Settings page showing live reload status](/screenshots/settings-page.png)
 *Settings page with live daemon status and reload controls.*
 
-The dashboard's **Settings → Storage** section also has its own **Reload
-from disk** button next to the `hal0.toml` path, which hits this same
-`POST /api/settings/reload` — use it after an out-of-band edit with `hal0
-config edit`.
+## Refresh the hardware probe
 
-## The dashboard Settings page
+```sh
+hal0 config hardware            # show the cached probe
+hal0 config hardware --refresh  # force a fresh probe
+```
 
-Beyond the files and CLI above, the dashboard's Settings view covers most of
-the same ground with a few operator conveniences. Sections, in nav order:
-Secrets, Storage, Updates, Voice, Image-gen, NPU, Default slots, General,
-Advanced, About.
-
-- **Secrets** — provider API key presets (Hugging Face, OpenAI, Anthropic,
-  Google, Groq) plus two paired **AWS Bedrock** presets
-  (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, cross-referenced in the
-  picker so you're reminded to set both), or a custom key name.
-- **Voice** — STT enable + model, and the **TTS request-default trio** for
-  the serving `tts` slot: **Default voice** (populated from the live voice
-  list where available), **Default speed** (`0.25`–`4.0`), and **Default
-  format** (`mp3`/`wav`/`opus`/`flac`/`pcm`). These persist to the same
-  `[slot]` keys as `slots/<name>.toml` and are applied to the next
-  `/v1/audio/speech` request with no restart — see
-  [Voice (STT/TTS)](/docs/guides/voice-stt-tts/).
-- **Image-gen** — `default_size`, `default_steps`, and `idle_restore_minutes`
-  for the `img`/ComfyUI slot's `[image]` table. `idle_restore_minutes` (how
-  long ComfyUI can sit idle before the GPU arbiter restores LLM slots) is
-  **hot-reloadable** — it takes effect on Save with no `hal0-api` restart.
-- **NPU** — for FastFlowLM (FLM) slots: **Context size** (`--ctx-len`),
-  **Load embeddings**, and **Load ASR** (all require restarting the slot),
-  plus a read-only **Occupancy** panel (TOPS, tile usage, per-slot
-  breakdown) when an NPU is present.
-- **Advanced** — schema-driven controls for every `[slots]`, `[dispatcher]`,
-  `[memory]`, and `[activity]` key that previously required `hal0 config
-  edit` (including `slots.evict_pressure_mb`, the pressure-eviction floor;
-  the `memory.engine` picker only offers `hindsight`/`pgvector` even though
-  the schema also accepts `mem0`, since it's silently remapped to
-  hindsight), plus a dedicated **memory graph** panel for
-  `[memory.graph]` (`extraction_slot`, `llm_timeout_s`) and a **Restart
-  hal0-api** button — a one-click restart-and-health-poll for
-  `hal0-api.service`, handy after any change flagged "restart required".
-- **General** — the **Anonymous telemetry** opt-in toggle for
-  `[telemetry] enabled` (off by default; see
-  [Configuration schema reference](/docs/reference/config-schema)).
+Replaces the old, now-deprecated `hal0 probe` top-level command.
 
 ## Migrate the schema forward
-
-When you update hal0 across a schema bump, bring `hal0.toml` to the latest
-version:
 
 ```sh
 hal0 config migrate
 ```
 
-It reads `meta.schema_version`, runs the registered migration chain, and
+Reads `meta.schema_version`, runs the registered migration chain, and
 **atomically writes the result back only if the version actually
 advanced**. If the config is already current (or absent), nothing is
-written and that is reported honestly.
+written.
 
-<Aside type="note">
-Capability selections version independently — `capabilities.toml` carries
-its own counter. Use `hal0 capabilities migrate` to bring that file
-forward against the current catalogue.
+<Aside type="caution">
+`hal0 update` runs this same migration chain automatically as part of an
+apply — see [Update and roll back](/docs/guides/update-and-rollback) for
+a **destructive** step in that same chain: on a pre-v1.0 box
+(`schema_version < 2`), the updater wipes and reseeds `profiles.toml`.
+Read that guide before your first v1.0 update if you've hand-edited
+custom profiles.
 </Aside>
+
+## Hardware ownership moved: slot, not profile
+
+If you're carrying config from a pre-v1.0 install: profiles used to own
+device/context-size selection. As of v1.0 the **slot** owns its hardware
+grid directly — `device`, `n_gpu_layers`, `threads`, `binary`, and the
+`image_pin` escape hatch all live on `SlotConfig`, not the profile. A
+profile now only supplies flags/image template; the slot supplies model,
+context, and port. Legacy per-slot fields (`parallel`, `chat_template`,
+`[model].n_gpu_layers`, `[server].extra_args`) are marked inert at launch
+and folded into the bound *model's* own defaults by a one-shot migrator —
+see [Choose models](/docs/guides/choose-models).
+
+## `[server].extra_args` is screened everywhere
+
+The freeform `[server].extra_args` string on a slot (llama-server CLI
+passthrough — sampling params, `--jinja`, `--metrics`, cache/quant
+tuning) is checked against a denylist of hardware and hal0-managed flags
+(`--n-gpu-layers`/`-ngl`, `--device`/`-dev`, `--threads`/`-t`, `--model`,
+`--ctx-size`, `--host`, `--port`, `--alias`) before it's written. This
+screen now runs on **every** write path — the HTTP config route, `hal0
+slot create`/`edit`, and the stacks-apply engine — not just the API route
+it originally covered. A blocked flag fails the write outright with a
+`slot.hardware_flag_denied` or `slot.managed_arg_denied` error explaining
+where that setting actually belongs (the slot's hardware grid, or the
+model's own launch defaults) rather than being silently stripped.
 
 ## Atomic writes
 
 Every config write hal0 performs — `config migrate`, the settings API,
 the updater's `hal0.previous` record — uses a tempfile + `os.replace`
-pattern so a write is either fully applied or not at all; an interrupted
-write never leaves a half-written, unparseable file in place.
+pattern so a write is either fully applied or not at all.
 
 ## See also
 
 - [Configuration schema reference](/docs/reference/config-schema) — every key in `hal0.toml` and the per-slot files.
-- [Paths and files](/docs/reference/paths-and-files) — the full FHS map.
-- [Environment variables](/docs/reference/env-vars) — the `api.env` keys.
-- [Update and roll back](/docs/guides/update-and-rollback) — how updates preserve `/etc/hal0`.
-- [Voice (STT/TTS)](/docs/guides/voice-stt-tts/) — the TTS request-default trio in depth.
+- [Manage slots](/docs/guides/manage-slots) — the slot-owned hardware grid in practice.
+- [Update and roll back](/docs/guides/update-and-rollback) — how updates preserve `/etc/hal0`, and the profiles.toml reseed warning.
+- [Connect MCP servers](/docs/guides/connect-mcp) — the `mcp-servers/<id>.toml` files.

@@ -1,74 +1,130 @@
 ---
-title: Model roster benchmark
-description: Decode/prefill/MTP-acceptance benchmarks for the full hal0 chat & coding model roster, measured under a uniform exclusive-GPU sweep on a single AMD Strix Halo box.
-# Wide benchmark table needs the horizontal room — drop the right-hand TOC and
-# let the content column fill the full pane width (page-scoped via head style).
-tableOfContents: false
-head:
-  - tag: style
-    content: ':root{--sl-content-width:100%}'
+title: Model roster & benchmarks reference
+description: "The model registry, curated catalogue, hardware-driven recommendation logic, and the bench/ benchmark pipeline — verified against src/hal0/registry, src/hal0/hardware, and src/hal0/bench in the v1.0 tree."
 sidebar:
-  order: 55
+  order: 60
 ---
 
 import { Aside } from '@astrojs/starlight/components';
-import ModelRoster from '../../../../components/ModelRoster.astro';
-import { ROSTER_DATE } from '../../../../data/model-roster.ts';
 
-export const updated = new Date(`${ROSTER_DATE}T00:00:00`).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+Three distinct concepts share the word "model" here: the **registry** (what's actually
+on disk), the **curated catalogue** (what the installer offers to download), and
+**benchmarks** (measured performance, not tied 1:1 to either).
 
-A head-to-head benchmark of every chat and coding model in the hal0 registry,
-measured under **uniform conditions** on a single [AMD Strix Halo](/docs/reference/hardware-matrix/)
-box: same context length, same profile, exclusive GPU access, one model at a
-time. The numbers below are throughput as served by hal0's `llama-server`
-provider — i.e. what a slot on this hardware actually delivers, not vendor
-marketing figures.
+## Model registry
 
-<ModelRoster />
+Each registered model is a `Model` record (`hal0.registry.model`), persisted as one
+atomic TOML file per model under `/var/lib/hal0/registry/`.
 
-## How to read it
+| Field | Notes |
+|---|---|
+| `id`, `name`, `path` | — |
+| `size_bytes`, `quant` | Derived from the GGUF header where possible, filename fallback. |
+| `license` | — |
+| `capabilities` | Freeform tags, normalized to a fixed modality set: `chat, embed, rerank, vision, asr, tts`. |
+| `hf_repo` / `hf_filename` | — |
+| `backends` | Which slot backends can run this model: GGUF → `vulkan, rocm, cuda, cpu`; moonshine → `moonshine`; kokoro → `kokoro`. |
+| `mmproj` | Optional vision-projector sidecar path. |
+| `defaults` | Tri-state launcher knobs the **model** now owns: `context_size`, `extra_args`, `chat_template`, `profile`, `mtp`, `jinja`, `enable_thinking`, `vision`. |
+| `default` | Per-dispatch-type default marker. |
+| `architecture` | e.g. `llama`, `qwen2`, `gemma3`, `gpt-oss`, `qwen3next`, `mamba` — drives MoE/context sizing. |
+| `capability_flags.tool_calling` | Typed tri-state flag. |
 
-- **Decode t/s** — single-stream token generation throughput (greedy, 256-token
-  completion, median of 3 runs). This is the number you feel during a chat.
-- **Prefill t/s** — prompt-ingestion throughput on a ~2k-token prompt.
-- **MTP acc%** — for [multi-token-prediction](/docs/concepts/capabilities-and-profiles/#mtp-a-model--profile--slot-decision)
-  models, the share of speculatively-drafted tokens the target model accepted.
-  Higher acceptance = more of the speedup is real.
-- **Caps** — capability tags that drive routing and slot features (MTP, vision,
-  tool-calling, coding, reasoning).
-- **Spec / KV / Size** — the speculative-decode mode, KV-cache quantization, and
-  on-disk GGUF size for the measured configuration.
+Registered models split into two buckets for the dashboard UI: **blessed** (path under
+`/var/lib/hal0/models/<recipe>/<capability>/`) vs **pulled** (anything downloaded or
+hand-registered outside that layout).
 
-## What the data shows
-
-- **MTP wins at every comparable size.** Among the 30B+ chat models, the
-  sparse MoE builds running self-speculative `draft-mtp` clearly lead —
-  `chadrock3-6-35b-uncensored-mtp-strix-lean` and `chadrock-35b-ace-saber` both
-  decode near 100 t/s, more than double the ~46 t/s a same-class 35B MoE model
-  manages without MTP (`qwen3.6-35b-a3b-q4kxl`). The single fastest row in the
-  whole table, tiny `qwen3.5-0.8b` at ~170 t/s, isn't an MTP result at all — a
-  0.8B dense model just has little enough compute per token that draft-and-
-  verify has nothing to add.
-- **Acceptance matters more than raw size.** A model with weak MTP acceptance
-  (drafted tokens getting rejected) gives back most of the speculative speedup —
-  watch the acc% column, not just the decode figure.
-- **Dense loses badly at scale.** Dense `qwen3.6-27b` is the slowest model in
-  the sweep at ~10 t/s — an MTP-enabled model in the same size class is
-  several times faster for the same class of work.
-
-<Aside type="note" title="Methodology & caveats">
-Every model was measured the same way: greedy 256-token decode (median of 3),
-~2k-token prefill, native `llama-server` `/completion` timings read directly
-from the slot port, with the `utility` slot locked out so nothing else contended
-for the GPU. MTP-tagged models ran with `--spec-type draft-mtp` (self
-speculation). Because the sweep is **uniform** (fixed context, one profile), a
-model's number here can differ from its tuned production-slot figure — this
-board answers "how do they compare head-to-head," not "what's each model's best
-possible config."
+<Aside type="note">
+As of the v1.0 slot/hardware-ownership rework, the **model**, not the slot, owns
+tuning knobs like `context_size` and MTP. A slot's `[model].context_size` is now a
+ceiling only — see [Config schema](/docs/reference/config-schema/#model-nested-under-a-slot).
 </Aside>
 
-<Aside type="tip" title="Auto-generated">
-These numbers are generated automatically and refresh whenever the model roster
-is re-benchmarked on the hardware above — no figures are edited by hand. **Last
-updated {updated}.**
+## Curated catalogue
+
+`hal0.registry.curated.CuratedModel` — **not a file on disk**, shipped in code with
+the release, so a fresh install can never land on a stale pick list. This is the roster
+the first-run wizard's model cards render via `GET /api/install/curated-models`.
+
+| Field | Notes |
+|---|---|
+| `id`, `display_name`, `description` | — |
+| `family`, `architecture` | — |
+| `size_gb`, `vram_gb_min` | — |
+| `license`, `license_url` | — |
+| `hf_repo`, `hf_file`, `mmproj_file` (optional) | — |
+| `context_length` | — |
+| `recommended_slot` | `chat` or `img` |
+| `capability` | `chat, embed, asr, tts, image` |
+| `tags`, `notes` | — |
+
+<Aside type="caution">
+STT/TTS curated picks are not implemented as of this writing — moonshine, kokoro, and
+vibevoice can't be expressed in the current single-file GGUF/safetensors/checkpoint
+curated schema (they ship as multi-file ONNX/PyTorch bundles). This is a documented
+open item in source with three possible resolution paths, none landed. Don't document
+a curated STT/TTS pick flow as existing.
 </Aside>
+
+## Hardware-driven recommendation
+
+`hardware.recommend.recommend_primary_slot(hw)` is the installer's logic for choosing
+the model that seeds the primary chat slot, ordered largest-to-smallest and RAM-gated:
+
+| Curated id | Min RAM | Class | Approx throughput |
+|---|---|---|---|
+| `Qwen3.6-35B-A3B-MTP-GGUF` | ≥ 48 GB | Hybrid MoE | ~45 tok/s |
+| `qwen3.5-9b` | ≥ 16 GB | Dense | — |
+| `qwen3-4b` | 0 GB (always downloadable) | Dense | — |
+| `llama32-3b` | CPU fallback | Dense | — |
+| `phi3-mini` | CPU fallback | Dense | — |
+
+Every id in this tier list must exist in the curated catalogue — enforced by test
+(`tests/registry/test_curation_drift.py`, `tests/hardware/test_recommend.py`), so this
+table can drift only if both source and its tests change together.
+
+Context-window resolution for the seeded primary slot: MoE/MTP models get the full
+architecture-max window (their KV cache is tiny relative to a hybrid model); dense
+models are capped at 32768 tokens; if neither applies, the fallback is 8192.
+
+See [Hardware matrix](/docs/reference/hardware-matrix/) for the backend (ROCm/Vulkan/
+CUDA/CPU) selection logic this recommendation composes with.
+
+## Benchmarks
+
+The `bench/` package measures real llama.cpp performance — this is a distinct concept
+from the roster above, not a per-curated-model score table.
+
+**Record schema** (`bench.schema`) — stdlib dataclasses only, no Pydantic, so a record
+is constructible with zero dependencies on the target box. Records are appended to a
+JSONL file. Each record splits into:
+
+- **Identity block** (feeds the dedup key `cell_key()`): `Model` (id, gguf path,
+  sha256, quant, size_bytes, capabilities), `Engine` (kind: `llama-bench` or
+  `llama-server`, image, image digest, llama.cpp build), `lane` (`rocm`, `vulkan_radv`,
+  `default`), `Config` (resolved argv/env/kv, spec block, parallel, context size),
+  `Workload` (kind: `pp`/`tg`/`chat`/`batch`/`embed`/`rerank`/`reuse`, depth, n_prompt,
+  n_gen, sampler, concurrency).
+- **Environment block** (`host`) — deliberately excluded from `cell_key()`, so a hal0
+  or kernel upgrade doesn't fork the identity of an otherwise-identical measurement.
+
+`Outcome` enum: `ok, failed, skipped-contended, oom, hang` — only `ok` counts as a
+measured/publishable value.
+
+Separately, `[profile]` sections in `config/schema.py` (sourced from `config/seeds.py`)
+carry a small **static** per-profile `tps`/`rtf` benchmark table
+(`PROFILE_BENCH: dict[str, dict[str, float]]`), surfaced on profile cards. This is
+curated per-*profile*, not per-model, and is distinct from the JSONL pipeline above.
+
+### CLI
+
+```sh
+hal0 bench plan|run|status|worker|results|history|reindex|devices|publish|eval|import-v1
+```
+
+`hal0 bench` is a raw argparse passthrough (not a Typer sub-app) — run
+`hal0 bench <verb> --help` for per-verb flags. Supporting modules: `bench/devices.py`
+(device enumeration), `bench/planner.py` (picks what's stale), `bench/runner.py`
+(drives `llama-bench`/`llama-server`), `bench/store.py` (JSONL/db layer),
+`bench/publish.py` (pushes results to the dashboard), `bench/suites.py`,
+`bench/regress.py`.

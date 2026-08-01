@@ -9,8 +9,11 @@
 .act-card {
   display: flex;
   flex-direction: column;
-  /* The card never grows unbounded — the body owns the scroll. */
-  max-height: 760px;
+  /* Fill the (stretched) side column rather than self-capping, so the pane
+     lines up with the bottom of the stacked main-column panes. The body
+     still owns the scroll — see `.act-body`. */
+  height: 100%;
+  min-height: 0;
 }
 
 /* ── header ─────────────────────────────────────────────────────── */
@@ -116,7 +119,9 @@
 .act-body {
   flex: 1 1 auto;
   min-height: 200px;
-  max-height: 620px;
+  /* No self-cap: the card is height:100% of the stretched side column, so the
+     body takes whatever is left after the header/filter bar. */
+  max-height: none;
   overflow-y: auto;
   overflow-x: hidden;
   font-family: var(--jbm);

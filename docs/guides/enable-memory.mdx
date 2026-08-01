@@ -1,89 +1,76 @@
 ---
 title: Enable memory
-description: hal0's memory subsystem is gated by [memory].enabled in hal0.toml (on by default). Toggle it with hal0 memory enable/disable and control graph extraction with hal0 memory graph --slot.
+description: hal0's memory subsystem is toggled with hal0 memory enable/disable — Hindsight-backed recall, optional graph extraction, and per-bank management.
 sidebar:
   order: 50
 ---
 
 import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
 
-hal0's memory subsystem is gated by a single config flag, `[memory].enabled`
-in `hal0.toml` — **on by default**. When it's on, hal0 gives agents a
-persistent recall store — **Hindsight** — plus an optional knowledge-graph
-extraction layer. Toggle it with `hal0 memory enable` / `hal0 memory
-disable` — no code change, no reinstall.
+hal0's memory subsystem gives agents a persistent recall store —
+**Hindsight** — plus an optional knowledge-graph extraction layer. As of
+v1.0 it's toggled with the `hal0 memory` CLI rather than an environment
+variable — the old `HAL0_MEMORY_ENABLED` flag is gone.
 
 <Aside type="note">
-A fresh install ships with this on and stands up the local Hindsight daemon
-automatically (skip it at install time with `HAL0_SKIP_HINDSIGHT=1`). The
-steps below are for re-enabling memory after you turned it off, or checking
-its state. In every case, every downstream caller — the admin MCP tools, the
-`/api/memory/*` routes, the agent memory provider — degrades to a no-op or
-`503` when memory is off, so flipping the flag is the whole toggle either
-way.
+A fresh install turns memory on for you and stands up the local Hindsight
+daemon automatically. The steps below are for the cases the installer
+doesn't cover: re-enabling memory after you turned it off, or a manual
+install. Every downstream caller — the admin MCP tools, the
+`/api/memory/*` routes, the agent memory provider — degrades to a no-op
+or `503` when memory is off.
 </Aside>
 
-Hermes ships with its own durable-memory wiring already pointed at this
-subsystem (`memory.provider=hal0-memory`, two banks — `private:hermes` and
-`shared`) — see [What memory powers](/docs/concepts/memory#what-memory-powers)
-for how that fits together. Hermes's memory calls still need
-`[memory].enabled=true` on the hal0-api side to actually work; without it
-they degrade the same as every other caller.
+## Turn it on or off
 
-## Turn it on
+```sh
+hal0 memory status
+hal0 memory enable
+hal0 memory disable
+```
 
-<Steps>
+Toggles `[memory].enabled` in `hal0.toml`; enabling requires a
+`hal0-api` restart to actually construct the memory provider.
 
-1. **Set the flag.**
-
-   ```sh
-   hal0 memory enable
-   ```
-
-2. **Restart the API** so `create_app` constructs the memory provider:
-
-   ```sh
-   sudo systemctl restart hal0-api
-   ```
-
-3. **Confirm it's wired.**
-
-   ```sh
-   hal0 memory status
-   hal0 memory graph status
-   ```
-
-</Steps>
-
-Turning it back off is the mirror image: `hal0 memory disable && sudo
-systemctl restart hal0-api`.
-
-When the flag is set, hal0 builds the memory provider from your config.
-The engine is **Hindsight**; if the Hindsight daemon is unreachable at
-startup, hal0 logs a warning and degrades to an in-memory PgVector fallback
-rather than failing startup.
+When enabled, hal0 builds the memory provider from your config. The
+engine is **Hindsight**; if the Hindsight daemon is unreachable at
+startup, hal0 logs a warning and degrades to an in-memory PgVector
+fallback rather than failing startup.
 
 <Aside type="caution">
-The PgVector fallback is **volatile** — every write is lost on restart. It
-exists so the tools and dashboard keep answering (empty results instead of a
-crash) while Hindsight is down, not as a durable substitute. Check
-`GET /api/memory/engine` — `"engine": "hindsight"` and `"reachable": true`
-means you're on the real store; `"engine": null` means you're on the
-volatile fallback.
+The PgVector fallback is **volatile** — every write is lost on restart.
+It exists so the tools and dashboard keep answering (empty results
+instead of a crash) while Hindsight is down, not as a durable substitute.
+Check `GET /api/memory/engine` — `"engine": "hindsight"` and
+`"reachable": true` means you're on the real store.
 </Aside>
+
+<Aside type="caution">
+`[memory].engine` accepts `hindsight` (default), `pgvector`, or `mem0`.
+The legacy `cognee` engine is **retired as of v1.0.0** and now fails
+config validation outright — migrate off it first (see
+[Migrate a legacy store](#migrate-a-legacy-store)) before updating past
+the version that dropped it.
+</Aside>
+
+## One shared bank, or per-agent private banks
+
+`[memory].unified_bank` (default `true`) routes all memory into one
+shared Hindsight bank instead of splitting it per agent into private
+banks. This is a config-level policy decision, not something you toggle
+per request — see [MCP servers](/docs/guides/connect-mcp) for how
+`X-hal0-Private` interacts with it at write time.
 
 ## The graph-extraction gate
 
 Storing recall items is one thing; running an LLM over them to extract a
-knowledge graph is heavier and separately gated, and it's **off by default**
-even on a fresh install. Control it with the `hal0 memory graph` sub-app (a
-thin client over `/api/memory/graph`).
+knowledge graph is heavier and separately gated — **off by default** even
+on a fresh install.
 
-Hindsight builds its graph natively from whatever local llm slot you point it
-at — there's no external-upstream routing anymore. That slot is
-`[memory.graph].extraction_slot` in `hal0.toml` (default `"utility"`);
-changing it repoints Hindsight's extraction LLM and restarts `hindsight-api`
-to apply it.
+Hindsight builds its graph natively from whatever local `llm` slot you
+point it at. That slot is `[memory.graph].extraction_slot` in
+`hal0.toml` (default `"utility"`); changing it repoints Hindsight's
+extraction LLM and restarts `hindsight-api` to apply it.
 
 ![Memory view showing live graph extraction status and counters](/screenshots/memory-view.png)
 *Live memory and graph-extraction dashboard in hal0.*
@@ -96,28 +83,22 @@ hal0 memory graph status
 hal0 memory graph status --json
 ```
 
-Shows whether extraction is on, the configured extraction slot (and whether
-it currently resolves to a live enabled llm slot), the available slots you
-could pick instead, and counters (builds OK, errors, in-flight, last build /
-error).
+Shows whether extraction is on, the configured extraction slot (and
+whether it currently resolves to a live enabled `llm` slot), the
+available slots you could pick instead, and build/error counters.
 
 </TabItem>
 <TabItem label="Enable">
 
 ```sh
-# turn extraction on, keeping the current extraction slot
-hal0 memory graph enable
-
-# turn extraction on and repoint it at a specific local slot
-hal0 memory graph enable --slot utility
+hal0 memory graph enable                  # keep the current extraction slot
+hal0 memory graph enable --slot utility   # repoint it
 hal0 memory graph enable --slot agent
 ```
 
 `--slot` names a local `type=llm` slot; it must already be enabled — the
-server validates the choice against the live enabled-slot set and rejects an
-unknown or non-llm slot before it ever reaches `hal0.toml`. On success it
-restarts `hindsight-api` so its extraction LLM actually follows the change.
-Omit `--slot` to flip `enabled` without touching the current slot.
+server validates the choice against the live enabled-slot set and rejects
+an unknown or non-llm slot before it ever reaches `hal0.toml`.
 
 </TabItem>
 <TabItem label="Disable">
@@ -132,21 +113,58 @@ unaffected either way — this gate only controls the graph layer.
 </TabItem>
 </Tabs>
 
+## Manage banks
+
+```sh
+hal0 memory bank list
+hal0 memory bank stats <bank>
+hal0 memory bank profile get <bank>
+hal0 memory bank profile set <bank> <key> <value>
+hal0 memory bank export <bank>
+hal0 memory bank import <bank> <file>
+hal0 memory bank delete <bank>
+hal0 memory bank consolidate <bank>
+```
+
+Deleting a whole bank requires an explicit confirmation that echoes the
+bank id back — a plain delete with no confirmation is rejected.
+
+## Async operations and mental models
+
+```sh
+hal0 memory ops list           # in-flight/recent Hindsight ops: retain, consolidation, refresh
+hal0 memory ops retry <id>
+hal0 memory mm list            # mental models Hindsight has built
+hal0 memory mm refresh <id>
+hal0 memory mm history <id>
+hal0 memory recall             # ad-hoc recall from the CLI
+```
+
+## Migrate a legacy store
+
+If you previously ran the Cognee-backed memory store, or need to bring
+per-agent private banks together into the unified bank:
+
+```sh
+hal0 memory migrate unify
+```
+
+<Aside type="caution">
+Check the command's own `--dry-run` support before running it against
+production data — a migration touching your durable recall store is
+worth previewing first.
+</Aside>
+
 ## Destructive ops are audited
 
 Every destructive call under `/api/memory/*` — bank delete, and the
-memories / config / document / directive / operation / mental-model delete
-routes, plus the namespace `POST /api/memory/delete` used for id-scoped
-deletes — records a durable audit row (actor, target, and a truthful
-outcome) so a memory wipe is attributable after the fact. Deleting a whole
-bank additionally requires
-an explicit confirmation that echoes the bank id back, via `?confirm=<bank_id>`
-(or `{"confirm": "<bank_id>"}` in the body) — a plain `DELETE` with no
-confirmation is rejected with `memory.confirm_required`.
+memories/config/document/directive/operation/mental-model delete routes
+— records a durable audit row (actor, target, and outcome) so a memory
+wipe is attributable after the fact.
 
 ## Related
 
 - [Run agents](/docs/guides/run-agents) — agents are the main consumer of
   the memory store.
-- [MCP tools](/docs/reference/mcp-tools) — the `memory_*` tool tiers and
-  the `/mcp/memory` server this guide's flag gates.
+- [Connect MCP servers](/docs/guides/connect-mcp) — the `memory_*` tool
+  tiers and the `/mcp/memory` server this guide's flag gates.

@@ -70,6 +70,7 @@ from hal0.config.schema import (
     resolve_chat_template,
     resolve_profile_flags,
 )
+from hal0.http_client import async_client
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import (
@@ -166,24 +167,40 @@ def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any
 def _effective_backend_and_device_class(
     slot_cfg: Mapping[str, Any] | None, profile: Any
 ) -> tuple[str | None, str | None]:
-    """``(backend, device_class)`` for this lane — slot override beats profile."""
-    backend = getattr(profile, "backend", None)
-    device_class = getattr(profile, "device_class", None)
+    """``(backend, device_class)`` for this lane — the SLOT's device decides.
+
+    SINGLE SOURCE for "what hardware class is this launch" (spec-hw-slot-ownership
+    §2/§4.1). Consumed by :func:`_effective_runner` (image/capability resolution)
+    AND by :func:`_resolve_llama_scalars` → :meth:`ContainerProvider.container_spec`
+    (the real ``/dev/kfd`` + ``/dev/dri`` / NVIDIA-CDI passthrough gate), so the
+    image that launches, the capabilities that gate its flags, and the device
+    nodes mounted into it can never disagree.
+
+    A PROFILE carries no hardware placement in 1.0. ``profile.device_class`` /
+    ``profile.backend`` survive on :class:`~hal0.config.schema.ProfileConfig` only
+    as INERT match-only fit hints for :func:`hal0.model_fit.profile_fits_slot`
+    (and for the shipped ``.hal0profile.json`` artifacts whose checksums cover
+    them). They are read here ONLY as the last-resort fallback for a hand-built
+    / pre-pivot ``slot_cfg`` dict that declares no ``device`` at all — every
+    real ``SlotConfig`` has one (``device`` defaults to
+    :data:`~hal0.model_meta.DEFAULT_DEVICE`), so on a real box the profile never
+    contributes.
+    """
     if isinstance(slot_cfg, Mapping):
-        # 1.0 profiles do not select hardware. Derive the runtime backend
-        # from the slot's authoritative device; retain the legacy backend
-        # mirror only for pre-pivot TOMLs that have no device.
+        # 1.0: the slot's ``device`` enum is the authoritative hardware fact.
         device = slot_cfg.get("device")
         if isinstance(device, str) and device:
             from hal0.model_meta import device_to_backend
 
-            _recipe, backend = device_to_backend(device)
-            device_class = "npu" if _recipe == "flm" else ("cpu" if device == "cpu" else "gpu")
-        else:
-            sb = slot_cfg.get("backend")
-            if isinstance(sb, str) and sb:
-                backend = sb
-    return backend, device_class
+            recipe, backend = device_to_backend(device)
+            device_class = "npu" if recipe == "flm" else ("cpu" if device == "cpu" else "gpu")
+            return backend, device_class
+        # No ``device`` at all: a pre-pivot TOML or a hand-built dict. Retain the
+        # pre-pivot slot-level ``backend`` mirror, then the profile's inert hint.
+        sb = slot_cfg.get("backend")
+        if isinstance(sb, str) and sb:
+            return sb, getattr(profile, "device_class", None)
+    return getattr(profile, "backend", None), getattr(profile, "device_class", None)
 
 
 def _binary_runner(slot_cfg: Mapping[str, Any] | None) -> Any | None:
@@ -1036,22 +1053,85 @@ def _profile_runtime_family(slot_cfg: dict[str, Any]) -> str | None:
         return None
 
 
-# Native context-window resolution (chat@4096 incident, 2026-06-15).
+# Context-window resolution (chat@4096 incident, 2026-06-15).
 #
-# A slot whose [model].context_size is unset must NEVER fall through to
-# llama-server's silent 4096 default. We derive the model's native window
-# from the registry (GGUF arch max), cap dense models so an unconfigured
-# slot can't request an impractically large KV cache, and otherwise use a
-# safe floor. Mirrors hal0.hardware.recommend's installer-side policy.
+# A slot must NEVER fall through to llama-server's silent 4096 default. When
+# the model declares no window of its own we derive it from the registry's
+# GGUF arch max, cap dense models so an unconfigured slot can't request an
+# impractically large KV cache, and otherwise use a safe floor. Mirrors
+# hal0.hardware.recommend's installer-side policy.
 _CTX_SAFE_FALLBACK = 8192
 _CTX_DENSE_CAP = 32768
 
+#: Plausibility bounds for an EXPLICIT ``defaults.context_size`` on the launch
+#: path (#1414). Mirrors the write-boundary range check so the two agree; kept
+#: as a separate launch-side guard on purpose, because the write boundary can
+#: only screen NEW writes — rows persisted before that screen existed (0, -1,
+#: 99999999 all returned HTTP 200) are deliberately left readable so they stay
+#: fixable, which means they are still on disk and still reach this function.
+#:
+#: Before the v1.0 ownership flip the damage was masked: the slot's
+#: ``[model].context_size`` won outright, so a slot with a sane value covered
+#: for a garbage model row. Now the MODEL is authoritative and a bad value goes
+#: straight to ``--ctx-size``, where -1 or 99999999 is a slot that never warms.
+#: Making the model the owner without this guard would have ENTRENCHED #1414.
+_CTX_MIN_PLAUSIBLE = 128
+_CTX_MAX_PLAUSIBLE = 2**24
+
+
+def _model_declared_ctx(model_info: dict[str, Any]) -> int | None:
+    """The MODEL's own explicit context window (``defaults.context_size``).
+
+    This is the authoritative value under the v1.0 ownership split — an
+    operator's deliberate, model-scoped choice made in the model drawer. It is
+    NOT dense-capped: an explicit number means what it says.
+
+    An unparseable or implausible value (outside
+    ``[_CTX_MIN_PLAUSIBLE, _CTX_MAX_PLAUSIBLE]``) is treated as ABSENT, not
+    clamped — a half-applied garbage number is harder to diagnose than falling
+    through to the native window or the safe floor, and the operator's stated
+    intent is unrecoverable either way. Logged at warning so the bad row is
+    visible in ``journalctl -u hal0-api`` instead of surfacing as a slot that
+    silently never warms.
+    """
+    defaults = model_info.get("defaults")
+    if not isinstance(defaults, dict) or not defaults.get("context_size"):
+        return None
+    raw = defaults["context_size"]
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "slot.context_size_unparseable",
+            extra={
+                "raw": repr(raw),
+                "hint": "model defaults.context_size is not a number; ignoring it and "
+                "falling back to the model's native window. Fix it in the model drawer.",
+            },
+        )
+        return None
+    if not (_CTX_MIN_PLAUSIBLE <= value <= _CTX_MAX_PLAUSIBLE):
+        log.warning(
+            "slot.context_size_implausible",
+            extra={
+                "value": value,
+                "min": _CTX_MIN_PLAUSIBLE,
+                "max": _CTX_MAX_PLAUSIBLE,
+                "hint": "model defaults.context_size is outside the plausible range; "
+                "ignoring it and falling back to the model's native window. Fix it in "
+                "the model drawer.",
+            },
+        )
+        return None
+    return value
+
 
 def _native_ctx(model_info: dict[str, Any]) -> int | None:
-    """Best-effort native context window for a model, or None if unknown.
+    """The model's INTRINSIC native window (registry ``metadata.context_length``).
 
-    GGUF arch max (registry metadata.context_length) is authoritative;
-    a model's own defaults.context_size is the secondary source.
+    Read straight off the GGUF arch max at import time — still a MODEL fact, but
+    a derived one, so it only applies when nobody made an explicit choice, and it
+    is dense-capped by the caller.
     """
     md = model_info.get("metadata")
     if isinstance(md, dict) and md.get("context_length"):
@@ -1059,29 +1139,99 @@ def _native_ctx(model_info: dict[str, Any]) -> int | None:
             return int(md["context_length"])
         except (TypeError, ValueError):
             pass
-    defaults = model_info.get("defaults")
-    if isinstance(defaults, dict) and defaults.get("context_size"):
-        try:
-            return int(defaults["context_size"])
-        except (TypeError, ValueError):
-            pass
     return None
 
 
-def _resolve_context_size(explicit: int | None, model_info: dict[str, Any]) -> int:
-    """The slot's effective context window.
+def _resolve_context_size(
+    slot_ceiling: int | None,
+    model_info: dict[str, Any],
+    *,
+    slot_name: str = "",
+) -> int:
+    """The slot's effective context window — the MODEL is authoritative.
 
-    The explicit slot value wins when set; otherwise derive the model's
-    native window (dense-capped); otherwise a safe _CTX_SAFE_FALLBACK.
-    Guarantees a non-None int so the slot never silently inherits
-    llama-server's 4096 default.
+    v1.0 ownership split: **the MODEL owns context size.** Before this, a slot's
+    ``[model].context_size`` won OUTRIGHT over everything, so two drawers
+    (model + slot) each exposed a "Context size" control with no indication that
+    the slot silently overrode the model. Precedence is now, highest first:
+
+    1. ``model_info["defaults"]["context_size"]`` — the model's own explicit
+       window (:func:`_model_declared_ctx`). Authoritative, NOT dense-capped —
+       but an unparseable or implausible value is ignored rather than launched
+       (#1414; see :data:`_CTX_MIN_PLAUSIBLE`).
+    2. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
+       window (:func:`_native_ctx`), dense-capped at :data:`_CTX_DENSE_CAP`.
+       Still a model fact, but a *derived* one, so an explicit choice outranks
+       it — the reverse of the pre-1.0 order, which let a 262144-token arch max
+       shadow a deliberate ``defaults.context_size``.
+    3. :data:`_CTX_SAFE_FALLBACK` (8192) — never llama-server's silent 4096.
+
+    ``slot_ceiling`` (the on-disk ``[model].context_size``) is NO LONGER an
+    override. It is honored only as a **hardware CEILING**: the slot owns
+    hardware, and a slot-level window written by
+    :func:`hal0.hardware.recommend.recommend_primary_slot` /
+    :mod:`hal0.install.orchestrate` is a VRAM-budget clamp computed for this
+    box's memory (#1108). Dropping it outright would let a model's own larger
+    window reopen the first-warm OOM those clamps exist to prevent. So the
+    resolved value is capped at the slot ceiling but can never be RAISED by it:
+
+        effective = min(model_authoritative, slot_ceiling)
+
+    Net effect on a box that already has a slot-level ``context_size`` on disk:
+    where the clamp was below the model's window (the installer's case) the
+    effective context is UNCHANGED; where the slot was silently inflating the
+    model's window (the dual-ownership bug) it drops to what the model asked
+    for. The effective context can therefore only stay the same or shrink —
+    never grow — so no box gains a KV cache it cannot hold. Every case where
+    the ceiling actually changes the answer is logged, so the change is visible
+    in ``journalctl -u hal0-api`` rather than silent.
+
+    Guarantees a non-None int.
     """
-    if explicit is not None:
-        return int(explicit)
-    native = _native_ctx(model_info)
-    if native:
-        return min(native, _CTX_DENSE_CAP)
-    return _CTX_SAFE_FALLBACK
+    declared = _model_declared_ctx(model_info)
+    if declared is not None:
+        resolved, source = declared, "model.defaults.context_size"
+    else:
+        native = _native_ctx(model_info)
+        if native:
+            resolved, source = min(native, _CTX_DENSE_CAP), "model.metadata.context_length"
+        else:
+            resolved, source = _CTX_SAFE_FALLBACK, "safe_fallback"
+
+    if slot_ceiling is None:
+        return resolved
+
+    ceiling = int(slot_ceiling)
+    if ceiling < resolved:
+        log.info(
+            "slot.context_size_clamped_by_slot",
+            extra={
+                "slot": slot_name,
+                "model_ctx": resolved,
+                "model_ctx_source": source,
+                "slot_ceiling": ceiling,
+                "effective": ceiling,
+                "hint": "the slot's [model].context_size is a hardware ceiling now, "
+                "not an override; raise it (or lower the model's context size) to change "
+                "the effective window",
+            },
+        )
+        return ceiling
+    if ceiling > resolved:
+        log.warning(
+            "slot.context_size_no_longer_overrides",
+            extra={
+                "slot": slot_name,
+                "model_ctx": resolved,
+                "model_ctx_source": source,
+                "slot_context_size": ceiling,
+                "effective": resolved,
+                "hint": "the MODEL owns context size in 1.0; this slot's larger "
+                "[model].context_size no longer wins. Set the window on the model to "
+                "restore it.",
+            },
+        )
+    return resolved
 
 
 def _resolve_llama_scalars(
@@ -1110,6 +1260,13 @@ def _resolve_llama_scalars(
     # the mtp/jinja capability gates below, so they can never drift onto two
     # different runners (§7.1a / ML-5).
     runner = _effective_runner(slot_cfg, profile, model_info)
+    # SINGLE SOURCE for "what hardware class is this launch" — the same helper
+    # ``_effective_runner`` uses, so the image and the device-node passthrough
+    # gate in ``container_spec`` can never drift onto two different hardware
+    # classes. Slot-derived; the profile contributes nothing on a real box.
+    effective_backend, effective_device_class = _effective_backend_and_device_class(
+        slot_cfg, profile
+    )
     effective_mtp = _effective_mtp(model_info, runner, log_ineligible=for_launch)
     # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
     # resolving the profile's flags — the profile flag resolver
@@ -1137,7 +1294,13 @@ def _resolve_llama_scalars(
     model_table = slot_cfg.get("model") or {}
     if not isinstance(model_table, dict):
         model_table = {}
-    context_size = _resolve_context_size(model_table.get("context_size"), model_info)
+    # MODEL-authoritative context window; the slot's on-disk [model].context_size
+    # is a hardware ceiling only, never an override (see _resolve_context_size).
+    context_size = _resolve_context_size(
+        model_table.get("context_size"),
+        model_info,
+        slot_name=str(slot_cfg.get("name") or ""),
+    )
 
     server_table = slot_cfg.get("server") or {}
     if not isinstance(server_table, dict):
@@ -1271,10 +1434,19 @@ def _resolve_llama_scalars(
         "slot_threads": slot_threads,
         # slot_parallel stays inert (spec-flags-ownership §2 — sunset).
         "slot_parallel": None,
-        "device_class": str(getattr(profile, "device_class", "gpu") or "gpu"),
-        # GPU vendor discriminator: the profile's declared backend (rocm /
-        # vulkan / cuda / None) — configuration, not host probing.
-        "profile_backend": getattr(profile, "backend", None),
+        # HARDWARE CLASS + GPU-vendor discriminator (spec-hw-slot-ownership §2):
+        # derived from the SLOT's ``device`` enum via the one shared helper, NOT
+        # read off the profile. A profile is a model-tuning bundle and selects no
+        # hardware; before this, a ``cpu-chat`` profile with device_class unset
+        # still fell through ``or "gpu"`` and requested /dev/kfd + /dev/dri on a
+        # ``device="cpu"`` slot. The ``or "gpu"`` floor is retained ONLY for a
+        # slot_cfg that declares no device at all (hand-built dict / pre-pivot
+        # TOML) so an old GPU slot is never stranded on CPU.
+        "device_class": str(effective_device_class or "gpu"),
+        "backend": effective_backend,
+        # Back-compat mirror of ``backend`` under its former name; some callers
+        # (and the ``is_nvidia_gpu_device`` parameter) still say "profile".
+        "profile_backend": effective_backend,
         "device": str(slot_cfg.get("device") or ""),
         "gpu_index": gpu_index,
     }
@@ -1312,7 +1484,7 @@ class ContainerProvider(Provider):
 
     async def infer(self, port: int, body: dict[str, Any]) -> dict[str, Any]:
         """Direct inference passthrough (used by tests; dispatcher is primary path)."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with async_client(timeout=30.0) as client:
             resp = await client.post(f"http://127.0.0.1:{port}/v1/chat/completions", json=body)
             resp.raise_for_status()
             return resp.json()  # type: ignore[no-any-return]
@@ -1330,14 +1502,17 @@ class ContainerProvider(Provider):
         the health-check override are all included, so what loads matches what
         the plan describes (no GPU-special argv assembly elsewhere).
 
-        GPU passthrough branches by VENDOR, decided from the slot's declared
-        device/profile (never by probing at spec-build time):
+        GPU passthrough branches by VENDOR, decided from the SLOT's declared
+        ``device`` enum (never by probing at spec-build time, and never from the
+        profile — spec-hw-slot-ownership §2: a profile is a model-tuning bundle
+        and selects no hardware):
 
-        * AMD/other (default): device nodes + group GIDs are included ONLY
-          for gpu/img profiles and are existence-filtered — a cpu (or npu)
-          ``device_class`` profile gets no ``/dev/kfd`` / ``/dev/dri``
-          passthrough or ``--group-add``.
-        * NVIDIA (``device=gpu-cuda`` or profile ``backend="cuda"``): CDI —
+        * AMD/other (default): device nodes + group GIDs are included ONLY when
+          the slot's device resolves to a gpu/img class, and are
+          existence-filtered — a ``device="cpu"`` (or ``"npu"``) slot gets no
+          ``/dev/kfd`` / ``/dev/dri`` passthrough and no ``--group-add``,
+          whatever its profile says.
+        * NVIDIA (``device=gpu-cuda``): CDI —
           ``--device nvidia.com/gpu=all`` (per-index ``nvidia.com/gpu=<n>``
           when ``gpu_index`` is set). CDI names are not paths, so no
           existence filter and no GID ``--group-add`` (the CDI spec injects
@@ -1352,12 +1527,16 @@ class ContainerProvider(Provider):
         model_path = _resolve_model_path(model_info)
         port = int(slot_cfg.get("port", 0))
 
-        # GPU plumbing gate (#674/CPU-profile fix): only gpu/img profiles get
-        # GPU passthrough. On the AMD path only device paths that actually
-        # exist on this host are passed (podman errors on a non-existent
-        # --device); CDI entries are names, not paths — passed verbatim.
+        # GPU plumbing gate (#674/CPU-profile fix): only a gpu/img-class SLOT
+        # gets GPU passthrough. ``scalars["device_class"]`` is derived from the
+        # slot's ``device`` enum by ``_effective_backend_and_device_class`` — a
+        # profile's inert ``device_class``/``backend`` hint can no longer mount
+        # /dev/kfd + /dev/dri into a ``device="cpu"`` slot's container. On the
+        # AMD path only device paths that actually exist on this host are passed
+        # (podman errors on a non-existent --device); CDI entries are names, not
+        # paths — passed verbatim.
         if scalars["device_class"] in ("gpu", "img"):
-            if is_nvidia_gpu_device(scalars["device"], scalars["profile_backend"]):
+            if is_nvidia_gpu_device(scalars["device"], scalars["backend"]):
                 devices = nvidia_cdi_devices(scalars["gpu_index"])
                 group_ids = []
             else:
@@ -1476,7 +1655,7 @@ class ContainerProvider(Provider):
         health_url = f"http://127.0.0.1:{port}/health"
         models_url = f"http://127.0.0.1:{port}/v1/models"
         try:
-            async with httpx.AsyncClient(timeout=_HEALTH_REQUEST_TIMEOUT_S) as client:
+            async with async_client(timeout=_HEALTH_REQUEST_TIMEOUT_S) as client:
                 resp = await client.get(health_url)
                 if resp.status_code == 200:
                     try:

@@ -1,6 +1,6 @@
 ---
 title: Manage slots
-description: Create, load, swap, restart, edit, and delete inference slots with the hal0 CLI. Each slot is a podman container behind a systemd unit and the local API.
+description: Create, load, swap, restart, rename, edit, and delete inference slots with the hal0 CLI or the dashboard's inline pencil editor. Each slot is a podman container behind a systemd unit and the local API.
 sidebar:
   order: 10
 ---
@@ -19,50 +19,31 @@ non-zero with an "API unreachable" message rather than acting on disk
 directly.
 </Aside>
 
-## List slots
+## List and inspect
 
 ```sh
-hal0 slot list
-```
-
-Shows every configured slot with its state, model, backend, port, and
-kind. The slot state machine moves through `offline → pulling → starting → warming → ready → serving → idle` (and `unloading` / `error`). Add `--json` to get
-the raw `/api/slots` payload for scripts:
-
-```sh
+hal0 slot list              # every configured slot: state, model, backend, port, kind
 hal0 slot list --json
+hal0 slot status <name>     # quick human-readable state/model/port check
+hal0 slot show <name>       # full status + on-disk TOML as JSON
+hal0 slot metrics <name>    # live throughput/latency for the slot
+hal0 slot capacity          # aggregate memory/port headroom across all slots
 ```
 
 ![Slot list showing configured slots with state badges, model names, device, and port](/screenshots/slots-inference.png)
 *The slot list view shows live state, assigned model, device, and port for every configured slot.*
 
-## Inspect one slot
-
-```sh
-hal0 slot show agent
-```
-
-Prints the full status **and** the on-disk TOML config as JSON. Use
-`--json` for the unformatted `{status, config}` object.
-
-For a quicker human-readable check (state, model, port), use `hal0 slot
-status`:
-
-```sh
-hal0 slot status agent
-```
-
 `status` also prints a `WARN config drift: ...` line when the container's
-*actual* running launch flags no longer match what hal0 would render today
-— see [Config drift after an update](#config-drift-after-an-update) below.
+*actual* running launch flags no longer match what hal0 would render
+today — see [Config drift after an update](#config-drift-after-an-update).
 
 ![Slot detail panel showing state, model, port, and on-disk TOML config as formatted JSON](/screenshots/slot-detail.png)
 *The slot detail panel combines live status with the persisted TOML config in a single view.*
 
 <Aside type="note">
-`primary` and `chat` are retired slot/role names (ADR-0023) — neither is
-accepted as an alias anymore. The canonical LLM roles are `agent` (the
-capable default/fallback anchor) and `utility` (the cheap helper seeded for
+`primary` and `chat` are retired slot/role names — neither is accepted as
+an alias anymore. The canonical LLM roles are `agent` (the capable
+default/fallback anchor) and `utility` (the cheap helper seeded for
 memory extraction); a custom slot is reachable only by its own name.
 </Aside>
 
@@ -87,13 +68,16 @@ hal0 slot create embed \
 3. **`--model` / `-m`** (required) — the initial model ref to assign.
 
 4. **`--hardware`** — the compute backend: `vulkan`, `rocm`, or `cpu`.
-   When omitted it reads the cached hardware probe
-   (`/etc/hal0/hardware.json`): `vulkan` if no probe has run yet, `cpu` if
-   the probe found no GPU. The slot's `device` field is derived from this:
-   `vulkan → gpu-vulkan`, `rocm → gpu-rocm`, `cpu → cpu`.
+   When omitted it reads the cached hardware probe: `vulkan` if no probe
+   has run yet, `cpu` if the probe found no GPU. This sets the slot's
+   `device` field directly (`vulkan → gpu-vulkan`, `rocm → gpu-rocm`,
+   `cpu → cpu`) — as of v1.0, **the slot owns its hardware grid**
+   (`device`, `n_gpu_layers`, `threads`, `binary`, `image_pin`), not the
+   profile it references. A profile now only supplies flags/image
+   template.
 
 5. **`--port` / `-p`** — the slot's port. Omit it and hal0 auto-assigns
-   the next free port in the `8081–8099` range.
+   the next free port.
 
 6. **`--ctx-size`** — context window in tokens (default `4096`).
 
@@ -105,21 +89,17 @@ start it — follow with `hal0 slot load`.
 <Aside type="note" title="Pinning a GPU on multi-GPU hosts">
 Multi-GPU hosts can pin a slot to one card via the `gpu_index` key in the
 slot's TOML — there's no `--gpu-index` CLI flag and no dashboard field for
-it, so set it by editing `/etc/hal0/slots/<name>.toml` directly (`gpu_index
-= 1`), then `hal0 slot restart <name>`. It maps to
-`HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` on `gpu-rocm`,
-`GGML_VK_VISIBLE_DEVICES` on `gpu-vulkan`, or a CDI `nvidia.com/gpu=<n>`
-device mapping on `gpu-cuda`. Leave it unset (the default) to expose every
-GPU to the container — unchanged pre-multi-GPU behavior.
+it, so set it by editing `/etc/hal0/slots/<name>.toml` directly
+(`gpu_index = 1`), then `hal0 slot restart <name>`.
 </Aside>
 
 <Aside type="caution">
-The legacy `--backend` / `-b` flag historically named the *provider*, not
-the hardware. It is deprecated and hidden. Use `--hardware` for the
-compute device and let `--type` select the provider.
+`--backend` / `-b` is a deprecated alias for `--provider` (the runtime
+label, e.g. `llama-server`/`flm`/`kokoro`) — it does **not** mean compute
+hardware. Use `--hardware` for the device.
 </Aside>
 
-## Load, restart, unload
+## Load, restart, unload, rename
 
 <Tabs>
 <TabItem label="Load">
@@ -142,7 +122,7 @@ hal0 slot restart agent
 ```
 
 Unloads then reloads — used after editing config that the running
-container baked in (ports, backend, ctx size).
+container baked in (ports, hardware grid, ctx size).
 
 </TabItem>
 <TabItem label="Unload">
@@ -154,6 +134,16 @@ hal0 slot unload agent
 Stops the container gracefully and returns the slot to `offline`.
 
 </TabItem>
+<TabItem label="Rename">
+
+```sh
+hal0 slot rename agent primary-llm
+```
+
+The slot's internal id is stable across a rename — only the label
+changes, so references from stacks and activity history stay intact.
+
+</TabItem>
 </Tabs>
 
 ## Swap the model
@@ -162,14 +152,15 @@ Stops the container gracefully and returns the slot to `offline`.
 hal0 slot swap agent --model qwen3.5-9b
 ```
 
-A swap does two things by default:
+A swap does two things by default, as two separate calls:
 
 1. **Hot-swap** the running slot to the new model (`POST
    /api/slots/{name}/swap`).
 2. **Persist** the new default to the slot's on-disk config so it
-   survives a restart.
+   survives a restart (`PUT /api/install/slots/{name}/model`).
 
-Pass `--no-persist` to try a model briefly without changing the default:
+Pass `--no-persist` to try a model briefly without changing the default —
+it reverts on the slot's next restart:
 
 ```sh
 hal0 slot swap agent --model phi3-mini --no-persist
@@ -178,12 +169,11 @@ hal0 slot swap agent --model phi3-mini --no-persist
 If the hot-swap succeeds but the persist step fails, the runtime swap is
 left in place and the failure is surfaced so you can retry.
 
-A swap also runs two best-effort adjustments before the reload: it adopts
-the new model's preferred profile (`model.defaults.profile`) when it's
-compatible with the slot's device/type — the slot's hardware is never
-flipped to fit a model — and it clears a forced `mtp = true` back to Auto
-if the new model doesn't actually ship MTP heads, so a stale forced-on
-override can't crash the next launch.
+## No `enabled` flag — a default model is the activation signal
+
+A slot has no separate `enabled` boolean. A non-empty `[model].default`
+on the slot **is** what makes it active; clearing the default (or never
+setting one) is how you take a slot out of rotation without deleting it.
 
 ## Edit slot config
 
@@ -193,161 +183,61 @@ hal0 slot edit embed --hardware rocm
 ```
 
 Pass any subset of `--model`, `--port`, `--ctx-size`, `--provider`,
-`--hardware`. At least one is required. Changes that the container baked
-in (port, backend) take effect on the next `restart`.
+`--hardware`. At least one is required. Changes the container baked in
+(port, hardware grid) take effect on the next `restart`.
+
+## Dashboard: the inline model-edit pencil
+
+Every slot card in the dashboard's **Slots** view carries a pencil icon
+next to its model control. Click it to open the docked **model drawer**
+directly for the slot's currently bound model — its launch flags, chat
+template, and capabilities, without leaving the slots view. The pencil is
+disabled when no model is bound yet.
+
+This is a separate action from the model dropdown on the same card, which
+swaps *which* model the slot runs — the pencil edits the *bound* model's
+own settings.
+
+The Edit Slot drawer has its own model-edit entry point too: opening it
+docks a second model drawer to the left of the slot drawer, so your
+in-progress slot edits stay visible while you tune the model.
 
 <Aside type="note" title="Editing raw flags in the dashboard">
-The dashboard's slot edit drawer can also set per-slot `[server] extra_args`
-(raw launch flags) — there's no CLI flag for this; it writes via
-`PUT /api/slots/{name}/config`. The drawer's **Resolved command** panel
-shows the real, live podman argv (not a client-side guess); if you type new
-`extra_args` before saving, the preview dims out and a **Regenerate** button
-appears — it persists just the `extra_args` (no restart) and refreshes the
-preview so it reflects your pending flags. Actually applying changed flags
-to a *running* container still needs a restart (Save with a profile/template
-change triggers one automatically; otherwise use `hal0 slot restart`). The
-drawer's context-size field seeds from the slot's *persisted*
-`[model].context_size` (not the live runtime metric, which reads `0` on a
-slot that isn't currently serving) and is only written back on Save if you
-actually changed it — so saving an unrelated field (profile, extra_args) no
-longer clobbers the stored context window on a cold reload or model swap.
-The CLI `--ctx-size` default remains `4096`.
-</Aside>
-
-## Dashboard edit drawers
-
-The dashboard's slot and model-recipe edit drawers expose fields the `hal0
-slot` / `hal0 model` CLIs don't have flags for.
-
-### MTP tri-state (Auto / On / Off)
-
-On any `llm`-type slot, the edit drawer's **MTP** control is a three-way
-segmented toggle — **Auto**, **On**, **Off** — that replaced the old binary
-MTP pill. It's always visible (not hidden when the current model looks
-ineligible), so an operator can discover it, and it writes
-`PUT /api/slots/{name}/config {"mtp": null|true|false}` (`null` = Auto) with
-a non-blocking background restart.
-
-A live hint under the control explains the *effective* decision:
-
-- **Auto · MTP active** — the profile opts in and the model ships MTP heads.
-- **Auto · off — ⟨reason⟩** — one of "model has no MTP heads and profile
-  doesn't enable MTP", "model has no MTP heads", or "profile doesn't enable
-  MTP".
-- **Forced on** / **Forced off** — an explicit override, regardless of
-  eligibility.
-
-Forcing MTP on for a model that doesn't advertise MTP support shows an
-extra warning ("model doesn't advertise MTP heads — launch fails unless it
-truly has them") — it's an intentional escape hatch for MTP-capable models
-the eligibility heuristics miss, not a guardrail against it. There's no
-`--mtp` CLI flag; set it from the drawer, a stack row (below), or by hand-
-editing the slot TOML (`mtp = true|false`, or omit the key entirely for
-Auto — TOML has no null, so "back to Auto" always means *deleting* the key,
-never writing `mtp = null`).
-
-### Image override
-
-A slot's container image resolves in three steps — first match wins:
-
-1. **`image`** — a top-level string in the slot TOML (distinct from the
-   `[image]` *table*, which is image-gen settings), set from the drawer's
-   **Image** row: a free-form text input with a live `will use:` preview of
-   the effective ref, plus a Reset button that clears the override.
-2. **`profile.image`** — the image pinned by the slot's runtime profile.
-3. **The code default** (`DEFAULT_ROCMFPX_IMAGE`) — so image bumps ship as
-   a code-only release and slots without an override track them
-   automatically.
-
-Leave the override empty unless you deliberately need to pin: `hal0 update`
-retags only pins that exactly match a *former* default image (stale
-materialized debris); any other value is treated as your choice and kept.
-
-### Other drawer-only fields
-
-- **Reasoning toggle** (llm slots) — instant-apply
-  `PUT /api/slots/{name}/config {enable_thinking}`, no restart — applies to
-  the next message.
-- **Per-slot vision toggle** — shown only when the bound model ships an
-  `mmproj` sidecar, defaults on (instant-apply; drops or reloads the ~0.9 GB
-  vision projector and restarts the container in the background).
-- **NPU modality toggles** — on `device = npu` slots, `asr` and `embed`
-  toggles write the slot's `[npu]` table (instant-apply, background
-  restart).
-- **Model recipe editor** — `capabilities`, `backends`, the `mmproj` path,
-  and the `hf_repo`/`hf_filename` re-pull coordinates are all editable from
-  the Models view, not just the registry API.
-- **Container image** — optional per-slot container-image override via the
-  dashboard EditSlotDrawer's **Image** field (validates registry-ref shape,
-  has a Reset button to clear to default). There is no CLI flag for this; set
-  it via the drawer, or hand-edit `/etc/hal0/slots/<name>.toml` with a
-  top-level `image = "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"` line,
-  then `hal0 slot restart <name>` to apply (launch-time-baked, same as other
-  container flags). Resolution order: `slot.image → profile.image →
-  ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`. Note: `profile.image` is
-  deprecated as of v0.9.5 and is planned for removal from `SEED_PROFILES` in
-  v0.9.6 — operators with custom profiles should migrate to the per-slot
-  override instead.
-
-<Aside type="note">
-`rope_freq_base` is not editable from either drawer — it's deprecated and
-inert (the launch path never emits it, on both the per-model default and the
-slot `[model]` table). Override RoPE base via `[server] extra_args` instead,
-e.g. `--rope-freq-base 10000`.
+`[server].extra_args` on a slot is legacy TOML round-trip only as of
+v1.0 — it's inert at launch. The live tuning surface for launch flags is
+the model's own `defaults.extra_args`, edited from the model drawer (see
+[Choose models](/docs/guides/choose-models)) — this is also where
+`[server].extra_args` writes are screened against the hardware/managed-flag
+denylist, see [Edit configuration](/docs/guides/configure#server-extra_args-is-screened-everywhere).
 </Aside>
 
 ## Editing multiple slots at once: Stacks
 
 The dashboard's **Stacks** view (there's no `hal0 stack` CLI command — it's
-dashboard/API only, `GET/POST/PUT/DELETE /api/stacks[/{slug}]`) lets you edit
-several slots as one named, portable bundle instead of one at a time. A
-stack row is effectively a slot-edit-drawer's worth of fields — model,
-device, profile, vision, MTP, `enable_thinking`, `server.extra_args`, plus
-embed/rerank/stt/tts/vision capability children — captured per slot name.
+dashboard/API only, `GET/POST/PUT/DELETE /api/stacks[/{slug}]`) lets you
+edit several slots as one named, portable bundle instead of one at a
+time. **Apply** (`POST /api/stacks/{slug}/apply`) creates any slot named
+in the stack that doesn't exist yet, then *converges* the live slot set —
+applying a stack is a declarative replace of what's currently running,
+not a merge. `[server].extra_args` set from a stack row goes through the
+same write-boundary screen as a direct `hal0 slot edit` — a blocked flag
+fails that one slot's convergence without aborting the rest of the apply.
 
-- **Row editor** — Slot name (existing slot, or a new one created on
-  apply), Model, Device, Profile (filtered to the row's device class;
-  incompatible profiles still show in a disabled "other device class"
-  group so a pre-existing cross-class binding is never trapped), and an
-  **MTP tri-state row** using the same Auto/On/Off control as the slot
-  drawer. New rows default `mtp` to Auto. Unlike the slot drawer (where MTP
-  is always shown), a stack row's MTP control only appears when it's
-  relevant — the row's model is MTP-eligible, its profile opts in, or an
-  explicit override already exists.
-- **Apply** (`POST /api/stacks/{slug}/apply`) — creates any slot named in
-  the stack that doesn't exist yet, then *converges* the live slot set:
-  loads/swaps/skips each primary slot, applies each enabled capability
-  child (embed/rerank/stt/tts/img/vision), and **unloads every other
-  dispatchable slot not mentioned in the stack** — applying a stack is a
-  declarative replace of what's currently running, not a merge.
-- **Drift** — the active stack shows **clean** (disk matches what was
-  applied), **modified since apply** (a slot was hand-edited afterward, or
-  the active stack was deleted), or **degraded** (config matches, but
-  convergence hit a per-slot runtime error) on its Hero card.
-- **Export / Import / Snapshot** — export downloads a checksummed
-  `{slug}.hal0stack.json`; import dry-runs first (classifies every
-  referenced model `present` / `pullable` / `unresolvable`, and a local
-  profile of the same name always wins over the imported one); Snapshot
-  captures your *current* running slot/capability config into a new draft
-  stack named "Snapshot".
-- The three seed stacks (`saber`, `forge`, `pi`) are immutable — clone one
-  under a new name to customize it.
+See [Stacks](/docs/concepts/stacks) for the full concept — row fields,
+plan/converge phases, drift states, export/import/snapshot.
 
 ## Config drift after an update
 
-A slot's systemd unit bakes its launch flags in **at load time** — updating
-hal0 changes the code that *would* render that unit, not the unit file
-itself. As of v0.8.5b2, `hal0 update` (and `install.sh`) automatically
-re-render every existing slot unit afterward (rewrite + one `daemon-reload`)
-so the next start of any slot — manual restart, crash-restart, or reboot —
-picks up the current flags. This **never bounces an already-running
-container**, by design: a slot that was serving when the update landed
-keeps running its old argv until its *next* load, swap, or restart.
+A slot's systemd unit bakes its launch flags in **at load time** —
+updating hal0 changes the code that *would* render that unit, not the
+unit file itself. `hal0 update` re-renders every existing slot unit
+afterward, but never bounces an already-running container — a slot that
+was serving when the update landed keeps running its old argv until its
+*next* load, swap, or restart.
 
 `hal0 slot status <name>` is how you check whether a running slot is in
-that stale window — it prints `WARN config drift: ...` when the container's
-live argv (read via `podman inspect`) no longer matches what hal0 would
-render today, comparing `--ctx-size`, `--model`, `--alias`, `-b`/`-ub`. If
+that stale window — it prints `WARN config drift: ...` when the
+container's live argv no longer matches what hal0 would render today. If
 you see it, `hal0 slot restart <name>` (or a dashboard restart) clears it.
 
 ## Delete a slot
@@ -361,72 +251,35 @@ Stops the unit and removes the config. You'll be asked to confirm; pass
 
 <Aside type="note">
 Seeded slots (`utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`,
-`agent`) are reserved and cannot be deleted — the API rejects the request.
-To stop one of these from serving, disable its capability in
-`capabilities.toml` (or clear the slot's `[model].default` — a slot with no
-model bound is inactive by definition) instead of trying to remove it.
+`agent`) are reserved and cannot be deleted — the API rejects the
+request. Clear the slot's default model instead to take it out of
+rotation.
 </Aside>
-
-## Idle eviction and memory pressure
-
-Two independent timers can idle-evict a slot, freeing the host RAM
-llama-server statically allocated at `ctx_size` (unloading is the only way
-to reclaim it):
-
-- **Per-slot idle TTL** — `idle_timeout_s` (default `300`s, `0` disables).
-  A slot idle past this is unloaded. The `agent`, `utility`, and `npu`
-  anchors are pinned by default (exempt from TTL eviction) unless you set
-  an explicit `idle_timeout_s` on them yourself — an explicit `0` still
-  pins.
-- **Host memory pressure** — `[slots].evict_pressure_mb` (default `8192`
-  MiB, `0` disables). When host `MemAvailable` drops below this floor,
-  idle LRU-eligible slots are evicted oldest-first until free RAM recovers.
-
-An idle-evicted slot isn't gone: the dispatcher reloads it transparently on
-its next request (wake-on-request), including `embed` / `rerank` / `tts`
-slots — these previously 404'd until a manual `hal0 slot load` after an
-idle eviction. The one exception is a slot **disabled** via a capability
-toggle: hal0 clears the slot's `[model].default` (#1369), and a slot with no
-model bound is excluded from wake-on-request, so it stays off until you
-re-enable the capability — a disable genuinely sticks instead of being
-silently woken by the next matching request. Your model pick isn't lost; it
-stays in `capabilities.toml` and is rebound on re-enable.
-
-See [Configuration schema reference](/docs/reference/config-schema) for
-`idle_timeout_s` and `evict_pressure_mb`.
-
-## Dashboard telemetry
-
-On the main dashboard, the **Power & Thermal** card (GPU clock MHz,
-temperature, power draw) and the **Per-Slot Throughput** card are on by
-default, and the **Utilization** card's iGPU row carries a live clock/temp
-caption alongside its usage bar. All three render a "pending driver" note
-instead of a fake reading when a metric isn't available on your host.
 
 ## Stream logs
 
 ```sh
-# last 200 lines
-hal0 slot logs agent
-
-# follow live (SSE tail)
-hal0 slot logs agent --follow
-
-# more history
-hal0 slot logs agent --lines 1000
+hal0 slot logs agent               # last 200 lines
+hal0 slot logs agent --follow      # -f, live SSE tail
+hal0 slot logs agent --lines 1000  # -n, more history
 ```
 
-Logs come from the slot's `hal0-slot@<name>.service` journal. On a host
-without `journalctl` the command returns an empty result with a hint
-rather than an error.
+Logs come from the slot's `hal0-slot@<name>.service` journal.
+
+## Migration helpers
+
+A handful of one-shot `hal0 slot migrate-*` commands exist for bringing
+older on-disk slot config forward through the v1.0 field-ownership
+changes: `migrate-id-keying`, `migrate-hw`, `migrate-caps`,
+`migrate-flags`, `migrate-enabled-removal`. `hal0 update` runs the ones a
+release needs automatically — you shouldn't need these by hand unless
+you're recovering a config that skipped a release.
 
 ## Related
 
 - [Pull and register models](/docs/guides/pull-and-register-models) — get
   a model into the registry before assigning it.
 - [Choose models](/docs/guides/choose-models) — recommended picks per
-  slot and how fit is evaluated.
-- [Slot lifecycle reference](/docs/reference/slot-lifecycle) — the full
-  state machine and every legal transition between states.
-- [Stacks](/docs/concepts/stacks) — the concept behind this page's Stacks
-  section: row fields, the plan/converge phases, and drift states.
+  slot, the model-owned launch defaults, and the dashboard's kebab menu.
+- [Edit configuration](/docs/guides/configure) — the slot-owned hardware
+  grid and where `[server].extra_args` is screened.

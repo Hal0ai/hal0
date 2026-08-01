@@ -118,7 +118,7 @@ function ctxInput(page: Page) {
   })
   return modelGroup
     .locator('.form-row')
-    .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(override\)$/ }) })
+    .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }) })
     .locator('input')
 }
 

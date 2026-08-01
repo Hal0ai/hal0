@@ -169,3 +169,103 @@ async def test_update_config_sole_default_does_not_self_conflict(slot_root: Path
     _write_slot(slot_root, "a", slot_type="llm", default=True)
     sm = SlotManager()
     await sm.update_config("a", {"model": {"context_size": 4096}})
+
+
+# ── First-of-type auto-default (create modal no longer asks) ───────────────
+
+
+@pytest.mark.asyncio
+async def test_create_first_slot_of_type_auto_defaults(slot_root: Path) -> None:
+    """The FIRST slot of a type becomes that type's default with no ask.
+
+    The create modal dropped its "default for <type>?" checkbox, so a create
+    body carries no ``default`` key at all. With no peer of the same type on
+    disk there is nothing to conflict with — the slot silently becomes the
+    type's default so routing has something to resolve.
+    """
+    sm = SlotManager()
+    await sm.create(
+        "a",
+        {
+            "name": "a",
+            "port": 8083,
+            "device": "gpu-rocm",
+            "type": "llm",
+            "model": {"default": "qwen3-1b"},
+        },
+    )
+    assert "default = true" in (slot_root / "a.toml").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_create_second_slot_of_type_is_not_auto_defaulted(slot_root: Path) -> None:
+    """A second slot of a type stays undefaulted — a peer already exists.
+
+    True regardless of whether the existing peer is itself the default: the
+    auto-default only fires when the type has no slot at all.
+    """
+    _write_slot(slot_root, "a", slot_type="llm", default=False)
+    sm = SlotManager()
+    await sm.create(
+        "b",
+        {
+            "name": "b",
+            "port": 8083,
+            "device": "gpu-rocm",
+            "type": "llm",
+            "model": {"default": "qwen3-1b"},
+        },
+    )
+    assert "default = true" not in (slot_root / "b.toml").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_create_second_slot_of_type_with_default_peer_is_not_auto_defaulted(
+    slot_root: Path,
+) -> None:
+    """Same, with the existing peer holding the default marker."""
+    _write_slot(slot_root, "a", slot_type="llm", default=True)
+    sm = SlotManager()
+    await sm.create(
+        "b",
+        {
+            "name": "b",
+            "port": 8083,
+            "device": "gpu-rocm",
+            "type": "llm",
+            "model": {"default": "qwen3-1b"},
+        },
+    )
+    assert "default = true" not in (slot_root / "b.toml").read_text(encoding="utf-8")
+
+
+# ── changed_keys: an unrelated PATCH is not blocked by stale disk state ────
+
+
+@pytest.mark.asyncio
+async def test_update_config_unrelated_patch_survives_stale_duplicate_defaults(
+    slot_root: Path,
+) -> None:
+    """A PATCH that doesn't touch ``default`` is never blocked by SC-4.
+
+    Two ``default=true`` peers of the same type on disk is an invariant
+    violation that predates (or raced) this guard. Re-litigating it on an
+    unrelated write bricks legitimate edits: the write is not moving the
+    invariant, so it is not this write's problem to fix or be blocked by.
+    """
+    _write_slot(slot_root, "a", slot_type="llm", default=True)
+    _write_slot(slot_root, "b", slot_type="llm", default=True)
+    sm = SlotManager()
+    await sm.update_config("b", {"n_gpu_layers": 40})
+    assert "n_gpu_layers = 40" in (slot_root / "b.toml").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_update_config_explicit_default_still_guarded(slot_root: Path) -> None:
+    """A PATCH that DOES set ``default=true`` is still refused on a conflict."""
+    _write_slot(slot_root, "a", slot_type="llm", default=True)
+    _write_slot(slot_root, "b", slot_type="llm", default=False)
+    sm = SlotManager()
+    with pytest.raises(SlotConfigError) as exc:
+        await sm.update_config("b", {"default": True})
+    assert "a" in exc.value.details["conflicting_slots"]

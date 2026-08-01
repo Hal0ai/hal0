@@ -1,260 +1,127 @@
 ---
-title: Devices, providers & profiles
-description: Valid devices, providers, and the seed profile catalog — the slot matrix reference covering device-to-profile defaults and toolbox container image refs.
+title: Providers, profiles & devices reference
+description: "Disambiguates hal0's two unrelated 'provider' concepts, the profile template system, and the canonical device taxonomy — verified against src/hal0/providers, src/hal0/upstreams, src/hal0/profiles, and src/hal0/model_meta in the v1.0 tree."
 sidebar:
-  order: 40
+  order: 70
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-A hal0 slot is described by three orthogonal facts: a **device** (the hardware
-preference), a **provider** (the inference runtime label), and a **profile** (a
-reusable container template — image plus bench-tuned flags). This page is the
-authoritative reference for the valid values of each and how they connect.
-
-<Aside type="caution" title="device, not backend">
-The legacy `backend` field is deprecated and accepted for one migration release
-only. Author every slot with `device`. A slot TOML that sets `backend` without
-`device` logs a deprecation warning and auto-fills `device`. (The legacy enum
-also accepts `cuda` now, so a `gpu-cuda` device round-trips through the same
-one-release write-back as every other device.)
+<Aside type="caution">
+hal0's source has **two unrelated "provider" concepts**. This page covers both,
+clearly separated — do not conflate them.
 </Aside>
 
-## Devices
+## (A) Local inference-backend provider
 
-`device` carries hardware intent only. It is validated at config-load time —
-a typo raises a `ValidationError` with the field path.
+`hal0.providers.base.Provider` — the abstract class that runs a slot's inference
+process. Concrete implementations:
 
-| `device`     | Hardware                              | Default provider |
-|--------------|----------------------------------------|------------------|
-| `gpu-rocm`   | AMD GPU via ROCm                      | `llama-server`   |
-| `gpu-vulkan` | Any GPU via Vulkan                    | `llama-server`   |
-| `gpu-cuda`   | NVIDIA GPU via CUDA — **experimental** | `llama-server`   |
-| `cpu`        | CPU-only fallback                     | `llama-server`   |
-| `npu`        | AMD XDNA NPU via FastFlowLM            | `flm`            |
+| Provider | Module | Runs |
+|---|---|---|
+| `ContainerProvider` | `providers/container.py` | llama-server, via podman. |
+| `FLMProvider` | `providers/flm.py` | NPU inference (FastFlowLM). |
+| `ComfyUIProvider` | `providers/comfyui.py` | Image generation. |
+| `KokoroProvider` | `providers/kokoro.py` | TTS. |
+| `Qwen3TTSProvider` | `providers/qwen3tts.py` | TTS. |
 
-`gpu-rocm` is the package-level default `device` constant, but the hardware
-recommender actively steers Strix Halo (unified memory) installs to `gpu-vulkan`
-for broader compatibility. On an NVIDIA host the recommender picks `gpu-cuda`
-when `nvidia-container-toolkit` (CDI) is present, and falls back to
-`gpu-vulkan` otherwise. The recommender may also select `cpu` or `npu` on
-hosts without ROCm support.
+Every `Provider` is stateless — no per-slot mutable state lives on the instance.
+Abstract methods: `build_env()`, `start_cmd()`, `health()`, `infer()`,
+`container_spec()`. Every slot dispatches through `ContainerProvider`, which builds a
+`RuntimeLaunchPlan` (frozen dataclass: image, command/argv, env, typed mounts with
+read-only/SELinux flags, devices, cap_add, security_opt, port, network_mode,
+extra_args, optional health check) fed to a single Quadlet renderer.
+
+`SlotConfig.provider` (the string field on a slot) is **deprecated** — every slot runs
+as a podman container now, and this field is a legacy label round-tripped for
+backwards compatibility and UI display only. The CLI's `SlotProvider` enum
+(`llama-server, flm, moonshine, kokoro`) names *the inference engine binary that serves
+the slot* — this is distinct from the slot's hardware backend (`vulkan`/`rocm`/`cpu`).
+
+## (B) Remote/cloud upstream provider catalog
+
+This is very likely the concept you mean when you say "provider" in a hal0 config
+context — the built-in template registry for cloud/remote LLM APIs
+(`hal0.upstreams.integrations`). The catalog itself is code, never mutated at runtime;
+user config lives in `/etc/hal0/upstreams.toml`.
+
+| Catalog id | Base URL | Auth style | Category | Capabilities |
+|---|---|---|---|---|
+| `openai` | `https://api.openai.com/v1` | `bearer` | cloud | chat, embed, vision, tools, tts, stt |
+| `anthropic` | `https://api.anthropic.com/v1` | `anthropic` (`x-api-key` + `anthropic-version` header) | cloud | chat, vision, tools |
+| `openrouter` | — | — | cloud | — |
+| `google_ai_studio` | — | — | cloud | — |
+| `deepseek` | — | — | cloud | — |
+| `minimax` | — | — | cloud | — |
+| `ollama` | `http://localhost:11434/v1` | `none` | local | — |
 
 <Aside type="note">
-This page, the dashboard, and the API all draw from one canonical device/
-backend taxonomy, served live at `GET /api/meta/enums` (devices, legacy
-backends, selectable backends, device classes, capabilities, and the
-device→default-profile map). If this page and a running host ever disagree,
-`/api/meta/enums` is the source of truth.
+`anthropic`'s catalog entry speaks the native `/v1/messages` shape only — it needs a
+proxy for OpenAI-shape compatibility. Auth styles overall: `bearer, anthropic,
+google_query, header, none`.
 </Aside>
 
-### Multi-GPU hosts
+Persisted config is a `ProviderEntry` per upstream (see
+[Config schema → providers.toml](/docs/reference/config-schema/#providerstoml)):
+`catalog_id`, `name`/`base_url` overrides, `auth_value_env` (the **name** of an
+environment variable, never the key itself — the actual secret lives in `api.env`),
+`enabled`, `models`.
 
-hal0's hardware probe enumerates every detected GPU (index + PCI bus id),
-additively for both AMD and NVIDIA parts. A slot can pin to one GPU via the
-`gpu_index` field, which emits the backend-appropriate visibility mechanism:
-`HIP_VISIBLE_DEVICES` + `ROCR_VISIBLE_DEVICES` for `gpu-rocm`,
-`GGML_VK_VISIBLE_DEVICES` for `gpu-vulkan`, or a CDI `nvidia.com/gpu=<n>`
-device plus `CUDA_VISIBLE_DEVICES=0` inside the container for `gpu-cuda`. An
-explicit `[server].env` entry always wins over the derived visibility var.
-Leaving `gpu_index` unset (the default) exposes all GPUs — unchanged
-behaviour.
-
-## Providers
-
-`provider` is the runtime label round-tripped on each slot. Every slot runs as
-a podman container regardless of provider; the field exists for UI labels and
-backwards compatibility.
-
-| `provider`     | Runtime                                  | Typical slot types                     |
-|----------------|------------------------------------------|----------------------------------------|
-| `llama-server` | llama.cpp server (ROCm / Vulkan / CUDA / CPU) | chat, embed, rerank                     |
-| `flm`          | FastFlowLM on the NPU                     | chat / stt / embed (one process, trio) |
-| `kokoro`       | Kokoro-82M text-to-speech (ONNX, CPU)     | tts                                    |
-| `qwen3tts`     | Qwen3-TTS-12Hz-1.7B multilingual TTS (ROCm, GPU) | tts                              |
-| `comfyui`      | ComfyUI image generation                  | image                                  |
-
-## Seed profiles
-
-Profiles live in `/etc/hal0/profiles.toml`. When that file is absent, hal0
-serves the built-in seed catalog below, so `GET /api/profiles` is always
-populated on a fresh install. A profile supplies the container image, the
-bench-tuned flag bundle, and an optional MTP toggle; the slot supplies the
-model, context size, and port.
-
-| Profile        | `device_class` | Image                                                                | MTP   | Intent                |
-|----------------|----------------|------------------------------------------------------------------------|-------|-----------------------|
-| `rocm`         | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`    | off   | MoE agents · q8 KV    |
-| `rocm-dense`   | gpu            | `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`                          | on    | ROCmFPX · DENSE · MTP (sustained-decode) |
-| `rocm-moe`     | gpu            | `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`                          | on    | ROCmFPX · MOE · MTP (prefill-bound / -dev ROCm0) |
-| `vulkan-dense` | gpu            | `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`                          | on    | ROCmFPX · DENSE · MTP (prefill-bound) |
-| `vulkan-moe`   | gpu            | `ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5`                          | on    | ROCmFPX · MOE · MTP (best decode t/s) |
-| `vulkan`       | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`           | off   | Vulkan std · fallback |
-| `cuda`         | gpu            | `ghcr.io/ggml-org/llama.cpp:server-cuda`                               | off   | CUDA · NVIDIA (upstream llama.cpp, experimental) |
-| `embed`        | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`    | off   | Embeddings · GPU      |
-| `rerank`       | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`    | off   | Reranking · GPU       |
-| `tts-qwen3`    | gpu            | `ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1`                              | off   | TTS · Qwen3 (multilingual GPU) |
-| `flm`          | npu            | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                               | off   | FLM NPU inference     |
-| `tts`          | cpu            | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                                | off   | TTS · Kokoro          |
-| `cpu-llm`      | cpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server` (no GPU passthrough) | off   | CPU-only LLM · llama-server |
-| `comfyui`      | img            | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69…`     | off   | Image generation      |
-
-![The Profiles tab in the hal0 dashboard showing seed profile cards with device class, intent, and bench metrics](/screenshots/profiles-tab.png)
-*Profiles tab in the hal0 dashboard — seed profile cards display device class, quantisation, and bench throughput (tokens/sec or RTF).*
-
-The `embed` and `rerank` profiles bake in the llama-server serving flags
-(`--embedding` / `--reranking`, `-ub 8192` so a full input fits one physical
-batch) so an embedding or reranking slot no longer has to hand-wire them in
-`extra_args`. On a `gpu-rocm` box, embed/rerank slots derive onto these lanes
-automatically; a Vulkan or CPU box falls back to the `vulkan` / `cpu-llm`
-profile until backend-specific embed/rerank variants ship.
-
-<Aside type="note">
-GPU profiles also carry a `backend` field (`rocm`, `vulkan`, or `cuda`) — that
-field, not the slug, is the authoritative ROCm-vs-Vulkan-vs-CUDA choice.
-Non-GPU profiles (`flm`, `tts`, `cpu-llm`, `comfyui`) omit it and let
-`device_class` drive display. Canonical image refs are pinned per release in
-`manifest.json` and may differ from these seed defaults.
+<Aside type="caution">
+`hal0 upstream` CLI commands (`upstream create`, `upstream credentials set`, etc.) and
+`upstreams.toml`/`UpstreamEntry` are a **separate schema** from `providers.toml`/
+`ProviderEntry` above — both represent "remote provider" concepts but are distinct
+tables with distinct fields (`UpstreamEntry` adds `kind`, `warmup_strategy`,
+`model_filters`; see [Config schema](/docs/reference/config-schema/#upstreamstoml)).
+Verify which one a given feature actually reads before documenting behavior.
 </Aside>
 
-<Aside type="caution" title="`cuda` is experimental">
-The `cuda` profile runs the upstream `ghcr.io/ggml-org/llama.cpp:server-cuda`
-image — not one of the AMD Strix Halo toolboxes — and needs
-`nvidia-container-toolkit` (CDI) on the host for GPU passthrough. It has no
-`PROFILE_BENCH` entry (unbenched) and isn't part of the Strix Halo–tuned
-profile family; it exists so NVIDIA hosts have a working `gpu-cuda` path. See
-[Hardware matrix](/docs/reference/hardware-matrix) for the current support
-level.
+## Profiles
+
+`hal0.profiles` + `ProfileConfig` — a profile is a reusable, device-agnostic backend
+tuning template: a bench-tuned flag bundle plus a few classification hints, **not** a
+runtime image reference.
+
+| Field | Purpose |
+|---|---|
+| `flags` | Bench-tuned llama-server CLI flags. |
+| `mtp` | **Informational only** — MTP is model-owned, not profile-owned (see [Model roster & benchmarks](/docs/reference/model-roster-benchmark/)). |
+| `device_class` | `gpu \| cpu \| npu \| img \| null`. |
+| `backend` | `rocm \| vulkan \| cuda \| null`. |
+| `cloned_from` | Provenance — set when a profile was cloned from a seed. |
+| `intent` | Dashboard card headline. |
+| `quant` | Display chip only — the runtime reads quant from the model, not the profile. |
+
+<Aside type="caution">
+On the v1.0 branch (Stream C, `fix/profile-tuning-only` — reviewed PASS, not yet
+merged to `main` at time of writing), `device_class`/`backend` are being rewritten to
+**inert match-only fit hints**. The slot's own `device` field (see the device
+taxonomy below) becomes the single authoritative hardware fact; the profile hints are
+retained on-disk only because published `.hal0profile.json` export artifacts carry
+them and their checksums cover the field. Verify this has landed on `main` before
+treating it as unqualified current behavior.
 </Aside>
 
-<Aside type="tip" title="Seeds are virtual">
-Seed profiles live in code (`SEED_PROFILES`) and are overlaid on every load —
-they are never materialised into `/etc/hal0/profiles.toml`. That means a
-re-tuned seed (new flags, a bumped toolbox image) reaches every install on
-upgrade instead of being frozen by a stale on-disk copy. The file holds only
-your own (non-seed) profiles; seed profiles are immutable, so to customise one
-you clone it under a new name.
-</Aside>
+Profiles carry **no `image` field** — image resolution is slot-owned
+(`slot.image_pin` or `RUNNER_IMAGES[slot.binary]`).
 
-<Aside type="caution" title="The old `rocm-mtp` slug">
-An earlier single `rocm-mtp` profile was split into `rocm-dnse` and `rocm-moe`,
-then in v0.9.5 the ROCmFPX slugs were consolidated again into today's 2×2 grid
-(`rocm-dense`/`rocm-moe`/`vulkan-dense`/`vulkan-moe`, all on the canonical
-`vulkan-minicpm5` runner). `rocm` itself is **not** retired — it's a live seed
-profile and the default for `gpu-rocm`. There is no loader remap, so a slot
-TOML pointing at a slug that no longer exists (`rocm-mtp`, `rocm-dnse`,
-`rocmfpx-rocm`, `vkfpx-dense`, `vkfpx-moe`) should be repointed to one of the
-current profiles.
-</Aside>
+`ProfileCatalog` provides CRUD over `/etc/hal0/profiles.toml`: `list()`, `resolve(name)`,
+`create()`, `update()` (via a `ProfilePatch`), `delete()` (blocked if the profile is
+still referenced by a slot or by a model's `defaults.profile`). Seed profiles are
+**virtual** — reapplied from code on every load, so they can't be deleted or edited,
+only cloned.
 
-### MTP flag bundle
+A resolved profile (`ResolvedProfile`) adds derived fields: `runtime_family`
+(`llama-server, flm, kokoro, qwen3tts, comfyui` — classified structurally off name and
+`device_class`, not by sniffing an image string), `supported_slot_types` (e.g. `flm` →
+`llm, embedding, transcription`; `kokoro`/`qwen3tts` → `tts`; `comfyui` → `image`;
+everything else → `llm, embedding, reranking`), `used_by` (slot names referencing the
+profile), and static `tps`/`rtf` numbers from the bench table.
 
-A slot's `mtp` field is a tri-state: `true` forces MTP on, `false` forces it
-off, and unset (**Auto**) defers to the profile. Under Auto, MTP is effective
-only when **both** the profile opts in (`mtp = true` — only
-`rocm-dense`, `rocm-moe`, `vulkan-dense`, and `vulkan-moe` do among the seeds)
-**and** the model is MTP-eligible (a registry
-`mtp` tag, or an `mtp` marker in the model's id/filename). A profile opting in
-no longer means "always append the spec-draft bundle" — a non-MTP model
-sitting on `rocm-moe` under Auto launches clean, without dead
-`--spec-draft-*` flags. See [Capabilities and
-profiles](/docs/concepts/capabilities-and-profiles#mtp-a-model--profile--slot-decision)
-for the full model/profile/slot resolution.
+## Device taxonomy
 
-Whenever the effective setting is on, `resolve_profile_flags` merges the
-multi-token-prediction draft-speculation flag bundle (`MTP_FLAG_BUNDLE`) into
-the profile's flags — as **defaults only**. A profile's own explicit
-`--spec-draft-*` flags win; the bundle just fills in whatever the profile left
-unset. Before v0.8.2b2 (#963) the bundle was appended verbatim and silently
-clobbered a profile's pinned spec-draft flags (e.g. a profile asking for
-`--spec-draft-type-k f16` still launched with the bundle's `q8_0`) — that's
-fixed now. The bundle's draft device also tracks the profile's own backend
-(`ROCm0` / `Vulkan0` / `CUDA0`) instead of a hardcoded `ROCm0`.
-
-<Aside type="caution" title="Forcing MTP on an ineligible model">
-An explicit `mtp = true` pointed at a model with no MTP heads makes
-llama-server refuse to start ("context type MTP requested but model doesn't
-contain MTP layers"). Two independent guards defuse exactly that combination:
-an update-time migration clears a stale forced-on override left on an
-ineligible model, and a swap-time guard clears it if a model swap lands an
-ineligible model on a slot still forced On. Both leave force-off and
-eligible force-on alone — only unresolvable-ineligible force-on is cleared.
-</Aside>
-
-## Device-to-default-profile map
-
-The create-slot device picker and legacy-slot migration use this map to choose
-a starting profile per device class:
-
-| `device`     | Default profile |
-|--------------|-----------------|
-| `gpu-rocm`   | `rocm`          |
-| `gpu-vulkan` | `vulkan`        |
-| `gpu-cuda`   | `cuda`          |
-| `cpu`        | `cpu-llm`       |
-| `npu`        | `flm`           |
-
-<Aside type="note">
-`cpu`'s default profile is `cpu-llm`, not `tts` — an earlier map pointed `cpu`
-at `tts`, which left a `profile=""` slot unloadable ("profile '' not found").
-`cpu-llm` runs the Vulkan toolbox image in CPU-only mode (no GPU devices passed
-to the container).
-</Aside>
-
-### Model preferred profile
-
-A registry model can also carry a preferred profile via `defaults.profile`. A
-slot adopts it on **create** (when the slot has no explicit profile) and on
-**every model swap** — but only when the profile fits the slot: it must exist
-in the catalog, support the slot's `type`, and match the slot's
-`device_class`/`backend`. An incompatible preference is skipped (logged as
-`slot.preferred_profile_skipped`) and the slot keeps its current or
-device-default profile; hal0 never flips a slot's device to satisfy a model's
-preference.
-
-## Portable profiles: export/import
-
-A profile can be exported to a self-contained, checksummed
-`.hal0profile.json` envelope and imported on another host — the same sharing
-model [stacks](/docs/concepts/stacks) use (no secrets, no host paths, an
-independent `schema_version`).
-
-- `GET /api/profiles/{name}` — resolve a single profile.
-- `POST /api/profiles/{name}/export` — build the envelope:
-  `{kind: "hal0.profile", schema_version, hal0_version, exported_at, name,
-  checksum, profile}`. `checksum` is a sha256 over the canonical profile body
-  only (key-order independent), so re-exporting an unchanged profile yields the
-  same checksum every time.
-- `POST /api/profiles/import` — dry-run then commit. `{"envelope": {...},
-  "name": "...", "dry_run": true}` validates the envelope + checksum and
-  reports whether `name` collides with an existing profile, without creating
-  anything. A commit (`dry_run` false, `name` set) creates the profile and
-  returns `409 profiles.exists` on a name collision.
-
-MCP mirrors the same surface: `profile_list` / `profile_status` /
-`profile_export` are read-shaped (autonomous, no confirmation gate);
-`profile_import` / `profile_delete` are gated. The dashboard's Profiles tab
-has an **Export** button on every profile card and an **Import** dialog
-(file → dry-run → commit) in the tab header.
-
-## Toolbox images
-
-Toolbox images are pinned per hal0 release in `manifest.json` (by short name →
-canonical ref plus a sha256 digest). They are public on `ghcr.io/hal0ai/`; the
-installer pulls them anonymously. An empty digest means the image is unpublished
-for that release and the runtime pulls by tag with a warning.
-
-| Short name  | Image ref (current release)                                                                      | Notes                                  |
-|-------------|---------------------------------------------------------------------------------------------------|----------------------------------------|
-| `vulkan`    | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`                                     | llama.cpp Vulkan backend               |
-| `rocm`      | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`                               | llama.cpp ROCm backend                 |
-| `flm`       | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                                                         | FastFlowLM on AMD XDNA2 NPU            |
-| `kokoro`    | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                                                          | Kokoro-82M TTS (CPU ONNX)              |
-| `qwen3tts`  | `ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1`                                                        | Qwen3-TTS-12Hz-1.7B multilingual TTS (ROCm) |
-| `comfyui`   | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2` | ComfyUI image generation               |
-
-## See also
-
-- [Hardware matrix](/docs/reference/hardware-matrix) — what runs on each device and the backend availability order.
-- [Config schema](/docs/reference/config-schema) — the full slot TOML, profile, and `hal0.toml` field reference.
-- [Paths & files](/docs/reference/paths-and-files) — where `profiles.toml`, slot TOMLs, and `manifest.json` live.
+See [Hardware matrix](/docs/reference/hardware-matrix/#canonical-device-taxonomy) for
+the full table. In short: `hal0.model_meta.CANONICAL_DEVICES` is the single source of
+truth for the 5 valid device ids (`gpu-rocm`, `gpu-vulkan`, `gpu-cuda`, `cpu`, `npu`),
+consumed by `SlotConfig.device`, a profile's (now inert) `device_class`, and every
+other call site that used to duplicate this list.

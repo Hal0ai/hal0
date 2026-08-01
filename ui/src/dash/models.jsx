@@ -70,7 +70,13 @@ function ModelsView() {
   const [addOpen, setAddOpen] = useStateM(false);
   const [addByPathOpen, setAddByPathOpen] = useStateM(false);
   const [scanOpen, setScanOpen] = useStateM(false);
-  const [recipeOpen, setRecipeOpen] = useStateM(false);
+  // Model whose edit drawer is open — deliberately decoupled from the row
+  // list's `selId`/`selected` so the row-menu kebab's "Edit model settings"
+  // can target ANY row (selected or not) without first mutating catalog
+  // selection, and so re-selecting a different row while the drawer is open
+  // never silently swaps the drawer's target out from under an in-progress
+  // edit (issue: the old `model={selected}` binding was reactive to selId).
+  const [recipeModel, setRecipeModel] = useStateM(null);
   const [delModel, setDelModel] = useStateM(null);
   // HF search
   const [searchOpen, setSearchOpen] = useStateM(false);
@@ -377,16 +383,16 @@ function ModelsView() {
             sectionedInference.map(item =>
               item.type === "label"
                 ? <div key={item.key} className="mdl-section-label">{item.text}</div>
-                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} />
+                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} onEditModel={setRecipeModel} />
             )
           ) : tab === "image" ? (
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} />
             ))
           ) : (
             /* upstream tab — flat paginated rows */
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
+              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} />
             ))
           )}
 
@@ -425,7 +431,7 @@ function ModelsView() {
           <ModelDetail
             model={selected}
             onDelete={() => setDelModel(selected)}
-            onEdit={() => setRecipeOpen(true)}
+            onEdit={() => setRecipeModel(selected)}
           />
           <DownloadsPane />
         </div>
@@ -435,7 +441,7 @@ function ModelsView() {
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} initialRepo={searchPick} />
       <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />
       <ScanDirectoryModal open={scanOpen} onClose={() => setScanOpen(false)} />
-      <ModelDrawer open={recipeOpen} onClose={() => setRecipeOpen(false)} model={selected} />
+      <ModelDrawer open={!!recipeModel} onClose={() => setRecipeModel(null)} model={recipeModel} />
       <DeleteModelDialog open={!!delModel} onClose={() => setDelModel(null)} model={delModel} />
 
       {searchOpen && (
@@ -510,8 +516,11 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 }
 
 // ── ModelRow ──────────────────────────────────────────────────────────
-function ModelRow({ model, selected, onSelect }) {
+// `onEditModel` (new — Stream E kebab menu) opens the model edit drawer
+// directly for THIS row's model, independent of catalog selection.
+function ModelRow({ model, selected, onSelect, onEditModel }) {
   const backends = Array.isArray(model.backends) ? model.backends : [];
+  const [menuOpen, setMenuOpen] = useStateM(false);
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
       <span className="mdl-row-icon" data-testid={model.installed ? "mdl-row-installed" : "mdl-row-not-installed"}>
@@ -550,6 +559,35 @@ function ModelRow({ model, selected, onSelect }) {
               ? <span className="chip amber" data-testid="mdl-row-update" role="status" aria-label="Update available on Hugging Face" title="A newer version of this file is available on Hugging Face">update ↑</span>
               : null}
       </span>
+      <span className="mdl-row-kebab">
+        <button
+          type="button"
+          className="btn ghost sm"
+          data-testid="mdl-row-menu-btn"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-label={`Actions for ${model.longName || model.name || model.id}`}
+          onClick={(e) => { e.stopPropagation(); setMenuOpen(o => !o); }}
+        >{Icons.more}</button>
+      </span>
+      {menuOpen && (
+        <>
+          {/* Full-viewport click-outside dismiss — same idiom as the
+              board-selector/orchestration dropdowns in board-view.jsx. */}
+          <div className="mdl-row-menu-backdrop" onClick={(e) => { e.stopPropagation(); setMenuOpen(false); }} />
+          <Menu
+            anchor="right"
+            items={[
+              {
+                icon: Icons.edit,
+                label: "Edit model settings",
+                onClick: () => onEditModel && onEditModel(model),
+              },
+            ]}
+            onClose={() => setMenuOpen(false)}
+          />
+        </>
+      )}
     </div>
   );
 }
@@ -569,13 +607,19 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
     );
   }
   const defaults = model.defaults || {};
-  const recipeRows = [
-    ["preferred_profile", defaults.profile],
-    ["context_size", defaults.context_size],
-    ["n_gpu_layers", defaults.n_gpu_layers],
-    ["rope_freq_base", defaults.rope_freq_base],
-    ["extra_args", defaults.extra_args],
-  ].filter(([, v]) => v !== null && v !== undefined && v !== "");
+  // n_gpu_layers + rope_freq_base intentionally dropped from this list
+  // (spec-hw-slot-ownership §2): NGL is slot-owned hardware now (moved off
+  // the model entirely — see model-drawer.jsx's dropped n_gpu_layers input),
+  // and rope_freq_base is deprecated and never emitted. Rendering either here
+  // would just be a dead key surfacing for a legacy row that still carries one.
+  const RECIPE_FIELDS = [
+    { key: "profile", label: "Profile", hint: "runtime profile that seeded this model's launch flags" },
+    { key: "context_size", label: "Context size", hint: "tokens · ⟳ requires the slot to restart to apply" },
+    { key: "extra_args", label: "Launch flags", hint: "the model's tune remainder · ⟳ requires the slot to restart to apply" },
+  ];
+  const recipeRows = RECIPE_FIELDS
+    .map(f => ({ ...f, value: defaults[f.key] }))
+    .filter(f => f.value !== null && f.value !== undefined && f.value !== "");
 
   const onPull = async () => {
     try {
@@ -647,21 +691,22 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
         {(model.labels || model.capabilities || []).map(l => <span key={l} className="chip">{l}</span>)}
       </div>
       <div className="mdl-detail-recipe">
-        <div className="lbl">recipe options</div>
+        <div className="form-section">Recipe options</div>
         {recipeRows.length === 0 ? (
           <div className="mono" style={{fontSize: 12, color: "var(--fg-4)", fontStyle: "italic"}}>
             No defaults set — launcher will use its own.
           </div>
-        ) : recipeRows.map(([k, v]) => (
-          <div key={k} className="ro-row">
-            <span className="k">{k}</span>
-            <span className="v">{String(v)}</span>
+        ) : recipeRows.map(f => (
+          <div key={f.key} className="form-row" data-testid={`mdl-recipe-row-${f.key}`}>
+            <div className="form-lbl">
+              <span>{f.label}</span>
+              <FieldInfoIcon description={f.hint} />
+            </div>
+            <div className="form-ctl">
+              <span>{String(f.value)}</span>
+            </div>
           </div>
         ))}
-        <div style={{marginTop: 10, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)", display: "flex", gap: 6, alignItems: "center"}}>
-          <span style={{color: "var(--warn)"}}>⟳</span>
-          <span>context_size + extra_args require slot restart to apply.</span>
-        </div>
       </div>
       <UsedByPanel model={model} />
       <OnDiskPanel model={model} />

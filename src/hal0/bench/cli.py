@@ -1,4 +1,4 @@
-"""cli.py — the single operator/agent surface: ``benchlab <verb>`` (DESIGN §5).
+"""The single operator/agent surface for the bench system: ``hal0 bench <verb>``.
 
 argparse (not typer) so the CLI is stdlib-only like the rest of the critical
 path (server_ab.py precedent). Every verb is a thin wrapper over the library
@@ -26,7 +26,8 @@ import urllib.error
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__
+import hal0
+
 from .planner import fetch_registry_models, plan
 from .publish import build_roster, emit_site_ts, write_roster
 from .regress import check as regress_check
@@ -959,8 +960,23 @@ def _stamp_to_run_id(ts: str) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="hal0 bench", description=__doc__.split("\n")[0])
-    ap.add_argument("--version", action="version", version=f"hal0 bench {__version__}")
+    # Operator-facing copy, not the module docstring's first line (#1477):
+    # that read "cli.py — the single operator/agent surface: ``benchlab
+    # <verb>`` (DESIGN §5)", so `hal0 bench --help` led with a filename, an
+    # internal design-doc section, and a command name (`benchlab`) that is not
+    # how anyone invokes this.
+    ap = argparse.ArgumentParser(
+        prog="hal0 bench",
+        description=(
+            "Keep hal0's throughput/latency benchmark dataset current: plan what is "
+            "stale, run those cells, and query or publish the results."
+        ),
+    )
+    ap.add_argument(
+        "--version",
+        action="version",
+        version=f"hal0 bench (hal0 {hal0.__version__})",
+    )
     ap.add_argument("--api", default=DEFAULT_API, help=f"hal0-api base (default {DEFAULT_API})")
     ap.add_argument(
         "--no-registry",

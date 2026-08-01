@@ -39,6 +39,7 @@ from hal0.config.schema import StackConfig
 from hal0.errors import BadRequest
 from hal0.model_meta import DEVICE_TO_DEFAULT_PROFILE
 from hal0.profiles import ProfileCatalog
+from hal0.slots.layout import resolve_slot_stem
 from hal0.stacks import ResolvedStack, StacksCatalog
 from hal0.stacks.apply import StackApplyEngine
 from hal0.stacks.portable import (
@@ -154,7 +155,16 @@ def _registry(request: Request) -> Any:
 
 
 def _slot_toml_exists(slot: str) -> bool:
-    return (paths.slots_config_dir() / f"{slot}.toml").exists()
+    """Does this box already have the slot a stack entry names? (#1510)
+
+    Resolved through the bilingual layout seam, not ``f"{slot}.toml"``: a
+    stack addresses slots by display name, and on an id-keyed box that name
+    lives under a digit stem (``agent`` → ``1.toml``). The raw f-string
+    reported every live slot missing, which made ``_create_missing_slots``
+    clone all sixteen of them alongside the originals — the duplicate-slot
+    state #1422 reports.
+    """
+    return resolve_slot_stem(paths.slots_config_dir(), slot) is not None
 
 
 def _missing_slot_names(cfg: StackConfig) -> list[str]:
@@ -173,6 +183,7 @@ async def _create_missing_slots(
     one bad entry doesn't sink the whole apply. Returns ``(created, errors)``.
     """
     from hal0.api.routes.slots import _normalize_create_body
+    from hal0.slots.config_write import guard_slot_write_payload
 
     created: list[str] = []
     errors: list[dict[str, str]] = []
@@ -181,16 +192,19 @@ async def _create_missing_slots(
             continue
         device = entry.device or "gpu-vulkan"
         profile = entry.profile or DEVICE_TO_DEFAULT_PROFILE.get(device, "")
-        # spec-hw-slot-ownership §1: vision/mtp are model-owned typed
-        # capabilities, so a stack-created slot must not be born carrying
+        # spec-hw-slot-ownership §1: vision/mtp/enable_thinking are model-owned
+        # typed capabilities, so a stack-created slot must not be born carrying
         # them. `reject_model_owned_slot_keys` guards the HTTP surface
         # (create_slot / update_slot_config in api/routes/slots.py), but this
         # path calls `SlotManager.create()` directly in-process and never
         # reaches that handler — so dropping them here is what keeps
         # stack-created slots on the right side of the partition.
-        # `entry.vision`/`entry.mtp` stay on the stack schema for back-compat
-        # but no longer project onto the slot, matching what
-        # `stacks.apply._reconciled_stack_slot` already does.
+        # `entry.vision`/`entry.mtp`/`entry.enable_thinking` stay on the stack
+        # schema for back-compat but no longer project onto the slot; the
+        # sibling UPDATE path (`stacks.apply._reconciled_stack_slot`) makes the
+        # same exclusion and `reconcile_and_guard_slot_config` now enforces it
+        # for both. (It did NOT before: that function declaratively wrote all
+        # three, so create and update disagreed and this comment was false.)
         body: dict[str, Any] = {
             "name": entry.slot,
             "type": "llm",
@@ -201,6 +215,12 @@ async def _create_missing_slots(
         if entry.server_extra_args:
             body["server"] = {"extra_args": entry.server_extra_args}
         try:
+            # `SlotManager.create()` has no write-boundary screen of its own, so
+            # a stack's freeform `[server].extra_args` would otherwise reach
+            # slot TOML carrying hardware / hal0-managed flags. Run the same
+            # in-process partition guard the update path now runs; per-slot
+            # failures are collected below like any other create error.
+            guard_slot_write_payload(body)
             await slot_manager.create(entry.slot, _normalize_create_body(body))
             created.append(entry.slot)
         except Exception as exc:
@@ -234,14 +254,22 @@ def _known_model_ids(request: Request) -> set[str]:
 
 
 def _diff_rows(plan: Any) -> list[dict[str, Any]]:
-    """Per-slot before→after model summary for the dry-run preview UI."""
+    """Per-slot before→after model summary for the dry-run preview UI.
+
+    ``slot`` is the DISPLAY name from ``plan.slot_names`` (#1510) — labelling
+    rows with ``after.path.stem`` listed an id-keyed box's slots to the
+    operator as ``1`` / ``13`` instead of ``agent`` / ``rerank``.
+    """
     rows: list[dict[str, Any]] = []
-    for before, after in zip(plan.change_set.before, plan.change_set.after, strict=True):
+    names = getattr(plan, "slot_names", ()) or ()
+    for i, (before, after) in enumerate(
+        zip(plan.change_set.before, plan.change_set.after, strict=True)
+    ):
         b_model = (before.data or {}).get("model", {}).get("default") if before.data else None
         a_model = (after.data or {}).get("model", {}).get("default") if after.data else None
         rows.append(
             {
-                "slot": after.path.stem,
+                "slot": names[i] if i < len(names) else after.path.stem,
                 "before_model": b_model,
                 "after_model": a_model,
                 "changed": before.data != after.data,

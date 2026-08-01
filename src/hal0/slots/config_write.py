@@ -236,12 +236,26 @@ def check_default_uniqueness(
     cfg_dict: dict[str, Any],
     *,
     slots_dir: Path | None = None,
+    changed_keys: set[str] | None = None,
 ) -> None:
     """Reject a write that would land a second ``default=true`` per type.
 
     Sync core of :meth:`SlotManager._check_default_uniqueness` (see its
     docstring for the full contract), shared with the stacks apply engine.
+
+    ``changed_keys`` is the set of keys this write actually touches. When it is
+    supplied and does NOT contain ``"default"``, the check is skipped outright:
+    the write isn't moving the invariant, so a pre-existing pair of stale
+    ``default=true`` peers on disk is not this write's problem to fix — and
+    must not veto it. (Without this, a plain ``update_config("b",
+    {"n_gpu_layers": 40})`` on a slot that merely *happens* to carry
+    ``default=true`` in an already-violated state gets rejected for a conflict
+    it did not create.) ``None`` — the default — keeps the historical behaviour
+    of validating the full merged dict, which is what ``create()`` wants: there
+    every key is new.
     """
+    if changed_keys is not None and "default" not in changed_keys:
+        return
     if cfg_dict.get("default") is not True:
         return
     type_ = cfg_dict.get("type")
@@ -265,6 +279,93 @@ def check_default_uniqueness(
         )
 
 
+def _screen_slot_extra_args(updates: dict[str, Any]) -> None:
+    """Reject hal0-owned flags in a slot write's ``[server].extra_args``.
+
+    The slot counterpart of the model
+    (:func:`hal0.services.models_service.screen_model_write`) and profile
+    (``api.routes.profiles._screen_profile_flags``) freeform-flag screens. Those
+    two live at their HTTP route layers, so the slot surface had NO screen at
+    all on any in-process writer: the stacks apply engine (and stack
+    create-on-apply) hand ``[server].extra_args`` straight to slot TOML, and
+    ``SlotManager.create`` never screened either. The launch path only screens
+    against :data:`~hal0.slots.argv.MANAGED_ARGS_DENYLIST` — and only at load
+    time, inside :func:`hal0.slots.argv.resolve_argv` — so a hardware flag
+    persisted here was never caught at all.
+
+    Hardware flags are checked FIRST so ``-ngl``/``-dev``/``--threads`` get the
+    actionable "belongs on the slot's hardware grid" message rather than the
+    generic managed-arg one (``-ngl`` is in both sets) — the same ordering
+    ``screen_model_write`` and ``_screen_profile_flags`` use.
+
+    No-op when the payload carries no ``[server].extra_args`` or it is blank.
+    Unparseable quoting is deferred to the schema/TOML layer rather than masked
+    with a partition message (mirrors ``_screen_profile_flags``).
+
+    Raises:
+        hal0.errors.BadRequest: ``slot.hardware_flag_denied`` /
+            ``slot.managed_arg_denied``.
+    """
+    server = updates.get("server")
+    if not isinstance(server, dict):
+        return
+    raw = server.get("extra_args")
+    if not isinstance(raw, str) or not raw.strip():
+        return
+
+    import shlex
+
+    from hal0.slots.argv import _deny_managed_flags, _deny_slot_hardware_flags
+
+    segment = "slot [server].extra_args"
+    try:
+        # Strip a trailing backslash that would make shlex.split() raise
+        # "No escaped character" (a common copy-paste artefact), same as
+        # models_service.screen_model_write.
+        tokens = shlex.split(raw.rstrip().rstrip("\\"))
+    except ValueError:
+        return
+    _deny_slot_hardware_flags(tokens, segment=segment)
+    _deny_managed_flags(tokens, segment=segment)
+
+
+def guard_slot_write_payload(updates: dict[str, Any]) -> None:
+    """Run the slot-write PARTITION boundary over an in-process write payload.
+
+    The three key-space partitions the HTTP slot-config routes enforce
+    (``api.routes.slots._reject_model_owned_config_keys`` +
+    ``_reject_unknown_config_keys`` → ``reject_removed_slot_keys``), plus the
+    freeform-flag screen, applied to a raw ``updates`` dict so an IN-PROCESS
+    writer that never passes through a FastAPI handler is held to the same
+    contract:
+
+      - :func:`~hal0.slot_config.reject_model_owned_slot_keys` —
+        ``mtp``/``enable_thinking``/``vision`` belong on the MODEL
+        (spec-hw-slot-ownership §1). ``SlotConfig`` is ``extra="allow"``, so
+        without this an in-process writer silently persists the pre-partition
+        on-disk shape that ``PUT /api/slots/{name}/config`` 400s on.
+      - :func:`~hal0.slot_config.reject_removed_slot_keys` — ``enabled`` and
+        friends (#1369) round-trip as inert debris while the caller believes
+        the setting took.
+      - :func:`_screen_slot_extra_args` — hardware / hal0-managed flags in
+        freeform ``[server].extra_args``.
+
+    Checked against ``updates`` (the write payload), NEVER the merged result:
+    an old pre-partition key already sitting on disk must not block an
+    unrelated legitimate edit to that slot. Converging the old shape is the
+    migration's job
+    (``config.migrations.model_owned_caps``), not this guard's.
+
+    Raises:
+        hal0.errors.BadRequest: the payload crosses a partition.
+    """
+    from hal0.slot_config import reject_model_owned_slot_keys, reject_removed_slot_keys
+
+    reject_model_owned_slot_keys(updates)
+    reject_removed_slot_keys(updates)
+    _screen_slot_extra_args(updates)
+
+
 def reconcile_slot_updates(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     """Normalize + merge ``updates`` onto ``base`` and keep device/profile coherent.
 
@@ -286,17 +387,39 @@ def reconcile_and_guard_slot_config(
     *,
     slots_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """The full guarded write pipeline: normalize + merge + reconcile + guards.
+    """The full guarded write pipeline: partition + normalize + merge + guards.
 
     Raises :class:`SlotConfigError` / :class:`NpuExclusivityViolation` when the
     projected config is incoherent (conflicting device+profile backends) or
     violates a cross-slot invariant (second model-bound NPU anchor, second
     default=true of a type). Used by the stacks apply engine so a stack can no
     longer persist what ``update_config`` would have refused.
+
+    Runs :func:`guard_slot_write_payload` FIRST so the key-space partition is
+    enforced before any merge work: previously this pipeline checked only the
+    two cross-slot invariants, so ``POST /api/stacks/{slug}/apply`` could land
+    model-owned ``mtp``/``enable_thinking``/``vision`` (and unscreened
+    ``[server].extra_args``) on an existing slot's TOML that
+    ``PUT /api/slots/{name}/config`` 400s on. The guard lives HERE, at the one
+    shared in-process guarded write path, rather than at the stacks call site,
+    so every future caller inherits it — this function's whole reason to exist
+    is "a writer can no longer persist what ``update_config`` would refuse".
+
+    Raises:
+        hal0.errors.BadRequest: ``updates`` crosses the slot/model partition.
     """
+    guard_slot_write_payload(updates)
     merged = reconcile_slot_updates(base, updates)
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
-    check_default_uniqueness(slot_name, merged, slots_dir=slots_dir)
+    # Only the keys this apply actually carries drive the SC-4 guard — an
+    # unrelated stack field must not be blocked by a stale duplicate-default
+    # state it neither created nor touches.
+    check_default_uniqueness(
+        slot_name,
+        merged,
+        slots_dir=slots_dir,
+        changed_keys=set(updates.keys()),
+    )
     return merged
 
 
@@ -306,8 +429,10 @@ __all__ = [
     "_iter_peer_configs",
     "_read_slot_toml_dict",
     "_reconcile_device_profile",
+    "_screen_slot_extra_args",
     "check_default_uniqueness",
     "check_npu_exclusivity",
+    "guard_slot_write_payload",
     "reconcile_and_guard_slot_config",
     "reconcile_slot_updates",
 ]

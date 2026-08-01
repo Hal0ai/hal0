@@ -1,46 +1,23 @@
 name: Toolbox image build
 
-# Build and push hal0 toolbox container images to ghcr.io/hal0ai/.
+# Build and publish every toolbox image that is owned by this repository to
+# ghcr.io/hal0ai/. Runtime images owned by other projects remain upstream
+# references in hal0.runners and are intentionally not mirrored here.
 #
-# Current images managed here:
-#   - hal0-toolbox-qwen3tts  (Qwen3-TTS ROCm GPU TTS backend)
-#
-# Previous toolbox images (vulkan, rocm, flm, moonshine, kokoro, comfyui) were
-# built and pushed in ad-hoc CI runs and are not yet wired to this workflow.
-# This workflow is the "never-built .github/workflows/toolbox.yml" referenced
-# in scripts/update-toolbox-digests.sh; qwen3tts is the first image to have a
-# durable build-on-push workflow.
-#
-# Digest pinning: after a successful push, the published digest lands on
-# ghcr.io.  Run `scripts/update-toolbox-digests.sh` on main to query the
-# registry and patch manifest.json with the new digest before cutting a
-# release.  `release.yml` refuses to publish while any toolbox_images digest
-# is null.
-#
-# Runner: ubuntu-latest (x86_64, standard GitHub-hosted).  Building a
-# ROCm/PyTorch-based image only requires pulling the base layers and running
-# pip install — no GPU hardware or ROCm runtime is needed at build time.
-# The resulting image is linux/amd64 and requires an AMD GPU at run time.
-#
-# Trigger:
-#   - push/PR that touches the qwen3tts Dockerfile or its context directory
-#   - workflow_dispatch for manual (re)builds — e.g. after base-image updates
-#
-# See: packaging/toolbox/qwen3tts.Dockerfile
-#      packaging/toolbox/qwen3tts/qwen3tts_server.py
-#      scripts/update-toolbox-digests.sh
-#      docs: PLAN.md §12 (toolbox images)
+# Digest pinning: after a successful push, run
+# scripts/update-toolbox-digests.sh on main to refresh manifest.json before a
+# release. release.yml refuses to publish while a toolbox digest is missing.
 
 on:
   push:
     branches: [main]
     paths:
-      - "packaging/toolbox/qwen3tts.Dockerfile"
-      - "packaging/toolbox/qwen3tts/**"
+      - "packaging/toolbox/**"
+      - ".github/workflows/toolbox.yml"
   pull_request:
     paths:
-      - "packaging/toolbox/qwen3tts.Dockerfile"
-      - "packaging/toolbox/qwen3tts/**"
+      - "packaging/toolbox/**"
+      - ".github/workflows/toolbox.yml"
   workflow_dispatch:
     inputs:
       push:
@@ -48,36 +25,44 @@ on:
         type: boolean
         default: true
 
-# Cancel superseded PR runs; never cancel a push to main.
 concurrency:
   group: toolbox-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
-  packages: write   # required to push to ghcr.io/hal0ai/
+  packages: write
 
 jobs:
-  # ── qwen3tts ────────────────────────────────────────────────────────────────
-  qwen3tts:
-    name: hal0-toolbox-qwen3tts
+  build:
+    name: hal0-toolbox-${{ matrix.name }}
     runs-on: ubuntu-latest
-    # Build time is dominated by pulling the ~4 GB rocm/pytorch base image and
-    # running pip install; 60 min is generous but safe for a cold cache.
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cpu
+            image: ghcr.io/hal0ai/hal0-toolbox-cpu
+            tag: v1
+            context: .
+            file: packaging/toolbox/cpu.Dockerfile
+            timeout: 45
+          - name: qwen3tts
+            image: ghcr.io/hal0ai/hal0-toolbox-qwen3tts
+            tag: v1
+            context: packaging/toolbox/qwen3tts
+            file: packaging/toolbox/qwen3tts.Dockerfile
+            timeout: 60
 
     env:
-      IMAGE: ghcr.io/hal0ai/hal0-toolbox-qwen3tts
-      TAG: v1
+      IMAGE: ${{ matrix.image }}
+      TAG: ${{ matrix.tag }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # Log in to ghcr.io so the push step (and the base-image pull, which is
-      # public but benefits from auth to avoid rate limits) is authenticated.
-      # On PRs `packages: write` is not granted for fork PRs, so we skip login
-      # and push there — the build still runs for validation.
       - name: Log in to ghcr.io
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -86,18 +71,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Set up Docker Buildx so we get BuildKit features (layer caching,
-      # --cache-from, multi-stage optimisation).
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Derive image tags from the Git context:
-      #   main push  → ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1  (the stable tag)
-      #              → ghcr.io/hal0ai/hal0-toolbox-qwen3tts:main (mutable branch ref)
-      #   PR         → ghcr.io/hal0ai/hal0-toolbox-qwen3tts:pr-<N>  (build-only, no push)
-      #   tag push   → ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1  (same stable tag)
-      #   manual     → ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1
-      - name: Compute image tags + labels
+      - name: Compute image tags and labels
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -107,64 +84,40 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
           labels: |
-            org.opencontainers.image.title=hal0-toolbox-qwen3tts
-            org.opencontainers.image.description=Qwen3-TTS multilingual GPU TTS backend (ROCm) for hal0
+            org.opencontainers.image.title=hal0-toolbox-${{ matrix.name }}
             org.opencontainers.image.source=https://github.com/Hal0ai/hal0
-            org.opencontainers.image.documentation=https://github.com/Hal0ai/hal0/blob/main/packaging/toolbox/qwen3tts.Dockerfile
+            org.opencontainers.image.documentation=https://github.com/Hal0ai/hal0/blob/main/${{ matrix.file }}
 
-      # Build (and push on non-PR runs unless workflow_dispatch chose dry-run).
-      # Context: packaging/toolbox/qwen3tts/ — this is the directory that
-      # qwen3tts.Dockerfile's COPY instruction targets (qwen3tts_server.py).
-      # The Dockerfile path is relative to the repo root.
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: packaging/toolbox/qwen3tts
-          file: packaging/toolbox/qwen3tts.Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push == true) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Layer cache: read from and write back to the GitHub Actions cache.
-          # The rocm/pytorch base is ~4 GB — caching the layers dramatically
-          # reduces rebuild time when only qwen3tts_server.py or pip deps change.
-          cache-from: type=gha,scope=toolbox-qwen3tts
-          cache-to: type=gha,mode=max,scope=toolbox-qwen3tts
+          cache-from: type=gha,scope=toolbox-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=toolbox-${{ matrix.name }}
           platforms: linux/amd64
           provenance: false
 
-      # Emit the published digest so it's easy to copy into manifest.json
-      # (or pipe into scripts/update-toolbox-digests.sh --patch).
       - name: Report published digest
         if: steps.build.outputs.digest != ''
         run: |
-          echo "Published: ${{ env.IMAGE }}:${{ env.TAG }}"
+          echo "Published: $IMAGE:$TAG"
           echo "Digest:    ${{ steps.build.outputs.digest }}"
-          echo ""
-          echo "To pin this digest in manifest.json, run on main:"
-          echo "  scripts/update-toolbox-digests.sh"
-          echo ""
-          echo "Or patch manually:"
-          echo "  jq '.toolbox_images.qwen3tts.digest = \"${{ steps.build.outputs.digest }}\"' manifest.json > tmp && mv tmp manifest.json"
-        shell: bash
+          echo "Refresh manifest.json with: scripts/update-toolbox-digests.sh"
 
       - name: Summary
         run: |
           {
-            echo "## hal0-toolbox-qwen3tts build"
-            echo ""
-            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-              echo "**PR build — image was NOT pushed** (push is skipped on PRs to avoid"
-              echo "publishing unreviewed images)."
+            echo "## hal0-toolbox-${{ matrix.name }} build"
+            echo
+            if [[ "${{ github.event_name }}" == "pull_request" || ("${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.push }}" != "true") ]]; then
+              echo "Build-only validation — image was not pushed."
             else
-              echo "**Pushed:** \`${{ env.IMAGE }}:${{ env.TAG }}\`"
-              if [[ -n "${{ steps.build.outputs.digest }}" ]]; then
-                echo ""
-                echo "**Digest:** \`${{ steps.build.outputs.digest }}\`"
-                echo ""
-                echo "Run \`scripts/update-toolbox-digests.sh\` on main to pin this digest"
-                echo "in \`manifest.json\` before the next release."
-              fi
+              echo "Published: `$IMAGE:$TAG`"
+              echo "Digest: `${{ steps.build.outputs.digest }}`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-        shell: bash

@@ -1203,6 +1203,16 @@ a { color: inherit; text-decoration: none; }
 }
 .dash-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .dash-side { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 12px; }
+/* Full-bleed side column (slots page): the ActivityLog spans the same
+   vertical extent as the stacked main-column panes (InferencePane +
+   NpuOccupancyCard) instead of capping itself short. `align-self: stretch`
+   fills the grid track; `position: static` because a stretched, track-height
+   box has nothing left to stick against — sticky and stretch fight. */
+.dash-side.dash-side-fill {
+  align-self: stretch;
+  position: static;
+  min-height: 0;
+}
 
 /* Slots-page tabs — underline style, matching the Agent page's tab bar
    (Inference · Image Gen · Endpoints · Profiles). Borderless buttons with an
@@ -1898,6 +1908,11 @@ a { color: inherit; text-decoration: none; }
 .slot-model:hover { border-color: var(--line-strong); }
 .slot-model .mid { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slot-model .chev { color: var(--fg-4); }
+/* Slot-card model row: the swap dropdown plus the inline model-edit pencil as
+   a SIBLING (never nested — .slot-model is itself the popover click target). */
+.slot-model-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.slot-model-row > .slot-model { flex: 1; min-width: 0; }
+.slot-model-row > .slot-model-edit { flex: 0 0 auto; }
 
 .slot-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 
@@ -2196,7 +2211,7 @@ select.npu-sel {
 }
 .mdl-row {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto 72px 78px;
+  grid-template-columns: 14px minmax(0, 1fr) auto 72px 78px 36px;
   gap: 12px;
   align-items: center;
   padding: 10px 16px;
@@ -2204,6 +2219,12 @@ select.npu-sel {
   cursor: pointer;
   font-family: var(--jbm);
   font-size: 12.5px;
+  /* Containing block for the row-menu kebab's <Menu> (position: absolute,
+     anchor="right" → right:0; top:calc(100% + 4px)). Nothing else in the
+     row is positioned, so this is the only stacking context the dropdown
+     needs — it paints above the sibling rows below it, same as any
+     ordinary absolutely-positioned overlay. */
+  position: relative;
 }
 .mdl-row:last-child { border-bottom: none; }
 .mdl-row:hover { background: var(--bg-2); }
@@ -2216,6 +2237,13 @@ select.npu-sel {
 .mdl-row .tg { color: var(--fg-3); font-size: 10.5px; text-align: right; }
 .mdl-row-icon { width: 14px; display: flex; align-items: center; justify-content: center; font-size: 12px; }
 .mdl-row-icon svg { width: 12px; height: 12px; }
+.mdl-row-kebab { display: flex; align-items: center; justify-content: center; }
+.mdl-row-kebab .btn { padding: 4px 8px; }
+/* Full-viewport, invisible click-outside dismiss for the kebab's <Menu> —
+   sits just under .hal0-menu's z-index:60 so a click anywhere else on the
+   page (including another row) closes the menu without also triggering
+   whatever's underneath it. */
+.mdl-row-menu-backdrop { position: fixed; inset: 0; z-index: 59; }
 
 .mdl-detail {
   background: var(--bg-1);
@@ -2243,16 +2271,35 @@ select.npu-sel {
 .mdl-detail-meta .k { color: var(--fg-4); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px; }
 .mdl-detail-meta .v { color: var(--fg); font-size: 12px; }
 .mdl-detail-labels { padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 5px; border-bottom: 1px solid var(--line-soft); }
+/* Recipe options / Used-by / On-disk all share this shell — restyled to the
+   model drawer's form-row/form-lbl/form-ctl rhythm (dashboard.css:2970-3054)
+   so the read-only sidebar and the editable drawer feel like one system.
+   .form-section already carries its own top padding for a standalone drawer
+   section; nested one level deeper here, that stacks with this container's
+   own padding, so trim it back to flush against the first heading. */
 .mdl-detail-recipe { padding: 14px 16px; border-bottom: 1px solid var(--line-soft); }
-.mdl-detail-recipe .lbl { font-family: var(--jbm); font-size: 10px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+.mdl-detail-recipe .form-section:first-child { padding-top: 0; margin-top: 0; }
+.mdl-detail-recipe .lbl {
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
 .mdl-detail-recipe .ro-row {
   display: grid;
-  grid-template-columns: 130px 1fr;
-  gap: 12px;
-  padding: 5px 0;
+  grid-template-columns: 160px 1fr;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
   font-family: var(--jbm);
   font-size: 12px;
 }
+.mdl-detail-recipe .ro-row:last-child { border-bottom: none; }
 .mdl-detail-recipe .ro-row .k { color: var(--fg-4); }
 .mdl-detail-recipe .ro-row .v { color: var(--fg-2); }
 .mdl-detail-actions { padding: 14px 16px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -2860,6 +2907,45 @@ select.npu-sel {
   gap: 12px;
 }
 
+/* ─── Docked drawer (side-by-side stack) ────────────────────────────
+   Consumed by the slot edit drawer, which stacks the model drawer beside
+   itself (see DrawerDock in dash/primitives.jsx). There are no portals here:
+   `.drawer` is `position: fixed; right: 0; z-index: 95`, so a second drawer
+   would otherwise land flush-right at equal z-index and fully cover the first.
+
+   `right` is driven by the --drawer-dock custom property, set inline by the
+   primitive, NOT by an inline `right`. Inline styles beat stylesheet rules only
+   for the properties they actually set, so keeping `right` in the stylesheet is
+   what lets the narrow-viewport fallback below reclaim it. */
+.drawer.drawer--docked {
+  right: var(--drawer-dock, 0px);
+  /* Never push the panel off-canvas to the left: shrink first. */
+  max-width: calc(100vw - var(--drawer-dock, 0px));
+  /* Flush against the drawer it stacks on — a lighter shadow so the seam
+     between the two panels reads as one continuous surface. */
+  box-shadow: -14px 0 40px -18px rgba(0, 0, 0, 0.55);
+}
+/* Closed, a docked drawer must slide fully off-canvas. The base
+   `translateX(100%)` only clears its own width, which would park the panel
+   directly on top of the drawer it is docked beside. */
+.drawer.drawer--docked:not(.open) {
+  transform: translateX(calc(100% + var(--drawer-dock, 0px)));
+}
+/* Below ~1200px there is no room for both panels (the slot drawer is 560 and
+   the model drawer 600 = 1160 plus breathing room), so drop back to the
+   overlay stack instead of squeezing the docked panel into a useless column. */
+@media (max-width: 1199px) {
+  .drawer.drawer--docked {
+    right: 0;
+    max-width: 100vw;
+  }
+  .drawer.drawer--docked:not(.open) { transform: translateX(100%); }
+}
+/* A stacked drawer's own scrim must not double-darken the page — the drawer
+   underneath already painted one. Kept as a click target with no paint so
+   click-outside still dismisses the TOP drawer. */
+.drawer-backdrop.drawer-backdrop--clear { background: transparent; }
+
 /* ─── Banner ───────────────────────────────────────────────────── */
 .view-banners { padding: 20px 28px 0; max-width: 1600px; margin: 0 auto; }
 .view-banners:empty { padding: 0; }
@@ -2987,15 +3073,26 @@ select.npu-sel {
   border-bottom: 1px solid var(--line-soft);
 }
 .form-row:last-child { border-bottom: none; }
+/* Row-flow so the (i) info affordance sits INLINE with the field title
+   instead of stacking beneath it. `.sub` keeps its own line via a
+   full-width flex-basis, so the multi-line label fields (model drawer,
+   create-model modal) look exactly as they did before. */
 .form-row .form-lbl {
   font-size: 12.5px;
   color: var(--fg);
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 3px;
 }
 .form-row .form-lbl .req { color: var(--accent); font-family: var(--jbm); font-size: 10px; }
-.form-row .form-lbl .sub { font-size: 11px; color: var(--fg-4); font-weight: 400; }
+.form-row .form-lbl .sub {
+  font-size: 11px;
+  color: var(--fg-4);
+  font-weight: 400;
+  flex: 0 0 100%;
+}
 
 /* Field descriptions are available only through the adjacent info affordance. */
 .field-info-wrap {

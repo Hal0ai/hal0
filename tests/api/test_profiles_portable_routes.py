@@ -163,6 +163,29 @@ class TestImportCommit:
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "profiles.envelope_too_new"
 
+    def test_commit_tampered_checksum_400(self, client: TestClient) -> None:
+        """#1416 — the exact envelope ``dry_run`` reports ``checksum_ok: false``
+        for used to commit anyway. Same input, both calls, asserted together so
+        the two paths can never disagree again."""
+        env = client.post(f"/api/profiles/{_seed_name()}/export").json()
+        env["profile"]["flags"] = "-fa off TAMPERED"
+
+        dry = client.post("/api/profiles/import", json={"envelope": env, "dry_run": True})
+        assert dry.json()["checksum_ok"] is False
+
+        r = client.post("/api/profiles/import", json={"envelope": env, "name": "tampered"})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"]["code"] == "profiles.checksum_mismatch"
+        # …and nothing was written.
+        assert client.get("/api/profiles/tampered").status_code == 404
+
+    def test_commit_checksumless_envelope_still_imports(self, client: TestClient) -> None:
+        """A hand-authored envelope omitting ``checksum`` is not corruption."""
+        env = client.post(f"/api/profiles/{_seed_name()}/export").json()
+        env.pop("checksum")
+        r = client.post("/api/profiles/import", json={"envelope": env, "name": "no-sum"})
+        assert r.status_code == 201, r.text
+
 
 # ── #1416: commit verifies the checksum + screens the flags ──────────────────
 #

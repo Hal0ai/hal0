@@ -78,7 +78,7 @@ class TestPlanComputeOnly:
 
 
 class TestReconciliation:
-    def test_after_sets_model_device_vision(self, tmp_hal0_home: str) -> None:
+    def test_after_sets_model_and_device(self, tmp_hal0_home: str) -> None:
         slot_path = _write_agent_slot(tmp_hal0_home)
         plan = StackApplyEngine().plan("saber", _stack())
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
@@ -90,7 +90,11 @@ class TestReconciliation:
         # ``backend`` mirror is no longer written.
         assert after["device"] == "gpu-rocm"
         assert "backend" not in after
-        assert after["vision"] is True
+        # spec-hw-slot-ownership §1: the stack entry's ``vision=True`` is a
+        # MODEL-owned capability and must NOT project onto the slot. The
+        # on-disk ``vision = false`` this fixture seeds is legacy debris the
+        # migration owns; the stack leaves it exactly as found.
+        assert after["vision"] is False, "stack apply must not write model-owned vision"
 
     def test_changed_true_when_model_differs(self, tmp_hal0_home: str) -> None:
         _write_agent_slot(tmp_hal0_home)
@@ -108,7 +112,17 @@ class TestReconciliation:
         plan = StackApplyEngine().plan("saber", _stack())
         assert any("agent" in line for line in plan.summary)
 
-    def test_vision_false_overwrites_on_disk_true(self, tmp_hal0_home: str) -> None:
+    def test_legacy_on_disk_vision_is_left_alone(self, tmp_hal0_home: str) -> None:
+        """A pre-partition ``vision`` already on disk is neither honoured nor swept.
+
+        The stack no longer projects ``vision`` at all (spec-hw-slot-ownership
+        §1), so a slot TOML that predates the partition keeps its stale value
+        until ``hal0 slot migrate-caps`` sweeps it. Deliberate: clearing it here
+        would need a ``{"vision": None}`` delete, which the write-boundary
+        partition guard refuses — and quietly rewriting hardware/capability
+        intent as a side effect of an unrelated model swap is exactly what the
+        guard exists to stop.
+        """
         slot_path = _slots_dir(tmp_hal0_home) / "agent.toml"
         slot_path.write_text(
             "\n".join(
@@ -119,7 +133,9 @@ class TestReconciliation:
         stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="m", vision=False)])
         plan = StackApplyEngine().plan("s", stack)
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
-        assert after["vision"] is False
+        assert after["vision"] is True, "legacy on-disk value survives untouched"
+        assert plan.errors == [], "an unrelated model swap must still succeed"
+        assert after["model"]["default"] == "m"
 
 
 class TestGuardedReconcile:

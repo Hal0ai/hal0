@@ -21,8 +21,10 @@ from typing import Any
 
 from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
+from hal0.errors import BadRequest
 from hal0.model_meta import canonical_device
 from hal0.slot_config import ChangeSet, FileState, SlotConfigStore
+from hal0.slots.layout import resolve_slot_stem
 from hal0.slots.manager import reconcile_and_guard_slot_config
 from hal0.slots.state import (
     DISPATCHABLE_STATES,
@@ -71,6 +73,12 @@ class StackChangePlan:
     change_set: ChangeSet
     summary: list[str]
     errors: list[tuple[str, str]] = field(default_factory=list)
+    # Display names, positionally parallel to ``change_set.before/after``
+    # (#1510). The ChangeSet addresses files by STEM, which on an id-keyed box
+    # is a digit ("1"), not the slot's name ("agent"). Anything that labels a
+    # row for a human, or keys a projection a StackConfig will later be
+    # compared against, must use THIS list — never ``FileState.path.stem``.
+    slot_names: tuple[str, ...] = ()
 
 
 # Slot states by convergence intent.
@@ -135,9 +143,27 @@ class StackApplyEngine:
         self._slot_manager = slot_manager
         self._orchestrator = orchestrator
 
+    def _slots_base(self) -> Path:
+        return self._slots_dir or paths.slots_config_dir()
+
+    def _slot_stem(self, slot_name: str) -> str:
+        """The on-disk stem for a stack entry's slot (#1510).
+
+        A stack entry addresses a slot by its *display name* — that is the
+        portable identity, and it is what ``SlotManager.load/swap/unload`` and
+        ``capabilities.toml`` already speak. The on-disk stem is this box's
+        storage detail: the same name on an id-keyed box lives at ``1.toml``.
+        Resolving through the layout seam is what makes snapshot→apply
+        round-trip instead of manufacturing a duplicate slot.
+
+        Falls back to the name itself when nothing resolves, so a slot the
+        stack names but the box doesn't have yet still gets the name-keyed
+        creation path the create-on-apply flow expects.
+        """
+        return resolve_slot_stem(self._slots_base(), slot_name) or slot_name
+
     def _slot_path(self, slot_name: str) -> Path:
-        base = self._slots_dir or paths.slots_config_dir()
-        return base / f"{slot_name}.toml"
+        return self._slots_base() / f"{self._slot_stem(slot_name)}.toml"
 
     # ── plan (compute-only) ──────────────────────────────────────────────────
 
@@ -149,29 +175,36 @@ class StackApplyEngine:
         scope). For every other entry ``after == before``.
 
         Guard violations from the shared write pipeline (incoherent
-        device+profile pair, NPU exclusivity, default uniqueness) never abort
-        the plan: the offending entry keeps ``after == before`` and the
-        violation is recorded per-slot in ``plan.errors`` (mirrored into
-        ``summary``), matching the engine's report-don't-raise philosophy.
+        device+profile pair, NPU exclusivity, default uniqueness, and the
+        ``BadRequest``-flavoured slot/model key partition + freeform-flag
+        screen) never abort the plan: the offending entry keeps
+        ``after == before`` and the violation is recorded per-slot in
+        ``plan.errors`` (mirrored into ``summary``), matching the engine's
+        report-don't-raise philosophy. One malformed stack row therefore
+        degrades to "that slot was skipped, here's why" instead of 400ing an
+        otherwise-valid multi-slot apply.
         """
         befores: list[FileState] = []
         afters: list[FileState] = []
+        slot_names: list[str] = []
         summary: list[str] = []
         errors: list[tuple[str, str]] = []
 
         for entry in stack.slots:
             if not entry.model:
                 continue
-            path = self._slot_path(entry.slot)
+            stem = self._slot_stem(entry.slot)
+            path = self._slots_base() / f"{stem}.toml"
             before = _read_toml_or_none(path)
             try:
-                after = self._reconciled_stack_slot(before, entry)
-            except (SlotConfigError, NpuExclusivityViolation) as exc:
+                after = self._reconciled_stack_slot(before, entry, stem)
+            except (SlotConfigError, NpuExclusivityViolation, BadRequest) as exc:
                 errors.append((entry.slot, str(exc)))
                 summary.append(f"{entry.slot}: rejected — {exc}")
                 after = before
             befores.append(FileState(path=path, data=before))
             afters.append(FileState(path=path, data=after))
+            slot_names.append(entry.slot)
             if before != after:
                 summary.append(self._summarize(entry.slot, before, after))
 
@@ -180,6 +213,7 @@ class StackApplyEngine:
             change_set=ChangeSet(before=tuple(befores), after=tuple(afters)),
             summary=summary,
             errors=errors,
+            slot_names=tuple(slot_names),
         )
 
     def validate(
@@ -207,7 +241,7 @@ class StackApplyEngine:
         return warnings
 
     def _reconciled_stack_slot(
-        self, before: dict[str, Any] | None, entry: StackSlotEntry
+        self, before: dict[str, Any] | None, entry: StackSlotEntry, stem: str | None = None
     ) -> dict[str, Any] | None:
         """Project a stack slot entry onto the existing slot TOML dict.
 
@@ -216,14 +250,23 @@ class StackApplyEngine:
         the SAME dual write ``SlotConfigStore._reconciled_slot`` performs)
         and then routes it through the shared guarded pipeline
         :func:`hal0.slots.manager.reconcile_and_guard_slot_config`: the
+        slot/model key-space partition + freeform-flag screen, the
         copy-safe one-level ``[model]``/``[server]`` merge, the #585
         ``ctx_size``→``context_size`` fold, device↔profile backend
         coherence, and the NPU-exclusivity / default-uniqueness guards.
         A stack can therefore no longer persist what ``update_config``
-        would refuse (e.g. a vulkan device under a rocm profile) — guard
+        would refuse (e.g. a vulkan device under a rocm profile, or a
+        model-owned ``mtp``/``vision``/``enable_thinking``) — guard
         violations raise and :meth:`plan` records them per-slot. Returns
         ``before`` unchanged when the slot file is absent (creation is out
         of 2a scope).
+
+        ``stem`` is the slot's ON-DISK stem (#1510). The cross-slot guards
+        exclude the slot's own file from its peer set by comparing against
+        ``path.stem``, so passing the display name on an id-keyed box made a
+        slot conflict with ITSELF (its ``1.toml`` never matched ``"agent"``)
+        and rejected its own plan. Defaults to ``entry.slot`` for the
+        name-keyed case, where the two are the same string.
         """
         if before is None:
             return None
@@ -239,21 +282,20 @@ class StackApplyEngine:
             updates["provider"] = entry.provider
         if entry.profile is not None:
             updates["profile"] = entry.profile
-        # ``vision`` is a plain bool (no inherit) → declaratively written.
-        updates["vision"] = entry.vision
-        # ``mtp`` is declaratively written INCLUDING None: a stack row set to
-        # Auto (null) must clear any forced true/false already on the slot, or
-        # the stack UI's "Auto" hint disagrees with what actually launches.
-        # merge_slot_config treats None as delete-key, so Auto rows reset the
-        # slot to the derived decision (model eligibility x profile opt-in).
-        updates["mtp"] = entry.mtp
-        if entry.enable_thinking is not None:
-            updates["enable_thinking"] = entry.enable_thinking
+        # spec-hw-slot-ownership §1: ``vision`` / ``mtp`` / ``enable_thinking``
+        # are MODEL-owned typed capabilities and are deliberately NOT projected
+        # onto the slot. They remain on ``StackSlotEntry`` (back-compat: seed
+        # stacks still declare ``mtp = true``, and ``snapshot_live_stack`` still
+        # reads them off pre-partition slot TOMLs) but a stack apply must not re-land
+        # the pre-partition on-disk shape that ``PUT /api/slots/{name}/config``
+        # 400s on. This is the same exclusion the sibling create path
+        # (``api.routes.stacks._create_missing_slots``) makes; the two agree
+        # again. ``reconcile_and_guard_slot_config`` now enforces it for real.
         if entry.server_extra_args is not None:
             updates["server"] = {"extra_args": entry.server_extra_args}
 
         return reconcile_and_guard_slot_config(
-            entry.slot, before, updates, slots_dir=self._slots_dir
+            stem or entry.slot, before, updates, slots_dir=self._slots_dir
         )
 
     @staticmethod
@@ -285,8 +327,25 @@ class StackApplyEngine:
     # ── drift / active pointer ───────────────────────────────────────────────
 
     def _projection_from_plan(self, plan: StackChangePlan) -> dict[str, Any]:
-        """The slot→after-dict projection a plan would write (keyed by slot name)."""
-        return {fs.path.stem: fs.data for fs in plan.change_set.after}
+        """The slot→after-dict projection a plan would write, keyed by DISPLAY NAME.
+
+        Must use ``plan.slot_names`` and not ``fs.path.stem`` (#1510): the
+        counterpart :meth:`_projection_live` keys by ``entry.slot``, so on an
+        id-keyed box a stem-keyed fingerprint (``{"1": ...}``) could never
+        match the name-keyed projection it is compared against (``{"agent":
+        ...}``) and every applied stack reported ``modified`` immediately.
+
+        No migration is needed for already-recorded fingerprints: on a
+        name-keyed box the stem IS the display name, so the key space is
+        byte-identical; on an id-keyed box the old fingerprint never matched
+        anything anyway.
+        """
+        after = plan.change_set.after
+        if len(plan.slot_names) == len(after):
+            return dict(zip(plan.slot_names, (fs.data for fs in after), strict=True))
+        # Defensive: a hand-built plan with no slot_names (older callers/tests)
+        # keeps the plain stem keying rather than silently mis-pairing.
+        return {fs.path.stem: fs.data for fs in after}
 
     def _projection_live(self, stack: StackConfig) -> dict[str, Any]:
         """The slot→current-disk-dict projection for a stack's primary slots."""

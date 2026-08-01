@@ -322,6 +322,29 @@ def write_model_meta(
     (dest.parent / "meta.json").write_text(_json.dumps(meta, indent=2) + "\n")
 
 
+def read_model_meta(dest: Path) -> dict[str, Any] | None:
+    """Read the ``meta.json`` sidecar next to *dest*, or ``None``.
+
+    The symmetric counterpart of :func:`write_model_meta`, which shipped
+    without a reader — so the provenance it records could be inspected by a
+    human but not by code. :func:`hal0.install.brain_model.already_pulled` is
+    the first consumer: it uses the recorded ``curated_id`` / ``hf_file`` /
+    ``size_bytes`` to decide whether a file already on disk is genuinely THIS
+    curated entry, complete, rather than re-downloading multiple gigabytes on
+    every ``install.sh`` re-run.
+
+    Best-effort: a missing, unreadable, malformed, or non-object sidecar all
+    return ``None``, i.e. "can't prove it — treat it as absent". Never raises.
+    """
+    import json as _json
+
+    try:
+        raw = _json.loads((dest.parent / "meta.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
 def _tmp_dir() -> Path:
     """Return the tempfile staging directory for in-flight pulls.
 

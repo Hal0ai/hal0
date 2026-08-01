@@ -26,7 +26,6 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
 
   const [name, setName] = useStateC("");
   const [modelId, setModelId] = useStateC("");
-  const [makeDefault, setMakeDefault] = useStateC(false);
   const [submitErr, setSubmitErr] = useStateC(null);
 
   const models = useMemoC(() => localModels(modelsQuery.data), [modelsQuery.data]);
@@ -35,7 +34,6 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
     if (open) {
       setName(defaults.name || "");
       setModelId(defaults.model || "");
-      setMakeDefault(false);
       setSubmitErr(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -69,7 +67,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const nameInvalid = name && !NAME_RE.test(name);
   const nameError = nameCollision ? "name already in use" : nameInvalid ? "lowercase + dashes only" : null;
 
-  const dirty = !!name || !!modelId || makeDefault;
+  const dirty = !!name || !!modelId;
   const canSave = !!name && !nameError && !!modelId && !createMut.isPending;
 
   async function onCreate() {
@@ -80,8 +78,10 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       runtime: "container",
       model: modelId,
       // Device rides the model — derived, not a slot choice.
+      // `default` is deliberately NOT sent: the backend silently defaults the
+      // FIRST slot of a type, and re-pointing the default afterwards is the
+      // explicit "Set as default" row action on the slot list.
       device: device || "gpu-rocm",
-      ...(makeDefault ? { default: true } : {}),
     };
     try {
       await createMut.mutateAsync(body);
@@ -173,19 +173,9 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
       </div>
 
-      {/* Default for type — promotes the picked MODEL as its type's default */}
-      <div className="form-row" style={{ marginTop: 8 }}>
-        <div className="form-lbl">
-          <span>default for {selModel?.type || "type"}?</span>
-          <FieldInfoIcon description="makes this model the {selModel?.type || &quot;type&quot;} default; demotes the current one" />
-        </div>
-        <div className="form-ctl">
-          <label className="checkbox-row">
-            <input type="checkbox" data-testid="create-slot-default" checked={makeDefault} onChange={(e) => setMakeDefault(e.target.checked)} />
-            <span>Set as default</span>
-          </label>
-        </div>
-      </div>
+      {/* (The "default for <type>?" checkbox is gone. The first slot of a type
+          becomes that type's default on the backend; changing it afterwards is
+          the explicit "Set as default" action on the slot's row.) */}
     </Modal>
   );
 }

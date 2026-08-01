@@ -180,10 +180,12 @@ test.describe('Slot edit controls (/slots)', () => {
     expect(puts[0]).toHaveProperty('n_gpu_layers', -1)
   })
 
-  test('HW grid — the 4 typed fields + image_pin render (§2)', async ({ page }) => {
+  test('HW grid — the typed fields + Runner Image render; Device does not (§2)', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/primary')
-    await expect(page.getByTestId('slot-hw-device')).toBeVisible()
+    // Device is create-time only now: it rides the model and is fixed for the
+    // slot's lifetime, so the drawer displays it but offers no control.
+    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
     await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
     await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
     await expect(page.getByTestId('slot-hw-binary')).toBeVisible()
@@ -217,19 +219,16 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [{ ...PRIMARY, device: 'gpu-rocm', threads: 0, binary: '', image_pin: null }, EMBED])
 
     await page.goto('/#slots/primary')
-    // Pick the runner while the gpu-rocm device still fits it — the Runner
-    // options are filtered by the device lane (runner_matches predicate);
-    // after the device flips to cpu the pick survives as an out-of-vocab
-    // persisted option.
-    await page.getByTestId('slot-hw-binary').selectOption({ index: 1 })
-    await page.getByTestId('slot-hw-device').selectOption('cpu')
+    // Pick the runner binary — the options are the ones that fit this slot's
+    // (fixed) device lane. There is no "— default (from device) —" entry any
+    // more, so the first real option is index 0.
+    await page.getByTestId('slot-hw-binary').selectOption('rocmfpx')
     await page.getByTestId('slot-hw-ngl').fill('0')
     await page.getByTestId('slot-hw-threads').fill('8')
     await page.getByTestId('slot-hw-image-pin').fill('ghcr.io/example/runner:test')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toMatchObject({
-      device: 'cpu',
       n_gpu_layers: 0,
       threads: 8,
       image_pin: 'ghcr.io/example/runner:test',
@@ -316,13 +315,14 @@ test.describe('Slot edit controls (/slots)', () => {
 
     await page.goto('/#slots/primary')
     // Context is directly visible in the Model group (not inside Advanced).
-    // Label reads "Context (override)" — spec-hw-slot-ownership §1: it is an
-    // explicit override of the bound model's own default context_size.
+    // Label reads "Context (ceiling)": the bound model's own default
+    // context_size is authoritative; this slot value only clamps it down for
+    // lighter hardware, it never overrides it upward.
     const modelGroup = page.locator('.drawer .field-group').filter({
       has: page.locator('.field-group-label', { hasText: /^Model$/ }),
     })
     const contextRow = modelGroup.locator('.form-row').filter({
-      has: page.locator('.form-lbl > span', { hasText: /^Context \(override\)$/ }),
+      has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
     })
     await expect(contextRow).toBeVisible()
     await contextRow.locator('input').fill('16384')

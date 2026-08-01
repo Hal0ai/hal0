@@ -15,9 +15,7 @@ const IS_DEV = !!(import.meta.env && (import.meta.env as any).DEV)
 export interface TweaksState {
   slotCardVariant: 'a' | 'b' | 'c' | 'instrument' | 'list' | 'spec'
   heroStrip: 'sparkline' | 'metrics' | 'minimal'
-  composerState: 'idle' | 'sending' | 'streaming' | 'swap' | 'no-tools' | 'offline'
   firstrunLayout: 'tiers' | 'wizard' | 'grid' | 'table'
-  personaPlacement: 'topbar' | 'inline' | 'drawer' | 'composer-left' | 'above'
   chatVariant: 'active' | 'empty'
   heroVariant: 'returning' | 'post-install' | 'skip-path-empty'
   // User-facing (persist in prod too)
@@ -28,9 +26,7 @@ export interface TweaksState {
 const DEFAULTS: TweaksState = {
   slotCardVariant: 'instrument',
   heroStrip: 'sparkline',
-  composerState: 'idle',
   firstrunLayout: 'grid',
-  personaPlacement: 'composer-left',
   chatVariant: 'active',
   heroVariant: 'returning',
   theme: 'dark',

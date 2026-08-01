@@ -186,7 +186,7 @@ function FlagsEditor({ value, onChange, invalid }) {
 				value={value}
 				onChange={(e) => onChange(e.target.value)}
 				onScroll={syncScroll}
-				placeholder="pick a profile to seed flags, or type your own · e.g. -fa on -b 2048 --threads 8"
+				placeholder="pick a profile to seed flags, or type your own · e.g. -fa on -b 2048 -ctk q8_0"
 				style={{
 					...shared,
 					position: "relative",

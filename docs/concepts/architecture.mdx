@@ -10,8 +10,9 @@ import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/compo
 hal0 is a single self-hosted service that turns one machine into an
 OpenAI-compatible inference platform. Everything runs behind one process —
 **hal0-api** — which owns configuration, model and slot lifecycle, request
-routing, and the web UI. Understanding how those parts relate is the key to
-understanding the rest of these docs.
+routing, and the web UI. Everything else — bundled agents, the memory brain,
+optional companion services — runs as its own sandboxed sibling unit that
+hal0-api provisions and talks to over HTTP or MCP, not in-process.
 
 ## The pieces
 
@@ -23,8 +24,8 @@ understanding the rest of these docs.
   </Card>
   <Card title="Slots" icon="puzzle">
     Each slot is one model served by one podman container, managed through a
-    `hal0-slot@<name>.service` systemd unit. The `SlotManager` owns their
-    lifecycle and state.
+    `hal0-slot@<name>.service` systemd unit. `SlotManager` owns their
+    lifecycle and state; it never imports the dispatcher.
   </Card>
   <Card title="Stacks" icon="seti:db">
     A named, portable bundle of slot assignments plus the profiles and model
@@ -34,12 +35,20 @@ understanding the rest of these docs.
   <Card title="Dispatcher" icon="random">
     The registry-aware router that resolves every incoming `/v1` request to a
     slot or an external upstream, then forwards it — wrapping the slot in its
-    serving state for the duration of the call.
+    serving state for the duration of the call. HTTP-only: it never starts or
+    stops a slot itself.
+  </Card>
+  <Card title="Bundled agent" icon="comment">
+    Hermes, a third-party agent runtime hal0 provisions and runs as its own
+    sandboxed `hal0-agent@<id>.service` — the only bundled agent as of v1.0
+    (earlier speculative bundles, pi-coder and opencode, were removed) —
+    plus **hal0-brain**, a first-class, Hermes-independent platform steward
+    that drives the admin tool surface directly. See
+    [Agents](/docs/concepts/agents).
   </Card>
   <Card title="Front ends" icon="laptop">
-    The React dashboard (served by hal0-api itself) for operating the platform
-    and its companion services, plus optional OpenWebUI as a chat front end
-    pointed at the `/v1` surface.
+    The React dashboard (served by hal0-api itself) for operating the platform,
+    plus optional OpenWebUI as a chat front end pointed at the `/v1` surface.
   </Card>
 </CardGrid>
 
@@ -54,7 +63,7 @@ surface area:
   `Authorization` header.
 - **`/api/*`** — the operator control plane: slots, stacks, models,
   capabilities, profiles, providers, companion services, hardware, health,
-  settings, activity, updates, and more.
+  settings, activity, auth, and more.
 - **`/mcp/admin`** and **`/mcp/memory`** — Model Context Protocol servers
   mounted as sub-applications so agents and tools can drive hal0 directly.
 - **`/`** — the built dashboard SPA, mounted last so it never shadows an API
@@ -68,24 +77,41 @@ state changes to the dashboard footer. These are shared across all requests —
 the API is a thin layer over them.
 
 <Aside type="note">
-hal0 ships with **no built-in authentication or TLS**. The API is open on the
-local network by design. See [Security](/docs/concepts/security) for the
-reverse-proxy pattern you put in front of it.
+hal0 ships **open by default** — no authentication is enforced unless you turn
+it on. A real, opt-in auth layer exists for when you need it. See
+[Security](/docs/concepts/security) for the auth tiers and the reverse-proxy
+pattern.
 </Aside>
 
 ## Slots: where models actually run
 
 A **slot** is a named, long-lived place to serve one model. Behind each slot is
 a single podman container started by a `hal0-slot@<name>.service` systemd unit
-whose `ExecStart` runs `podman run`. The `SlotManager` drives every transition
-through an explicit state machine and persists it so the dashboard reflects real
-lifecycle events, not systemd snapshots.
+whose `ExecStart` runs `podman run`. `SlotManager` drives every transition
+through an explicit state machine and persists it so the dashboard reflects
+real lifecycle events, not systemd snapshots.
 
 Slots are the unit hal0 reasons about everywhere: the dispatcher routes to
 them, the GPU arbiter coordinates exclusive GPU access between them, and
-capabilities and profiles describe how to configure them. The
-[Slots](/docs/concepts/slots) concept covers the lifecycle, single-flight
-dispatch, and the GPU arbiter in depth.
+profiles configure how they run. As of v1.0, the slot is also the sole owner
+of *where* a model runs and *how much context it gets* — a real split from
+profiles, covered below and in [Slots](/docs/concepts/slots).
+
+## Capabilities & profiles: what a slot does, and how
+
+A slot's behavior is shaped by two more ideas that sit on top of it:
+
+- A **capability** groups related slots under one operator-facing idea
+  (`embed`, `voice`, `img`, `vision`) so you configure a concept, not raw
+  slot fields.
+- A **profile** is a device-agnostic, reusable *tune template* — sampler
+  settings, KV-cache policy, batch size, reasoning mode. As of the v1.0
+  hardware-ownership split, a profile carries **no image and no hardware
+  placement** — that's the slot's job.
+
+See [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) for
+the full model, including the write-boundary partition between what the slot
+owns and what the model owns.
 
 ## Stacks: applying a slot set as one unit
 
@@ -98,17 +124,14 @@ to another machine.
 
 Applying a stack is two phases: it's first **planned** and committed as an
 atomic write through the same guarded slot-config pipeline every other slot
-edit goes through (a stack can't write anything a manual edit would be
-refused), then **converged** against the live slot set — loading, swapping,
-or skipping each slot and its capability children, and unloading anything
-running that the stack doesn't mention. hal0 ships three seed stacks
-(`saber`, `forge`, `pi`) tuned to the reference Strix Halo roster; seeds are
-immutable, so customizing one means cloning it under a new name. The
-dashboard's **Stacks** view is where you load, edit, export, and import
-them, and it tracks which stack is active and whether the running
-configuration has drifted from what was last applied. See
-[Stacks](/docs/concepts/stacks) for the full model — row fields, the
-plan/converge phases, drift states, and portable export/import.
+edit goes through (`guard_slot_write_payload` — a stack can't write anything a
+manual edit would be refused), then **converged** against the live slot set —
+loading, swapping, or skipping each slot and its capability children, and
+unloading anything running that the stack doesn't mention. hal0 ships three
+seed stacks (`saber`, `forge`, `pi`) tuned to the reference Strix Halo roster;
+seeds are immutable, so customizing one means cloning it under a new name.
+See [Stacks](/docs/concepts/stacks) for the full model, and an honest read on
+how mature this feature is.
 
 ## The dispatcher: routing a request
 
@@ -149,17 +172,17 @@ a request went where it did.
 <Steps>
 
 1. A client `POST`s to `/v1/chat/completions` with a `model` field — that can
-   be a model id, or a **slot alias**: the name of any llm slot with a model bound, such
+   be a model id, or a **slot alias**: the name of any enabled llm slot, such
    as `agent` or `utility`.
 
 2. The route layer translates a slot alias to the slot's configured model id,
    then asks the dispatcher to resolve the request to an `UpstreamCall`.
 
 3. If the target is a local slot whose model isn't loaded yet, the dispatcher
-   kicks a backend-aware load so the slot's declared device and profile pick
-   the runtime — then gates on readiness. A slot that is still loading returns a
-   structured `slot.loading` 503 with a `Retry-After` hint instead of a raw
-   connection error.
+   kicks a load using the slot's own hardware grid — `device`, `binary`,
+   `n_gpu_layers`, `threads` — then gates on readiness. A slot that is still
+   loading returns a structured `slot.loading` 503 with a `Retry-After` hint
+   instead of a raw connection error.
 
 4. Once the slot is ready, the dispatcher forwards the request, wrapping the
    slot in its **serving** state for the lifetime of the call. For a streamed
@@ -178,9 +201,9 @@ change when you swap the underlying model. See [Slots](/docs/concepts/slots).
 
 ## The front ends
 
-hal0-api serves the **dashboard** itself — a React single-page application. 
-There is no separate web server to run. The dashboard is where you create and 
-operate slots, pull models, pick capabilities, watch live activity, and configure 
+hal0-api serves the **dashboard** itself — a React single-page application.
+There is no separate web server to run. The dashboard is where you create and
+operate slots, pull models, pick capabilities, watch live activity, and configure
 the platform.
 
 For end-user chat, point **OpenWebUI** (or any OpenAI-compatible client) at
@@ -193,9 +216,9 @@ OpenAI talks to hal0.
 ## Where to go next
 
 <CardGrid>
-  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle, single-flight dispatch, and the GPU arbiter." />
+  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle, single-flight dispatch, and the write-boundary partition." />
   <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="How capabilities, profiles, and devices shape a slot." />
   <LinkCard title="Stacks" href="/docs/concepts/stacks" description="Applying a whole slot lineup as one declarative unit." />
   <LinkCard title="Strix Halo" href="/docs/concepts/strix-halo" description="The reference hardware and why it's the tuning target." />
-  <LinkCard title="Security" href="/docs/concepts/security" description="The LAN-open posture and the reverse-proxy pattern." />
+  <LinkCard title="Security" href="/docs/concepts/security" description="The open-by-default posture and the opt-in auth layer." />
 </CardGrid>

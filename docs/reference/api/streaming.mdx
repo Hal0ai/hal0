@@ -1,105 +1,58 @@
 ---
-title: Streaming (SSE)
-description: Streaming reference for hal0's OpenAI-compatible API — the server-sent-events wire format for /v1/chat/completions and /v1/completions, the chunk shape, the [DONE] sentinel, and a client example.
+title: Streaming reference
+description: "How hal0 forwards streaming (SSE) responses — verified against src/hal0/dispatcher/router.py and src/hal0/api/routes/v1.py in the v1.0 tree."
 sidebar:
-  order: 30
+  order: 20
 ---
 
-import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Aside } from '@astrojs/starlight/components';
 
-When a request to `/v1/chat/completions` or `/v1/completions` sets
-`"stream": true`, hal0 returns a server-sent-events (SSE) stream. The format is
-the standard OpenAI streaming wire format: hal0 dispatches the request to a slot
-and forwards the upstream inference server's SSE bytes through unchanged, so any
-OpenAI-compatible streaming client works without modification.
+`stream: true` in a `/v1/chat/completions` (or other dispatched) request body triggers
+hal0's streaming forward path in the dispatcher (`hal0.dispatcher.router`).
 
-## Wire format
+## Behavior
 
-Each event is a line beginning with `data: ` followed by a JSON object, with a
-blank line separating events. The stream is terminated by a final
-`data: [DONE]` sentinel.
+- The upstream connection is opened **eagerly** (`httpx.AsyncClient.send(req, stream=True)`)
+  specifically so a connect failure surfaces as a clean `502 UpstreamUnavailable`
+  rather than failing partway through an already-started response generator.
+- The client response is a Starlette `StreamingResponse` whose body iterator does a
+  **raw byte passthrough** — `async for chunk in resp.aiter_raw(): yield chunk`. hal0
+  does **not** parse or re-emit SSE events itself; the OpenAI-standard
+  `data: {...}\n\n` ... `data: [DONE]\n\n` framing and the `text/event-stream`
+  content-type come from whatever upstream is serving the slot (llama-server, FLM, or
+  a remote provider), copied through verbatim.
+- Status code and `content-type` on the client response are copied verbatim from the
+  upstream response.
 
-```text
-data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1700000000,"model":"chat","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1700000000,"model":"chat","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1700000000,"model":"chat","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1700000000,"model":"chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
-
-data: [DONE]
-```
-
-| Field         | Meaning                                                                 |
-|---------------|------------------------------------------------------------------------|
-| `object`      | `chat.completion.chunk` for chat; `text_completion` for `/v1/completions`. |
-| `choices[].delta` | The incremental piece. The first chunk typically carries `{"role":"assistant"}`; subsequent chunks carry `{"content":"…"}`; the last carries `{}`. |
-| `choices[].finish_reason` | `null` until the final content-bearing chunk, then `stop` (or `length`, etc.). |
-| `[DONE]`      | Literal sentinel marking end of stream — it is **not** JSON. Stop reading after it. |
-
-<Aside type="note">
-`/v1/completions` streams the same envelope but with `object: "text_completion"`
-and the generated text under `choices[].text` instead of `choices[].delta`. The
-`[DONE]` sentinel is identical.
-</Aside>
-
-The Content-Type of a streaming response is `text/event-stream`. hal0 measures
-per-chunk throughput on the streaming path (counting content deltas) to populate
-its slot tok/s metrics, and records a one-shot time-to-first-token (TTFT) reading
-per response from the first content-bearing delta — both feed the dashboard's
-per-slot throughput history — but hal0 does not alter the bytes it forwards.
+## Timeouts
 
 <Aside type="caution">
-Setting `"omni": true` on a `/v1/chat/completions` request (opting into the
-OmniRouter tool-calling loop) forces `stream` to `false` for the duration of the
-loop, regardless of what the request body asked for — streaming through
-OmniRouter isn't implemented yet. A plain (non-`omni`) request streams normally.
+`[dispatcher].direct_read_timeout_s` (default `300.0`, range `30.0-600.0` — see
+[Config schema](/docs/reference/config-schema/#dispatcher)) governs the
+**non-streaming** forward path only. Once a stream is open, this timeout does not
+apply — only the underlying HTTP client's `connect` (5.0s), `write` (10.0s), and
+`pool` (5.0s) timeouts constrain the streaming path's connection setup. There is no
+separate configurable read timeout once bytes start flowing.
 </Aside>
 
-## Client example
+## Slot state during a stream
 
-<Tabs>
-<TabItem label="curl">
+A slot dispatching a streaming request is held in the `SERVING` state until the client
+has fully drained the stream, not just until the first byte is sent — released via a
+wrapped async generator. See [Slot lifecycle](/docs/reference/slot-lifecycle/) for the
+full state machine.
 
-```bash
-curl -N http://hal0.local:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "chat",
-    "stream": true,
-    "messages": [{"role": "user", "content": "Say hi in three words."}]
-  }'
-```
+## Observability piggybacked on the stream
 
-`-N` disables curl's buffering so chunks print as they arrive.
+hal0 wraps the streaming byte iterator purely for metrics — this does not alter what's
+sent to the client:
 
-</TabItem>
-<TabItem label="Python (openai)">
+- **Approximate token count**: counts `"delta":` substring occurrences per chunk, fed
+  into a per-slot tokens/sec gauge (`GET /api/slots/metrics`).
+- **Time-to-first-token (TTFT)**: recorded at the first chunk containing a `"delta":`
+  marker, deliberately skipping llama-server's initial role-only chunk — stored in a
+  per-slot TTFT event deque.
 
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://hal0.local:8080/v1", api_key="not-needed")
-
-stream = client.chat.completions.create(
-    model="chat",
-    stream=True,
-    messages=[{"role": "user", "content": "Say hi in three words."}],
-)
-for chunk in stream:
-    delta = chunk.choices[0].delta
-    if delta.content:
-        print(delta.content, end="", flush=True)
-```
-
-The SDK consumes the `[DONE]` sentinel for you. hal0 ships with no built-in
-auth, so any `api_key` value is accepted on the local network.
-
-</TabItem>
-</Tabs>
-
-## See also
-
-- [REST API index](/docs/reference/api/rest-api) — the full `/api/*` and `/v1/*` surface.
-- [Devices, providers & profiles](/docs/reference/providers-profiles-devices) — what the `model` field can name.
+Non-streaming responses get an analogous hook that pulls `usage.completion_tokens`
+(and, for FLM/NPU responses, the hal0-specific `usage.decoding_speed_tps` /
+`usage.kv_token_occupancy_rate_percentage` fields) out of the JSON body.

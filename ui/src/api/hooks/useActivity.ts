@@ -211,8 +211,29 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
   const esRef = useRef<EventSource | null>(null)
   const epochRef = useRef<string | null>(_epochCache.get(filterKey) ?? null)
   const errorCountRef = useRef(0)
+  // Resume cursor — the highest activity id this filter set has already seen.
+  //
+  // Without it EVERY connect() asked the backend for `since=0`, i.e. a full
+  // durable backfill (up to the server's 1000-row cap) streamed one SSE frame
+  // at a time. ActivityLog is mounted in several mutually-exclusive branches
+  // of SlotsView (loading skeleton / empty / populated), so a normal page load
+  // unmounts and remounts it as soon as /api/slots resolves — two full
+  // replays back-to-back, which is exactly the "activity log floods on load
+  // then settles" symptom. The id-dedup below made the second replay a no-op
+  // *semantically*, but only after every one of its frames had been pushed
+  // through setRecords. Resuming from the cursor means a reconnect asks only
+  // for what it has not already got.
+  const sinceRef = useRef<number>(0)
+  // Re-seed whenever the filter set changes: each filter set has its own ring.
+  const seededForRef = useRef<string | null>(null)
+  if (seededForRef.current !== filterKey) {
+    seededForRef.current = filterKey
+    const cached = _ringCache.get(filterKey) ?? []
+    sinceRef.current = cached.reduce((mx, r) => (r.id != null && r.id > mx ? r.id : mx), 0)
+  }
 
   const push = (record: ActivityRecord) => {
+    if (record.id != null && record.id > sinceRef.current) sinceRef.current = record.id
     setRecords((prev) => {
       // Dedup by id (durable backfill can overlap a reconnect replay, and a
       // remount rehydrates from the cache before the SSE replays).
@@ -239,7 +260,13 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
     const connect = () => {
       if (cancelled) return
       try {
-        const url = `${ENDPOINTS.activityStream}${buildActivityQuery(filters)}`
+        // Resume from the cursor unless the caller pinned its own `since`
+        // (then that value IS the contract and must not be overridden).
+        const query =
+          filters.since != null || sinceRef.current <= 0
+            ? buildActivityQuery(filters)
+            : buildActivityQuery({ ...filters, since: sinceRef.current })
+        const url = `${ENDPOINTS.activityStream}${query}`
         esRef.current = new EventSource(url)
       } catch {
         setDisconnected(true)
@@ -257,6 +284,8 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
             if (epochRef.current != null) {
               setRecords([])
               _ringCache.delete(filterKey)
+              // Ids restart with the new epoch — the old cursor is meaningless.
+              sinceRef.current = 0
             }
             epochRef.current = ep
             _epochCache.set(filterKey, ep)

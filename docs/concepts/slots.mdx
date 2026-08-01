@@ -1,6 +1,6 @@
 ---
 title: Slots
-description: A slot is one model served by one podman container. Learn the lifecycle state machine, single-flight dispatch, the GPU arbiter, and the seeded slot catalogue.
+description: A slot is one model served by one podman container. Learn the lifecycle state machine, the write-boundary partition between slot and model, single-flight dispatch, and the GPU arbiter.
 sidebar:
   order: 20
 ---
@@ -10,8 +10,11 @@ import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/compo
 A **slot** is hal0's unit of served inference: one named place that runs one
 model. Behind every slot is a single podman container, and around every slot is
 a lifecycle the platform manages for you. Slots are what the dispatcher routes
-to, what the GPU arbiter coordinates, and what capabilities and profiles
-configure — so they are the central concept in hal0.
+to, what the GPU arbiter coordinates, and — as of v1.0 — the sole owner of
+*where* a model runs and *how much context it gets*. That last point is a real
+v1.0 behavior change from earlier releases, and it's worth understanding
+precisely: see [The hardware/model write boundary](#the-hardwaremodel-write-boundary)
+below.
 
 ## One slot, one container
 
@@ -22,24 +25,73 @@ port. The container runtime defaults to podman; the unit uses `--replace` so a
 restart never trips over a stale container name, and publishes its port on
 `127.0.0.1` only.
 
-The **`SlotManager`** owns this. It renders the unit, starts and stops it,
-tracks state, and registers the running container as an internal upstream so the
-dispatcher can forward to it. A slot is configured by a small TOML file that
-supplies the model, context size, and port; the tuned flags come from the
-slot's [profile](/docs/concepts/capabilities-and-profiles), and so does the
-container image — unless the slot TOML sets its own top-level `image` field,
-which wins over the profile's image.
+**`SlotManager`** owns this. It renders the unit, starts and stops it, tracks
+state, and registers the running container as an internal upstream so the
+dispatcher can forward to it. A slot's TOML supplies its name, port, hardware
+grid, and a reference to a [profile](/docs/concepts/capabilities-and-profiles)
+for the workload tune; the model itself (and the model's own settings) come
+from the registry.
 
 <Aside type="note">
 The container runtime is podman. A docker fallback exists, but podman is the
 supported path — slot units are generated for it.
 </Aside>
 
-### Pinning a slot to one GPU
+## The hardware/model write boundary
+
+v1.0 draws a hard line between two layers, and enforces it at every write path
+rather than just documenting it:
+
+- **The slot owns the physical/placement layer** — `device`, `gpu_index`,
+  `n_gpu_layers`, `threads`, `binary` (which container image family to run),
+  and the `image_pin` escape hatch. This is the "hardware grid":
+  `[device · NGL · THREADS · BINARY]`.
+- **The model owns the logical/behavioral layer** — `mtp`, `enable_thinking`,
+  `vision`, `jinja`, `chat_template`, and freeform tuning flags. These are set
+  on the model's registry entry (`defaults`), not on the slot.
+
+Three keys in particular — **`mtp`, `enable_thinking`, `vision`** — are
+explicitly forbidden on a slot. `SlotConfig` doesn't even declare them as
+fields; attempting to write one to a slot is rejected outright
+(`slot.model_owned_key_denied`) with a message pointing you at
+`PUT /api/models/{id}` instead. The symmetric guard runs the other way too:
+hardware flags like `--n-gpu-layers`/`-ngl`, `--device`/`-dev`, and
+`--threads`/`-t` are rejected if you try to set them as a model or profile
+freeform flag — those belong on the slot.
+
+<Aside type="caution">
+This partition is a hard invariant, but its enforcement has a real track
+record of needing to be retrofitted onto *new* write paths after the fact —
+the stacks-apply engine, in particular, bypassed it more than once before a
+single shared gate (`guard_slot_write_payload`) was made the one pipeline
+every writer (`SlotManager.create`, `SlotManager.update_config`, and stacks
+apply) routes through. If you're adding a new way to write a slot config,
+route it through that shared gate rather than hand-rolling a merge.
+</Aside>
+
+A legacy slot TOML that still carries `mtp`/`enable_thinking`/`vision` from a
+pre-1.0 install still **loads** fine — a one-shot migrator folds the value
+onto the bound model's `defaults` and drops the slot key. Only new **writes**
+carrying those keys are rejected going forward.
+
+### Context size is a ceiling, not an override
+
+The same ownership split applies to context size. The **model** owns the
+resolved context window — its own `defaults.context_size`, else the
+GGUF-derived native window (dense-capped), else a safe 8192 floor. A slot's
+`[model].context_size` value, if set, is honored only as a **cap** on that
+resolved window (`effective = min(model_window, slot_value)`) — because a
+slot owns hardware, and the installer uses this field to write a VRAM-budget
+clamp. It can never *raise* the effective window above what the model
+resolves to. Leaving it unset (the default for a new slot) means "follow the
+model."
+
+## Pinning a slot to one GPU
 
 On a multi-GPU host, a slot's `gpu_index` (an integer, `0` and up) pins it to a
 single card instead of the default "all GPUs" behaviour. The env or device
-mapping it emits is backend-specific:
+mapping it emits is backend-specific, and — as of v1.0 — is derived from the
+slot's own `device`, never from a profile's fields:
 
 | Device | What `gpu_index` does |
 |---|---|
@@ -51,6 +103,13 @@ Leaving `gpu_index` unset (the default) targets every GPU the backend can see,
 unchanged from single-GPU behaviour. Any explicit `[server].env` entry you set
 still wins over the derived visibility variables — they're merged underneath,
 never over.
+
+<Aside type="note">
+This GPU device-node passthrough decision used to read a profile's
+`device_class`/`backend` fields as authoritative, which meant a `cpu`-targeted
+slot on a CPU-only profile could still request real GPU device nodes. v1.0
+fixes this: passthrough is decided from `slot.device` alone.
+</Aside>
 
 ## The lifecycle state machine
 
@@ -121,8 +180,9 @@ that already rendered it. Left alone, a slot that was running before an
 update keeps running the pre-update flags through `systemctl restart`,
 crash-restarts, and even reboots, until something forces a fresh render.
 
-hal0 now closes most of that gap automatically: after an update finishes (and
-during `install.sh`'s update flow), it re-renders every existing slot's unit
+hal0 closes most of that gap automatically: after an update finishes (and
+during `install.sh`'s update flow — now the single user-facing entry point for
+both fresh installs and updates), it re-renders every existing slot's unit
 file through current code and issues one `daemon-reload`. Crucially, it
 **never bounces a running unit** to do this — a slot that's already serving
 keeps serving on its old argv; the fresh command only takes effect the next
@@ -168,7 +228,7 @@ enabling a second `device=npu` chat slot is rejected.
 
 ## Dedicated embed and rerank lanes
 
-`embed` and `rerank` each get their own bench-tuned profile and their own
+`embed` and `rerank` each get their own tuned profile and their own
 podman container — they are never combined on one llama-server instance.
 That's a hard constraint, not a style choice: passing both `--embedding` and
 `--reranking` to the same llama-server yields all-zero scores. Reranking is
@@ -178,39 +238,32 @@ the `embed` slot it's paired with in the capability catalogue.
 Both lanes are tuned for how pooled scoring actually works: `-ub 8192`
 matches their batch size because a pooled embedding or rerank pass has to run
 the whole input in one physical micro-batch — a smaller ubatch truncates or
-fails on longer inputs. On a `gpu-rocm` box, the `embed` and `rerank`
-capabilities derive onto these dedicated lanes automatically, whether you're
-running the fresh-install picker or reconciling a capability change later;
-Vulkan and CPU boxes still fall back to the generic `vulkan`/`cpu-llm`
-profile until backend-specific embed/rerank variants ship.
+fails on longer inputs.
 
 ## MTP: an Auto / On / Off decision, not a switch
 
 Multi-token prediction (speculative decoding against the model's own draft
-heads) is resolved from three independent signals, in this order:
+heads) is resolved from independent signals, in this order:
 
 1. **Model eligibility** — does the model actually ship MTP heads? hal0 checks
    the registry's `mtp` tag or an `mtp` marker in the model's id/filename.
-2. **Profile opt-in** — does the slot's profile enable MTP at all? Only the
-   `rocm-dense`, `rocm-moe`, `vulkan-dense`, and `vulkan-moe` seed profiles do.
-3. **Slot override** — the slot's own `mtp` setting, a tri-state: forced
+2. **Slot override** — the slot's own `mtp` field is a tri-state: forced
    **On**, forced **Off**, or **Auto** (the default, shown as the middle
-   position of the dashboard's Auto/On/Off control in the slot drawer).
+   position of the dashboard's Auto/On/Off control in the slot drawer). MTP is
+   a model capability, gated by the launching runner's support for it — a
+   profile's `mtp` field is informational only and is never read by the
+   launch path.
 
 An explicit slot override always wins. Left on **Auto**, MTP only turns on
-when the profile opts in *and* the model is actually eligible — so a plain
-chat model dropped onto an MTP profile no longer launches with dead
-speculative-decoding flags. Because eligibility now gates Auto, a real
-MTP-capable model that isn't tagged and has no name marker won't speculate
-until you tag it or force the slot **On**.
+when the model is actually eligible — so a plain chat model dropped onto a
+slot no longer launches with dead speculative-decoding flags.
 
 Forcing **On** for a model that turns out to have no MTP heads is a launch
 crash waiting to happen (`context type MTP requested but model doesn't
 contain MTP layers`), so hal0 defuses that specific combination rather than
 letting it recur: swapping a forced-on slot onto an ineligible model clears
 the override back to Auto, and an update sweeps existing slot configs for the
-same stale combination. A forced **Off**, or a forced **On** that's actually
-eligible, is left alone either way.
+same stale combination.
 
 ## Seeded slots, roles, and aliases
 
@@ -226,41 +279,41 @@ Seeded slots are reserved — you can't create a conflicting name or delete them
 The two canonical LLM roles are **`agent`** (the capable default — the
 dispatch fallback anchor every routing chain ends in) and **`utility`** (the
 cheap helper, seeded on every install so tasks like memory extraction always
-have a cheap local model to target). `chat` and `primary` are retired as
-slot/role names — the `chat` *capability* itself is unaffected, since any
-`type: llm` slot can serve it.
+have a cheap local model to target).
 
 Each slot carries a **type** (`llm`, `embedding`, `reranking`, `transcription`,
 `tts`, or `image`) and a **device** preference (`gpu-rocm`, `gpu-vulkan`,
 `gpu-cuda`, `cpu`, or `npu` — `gpu-cuda` is the experimental path for
 non-Strix-Halo NVIDIA hosts). hal0 keeps one back-compat **alias** so older
-callers keep working:
-`agent-hermes` resolves to `agent`. Aliases are never written to disk and
-never appear in slot listings — they're a transparent translation at dispatch
-time.
+callers keep working: `agent-hermes` resolves to `agent`. Aliases are never
+written to disk and never appear in slot listings — they're a transparent
+translation at dispatch time.
 
 Addressing a slot by its name (e.g. `model: "agent"`) is the stable way to pin
 a co-resident model: the name doesn't change when you swap the underlying
 model file. hal0 also advertises three virtual model names that resolve to
 whichever slot is actually loaded — `hal0/agent`, `hal0/utility`, and
-`hal0/npu` — and generalizes the pattern to any `type: llm` slot with a model bound: a
+`hal0/npu` — and generalizes the pattern to any enabled `type: llm` slot: a
 custom slot named `research` is addressable as `hal0/research` even though
 it isn't one of the three advertised names.
+
+## The NPU trio
+
+The AMD XDNA NPU is driven by FastFlowLM (FLM), and one detail shapes how hal0
+uses it: a **single `flm serve` process serves three modalities at once** —
+chat, speech-to-text, and embeddings. hal0 calls this the **NPU trio**. See
+[Strix Halo](/docs/concepts/strix-halo) for the hardware reason this exists.
 
 ## Stacks — declarative slot bundles
 
 A **stack** is a preconfigured slot + profile + model bundle you can apply
-atomically: activate a "Daily driver" (chat + voice + image) in one move, and
-hal0 reconciles the running slots to match. Stacks carry the same portable
-export / import envelope as profiles, so you can snapshot a working layout and
-move it to another box. Missing models are flagged before you apply. See
-[Stacks](/docs/concepts/stacks) for the full model — the TOML shape, apply
-semantics, and the portable export/import envelope.
+atomically. See [Stacks](/docs/concepts/stacks) for the full model — the TOML
+shape, apply semantics, and an honest maturity read.
 
 ## Where to go next
 
 <CardGrid>
-  <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="How a slot gets its image, flags, and device." />
+  <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="How a slot's profile shapes its tune, and why hardware no longer lives there." />
   <LinkCard title="Stacks" href="/docs/concepts/stacks" description="Applying a whole set of slots as one named, portable unit." />
   <LinkCard title="Architecture" href="/docs/concepts/architecture" description="How slots sit under the dispatcher and API." />
   <LinkCard title="Strix Halo" href="/docs/concepts/strix-halo" description="The unified-memory hardware the arbiter coordinates." />

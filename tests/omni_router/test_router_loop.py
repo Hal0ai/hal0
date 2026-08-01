@@ -553,3 +553,113 @@ async def test_loop_handles_malformed_arguments_gracefully() -> None:
         body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
     )
     assert result["choices"][0]["message"]["content"] == "sorry"
+
+
+# ── the shared loop core is not brain-specific (Stream G guard) ─────────────
+#
+# `hal0.toolloop.engine.run_tool_loop` is shared with the hal0-brain steward
+# chat, which gained per-round model rerouting (`[brain_chat] tool_model`) so a
+# tool round can leave the ~1.1B brain for a tool-capable model. That reroute
+# is implemented ENTIRELY on the brain's side of the seam, as a wrapper around
+# the `llm_fn` it hands the engine. These tests fail if it ever leaks in here.
+
+
+@pytest.mark.asyncio
+async def test_router_loop_never_rewrites_the_model_between_rounds() -> None:
+    """Every round of an OmniRouter loop uses the caller's model, verbatim.
+
+    The brain rewrites `body["model"]` per round. OmniRouter must not: its
+    `model` is the caller's slot resolution and rewriting it would silently
+    re-route someone else's `/v1/chat/completions` request mid-loop.
+    """
+    rounds: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        # Only the LOOP's own completions — not the image dispatch a tool call
+        # fans out to, which legitimately carries the image slot's model.
+        if req.url.path != "/v1/chat/completions":
+            return httpx.Response(200, json={"data": [{"url": "http://img/1.png"}]})
+        body = json.loads(req.read())
+        rounds.append(body)
+        if len(rounds) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "c1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "generate_image",
+                                            "arguments": json.dumps({"prompt": "a cat"}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "done"}}]})
+
+    router = _make_router(handler, [_caller(), _img_slot()])
+    await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "draw"}]},
+    )
+
+    assert len(rounds) >= 2, "the loop did not run a continuation round"
+    assert [r["model"] for r in rounds] == ["agent"] * len(rounds)
+
+
+@pytest.mark.asyncio
+async def test_router_loop_signature_takes_no_model_hook() -> None:
+    """`run_tool_loop` grew no per-round model parameter.
+
+    The brain's reroute needed one; adding it to the shared core would have
+    changed this caller's contract. It was implemented as an `llm_fn` wrapper
+    instead, so the engine's signature is exactly what it was.
+    """
+    import inspect
+
+    from hal0.toolloop.engine import run_tool_loop
+
+    params = inspect.signature(run_tool_loop).parameters
+    assert list(params) == [
+        "llm_fn",
+        "tools",
+        "dispatch_fn",
+        "body",
+        "max_rounds",
+        "known_tool_names",
+        "on_event",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_loop_never_synthesises_a_reply_for_an_error_round() -> None:
+    """An upstream error stays an error for OmniRouter.
+
+    The brain turns a failed TOOL-model round into a synthetic assistant
+    message ("tool calls need a model on the agent slot..."). That degrade is
+    brain-local: OmniRouter must keep returning the raw error envelope its
+    callers forward verbatim.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="upstream is down")
+
+    router = _make_router(handler, [_caller(), _img_slot()])
+    result = await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert "error" in result
+    assert "503" in result["error"]
+    assert "choices" not in result

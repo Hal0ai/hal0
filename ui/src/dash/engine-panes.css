@@ -1159,6 +1159,25 @@
   cursor: default;
 }
 
+/* model row + inline model-edit pencil (slot card).
+   The pencil is a SIBLING of the model control, never nested inside it: the
+   LLM row is a <select> whose own click gesture must stay uncontested. The
+   picker keeps flexing to fill; the button is a fixed square. */
+:is(.infer-pane, .npu-pane) .smodel-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+:is(.infer-pane, .npu-pane) .smodel-row > .model-picker,
+:is(.infer-pane, .npu-pane) .smodel-row > .smodel {
+  flex: 1;
+  min-width: 0;
+}
+:is(.infer-pane, .npu-pane) .sctrl.scard-model-edit {
+  flex: 0 0 auto;
+}
+
 /* expanded-body status line — right-aligned mono */
 :is(.infer-pane, .npu-pane) .body-status {
   display: flex;

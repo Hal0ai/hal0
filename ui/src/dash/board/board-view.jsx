@@ -178,6 +178,9 @@ function BoardView() {
   const useCreateBoard      = window.__hal0UseCreateBoard;
   const useCreateTask       = window.__hal0UseCreateTask;
   const useBoardEventsStream = window.__hal0UseBoardEventsStream;
+  // primitives.jsx publishes ConfirmDialog on window (this module takes no ES
+  // imports from dash/*). Used for the #1535 bulk-delete guard.
+  const ConfirmDialog       = window.ConfirmDialog;
 
   // ── board scope (declared before the queries that thread it) ──
   // null = the server's current board (omit ?board=, per contract). Set only
@@ -230,6 +233,9 @@ function BoardView() {
   const [byProfile, setByProfile]   = useState(true);
 
   const [sel, setSel]               = useState(() => new Set());
+  // #1535: ids awaiting the bulk-delete confirmation. null = no confirm open.
+  // Delete is the only bulk action gated this way — see the button + dialog.
+  const [delConfirm, setDelConfirm] = useState(null);
   const [openTask, setOpenTask]     = useState(null);
   const [chatOpen, setChatOpen]     = useState(false);
   const [newTaskLane, setNewTaskLane] = useState(null);
@@ -353,11 +359,14 @@ function BoardView() {
     }
   };
 
+  // Terminal. Only ever reached from the confirmation dialog (#1535) — the
+  // toolbar button stages ids into `delConfirm` instead of calling this.
   const delTasks = (ids) => {
     if (deleteTask) {
       ids.forEach(id => deleteTask.mutate(id));
     }
     setSel(new Set());
+    setDelConfirm(null);
   };
 
   const doReassign = () => {
@@ -623,8 +632,13 @@ function BoardView() {
                   onClick={() => { moveTo([...sel], "done"); clearSel(); }}>complete</button>
                 <button className="bb-act" data-testid="board-action-archive"
                   onClick={() => { moveTo([...sel], "archived"); clearSel(); }}>archive</button>
+                {/* #1535: delete is TERMINAL — store.delete_task() is a hard SQL
+                    delete that cascades comments/links/runs/events, and `archive`
+                    (the reversible option) sits one button to the left. A slip
+                    between the two used to destroy N cards and their whole
+                    history on one unacknowledged click. Gate it, and only it. */}
                 <button className="bb-act danger" data-testid="board-action-delete"
-                  onClick={() => delTasks([...sel])}>
+                  onClick={() => setDelConfirm([...sel])}>
                   <BoardIcon name="trash" size={12} />delete
                 </button>
                 <span className="bdiv" />
@@ -778,6 +792,46 @@ function BoardView() {
           }}
         />
         </div>
+      )}
+
+      {/* #1535: bulk-delete confirmation. Terminal action, so it follows the
+          DeleteSlotDialog precedent exactly — `destructive`, type-to-confirm,
+          and an explicit blast radius that names what is destroyed AND what
+          survives. The cascade (comments/links/runs/events) is the part the
+          operator cannot see from the board, so it is spelled out; `archive`
+          is named because a slip onto the adjacent red button is the actual
+          failure mode this guards. */}
+      {delConfirm && ConfirmDialog && (
+        <ConfirmDialog
+          open
+          onCancel={() => setDelConfirm(null)}
+          onConfirm={() => delTasks(delConfirm)}
+          destructive
+          typeToConfirm="delete"
+          confirmLabel={`Delete ${delConfirm.length} card${delConfirm.length === 1 ? "" : "s"}`}
+          title={`Delete ${delConfirm.length} card${delConfirm.length === 1 ? "" : "s"}?`}
+          message={
+            <span data-testid="board-delete-blast">
+              Deleting {delConfirm.length} card{delConfirm.length === 1 ? "" : "s"} will:
+              <span style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 11, fontFamily: "var(--jbm)", fontSize: 11.5, lineHeight: 1.5 }}>
+                <span style={{ display: "flex", gap: 8 }}><span style={{ color: "var(--err)" }}>−</span><span style={{ color: "var(--fg-2)" }}>remove {delConfirm.length === 1 ? "the card" : "the cards"} permanently — this is a hard delete, not an archive</span></span>
+                <span style={{ display: "flex", gap: 8 }}><span style={{ color: "var(--err)" }}>−</span><span style={{ color: "var(--fg-2)" }}>cascade every <span style={{ color: "var(--fg)" }}>comment</span>, <span style={{ color: "var(--fg)" }}>link</span>, <span style={{ color: "var(--fg)" }}>run</span> and <span style={{ color: "var(--fg)" }}>event</span> attached to them</span></span>
+                <span style={{ display: "flex", gap: 8 }}><span style={{ color: "var(--fg-4)" }}>·</span><span style={{ color: "var(--fg-3)" }}>there is no undo — use <b style={{ color: "var(--fg-2)" }}>archive</b> instead if you want them back later</span></span>
+              </span>
+              <span style={{ display: "block", marginTop: 12, maxHeight: 132, overflowY: "auto", fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-3)", lineHeight: 1.7 }}>
+                {delConfirm.slice(0, 8).map(id => (
+                  <span key={id} style={{ display: "block", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    <span style={{ color: "var(--fg-5)" }}>{id}</span>{" "}
+                    {(byId[id] && (byId[id].title || byId[id].name)) || ""}
+                  </span>
+                ))}
+                {delConfirm.length > 8 && (
+                  <span style={{ display: "block", color: "var(--fg-5)" }}>+{delConfirm.length - 8} more</span>
+                )}
+              </span>
+            </span>
+          }
+        />
       )}
     </React.Fragment>
   );

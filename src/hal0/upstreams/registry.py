@@ -83,6 +83,25 @@ class UpstreamProtected(UpstreamError):
     status = 400
 
 
+class UpstreamAuthUnconfigured(UpstreamError):
+    """An upstream declares an auth style that needs a credential it lacks.
+
+    Before #1513 this was silent: :meth:`UpstreamRegistry.auth_headers`
+    returned ``{}`` when the env var behind ``auth_value_env`` was unset, so
+    the request went out unauthenticated and the *remote* reported the
+    problem — as a 401 the operator had to go and read — while the dashboard
+    showed a green "key set" chip (``auth_key_present`` is env-var presence,
+    not presentability). Failing here names the upstream and the variable, at
+    the point the credential was supposed to be attached.
+
+    502 rather than 500: the call never left hal0, and the fault is
+    configuration of a remote dependency, not an internal error.
+    """
+
+    code = "system.upstream_auth_unconfigured"
+    status = 502
+
+
 # "hal0" is reserved from the reactive CRUD surface (POST/DELETE
 # /api/upstreams) — it's the cache key the /v1/models aggregator and the
 # dashboard's synthetic slot tile use for the direct-read model catalogue
@@ -114,7 +133,7 @@ class Upstream:
     """Base URL, e.g. "http://127.0.0.1:8081/v1" or "https://openrouter.ai/api/v1"."""
 
     auth_style: str = "bearer"
-    """How to present the API key: "bearer" | "anthropic" | "google_query" | "header" | "none"."""
+    """How to present the API key: "bearer" | "anthropic" | "header" | "none"."""
 
     auth_header: str = ""
     """Custom header name when auth_style == "header"."""
@@ -149,6 +168,16 @@ class Upstream:
 
     model_filters: ModelFilters | None = None
     """Optional /v1/models advertising filters.  Dispatch is unfiltered."""
+
+    hal0_peer: bool | None = None
+    """Is this upstream another hal0 (issue #1425)?
+
+    ``True``/``False`` are an explicit operator declaration; ``None`` (the
+    default) auto-derives from the URL host — see
+    :func:`hal0.upstreams.peers.is_hal0_peer`. Only peers are asked for
+    hal0-internal API paths; a third-party OpenAI-compatible provider never
+    is.
+    """
 
 
 # ── Config-layer ↔ runtime conversion ─────────────────────────────────────────
@@ -211,6 +240,7 @@ def upstream_from_entry(entry: UpstreamEntry) -> Upstream:
         advertise_models=entry.advertise_models,
         enabled=entry.enabled,
         model_filters=_filters_to_runtime(entry.model_filters),
+        hal0_peer=entry.hal0_peer,
     )
 
 
@@ -546,13 +576,38 @@ class UpstreamRegistry:
 
     # ── Auth headers ──────────────────────────────────────────────────────────
 
+    #: Auth styles that cannot do their job without a credential. A missing
+    #: key for one of these is a configuration error, not "no header today"
+    #: (#1513).
+    _CREDENTIALED_STYLES = frozenset({"bearer", "anthropic", "header"})
+
     def auth_headers(self, u: Upstream) -> dict[str, str]:
-        """Build outbound auth headers honouring `u.auth_style`."""
+        """Build outbound auth headers honouring `u.auth_style`.
+
+        Raises :class:`UpstreamAuthUnconfigured` when the style needs a
+        credential and ``$auth_value_env`` is unset or blank. It used to
+        return ``{}`` and let the request go out naked (#1513) — a silent
+        downgrade from "authenticated" to "not", which is the failure mode the
+        dashboard's "key set" chip was actively contradicting. A blank value
+        counts as missing: ``KEY=`` is the shape left behind by clearing a
+        secret, not a credential.
+
+        ``none`` — and any upstream that declares no ``auth_value_env`` at
+        all, which is every local slot upstream — is unaffected.
+        """
         style = (u.auth_style or "bearer").lower()
-        key = os.environ.get(u.auth_value_env, "") if u.auth_value_env else ""
+        key = os.environ.get(u.auth_value_env, "").strip() if u.auth_value_env else ""
 
         if style == "none":
             return {}
+        if style in self._CREDENTIALED_STYLES and u.auth_value_env and not key:
+            raise UpstreamAuthUnconfigured(
+                f"upstream {u.name!r} uses auth_style {style!r} but "
+                f"${u.auth_value_env} is unset — the request would be sent "
+                "unauthenticated. Set it via Settings ▸ Secrets or in "
+                "/etc/hal0/api.env, then restart hal0-api.",
+                details={"name": u.name, "auth_style": style, "env": u.auth_value_env},
+            )
         if style == "bearer":
             if not key:
                 return {}
@@ -565,9 +620,6 @@ class UpstreamRegistry:
             if key:
                 out["x-api-key"] = key
             return out
-        if style == "google_query":
-            # Google keys ride as ?key=… on the URL — emit no header here.
-            return {}
         if style == "header":
             if u.auth_header and key:
                 return {u.auth_header: key}
@@ -812,10 +864,19 @@ class UpstreamRegistry:
             return []
         target = u.url.rstrip("/") + "/models"
         try:
+            # #1513: auth_headers now raises on an unconfigured credential
+            # rather than silently probing naked. Model prefetch is
+            # best-effort — an upstream that cannot authenticate drops out of
+            # the advertised list instead of taking the whole fan-out down.
+            headers = self.auth_headers(u)
+        except UpstreamAuthUnconfigured as exc:
+            log.warning("upstream.fetch_models_auth_unconfigured", name=name, detail=str(exc))
+            return []
+        try:
             c = self._get_client()
             resp = await c.get(
                 target,
-                headers=self.auth_headers(u),
+                headers=headers,
                 timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0),
             )
             if resp.status_code != 200:

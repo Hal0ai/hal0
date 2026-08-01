@@ -1023,3 +1023,83 @@ def test_explicit_request_model_wins_over_config_override(tmp_path) -> None:
         json={"model": "hal0/utility", "messages": [{"role": "user", "content": "x"}]},
     )
     assert stub.calls[0]["model"] == "hal0/utility"
+
+
+class _ModelTracingLLM(_StubLLM):
+    """_StubLLM that records the model of EVERY round.
+
+    ``_StubLLM`` appends the live ``body`` dict, which the tool loop mutates in
+    place across rounds — so all its entries alias the last round. Fine for the
+    single-round tests above; useless for asserting per-round routing.
+    """
+
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        super().__init__(responses)
+        self.models: list[str] = []
+
+    async def __call__(self, body: dict[str, Any]) -> dict[str, Any]:
+        self.models.append(body["model"])
+        return await super().__call__(body)
+
+
+def test_plain_chat_stays_on_the_brain_model(tmp_path) -> None:
+    # Half of the tool_model contract: a turn that never needs a tool never
+    # leaves the fast 1B. (This assertion is what the old
+    # "brain routes tool turns internally now" test actually pinned — it used a
+    # plain-chat response, so it never exercised the tool path at all.)
+    rec = _Recorder()
+    stub = _ModelTracingLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, read_only=False, model="hal0/brain", tool_model="hal0/agent")
+
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert stub.models == ["hal0/brain"]
+
+
+def test_a_tool_round_routes_to_the_tool_model(tmp_path) -> None:
+    # The other half, and the contract the old test asserted the INVERSE of:
+    # the brain no longer "handles tool calls internally" — it can't (the ~1.1B
+    # emits no parseable call on this runtime), so the tool round and every
+    # continuation of it run on [brain_chat] tool_model.
+    rec = _Recorder()
+    rec.respond("GET", "/board", {"columns": []})
+    stub = _ModelTracingLLM(
+        [_tool_call_response("get_board", {}, "c1"), _final_response("all clear")]
+    )
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, read_only=False, model="hal0/brain", tool_model="hal0/agent")
+
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert resp.status_code == 200
+    # Round 0 decides on the brain; the round that READS the tool result runs
+    # on the tool model.
+    assert stub.models == ["hal0/brain", "hal0/agent"]
+    events = _sse_events(resp.text)
+    assert next(e for e in events if e["type"] == "tool_call")["name"] == "get_board"
+
+
+def test_explicit_request_model_wins_over_tool_model(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    _set_brain_chat_config(app, tool_model="hal0/agent")
+
+    client.post(
+        "/api/board/chat",
+        json={"model": "hal0/utility", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert stub.calls[0]["model"] == "hal0/utility"
+
+
+def test_no_tool_model_keeps_brain_model(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    app, client = _make_app(rec, stub, tmp_path)
+    # "off" is the explicit no-reroute spelling. An empty string is NOT — it
+    # now normalises back to the "hal0/agent" default with a warning, because a
+    # bare "" on disk is indistinguishable from a key nobody set (see
+    # tests/config/test_brain_tool_model_empty.py).
+    _set_brain_chat_config(app, model="hal0/brain", tool_model="off")
+
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert stub.calls[0]["model"] == "hal0/brain"

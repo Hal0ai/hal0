@@ -17,11 +17,17 @@ import { useHardware } from "@/api/hooks/useHardware";
 import { useModels, usePullJob } from "@/api/hooks/useModels";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
-import { useMetaEnums } from "@/api/hooks/useMeta";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
 import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
+import { slotModelRow } from "./slots/slot-shared.js";
+
+// The slot edit drawer's own width, and therefore the offset the stacked model
+// drawer docks at so its right edge lands flush against this drawer's left one.
+// ONE constant: a width that drifted from the dock offset would leave a gap or
+// an overlap with no obvious cause.
+const SLOT_DRAWER_WIDTH = 560;
 
 const {
 	useState: useStateSM,
@@ -209,9 +215,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const swapMut = useSlotSwap();
 	const profilesQuery = useProfiles();
 	const modelsQuery = useModels();
-	// HW grid (spec-hw-slot-ownership §2): device enum from meta, BINARY options +
-	// fit-check metadata from system-info (RUNNER_IMAGES).
-	const metaEnums = useMetaEnums();
+	// HW grid (spec-hw-slot-ownership §2): BINARY options + fit-check metadata
+	// from system-info (RUNNER_IMAGES). The device ENUM is no longer read here —
+	// device rides the model at creation and is not editable post-create, so the
+	// drawer only ever *displays* the slot's persisted device.
 	const systemInfoQuery = useSystemInfo();
 
 	// Seed from the PERSISTED context window (slot.ctx_max, from
@@ -471,10 +478,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 	// Bound model row, resolved BEFORE the `!slot` guard below: the effect
 	// that follows must run on every render, and anything after an early
-	// return does not (React counts hooks positionally).
-	const curModelId = slot?.model_id || slot?.model || "";
-	const curModelRow =
-		(modelsQuery.data ?? []).find((m) => m.id === curModelId) || null;
+	// return does not (React counts hooks positionally). slotModelRow is the
+	// shared resolver (dash/slots/slot-shared.js) the slot card uses too.
+	const curModelRow = slotModelRow(slot, modelsQuery.data);
 	// ModelDrawer renders nothing for a null model and never calls onClose in
 	// that path, so a models refetch that drops the bound row would otherwise
 	// leave modelEditOpen stuck true (dead ✕/Esc, and a surprise re-stack when
@@ -624,7 +630,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// drawer in a blocked "Saving…" state for the whole model-load.
 	const saving = editMut.isPending || defaultsMut.isPending;
 
-	// (curModelId / curModelRow are resolved above the `!slot` guard, so the
+	// (curModelRow is resolved above the `!slot` guard, so the
 	// modelEditOpen effect can run on every render.)
 
 	// Device-class token for profile/runner fit filters — mirrors the
@@ -752,7 +758,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				onClose={requestClose}
 				eyebrow={`Slots · /slots/${slot.name}`}
 				title={`Edit ${slot.name}`}
-				width={560}
+				width={SLOT_DRAWER_WIDTH}
 				headRight={
 					<label
 						className="slot-enable-toggle drawer-enable"
@@ -861,13 +867,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					/>
 				</div>
 
-				{/* Runner + image status strip — read-only. Runner (BINARY) resolves the
-          launch image (RUNNER_IMAGES[binary]); image_pin overrides it (§3).
+				{/* Runner + type + image status strip — read-only. Runner (BINARY)
+          resolves the launch image (RUNNER_IMAGES[binary]); image_pin overrides
+          it (§3). `type` sits between the two: it is fixed at creation (it rides
+          the model, exactly like device), so it belongs in the read-only strip
+          rather than as a disabled form control down in the Slot group.
           image status keyed to slot_id so the operator knows which slot owns it. */}
 				<div
 					style={{
 						display: "grid",
-						gridTemplateColumns: "1fr 1fr",
+						gridTemplateColumns: "1fr 1fr 1fr",
 						gap: 0,
 						border: "1px solid var(--line-soft)",
 						borderRadius: "var(--rad-sm)",
@@ -878,6 +887,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					<ReadOnlyStrip
 						k="runner · binary"
 						v={slot.binary || `auto · ${deviceBackend(device) || device}`}
+					/>
+					<ReadOnlyStrip
+						k="type"
+						v={
+							<span
+								data-testid="slot-type-readonly"
+								title="Type is fixed once created — make a new slot for a different kind."
+							>
+								{slot.type || "—"}
+							</span>
+						}
 					/>
 					<ReadOnlyStrip
 						k="image status"
@@ -926,114 +946,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							</button>
 						</div>
 					</div>
-
-					<div className="form-row">
-						<div className="form-lbl">
-							<span>Type</span>
-						</div>
-						<div className="form-ctl">
-							<select className="input mono" defaultValue={slot.type} disabled>
-								<option>{slot.type}</option>
-							</select>
-							<FieldInfoIcon description="Type is fixed once created. Make a new slot for a different kind." />
-						</div>
-					</div>
+					{/* Type moved to the read-only strip above — it is fixed at
+					    creation, so a disabled select here was a control that could
+					    never do anything. */}
 				</FieldGroup>
 
-				{/* Runtime profile — the slot's SlotConfig.profile. Controls the
-	          runtime family, device-class gating and MTP draft backend; profile
-	          FLAGS are copy-on-stamp into the model tune (model drawer), never
-	          read at launch. */}
-				<FieldGroup label="Profile">
-					{(() => {
-						const all = Array.isArray(profilesQuery.data)
-							? profilesQuery.data
-							: [];
-						const devBackend = deviceBackend(device);
-						// Mirror backend profile_fits_slot: slot type supported +
-						// device_class match + backend match (when both declared).
-						const fit = all.filter(
-							(p) =>
-								(!Array.isArray(p.supported_slot_types) ||
-									p.supported_slot_types.includes(slot.type)) &&
-								(!p.device_class || p.device_class === deviceClass) &&
-								(!p.backend || !devBackend || p.backend === devBackend),
-						);
-						const fitNames = fit.map((p) => p.name);
-						const adoptedFromModel =
-							!!profileSel &&
-							profileSel === (curModelRow?.defaults?.profile || "");
-						// The options are filtered against the CURRENT device, but the
-						// device select sits below and can flip afterwards. Saving a
-						// profile+device pair with conflicting backends is a hard
-						// SlotConfigError (_reconcile_device_profile), so warn instead of
-						// silently PUTting the conflict.
-						const profileFitWarn =
-							profileSel && all.length > 0 && !fitNames.includes(profileSel)
-								? `Profile "${profileSel}" does not fit device "${device}" — saving both together is rejected. Pick a listed profile or revert the device.`
-								: null;
-						return (
-							<div className="form-row">
-								<div className="form-lbl">
-									<span>Profile</span>
-									<FieldInfoIcon description="⟳ Runtime profile — picks the runtime family, device-class
-										gating and the MTP draft backend. Flags are NOT read from here
-										at launch; they are stamped into the model's launch flags on
-										the model drawer." />
-								</div>
-								<div className="form-ctl">
-									<select
-										className="input mono"
-										data-testid="slot-profile"
-										value={profileSel}
-										onChange={(e) => setProfileSel(e.target.value)}
-									>
-										{/* keep a none/out-of-vocab persisted profile selectable */}
-										{!slot.profile && <option value="">— none —</option>}
-										{profileSel && !fitNames.includes(profileSel) && (
-											<option value={profileSel}>{profileSel}</option>
-										)}
-										{fit.map((p) => (
-											<option key={p.name} value={p.name} title={p.intent}>
-												{p.name}
-												{p.intent ? ` · ${p.intent}` : ""}
-											</option>
-										))}
-									</select>
-									{adoptedFromModel && (
-										<div className="hint">
-											Adopted from the bound model's preference — swapping the
-											model may change it.
-										</div>
-									)}
-									{profileFitWarn && (
-										<div
-											className="hint"
-											data-testid="slot-profile-fit-warning"
-											style={{
-												marginTop: 6,
-												padding: "6px 10px",
-												borderRadius: "var(--rad-sm)",
-												color: "var(--warn)",
-												border: "1px solid var(--warn-line)",
-												background: "var(--warn-soft)",
-											}}
-										>
-											⚠ {profileFitWarn}
-										</div>
-									)}
-								</div>
-							</div>
-						);
-					})()}
-				</FieldGroup>
 
 				{/* Hardware ownership — changes apply on Save and require a restart. */}
 				<FieldGroup label="Hardware">
 					{(() => {
-						const devices = Array.isArray(metaEnums?.devices)
-							? metaEnums.devices
-							: [];
 						const backends = systemInfoQuery.data?.backends ?? {};
 						const binaryKeys = Object.keys(backends);
 						const devBackend = deviceBackend(device);
@@ -1043,7 +964,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						// qwen3tts/comfyui) and the SAME supported_backends list the
 						// fit-check below warns on. An out-of-vocab persisted value stays
 						// selectable underneath.
-						const fitBinaryKeys = binaryKeys.filter((k) => {
+						const deviceFitBinaryKeys = binaryKeys.filter((k) => {
 							const r = backends[k] || {};
 							if (r.device_class && r.device_class !== deviceClass)
 								return false;
@@ -1053,6 +974,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							const sup = runnerBackends(r);
 							return !(sup.length > 0 && devBackend && !sup.includes(devBackend));
 						});
+						// The Runner Binary dropdown offers the binaries BUILT INTO the
+						// currently-named Runner Image — one image can ship several
+						// (e.g. the shared rocmfpx image serves both `rocmfpx · rocm`
+						// and `vulkanfpx · vulkan`). With no image named yet there is
+						// nothing to match against, so fall back to the device fit set.
+						const pinnedImage = (imagePin || "").trim();
+						const imageFitKeys = pinnedImage
+							? binaryKeys.filter((k) => backends[k]?.image === pinnedImage)
+							: [];
+						const fitBinaryKeys = pinnedImage
+							? imageFitKeys
+							: deviceFitBinaryKeys;
 						// Fit-check (§4): the selected device's backend must be in the chosen
 						// BINARY's supported_backends. WARN at assignment, never block. Only
 						// when a BINARY is explicitly picked (empty = HW-gated default).
@@ -1068,35 +1001,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								: null;
 						return (
 							<>
+								{/* Device has no control here on purpose: it rides the model
+								    at creation (see the create modal's device-redirect note),
+								    and changing it afterwards means duplicating the model for
+								    the other device and making a new slot. The drawer still
+								    READS slot.device for the fit filters below. */}
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Device</span>
-										<FieldInfoIcon description="Changing device changes the hardware class/backend and requires a restart." />
-									</div>
-									<div className="form-ctl">
-										<select
-											className="input mono"
-											data-testid="slot-hw-device"
-											value={device}
-											onChange={(e) => setDevice(e.target.value)}
-										>
-											{/* keep an out-of-vocab persisted device selectable */}
-											{device && !devices.some((d) => d.id === device) && (
-												<option value={device}>{device}</option>
-											)}
-											{devices.map((d) => (
-												<option key={d.id} value={d.id} title={d.description}>
-													{d.label}
-													{d.recommended ? " ★" : ""}
-												</option>
-											))}
-										</select>
-									</div>
-								</div>
-
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Image pin</span>
+										<span>Runner Image</span>
 										<FieldInfoIcon description="Optional container image override for a debug build, A/B test, or rollback. Empty uses the release default." />
 									</div>
 									<div className="form-ctl">
@@ -1128,10 +1040,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Runner</span>
-										<FieldInfoIcon description="⟳ Which runner build/image executes on the selected
-											device (a RUNNER_IMAGES key, not a profile). Empty = auto
-											from device." />
+										<span>Runner Binary</span>
+										<FieldInfoIcon description="⟳ Which binary inside the Runner Image executes (a
+											RUNNER_IMAGES key, not a profile). One image can ship
+											several — the list shows exactly what the named Runner
+											Image provides." />
 									</div>
 									<div className="form-ctl">
 										<select
@@ -1140,8 +1053,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											value={binary}
 											onChange={(e) => setBinary(e.target.value)}
 										>
-											<option value="">— default (from device) —</option>
-											{/* keep an out-of-vocab persisted binary selectable */}
+											{/* No "— default (from device) —" entry: the dropdown lists
+											    the binaries actually built into the Runner Image, and
+											    nothing else. An out-of-vocab persisted value keeps its
+											    own option so the drawer never silently rewrites it. */}
 											{binary && !fitBinaryKeys.includes(binary) && (
 												<option value={binary}>{binary}</option>
 											)}
@@ -1154,6 +1069,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												</option>
 											))}
 										</select>
+										{!binary && fitBinaryKeys.length > 0 && (
+											<div className="hint">
+												No binary pinned — the launcher resolves one from the
+												device. Pick one to fix it.
+											</div>
+										)}
+										{pinnedImage && fitBinaryKeys.length === 0 && (
+											<div className="hint" data-testid="slot-hw-binary-none">
+												No known runner binary ships in{" "}
+												<span className="mono">{pinnedImage}</span>. Clear the
+												Runner Image to see the binaries that fit this device.
+											</div>
+										)}
 										{fitWarn && (
 											<div
 												className="hint"
@@ -1233,6 +1161,95 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					})()}
 				</FieldGroup>
 
+				{/* Runtime profile — the slot's SlotConfig.profile. Controls the
+	          runtime family, device-class gating and MTP draft backend; profile
+	          FLAGS are copy-on-stamp into the model tune (model drawer), never
+	          read at launch. */}
+				<FieldGroup label="Profile">
+					{(() => {
+						const all = Array.isArray(profilesQuery.data)
+							? profilesQuery.data
+							: [];
+						const devBackend = deviceBackend(device);
+						// Mirror backend profile_fits_slot: slot type supported +
+						// device_class match + backend match (when both declared).
+						const fit = all.filter(
+							(p) =>
+								(!Array.isArray(p.supported_slot_types) ||
+									p.supported_slot_types.includes(slot.type)) &&
+								(!p.device_class || p.device_class === deviceClass) &&
+								(!p.backend || !devBackend || p.backend === devBackend),
+						);
+						const fitNames = fit.map((p) => p.name);
+						const adoptedFromModel =
+							!!profileSel &&
+							profileSel === (curModelRow?.defaults?.profile || "");
+						// The options are filtered against the slot's device, which is no
+						// longer editable here — a profile persisted on disk can still be
+						// out-of-vocab for it. Saving a
+						// profile+device pair with conflicting backends is a hard
+						// SlotConfigError (_reconcile_device_profile), so warn instead of
+						// silently PUTting the conflict.
+						const profileFitWarn =
+							profileSel && all.length > 0 && !fitNames.includes(profileSel)
+								? `Profile "${profileSel}" does not fit device "${device}" — saving both together is rejected. Pick a listed profile or revert the device.`
+								: null;
+						return (
+							<div className="form-row">
+								<div className="form-lbl">
+									<span>Profile</span>
+									<FieldInfoIcon description="⟳ Runtime profile — picks the runtime family, device-class
+										gating and the MTP draft backend. Flags are NOT read from here
+										at launch; they are stamped into the model's launch flags on
+										the model drawer." />
+								</div>
+								<div className="form-ctl">
+									<select
+										className="input mono"
+										data-testid="slot-profile"
+										value={profileSel}
+										onChange={(e) => setProfileSel(e.target.value)}
+									>
+										{/* keep a none/out-of-vocab persisted profile selectable */}
+										{!slot.profile && <option value="">— none —</option>}
+										{profileSel && !fitNames.includes(profileSel) && (
+											<option value={profileSel}>{profileSel}</option>
+										)}
+										{fit.map((p) => (
+											<option key={p.name} value={p.name} title={p.intent}>
+												{p.name}
+												{p.intent ? ` · ${p.intent}` : ""}
+											</option>
+										))}
+									</select>
+									{adoptedFromModel && (
+										<div className="hint">
+											Adopted from the bound model's preference — swapping the
+											model may change it.
+										</div>
+									)}
+									{profileFitWarn && (
+										<div
+											className="hint"
+											data-testid="slot-profile-fit-warning"
+											style={{
+												marginTop: 6,
+												padding: "6px 10px",
+												borderRadius: "var(--rad-sm)",
+												color: "var(--warn)",
+												border: "1px solid var(--warn-line)",
+												background: "var(--warn-soft)",
+											}}
+										>
+											⚠ {profileFitWarn}
+										</div>
+									)}
+								</div>
+							</div>
+						);
+					})()}
+				</FieldGroup>
+
 				{device !== "npu" && (
 					<FieldGroup label="Model">
 						{/* Task 1: live model swap — mirrors the card's ModelPicker but with the
@@ -1302,14 +1319,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
 													</option>
 												))}
 											</select>
+											{/* Inline model edit — the app-wide pencil affordance
+											    (Icons.edit), same bare `btn ghost sm` icon-button
+											    convention as the slot card. Opens the model drawer
+											    DOCKED to the left of this one, so the slot's unsaved
+											    edits stay visible and editable underneath. */}
 											<button
 												className="btn ghost sm"
 												data-testid="slot-model-edit-open"
 												disabled={!curModelRow}
 												title="Edit the bound model's tune (flags, template, caps) in place"
-												onClick={() => setModelEditOpen(true)}
+												aria-label={`Edit model ${curModelRow?.longName || curModelRow?.name || ""}`.trim()}
+												onClick={(e) => {
+													e.stopPropagation();
+													setModelEditOpen(true);
+												}}
 											>
-												Edit model…
+												{Icons.edit}
 											</button>
 										</div>
 										{swapping && <div className="hint">Swapping…</div>}
@@ -1320,12 +1346,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 						<div className="form-row">
 							<div className="form-lbl">
-								<span>Context (override)</span>
-								<FieldInfoIcon description="⟳ ctx_size — context window in tokens, an OVERRIDE of the
-									bound model's own default context_size (set on the model drawer).
-									Slot-owned so the same model can run a bigger/smaller window on
-									different hardware. PATCHes /defaults; takes effect on next
-									request. (~model-load seconds)" />
+								<span>Context (ceiling)</span>
+								<FieldInfoIcon description="⟳ ctx_size — a hardware CEILING in tokens, not an
+									override: the bound model's own default context_size (set on the
+									model drawer) is authoritative, and this only clamps it down for
+									hardware that can't fit the model's full window. Slot-owned so the
+									same model can run capped on lighter hardware elsewhere. PATCHes
+									/defaults; takes effect on next request. (~model-load seconds)" />
 							</div>
 							<div className="form-ctl">
 								<input
@@ -1710,14 +1737,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				onClose={() => setRenameOpen(false)}
 			/>
 			{/* Stacked model editor — the reusable ModelDrawer (window-global,
-	        same instance contract as models.jsx). Rendered later in the DOM at
-	        equal z-index so it fully overlays this drawer; its own save path
-	        closes it and returns here with every slot edit intact. */}
-			<ModelDrawer
-				open={modelEditOpen && !!curModelRow}
-				onClose={() => setModelEditOpen(false)}
-				model={curModelRow}
-			/>
+	        same instance contract as models.jsx). DrawerDock reaches the
+	        <Drawer> nested inside ModelDrawer through context, docking it
+	        SLOT_DRAWER_WIDTH px inboard so it lands flush against this drawer's
+	        left edge: two panels side by side, both fully visible and
+	        interactive, instead of the model drawer covering this one at equal
+	        z-index. `backdrop="clear"` keeps exactly one dim scrim on the page
+	        (this drawer's) while leaving click-outside dismissing the TOP layer.
+	        Below 1200px there is no room for both, and the CSS falls back to the
+	        overlay stack (see .drawer--docked in dashboard.css). Its own save
+	        path closes it and returns here with every slot edit intact. */}
+			<DrawerDock rightOf={SLOT_DRAWER_WIDTH} backdrop="clear">
+				<ModelDrawer
+					open={modelEditOpen && !!curModelRow}
+					onClose={() => setModelEditOpen(false)}
+					model={curModelRow}
+				/>
+			</DrawerDock>
 			<ConfirmDialog
 				open={discardOpen}
 				onCancel={() => setDiscardOpen(false)}

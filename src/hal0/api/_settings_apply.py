@@ -181,6 +181,9 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "brain_chat.enabled": {"apply_class": "immediate", "services": []},
     "brain_chat.read_only": {"apply_class": "immediate", "services": []},
     "brain_chat.model": {"apply_class": "immediate", "services": []},
+    # Was missing, so a settings PUT touching it came back badged "unknown key"
+    # even though BrainChatConfig has declared it since spec-p3-brain §5a.
+    "brain_chat.tool_model": {"apply_class": "immediate", "services": []},
     "brain_chat.max_rounds": {"apply_class": "immediate", "services": []},
     "brain_chat.completion_timeout_s": {"apply_class": "immediate", "services": []},
     # [meta]

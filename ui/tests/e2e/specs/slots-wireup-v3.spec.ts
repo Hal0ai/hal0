@@ -97,10 +97,11 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     const modelGroup = page.locator('.drawer .field-group').filter({
       has: page.locator('.field-group-label', { hasText: /^Model$/ }),
     })
-    // Label reads "Context (override)" — spec-hw-slot-ownership §1: it is an
-    // explicit override of the bound model's own default context_size.
+    // Label reads "Context (ceiling)": the bound model's own default
+    // context_size is authoritative; this slot value only clamps it down for
+    // lighter hardware, it never overrides it upward.
     const contextRow = modelGroup.locator('.form-row').filter({
-      has: page.locator('.form-lbl > span', { hasText: /^Context \(override\)$/ }),
+      has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
     })
     const ctxInput = contextRow.locator('input')
     await expect(ctxInput).toBeVisible()

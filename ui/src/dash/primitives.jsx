@@ -5,7 +5,7 @@ import { useUpdateState, useUpdateApply, useUpdateJob } from '@/api/hooks/useUpd
 import { useInstallState, bundleNameOr } from '@/api/hooks/useInstallState'
 import { useComfyui } from '@/api/hooks/useComfyui'
 
-const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, createContext: createContextP, useContext: useContextP } = React;
+const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, useMemo: useMemoP, createContext: createContextP, useContext: useContextP } = React;
 
 // ─── Shared leaf utilities (single source of truth for the dash editors) ───
 // Slug/name rule — mirrors the API regex ^[a-z0-9][a-z0-9_-]{0,31}$. Consumed
@@ -145,12 +145,51 @@ function Modal({ open, onClose, title, eyebrow, children, foot, width = 640, dis
   );
 }
 
+// ─── DrawerDock — side-by-side drawer stacking ─────────────────────────────
+// This app has no portals: every overlay is an in-place `position: fixed` +
+// z-index element. `.drawer` (dashboard.css) hardcodes `right: 0; z-index: 95`,
+// so two drawers open at once dock flush-right at EQUAL z-index and the
+// later-rendered one fully COVERS the first instead of sitting beside it.
+//
+// Two knobs fix that, both readable as direct Drawer props:
+//   rightOf  — px to move the drawer's right edge inboard, so it lands flush
+//              against the left edge of the drawer it stacks on. Pass the
+//              other drawer's width. Degrades to the overlay stack below
+//              1200px (see `.drawer--docked` in dashboard.css) rather than
+//              pushing the panel off-canvas to the left.
+//   backdrop — "dim" (default, the normal scrim) | "clear" (a click target
+//              with no paint) | "none". Each Drawer renders its OWN
+//              full-screen `.drawer-backdrop`, and two dimmed scrims
+//              double-darken the page, so a stacked drawer wants "clear":
+//              exactly one dim layer, and click-outside still dismisses the
+//              TOP drawer.
+//
+// DrawerDock exists because the drawer being docked usually isn't the one you
+// own. EditSlotDrawer stacks <ModelDrawer>, which owns its own <Drawer> and
+// takes no drawer props — wrapping it in <DrawerDock> reaches that nested
+// Drawer through context instead of threading a prop through every component
+// in between. Explicit props always beat the ambient dock.
+const DrawerDockContext = createContextP(null);
+
+export function DrawerDock({ rightOf = 0, backdrop = "clear", children }) {
+  const value = useMemoP(() => ({ rightOf, backdrop }), [rightOf, backdrop]);
+  return <DrawerDockContext.Provider value={value}>{children}</DrawerDockContext.Provider>;
+}
+
 // ─── Right-side Drawer ────────────────────────────────────────────────────
 // Captures + restores focus and traps Tab within the drawer (honours
 // role="dialog" aria-modal). Pass `dirty` (+ optional `confirmDiscard`) to
 // guard Esc/backdrop/close against unsaved changes; `dismissable={false}`
-// disables backdrop dismissal.
-function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, headRight, dirty = false, dismissable = true, confirmDiscard = "Discard unsaved changes?" }) {
+// disables backdrop dismissal. `rightOf` / `backdrop` dock this drawer beside
+// another one — see DrawerDock above.
+function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, headRight, dirty = false, dismissable = true, confirmDiscard = "Discard unsaved changes?", rightOf, backdrop }) {
+  const dock = useContextP(DrawerDockContext);
+  // A non-finite / negative offset is treated as "not docked" rather than
+  // emitting `right: NaNpx`, which would collapse the panel to the viewport
+  // edge with no visible cause.
+  const dockRaw = Number(rightOf ?? dock?.rightOf ?? 0);
+  const dockOffset = Number.isFinite(dockRaw) && dockRaw > 0 ? dockRaw : 0;
+  const scrim = backdrop ?? dock?.backdrop ?? "dim";
   const shellRef = useRefP(null);
   const [discardOpen, setDiscardOpen] = useStateP(false);
   useEffectP(() => { if (!open) setDiscardOpen(false); }, [open]);
@@ -168,10 +207,16 @@ function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, he
   useFocusTrap(shellRef, open);
   return (
     <>
-      <div
-        className={"drawer-backdrop" + (open ? " open" : "")}
-        onClick={() => { if (dismissable) requestClose(); }}
-      />
+      {scrim !== "none" && (
+        <div
+          className={
+            "drawer-backdrop" +
+            (open ? " open" : "") +
+            (scrim === "clear" ? " drawer-backdrop--clear" : "")
+          }
+          onClick={() => { if (dismissable) requestClose(); }}
+        />
+      )}
       {dirty && (
         <DiscardGuardDialog
           open={discardOpen}
@@ -183,10 +228,17 @@ function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, he
       <aside
         ref={shellRef}
         tabIndex={-1}
-        className={"drawer" + (open ? " open" : "")}
-        style={{ width }}
+        className={"drawer" + (open ? " open" : "") + (dockOffset ? " drawer--docked" : "")}
+        // The dock offset rides a CSS custom property, not `right` directly:
+        // inline styles win over stylesheet rules only for the properties they
+        // actually set, so `.drawer--docked`'s narrow-viewport media query can
+        // still reset `right` back to 0.
+        style={dockOffset ? { width, "--drawer-dock": `${dockOffset}px` } : { width }}
+        data-drawer-dock={dockOffset || undefined}
+        // aria-modal is a lie while two drawers are docked side by side — both
+        // are genuinely reachable — so the stacked one drops the claim.
         role="dialog"
-        aria-modal="true"
+        aria-modal={dockOffset ? undefined : "true"}
         aria-hidden={!open}
       >
         <div className="drawer-h">
@@ -490,9 +542,13 @@ const BANNER_CATALOG = [
     id: "post-install", scope: "dashboard", kind: "info",
     eyebrow: "FirstRun · just installed",
     heading: "Welcome to hal0 — {bundleName} is loaded",
-    body: <span>Try a message below. <span className="mono" style={{color: "var(--fg)"}}>primary</span> is your default chat persona. The persona dropdown lets you swap to <span className="mono">coder</span> or the NPU <span className="mono">agent</span>.</span>,
+    // Copy rewritten in #1477. It used to say "Try a message below … the
+    // persona dropdown lets you swap to coder or the NPU agent" — describing
+    // the chat page and its persona dropdown, both deleted in #439. It points
+    // at the surfaces that actually exist now. "Take the tour" is gone too: it
+    // dispatched `hal0:tour-start`, for which no listener has ever existed.
+    body: <span>Ask the steward anything from the <span className="mono" style={{color: "var(--fg)"}}>Quick chat</span> card, or open the platform steward from the Board. Your slots and models live under <span className="mono">Slots</span>.</span>,
     actions: [
-      { label: "Take the tour", primary: true, onClick: () => window.dispatchEvent(new CustomEvent("hal0:tour-start")) },
       { label: "Dismiss" },
     ],
   },
@@ -1057,4 +1113,4 @@ function ImportDialog({
   );
 }
 
-Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, FieldInfoIcon, PillToggle, MtpControl, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });
+Object.assign(window, { Modal, Drawer, DrawerDock, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, FieldInfoIcon, PillToggle, MtpControl, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });

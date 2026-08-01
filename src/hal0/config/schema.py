@@ -128,10 +128,18 @@ class ModelConfig(BaseModel):
         default=None,
         ge=128,
         description=(
-            "Context window size in tokens. Unset (None) is NOT 4096: the "
-            "load path derives the model's native window (dense-capped) or a "
-            "safe 8192 floor, so a slot never silently inherits llama-server's "
-            "4096 default (chat@4096 incident, 2026-06-15)."
+            "HARDWARE CEILING ONLY — no longer an override. v1.0 ownership "
+            "split: the MODEL owns context size (its "
+            "``defaults.context_size``, else the GGUF-derived native window "
+            "dense-capped, else a safe 8192 floor — never llama-server's "
+            "silent 4096, chat@4096 incident 2026-06-15). This slot-level "
+            "value is honored only as a cap on that resolved window "
+            "(``effective = min(model_window, this)``) because a slot owns "
+            "hardware and the installer writes a VRAM-budget clamp here "
+            "(hal0.hardware.recommend / hal0.install.orchestrate, #1108). It "
+            "can never RAISE the effective window. Unset (None) — the default, "
+            "and what a new slot gets — means 'follow the model'. See "
+            "hal0.providers.container._resolve_context_size."
         ),
     )
     # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
@@ -1108,22 +1116,39 @@ class ProfileConfig(BaseModel):
     device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
         default=None,
         description=(
-            "Device class this profile targets.  None (default, per "
-            "spec-hw-slot-ownership.md §4.1 / seeded-profile-rework §4.1) "
-            "means the profile is device-agnostic — the slot owns device "
-            "and the profile supplies the logical tune only.  ``'gpu'``, "
-            "``'cpu'``, ``'npu'``, ``'img'`` are explicit-fit values; "
-            "``profile_fits_slot`` skips the device-class gate when this is "
-            "None."
+            "INERT MATCH-ONLY FIT HINT — selects no hardware (v1.0, "
+            "spec-hw-slot-ownership §2/§4.1). A profile is a bundle of "
+            "model-tuning flags and carries no hardware placement; the SLOT's "
+            "``device`` enum is the single authoritative hardware fact. This "
+            "field is read ONLY by ``hal0.model_fit.profile_fits_slot`` (does "
+            "this profile suit this slot?), by the display/runtime-family "
+            "classification in ``hal0.profiles._runtime_family``, and as a "
+            "last-resort fallback in "
+            "``providers.container._effective_backend_and_device_class`` for a "
+            "hand-built slot dict that declares no ``device`` at all. It no "
+            "longer gates real ``/dev/kfd`` + ``/dev/dri`` passthrough — it "
+            "did until 1.0, which let a ``cpu-chat`` profile request GPU device "
+            "nodes on a ``device='cpu'`` slot. None (the default, and what "
+            "every shipped seed uses) means device-agnostic: "
+            "``profile_fits_slot`` skips the device-class gate entirely. "
+            "RETAINED on this class rather than removed because published "
+            "``.hal0profile.json`` artifacts carry it and their checksums cover "
+            "it — dropping it would break import round-trip."
         ),
     )
     backend: Literal["rocm", "vulkan", "cuda"] | None = Field(
         default=None,
         description=(
-            "GPU runtime this profile targets — the authoritative source for the "
-            "ROCm-vs-Vulkan-vs-CUDA choice (replaces sniffing the image tag).  "
-            "``None`` for non-GPU profiles (npu/cpu/img), where ``device_class`` "
-            "drives display and slot-card colour."
+            "INERT MATCH-ONLY FIT HINT — selects no runtime (v1.0, "
+            "spec-hw-slot-ownership §2). NOT the source of the "
+            "ROCm-vs-Vulkan-vs-CUDA choice: that is derived from the SLOT's "
+            "``device`` enum by ``hal0.model_meta.device_to_backend`` via "
+            "``providers.container._effective_backend_and_device_class``, which "
+            "feeds BOTH the image/capability resolution and the device-node "
+            "passthrough gate so the two can never drift. Read here only as the "
+            "last-resort fallback for a slot dict with no ``device``. ``None`` "
+            "for non-GPU profiles (npu/cpu/img). RETAINED for on-disk and "
+            "envelope-checksum back-compat (see ``device_class``)."
         ),
     )
     cloned_from: str | None = Field(
@@ -1441,8 +1466,26 @@ def resolve_chat_template(slot_cfg: dict, model_info: dict) -> str | None:
 
 
 _VALID_UPSTREAM_KINDS = frozenset({"slot", "remote"})
-# The full set implemented by UpstreamRegistry.auth_headers().
-_VALID_AUTH_STYLES = frozenset({"bearer", "anthropic", "google_query", "header", "none"})
+# The full set implemented by UpstreamRegistry.auth_headers() — and this
+# comment is now enforced (tests/security/test_upstream_auth_contract.py).
+# "google_query" sat here for releases with no implementation behind it, so
+# Google AI Studio dispatched unauthenticated while the UI showed "key set"
+# (#1513).
+_VALID_AUTH_STYLES = frozenset({"bearer", "anthropic", "header", "none"})
+
+#: Retired auth styles → the style that replaces them on read. Dropping
+#: "google_query" from the enum outright would hard-fail config load on any
+#: box that already has a Google upstream configured; coercing it to "bearer"
+#: both keeps that box booting AND starts authenticating its Gemini calls,
+#: because bearer is what the endpoint it points at actually accepts.
+_AUTH_STYLE_ALIASES: dict[str, str] = {"google_query": "bearer"}
+
+
+def coerce_auth_style(style: str) -> str:
+    """Map a retired auth style onto its replacement; pass others through."""
+    return _AUTH_STYLE_ALIASES.get((style or "").strip().lower(), style)
+
+
 # Canonical vocabulary matches the Upstream dataclass; "lazy"/"eager" were the
 # original schema-only spellings and are still accepted as aliases on read.
 _VALID_WARMUP = frozenset({"none", "ondemand", "always"})
@@ -1498,6 +1541,17 @@ class UpstreamEntry(BaseModel):
         description="When false the upstream is skipped by routing and /v1/models.",
     )
     model_filters: UpstreamModelFilters | None = Field(default=None)
+    hal0_peer: bool | None = Field(
+        default=None,
+        description=(
+            "Is this upstream another hal0 whose internal dashboard API "
+            "(/api/stats/hardware, /api/slots/metrics) may be polled? "
+            "Unset (null) auto-derives from the URL host: private/loopback "
+            "hosts are treated as peers, public hosts never are, so "
+            "hal0-internal paths are never sent to a third-party provider "
+            "(issue #1425). Set true to opt a public-hostname hal0 peer in."
+        ),
+    )
 
     @field_validator("name")
     @classmethod
@@ -1525,11 +1579,25 @@ class UpstreamEntry(BaseModel):
     @field_validator("auth_style")
     @classmethod
     def auth_style_valid(cls, v: str) -> str:
-        if v not in _VALID_AUTH_STYLES:
+        # Coerce retired styles before validating (#1513) — an existing box
+        # carrying auth_style = "google_query" must keep booting, and must
+        # start authenticating rather than continue dispatching naked.
+        coerced = coerce_auth_style(v)
+        if coerced != v:
+            # stdlib logging here (this module predates the structlog sweep),
+            # so %-style rather than kwargs.
+            log.warning(
+                "upstream.auth_style_retired: auth_style %r was never "
+                "implemented and dispatched unauthenticated; reading it as "
+                "%r. Update /etc/hal0/upstreams.toml to silence this.",
+                v,
+                coerced,
+            )
+        if coerced not in _VALID_AUTH_STYLES:
             raise ValueError(
                 f"auth_style {v!r} is not valid; choose from {sorted(_VALID_AUTH_STYLES)}"
             )
-        return v
+        return coerced
 
     @field_validator("warmup_strategy")
     @classmethod
@@ -2639,6 +2707,19 @@ class ActivityConfig(BaseModel):
     max_rows: int | None = Field(default=50_000, ge=100)
 
 
+#: Where the steward sends TOOL turns when nothing else says otherwise. ADR-0023's
+#: always-on LLM anchor — the model every ``hal0/<slot>`` fallback chain ends in,
+#: and the slot ``installer/etc-hal0/slots/agent.toml`` seeds.
+BRAIN_TOOL_MODEL_DEFAULT = "hal0/agent"
+
+#: The spellings that mean "deliberately route tool turns nowhere". Written out
+#: because the obvious spelling — the empty string — is indistinguishable on
+#: disk from a key nobody set, and silently disabling tool routing is exactly
+#: the failure this vocabulary exists to prevent. See
+#: :meth:`BrainChatConfig._normalise_tool_model`.
+BRAIN_TOOL_MODEL_DISABLED = frozenset({"off", "none", "disabled"})
+
+
 class BrainChatConfig(BaseModel):
     """``[brain_chat]`` — the dashboard's agent-chat steward (hal0-brain).
 
@@ -2692,8 +2773,70 @@ class BrainChatConfig(BaseModel):
     # the steward system prompt alone is ~7.3k tokens — and must actually be
     # LOADED, or the chat 404s (see BrainChatConfig docstring above).
     model: str = ""
+    # Route tool-calling ROUNDS to a capable, tool-format-compatible model —
+    # the escape hatch for boxes whose ``model`` (the shipped ~1.1B brain slot)
+    # can't emit tool calls the local runtime parses natively (it leaks/500s).
+    # Point it at a model that tool-calls cleanly on this runtime (a capable
+    # local slot like ``hal0/agent``, or the fallback provider). Default
+    # "hal0/agent" per spec-p3-brain.final.md §5a + ADR-0023 (always-on anchor
+    # every fallback chain ends in), resolved through the normal virtual-model
+    # chain (:mod:`hal0.normalize.resolver`).
+    #
+    # PER ROUND, NOT PER CONVERSATION. Plain-chat rounds stay on ``model`` —
+    # that is the whole point of a fast 1B steward — and only a round that
+    # needs a tool reroutes here; once a turn is in a tool chain the tool model
+    # finishes it (it, not the 1B, reads the ``role: tool`` payloads). An
+    # explicit per-request ``model`` sets the CHAT model and does NOT suppress
+    # the reroute: the dashboard sends one on every message, so treating it as
+    # a whole-turn pin would disable this feature in the only UI that uses it.
+    # Implementation + measured failure modes: :func:`hal0.brain.chat
+    # ._tool_routing_llm`.
+    #
+    # EMPTY STRING IS NOT "DISABLED" — see _normalise_tool_model below. A live
+    # box was found with `[brain_chat] tool_model = ""`, which silently
+    # overrode this default; it is now coerced back to the default with a loud
+    # warning. Opting OUT is spelled explicitly: "off" / "none" / "disabled".
+    tool_model: str = BRAIN_TOOL_MODEL_DEFAULT
     max_rounds: int = Field(default=8, ge=1, le=100)
     completion_timeout_s: float = Field(default=300.0, gt=0)
+
+    @field_validator("tool_model", mode="before")
+    @classmethod
+    def _normalise_tool_model(cls, v: Any) -> str:
+        """Coerce an empty ``tool_model`` back to the default, loudly.
+
+        The trap this closes: ``tool_model = ""`` in ``hal0.toml`` is
+        indistinguishable, on disk, from "I never set this". It is *not*
+        indistinguishable to pydantic — an explicit empty string overrides the
+        ``"hal0/agent"`` default — so a config that looks unset silently
+        removes the steward's tool-routing target. There is no error, no
+        warning, and no observable symptom except that tool turns quietly stop
+        going anywhere useful. That is the worst class of config bug: it looks
+        like nothing happened.
+
+        Somebody who genuinely wants no tool routing has to say so out loud,
+        with one of :data:`BRAIN_TOOL_MODEL_DISABLED`, which normalises to the
+        empty string internally. That keeps the "no reroute" behaviour
+        reachable while making it impossible to arrive at by accident.
+        """
+        if v is None:
+            return BRAIN_TOOL_MODEL_DEFAULT
+        if not isinstance(v, str):
+            return v  # let pydantic's own str validation produce the error
+        text = v.strip()
+        if not text:
+            log.warning(
+                "[brain_chat] tool_model is empty — an explicit empty string OVERRIDES the "
+                "%r default and would leave the steward's tool turns with no target. "
+                "Using %r. To genuinely disable tool routing, set tool_model to one of %s.",
+                BRAIN_TOOL_MODEL_DEFAULT,
+                BRAIN_TOOL_MODEL_DEFAULT,
+                sorted(BRAIN_TOOL_MODEL_DISABLED),
+            )
+            return BRAIN_TOOL_MODEL_DEFAULT
+        if text.lower() in BRAIN_TOOL_MODEL_DISABLED:
+            return ""
+        return text
 
 
 class SecurityConfig(BaseModel):
