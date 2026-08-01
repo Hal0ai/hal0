@@ -61,6 +61,13 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  // Same single source of truth the <title> stamp uses (appVersion, read from
+  // package.json above), exposed to app code so src/sentry.ts can tag events
+  // with the exact UI build that produced them instead of carrying a second
+  // version constant that would drift.
+  define: {
+    __HAL0_UI_VERSION__: JSON.stringify(appVersion),
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
