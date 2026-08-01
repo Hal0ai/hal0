@@ -802,6 +802,7 @@ jobs:
           EXPECTED_PRERELEASE: ${{ needs.resolve.outputs.github_prerelease }}
           EXPECTED_LATEST: ${{ needs.resolve.outputs.github_latest }}
           PUBLISH_PYPI: ${{ needs.resolve.outputs.publish_pypi }}
+          POLICY_KIND: ${{ needs.resolve.outputs.kind }}
           SIGNER_IDENTITY: ${{ needs.resolve.outputs.signer_identity }}
           EXPECTED_DIGEST: ${{ needs.release.outputs.tarball_digest }}
         run: |
@@ -1077,7 +1078,7 @@ jobs:
           PY
             echo "pypi_evidence=PyPI publication | hal0ai==${PYPI_VERSION} verified" >> "$GITHUB_OUTPUT"
           else
-            echo "pypi_evidence=PyPI publication | not required (nightly policy)" >> "$GITHUB_OUTPUT"
+            echo "pypi_evidence=PyPI publication | not required (${POLICY_KIND} policy)" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Record non-mutating authorization evidence

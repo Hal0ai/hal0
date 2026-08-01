@@ -43,6 +43,32 @@ done
 PVE() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "$PVE_HOST" "$@"; }
 log() { echo "[fresh-test-ct] $*" >&2; }
 
+# ── preflight: fail loudly BEFORE allocating a vmid ─────────────────────────
+# `pct clone` against a missing template produced a bare "install_ok:false"
+# JSON row with no reason, which reads as "the installer broke" when in fact
+# the harness was pointed at a template that does not exist. Both defaults
+# (HAL0_PVE=pve, HAL0_TEST_TEMPLATE=200) go stale as soon as the lab is
+# rebuilt, so check them explicitly and say what IS available.
+PVE "true" >/dev/null 2>&1 || {
+  echo "cannot reach Proxmox host via ssh alias '${PVE_HOST}'" >&2
+  echo "  set HAL0_PVE to the right ssh alias (check: grep -i '^Host ' ~/.ssh/config)" >&2
+  exit 2
+}
+if ! PVE "pct config ${TEMPLATE}" >/dev/null 2>&1; then
+  echo "template CT ${TEMPLATE} does not exist on ${PVE_HOST}" >&2
+  echo "  set HAL0_TEST_TEMPLATE to a real template vmid. Templates present:" >&2
+  PVE "pct list | tail -n +2 | awk '{print \$1}' | while read -r v; do
+        pct config \"\$v\" 2>/dev/null | grep -q '^template: 1' && echo \"    \$v \$(pct config \"\$v\" | sed -n 's/^hostname: //p')\"
+      done" >&2 || true
+  exit 2
+fi
+PVE "pct config ${TEMPLATE} | grep -q '^template: 1'" 2>/dev/null || {
+  echo "CT ${TEMPLATE} exists but is NOT a template — refusing to clone a live container" >&2
+  echo "  convert it first: pct stop ${TEMPLATE} && pct template ${TEMPLATE}" >&2
+  exit 2
+}
+[[ -r "$KEY" ]] || { echo "ssh key not readable: ${KEY} (set HAL0_TEST_KEY)" >&2; exit 2; }
+
 # Pick a free ephemeral vmid (990-999) if none given.
 if [[ -z "$VMID" ]]; then
   for c in $(seq 990 999); do
@@ -60,6 +86,7 @@ emit() {
     "$VMID" "$INSTALL_OK" "$SMOKE_OK" "$UNINSTALL_OK" "$RESIDUE" "$IP" "$elapsed"
 }
 cleanup() {
+  [[ -n "${KNOWN_HOSTS:-}" ]] && rm -f "${KNOWN_HOSTS}"
   if [[ "$KEEP" == "1" ]]; then log "--keep: clone $VMID left running at ${IP:-?}"; return; fi
   # A privileged LXC holding /dev/kfd (after install warms ROCm) hangs on
   # `lxc-stop --kill`. SIGKILL the lxc-start monitor first — that tears the
@@ -95,7 +122,17 @@ IP="$(PVE "pct exec $VMID -- hostname -I" 2>/dev/null | awk '{print $1}')"
 [[ -n "$IP" ]] || { log "no IP"; emit; exit 1; }
 log "clone IP $IP"
 
-SSH() { ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "halo@$IP" "$@"; }
+# Throwaway known_hosts. Ephemeral clones recycle both vmids AND DHCP leases,
+# so a previous run's host key sits in ~/.ssh/known_hosts under the same IP and
+# the next run dies on REMOTE HOST IDENTIFICATION HAS CHANGED. accept-new does
+# NOT cover a *changed* key — only an unknown one — so isolate the file instead
+# of polluting (or having to hand-prune) the operator's real known_hosts.
+# (Removed by cleanup() — do NOT add a second `trap ... EXIT` here, it would
+# override `trap cleanup EXIT` above and orphan every clone.)
+KNOWN_HOSTS="$(mktemp)"
+SSH() { ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile="$KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null \
+  -o ConnectTimeout=10 "halo@$IP" "$@"; }
 for _ in $(seq 1 30); do SSH true 2>/dev/null && break; sleep 2; done
 
 # ── install ──────────────────────────────────────────────────────────────────
