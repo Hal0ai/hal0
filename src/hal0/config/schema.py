@@ -1484,6 +1484,8 @@ _AUTH_STYLE_ALIASES: dict[str, str] = {"google_query": "bearer"}
 def coerce_auth_style(style: str) -> str:
     """Map a retired auth style onto its replacement; pass others through."""
     return _AUTH_STYLE_ALIASES.get((style or "").strip().lower(), style)
+
+
 # Canonical vocabulary matches the Upstream dataclass; "lazy"/"eager" were the
 # original schema-only spellings and are still accepted as aliases on read.
 _VALID_WARMUP = frozenset({"none", "ondemand", "always"})
