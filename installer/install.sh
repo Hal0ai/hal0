@@ -1103,10 +1103,6 @@ fi
 # proxy. The API binds 0.0.0.0:8080 directly and any TLS / certs are
 # handled by Traefik / nginx / Cloudflare Tunnel in front of it. See
 # docs/operate/tls.md for example proxy configs.
-# HAL0_AUTH_ENABLED_FOR_RENDER kept for OWUI prewire compatibility — set
-# to "0" until the auth-removal sweep collapses that flag entirely.
-HAL0_AUTH_ENABLED_FOR_RENDER="0"
-
 # OpenWebUI prewire env. Rendered via the just-installed venv so the
 # defaults live in exactly one place (src/hal0/openwebui/env_writer.py).
 # In dev mode we point HAL0_HOME at the prefix so the file lands under
@@ -1115,12 +1111,31 @@ HAL0_HOME_FOR_OWUI=""
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     HAL0_HOME_FOR_OWUI="${PREFIX}"
 fi
-# HAL0_AUTH_ENABLED in the calling env flips OpenWebUI prewire defaults
-# to single-sign-on (WEBUI_AUTH=True + WEBUI_AUTH_TRUSTED_EMAIL_HEADER).
-if HAL0_HOME="${HAL0_HOME_FOR_OWUI}" HAL0_AUTH_ENABLED="${HAL0_AUTH_ENABLED_FOR_RENDER}" \
+# Two knobs reach the prewire (#1515). Both were previously unreachable: the
+# only documented path was a `overrides=` parameter no caller ever passed, and
+# the HAL0_AUTH_ENABLED flag threaded here was dead — env_writer stopped
+# reading it in the auth-removal sweep, so the comment promising it "flips
+# OpenWebUI prewire defaults to single-sign-on" had been false for releases.
+#
+#   HAL0_BIND_HOST                  the box's one bind choice (same value that
+#                                   seeds api.env above), rendered into
+#                                   HAL0_OWUI_BIND_HOST for the unit's
+#                                   `podman run -p`. The chat UI now follows
+#                                   the operator off the LAN instead of
+#                                   publishing on 0.0.0.0 regardless.
+#   HAL0_OWUI_TRUSTED_EMAIL_HEADER  pass-through from the installer's own env
+#                                   for operators fronting hal0 with a proxy
+#                                   that injects a trusted email header.
+#
+# This call is also no longer a clobber (#1514): main() merges, so an operator
+# who hand-edited openwebui.env keeps every value across repair and upgrade
+# runs while still receiving newly shipped defaults.
+if HAL0_HOME="${HAL0_HOME_FOR_OWUI}" \
+    HAL0_BIND_HOST="${API_BIND_HOST}" \
+    HAL0_OWUI_TRUSTED_EMAIL_HEADER="${HAL0_OWUI_TRUSTED_EMAIL_HEADER:-}" \
     "${VENV_DIR}/bin/python" -c \
     'from hal0.openwebui.env_writer import main; main()'; then
-    info "wrote ${ETC_DIR}/openwebui.env"
+    info "wrote ${ETC_DIR}/openwebui.env (bind ${API_BIND_HOST}:3001)"
 else
     warn "failed to write openwebui.env — OpenWebUI may not start"
 fi

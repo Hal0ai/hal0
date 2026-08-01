@@ -12,10 +12,25 @@ Wants=network-online.target hal0-api.service
 [Service]
 Type=simple
 
+# Inline default for the publish address (#1515). MUST precede the
+# EnvironmentFile below: systemd applies Environment=/EnvironmentFile= in
+# order and the last one wins, so putting this after would clobber the
+# operator's value. It is required rather than belt-and-braces because
+# systemd has no ${VAR:-default} in ExecStart — an unset variable expands to
+# nothing and would hand podman `-p :3001:8080`. It is what carries an
+# upgraded box whose openwebui.env predates the key.
+Environment=HAL0_OWUI_BIND_HOST=0.0.0.0
+
 # /etc/hal0/openwebui.env is written by install.sh via
 # `python -m hal0.openwebui.env_writer`. Key vars: OPENAI_API_BASE_URLS,
-# WEBUI_AUTH, WEBUI_NAME, DATA_DIR. Re-render and `systemctl restart
-# hal0-openwebui` after editing.
+# WEBUI_AUTH, WEBUI_NAME, DATA_DIR, HAL0_OWUI_BIND_HOST. Hand edits survive
+# an install re-run (#1514); `systemctl restart hal0-openwebui` to apply.
+#
+# This is openwebui.env and not api.env on purpose: reaching HAL0_BIND_HOST
+# directly would mean sourcing the file that carries every provider token,
+# pushing them into the podman process environment and re-spreading exactly
+# what #1466 contained. env_writer renders the bind choice into this
+# secret-free file instead.
 EnvironmentFile=/etc/hal0/openwebui.env
 
 # Pre-pull on first start so the unit doesn't sit in 'activating' for
@@ -29,11 +44,18 @@ ExecStartPre=-/usr/bin/podman pull ghcr.io/open-webui/open-webui@sha256:7f1b0a1a
 # exit code so a missing container isn't a failure.
 ExecStartPre=-/usr/bin/podman rm -f hal0-openwebui
 
+# Publish address (#1515). The host port :3001 used to be a hardcoded
+# `0.0.0.0`, so an operator who set HAL0_BIND_HOST=127.0.0.1 to keep hal0 off
+# the LAN got exactly that on :8080 and a wide-open, unauthenticated chat UI
+# on :3001 anyway. HAL0_OWUI_BIND_HOST is rendered from that same one bind
+# choice by hal0.openwebui.env_writer, so both surfaces follow it.
+# See the Environment=/EnvironmentFile= block above for the default and the
+# reason the value is sourced from openwebui.env rather than api.env.
+#
 # --rm so the container is cleaned up on any exit (normal or crash).
 # The container name is stable so ExecStop can target it by name.
 # Data lives in /var/lib/hal0/openwebui/ which survives container
-# restarts and hal0 updates. The host port :3001 binds 0.0.0.0 by
-# default (PLAN §2 "public" tier).
+# restarts and hal0 updates.
 # --add-host host.docker.internal:host-gateway: podman (>=4.0) honours the
 # host-gateway magic value, so OPENAI_API_BASE_URLS can reach hal0-api on
 # the host the same way it did under docker.
@@ -44,7 +66,7 @@ ExecStart=/usr/bin/podman run \
   --name hal0-openwebui \
   --env-file /etc/hal0/openwebui.env \
   -v /var/lib/hal0/openwebui:/app/backend/data \
-  -p 0.0.0.0:3001:8080 \
+  -p ${HAL0_OWUI_BIND_HOST}:3001:8080 \
   --add-host=host.docker.internal:host-gateway \
   --security-opt apparmor=unconfined \
   ghcr.io/open-webui/open-webui@sha256:7f1b0a1a50cfbac23da3b16f96bc968fd757b26dc9e54e93813d61768ea9184e

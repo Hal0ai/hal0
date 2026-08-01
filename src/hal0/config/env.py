@@ -41,7 +41,19 @@ def _quote_value(value: str) -> str:
     return value
 
 
-def write_env_atomic(path: Path | str, env_dict: dict[str, str]) -> None:
+#: Header for slot env files — regenerated wholesale on every slot load, so
+#: "do not edit" is literally true for them.
+_SLOT_HEADER: tuple[str, ...] = (
+    "# hal0 slot environment — written by hal0.config.env.write_env_atomic",
+    "# Do not edit manually; changes will be overwritten on next slot load.",
+)
+
+
+def write_env_atomic(
+    path: Path | str,
+    env_dict: dict[str, str],
+    header: tuple[str, ...] | list[str] | None = None,
+) -> None:
     """Write an environment file atomically.
 
     Writes the key=value pairs in env_dict to a temporary file in the same
@@ -59,6 +71,11 @@ def write_env_atomic(path: Path | str, env_dict: dict[str, str]) -> None:
         env_dict: Mapping of variable names to string values.  Keys are
                   written in sorted order for deterministic diffs.
                   Values are quoted if they contain shell-special characters.
+        header:   Comment lines written above the values.  Defaults to the
+                  slot-env header.  ``openwebui.env`` passes its own,
+                  because since #1514 that file is merged rather than
+                  regenerated — telling its operator that edits "will be
+                  overwritten on next slot load" was wrong on both counts.
 
     Raises:
         OSError: If the directory doesn't exist, or disk full, or
@@ -69,11 +86,7 @@ def write_env_atomic(path: Path | str, env_dict: dict[str, str]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    lines: list[str] = [
-        "# hal0 slot environment — written by hal0.config.env.write_env_atomic",
-        "# Do not edit manually; changes will be overwritten on next slot load.",
-        "",
-    ]
+    lines: list[str] = [*(header if header is not None else _SLOT_HEADER), ""]
     for key in sorted(env_dict.keys()):
         value = env_dict[key]
         if not isinstance(value, str):
