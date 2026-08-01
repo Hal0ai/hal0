@@ -542,9 +542,13 @@ const BANNER_CATALOG = [
     id: "post-install", scope: "dashboard", kind: "info",
     eyebrow: "FirstRun · just installed",
     heading: "Welcome to hal0 — {bundleName} is loaded",
-    body: <span>Try a message below. <span className="mono" style={{color: "var(--fg)"}}>primary</span> is your default chat persona. The persona dropdown lets you swap to <span className="mono">coder</span> or the NPU <span className="mono">agent</span>.</span>,
+    // Copy rewritten in #1477. It used to say "Try a message below … the
+    // persona dropdown lets you swap to coder or the NPU agent" — describing
+    // the chat page and its persona dropdown, both deleted in #439. It points
+    // at the surfaces that actually exist now. "Take the tour" is gone too: it
+    // dispatched `hal0:tour-start`, for which no listener has ever existed.
+    body: <span>Ask the steward anything from the <span className="mono" style={{color: "var(--fg)"}}>Quick chat</span> card, or open the platform steward from the Board. Your slots and models live under <span className="mono">Slots</span>.</span>,
     actions: [
-      { label: "Take the tour", primary: true, onClick: () => window.dispatchEvent(new CustomEvent("hal0:tour-start")) },
       { label: "Dismiss" },
     ],
   },

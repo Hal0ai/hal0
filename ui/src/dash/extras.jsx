@@ -2,9 +2,13 @@
 //
 // Phase B1: Logs reads from real hooks. v0.3 PR-8 split the
 // AgentView monolith out of this file into ui/src/dash/agents/* — see
-// agent-view.jsx, hermes-chat-tab.jsx, personas-tab.jsx, skills-tab.jsx,
-// memory-tab.jsx, plugins-tab.jsx. v0.4: BackendsView removed (the page
+// agent-view.jsx and memory-tab.jsx. v0.4: BackendsView removed (the page
 // duplicated Settings → Runtime + config.json).
+//
+// (#1477) This map used to also name hermes-chat-tab.jsx, personas-tab.jsx,
+// skills-tab.jsx and plugins-tab.jsx. None of those exist any more, so the
+// only thing the comment did was send a reader looking for files that were
+// deleted with the chat page in #439.
 
 import { useLogsHistorical, useLogsStream, useSlotLogsStream } from '@/api/hooks/useLogs'
 import { useSlots } from '@/api/hooks/useSlots'
