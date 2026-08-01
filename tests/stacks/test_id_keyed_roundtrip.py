@@ -115,7 +115,10 @@ class TestSnapshotApplyRoundTrip:
         touched = {fs.path for fs in plan.change_set.after}
         assert touched == {path}, f"apply must address the id-keyed file, got {touched}"
         assert plan.errors == []
-        assert any(fs.data != b.data for b, fs in zip(plan.change_set.before, plan.change_set.after))
+        assert any(
+            fs.data != b.data
+            for b, fs in zip(plan.change_set.before, plan.change_set.after, strict=True)
+        )
 
     def test_apply_commits_onto_the_id_keyed_file_and_creates_no_duplicate(
         self, reg: ModelRegistry, tmp_hal0_home: str
@@ -170,10 +173,15 @@ class TestGuardsExcludeTheSlotItself:
         plan = StackApplyEngine().plan("live", _stack())
         assert plan.errors == [], f"the slot conflicted with itself: {plan.errors}"
 
-    def test_default_uniqueness_still_fires_against_a_real_peer(self, tmp_hal0_home: str) -> None:
-        """The guard must keep its teeth — a genuine second default=true peer is
-        still rejected when both slots are id-keyed. ``default`` is not a stack
-        field, so it reaches the merged config from the slot's own TOML."""
+    def test_stale_duplicate_default_state_does_not_veto_the_apply(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """SC-4 ``changed_keys`` semantics: ``default`` is not a stack field,
+        so a stack apply never moves the default-uniqueness invariant — and a
+        pre-existing two-defaults-on-disk state it neither created nor touches
+        must not veto it (``check_default_uniqueness`` skips when the write
+        carries no ``default`` key). This holds identically on an id-keyed
+        box: the plan reconciles, and the model change lands."""
         write_id_keyed_slot(
             tmp_hal0_home, stem="1", name="agent", model="ace-saber", extra=["default = true"]
         )
@@ -181,7 +189,10 @@ class TestGuardsExcludeTheSlotItself:
             tmp_hal0_home, stem="2", name="code", model="other", extra=["default = true"]
         )
         plan = StackApplyEngine().plan("live", _stack())
-        assert plan.errors, "a real second default=true must still be rejected"
+        assert plan.errors == [], (
+            f"a stack apply that never touches default was vetoed: {plan.errors}"
+        )
+        assert plan.slot_names == ("agent",)
 
 
 # ── 3. drift ─────────────────────────────────────────────────────────────────
