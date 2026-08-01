@@ -204,6 +204,15 @@ RULES: tuple[_Rule, ...] = (
         _POST,
     ),
     _Rule("models mutations", _prefix("/api/models"), AuthClass.ADMIN, None),
+    # ── Runner Image catalogue (feat/runner-image-catalogue) ───────────
+    # Same shape as the models block above: read-only listing/detail is
+    # CLIENT (dashboard needs it just to render the page); sync + every
+    # pull mutation (start/cancel) is ADMIN, matching the model-pull
+    # surface's mutation classification.
+    _Rule("runner images list/detail (GET)", _prefix("/api/runner-images"), AuthClass.CLIENT, _GET),
+    _Rule(
+        "runner images sync/pull mutations", _prefix("/api/runner-images"), AuthClass.ADMIN, None
+    ),
     _Rule("slots list (GET, exact)", _exact("/api/slots"), AuthClass.CLIENT, _GET),
     _Rule("slots (everything else)", _prefix("/api/slots"), AuthClass.ADMIN, None),
     _Rule("hf search (GET)", _prefix("/api/hf"), AuthClass.CLIENT, _GET),

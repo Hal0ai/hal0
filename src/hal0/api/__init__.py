@@ -121,6 +121,9 @@ from hal0.api.routes import (
     realtime as realtime_routes,
 )
 from hal0.api.routes import (
+    runner_images as runner_images_routes,
+)
+from hal0.api.routes import (
     secrets as secrets_routes,
 )
 from hal0.api.routes import (
@@ -137,6 +140,7 @@ from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
 from hal0.registry.discover import scan_and_register
 from hal0.registry.model import _BLESSED_PREFIX
+from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
@@ -924,6 +928,9 @@ class BootState:
     hardware_stats: Any = None
     model_pull_jobs: dict[str, Any] = field(default_factory=dict)
     model_pull_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    runner_image_registry: RunnerImageStore | None = None
+    runner_image_pull_jobs: dict[str, Any] = field(default_factory=dict)
+    runner_image_pull_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     shutting_down: asyncio.Event | None = None
     slot_pull_jobs: dict[str, Any] = field(default_factory=dict)
     events: EventBus | None = None
@@ -986,6 +993,7 @@ async def _boot_registries(app: FastAPI, ctx: BootState) -> None:
     ctx.upstreams = UpstreamRegistry()
     _hydrate_upstreams(ctx.upstreams)
     ctx.model_registry = ModelRegistry()
+    ctx.runner_image_registry = RunnerImageStore()
     ctx.hardware_probe = HardwareProbe()
 
     # Cache the parsed top-level config so request handlers don't repeatedly
@@ -1254,6 +1262,12 @@ async def _boot_pull_registry(app: FastAPI, ctx: BootState) -> None:
     # download — this dict is what lets the shutdown path below (
     # _shutdown_pull_jobs) find and cancel any still-running pull.
     app.state.model_pull_tasks = ctx.model_pull_tasks
+    # Runner-image catalogue store + its own pull-job/task dicts, same
+    # shape as the model-pull pair above but keyed by GHCR repo path
+    # (feat/runner-image-catalogue).
+    app.state.runner_image_registry = ctx.runner_image_registry
+    app.state.runner_image_pull_jobs = ctx.runner_image_pull_jobs
+    app.state.runner_image_pull_tasks = ctx.runner_image_pull_tasks
     # Flipped at the START of shutdown (see the lifespan finally block) so
     # long-lived generators (the pull SSE stream) can notice a restart is in
     # progress and close promptly instead of blocking uvicorn's connection
@@ -1895,6 +1909,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # shutdown (and thus `systemctl restart hal0-api`) waiting.
         with contextlib.suppress(Exception):
             await _shutdown_pull_jobs(app)
+        with contextlib.suppress(Exception):
+            from hal0.registry.runner_pull_jobs import shutdown_pull_jobs as _shutdown_runner_pulls
+
+            await _shutdown_runner_pulls(app.state)
         if ctx.omni_router_client is not None:
             with contextlib.suppress(Exception):
                 await ctx.omni_router_client.aclose()
@@ -1982,6 +2000,10 @@ def create_app() -> FastAPI:
     # "model 'health' not found" lookup instead.
     app.include_router(hardware.router, prefix="/api", tags=["hardware"])
     app.include_router(models.router, prefix="/api/models", tags=["models"])
+    # Runner Image catalogue — subpage of Models (feat/runner-image-catalogue).
+    app.include_router(
+        runner_images_routes.router, prefix="/api/runner-images", tags=["runner-images"]
+    )
     # Issue #311: HuggingFace Hub discovery (search proxy). Sits next
     # to the models surface so the dashboard's "Search HF" button has a
     # backend to call; the inspect endpoint already lives under
