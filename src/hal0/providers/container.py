@@ -70,6 +70,7 @@ from hal0.config.schema import (
     resolve_chat_template,
     resolve_profile_flags,
 )
+from hal0.http_client import async_client
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import (
@@ -1483,7 +1484,7 @@ class ContainerProvider(Provider):
 
     async def infer(self, port: int, body: dict[str, Any]) -> dict[str, Any]:
         """Direct inference passthrough (used by tests; dispatcher is primary path)."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with async_client(timeout=30.0) as client:
             resp = await client.post(f"http://127.0.0.1:{port}/v1/chat/completions", json=body)
             resp.raise_for_status()
             return resp.json()  # type: ignore[no-any-return]
@@ -1654,7 +1655,7 @@ class ContainerProvider(Provider):
         health_url = f"http://127.0.0.1:{port}/health"
         models_url = f"http://127.0.0.1:{port}/v1/models"
         try:
-            async with httpx.AsyncClient(timeout=_HEALTH_REQUEST_TIMEOUT_S) as client:
+            async with async_client(timeout=_HEALTH_REQUEST_TIMEOUT_S) as client:
                 resp = await client.get(health_url)
                 if resp.status_code == 200:
                     try:

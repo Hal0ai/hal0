@@ -39,6 +39,7 @@ from typing import Any
 import httpx
 
 from hal0.errors import Hal0Error
+from hal0.http_client import async_client
 from hal0.providers.base import ContainerSpec, Provider
 from hal0.runners import RUNNER_IMAGES
 
@@ -588,7 +589,7 @@ class FLMProvider(Provider):
         """
         models_url = f"http://127.0.0.1:{port}/v1/models"
         try:
-            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+            async with async_client(timeout=_HEALTH_TIMEOUT) as client:
                 models_resp = await client.get(models_url)
                 models_resp.raise_for_status()
                 data = models_resp.json()
@@ -641,7 +642,7 @@ class FLMProvider(Provider):
         models_url = f"http://127.0.0.1:{port}/v1/models"
         chat_url = f"http://127.0.0.1:{port}/v1/chat/completions"
         try:
-            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+            async with async_client(timeout=_HEALTH_TIMEOUT) as client:
                 models_resp = await client.get(models_url)
                 models_resp.raise_for_status()
                 data = models_resp.json()
@@ -655,7 +656,7 @@ class FLMProvider(Provider):
                 ids = [m.get("id") for m in models]
                 model_id = expected_model if expected_model in ids else models[0].get("id")
 
-            async with httpx.AsyncClient(timeout=_HEALTH_INFER_TIMEOUT) as client:
+            async with async_client(timeout=_HEALTH_INFER_TIMEOUT) as client:
                 probe_body = {
                     "model": model_id,
                     "messages": [{"role": "user", "content": "ping"}],
@@ -709,7 +710,7 @@ class FLMProvider(Provider):
         models_url = f"http://127.0.0.1:{port}/v1/models"
         embed_url = f"http://127.0.0.1:{port}/v1/embeddings"
         try:
-            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+            async with async_client(timeout=_HEALTH_TIMEOUT) as client:
                 models_resp = await client.get(models_url)
                 models_resp.raise_for_status()
                 data = models_resp.json()
@@ -722,7 +723,7 @@ class FLMProvider(Provider):
                     }
                 model_id = models[0].get("id")
 
-            async with httpx.AsyncClient(timeout=_HEALTH_INFER_TIMEOUT) as client:
+            async with async_client(timeout=_HEALTH_INFER_TIMEOUT) as client:
                 probe_body = {"model": model_id, "input": "ping"}
                 resp = await asyncio.shield(client.post(embed_url, json=probe_body))
                 if resp.status_code != 200:
@@ -748,7 +749,7 @@ class FLMProvider(Provider):
         """Passthrough /v1/chat/completions to FLM."""
         url = f"http://127.0.0.1:{port}/v1/chat/completions"
         try:
-            async with httpx.AsyncClient(timeout=_INFER_TIMEOUT) as client:
+            async with async_client(timeout=_INFER_TIMEOUT) as client:
                 resp = await client.post(url, json=body)
                 resp.raise_for_status()
                 return resp.json()
