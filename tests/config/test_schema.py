@@ -340,12 +340,16 @@ class TestUpstreamEntry:
             UpstreamEntry(name="x", url="http://x", timeout_seconds=-1.0)
 
     def test_anthropic_and_google_auth_styles_accepted(self) -> None:
-        # These were rejected pre-fix even though the runtime implements them.
+        # "anthropic" is implemented by the runtime and passes through.
+        # "google_query" was retired in #1513 (declared but implemented
+        # nowhere, so Google calls dispatched unauthenticated); an existing
+        # config carrying it is coerced to "bearer" so the box keeps booting
+        # and starts authenticating.
         assert UpstreamEntry(name="a", url="http://x", auth_style="anthropic").auth_style == (
             "anthropic"
         )
         assert UpstreamEntry(name="g", url="http://x", auth_style="google_query").auth_style == (
-            "google_query"
+            "bearer"
         )
 
     def test_warmup_canonical_vocabulary_accepted(self) -> None:
