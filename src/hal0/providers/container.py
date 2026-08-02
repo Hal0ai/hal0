@@ -1647,9 +1647,14 @@ class ContainerProvider(Provider):
                 provider = _spec_provider_for(slot_cfg)
             except Exception:
                 provider = None
+            from hal0.providers.comfyui import ComfyUIProvider
             from hal0.providers.flm import FLMProvider
 
-            if isinstance(provider, FLMProvider):
+            # ComfyUI serves neither /health nor /v1/models (its liveness
+            # probe is GET /system_stats), so the generic path below read a
+            # healthy ComfyUI as http_404 — the fail-watcher then struck a
+            # READY img slot to ERROR within seconds of it coming up.
+            if isinstance(provider, (FLMProvider, ComfyUIProvider)):
                 return await provider.health(port)
 
         health_url = f"http://127.0.0.1:{port}/health"

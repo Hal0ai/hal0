@@ -394,3 +394,34 @@ async def test_health_v1_models_also_fails_unhealthy() -> None:
         result = await provider.health(8088)
 
     assert result["ok"] is False
+
+
+@pytest.mark.anyio
+async def test_health_delegates_to_comfyui_system_stats() -> None:
+    """A comfyui-family slot_cfg delegates to ComfyUIProvider.health.
+
+    ComfyUI serves neither /health nor /v1/models (liveness is GET
+    /system_stats) — the generic fallback read a healthy server as http_404
+    and the fail-watcher struck a READY img slot to ERROR within seconds.
+    """
+    from hal0.providers.comfyui import ComfyUIProvider
+
+    sentinel = {"ok": True, "status": "healthy"}
+
+    async def fake_comfy_health(self: Any, port: int) -> dict[str, Any]:
+        assert port == 8188
+        return sentinel
+
+    provider = ContainerProvider()
+    with (
+        patch.object(ComfyUIProvider, "health", fake_comfy_health),
+        patch(
+            "hal0.providers.container.httpx.AsyncClient",
+            side_effect=AssertionError("must not open an httpx client when delegating"),
+        ),
+    ):
+        result = await provider.health(
+            8188, slot_cfg={"provider": "comfyui", "type": "image", "name": "img"}
+        )
+
+    assert result is sentinel

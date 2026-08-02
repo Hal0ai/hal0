@@ -3302,12 +3302,18 @@ class SlotManager:
         if not cfg:
             return SlotState.READY  # nothing more to verify
 
-        # Wait for /health 200 on the container port.
+        # Wait for /health 200 on the container port. A runtime family whose
+        # provider ships its OWN wait_ready (ComfyUI — no llama-style /health,
+        # readiness is GET /system_stats) waits through that instead: the
+        # generic waiter 404-polled ComfyUI for the full deadline and wedged
+        # the slot in WARMING behind a healthy server.
         slot_port = port or int(_cfg_to_dict(cfg).get("port", 0))
         from hal0.providers.container import _spec_provider_for, container_provider
 
+        spec_provider = _spec_provider_for(cfg)
+        wait_ready = getattr(spec_provider, "wait_ready", None) or container_provider().wait_ready
         try:
-            await container_provider().wait_ready(slot_port)
+            await wait_ready(slot_port)
         except TimeoutError as exc:
             log.warning(
                 "slot.container_await_ready_timeout",

@@ -23,6 +23,14 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- ComfyUI img slot reliability: the provider now creates its bind-mount
+  data dirs before spawn (a missing tree crash-looped the container with
+  podman exit 125), slot readiness waits on ComfyUI's real health probe
+  (`GET /system_stats`) instead of 404-polling the llama-style `/health`
+  for the full 180 s deadline and wedging the slot in WARMING, and the
+  fail-watcher's health probe delegates to the ComfyUI provider so a
+  READY img slot is no longer struck to ERROR seconds after coming up.
+
 - `GET /api/slots` latency cut sharply on wide boxes (#1507 follow-up):
   the per-slot probe no longer runs `podman inspect` for stopped slots,
   `podman image inspect` answers are TTL-cached per image ref, and the
