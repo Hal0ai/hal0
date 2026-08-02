@@ -8,7 +8,7 @@ unit for. Spec 2026-08-02 split the two: boot autostart is now the explicit,
 independently-gated ``autoload`` field — this module owns
 :func:`autoload_enabled`, the raw-dict predicate that mirrors
 ``SlotConfig._derive_autoload`` (explicit key wins; an absent key falls back
-to the legacy implicit signal, a bound model, so pre-field TOMLs keep their
+to the pre-field implicit signal, a bound model, so pre-field TOMLs keep their
 boot behaviour). Activation itself is unchanged: ``[model].default`` is
 still the real routability/loadability signal, and every check that used to
 consult ``enabled`` was immediately followed by a model-presence gate
@@ -83,7 +83,7 @@ def autoload_enabled(cfg: dict[str, Any] | None) -> bool:
 
     Mirror of ``SlotConfig._derive_autoload`` for the raw-dict readers
     (unit render, slot_view lift): an explicit ``autoload`` key wins;
-    an absent key falls back to the legacy implicit signal — a bound
+    an absent key falls back to the pre-field implicit signal — a bound
     model (:func:`is_activated`) — so pre-field TOMLs keep their boot
     behavior. Same raw-dict contract as :func:`hal0.slots.reaper.is_pinned`.
     """

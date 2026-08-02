@@ -720,7 +720,7 @@ async def create_slot(request: Request) -> dict[str, object]:
         port_end=(int(slots_cfg.port_range_end) if slots_cfg else None),
         slot_snapshots=runtime_ports,
     )
-    # Spec 2026-08-02: new slots never inherit the legacy implicit boot
+    # Spec 2026-08-02: new slots never inherit the pre-field implicit boot
     # start — persist an explicit autoload so the migration shim (absent
     # key + bound model → true) only ever applies to pre-field TOMLs.
     body.setdefault("autoload", False)

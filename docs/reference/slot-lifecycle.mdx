@@ -134,7 +134,7 @@ never a victim, and only resident slots (`READY`/`IDLE`) are considered at all.
 
 <Aside type="caution">
 The old `lru = true` eviction opt-in is retired. The key is still accepted in slot TOML
-but ignored, with a one-time `slot.lru_flag_deprecated` warning per slot — remove it and
+but ignored, with a one-time `slot.lru_flag_retired` warning per slot — remove it and
 use `priority`/`pinned` instead. Slots that never set `lru` are now evictable where they
 previously were not.
 </Aside>

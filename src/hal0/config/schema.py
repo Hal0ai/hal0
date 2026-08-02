@@ -577,7 +577,7 @@ class SlotConfig(BaseModel):
             "and the slot starts at boot; False → the unit exists but "
             "nothing starts it automatically (manual load/swap only). "
             "None (key absent on disk) is the migration shim: derived from "
-            "the legacy implicit signal — non-empty [model].default — by "
+            "the pre-field implicit signal — non-empty [model].default — by "
             "_derive_autoload below, so pre-field TOMLs keep their boot "
             "behavior. API-created slots always persist an explicit value "
             "(create route defaults it to false)."
@@ -591,7 +591,7 @@ class SlotConfig(BaseModel):
             "Eviction priority (spec 2026-08-02): lower evicts first, "
             "last_used breaks ties. Orders victims in pressure eviction "
             "(SlotReaper.pressure_evict_once) and pre-load eviction "
-            "(preload_evict). Replaces the deprecated lru=true opt-in — "
+            "(preload_evict). Replaces the retired lru=true opt-in — "
             "every non-pinned slot is now a candidate. 100 is NOT a pin "
             "(evicted last, still evictable); use `pinned` to exempt."
         ),
@@ -792,7 +792,7 @@ class SlotConfig(BaseModel):
 
     @model_validator(mode="after")
     def _derive_autoload(self) -> SlotConfig:
-        """Resolve the migration shim: absent key → legacy implicit signal.
+        """Resolve the migration shim: absent key → pre-field implicit signal.
 
         A TOML written before the field existed boot-started iff it had a
         model bound (#1369 activation semantics); deriving here means every

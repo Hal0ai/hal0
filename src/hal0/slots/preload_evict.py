@@ -73,7 +73,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from hal0.slots.reaper import (
     _DEFAULT_EVICTION_PRIORITY,
-    _warn_lru_deprecated,
+    _warn_lru_retired,
     eviction_priority,
     is_pinned,
 )
@@ -297,7 +297,7 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
     pinned (:func:`is_pinned`). Every other resident slot is eligible,
     ordered by :func:`hal0.slots.reaper.eviction_priority` (lower evicts
     first); the retired ``lru = true`` TOML key is ignored and warned once
-    per slot (:func:`hal0.slots.reaper._warn_lru_deprecated`). The slot
+    per slot (:func:`hal0.slots.reaper._warn_lru_retired`). The slot
     about to be loaded is always excluded — by construction it can't be
     READY/IDLE yet (``load()`` short-circuits before this point when it
     already is), but the exclusion is explicit here too as a hard
@@ -343,7 +343,7 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
                     if is_pinned(canonical, cfg):
                         eligible, reason = False, "pinned"
                     else:
-                        _warn_lru_deprecated(canonical, cfg)
+                        _warn_lru_retired(canonical, cfg)
                         priority = eviction_priority(cfg)
 
         footprint_mb = float(per_slot.get(name, {}).get("mem_mb", 0.0) or 0.0)

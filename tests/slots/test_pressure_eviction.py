@@ -437,7 +437,7 @@ async def test_lru_key_ignored_and_warned_once(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A cfg carrying lru=false is evictable anyway; slot.lru_flag_deprecated
+    """A cfg carrying lru=false is evictable anyway; slot.lru_flag_retired
     is logged exactly once across two sweeps (one-shot per slot per process)."""
     _write_slot(slot_root, "rerank", port=8090, lru=False)
     sm = SlotManager(evict_pressure_mb=8192.0)
@@ -455,6 +455,6 @@ async def test_lru_key_ignored_and_warned_once(
         await sm._pressure_evict_once()
         assert (await sm.status("rerank")).state == SlotState.OFFLINE
 
-    warnings = [r for r in caplog.records if r.message == "slot.lru_flag_deprecated"]
+    warnings = [r for r in caplog.records if r.message == "slot.lru_flag_retired"]
     assert len(warnings) == 1, f"expected exactly one deprecation warning; got {len(warnings)}"
     assert len(container_stub.unload_calls) == 2  # evicted both sweeps despite lru=false

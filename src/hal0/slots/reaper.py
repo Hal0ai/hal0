@@ -128,7 +128,7 @@ def eviction_priority(cfg: dict[str, Any] | None) -> int:
 _lru_flag_warned: set[str] = set()
 
 
-def _warn_lru_deprecated(canonical_name: str, cfg: dict[str, Any] | None) -> None:
+def _warn_lru_retired(canonical_name: str, cfg: dict[str, Any] | None) -> None:
     """One-shot deprecation warning for the retired ``lru`` TOML key.
 
     The key is IGNORED (never an error): eviction eligibility is now
@@ -141,7 +141,7 @@ def _warn_lru_deprecated(canonical_name: str, cfg: dict[str, Any] | None) -> Non
         return
     _lru_flag_warned.add(canonical_name)
     log.warning(
-        "slot.lru_flag_deprecated",
+        "slot.lru_flag_retired",
         extra={
             "slot": canonical_name,
             "hint": "lru is ignored; eviction order is priority (0-100, "
@@ -447,7 +447,7 @@ class SlotReaper:
             regardless of its priority.
           - Every other resident slot is a candidate. The retired ``lru =
             true`` opt-in no longer gates eligibility — the key is
-            ignored (:func:`_warn_lru_deprecated` logs it once per slot).
+            ignored (:func:`_warn_lru_retired` logs it once per slot).
         """
         host = self._host
         floor = host._evict_pressure_mb
@@ -483,7 +483,7 @@ class SlotReaper:
                 continue
             if is_pinned(canonical, cfg):
                 continue
-            _warn_lru_deprecated(canonical, cfg)
+            _warn_lru_retired(canonical, cfg)
             candidates.append((eviction_priority(cfg), ts, slot_name))
 
         candidates.sort(key=lambda item: (item[0], item[1]))
@@ -529,7 +529,7 @@ __all__ = [
     "_PINNED_BY_DEFAULT",
     "ReaperHost",
     "SlotReaper",
-    "_warn_lru_deprecated",
+    "_warn_lru_retired",
     "eviction_priority",
     "is_pinned",
     "probe_host_free_mb",
