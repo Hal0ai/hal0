@@ -77,6 +77,7 @@ def _render_llama(
     extra_args=None,
     model_alias=None,
     publish_host="127.0.0.1",
+    autoload=True,
 ):
     """Test shim mirroring the deleted ``_render_unit`` scalar shim, producing
     Quadlet text: build the llama launch plan, then render it.
@@ -107,7 +108,7 @@ def _render_llama(
         model_alias=model_alias,
         model_defaults={"extra_args": merged_tune} if merged_tune else None,
     )
-    return _render_quadlet_from_plan(token, plan, publish_host=publish_host)
+    return _render_quadlet_from_plan(token, plan, publish_host=publish_host, autoload=autoload)
 
 
 def _exec_line(unit_text: str) -> str:
@@ -525,6 +526,33 @@ class TestRenderUnit:
         assert "[Service]" in unit
         assert "[Install]" in unit
         # Quadlet owns crash recovery now (was the hand-rendered Restart=no).
+        assert "Restart=always" in unit.splitlines()
+
+    def test_install_stanza_present_by_default(self) -> None:
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
+        assert "[Install]" in unit
+        assert "WantedBy=hal0.target" in unit.splitlines()
+
+    def test_autoload_false_omits_install_stanza(self) -> None:
+        """autoload=false → no [Install] → nothing boot-starts the slot.
+
+        The unit must remain manually startable: [Service]/Restart survive.
+        """
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama(
+            "test-slot",
+            _TEST_IMAGE,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            autoload=False,
+        )
+        assert "[Install]" not in unit
+        assert "WantedBy=hal0.target" not in unit
+        assert "[Service]" in unit
         assert "Restart=always" in unit.splitlines()
 
     def test_startlimit_keys_land_in_unit_section_not_service(self) -> None:
