@@ -134,6 +134,40 @@ case "$cmd" in
     exec systemctl disable "${AGENT_UNIT_PREFIX}${id}.service"
     ;;
 
+  # Dashboard Services page lifecycle (#1590): the /api/services surface
+  # advertises start/restart/enable for the bundled-agent card too, and until
+  # these arms existed the API fell through to a bare unprivileged systemctl —
+  # polkit's "Interactive authentication required" — for every one of them.
+  # Same posture as stop-agent: literal verb per arm, validated id, unit name
+  # built here.
+  start-agent)                # start-agent <agent-id>  -> systemctl start hal0-agent@<id>.service
+    id="${1:-}"; validate_agent_id "$id"
+    exec systemctl start "${AGENT_UNIT_PREFIX}${id}.service"
+    ;;
+
+  restart-agent)              # restart-agent <agent-id> -> systemctl restart hal0-agent@<id>.service
+    id="${1:-}"; validate_agent_id "$id"
+    exec systemctl restart "${AGENT_UNIT_PREFIX}${id}.service"
+    ;;
+
+  enable-agent)               # enable-agent <agent-id> -> systemctl enable hal0-agent@<id>.service
+    id="${1:-}"; validate_agent_id "$id"
+    exec systemctl enable "${AGENT_UNIT_PREFIX}${id}.service"
+    ;;
+
+  # Companion-service units (#1590). A CLOSED name->unit map — the caller
+  # supplies a service key, never a unit string, so this family can only ever
+  # reach the units enumerated here. Growing the map is a reviewable diff.
+  svc-start|svc-stop|svc-restart|svc-enable|svc-disable)
+    key="${1:-}"
+    case "$key" in
+      openwebui)  unit="hal0-openwebui.service" ;;
+      hindsight)  unit="hindsight-api.service" ;;
+      *) die "bad service key: ${key:-<missing>}" ;;
+    esac
+    exec systemctl "${cmd#svc-}" "$unit"
+    ;;
+
   restart-self)                # literal-only: restart hal0-api.service, never a variable name
     # --no-block: this is invoked BY hal0-api, from inside hal0-api.service's
     # own cgroup. A blocking `systemctl restart` waits for the unit to stop —
@@ -157,6 +191,10 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   reset-failed <slot-id>           clear a crash-looped unit's failed sub-state
   stop-agent <agent-id>            systemctl stop ${AGENT_UNIT_PREFIX}<id>.service
   disable-agent <agent-id>         systemctl disable ${AGENT_UNIT_PREFIX}<id>.service
+  start-agent <agent-id>           systemctl start ${AGENT_UNIT_PREFIX}<id>.service
+  restart-agent <agent-id>         systemctl restart ${AGENT_UNIT_PREFIX}<id>.service
+  enable-agent <agent-id>          systemctl enable ${AGENT_UNIT_PREFIX}<id>.service
+  svc-<verb> <openwebui|hindsight> systemctl <verb> on the mapped companion unit
   restart-self                     systemctl restart ${SELF_UNIT}
 EOF
     ;;

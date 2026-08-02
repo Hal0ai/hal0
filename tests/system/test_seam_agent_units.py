@@ -79,9 +79,10 @@ def test_agent_unit_name_builds_expected_unit(good: str) -> None:
 
 
 def test_agent_unit_argv_rejects_unknown_verb() -> None:
-    """Only stop/disable exist. A typo is a caller bug, caught before exec."""
+    """Only the AGENT_UNIT_VERBS map exists (start/stop/restart/enable/disable
+    since #1590). A verb outside it is a caller bug, caught before exec."""
     with pytest.raises(KeyError):
-        seam_mod.agent_unit_argv("restart", "hermes", euid=1000)
+        seam_mod.agent_unit_argv("mask", "hermes", euid=1000)
 
 
 # ── Python side: privilege routing ───────────────────────────────────────────
@@ -89,7 +90,13 @@ def test_agent_unit_argv_rejects_unknown_verb() -> None:
 
 @pytest.mark.parametrize(
     ("verb", "seam_verb"),
-    [("stop", "stop-agent"), ("disable", "disable-agent")],
+    [
+        ("stop", "stop-agent"),
+        ("disable", "disable-agent"),
+        ("start", "start-agent"),
+        ("restart", "restart-agent"),
+        ("enable", "enable-agent"),
+    ],
 )
 def test_unprivileged_routes_through_sudo_seam(verb: str, seam_verb: str) -> None:
     """THE regression. Off root the argv must be the ``sudo -n`` seam call —
@@ -109,7 +116,13 @@ def test_unprivileged_routes_through_sudo_seam(verb: str, seam_verb: str) -> Non
 
 @pytest.mark.parametrize(
     ("verb", "seam_verb"),
-    [("stop", "stop-agent"), ("disable", "disable-agent")],
+    [
+        ("stop", "stop-agent"),
+        ("disable", "disable-agent"),
+        ("start", "start-agent"),
+        ("restart", "restart-agent"),
+        ("enable", "enable-agent"),
+    ],
 )
 def test_root_runs_systemctl_directly(verb: str, seam_verb: str) -> None:
     """Root needs no seam — and the installer/uninstaller runs at moments when
@@ -191,6 +204,9 @@ def test_wrapper_rejects_malformed_agent_id(
     [
         ("stop-agent", "stop hal0-agent@hermes.service"),
         ("disable-agent", "disable hal0-agent@hermes.service"),
+        ("start-agent", "start hal0-agent@hermes.service"),
+        ("restart-agent", "restart hal0-agent@hermes.service"),
+        ("enable-agent", "enable hal0-agent@hermes.service"),
     ],
 )
 def test_wrapper_builds_the_unit_name_itself(
@@ -224,10 +240,50 @@ def test_wrapper_rejects_unknown_agent_verb(
     """The verb allow-list is the case statement; nothing else gets through."""
     env, log = fake_systemctl
 
-    for verb in ("restart-agent", "enable-agent", "mask-agent", "start-agent"):
+    for verb in ("mask-agent", "kill-agent", "isolate-agent"):
         proc = _run_wrapper(env, verb, "hermes")
         assert proc.returncode == 64, f"{verb} should not exist: {proc.stderr}"
         assert "bad cmd" in proc.stderr
+    assert not log.exists()
+
+
+# ── Companion-service family (svc-<verb>, #1590) ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("cmd", "key", "expected"),
+    [
+        ("svc-start", "openwebui", "start hal0-openwebui.service"),
+        ("svc-stop", "openwebui", "stop hal0-openwebui.service"),
+        ("svc-restart", "hindsight", "restart hindsight-api.service"),
+        ("svc-enable", "hindsight", "enable hindsight-api.service"),
+        ("svc-disable", "openwebui", "disable hal0-openwebui.service"),
+    ],
+)
+def test_wrapper_companion_family_maps_key_to_unit(
+    cmd: str, key: str, expected: str, fake_systemctl: tuple[dict[str, str], Path]
+) -> None:
+    """The caller passes a service KEY from a closed map, never a unit string."""
+    env, log = fake_systemctl
+
+    proc = _run_wrapper(env, cmd, key)
+
+    assert proc.returncode == 0, proc.stderr
+    assert log.read_text().strip() == expected
+
+
+@pytest.mark.parametrize("bad", ["hal0-api", "comfyui", "../etc", "hal0-openwebui.service", ""])
+def test_wrapper_companion_family_rejects_unknown_keys(
+    bad: str, fake_systemctl: tuple[dict[str, str], Path]
+) -> None:
+    """Anything outside the enumerated map dies before exec — including a raw
+    unit string, so the family can never be widened from the caller side."""
+    env, log = fake_systemctl
+
+    proc = _run_wrapper(env, "svc-restart", bad)
+
+    assert proc.returncode == 64, proc.stderr
+    assert "bad service key" in proc.stderr
     assert not log.exists()
 
 

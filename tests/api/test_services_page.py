@@ -139,10 +139,12 @@ def test_list_services_200_all_ids(svc_client: TestClient) -> None:
 # ── 2. registry invariants ────────────────────────────────────────────────────
 
 
-def test_registry_comfyui_restart_only() -> None:
+def test_registry_comfyui_start_and_restart_only() -> None:
+    # start is arbiter-delegated (#1590), restart is the raw unit bounce;
+    # stop stays arbiter-owned (Image-Gen pane switchover), never a raw verb.
     comfy = service_by_id("comfyui")
     assert comfy is not None
-    assert comfy.actions == ("restart",)
+    assert comfy.actions == ("start", "restart")
     assert comfy.unit == "hal0-slot@img.service"
 
 
@@ -168,19 +170,38 @@ def test_action_missing_action_400(svc_client: TestClient) -> None:
 
 
 def test_action_disallowed_verb_400(svc_client: TestClient) -> None:
-    # ComfyUI: stop is arbiter-owned, registry only allows restart.
+    # ComfyUI: stop is arbiter-owned, registry allows only start + restart.
     r = svc_client.post("/api/services/comfyui/action", json={"action": "stop"})
     assert r.status_code == 400
     body = r.json()["error"]
     assert body["code"] == "services.action_not_allowed"
-    assert body["details"]["allowed"] == ["restart"]
+    assert body["details"]["allowed"] == ["start", "restart"]
 
 
 def test_action_disallowed_action_400(svc_client: TestClient) -> None:
-    # comfyui only exposes "restart"; any other verb → action_not_allowed.
-    r = svc_client.post("/api/services/comfyui/action", json={"action": "start"})
+    # comfyui exposes start/restart; any other verb → action_not_allowed.
+    r = svc_client.post("/api/services/comfyui/action", json={"action": "disable"})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "services.action_not_allowed"
+
+
+def test_action_comfyui_start_delegates_to_switchover_not_systemctl(
+    svc_client: TestClient,
+) -> None:
+    # #1590: comfyui "start" must never run `systemctl start` — it drives the
+    # GPU-arbiter switchover. With no arbiter wired on the test app the
+    # switchover answers 503 arbiter_unavailable, which the services route
+    # reports as an honest ok=False — and unit_action is never called.
+    with patch(
+        f"{_ROUTE}.svc_systemd.unit_action",
+        new_callable=AsyncMock,
+    ) as action_mock:
+        r = svc_client.post("/api/services/comfyui/action", json={"action": "start"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "arbiter" in body["message"]
+    action_mock.assert_not_awaited()
 
 
 # ── 4. action happy path ──────────────────────────────────────────────────────
