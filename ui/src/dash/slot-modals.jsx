@@ -755,6 +755,92 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			);
 	};
 
+	// Runtime profile row — the slot's SlotConfig.profile. Controls the runtime
+	// family, device-class gating and MTP draft backend; profile FLAGS are
+	// copy-on-stamp into the model tune (model drawer), never read at launch.
+	// Rendered inside the Model group right under the model select (it rides
+	// the model choice), or under its own group on an NPU slot where the Model
+	// group is replaced by the NPU capability matrix.
+	const profileRow = (() => {
+		const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
+		const devBackend = deviceBackend(device);
+		// Mirror backend profile_fits_slot: slot type supported +
+		// device_class match + backend match (when both declared).
+		const fit = all.filter(
+			(p) =>
+				(!Array.isArray(p.supported_slot_types) ||
+					p.supported_slot_types.includes(slot.type)) &&
+				(!p.device_class || p.device_class === deviceClass) &&
+				(!p.backend || !devBackend || p.backend === devBackend),
+		);
+		const fitNames = fit.map((p) => p.name);
+		const adoptedFromModel =
+			!!profileSel && profileSel === (curModelRow?.defaults?.profile || "");
+		// The options are filtered against the slot's device, which is no
+		// longer editable here — a profile persisted on disk can still be
+		// out-of-vocab for it. Saving a
+		// profile+device pair with conflicting backends is a hard
+		// SlotConfigError (_reconcile_device_profile), so warn instead of
+		// silently PUTting the conflict.
+		const profileFitWarn =
+			profileSel && all.length > 0 && !fitNames.includes(profileSel)
+				? `Profile "${profileSel}" does not fit device "${device}" — saving both together is rejected. Pick a listed profile or revert the device.`
+				: null;
+		return (
+			<div className="form-row">
+				<div className="form-lbl">
+					<span>Profile</span>
+					<FieldInfoIcon description="⟳ Runtime profile — picks the runtime family, device-class
+						gating and the MTP draft backend. Flags are NOT read from here
+						at launch; they are stamped into the model's launch flags on
+						the model drawer." />
+				</div>
+				<div className="form-ctl">
+					<select
+						className="input mono"
+						data-testid="slot-profile"
+						value={profileSel}
+						onChange={(e) => setProfileSel(e.target.value)}
+					>
+						{/* keep a none/out-of-vocab persisted profile selectable */}
+						{!slot.profile && <option value="">— none —</option>}
+						{profileSel && !fitNames.includes(profileSel) && (
+							<option value={profileSel}>{profileSel}</option>
+						)}
+						{fit.map((p) => (
+							<option key={p.name} value={p.name} title={p.intent}>
+								{p.name}
+								{p.intent ? ` · ${p.intent}` : ""}
+							</option>
+						))}
+					</select>
+					{adoptedFromModel && (
+						<div className="hint">
+							Adopted from the bound model's preference — swapping the model
+							may change it.
+						</div>
+					)}
+					{profileFitWarn && (
+						<div
+							className="hint"
+							data-testid="slot-profile-fit-warning"
+							style={{
+								marginTop: 6,
+								padding: "6px 10px",
+								borderRadius: "var(--rad-sm)",
+								color: "var(--warn)",
+								border: "1px solid var(--warn-line)",
+								background: "var(--warn-soft)",
+							}}
+						>
+							⚠ {profileFitWarn}
+						</div>
+					)}
+				</div>
+			</div>
+		);
+	})();
+
 	return (
 		<>
 			{/* The Drawer's Esc/backdrop/✕ paths call onClose — routed through
@@ -1251,94 +1337,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					})()}
 				</FieldGroup>
 
-				{/* Runtime profile — the slot's SlotConfig.profile. Controls the
-	          runtime family, device-class gating and MTP draft backend; profile
-	          FLAGS are copy-on-stamp into the model tune (model drawer), never
-	          read at launch. */}
-				<FieldGroup label="Profile">
-					{(() => {
-						const all = Array.isArray(profilesQuery.data)
-							? profilesQuery.data
-							: [];
-						const devBackend = deviceBackend(device);
-						// Mirror backend profile_fits_slot: slot type supported +
-						// device_class match + backend match (when both declared).
-						const fit = all.filter(
-							(p) =>
-								(!Array.isArray(p.supported_slot_types) ||
-									p.supported_slot_types.includes(slot.type)) &&
-								(!p.device_class || p.device_class === deviceClass) &&
-								(!p.backend || !devBackend || p.backend === devBackend),
-						);
-						const fitNames = fit.map((p) => p.name);
-						const adoptedFromModel =
-							!!profileSel &&
-							profileSel === (curModelRow?.defaults?.profile || "");
-						// The options are filtered against the slot's device, which is no
-						// longer editable here — a profile persisted on disk can still be
-						// out-of-vocab for it. Saving a
-						// profile+device pair with conflicting backends is a hard
-						// SlotConfigError (_reconcile_device_profile), so warn instead of
-						// silently PUTting the conflict.
-						const profileFitWarn =
-							profileSel && all.length > 0 && !fitNames.includes(profileSel)
-								? `Profile "${profileSel}" does not fit device "${device}" — saving both together is rejected. Pick a listed profile or revert the device.`
-								: null;
-						return (
-							<div className="form-row">
-								<div className="form-lbl">
-									<span>Profile</span>
-									<FieldInfoIcon description="⟳ Runtime profile — picks the runtime family, device-class
-										gating and the MTP draft backend. Flags are NOT read from here
-										at launch; they are stamped into the model's launch flags on
-										the model drawer." />
-								</div>
-								<div className="form-ctl">
-									<select
-										className="input mono"
-										data-testid="slot-profile"
-										value={profileSel}
-										onChange={(e) => setProfileSel(e.target.value)}
-									>
-										{/* keep a none/out-of-vocab persisted profile selectable */}
-										{!slot.profile && <option value="">— none —</option>}
-										{profileSel && !fitNames.includes(profileSel) && (
-											<option value={profileSel}>{profileSel}</option>
-										)}
-										{fit.map((p) => (
-											<option key={p.name} value={p.name} title={p.intent}>
-												{p.name}
-												{p.intent ? ` · ${p.intent}` : ""}
-											</option>
-										))}
-									</select>
-									{adoptedFromModel && (
-										<div className="hint">
-											Adopted from the bound model's preference — swapping the
-											model may change it.
-										</div>
-									)}
-									{profileFitWarn && (
-										<div
-											className="hint"
-											data-testid="slot-profile-fit-warning"
-											style={{
-												marginTop: 6,
-												padding: "6px 10px",
-												borderRadius: "var(--rad-sm)",
-												color: "var(--warn)",
-												border: "1px solid var(--warn-line)",
-												background: "var(--warn-soft)",
-											}}
-										>
-											⚠ {profileFitWarn}
-										</div>
-									)}
-								</div>
-							</div>
-						);
-					})()}
-				</FieldGroup>
+				{/* NPU slots have no Model group (the capability matrix replaces it),
+				    so the profile keeps its own group there. Everywhere else the row
+				    lives inside Model, under the model select. */}
+				{device === "npu" && (
+					<FieldGroup label="Profile">{profileRow}</FieldGroup>
+				)}
 
 				{device !== "npu" && (
 					<FieldGroup label="Model">
@@ -1433,6 +1437,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								</div>
 							);
 						})()}
+
+						{profileRow}
 
 						<div className="form-row">
 							<div className="form-lbl">

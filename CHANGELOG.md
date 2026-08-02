@@ -33,6 +33,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
+- Slot drawer: the Profile field moved into the Model group, directly under
+  the model select (it rides the model choice). NPU slots keep a standalone
+  Profile group since the capability matrix replaces the Model group there.
+
 - Slot drawer: the Runner Image field is a dropdown of the runner-image
   catalog (the same registry the Runtimes page shows) instead of a free-text
   input; a "Custom image ref…" option keeps the debug/A-B/rollback escape

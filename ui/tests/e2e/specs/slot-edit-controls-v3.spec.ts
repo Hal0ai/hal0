@@ -468,7 +468,11 @@ test.describe('Slot edit controls (/slots)', () => {
     // Vision) was removed outright — those caps moved to the model drawer.
     await expect(page.locator('.field-group-label', { hasText: /^Inference$/i })).toHaveCount(0)
     const modelGroup = page.locator('.field-group', { has: page.locator('.field-group-label', { hasText: /^Model$/i }) })
-    await expect(modelGroup.locator('.form-row', { hasText: 'Model' }).locator('select')).toBeVisible()
+    await expect(modelGroup.getByLabel('Model for primary')).toBeVisible()
+    // The Profile row moved INTO the Model group (under the model select) —
+    // no standalone Profile group on non-NPU slots.
+    await expect(modelGroup.getByTestId('slot-profile')).toBeVisible()
+    await expect(page.locator('.field-group-label', { hasText: /^Profile$/i })).toHaveCount(0)
   })
 
   test('default-for-type row is gone from the edit drawer and Save omits default', async ({ page }) => {
