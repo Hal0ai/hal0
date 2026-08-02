@@ -26,6 +26,11 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
 
   const [name, setName] = useStateC("");
   const [modelId, setModelId] = useStateC("");
+  // Spec 2026-08-02: new slots start with no boot-start and mid-priority —
+  // no legacy behavior to migrate, so these default cold rather than
+  // inheriting anything from an existing slot.
+  const [autoload, setAutoload] = useStateC(false);
+  const [priority, setPriority] = useStateC(50);
   const [submitErr, setSubmitErr] = useStateC(null);
 
   const models = useMemoC(() => localModels(modelsQuery.data), [modelsQuery.data]);
@@ -34,6 +39,8 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
     if (open) {
       setName(defaults.name || "");
       setModelId(defaults.model || "");
+      setAutoload(false);
+      setPriority(50);
       setSubmitErr(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -82,6 +89,8 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       // FIRST slot of a type, and re-pointing the default afterwards is the
       // explicit "Set as default" row action on the slot list.
       device: device || "gpu-rocm",
+      autoload,
+      priority,
     };
     try {
       await createMut.mutateAsync(body);
@@ -156,6 +165,49 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
             assigned on create
             <span className="tag" style={{ color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 9, letterSpacing: ".05em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 3, border: "1px solid var(--line)", background: "var(--bg-2)" }}>by PortAuthority</span>
           </span>
+        </div>
+      </div>
+
+      {/* Auto-load on start — off by default; a new slot has no legacy boot
+          behavior to inherit. */}
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>auto-load on start</span>
+          <FieldInfoIcon description="start this slot automatically at boot — off means it only loads when you load or swap it" />
+        </div>
+        <div className="form-ctl">
+          <label className="slot-enable-toggle">
+            <input
+              type="checkbox"
+              data-testid="create-slot-autoload"
+              checked={autoload}
+              onChange={() => setAutoload(!autoload)}
+              aria-label={autoload ? "Disable auto-load on start" : "Enable auto-load on start"}
+            />
+            <span className="slot-enable-track" aria-hidden="true" />
+          </label>
+        </div>
+      </div>
+
+      {/* Eviction priority — 0-100, defaults to the mid-point */}
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>eviction priority</span>
+          <FieldInfoIcon description="0-100 — lower unloads first when memory is needed; ties go to the least recently used" />
+        </div>
+        <div className="form-ctl">
+          <input
+            className="input mono"
+            data-testid="create-slot-priority"
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            value={priority}
+            onChange={(e) => setPriority(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+            style={{ width: 90 }}
+          />
+          <div className="hint">lower unloads first</div>
         </div>
       </div>
 

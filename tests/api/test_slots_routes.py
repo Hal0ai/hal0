@@ -535,6 +535,30 @@ def test_create_slot_rejects_model_owned_keys(
     assert not (slot_root / "owned.toml").exists()
 
 
+def test_create_slot_without_autoload_persists_explicit_false(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """POST /api/slots with no ``autoload`` key persists an explicit False.
+
+    Spec 2026-08-02: new slots never inherit the legacy implicit boot start
+    — the absent-key migration shim (bound model → true) is for pre-field
+    TOMLs only. A freshly created slot must not silently boot-start just
+    because it has a model bound.
+    """
+    body = {
+        "name": "fresh",
+        "model": "qwen3-4b-q4_k_m",
+        "device": "gpu-vulkan",
+        "profile": "vulkan-radv",
+    }
+    r = isolated_client.post("/api/slots", json=body)
+    assert r.status_code == 201, r.text
+    cfg = isolated_client.get("/api/slots/fresh/config").json()
+    assert cfg.get("autoload") is False
+
+
 @pytest.mark.parametrize("key", ["mtp", "enable_thinking", "vision"])
 def test_patch_defaults_rejects_model_owned_keys_with_the_right_message(
     key: str,
