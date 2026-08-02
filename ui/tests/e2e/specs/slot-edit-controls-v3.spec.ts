@@ -225,6 +225,9 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.getByTestId('slot-hw-binary').selectOption('rocmfpx')
     await page.getByTestId('slot-hw-ngl').fill('0')
     await page.getByTestId('slot-hw-threads').fill('8')
+    // Runner Image is a catalog dropdown now; the free-text escape hatch
+    // lives behind the "Custom image ref…" option.
+    await page.getByTestId('slot-hw-image-pin').selectOption('__custom__')
     await page.getByTestId('slot-hw-image-pin').fill('ghcr.io/example/runner:test')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
@@ -234,6 +237,73 @@ test.describe('Slot edit controls (/slots)', () => {
       image_pin: 'ghcr.io/example/runner:test',
     })
     expect(puts[0].binary).toBeTruthy()
+  })
+
+  test('HW grid — Runner Image is a catalog dropdown; picking one repopulates BINARY', async ({ page }) => {
+    // rocmfpx + vulkanfpx share one dual-binary image; cuda ships its own.
+    // The Runner Image select lists the two distinct refs; choosing the
+    // shared one offers both binaries, choosing cuda's hops BINARY to its
+    // sole key.
+    await page.route('**/api/system-info', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          hardware: {},
+          features: {},
+          podman_context: 'rootless',
+          backends: {
+            rocmfpx: {
+              image: 'ghcr.io/hal0ai/tb:dual',
+              runtime_family: 'llamacpp',
+              device_class: 'gpu',
+              backend: 'rocm',
+              supported_backends: ['rocm', 'vulkan'],
+              format_arch: 'gguf',
+              state: 'installed',
+            },
+            vulkanfpx: {
+              image: 'ghcr.io/hal0ai/tb:dual',
+              runtime_family: 'llamacpp',
+              device_class: 'gpu',
+              backend: 'vulkan',
+              supported_backends: ['rocm', 'vulkan'],
+              format_arch: 'gguf',
+              state: 'installed',
+            },
+            cuda: {
+              image: 'ghcr.io/hal0ai/tb:cuda',
+              runtime_family: 'llamacpp',
+              device_class: 'gpu',
+              backend: 'cuda',
+              supported_backends: ['cuda'],
+              format_arch: 'gguf',
+              state: 'installed',
+            },
+          },
+        }),
+      }),
+    )
+    await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx', image_pin: null }, EMBED])
+    await page.goto('/#slots/primary')
+
+    const imageSel = page.getByTestId('slot-hw-image-pin')
+    await expect(imageSel).toBeVisible()
+    // Catalog: default + 2 distinct images + the custom escape hatch.
+    await expect(imageSel.locator('option')).toHaveCount(4)
+
+    // Pick the shared dual-binary image → BINARY offers both its binaries
+    // and the current rocmfpx selection survives (it ships in the image).
+    await imageSel.selectOption('ghcr.io/hal0ai/tb:dual')
+    const binarySel = page.getByTestId('slot-hw-binary')
+    await expect(binarySel.locator('option')).toHaveCount(2)
+    await expect(binarySel).toHaveValue('rocmfpx')
+
+    // Hop to the cuda image → rocmfpx doesn't ship in it, so BINARY moves
+    // to the image's sole binary.
+    await imageSel.selectOption('ghcr.io/hal0ai/tb:cuda')
+    await expect(binarySel).toHaveValue('cuda')
+    await expect(binarySel.locator('option')).toHaveCount(1)
   })
 
   test('HW grid — fit-check warns when device backend ∉ BINARY supported_backends (§4)', async ({ page }) => {
