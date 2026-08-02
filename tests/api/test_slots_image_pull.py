@@ -368,3 +368,37 @@ async def test_pull_image_stream_failed_on_nonzero_exit(tmp_path: Path) -> None:
 
     assert chunks, "must yield at least one chunk"
     assert chunks[-1]["state"] == "failed"
+
+
+def test_slots_snapshot_cache_serves_within_ttl_and_invalidates_on_mutation(
+    container_client: TestClient,
+) -> None:
+    """#1507 follow-up: the /api/slots probe fan-out runs once per TTL window,
+    and any slot mutation drops the cached snapshot immediately."""
+    fake_catalog, _ = _fake_profile_catalog()
+    calls = {"n": 0}
+
+    def _counting_is_active(self, slot):
+        calls["n"] += 1
+        return False
+
+    with (
+        patch("hal0.providers.container.ContainerProvider.is_active", _counting_is_active),
+        patch(
+            "hal0.providers.container.ContainerProvider.health",
+            new_callable=AsyncMock,
+            return_value={"ok": False},
+        ),
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.providers.container.ContainerProvider.image_present", return_value=True),
+    ):
+        assert container_client.get("/api/slots").status_code == 200
+        probes_first = calls["n"]
+        assert probes_first > 0
+        # Second GET inside the TTL — served from the snapshot cache, no probe.
+        assert container_client.get("/api/slots").status_code == 200
+        assert calls["n"] == probes_first
+        # A mutation invalidates the snapshot, so the next GET re-probes.
+        container_client.put("/api/slots/gpu-chat/config", json={"threads": 3})
+        assert container_client.get("/api/slots").status_code == 200
+        assert calls["n"] > probes_first

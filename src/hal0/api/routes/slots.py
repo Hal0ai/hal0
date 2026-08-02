@@ -327,6 +327,34 @@ def overlay_cached_enrichment(
     return entries
 
 
+#: How long a ``GET /api/slots`` snapshot may be re-served. Well under the
+#: dashboard's 2.5 s poll cadence — bounded staleness, one probe fan-out per
+#: window no matter how many panes/tabs poll concurrently.
+_SLOTS_SNAPSHOT_TTL_S = 2.0
+
+
+def _invalidates_snapshot(fn):
+    """Drop the /api/slots snapshot cache after a slot-mutating handler.
+
+    A mutation (create/rename/delete/config/load/swap/restart) must be
+    visible on the very next poll — TTL alone would let a stale snapshot
+    answer for up to :data:`_SLOTS_SNAPSHOT_TTL_S` after the change (and
+    break every test that mutates then immediately lists).
+    """
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            req = kwargs.get("request") or next((a for a in args if isinstance(a, Request)), None)
+            if req is not None:
+                req.app.state._slots_snapshot_cache = None
+
+    return wrapper
+
+
 # ── list / create ──────────────────────────────────────────────────────────
 
 
@@ -344,20 +372,41 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     :class:`hal0.slot_view.SlotView` rows.
     """
     import functools
+    import time as _time
 
-    sm = _get_slot_manager(request)
     state = request.app.state
-    aggregator = SlotViewAggregator(
-        sm,
-        registry=getattr(state, "model_registry", None),
-        metrics=functools.partial(slot_metrics, request),
-        model_cache=getattr(state, "model_cache", {}) or {},
-        upstreams=_UpstreamsWithHal0Composite(state.upstreams),
-        last_used_model=getattr(state, "last_used_model", {}),
-        slot_pull_jobs=getattr(state, "slot_pull_jobs", {}),
-    )
-    dicts = [view.to_dict() for view in await aggregator.snapshot()]
-    _cache_slot_enrichment(request, dicts)
+
+    # Single-flight + short-TTL snapshot cache (#1507 follow-up). The probe
+    # fan-out behind snapshot() spawns dozens of systemctl/podman children;
+    # with the dashboard polling every 2.5 s and the probe itself taking
+    # seconds on a wide box, overlapping requests piled up and multiplied
+    # the subprocess load. One probe per TTL window serves every concurrent
+    # caller; staleness is bounded well under the poll cadence.
+    cached = getattr(state, "_slots_snapshot_cache", None)
+    if cached is not None and _time.monotonic() - cached[0] < _SLOTS_SNAPSHOT_TTL_S:
+        return cached[1]
+    lock = getattr(state, "_slots_snapshot_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        state._slots_snapshot_lock = lock
+    async with lock:
+        # A concurrent caller may have refreshed while we waited on the lock.
+        cached = getattr(state, "_slots_snapshot_cache", None)
+        if cached is not None and _time.monotonic() - cached[0] < _SLOTS_SNAPSHOT_TTL_S:
+            return cached[1]
+        sm = _get_slot_manager(request)
+        aggregator = SlotViewAggregator(
+            sm,
+            registry=getattr(state, "model_registry", None),
+            metrics=functools.partial(slot_metrics, request),
+            model_cache=getattr(state, "model_cache", {}) or {},
+            upstreams=_UpstreamsWithHal0Composite(state.upstreams),
+            last_used_model=getattr(state, "last_used_model", {}),
+            slot_pull_jobs=getattr(state, "slot_pull_jobs", {}),
+        )
+        dicts = [view.to_dict() for view in await aggregator.snapshot()]
+        _cache_slot_enrichment(request, dicts)
+        state._slots_snapshot_cache = (_time.monotonic(), dicts)
     return dicts
 
 
@@ -555,6 +604,7 @@ def _normalize_create_body(
 
 
 @router.post("", status_code=201)
+@_invalidates_snapshot
 async def create_slot(request: Request) -> dict[str, object]:
     """Create a new slot. Body: SlotConfig schema.
 
@@ -711,6 +761,7 @@ async def get_slot_by_id(slot_id: int, request: Request) -> dict[str, object]:
 
 
 @router.post("/{name}/rename")
+@_invalidates_snapshot
 async def rename_slot(name: str, request: Request) -> dict[str, object]:
     """Rename a slot's display label. Body: ``{"new_name": "..."}``.
 
@@ -968,6 +1019,7 @@ async def _safe_config(sm: Any, name: str) -> dict[str, Any] | None:
 
 
 @router.delete("/{name}")
+@_invalidates_snapshot
 async def delete_slot(name: str, request: Request, force: bool = False) -> dict[str, object]:
     """Delete a slot. If the slot is running, it is stopped first.
 
@@ -1028,6 +1080,7 @@ async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
 
 
 @router.put("/{name}/config")
+@_invalidates_snapshot
 async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     """Update a slot's config. Body: partial SlotConfig (shallow merge)."""
     sm = _get_slot_manager(request)
@@ -1082,6 +1135,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
 
 
 @router.patch("/{name}/defaults")
+@_invalidates_snapshot
 async def update_slot_defaults(name: str, request: Request) -> dict[str, object]:
     """Update slot defaults (ctx_size / context_size, n_gpu_layers, …).
 
@@ -1127,6 +1181,7 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
 
 
 @router.post("/{name}/load")
+@_invalidates_snapshot
 async def load_slot(name: str, request: Request) -> dict[str, object]:
     """Load a model into a slot. Optional body: {"model_id": "..."}.
 
@@ -1190,6 +1245,7 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
 
 
 @router.post("/{name}/unload")
+@_invalidates_snapshot
 async def unload_slot(name: str, request: Request, force: bool = False) -> dict[str, object]:
     """Unload a slot. A pinned slot (§21.10) requires ``?force=true``.
 
@@ -1214,6 +1270,7 @@ async def unload_slot(name: str, request: Request, force: bool = False) -> dict[
 
 
 @router.post("/{name}/restart")
+@_invalidates_snapshot
 async def restart_slot(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
     async with record_action(request, category="slot", action="slot.restart", target=name) as _rec:
@@ -1223,6 +1280,7 @@ async def restart_slot(name: str, request: Request) -> dict[str, object]:
 
 
 @router.post("/{name}/swap")
+@_invalidates_snapshot
 async def swap_slot(name: str, request: Request) -> dict[str, object]:
     """Hot-swap a slot's model. Body: {"model_id": "..."}.
 
