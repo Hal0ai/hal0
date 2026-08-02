@@ -100,7 +100,9 @@ async def test_pressure_sweep_sees_slot_missing_from_last_used(
     container_stub: FakeContainerProvider,
     monkeypatch,
 ) -> None:
-    """Pressure eviction reclaims an lru slot known only via state.json."""
+    """Pressure eviction reclaims a non-pinned slot known only via
+    state.json. `lru = true` in the TOML confirms the retired key is
+    tolerated (and ignored) rather than required for eligibility."""
     (slot_root / "chat.toml").write_text(
         "\n".join(
             [

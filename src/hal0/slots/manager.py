@@ -416,8 +416,9 @@ class SlotManager:
         # idle_timeout_s overrides this global default.
         self._evict_after_s: float = evict_after_s
         # Pressure-eviction floor (#903): when host MemAvailable drops below
-        # this value (MiB), idle lru-eligible slots are evicted in LRU order
-        # until free RAM recovers.  0 disables pressure eviction.
+        # this value (MiB), every non-pinned resident slot is evicted in
+        # priority order (lowest `priority` first, LRU within a tier — spec
+        # 2026-08-02) until free RAM recovers.  0 disables pressure eviction.
         self._evict_pressure_mb: float = float(evict_pressure_mb)
         # §21.10 threshold_pct: when set, the pressure floor is instead
         # ``evict_pressure_pct`` percent of total GTT-aware capacity,
@@ -426,9 +427,10 @@ class SlotManager:
         # ``evict_pressure_mb`` floor above — purely additive.
         self._evict_pressure_pct: float | None = evict_pressure_pct
         # Pre-load eviction (synchronous, at admission time — see
-        # hal0.slots.preload_evict): before a load starts, free idle
-        # lru-eligible slots until the incoming model's estimated
-        # footprint + headroom fits in projected free memory, instead of
+        # hal0.slots.preload_evict): before a load starts, free idle,
+        # non-pinned resident slots (lowest `priority` first, LRU within a
+        # tier) until the incoming model's estimated footprint + headroom
+        # fits in projected free memory, instead of
         # waiting for the next pressure-sweep tick. `_preload_evict_enabled
         # = False` disables the gate entirely (reactive TTL/pressure
         # eviction still applies). `_admission_lock` serializes the
@@ -1557,7 +1559,8 @@ class SlotManager:
                 model_info = await self._resolve_model_info(resolved_model)
                 # Pre-load eviction (O26): estimate resolved_model's
                 # footprint and, if projected free memory is short, evict
-                # idle/LRU-eligible resident slots until it fits — BEFORE
+                # idle, non-pinned resident slots (lowest `priority` first,
+                # LRU within a tier) until it fits — BEFORE
                 # starting the container, not after the box is already
                 # tight. Raises PreloadEvictionFailed (caught by the
                 # except below, which stamps ERROR and re-raises) when it

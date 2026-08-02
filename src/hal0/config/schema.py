@@ -550,7 +550,13 @@ class SlotConfig(BaseModel):
     idle_timeout_s: int = Field(
         default=300,
         ge=0,
-        description="Seconds idle before transitioning to 'idle' state.  0 disables.",
+        description=(
+            "Per-slot idle-TTL override (seconds) for hard eviction "
+            "(SlotReaper.evict_timeout_for). 0 disables IDLE-TTL eviction "
+            "for this slot only — pressure eviction and pre-load eviction "
+            "are separate paths, exempted only by `pinned`, not by this "
+            "value."
+        ),
     )
     pinned: bool = Field(
         default=False,
@@ -561,6 +567,33 @@ class SlotConfig(BaseModel):
             "POST /{name}/unload or DELETE /{name} refuses without ?force=true "
             "(HTTP 409 slot.pinned). Additive field — default False preserves "
             "existing behavior for every slot that doesn't set it."
+        ),
+    )
+    autoload: bool | None = Field(
+        default=None,
+        description=(
+            "Explicit boot-start setting (spec 2026-08-02). True → the "
+            "generated Quadlet unit carries [Install] WantedBy=hal0.target "
+            "and the slot starts at boot; False → the unit exists but "
+            "nothing starts it automatically (manual load/swap only). "
+            "None (key absent on disk) is the migration shim: derived from "
+            "the pre-field implicit signal — non-empty [model].default — by "
+            "_derive_autoload below, so pre-field TOMLs keep their boot "
+            "behavior. API-created slots always persist an explicit value "
+            "(create route defaults it to false)."
+        ),
+    )
+    priority: int = Field(
+        default=50,
+        ge=0,
+        le=100,
+        description=(
+            "Eviction priority (spec 2026-08-02): lower evicts first, "
+            "last_used breaks ties. Orders victims in pressure eviction "
+            "(SlotReaper.pressure_evict_once) and pre-load eviction "
+            "(preload_evict). Replaces the retired lru=true opt-in — "
+            "every non-pinned slot is now a candidate. 100 is NOT a pin "
+            "(evicted last, still evictable); use `pinned` to exempt."
         ),
     )
 
@@ -756,6 +789,24 @@ class SlotConfig(BaseModel):
                 )
             new_data["device"] = mapped
         return new_data
+
+    @model_validator(mode="after")
+    def _derive_autoload(self) -> SlotConfig:
+        """Resolve the migration shim: absent key → pre-field implicit signal.
+
+        A TOML written before the field existed boot-started iff it had a
+        model bound (#1369 activation semantics); deriving here means every
+        config READ resolves autoload from that signal. This does NOT get
+        written back to disk in production — the config write path merges
+        RAW dicts (reconcile_slot_updates), not this pydantic model, so an
+        absent-key TOML stays absent-key and the shim re-derives on every
+        subsequent read until an explicit `autoload` key is authored (e.g.
+        via the create route's `body.setdefault("autoload", False)`, or an
+        operator toggling the drawer).
+        """
+        if self.autoload is None:
+            self.autoload = bool(self.model.default)
+        return self
 
     @model_serializer(mode="wrap")
     def _tuck_server_into_extra(self, handler: Any) -> dict[str, Any]:
@@ -1891,20 +1942,25 @@ class SlotsConfig(BaseModel):
         default=300,
         ge=0,
         description=(
-            "Default idle-eviction TTL (seconds), applied per slot. "
-            "A slot that has not served a request for this long transitions "
-            "to idle. 0 disables eviction. Per-slot idle_timeout_s in each "
-            "slot's TOML overrides this value."
+            "Default idle-TTL (seconds) for hard eviction, applied per slot "
+            "when the slot's own TOML has no idle_timeout_s override. 0 "
+            "disables IDLE-TTL eviction for slots using this default — "
+            "pressure eviction and pre-load eviction are separate paths, "
+            "exempted only by `pinned`, not by this value."
         ),
     )
     evict_pressure_mb: int = Field(
         default=8192,
         ge=0,
         description=(
-            "Host free-RAM floor (MiB) for pressure-driven LRU eviction (#903). "
-            "When host MemAvailable drops below this value, idle lru-eligible "
-            "slots are evicted in least-recently-used order until free RAM is "
-            "back above the floor. 0 disables pressure eviction."
+            "Host free-RAM floor (MiB) for pressure-driven eviction (#903, "
+            "spec 2026-08-02). When host MemAvailable drops below this "
+            "value, every non-pinned resident slot is a candidate, evicted "
+            "in priority order (lowest `priority` first, "
+            "least-recently-used as the tie-break within a tier) until "
+            "free RAM is back above the floor. 0 disables pressure "
+            "eviction. `pinned` is the only exemption — `idle_timeout_s = "
+            "0` on a slot does not exempt it from this path."
         ),
     )
     preload_evict_enabled: bool = Field(
@@ -1913,8 +1969,9 @@ class SlotsConfig(BaseModel):
             "Free memory SYNCHRONOUSLY before a load starts, when the "
             "incoming model's estimated footprint plus "
             "preload_evict_headroom_mb would not fit in projected free "
-            "memory. Evicts idle lru-eligible resident slots in "
-            "least-recently-used order — the same eligibility "
+            "memory. Evicts non-pinned resident slots in priority order "
+            "(lowest `priority` first, least-recently-used as the "
+            "tie-break within a tier) — the same eligibility "
             "evict_pressure_mb uses — until it fits, or fails the load "
             "with a clear error if it still doesn't fit after evicting "
             "everything eligible. Set to false to rely solely on the "

@@ -261,6 +261,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// drawer). Rides Save (PUT /config {profile}), restart-required; the
 	// backend's _reconcile_device_profile keeps device/profile coherent.
 	const [profileSel, setProfileSel] = useStateSM(slot?.profile || "");
+	// Eviction priority (spec 2026-08-02) — instant-apply on blur/Enter, NOT
+	// part of the Save batch (see the pinned-toggle-shaped handler below).
+	// Hooks must execute every render (see the note atop this component), so
+	// this is declared here rather than next to its handler.
+	const [prio, setPrio] = useStateSM(
+		Number.isInteger(slot?.priority) ? slot.priority : 50,
+	);
 	// (#1379: `parallel` and `extra_args` state removed with their controls —
 	// both are INERT at launch, so editing them here only wrote TOML nothing
 	// reads. See configBaseline above.)
@@ -498,6 +505,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	useEffectSM(() => {
 		if (!open || !curModelRow) setModelEditOpen(false);
 	}, [open, curModelRow]);
+	// Re-seed `prio` from server truth whenever the slot's persisted priority
+	// changes (poll refresh, or this drawer's own commitPriority resolving) —
+	// same shape as the config-baseline effect above, but for an instant-apply
+	// field that never enters `baseline`. Must run every render (see above).
+	useEffectSM(() => {
+		if (Number.isInteger(slot?.priority)) setPrio(slot.priority);
+	}, [slot?.priority]);
 
 	if (!slot) return null;
 
@@ -680,6 +694,53 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		}
 	};
 
+	// Instant-apply autoload toggle + priority commit (spec 2026-08-02).
+	// Same contract as the pinned toggle above: fire the PUT, toast, let the
+	// slots poll re-render from server truth. Excluded from the Save batch —
+	// see the `dirty` comment below.
+	const autoload = slot.autoload === true;
+	const onToggleAutoload = async (next) => {
+		try {
+			await editMut.mutateAsync({ name: slot.name, body: { autoload: next } });
+			window.__hal0Toast &&
+				window.__hal0Toast(
+					`${slot.name} auto-load ${next ? "on" : "off"}`,
+					"ok",
+				);
+		} catch (err) {
+			window.__hal0Toast &&
+				window.__hal0Toast(
+					err?.message ? `${slot.name}: ${err.message}` : `${slot.name}: toggle failed`,
+					"warn",
+				);
+		}
+	};
+	const commitPriority = async () => {
+		// An emptied/garbage input must never commit as 0 — that's the most
+		// aggressive evict-first priority, not "no input yet". Revert to the
+		// last known-good value (server truth, or the 50 default) and bail
+		// without a PUT rather than guessing.
+		const raw = String(prio).trim();
+		if (raw === "" || !Number.isFinite(Number(raw))) {
+			setPrio(Number.isInteger(slot.priority) ? slot.priority : 50);
+			return;
+		}
+		const v = Math.max(0, Math.min(100, Math.round(Number(raw))));
+		setPrio(v);
+		if (v === slot.priority) return;
+		try {
+			await editMut.mutateAsync({ name: slot.name, body: { priority: v } });
+			window.__hal0Toast && window.__hal0Toast(`${slot.name} priority → ${v}`, "ok");
+		} catch (err) {
+			setPrio(Number.isInteger(slot.priority) ? slot.priority : 50);
+			window.__hal0Toast &&
+				window.__hal0Toast(
+					err?.message ? `${slot.name}: ${err.message}` : `${slot.name}: priority save failed`,
+					"warn",
+				);
+		}
+	};
+
 	// THE dirty comparison — derived once, against the FROZEN baseline, and read
 	// by every consumer (the unsaved-changes guard, the Save body, the stale-
 	// command overlay). No predicate is re-derived anywhere else, and none of
@@ -704,9 +765,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields — the
 	// HW grid and ctx. The instant-apply ``pinned`` toggle fires its own PUT
 	// outside Save and is intentionally excluded: a flipped toggle is already
-	// persisted. (Reasoning/MTP/Vision were also instant-apply toggles here;
-	// they moved to the model drawer — spec-hw-slot-ownership §1. Template /
-	// Parallel / Extra Args left with #1379 — see configBaseline.)
+	// persisted. ``autoload``/``priority`` (spec 2026-08-02) are the same
+	// shape — their own PUT fires on toggle/blur above and neither is passed
+	// into deriveChanges, so they never enter this dirty aggregate. (Reasoning/
+	// MTP/Vision were also instant-apply toggles here; they moved to the model
+	// drawer — spec-hw-slot-ownership §1. Template / Parallel / Extra Args
+	// left with #1379 — see configBaseline.)
 	const dirty =
 		!!changes &&
 		(changes.ctx ||
@@ -1439,6 +1503,53 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						})()}
 
 						{profileRow}
+
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>Auto-load on start</span>
+								<FieldInfoIcon description="Start this slot automatically at boot. Off: the slot
+									only loads when you load or swap it — binding a model no
+									longer implies boot start." />
+							</div>
+							<div className="form-ctl">
+								<label className="slot-enable-toggle">
+									<input
+										type="checkbox"
+										data-testid="slot-autoload-toggle"
+										checked={autoload}
+										onChange={() => onToggleAutoload(!autoload)}
+										aria-label={autoload ? "Disable auto-load on start" : "Enable auto-load on start"}
+									/>
+									<span className="slot-enable-track" aria-hidden="true" />
+								</label>
+							</div>
+						</div>
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>Eviction priority</span>
+								<FieldInfoIcon description="0-100 — lower unloads first when memory is needed.
+									Ties go to the least recently used. Pin the slot to exempt
+									it entirely." />
+							</div>
+							<div className="form-ctl">
+								<input
+									className="input mono"
+									data-testid="slot-priority-input"
+									type="number"
+									min={0}
+									max={100}
+									step={1}
+									value={prio}
+									onChange={(e) => setPrio(e.target.value)}
+									onBlur={commitPriority}
+									onKeyDown={(e) => {
+										if (e.key === "Enter") e.currentTarget.blur();
+									}}
+									style={{ width: 90 }}
+								/>
+								<div className="hint">lower unloads first</div>
+							</div>
+						</div>
 
 						<div className="form-row">
 							<div className="form-lbl">

@@ -30,6 +30,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ValidationError
@@ -53,6 +54,8 @@ from hal0.slots import metrics_collect as _metrics_collect
 from hal0.slots import port_alloc as _port_alloc
 from hal0.slots import voices as _voices
 from hal0.slots.manager import Slot, SlotManager
+
+log = structlog.get_logger(__name__)
 
 # Auth was removed by design. All routes are open on the local network.
 
@@ -480,6 +483,46 @@ class _SlotSwapBody(BaseModel):
     model_id: str | None = None
 
 
+def _validate_autoload_priority(body: dict[str, Any]) -> None:
+    """Value-level guard for the two spec-2026-08-02 fields.
+
+    The config write path merges RAW dicts (reconcile_slot_updates), so
+    SlotConfig's ge/le never runs — an out-of-range priority would persist
+    to TOML silently and the eviction helper would clamp it forever.
+    """
+    if "autoload" in body and not isinstance(body["autoload"], bool):
+        raise BadRequest(
+            "autoload must be a boolean",
+            details={"autoload": repr(body["autoload"])},
+            code="validation.invalid_value",
+        )
+    if "priority" in body:
+        prio = body["priority"]
+        if isinstance(prio, bool) or not isinstance(prio, int) or not 0 <= prio <= 100:
+            raise BadRequest(
+                "priority must be an integer between 0 and 100",
+                details={"priority": repr(prio)},
+                code="validation.invalid_value",
+            )
+
+
+def _rerender_slot_unit_best_effort(cfg: dict[str, Any]) -> None:
+    """Rewrite a slot's on-disk Quadlet unit after an ``autoload`` change.
+
+    The unit's [Install] stanza is baked at render time; without this, a
+    toggle only takes effect on the next load — and a reboot in between
+    boot-starts a slot the operator just opted out. Same provider trio as
+    the updater's post-update unit sweep (updater.py). Never raises past
+    the caller's guard; never starts/stops anything.
+    """
+    from hal0.providers.container import ContainerProvider, _best_effort_model_info
+
+    provider = ContainerProvider()
+    model_info = _best_effort_model_info(cfg, None)
+    if provider.rerender_unit_sync(cfg, model_info):
+        provider.daemon_reload()
+
+
 def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
     """400 when a slot-config write body carries keys the schema doesn't know.
 
@@ -677,10 +720,15 @@ async def create_slot(request: Request) -> dict[str, object]:
         port_end=(int(slots_cfg.port_range_end) if slots_cfg else None),
         slot_snapshots=runtime_ports,
     )
+    # Spec 2026-08-02: new slots never inherit the pre-field implicit boot
+    # start — persist an explicit autoload so the migration shim (absent
+    # key + bound model → true) only ever applies to pre-field TOMLs.
+    body.setdefault("autoload", False)
     if isinstance(body.get("port"), int):
         _reject_port_conflict(int(body["port"]), name, runtime_ports)
     _reject_model_owned_config_keys(body)
     _reject_unknown_config_keys(body)
+    _validate_autoload_priority(body)
     async with record_action(
         request,
         category="slot",
@@ -1096,6 +1144,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
     _reject_model_owned_config_keys(body)
     _reject_unknown_config_keys(body)
+    _validate_autoload_priority(body)
     # Port moves go through the registry so an edit can't land on a port
     # another slot (config or runtime) or listener already owns.
     new_port = body.get("port")
@@ -1115,6 +1164,19 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     ) as _rec:
         snap = await sm.update_config(name, body)
         _rec.after = body
+    if "autoload" in body:
+        try:
+            cfg_after = await _safe_config(sm, name)
+            if cfg_after:
+                await asyncio.to_thread(_rerender_slot_unit_best_effort, cfg_after)
+        except Exception as exc:
+            # Best-effort: the TOML is the source of truth; the updater
+            # sweep / next load converges the unit if this fails.
+            log.warning(
+                "slot.config_autoload_unit_rerender_failed",
+                slot=name,
+                error=str(exc),
+            )
     # NOTE (#1369): this route is a PURE config write — no lifecycle side
     # effect. It used to unload a running slot on an ``enabled: false`` body
     # (so the faded card matched reality); with the field gone, config edits

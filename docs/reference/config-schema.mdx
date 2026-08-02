@@ -215,8 +215,10 @@ top-level scalars are accepted on load and normalized.
 | `default_speed` | float \| null | `null` | — | `0.25-4.0` |
 | `default_response_format` | str \| null | `null` | — | one of `mp3, wav, opus, flac, pcm` |
 | `workers` | int | `1` | — | `>= 1`; deprecated/inert |
-| `idle_timeout_s` | int | `300` | — | `>= 0`; `0` disables the idle transition |
+| `idle_timeout_s` | int | `300` | — | `>= 0`; `0` disables IDLE-TTL eviction for this slot only — pressure and pre-load eviction are separate paths, exempted only by `pinned`. Read via the raw-dict sweep path (not the typed loader), an out-of-range value there is clamped/floored at read time, not errored — the typed `POST`/`PUT` API path still hard-rejects via pydantic's `ge` |
 | `pinned` | bool | `false` | — | exempts the slot from auto-eviction; blocks manual unload without `force` |
+| `autoload` | bool \| null | `null` | — | `true` → the Quadlet unit gets `[Install] WantedBy=hal0.target` and the slot starts at boot; `false` → unit exists, nothing starts it. `null` (key absent) is the migration shim: derived from a non-empty `model.default`. `POST /api/slots` persists an explicit value (`false`) |
+| `priority` | int | `50` | — | `0-100`; eviction order, lowest evicted first, `last_used` breaks ties. `100` is *not* a pin — use `pinned`. Read via the raw-dict sweep path, an out-of-range TOML value is clamped to `0-100` at read time, not errored — the typed `POST`/`PUT` API path still hard-rejects via pydantic's `ge`/`le` |
 | `model` | table | — | — | `[model]`, see below |
 | `server` | table | — | — | `[server]`, see below |
 | `npu` | table \| null | `null` | — | `[npu]`, see below |
@@ -224,6 +226,9 @@ top-level scalars are accepted on load and normalized.
 | `extra` | dict | `{}` | — | catch-all |
 
 There is **no `enabled` field** — a non-empty `model.default` is the activation signal.
+Boot start is separate and explicit (`autoload`); a retired `lru` key is still accepted
+but ignored, with a one-time deprecation warning. See
+[Slot lifecycle → Activation](/docs/reference/slot-lifecycle/#activation).
 
 <Aside type="note">
 A legacy `backend` key on a slot is silently promoted to `device` and dropped on load

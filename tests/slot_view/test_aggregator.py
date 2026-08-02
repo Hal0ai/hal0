@@ -270,6 +270,22 @@ class TestConfigEnrichment:
         out = config_enrichment([_llm_cfg(device="gpu-vulkan")])
         assert out["chat"]["declared_backend"] == "vulkan"
 
+    def test_lifts_autoload_and_priority(self) -> None:
+        """Effective autoload (shim: bound model + no key → true) and priority
+        are lifted so the drawer renders without a per-slot /config fetch."""
+        out = config_enrichment(
+            [
+                # cfg A: bound model, no autoload/priority keys → shim defaults.
+                _llm_cfg(),
+                # cfg B: explicit keys win.
+                _llm_cfg(name="b", autoload=False, priority=10),
+            ],
+        )
+        assert out["chat"]["autoload"] is True
+        assert out["chat"]["priority"] == 50
+        assert out["b"]["autoload"] is False
+        assert out["b"]["priority"] == 10
+
     def test_coresident_group_for_npu_trio(self) -> None:
         configs = [
             _llm_cfg(name="agent", device="npu"),

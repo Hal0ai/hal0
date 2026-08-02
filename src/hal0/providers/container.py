@@ -81,6 +81,7 @@ from hal0.providers._gpu import (
     resolve_gpu_group_ids,
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+from hal0.slots.activation import autoload_enabled
 from hal0.slots.argv import ResolvedArgv, resolve_argv
 from hal0.slots.naming import (
     slot_container_name,
@@ -625,6 +626,7 @@ def _render_quadlet_from_plan(
     *,
     publish_host: str = "127.0.0.1",
     network_mode_default: str = "",
+    autoload: bool = True,
 ) -> str:
     """Render a Podman Quadlet ``.container`` unit from a launch plan.
 
@@ -793,12 +795,16 @@ def _render_quadlet_from_plan(
             f"SyslogIdentifier={container_name}",
             "StandardOutput=journal",
             "StandardError=journal",
-            "",
-            "[Install]",
-            "WantedBy=hal0.target",
-            "",
         ]
     )
+    # [Install] WantedBy=hal0.target is the ONLY thing that boot-starts a
+    # slot (Quadlet's generator links the .wants symlink from unit content —
+    # no systemctl enable anywhere). autoload=false omits it wholesale: the
+    # unit stays start-able (load/swap use `systemctl restart`, which never
+    # consulted [Install]) but nothing pulls it up at boot. Spec 2026-08-02.
+    if autoload:
+        lines.extend(["", "[Install]", "WantedBy=hal0.target"])
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -1706,8 +1712,10 @@ class ContainerProvider(Provider):
         The Quadlet sequence that replaces the old write→daemon-reload→enable→
         restart triple: the ``.container`` file is the source of truth, podman's
         generator emits ``hal0-slot@<token>.service`` on ``daemon-reload``, and
-        ``[Install] WantedBy=hal0.target`` in the unit handles boot-enable — so
-        no per-load ``systemctl enable``. ``restart`` (not bare ``start``) keeps
+        ``[Install] WantedBy=hal0.target`` in the unit handles boot-enable
+        (autoload-gated: slots with ``autoload = false`` render without an
+        ``[Install]`` section and do not boot-start) — so no per-load
+        ``systemctl enable``. ``restart`` (not bare ``start``) keeps
         this idempotent: it starts a stopped slot and restarts a running one,
         exactly as before. All writes route through the hal0-systemctl seam.
         """
@@ -1771,6 +1779,7 @@ class ContainerProvider(Provider):
             plan,
             publish_host=_slot_publish_host(),
             network_mode_default=_slot_network_mode(),
+            autoload=autoload_enabled(slot_cfg),
         )
 
     def load_sync(

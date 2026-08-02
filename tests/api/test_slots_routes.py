@@ -535,6 +535,30 @@ def test_create_slot_rejects_model_owned_keys(
     assert not (slot_root / "owned.toml").exists()
 
 
+def test_create_slot_without_autoload_persists_explicit_false(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """POST /api/slots with no ``autoload`` key persists an explicit False.
+
+    Spec 2026-08-02: new slots never inherit the legacy implicit boot start
+    — the absent-key migration shim (bound model → true) is for pre-field
+    TOMLs only. A freshly created slot must not silently boot-start just
+    because it has a model bound.
+    """
+    body = {
+        "name": "fresh",
+        "model": "qwen3-4b-q4_k_m",
+        "device": "gpu-vulkan",
+        "profile": "vulkan-radv",
+    }
+    r = isolated_client.post("/api/slots", json=body)
+    assert r.status_code == 201, r.text
+    cfg = isolated_client.get("/api/slots/fresh/config").json()
+    assert cfg.get("autoload") is False
+
+
 @pytest.mark.parametrize("key", ["mtp", "enable_thinking", "vision"])
 def test_patch_defaults_rejects_model_owned_keys_with_the_right_message(
     key: str,
@@ -736,6 +760,92 @@ def test_put_config_pinned_round_trips(
     assert r.status_code == 200, r.text
     cfg = isolated_client.get("/api/slots/chat/config").json()
     assert cfg.get("pinned") is False
+
+
+# ── autoload/priority (spec-2026-08-02): unit rerender + value validation ───
+
+
+def test_put_config_autoload_triggers_unit_rerender(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PUT {autoload: false} rewrites the on-disk Quadlet unit immediately —
+    otherwise a reboot before the next load still boot-starts the slot."""
+    from hal0.api.routes import slots as slots_routes
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        slots_routes, "_rerender_slot_unit_best_effort", lambda cfg: calls.append(cfg)
+    )
+    resp = isolated_client.put("/api/slots/chat/config", json={"autoload": False})
+    assert resp.status_code == 200, resp.text
+    assert len(calls) == 1
+
+
+def test_put_config_priority_skips_unit_rerender(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0.api.routes import slots as slots_routes
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        slots_routes, "_rerender_slot_unit_best_effort", lambda cfg: calls.append(cfg)
+    )
+    resp = isolated_client.put("/api/slots/chat/config", json={"priority": 10})
+    assert resp.status_code == 200, resp.text
+    assert calls == []
+    cfg = isolated_client.get("/api/slots/chat/config").json()
+    assert cfg.get("priority") == 10
+
+
+@pytest.mark.parametrize("bad", [-1, 101, "high", 3.5, True])
+def test_put_config_priority_out_of_range_rejected(
+    bad: object,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    resp = isolated_client.put("/api/slots/chat/config", json={"priority": bad})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "validation.invalid_value"
+
+
+def test_create_slot_priority_out_of_range_rejected(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """POST /api/slots refuses an out-of-range priority the same way PUT
+    /config does (test_put_config_priority_out_of_range_rejected above) —
+    the create path runs the same `_validate_autoload_priority` guard, so a
+    bad value must 400 before the slot TOML is ever written, not persist and
+    get silently clamped forever by the eviction helper."""
+    body = {
+        "name": "badprio",
+        "model": "qwen3-4b-q4_k_m",
+        "device": "gpu-vulkan",
+        "profile": "vulkan-radv",
+        "priority": 101,
+    }
+    r = isolated_client.post("/api/slots", json=body)
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "validation.invalid_value"
+    assert not (slot_root / "badprio.toml").exists()
+
+
+def test_put_config_autoload_must_be_bool(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    resp = isolated_client.put("/api/slots/chat/config", json={"autoload": "yes"})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "validation.invalid_value"
 
 
 def test_binding_a_second_npu_model_surfaces_conflict(

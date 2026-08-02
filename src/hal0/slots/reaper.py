@@ -104,6 +104,52 @@ def is_pinned(canonical_name: str, cfg: dict[str, Any] | None) -> bool:
     return canonical_name in _PINNED_BY_DEFAULT
 
 
+_DEFAULT_EVICTION_PRIORITY: int = 50
+
+
+def eviction_priority(cfg: dict[str, Any] | None) -> int:
+    """Effective eviction priority for a RAW slot TOML dict (0-100).
+
+    Lower evicts first; ties fall back to LRU order at the call sites.
+    Defensive by design — the sweep must never crash on a hand-authored
+    TOML: a missing/bool/non-int value falls back to the default and an
+    out-of-range int is clamped. The pydantic paths (SlotConfig ge/le)
+    hard-reject instead; this is the fail-open mirror, same contract as
+    :func:`is_pinned` reading the raw dict.
+    """
+    if not isinstance(cfg, dict):
+        return _DEFAULT_EVICTION_PRIORITY
+    raw = cfg.get("priority")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return _DEFAULT_EVICTION_PRIORITY
+    return max(0, min(100, raw))
+
+
+_lru_flag_warned: set[str] = set()
+
+
+def _warn_lru_retired(canonical_name: str, cfg: dict[str, Any] | None) -> None:
+    """One-shot deprecation warning for the retired ``lru`` TOML key.
+
+    The key is IGNORED (never an error): eviction eligibility is now
+    priority-ordered for every non-pinned slot (spec 2026-08-02). Warned
+    once per slot per process so a 30 s sweep doesn't spam the journal.
+    """
+    if not isinstance(cfg, dict) or cfg.get("lru") is None:
+        return
+    if canonical_name in _lru_flag_warned:
+        return
+    _lru_flag_warned.add(canonical_name)
+    log.warning(
+        "slot.lru_flag_retired",
+        extra={
+            "slot": canonical_name,
+            "hint": "lru is ignored; eviction order is priority (0-100, "
+            "lower first) — remove the key, use `priority`/`pinned`",
+        },
+    )
+
+
 def probe_host_free_mb() -> float:
     """Return free host memory in MiB, GTT-aware where possible (§21.10).
 
@@ -385,10 +431,11 @@ class SlotReaper:
         ``host._probe_host_free_mb()``). The floor is either the absolute
         ``_evict_pressure_mb`` (default) or, when ``_evict_pressure_pct``
         is set, that percentage of total capacity (``threshold_pct``,
-        §21.10). When free RAM is below the floor, evicts idle,
-        ``lru``-eligible, unpinned slots one at a time in
-        least-recently-used order (oldest ``last_used`` first) until free
-        RAM is back above the floor or no more eligible slots remain.
+        §21.10). When free RAM is below the floor, evicts idle, unpinned
+        slots one at a time in priority order — lowest ``eviction_priority``
+        first, oldest ``last_used`` as the tie-break within a priority tier
+        (spec 2026-08-02) — until free RAM is back above the floor or no
+        more eligible slots remain.
 
         Guards:
           - floor <= 0 → pressure eviction is disabled.
@@ -396,8 +443,11 @@ class SlotReaper:
             evicted.
           - A pinned slot (:func:`is_pinned`: the canonical ``agent``
             anchor and other default-pinned names, or any slot with
-            ``SlotConfig.pinned = true``) is never evicted by pressure.
-          - Only slots with ``lru = true`` in their TOML are eligible.
+            ``SlotConfig.pinned = true``) is never evicted by pressure,
+            regardless of its priority.
+          - Every other resident slot is a candidate. The retired ``lru =
+            true`` opt-in no longer gates eligibility — the key is
+            ignored (:func:`_warn_lru_retired` logs it once per slot).
         """
         host = self._host
         floor = host._evict_pressure_mb
@@ -412,11 +462,14 @@ class SlotReaper:
         if free_mb >= floor:
             return
 
-        # Build the LRU-ordered candidate list. sweep_candidates() unions
-        # _last_used with dispatchable slots known only via state.json
-        # (adopted / restart-surviving), timestamped by their last observed
-        # transition, so pressure eviction can also reclaim those.
-        candidates: list[tuple[float, str]] = []
+        # Build the victim list ordered (priority asc, last_used asc):
+        # lowest priority first, LRU within a tier (spec 2026-08-02).
+        # sweep_candidates() unions _last_used with dispatchable slots known
+        # only via state.json (adopted / restart-surviving), timestamped by
+        # their last observed transition, so pressure eviction can also
+        # reclaim those. The retired ``lru = true`` opt-in no longer gates —
+        # every non-pinned resident slot is a candidate.
+        candidates: list[tuple[int, float, str]] = []
         for slot_name, ts in self.sweep_candidates().items():
             if host._serving_count.get(host._key(slot_name), 0) > 0:
                 continue
@@ -424,20 +477,17 @@ class SlotReaper:
             state = host._current_state(slot_name)
             if state not in (SlotState.READY, SlotState.IDLE):
                 continue
-            # Read cfg once — used for both the pin check and the lru flag.
             try:
                 cfg = await host._load_slot_config(slot_name)
             except (SlotConfigError, SlotNotFound):
                 continue
             if is_pinned(canonical, cfg):
                 continue
-            if not cfg.get("lru", False):
-                continue
-            candidates.append((ts, slot_name))
+            _warn_lru_retired(canonical, cfg)
+            candidates.append((eviction_priority(cfg), ts, slot_name))
 
-        # Evict oldest-first until pressure is relieved or list is exhausted.
-        candidates.sort(key=lambda pair: pair[0])
-        for _ts, slot_name in candidates:
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        for _prio, _ts, slot_name in candidates:
             # Re-check serving guard and state — may have changed since
             # the list was built (another coroutine may have started a
             # request or the TTL sweep may have evicted it already).
@@ -472,12 +522,15 @@ class SlotReaper:
 
 
 __all__ = [
+    "_DEFAULT_EVICTION_PRIORITY",
     "_EVICT_AFTER_S",
     "_IDLE_AFTER_S",
     "_IDLE_MONITOR_INTERVAL_S",
     "_PINNED_BY_DEFAULT",
     "ReaperHost",
     "SlotReaper",
+    "_warn_lru_retired",
+    "eviction_priority",
     "is_pinned",
     "probe_host_free_mb",
     "probe_host_total_mb",
