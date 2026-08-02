@@ -119,6 +119,19 @@ class CuratedModel(BaseModel):
         default=0,
         description=("Native context window in tokens. Zero/omitted for image-gen entries."),
     )
+    chat_template: str = Field(
+        default="",
+        description=(
+            "Optional bundled chat-template id (a ``<id>.jinja`` under the "
+            "model-store ``chat-templates/`` dir, seeded from "
+            "``hal0.templates``). When set, the pull layer stamps it into the "
+            "registry row's ``defaults.chat_template`` so launches use the "
+            "curated template instead of the GGUF-embedded one — the escape "
+            "hatch for artifacts whose embedded template trips the runner's "
+            "jinja engine (e.g. hal0-brain-sft's ``|min`` filter, which minja "
+            "lacks). Empty = use the embedded template ('auto')."
+        ),
+    )
     recommended_slot: str = Field(
         default="chat",
         description="Default slot to assign the model to. 'chat' for chat, 'img' for image-gen.",
@@ -351,6 +364,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
         hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
         context_length=131072,
+        chat_template="hal0-brain-sft",
         recommended_slot="chat",
         tags=["chat", "brain", "steward", "tool-use", "tiny", "rocmfpx"],
         notes=(
@@ -373,6 +387,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
         hf_file="hal0-brain-sft-Q4_0_ROCMFP4_COHERENT.gguf",
         context_length=131072,
+        chat_template="hal0-brain-sft",
         recommended_slot="chat",
         tags=["chat", "brain", "steward", "tool-use", "tiny", "rocmfp4"],
         notes=(
@@ -395,6 +410,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
         hf_file="hal0-brain-sft-F16.gguf",
         context_length=131072,
+        chat_template="hal0-brain-sft",
         recommended_slot="chat",
         tags=["chat", "brain", "steward", "tool-use", "tiny", "portable"],
         notes=(
