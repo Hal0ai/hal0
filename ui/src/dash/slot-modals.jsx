@@ -274,7 +274,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Name the current baseline belongs to. Guards the re-seed effect so a poll
 	// that merely RECOVERS from a degraded interval doesn't wipe the operator's
 	// in-flight edits (the enrichment flag flipping false→true re-runs it).
-	const baselineFor = useRefSM(baseline ? slot.name : null);
+	// `slot` can be undefined here while `baseline` is still set: a save's
+	// invalidation can drop the slot from one poll before the cleanup effect
+	// below runs, and this initializer argument is evaluated on that render.
+	const baselineFor = useRefSM(baseline && slot ? slot.name : null);
 	const [submitErr, setSubmitErr] = useStateSM(null);
 	// Dirty-close confirms through the shared ConfirmDialog (state-driven),
 	// replacing the raw window.confirm. Every dismiss path (Cancel, ✕, Esc,
