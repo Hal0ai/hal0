@@ -166,6 +166,7 @@ async def stream_activity(
     actor: str | None = None,
     kind: str | None = None,
     search: str | None = None,
+    limit: int = Query(_LIMIT_MAX, ge=1, le=_LIMIT_MAX),
 ) -> StreamingResponse:
     _validate(severity, kind, outcome)
     store = _store(request)
@@ -183,10 +184,13 @@ async def stream_activity(
 
     async def gen():
         # Durable backfill first (id > since), oldest→newest for replay.
+        # ``limit`` caps ONLY this replay (the newest N matching rows): the
+        # dashboard pane keeps a 200-row ring, so streaming the full
+        # 1000-row durable backlog one SSE frame at a time just made the
+        # slots page churn through hundreds of frames it would immediately
+        # discard. The live tail below is unaffected.
         backfill = list(
-            reversed(
-                [_row_to_dict(r) for r in store.query(since=since, limit=_LIMIT_MAX, **filters)]
-            )
+            reversed([_row_to_dict(r) for r in store.query(since=since, limit=limit, **filters)])
         )
         cursor = since
         for rec in backfill:
