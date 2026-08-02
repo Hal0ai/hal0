@@ -1206,12 +1206,24 @@ a { color: inherit; text-decoration: none; }
 /* Full-bleed side column (slots page): the ActivityLog spans the same
    vertical extent as the stacked main-column panes (InferencePane +
    NpuOccupancyCard) instead of capping itself short. `align-self: stretch`
-   fills the grid track; `position: static` because a stretched, track-height
-   box has nothing left to stick against — sticky and stretch fight. */
+   fills the grid track (`position` no longer sticky — a stretched,
+   track-height box has nothing left to stick against).
+
+   The log is absolutely filled into the track rather than flowing in it:
+   `height: 100%` on the card does NOT stop the log's intrinsic content
+   height from driving grid track sizing, so a long feed stretched the row
+   thousands of px past the main column's last pane (the NPU card). An
+   abspos child contributes nothing to track sizing — the row is sized by
+   the main column alone and the log fills exactly that, scrolling inside
+   (.act-body owns the scroll). */
 .dash-side.dash-side-fill {
   align-self: stretch;
-  position: static;
+  position: relative;
   min-height: 0;
+}
+.dash-side.dash-side-fill > * {
+  position: absolute;
+  inset: 0;
 }
 
 /* Slots-page tabs — underline style, matching the Agent page's tab bar
@@ -2380,6 +2392,12 @@ select.npu-sel {
   .dash { grid-template-columns: 1fr; }
   .dash-side { position: static; flex-direction: row; flex-wrap: wrap; }
   .dash-side > * { flex: 1; min-width: 260px; }
+  /* Single-column: the side stacks under main, so there is no track to
+     abs-fill — an inset-0 child of a content-sized parent would collapse
+     to nothing. Back to in-flow, with a viewport cap so the uncapped
+     activity feed can't stretch the column instead. */
+  .dash-side.dash-side-fill > * { position: static; inset: auto; }
+  .dash-side.dash-side-fill .act-card { max-height: 70vh; }
   .models-layout { grid-template-columns: 1fr; }
   .models-sidebar { position: static; max-height: none; overflow-y: visible; }
 }
