@@ -1,7 +1,10 @@
 /* hal0 dashboard — Services page (#services)
    Page-scoped styles (svcp- prefix). Reuses the global service atoms from
-   overhaul.css: .sdot, .svc-pill, .svc-icon-tile, .svc-btn, .svc-pending,
-   .svc-comfy-drawer (queue drawer shared with services-card.jsx). */
+   overhaul.css (.sdot, .svc-pill, .svc-icon-tile, .svc-btn, .svc-pending,
+   .svc-comfy-drawer) and matches the slot-card design system: same card
+   container (bg-1 / line / rad-lg), same JetBrains Mono label rhythm, same
+   ok/warn/err token vocabulary — no generic rgba fallbacks, no opacity
+   dimming where a foreground tier token exists. */
 
 .svcp-view .dcard { margin-bottom: 14px; }
 
@@ -11,16 +14,19 @@
   gap: 14px;
 }
 
+/* Card container — mirrors .slot (dashboard.css). */
 .svcp-card {
-  border: 1px solid var(--line, rgba(127, 127, 127, 0.25));
-  border-radius: 10px;
-  padding: 14px 16px;
-  background: var(--card-bg, rgba(127, 127, 127, 0.04));
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  padding: 16px 16px 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   min-width: 0;
+  transition: border-color 0.12s ease;
 }
+.svcp-card:hover { border-color: var(--line-strong); }
 
 .svcp-card-head {
   display: flex;
@@ -36,39 +42,51 @@
   flex: 1;
 }
 
-.svcp-name { font-weight: 600; }
+/* Name — mirrors .slot-name typography. */
+.svcp-name {
+  font-family: var(--jbm);
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+}
 
 .svcp-uptime {
+  font-family: var(--jbm);
   font-size: 11px;
-  opacity: 0.65;
+  color: var(--fg-4);
 }
 
 .svcp-desc {
   font-size: 12px;
-  opacity: 0.8;
+  color: var(--fg-3);
+  line-height: 1.5;
 }
 
 .svcp-detail {
-  font-size: 12px;
-  opacity: 0.6;
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
 }
 
+/* Meta rows — the slot-met label register: mono, small, tiered fg. */
 .svcp-meta {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   font-size: 11px;
-  opacity: 0.7;
+  color: var(--fg-4);
   overflow-wrap: anywhere;
 }
 
-.svcp-meta-row b { font-weight: 600; }
+.svcp-meta-row b { font-weight: 500; color: var(--fg-2); }
 
-.svcp-unmanaged { opacity: 0.55; font-style: italic; }
+.svcp-unmanaged { color: var(--fg-4); font-style: italic; }
 
 .svcp-hints {
   font-size: 11px;
-  opacity: 0.65;
+  color: var(--fg-4);
+  line-height: 1.5;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -82,37 +100,54 @@
   margin-top: auto;
 }
 
+/* Buttons are .btn.ghost.sm (the slot-card family) — this only keeps the
+   icon+label gap; size/colors come from the shared .btn rules. */
 .svcp-act {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
 }
 
-.svcp-act-danger { color: var(--danger, #d05050); }
+/* Danger verb (Stop) — the .btn.danger vocabulary. */
+.svcp-act-danger { color: var(--err); border-color: var(--err-line); }
+.svcp-act-danger:hover { background: var(--err-soft); border-color: var(--err-line); }
 
-.svcp-busy { font-size: 11px; opacity: 0.6; }
+.svcp-busy {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-4);
+}
 
+/* Action outcome line — ok/err soft tokens, chip-adjacent. */
 .svcp-result {
+  font-family: var(--jbm);
   font-size: 11px;
   padding: 6px 8px;
-  border-radius: 6px;
-  background: rgba(80, 180, 110, 0.1);
+  border-radius: var(--rad-sm);
+  background: var(--ok-soft);
+  color: var(--ok);
+  border: 1px solid var(--ok-line);
 }
 
-.svcp-result.err { background: rgba(210, 80, 80, 0.12); }
+.svcp-result.err {
+  background: var(--err-soft);
+  color: var(--err);
+  border-color: var(--err-line);
+}
 
 /* ── logs drawer ── */
 .svcp-logs {
-  border-top: 1px solid var(--line, rgba(127, 127, 127, 0.2));
+  border-top: 1px solid var(--line-soft);
   padding-top: 8px;
   max-height: 260px;
   overflow: auto;
 }
 
 .svcp-logs-pre {
+  font-family: var(--jbm);
   font-size: 10.5px;
   line-height: 1.5;
+  color: var(--fg-2);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   margin: 0;
@@ -120,7 +155,7 @@
 
 .svcp-logs-empty {
   font-size: 11px;
-  opacity: 0.55;
+  color: var(--fg-4);
   padding: 6px 0;
 }
 
@@ -136,12 +171,17 @@
   align-items: center;
   gap: 8px;
   font-size: 13px;
+  color: var(--fg);
 }
 
-.svcp-mdns-host { opacity: 0.7; font-size: 12px; }
+.svcp-mdns-host {
+  font-family: var(--jbm);
+  font-size: 12px;
+  color: var(--fg-4);
+}
 
 .svcp-mdns-sub {
   font-size: 12px;
-  opacity: 0.7;
+  color: var(--fg-3);
   line-height: 1.55;
 }
