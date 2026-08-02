@@ -588,6 +588,27 @@ jobs:
             echo "See CHANGELOG.md for release notes." > "${NOTES_FILE}"
           fi
 
+          # GitHub rejects a release body over 125,000 characters (observed
+          # live on v1.0.0-rc.1: the folded milestone section is ~150 KB and
+          # the publish step died with HTTP 422 "body is too long"). The full
+          # notes still ship *inside* the signed tarball as RELEASE_NOTES.md
+          # (step 2b) — the release page body is a rendering, not the record —
+          # so truncate at a line boundary under the cap and point at the
+          # canonical copy rather than failing the whole publication.
+          BODY_CAP=120000
+          if [[ "$(wc -c < "${NOTES_FILE}")" -gt "${BODY_CAP}" ]]; then
+            # $'…' single-line form on purpose: a multi-line string literal
+            # whose continuation lines start at column 0 would terminate this
+            # YAML literal block (tests/release/test_workflow_contract.py
+            # parses this file and would fail on it).
+            TRAILER=$'\n\n*Truncated — full notes in [CHANGELOG.md](https://github.com/'"${GITHUB_REPOSITORY}"$'/blob/'"${TAG}"$'/CHANGELOG.md) and as RELEASE_NOTES.md inside the release tarball.*'
+            head -c $(( BODY_CAP - ${#TRAILER} )) "${NOTES_FILE}" \
+              | sed '$ d' > "${NOTES_FILE}.capped"
+            printf '%s' "${TRAILER}" >> "${NOTES_FILE}.capped"
+            mv "${NOTES_FILE}.capped" "${NOTES_FILE}"
+            echo "::warning::release notes body exceeded ${BODY_CAP} chars; truncated for the release page (full copy remains in the tarball)"
+          fi
+
           echo "path=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
 
       # ── 7. Publish one immutable GitHub Release ────────────────────────────
