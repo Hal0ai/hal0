@@ -17,8 +17,9 @@ divergent notion of "fits" or "evictable":
     :func:`hal0.slots.capacity.build_per_slot` uses as its baseline.
   - Free-memory probe: :meth:`SlotManager._probe_host_free_mb` (GTT-aware,
     §21.10) — the same probe the pressure sweeper reads.
-  - Eviction eligibility: :func:`hal0.slots.reaper.is_pinned` + the
-    per-slot ``lru = true`` TOML flag + ``serving_count`` + state — the
+  - Eviction eligibility: :func:`hal0.slots.reaper.is_pinned` +
+    ``serving_count`` + state, ordered by
+    :func:`hal0.slots.reaper.eviction_priority` (lower evicts first) — the
     EXACT rules :meth:`hal0.slots.reaper.SlotReaper.pressure_evict_once`
     already applies, just run synchronously at admission time instead of on
     a timer.
@@ -68,7 +69,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from hal0.slots.reaper import is_pinned
+from hal0.slots.reaper import _warn_lru_deprecated, eviction_priority, is_pinned
 from hal0.slots.state import (
     IllegalSlotTransition,
     SlotConfigError,
@@ -129,6 +130,7 @@ class CandidateSlot:
     footprint_mb: float
     eligible: bool
     reason: str = ""
+    priority: int = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +145,7 @@ class EvictionStep:
 class PreloadEvictionPlan:
     """Pure decision output of :func:`select_eviction_order`.
 
-    ``selected`` is the LRU-ordered subset of eligible candidates the
+    ``selected`` is the priority-ordered subset of eligible candidates the
     caller should evict; ``projected_free_mb`` is the ESTIMATE after
     evicting all of them (real callers re-probe after each real eviction
     rather than trusting this cumulative estimate — see :func:`admit`).
@@ -164,15 +166,16 @@ def select_eviction_order(
     headroom_mb: float,
     free_mb: float,
 ) -> PreloadEvictionPlan:
-    """Decide which candidates to evict, in LRU order, until it fits.
+    """Decide which candidates to evict, lowest priority first, until it fits.
 
     Pure: no I/O, no SlotManager. Ineligible candidates (``eligible=False``
-    — pinned, non-lru, serving, or in a non-resident state) are NEVER
-    selected regardless of how old or how large they are. Eligible
-    candidates are evicted oldest-``last_used``-first, stopping as soon as
-    the running projected free memory covers ``needed_mb + headroom_mb``,
-    matching :meth:`hal0.slots.reaper.SlotReaper.pressure_evict_once`'s
-    "stop as soon as relieved" behaviour.
+    — pinned, serving, not resident, or config unavailable) are NEVER
+    selected regardless of priority. Eligible candidates are evicted
+    lowest-``priority``-first, oldest-``last_used``-first within a tier,
+    stopping as soon as the running projected free memory covers
+    ``needed_mb + headroom_mb``, matching
+    :meth:`hal0.slots.reaper.SlotReaper.pressure_evict_once`'s "stop as
+    soon as relieved" behaviour.
     """
     target = needed_mb + headroom_mb
     if free_mb >= target:
@@ -185,7 +188,9 @@ def select_eviction_order(
             fits=True,
         )
 
-    eligible = sorted((c for c in candidates if c.eligible), key=lambda c: c.last_used)
+    eligible = sorted(
+        (c for c in candidates if c.eligible), key=lambda c: (c.priority, c.last_used)
+    )
     selected: list[CandidateSlot] = []
     projected = free_mb
     for candidate in eligible:
@@ -282,9 +287,12 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
 
     Eligibility mirrors :meth:`hal0.slots.reaper.SlotReaper.pressure_evict_once`
     exactly: resident state (READY/IDLE), not currently serving, not
-    pinned (:func:`is_pinned`), and ``lru = true`` in the slot's TOML. The
-    slot about to be loaded is always excluded — by construction it can't
-    be READY/IDLE yet (``load()`` short-circuits before this point when it
+    pinned (:func:`is_pinned`). Every other resident slot is eligible,
+    ordered by :func:`hal0.slots.reaper.eviction_priority` (lower evicts
+    first); the retired ``lru = true`` TOML key is ignored and warned once
+    per slot (:func:`hal0.slots.reaper._warn_lru_deprecated`). The slot
+    about to be loaded is always excluded — by construction it can't be
+    READY/IDLE yet (``load()`` short-circuits before this point when it
     already is), but the exclusion is explicit here too as a hard
     guarantee, not an accident of state timing.
     """
@@ -312,6 +320,7 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
 
         reason = ""
         eligible = True
+        priority = 50
         if host._serving_count.get(host._key(name), 0) > 0:
             eligible, reason = False, "serving"
         else:
@@ -326,8 +335,9 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
                 else:
                     if is_pinned(canonical, cfg):
                         eligible, reason = False, "pinned"
-                    elif not cfg.get("lru", False):
-                        eligible, reason = False, "not_lru"
+                    else:
+                        _warn_lru_deprecated(canonical, cfg)
+                        priority = eviction_priority(cfg)
 
         footprint_mb = float(per_slot.get(name, {}).get("mem_mb", 0.0) or 0.0)
         out.append(
@@ -337,6 +347,7 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
                 footprint_mb=footprint_mb,
                 eligible=eligible,
                 reason=reason,
+                priority=priority,
             )
         )
     return out

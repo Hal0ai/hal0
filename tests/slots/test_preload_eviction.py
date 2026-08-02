@@ -19,14 +19,33 @@ from typing import Any
 
 import pytest
 
+from hal0.slots import reaper
 from hal0.slots.manager import SlotManager
 from hal0.slots.preload_evict import (
     CandidateSlot,
     PreloadEvictionFailed,
+    _gather_candidates,
     select_eviction_order,
 )
 from hal0.slots.state import SlotState
 from tests.slots.conftest import FakeContainerProvider
+
+
+@pytest.fixture(autouse=True)
+def _reset_lru_deprecation_state() -> None:
+    """``reaper._lru_flag_warned`` is module-level, one-shot-per-process.
+
+    Shared with ``hal0.slots.reaper`` (see
+    ``tests/slots/test_pressure_eviction.py``'s identical fixture) — this
+    file writes slots with a bare/omitted ``lru`` key too, so without a
+    reset whichever test runs first (in this file OR the reaper test file,
+    same pytest process) would "use up" the one-shot warning for everyone
+    after it.
+    """
+    reaper._lru_flag_warned.clear()
+    yield
+    reaper._lru_flag_warned.clear()
+
 
 # ── pure planner: select_eviction_order() ────────────────────────────────────
 
@@ -93,18 +112,84 @@ def test_select_insufficient_when_only_ineligible_candidates_exist() -> None:
     assert plan.fits is False
 
 
+def test_select_orders_by_priority_then_lru() -> None:
+    """priority beats recency: an old high-priority slot survives while a
+    newer low-priority one is selected first."""
+    cands = [
+        CandidateSlot(name="hi", last_used=100.0, footprint_mb=4000.0, eligible=True, priority=90),
+        CandidateSlot(name="lo-new", last_used=900.0, footprint_mb=4000.0, eligible=True, priority=10),
+        CandidateSlot(name="lo-old", last_used=100.0, footprint_mb=4000.0, eligible=True, priority=10),
+    ]
+    plan = select_eviction_order(cands, needed_mb=7000.0, headroom_mb=1000.0, free_mb=0.0)
+    assert [c.name for c in plan.selected] == ["lo-old", "lo-new"]
+    assert plan.fits is True
+
+
+def test_select_ineligible_never_selected_regardless_of_priority() -> None:
+    cands = [
+        CandidateSlot(name="pinned", last_used=1.0, footprint_mb=9000.0, eligible=False,
+                      reason="pinned", priority=0),
+        CandidateSlot(name="ok", last_used=2.0, footprint_mb=9000.0, eligible=True, priority=100),
+    ]
+    plan = select_eviction_order(cands, needed_mb=8000.0, headroom_mb=0.0, free_mb=0.0)
+    assert [c.name for c in plan.selected] == ["ok"]
+
+
+# ── _gather_candidates() ──────────────────────────────────────────────────────
+
+
+async def test_gather_candidates_no_lru_key_is_eligible_with_priority(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A slot with no ``lru`` key at all is eligible, priority read from
+    cfg (was ``eligible=False, reason="not_lru"`` before the priority
+    rework — the retired key no longer gates eligibility)."""
+    _write_slot(slot_root, "rerank", port=8090, priority=30)
+    sm = SlotManager()
+    await sm.load("rerank")
+
+    candidates = await _gather_candidates(sm, exclude="chat")
+
+    assert len(candidates) == 1
+    cand = candidates[0]
+    assert cand.name == "rerank"
+    assert cand.eligible is True
+    assert cand.reason == ""
+    assert cand.priority == 30
+
+
 # ── SlotManager.load() integration ───────────────────────────────────────────
 
 
-def _write_slot(root: Path, name: str, *, port: int, lru: bool = False) -> None:
+def _write_slot(
+    root: Path,
+    name: str,
+    *,
+    port: int,
+    lru: bool | None = None,
+    priority: int | None = None,
+    pinned: bool | None = None,
+) -> None:
+    """Write a minimal slot TOML.
+
+    ``lru`` is the retired opt-in key — pass it to prove it's
+    read-but-ignored; omit it (default) to match a freshly authored TOML
+    that never had it. ``priority``/``pinned`` map directly to the current
+    eviction-order fields (mirrors ``test_pressure_eviction.py``'s helper).
+    """
     lines = [
         f'name = "{name}"',
         f"port = {port}",
         'backend = "vulkan"',
         'provider = "llama-server"',
     ]
-    if lru:
-        lines.append("lru = true")
+    if lru is not None:
+        lines.append(f"lru = {'true' if lru else 'false'}")
+    if priority is not None:
+        lines.append(f"priority = {priority}")
+    if pinned is not None:
+        lines.append(f"pinned = {'true' if pinned else 'false'}")
     lines += ["[model]", 'default = "qwen3-4b-q4_k_m"', ""]
     (root / f"{name}.toml").write_text("\n".join(lines), encoding="utf-8")
 
@@ -149,10 +234,10 @@ async def test_load_fails_clearly_when_nothing_fits(
     container_stub: FakeContainerProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No eligible (non-lru) candidate exists: the load fails with a clear,
-    actionable error — nothing half-loaded, and the resident slot (not
-    lru-eligible, so never a candidate) is left completely untouched."""
-    _write_slot(slot_root, "rerank", port=8090, lru=False)
+    """No eligible candidate exists: the load fails with a clear,
+    actionable error — nothing half-loaded, and the resident slot (pinned,
+    so never a candidate) is left completely untouched."""
+    _write_slot(slot_root, "rerank", port=8090, pinned=True)
     sm = SlotManager(preload_evict_headroom_mb=0.0)
     await sm.load("rerank")
 
