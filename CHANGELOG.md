@@ -21,6 +21,16 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- hal0-brain tool-bearing requests no longer 500 with "Unknown (built-in)
+  filter 'min'": the GGUF-embedded chat template uses the `|min` filter,
+  which llama-server's jinja engine (minja) lacks. A corrected template
+  (`hal0-brain-sft.jinja`) now ships bundled, and the curated catalogue
+  stamps it into the model's `defaults.chat_template` at pull time so
+  fresh installs launch with `--chat-template-file` instead of the broken
+  embedded template.
+
 ### Changed
 
 - Slot drawer: the Runner Image field is a dropdown of the runner-image

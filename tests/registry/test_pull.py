@@ -122,6 +122,99 @@ async def test_run_pull_happy_path_writes_file_and_registers(
     assert entry.metadata.get("sha256") == digest
 
 
+# ── curated chat-template stamping ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_pull_stamps_curated_chat_template(tmp_hal0_home: str) -> None:
+    """A curated entry naming a bundled template lands in defaults.chat_template.
+
+    hal0-brain-sft's GGUF-embedded template uses the ``|min`` filter, which
+    llama-server's minja lacks — every tool-bearing request 500s. The curated
+    row therefore names the bundled ``hal0-brain-sft`` template, and the pull
+    layer must stamp it so launches pass ``--chat-template-file`` instead of
+    trusting the embedded one.
+    """
+    body = _payload(4096)
+    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    entry = registry.get("hal0-brain-sft-q8-rocmfpx")
+    assert entry.defaults is not None
+    assert entry.defaults.chat_template == "hal0-brain-sft"
+
+
+@pytest.mark.asyncio
+async def test_run_pull_keeps_operator_chat_template(tmp_hal0_home: str) -> None:
+    """A re-pull never clobbers a chat_template the operator already set."""
+    from hal0.registry.model import Model, ModelDefaults
+
+    body = _payload(4096)
+    registry = ModelRegistry()
+    registry.add(
+        Model(
+            id="hal0-brain-sft-q8-rocmfpx",
+            name="hal0-brain-sft-q8-rocmfpx",
+            path="/nonexistent/model.gguf",
+            size_bytes=1,
+            defaults=ModelDefaults(chat_template="operator-own"),
+        )
+    )
+    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    entry = registry.get("hal0-brain-sft-q8-rocmfpx")
+    assert entry.defaults is not None
+    assert entry.defaults.chat_template == "operator-own"
+
+
+@pytest.mark.asyncio
+async def test_run_pull_uncurated_model_gets_no_template_default(
+    tmp_hal0_home: str,
+) -> None:
+    """A non-curated pull (custom HF coords) leaves defaults untouched."""
+    body = _payload(4096)
+    job = make_job("some-random-gguf")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="org/random-GGUF",
+            hf_file="random.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert registry.get("some-random-gguf").defaults is None
+
+
 # ── MR-1: run_pull persists a durable snapshot for ALL callers ────────────────
 
 

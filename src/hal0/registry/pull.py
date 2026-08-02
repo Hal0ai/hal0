@@ -40,7 +40,7 @@ from hal0.db import repository
 from hal0.db.connection import connect, tx
 from hal0.errors import Hal0Error
 from hal0.registry.fileset import FileSetEntry, FileSetPlan
-from hal0.registry.model import Model
+from hal0.registry.model import Model, ModelDefaults
 from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
 
 log = logging.getLogger(__name__)
@@ -1200,6 +1200,14 @@ def _register_pulled(
     # bytes were fetched — and thereby how stale they are vs an available
     # HF update (registry/update_check.py compares the shas).
     fresh_meta = {"sha256": sha256, "pulled_at": int(time.time())}
+    # Curated template override: some artifacts ship an embedded chat template
+    # the runner's jinja engine can't execute (hal0-brain-sft's ``|min``), so
+    # their catalogue entry names a bundled replacement. Stamped as a defaults
+    # value, never over an operator's own setting.
+    from hal0.registry.curated import get_curated
+
+    curated = get_curated(model_id)
+    curated_template = curated.chat_template if curated is not None else ""
     updates: dict[str, Any] = {
         "path": path,
         "size_bytes": size_bytes,
@@ -1228,6 +1236,9 @@ def _register_pulled(
                 backends=backends,
                 mmproj=mmproj,
                 metadata=dict(fresh_meta),
+                defaults=ModelDefaults(chat_template=curated_template)
+                if curated_template
+                else None,
             )
         )
         return
@@ -1237,6 +1248,15 @@ def _register_pulled(
     merged_meta = dict(existing.metadata)
     merged_meta.update(fresh_meta)
     updates["metadata"] = merged_meta
+    if curated_template and not (
+        existing.defaults is not None and existing.defaults.chat_template
+    ):
+        merged_defaults = (
+            existing.defaults.model_copy(update={"chat_template": curated_template})
+            if existing.defaults is not None
+            else ModelDefaults(chat_template=curated_template)
+        )
+        updates["defaults"] = merged_defaults
     registry.update(model_id, updates)
 
 
