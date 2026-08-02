@@ -251,6 +251,22 @@ class ComfyUIProvider(Provider):
             os.environ.get("HAL0_COMFYUI_DATA_ROOT", "").strip()
             or f"{model_store_root()}/{_COMFYUI_DATA_SUBDIR}"
         )
+        # Podman refuses a bind mount whose host path is absent (statfs →
+        # exit 125), which crash-looped the img slot on any box where the
+        # comfyui tree hadn't been provisioned (fresh install, or a store
+        # root that moved after install). Ensure every mounted dir exists,
+        # and the extra_model_paths.yaml file too — an empty one is a valid
+        # ComfyUI config. Best-effort: a read-only store degrades to the old
+        # behaviour (podman reports the missing path).
+        try:
+            for sub in ("models", "output", "input", "user", "custom_nodes"):
+                os.makedirs(f"{data_root}/{sub}", exist_ok=True)
+            yaml_path = f"{data_root}/extra_model_paths.yaml"
+            if not os.path.exists(yaml_path):
+                with open(yaml_path, "w", encoding="utf-8"):
+                    pass
+        except OSError as exc:
+            log.warning("comfyui.data_root_provision_failed root=%s err=%s", data_root, exc)
         # read_only is a first-class Mount flag; extra_model_paths.yaml is the
         # only read-only mount (the renderer appends ":ro").
         mounts: list[Mount] = [
@@ -285,6 +301,25 @@ class ComfyUIProvider(Provider):
         )
 
     # ── Health ─────────────────────────────────────────────────────────────────
+
+    async def wait_ready(self, port: int) -> None:
+        """Poll ``/system_stats`` until healthy or the container deadline passes.
+
+        Mirrors :meth:`ContainerProvider.wait_ready`'s loop but through THIS
+        provider's health probe: ComfyUI ships no llama-style ``/health``, so
+        the generic container waiter 404-polled for the full 180 s and the
+        slot wedged in WARMING with a perfectly healthy server behind it
+        (every ``/v1/images/generations`` then 409'd on warming → starting).
+        """
+        from hal0.providers.container import _HEALTH_POLL_INTERVAL_S, _HEALTH_TIMEOUT_S
+
+        deadline = asyncio.get_event_loop().time() + _HEALTH_TIMEOUT_S
+        while asyncio.get_event_loop().time() < deadline:
+            h = await self.health(port)
+            if h.get("ok"):
+                return
+            await asyncio.sleep(_HEALTH_POLL_INTERVAL_S)
+        raise TimeoutError(f"comfyui slot port {port} did not become healthy")
 
     async def health(self, port: int) -> dict[str, Any]:
         """Health probe: GET /system_stats returns 200 with python_version.

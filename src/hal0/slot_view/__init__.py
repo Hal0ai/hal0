@@ -523,10 +523,24 @@ async def container_enrichment(
             # token, which is the durable id on a post-migration box (#1417).
             active = await loop.run_in_executor(None, cp.is_active, cfg)
             if active:
-                # 2) /health probe on the slot port to distinguish running vs starting
+                # 2) /health probe on the slot port to distinguish running vs starting.
+                # ComfyUI ships no llama-style /health — its readiness probe is
+                # GET /system_stats (ComfyUIProvider.health). Probing the
+                # generic path 404'd forever, so a healthy img slot rendered
+                # "starting"/unhealthy in the dashboard indefinitely. Only when
+                # no provider was injected (tests inject fakes and expect them
+                # to answer): production resolves the real family provider.
                 port = _cfg_port(cfg)
                 if port:
-                    health = await cp.health(port)
+                    health_probe = cp.health
+                    if provider is None:
+                        from hal0.providers.comfyui import ComfyUIProvider
+                        from hal0.providers.container import _spec_provider_for
+
+                        sp = _spec_provider_for(cfg)
+                        if isinstance(sp, ComfyUIProvider):
+                            health_probe = sp.health
+                    health = await health_probe(port)
                     container_health = bool(health.get("ok"))
                     return ("running" if container_health else "starting", container_health)
                 return "running", False

@@ -10,6 +10,7 @@ and label=disable alongside the usual LXC security opts.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -193,3 +194,48 @@ def test_image_section_dict_is_not_an_image_override(monkeypatch) -> None:
     assert isinstance(ref, str)
     assert "idle_restore_minutes" not in ref
     assert "kyuz0/amd-strix-halo-comfyui" in ref  # manifest pin or fallback tag
+
+
+def test_comfyui_container_spec_provisions_data_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing data dirs are created before the mounts are rendered.
+
+    Podman refuses a bind mount whose host path is absent (statfs → exit
+    125), which crash-looped the img slot on any box where the comfyui tree
+    wasn't provisioned.
+    """
+    root = tmp_path / "comfy-data"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(root))
+    ComfyUIProvider().container_spec(_img_cfg(), {})
+    for sub in ("models", "output", "input", "user", "custom_nodes"):
+        assert (root / sub).is_dir(), sub
+    assert (root / "extra_model_paths.yaml").is_file()
+
+
+@pytest.mark.asyncio
+async def test_comfyui_wait_ready_uses_system_stats_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wait_ready resolves through the provider's own /system_stats health.
+
+    The generic container waiter polls llama-style /health, which ComfyUI
+    never serves — the slot wedged in WARMING behind a healthy server.
+    """
+    provider = ComfyUIProvider()
+    answers = iter([{"ok": False, "status": "http_404"}, {"ok": True}])
+
+    async def _fake_health(port: int) -> dict:
+        return next(answers)
+
+    monkeypatch.setattr(provider, "health", _fake_health)
+    monkeypatch.setattr("hal0.providers.container._HEALTH_POLL_INTERVAL_S", 0.01)
+    await provider.wait_ready(8188)  # returns without raising
+
+    async def _never_ok(port: int) -> dict:
+        return {"ok": False, "status": "http_404"}
+
+    monkeypatch.setattr(provider, "health", _never_ok)
+    monkeypatch.setattr("hal0.providers.container._HEALTH_TIMEOUT_S", 0.05)
+    with pytest.raises(TimeoutError):
+        await provider.wait_ready(8188)
