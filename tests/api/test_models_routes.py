@@ -280,6 +280,60 @@ def test_inspect_surfaces_bare_mmproj_sidecar(
     assert "mmproj" in variants["mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj"]["info"]
 
 
+def test_inspect_lists_tree_recursively_and_surfaces_nested_mmproj(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tree fetch must ask HF for a recursive listing.
+
+    Regression: repos like ``jcbtc/Ornith1.0-35b-…-GGUF`` nest the projector
+    in a subdirectory (``vision/Ornith-1.0-35B-F32.mmproj``). The inspect
+    fetch used the non-recursive ``/tree/main`` listing, which only returns
+    root entries — the sidecar never reached the variant list and the vision
+    picker claimed the repo ships no mmproj file.
+    """
+    seen_tree_urls: list[httpx.URL] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/tree/main"):
+            seen_tree_urls.append(req.url)
+            # HF only returns nested entries when recursive=true is passed —
+            # mirror that so a non-recursive fetch fails this test.
+            if req.url.params.get("recursive") != "true":
+                tree = [{"path": "vision", "type": "directory"}]
+            else:
+                tree = [
+                    {
+                        "path": "Ornith1.0-35b-CIRU-DUALVIEW-FPX7+Q8-MTP.gguf",
+                        "lfs": {"size": 33_536_832_416},
+                        "size": 136,
+                    },
+                    {"path": "vision", "type": "directory"},
+                    {
+                        "path": "vision/Ornith-1.0-35B-F32.mmproj",
+                        "lfs": {"size": 1_786_305_248},
+                        "size": 134,
+                    },
+                ]
+            return httpx.Response(200, json=tree)
+        return httpx.Response(200, json={"tags": []})
+
+    _patch_httpx_transport(monkeypatch, handler)
+
+    r = inspect_client.post(
+        "/api/models/inspect",
+        json={"hf_repo": "jcbtc/Ornith1.0-35b-CIRU-DUALVIEW-FPX7-Q8-MTP-GGUF"},
+    )
+    assert r.status_code == 200, r.text
+    assert seen_tree_urls and seen_tree_urls[0].params.get("recursive") == "true"
+    variants = {v["id"]: v for v in r.json()["variants"]}
+    assert "Ornith1.0-35b-CIRU-DUALVIEW-FPX7+Q8-MTP.gguf" in variants
+    # The nested sidecar keeps its repo-relative path — that's what the pull
+    # endpoint resolves against (hf_filename).
+    assert "vision/Ornith-1.0-35B-F32.mmproj" in variants
+    assert "mmproj" in variants["vision/Ornith-1.0-35B-F32.mmproj"]["info"]
+
+
 def test_inspect_surfaces_flm_npu_repo(
     inspect_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
