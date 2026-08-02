@@ -50,6 +50,8 @@ const CONFIG_ENRICHMENT_KEYS = [
   'model_default',
   'labels',
   'pinned',
+  'autoload',
+  'priority',
   'ctx_max',
   'chat_template',
   'n_gpu_layers',

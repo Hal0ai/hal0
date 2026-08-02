@@ -204,7 +204,18 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
             max={100}
             step={1}
             value={priority}
-            onChange={(e) => setPriority(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+            onChange={(e) => {
+              // Same numeric hardening as the edit drawer's commitPriority:
+              // a blank/garbage value must not silently become 0 (the most
+              // aggressive evict-first priority) or a float the backend 400s
+              // on — fall back to the 50 default and otherwise round+clamp.
+              const raw = e.target.value.trim();
+              if (raw === "" || !Number.isFinite(Number(raw))) {
+                setPriority(50);
+                return;
+              }
+              setPriority(Math.max(0, Math.min(100, Math.round(Number(raw)))));
+            }}
             style={{ width: 90 }}
           />
           <div className="hint">lower unloads first</div>

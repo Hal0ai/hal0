@@ -716,7 +716,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		}
 	};
 	const commitPriority = async () => {
-		const v = Math.max(0, Math.min(100, Number(prio) || 0));
+		// An emptied/garbage input must never commit as 0 — that's the most
+		// aggressive evict-first priority, not "no input yet". Revert to the
+		// last known-good value (server truth, or the 50 default) and bail
+		// without a PUT rather than guessing.
+		const raw = String(prio).trim();
+		if (raw === "" || !Number.isFinite(Number(raw))) {
+			setPrio(Number.isInteger(slot.priority) ? slot.priority : 50);
+			return;
+		}
+		const v = Math.max(0, Math.min(100, Math.round(Number(raw))));
 		setPrio(v);
 		if (v === slot.priority) return;
 		try {

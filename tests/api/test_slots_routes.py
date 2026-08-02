@@ -815,6 +815,29 @@ def test_put_config_priority_out_of_range_rejected(
     assert resp.json()["error"]["code"] == "validation.invalid_value"
 
 
+def test_create_slot_priority_out_of_range_rejected(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """POST /api/slots refuses an out-of-range priority the same way PUT
+    /config does (test_put_config_priority_out_of_range_rejected above) —
+    the create path runs the same `_validate_autoload_priority` guard, so a
+    bad value must 400 before the slot TOML is ever written, not persist and
+    get silently clamped forever by the eviction helper."""
+    body = {
+        "name": "badprio",
+        "model": "qwen3-4b-q4_k_m",
+        "device": "gpu-vulkan",
+        "profile": "vulkan-radv",
+        "priority": 101,
+    }
+    r = isolated_client.post("/api/slots", json=body)
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "validation.invalid_value"
+    assert not (slot_root / "badprio.toml").exists()
+
+
 def test_put_config_autoload_must_be_bool(
     slot_root: Path,
     container_stub: dict[str, Any],

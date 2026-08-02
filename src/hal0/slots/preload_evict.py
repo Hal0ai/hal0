@@ -69,7 +69,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from hal0.slots.reaper import _warn_lru_deprecated, eviction_priority, is_pinned
+from hal0.slots.reaper import (
+    _DEFAULT_EVICTION_PRIORITY,
+    _warn_lru_deprecated,
+    eviction_priority,
+    is_pinned,
+)
 from hal0.slots.state import (
     IllegalSlotTransition,
     SlotConfigError,
@@ -130,7 +135,7 @@ class CandidateSlot:
     footprint_mb: float
     eligible: bool
     reason: str = ""
-    priority: int = 50
+    priority: int = _DEFAULT_EVICTION_PRIORITY
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,7 +325,7 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
 
         reason = ""
         eligible = True
-        priority = 50
+        priority = _DEFAULT_EVICTION_PRIORITY
         if host._serving_count.get(host._key(name), 0) > 0:
             eligible, reason = False, "serving"
         else:
