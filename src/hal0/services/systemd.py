@@ -10,9 +10,18 @@ This module is the single implementation the services surface uses:
 * :func:`unit_action` — run one allow-listed lifecycle verb.
 
 Everything is fail-soft: a host without systemd (CI, dev laptop) yields
-"unknown" states and honest error strings, never an exception. hal0-api
-runs as root, so systemctl is invoked directly — same assumption as
-``installer._privileged_systemctl_argv`` (the sudoers seam was removed).
+"unknown" states and honest error strings, never an exception.
+
+Privilege (#1590): hal0-api runs as ``User=hal0`` post-P3-perms, so the
+MUTATING verbs (:func:`unit_action`) route through
+:class:`hal0.system.seam.SystemCtlSeam` — which forwards hal0-managed units
+(``hal0-slot@*``, ``hal0-agent@*``, and the companion units in
+``COMPANION_SERVICE_UNITS``) through the ``hal0-systemctl`` sudo wrapper and
+passes everything else straight through. The original "hal0-api runs as
+root, so systemctl is invoked directly" assumption here predated that flip:
+every Services-page verb died on polkit's "Interactive authentication
+required". Read-only queries (``show``, ``is-active``) stay direct — they
+never need root.
 
 The verb allow-list is enforced HERE, at the execution boundary, in
 addition to the per-service ``ServiceDef.actions`` check in the route —
@@ -24,10 +33,18 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+import subprocess
 
 import structlog
 
+from hal0.system.seam import SystemCtlSeam
+
 log = structlog.get_logger(__name__)
+
+#: Shared seam instance for the mutating verbs. Default construction =
+#: production gating (seam engages only for the real hal0 service account;
+#: dev/CI/tests pass straight through, exactly as before #1590).
+_SEAM = SystemCtlSeam()
 
 #: Verbs :func:`unit_action` will ever execute.
 ALLOWED_VERBS = frozenset({"start", "stop", "restart", "enable", "disable"})
@@ -194,10 +211,31 @@ async def unit_action(unit: str, verb: str) -> dict[str, object]:
         raise ValueError(f"verb {verb!r} is not an allowed systemctl verb")
     if not valid_unit(unit):
         raise ValueError(f"invalid unit name {unit!r}")
-    rc, _stdout, stderr = await _run(verb, unit, timeout=_VERB_TIMEOUT[verb])
-    if rc == 0:
+    if shutil.which("systemctl") is None:
+        return {"ok": False, "message": f"{verb} {unit} failed: systemctl not available"}
+    # Through the seam (#1590): as the hal0 service user this becomes
+    # `sudo -n hal0-systemctl …` for hal0-managed units; everywhere else it is
+    # the plain systemctl call this module always made. Sync subprocess —
+    # off-loop so a slow verb can't stall the event loop.
+    try:
+        proc = await asyncio.to_thread(
+            _SEAM.systemctl,
+            "systemctl",
+            verb,
+            unit,
+            check=False,
+            timeout=_VERB_TIMEOUT[verb],
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "message": f"{verb} {unit} failed: timed out after {_VERB_TIMEOUT[verb]:.0f}s",
+        }
+    except OSError as exc:  # pragma: no cover — spawn failure
+        return {"ok": False, "message": f"{verb} {unit} failed: {exc}"}
+    if proc.returncode == 0:
         return {"ok": True, "message": f"{verb} {unit}: ok"}
-    detail = stderr.strip() or f"exit code {rc}"
+    detail = (proc.stderr or "").strip() or f"exit code {proc.returncode}"
     log.warning("services.unit_action_failed", unit=unit, verb=verb, detail=detail)
     return {"ok": False, "message": f"{verb} {unit} failed: {detail}"}
 

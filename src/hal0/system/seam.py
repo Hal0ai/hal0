@@ -72,7 +72,25 @@ _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 #: The only agent-unit verbs the seam exposes, mapped bare-systemctl verb ->
 #: seam verb. Anything not in here is a programming error, not a runtime input.
-AGENT_UNIT_VERBS: dict[str, str] = {"stop": "stop-agent", "disable": "disable-agent"}
+#: start/restart/enable joined stop/disable for the dashboard Services page
+#: (#1590) — before that every mutating verb on the hermes card fell through
+#: to bare systemctl and died on polkit.
+AGENT_UNIT_VERBS: dict[str, str] = {
+    "stop": "stop-agent",
+    "disable": "disable-agent",
+    "start": "start-agent",
+    "restart": "restart-agent",
+    "enable": "enable-agent",
+}
+
+#: Companion-service units the seam's ``svc-<verb>`` family may reach (#1590),
+#: mapped unit name -> the service key the wrapper's own CLOSED map accepts.
+#: Mirrors the ``svc-start|...`` case arm in installer/wrappers/hal0-systemctl
+#: exactly — the wrapper is the boundary, this is the client-side spelling.
+COMPANION_SERVICE_UNITS: dict[str, str] = {
+    "hal0-openwebui.service": "openwebui",
+    "hindsight-api.service": "hindsight",
+}
 
 
 class Hal0SeamMissing(RuntimeError):
@@ -186,6 +204,15 @@ def _slot_id_from_unit(unit_name: str) -> str | None:
     """Extract ``<id>`` from ``hal0-slot@<id>.service``, or ``None`` if the
     unit name isn't one (e.g. ``hal0-api.service`` — never routed here)."""
     m = _UNIT_NAME_RE.match(unit_name)
+    return m.group(1) if m else None
+
+
+_AGENT_UNIT_NAME_RE = re.compile(r"^hal0-agent@([A-Za-z0-9_-]{1,64})\.service$")
+
+
+def _agent_id_from_unit(unit_name: str) -> str | None:
+    """Extract ``<id>`` from ``hal0-agent@<id>.service``, or ``None``."""
+    m = _AGENT_UNIT_NAME_RE.match(unit_name)
     return m.group(1) if m else None
 
 
@@ -324,7 +351,32 @@ class SystemCtlSeam:
                     check=check,
                     timeout=timeout,
                 )
-        # Not a routable hal0-slot@ op (e.g. is-active, or a non-slot unit) —
+            # Bundled-agent unit (hal0-agent@<id>.service) — route through the
+            # wrapper's <verb>-agent arms (#1590). Same shape as the slot
+            # family: the seam takes the bare id and rebuilds the unit name
+            # root-side.
+            agent_id = _agent_id_from_unit(args[2])
+            if agent_id is not None and verb in AGENT_UNIT_VERBS:
+                return self._run(
+                    self._seam_argv(AGENT_UNIT_VERBS[verb], agent_id),
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                    timeout=timeout,
+                )
+            # Companion-service unit (openwebui / hindsight) — the wrapper's
+            # svc-<verb> family takes a service KEY from a closed map, never a
+            # unit string (#1590).
+            svc_key = COMPANION_SERVICE_UNITS.get(args[2])
+            if svc_key is not None and verb != "reset-failed":
+                return self._run(
+                    self._seam_argv(f"svc-{verb}", svc_key),
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                    timeout=timeout,
+                )
+        # Not a routable hal0-managed op (e.g. is-active, or a foreign unit) —
         # pass through unprivileged; systemctl read-only queries never need root.
         return self._run(list(args), capture_output=True, text=True, check=check, timeout=timeout)
 
@@ -345,6 +397,7 @@ class SystemCtlSeam:
 __all__ = [
     "AGENT_UNIT_PREFIX",
     "AGENT_UNIT_VERBS",
+    "COMPANION_SERVICE_UNITS",
     "SEAM_BIN",
     "Hal0SeamMissing",
     "SystemCtlSeam",

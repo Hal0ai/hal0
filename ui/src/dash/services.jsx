@@ -98,21 +98,21 @@ function ActionButtons({ svc, onAction, busy }) {
   return (
     <>
       {has('restart') && (
-        <button className="btn ghost svcp-act" disabled={busy}
+        <button className="btn ghost sm svcp-act" disabled={busy}
           data-testid={`svcp-restart-${svc.id}`}
           onClick={() => onAction(svc.id, 'restart')}>
           {SIcons.restart} Restart
         </button>
       )}
       {has('start') && !running && (
-        <button className="btn ghost svcp-act" disabled={busy}
+        <button className="btn ghost sm svcp-act" disabled={busy}
           data-testid={`svcp-start-${svc.id}`}
           onClick={() => onAction(svc.id, 'start')}>
           {SIcons.play} Start
         </button>
       )}
       {has('stop') && running && (
-        <button className="btn ghost svcp-act svcp-act-danger" disabled={busy}
+        <button className="btn ghost sm svcp-act svcp-act-danger" disabled={busy}
           data-testid={`svcp-stop-${svc.id}`}
           onClick={() => {
             if (window.confirm(`Stop ${svc.name}? Clients using it will lose access until it is started again.`)) {
@@ -171,14 +171,14 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, comfyReachable }) {
       <div className="svcp-actions">
         <ActionButtons svc={svc} onAction={onAction} busy={busy} />
         {svc.unit && (
-          <button className={'btn ghost svcp-act' + (logsOpen ? ' on' : '')}
+          <button className={'btn ghost sm svcp-act' + (logsOpen ? ' on' : '')}
             data-testid={`svcp-logbtn-${svc.id}`}
             onClick={() => setLogsOpen(v => !v)}>
             {SIcons.logs} Logs {logsOpen ? SIcons.chevUp : SIcons.chev}
           </button>
         )}
         {isComfy && CJQ && (
-          <button className={'btn ghost svcp-act' + (queueOpen ? ' on' : '')}
+          <button className={'btn ghost sm svcp-act' + (queueOpen ? ' on' : '')}
             data-testid="svcp-queue-comfyui"
             onClick={() => setQueueOpen(v => !v)}>
             Queue {queueOpen ? SIcons.chevUp : SIcons.chev}
@@ -211,7 +211,7 @@ function DiscoveryCard({ mdns, services }) {
           <span>avahi {mdns.available ? 'active' : 'inactive'}</span>
           <span className="svcp-mdns-host mono">{mdns.hostname}</span>
           <span className="vh-spacer" style={{ flex: 1 }} />
-          <button className={'btn ghost svcp-act' + (on ? ' on' : '')}
+          <button className={'btn ghost sm svcp-act' + (on ? ' on' : '')}
             data-testid="svcp-mdns-toggle"
             disabled={advertiseMut.isPending || !mdns.available}
             onClick={() => advertiseMut.mutate(!on)}>

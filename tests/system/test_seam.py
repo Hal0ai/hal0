@@ -249,15 +249,51 @@ def test_systemctl_read_only_query_never_routed_even_as_hal0_user() -> None:
     assert calls == [["systemctl", "is-active", "hal0-slot@chat.service"]]
 
 
-def test_systemctl_non_slot_unit_passes_through_even_as_hal0_user() -> None:
-    """A non-hal0-slot@ unit (e.g. hindsight-api.service) isn't covered by the
-    seam's whitelist — passes straight through unprivileged."""
+def test_systemctl_foreign_unit_passes_through_even_as_hal0_user() -> None:
+    """A unit hal0 doesn't manage at all isn't covered by any seam family —
+    passes straight through unprivileged. (hindsight-api used to be the
+    example here; #1590 made it seam-routed, which was exactly the point.)"""
     calls, run = _recorder()
     seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
 
-    seam.systemctl("systemctl", "restart", "hindsight-api.service")
+    seam.systemctl("systemctl", "restart", "nginx.service")
 
-    assert calls == [["systemctl", "restart", "hindsight-api.service"]]
+    assert calls == [["systemctl", "restart", "nginx.service"]]
+
+
+@pytest.mark.parametrize(
+    ("unit", "verb", "seam_argv_tail"),
+    [
+        ("hal0-agent@hermes.service", "start", ["start-agent", "hermes"]),
+        ("hal0-agent@hermes.service", "restart", ["restart-agent", "hermes"]),
+        ("hal0-openwebui.service", "restart", ["svc-restart", "openwebui"]),
+        ("hal0-openwebui.service", "start", ["svc-start", "openwebui"]),
+        ("hindsight-api.service", "stop", ["svc-stop", "hindsight"]),
+        ("hindsight-api.service", "enable", ["svc-enable", "hindsight"]),
+    ],
+)
+def test_systemctl_routes_agent_and_companion_units_through_seam(
+    unit: str, verb: str, seam_argv_tail: list[str]
+) -> None:
+    """#1590: as the hal0 user, agent + companion units route through the
+    wrapper instead of falling through to bare systemctl (= polkit)."""
+    calls, run = _recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    seam.systemctl("systemctl", verb, unit)
+
+    assert calls == [["sudo", "-n", seam._seam_bin, *seam_argv_tail]]
+
+
+def test_systemctl_companion_units_pass_through_off_the_service_account() -> None:
+    """Dev/CI/tests (not the hal0 user) keep the direct call — no sudo grant
+    exists there, and root needs none."""
+    calls, run = _recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
+
+    seam.systemctl("systemctl", "restart", "hal0-openwebui.service")
+
+    assert calls == [["systemctl", "restart", "hal0-openwebui.service"]]
 
 
 def test_systemctl_non_systemctl_argv_always_passes_through() -> None:

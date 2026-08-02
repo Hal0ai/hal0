@@ -18,6 +18,7 @@ import {
   useComfyui,
   useComfyuiRenderCancel,
   useComfyuiRestart,
+  useComfyuiSwitchover,
   useComfyuiWorkflows,
   transformComfyuiStatus,
   COMFYUI_FALLBACK,
@@ -400,7 +401,7 @@ export const COMFYUI_V2_MOCK = {
 // is worse than none, so it's removed rather than wired to a speculative
 // endpoint; switching away from generation mode already has a real path via
 // the arbiter switchover (mode=inference).
-function CardHead({ run, pct, onRestart, onLogs }) {
+function CardHead({ run, pct, onRestart, onLogs, onStart, engineStopped, startBusy }) {
   const hasRun = run != null
   return (
     <div className="engine-h wcard-h">
@@ -414,7 +415,7 @@ function CardHead({ run, pct, onRestart, onLogs }) {
       </span>
       <span className={'epill' + (hasRun ? ' generating' : '')}>
         <span className="dot" />
-        {hasRun ? `generating · ${Math.round(pct)}%` : 'idle'}
+        {hasRun ? `generating · ${Math.round(pct)}%` : (engineStopped ? 'stopped' : 'idle')}
       </span>
       <span className="grow" />
       <span className="eh-right">
@@ -422,8 +423,18 @@ function CardHead({ run, pct, onRestart, onLogs }) {
           <span className="d" />
           iGPU · exclusive
         </span>
-        {/* Container controls — moved up from the footer to the header far right. */}
+        {/* Container controls — moved up from the footer to the header far right.
+            Start (#1590) drives the GPU-arbiter switchover to generation mode —
+            the honest way to bring ComfyUI up (drain LLM slots, hand the iGPU
+            over) — and renders only while the engine is down. Slot-card button
+            style per the operator's ask. */}
         <span className="foot-ctrls">
+          {engineStopped && onStart && (
+            <button className="btn ghost sm" data-testid="comfy-start"
+              disabled={startBusy} onClick={onStart}>
+              {startBusy ? 'starting…' : 'Start'}
+            </button>
+          )}
           <button className="sctrl restart" title="Restart" onClick={onRestart}><Ci name="refresh" size={12} /></button>
           <button className="sctrl" title="Logs" onClick={onLogs}><Ci name="logs" size={12} /></button>
         </span>
@@ -478,6 +489,9 @@ export function ImageGenCard({
   onCancel,
   onRestart,
   onLogs,
+  onStart,
+  engineStopped,
+  startBusy,
   comfyBaseUrl,
 }) {
   const { engine, run, queue, gtt, ram, stats, inventory } = mock
@@ -517,7 +531,8 @@ export function ImageGenCard({
 
   return (
     <div className="engine wcard active">
-      <CardHead run={run} pct={pct} onRestart={onRestart} onLogs={onLogs} />
+      <CardHead run={run} pct={pct} onRestart={onRestart} onLogs={onLogs}
+        onStart={onStart} engineStopped={engineStopped} startBusy={startBusy} />
       <div className="wcard-b">
 
         {/* Render-active notice — moved out of the card header so it sits
@@ -765,6 +780,16 @@ export function ComfyuiPane() {
   // Control mutations
   const cancelMutation = useComfyuiRenderCancel()
   const restartMutation = useComfyuiRestart()
+  // Start = GPU-arbiter switchover to generation mode (#1590). Gated on the
+  // LIVE status (never the mock override), so the button can only appear when
+  // the real engine reports stopped/error; the switchover block on /status
+  // then drives the pill through starting → running on the next polls.
+  const switchoverMutation = useComfyuiSwitchover()
+  const engineStopped =
+    !override && liveStatus != null &&
+    (liveStatus.engine === 'stopped' || liveStatus.engine === 'error') &&
+    !liveStatus.switchover?.active
+  const startBusy = switchoverMutation.isPending || !!liveStatus?.switchover?.active
 
   // Resolve the browser-reachable ComfyUI base URL. The authoritative source
   // is /api/config/urls → `comfyui` (HAL0_COMFYUI_PUBLIC_URL, or
@@ -788,6 +813,9 @@ export function ComfyuiPane() {
         mock={paneData}
         onCancel={() => cancelMutation.mutate()}
         onRestart={() => restartMutation.mutate()}
+        onStart={() => switchoverMutation.mutate({ mode: 'generation' })}
+        engineStopped={engineStopped}
+        startBusy={startBusy}
         onLogs={() => {
           // Fetch logs and open in a basic alert for now; a logs drawer is a
           // future enhancement (the endpoint is wired, UI depth TBD).

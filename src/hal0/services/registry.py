@@ -84,9 +84,13 @@ SERVICES: tuple[ServiceDef, ...] = (
         port=8188,
         public_url_env="HAL0_COMFYUI_PUBLIC_URL",
         probe="comfyui",
-        actions=("restart",),
+        # "start" here does NOT run `systemctl start` — the route special-cases
+        # it into the GPU-arbiter switchover (drain LLM slots, hand the iGPU
+        # over), the only honest way to bring ComfyUI up (#1590). "restart"
+        # stays the raw unit bounce the FirstRun repair button uses.
+        actions=("start", "restart"),
         mdns=True,
-        hints=("start/stop is GPU-arbiter managed — use the Image-Gen pane switchover",),
+        hints=("stop is GPU-arbiter managed — switch back to inference in the Image-Gen pane",),
     ),
     ServiceDef(
         id="hermes",

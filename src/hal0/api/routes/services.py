@@ -28,12 +28,13 @@ verb subset lives in ``hal0.services.registry`` (e.g. ComfyUI only exposes
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
 import httpx
 import structlog
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 
 from hal0.api._audit import record_action
 from hal0.api.routes.config import _behind_proxy, _host_without_port, _resolve_host
@@ -183,14 +184,41 @@ async def list_services(request: Request) -> dict[str, Any]:
     return {"services": services, "mdns": disco}
 
 
+async def _comfyui_start(request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    """ComfyUI "start" = the GPU-arbiter switchover to generation mode.
+
+    A raw ``systemctl start hal0-slot@img`` would boot ComfyUI *under* the
+    resident LLM stack — the arbiter exists precisely to drain and hand the
+    iGPU over first. Delegates to the comfyui router's own switchover handler
+    so the guards (switch-in-flight 409, already-there noop, arbiter-missing
+    503) stay in one place.
+    """
+    from hal0.api.routes.comfyui import SwitchoverBody, comfyui_switchover
+
+    resp = await comfyui_switchover(request, background_tasks, SwitchoverBody(mode="generation"))
+    try:
+        payload = json.loads(bytes(resp.body))
+    except Exception:  # pragma: no cover — defensive
+        payload = {}
+    if resp.status_code == 202:
+        return {"ok": True, "message": "GPU switchover to generation started — track via status"}
+    if resp.status_code == 200 and payload.get("status") == "noop":
+        return {"ok": True, "message": "already in generation mode"}
+    detail = (payload.get("error") or {}).get("message") or f"HTTP {resp.status_code}"
+    return {"ok": False, "message": f"start comfyui failed: {detail}"}
+
+
 @router.post("/{service_id}/action")
-async def service_action(service_id: str, request: Request) -> dict[str, Any]:
+async def service_action(
+    service_id: str, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
     """Run one lifecycle verb against a registered service's unit.
 
     Body: ``{"action": "start"|"stop"|"restart"|"enable"|"disable"}``.
-    The verb must be in the service's registry allow-list — e.g. ComfyUI
-    accepts only ``restart`` (its start/stop belongs to the GPU arbiter).
-    Audit-logged with a truthful outcome.
+    The verb must be in the service's registry allow-list. ComfyUI's
+    ``start`` is special-cased into the GPU-arbiter switchover (#1590);
+    its ``restart`` stays a plain unit bounce. Audit-logged with a
+    truthful outcome.
     """
     sdef = service_by_id(service_id)
     if sdef is None:
@@ -220,7 +248,10 @@ async def service_action(service_id: str, request: Request) -> dict[str, Any]:
         action=f"services.{action}",
         target=sdef.unit,
     ) as rec:
-        result = await svc_systemd.unit_action(sdef.unit, action)
+        if sdef.id == "comfyui" and action == "start":
+            result = await _comfyui_start(request, background_tasks)
+        else:
+            result = await svc_systemd.unit_action(sdef.unit, action)
         active = await svc_systemd.unit_is_active(sdef.unit)
         rec.after = {"ok": result["ok"], "active": active}
         rec.message = str(result["message"])
