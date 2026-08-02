@@ -51,8 +51,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from hal0.model_meta import device_to_backend
-from hal0.slots.activation import claims_npu_anchor, npu_modality_active
+from hal0.slots.activation import autoload_enabled, claims_npu_anchor, npu_modality_active
 from hal0.slots.naming import slot_instance_token, slot_unit_name
+from hal0.slots.reaper import eviction_priority
 from hal0.slots.reaper import is_pinned as reaper_is_pinned
 
 log = logging.getLogger(__name__)
@@ -267,6 +268,13 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # Pinned/Unpinned toggle and the card badge render without a
         # per-slot /config fetch.
         entry["pinned"] = reaper_is_pinned(name, cfg)
+
+        # Spec 2026-08-02: lift the EFFECTIVE autoload (migration shim
+        # applied — absent key + bound model reads true) and eviction
+        # priority so the drawer's controls render without a per-slot
+        # /config fetch, same pattern as the pinned lift above.
+        entry["autoload"] = autoload_enabled(cfg)
+        entry["priority"] = eviction_priority(cfg)
 
         # SC-4 default marker: exactly one slot per ``type`` may carry
         # ``default = true`` (check_default_uniqueness). Lifted verbatim so the
