@@ -488,6 +488,22 @@ async def _notify(on_event: OnEvent | None, event: dict[str, Any]) -> None:
         await result
 
 
+#: Minimum budget the one-shot truncation retry re-runs a cut round with.
+#: Double the brain default cap (4096, brain/chat.py) — enough that only a
+#: genuinely runaway chain of thought can truncate twice, at which point the
+#: honest cut-note is the right answer, not a third completion.
+_TRUNCATION_RETRY_FLOOR = 8192
+
+
+def _finish_reason(response: Any) -> str | None:
+    """``choices[0].finish_reason`` off a completion dict, or ``None``."""
+    try:
+        choices = response.get("choices") or []
+        return (choices[0] or {}).get("finish_reason")
+    except (AttributeError, IndexError, TypeError):
+        return None
+
+
 async def run_tool_loop(
     llm_fn: LlmFn,
     tools: list[dict[str, Any]],
@@ -525,6 +541,7 @@ async def run_tool_loop(
     body["tools"] = tools
     body["stream"] = False
 
+    retried_truncation = False
     for _round in range(max_rounds):
         response = await llm_fn(body)
         await _notify(on_event, {"type": "response", "data": response})
@@ -548,6 +565,36 @@ async def run_tool_loop(
         tool_calls = extract_tool_calls(response)
         if not tool_calls:
             tool_calls, text = parse_text_tool_calls(text, known_tool_names)
+
+        # Truncated round with nothing actionable. `finish_reason: "length"`
+        # means the completion budget ran out mid-reply — and on a thinking
+        # model the reasoning is drawn from the SAME budget (see
+        # `_MIN_COMPLETION_TOKENS` in brain/chat.py), so a long chain of
+        # thought can eat almost all of it and the visible text cuts off right
+        # after the intent prose ("Let me check the catalog:") with the tool
+        # call that would have followed never emitted. Finalizing that
+        # fragment reads as the steward silently giving up mid-sentence —
+        # observed live on lxc105. Retry the round ONCE with a doubled budget
+        # (nothing has been yielded for this round yet, so the fragment is
+        # simply discarded); if it still truncates with no call, finalize the
+        # fragment but SAY it was cut rather than presenting it as complete.
+        if not tool_calls and _finish_reason(response) == "length":
+            if not retried_truncation:
+                retried_truncation = True
+                try:
+                    current_budget = int(body.get("max_tokens") or 0)
+                except (TypeError, ValueError):
+                    current_budget = 0
+                body["max_tokens"] = max(current_budget * 2, _TRUNCATION_RETRY_FLOOR)
+                # The retry consumes this round's slot in `max_rounds` — the
+                # loop stays bounded at max_rounds completions either way.
+                continue
+            cut_note = (
+                "\n\n⚠ reply truncated — the completion budget ran out before "
+                "the model finished (its reasoning consumes the same budget). "
+                "Retry the message, or raise `max_tokens`."
+            )
+            text = (text or "") + cut_note
 
         thinking = "\n".join(t for t in (explicit_thinking, inline_thinking) if t)
         if thinking:
