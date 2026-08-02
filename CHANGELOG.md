@@ -21,6 +21,16 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Changed
+
+- Slot drawer: the Runner Image field is a dropdown of the runner-image
+  catalog (the same registry the Runtimes page shows) instead of a free-text
+  input; a "Custom image ref…" option keeps the debug/A-B/rollback escape
+  hatch. Picking an image repopulates the Runner Binary dropdown with the
+  binaries that image ships — dual-binary images (e.g. the shared
+  ROCm/Vulkan image) offer both, single-binary images hop the selection to
+  their sole binary.
+
 ## [1.0.0-rc.1] — 2026-08-01 (R5 · the rework release)
 
 The R5 rework puts the platform back together as a genuine 1.0: memory and

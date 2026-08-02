@@ -250,6 +250,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// image_pin — optional escape hatch. Empty = release default
 	// (RUNNER_IMAGES[binary]). A non-default pin is shown on the slot card.
 	const [imagePin, setImagePin] = useStateSM(slot?.image_pin || "");
+	// Runner Image is a catalog dropdown (the RUNNER_IMAGES refs system-info
+	// reports — same source as the Runtimes page). `pinCustom` flips the
+	// control to a free-text input for the debug-build/A-B/rollback escape
+	// hatch the field originally existed for.
+	const [pinCustom, setPinCustom] = useStateSM(false);
 	// Runtime profile (SlotConfig.profile) — picks the runtime family,
 	// device-class gating and MTP draft backend. NOT a flags source at launch:
 	// profile flags are copy-on-stamp into model.defaults.extra_args (model
@@ -459,6 +464,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setThreads(slot.threads != null ? String(slot.threads) : "0");
 		setBinary(slot.binary || "");
 		setImagePin(slot.image_pin || "");
+		setPinCustom(false);
 		setProfileSel(slot.profile || "");
 		setSubmitErr(null);
 		setDiscardOpen(false);
@@ -983,6 +989,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						// and `vulkanfpx · vulkan`). With no image named yet there is
 						// nothing to match against, so fall back to the device fit set.
 						const pinnedImage = (imagePin || "").trim();
+						// Runner Image catalog — the distinct image refs RUNNER_IMAGES
+						// resolves to (same system-info source the Runtimes page renders).
+						// One image can ship several binaries (rocmfpx/vulkanfpx share
+						// one Vulkan-portable image); the map records which, so picking
+						// an image repopulates the Runner Binary dropdown below.
+						const imageKeysByRef = new Map();
+						for (const k of binaryKeys) {
+							const img = backends[k]?.image;
+							if (!img) continue;
+							if (!imageKeysByRef.has(img)) imageKeysByRef.set(img, []);
+							imageKeysByRef.get(img).push(k);
+						}
+						const catalogImages = [...imageKeysByRef.keys()];
 						const imageFitKeys = pinnedImage
 							? binaryKeys.filter((k) => backends[k]?.image === pinnedImage)
 							: [];
@@ -1012,27 +1031,95 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Runner Image</span>
-										<FieldInfoIcon description="Optional container image override for a debug build, A/B test, or rollback. Empty uses the release default." />
+										<FieldInfoIcon description="Pin the container image the slot launches. The list is the
+											runner-image catalog (the same registry the Runtimes page
+											shows); ‘Custom image ref…’ keeps the free-text escape
+											hatch for a debug build, A/B test, or rollback. Empty
+											uses the release default resolved from Runner Binary." />
 									</div>
 									<div className="form-ctl">
-										<input
-											className={
-												"input mono" + (fieldErrs.imagePin ? " input-err" : "")
-											}
-											data-testid="slot-hw-image-pin"
-											value={imagePin}
-											onChange={(e) => {
-												setImagePin(e.target.value);
-												setFieldErrs((p) => ({ ...p, imagePin: undefined }));
-											}}
-											placeholder={
-												binary && backends[binary]?.image
-													? backends[binary].image
-													: "will resolve from runner (binary)"
-											}
-											spellCheck={false}
-											style={imagePin ? {} : { color: "var(--fg-4)" }}
-										/>
+										{pinCustom ? (
+											<div
+												style={{ display: "flex", gap: 8, alignItems: "center" }}
+											>
+												<input
+													className={
+														"input mono" +
+														(fieldErrs.imagePin ? " input-err" : "")
+													}
+													data-testid="slot-hw-image-pin"
+													value={imagePin}
+													onChange={(e) => {
+														setImagePin(e.target.value);
+														setFieldErrs((p) => ({
+															...p,
+															imagePin: undefined,
+														}));
+													}}
+													placeholder={
+														binary && backends[binary]?.image
+															? backends[binary].image
+															: "will resolve from runner (binary)"
+													}
+													spellCheck={false}
+													style={{ flex: 1 }}
+													autoFocus
+												/>
+												<button
+													className="btn ghost sm"
+													data-testid="slot-hw-image-pin-catalog"
+													title="Back to the runner-image catalog"
+													onClick={() => setPinCustom(false)}
+												>
+													Catalog
+												</button>
+											</div>
+										) : (
+											<select
+												className={
+													"input mono" +
+													(fieldErrs.imagePin ? " input-err" : "")
+												}
+												data-testid="slot-hw-image-pin"
+												value={imagePin}
+												onChange={(e) => {
+													const v = e.target.value;
+													if (v === "__custom__") {
+														setPinCustom(true);
+														return;
+													}
+													setImagePin(v);
+													setFieldErrs((p) => ({ ...p, imagePin: undefined }));
+													// Keep BINARY coherent with the picked image: if the
+													// current binary doesn't ship in it, hop to the
+													// image's sole binary, or clear so the operator picks
+													// from the repopulated list.
+													const keys = imageKeysByRef.get(v) || [];
+													if (v && binary && !keys.includes(binary)) {
+														setBinary(keys.length === 1 ? keys[0] : "");
+													}
+												}}
+												style={imagePin ? {} : { color: "var(--fg-4)" }}
+											>
+												<option value="">
+													— default · resolved from Runner Binary —
+												</option>
+												{/* A persisted pin outside the catalog (older release,
+												    hand-edited TOML) keeps its own option so opening the
+												    drawer never silently rewrites it. */}
+												{pinnedImage && !catalogImages.includes(pinnedImage) && (
+													<option value={pinnedImage}>
+														{pinnedImage} · custom
+													</option>
+												)}
+												{catalogImages.map((img) => (
+													<option key={img} value={img} title={img}>
+														{(imageKeysByRef.get(img) || []).join(" / ")} · {img}
+													</option>
+												))}
+												<option value="__custom__">Custom image ref…</option>
+											</select>
+										)}
 										{fieldErrs.imagePin ? (
 											<div className="hint" style={{ color: "var(--err)" }}>
 												{fieldErrs.imagePin}
