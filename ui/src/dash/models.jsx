@@ -383,16 +383,16 @@ function ModelsView() {
             sectionedInference.map(item =>
               item.type === "label"
                 ? <div key={item.key} className="mdl-section-label">{item.text}</div>
-                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} onEditModel={setRecipeModel} />
+                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} onEditModel={setRecipeModel} onDeleteModel={setDelModel} />
             )
           ) : tab === "image" ? (
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} />
+              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} onDeleteModel={setDelModel} />
             ))
           ) : (
             /* upstream tab — flat paginated rows */
             sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} />
+              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} onDeleteModel={setDelModel} />
             ))
           )}
 
@@ -518,7 +518,10 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 // ── ModelRow ──────────────────────────────────────────────────────────
 // `onEditModel` (new — Stream E kebab menu) opens the model edit drawer
 // directly for THIS row's model, independent of catalog selection.
-function ModelRow({ model, selected, onSelect, onEditModel }) {
+// `onDeleteModel` opens the shared DeleteModelDialog (type-the-name confirm,
+// refcounted blob release) for THIS row — only offered for installed local
+// models, mirroring the detail pane's Delete button gate.
+function ModelRow({ model, selected, onSelect, onEditModel, onDeleteModel }) {
   const backends = Array.isArray(model.backends) ? model.backends : [];
   const [menuOpen, setMenuOpen] = useStateM(false);
   return (
@@ -583,6 +586,22 @@ function ModelRow({ model, selected, onSelect, onEditModel }) {
                 label: "Edit model settings",
                 onClick: () => onEditModel && onEditModel(model),
               },
+              // Delete — same gate as the detail pane's Delete button: only an
+              // installed local model has bytes/registry row to remove (an
+              // upstream row is served remotely; a not-installed catalog row
+              // has nothing on disk). Routes through DeleteModelDialog, so the
+              // type-the-name confirm + refcount contract stays the boundary.
+              ...(model.installed && !isUpstreamModel(model)
+                ? [
+                    { divider: true },
+                    {
+                      icon: Icons.unload,
+                      label: "Delete model…",
+                      danger: true,
+                      onClick: () => onDeleteModel && onDeleteModel(model),
+                    },
+                  ]
+                : []),
             ]}
             onClose={() => setMenuOpen(false)}
           />
