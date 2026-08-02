@@ -105,8 +105,39 @@ with the dashboard's own `SELF_MANAGED_PROVIDERS` constant.
 ## Activation
 
 There is **no `enabled` field** on `SlotConfig`. A non-empty `model.default` is the
-activation signal; boot autostart is gated by the Quadlet unit's
-`WantedBy=hal0.target` plus `SlotManager.load()`'s empty-model guard.
+activation signal — it is what makes a slot routable and loadable.
+
+Boot autostart is a separate, explicit setting: `autoload`. The generated Quadlet unit
+carries `[Install] WantedBy=hal0.target` **only when `autoload = true`**, and that stanza
+is the only thing that starts a slot at boot. With `autoload = false` the unit still
+exists and is start-able (load/swap use `systemctl restart`, which never consults
+`[Install]`) — nothing just pulls it up on reboot. Binding a model no longer implies a
+boot start.
+
+Slots written before the field existed (key absent on disk) migrate to
+`autoload = true` when they have a bound model, and `false` otherwise, so an upgrade
+preserves the old behaviour until you toggle it. Slots created through
+`POST /api/slots` always persist an explicit value, defaulting to `false`.
+
+Editing `autoload` via `PUT /api/slots/{name}/config` re-renders the on-disk unit, so the
+change takes effect from the next boot without a manual reload.
+
+## Eviction priority
+
+Every non-pinned slot is an eviction candidate. `priority` (int, `0–100`, default `50`)
+orders the victims for both memory-pressure eviction (`SlotReaper.pressure_evict_once`)
+and pre-load eviction (`preload_evict`): the **lowest priority is unloaded first**, with
+least-recently-used as the tie-break inside a priority tier. `priority = 100` is not a
+pin — it is merely evicted last; `pinned = true` is what exempts a slot entirely, as do
+the default-pinned anchors (`agent` and friends). A slot with a request in flight is
+never a victim, and only resident slots (`READY`/`IDLE`) are considered at all.
+
+<Aside type="caution">
+The old `lru = true` eviction opt-in is retired. The key is still accepted in slot TOML
+but ignored, with a one-time `slot.lru_flag_deprecated` warning per slot — remove it and
+use `priority`/`pinned` instead. Slots that never set `lru` are now evictable where they
+previously were not.
+</Aside>
 
 ## The v1.0 write-boundary guard
 

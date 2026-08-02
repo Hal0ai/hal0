@@ -21,6 +21,18 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- Slots: explicit `autoload` setting — a slot starts at boot only when
+  `autoload = true` (slot drawer toggle). Binding a model no longer
+  implies boot start; existing slots with a bound model migrate as
+  `true`, so upgrade changes nothing until toggled.
+- Slots: eviction `priority` (0–100, default 50, drawer field) — memory
+  pressure and pre-load eviction now unload the lowest-priority slot
+  first (least-recently-used within a tier). The `lru = true` opt-in is
+  retired: every non-pinned slot is evictable; the key is ignored with a
+  one-time deprecation warning. `pinned` still exempts entirely.
+
 ### Fixed
 
 - `GET /api/slots` latency cut sharply on wide boxes (#1507 follow-up):
