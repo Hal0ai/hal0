@@ -56,3 +56,32 @@ def test_unknown_model_returns_none(monkeypatch):
     cap, subdir = _resolve_pull_capability(_req(), "ad-hoc", None)
     assert cap is None
     assert subdir is None
+
+
+def test_registered_curated_image_model_keeps_comfyui_subdir(monkeypatch):
+    """RE-pulling an already-registered curated image model keeps the subdir.
+
+    The repair path for deleted checkpoint bytes: the registry row survives,
+    so resolution took the registry branch — which used to return
+    ``subdir=None`` and landed the safetensors at ``image/<id>/model.gguf``
+    where ComfyUI never finds it.
+    """
+    import hal0.registry.pull_jobs as m
+
+    curated = SimpleNamespace(capability="image", comfyui_subdir="checkpoints")
+    monkeypatch.setattr(m, "get_curated", lambda _mid: curated)
+    entry = SimpleNamespace(capabilities=["image"], hf_repo="r", hf_filename="f")
+    cap, subdir = _resolve_pull_capability(_req(entry), "sdxl-turbo", None)
+    assert cap == "image"
+    assert subdir == "checkpoints"
+
+
+def test_body_capability_keeps_curated_subdir(monkeypatch):
+    """An explicit body capability doesn't discard the curated subdir."""
+    import hal0.registry.pull_jobs as m
+
+    curated = SimpleNamespace(capability="image", comfyui_subdir="checkpoints")
+    monkeypatch.setattr(m, "get_curated", lambda _mid: curated)
+    cap, subdir = _resolve_pull_capability(_req(), "sdxl-turbo", {"capability": "image"})
+    assert cap == "image"
+    assert subdir == "checkpoints"

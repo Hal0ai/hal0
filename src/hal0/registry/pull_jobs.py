@@ -201,26 +201,35 @@ def resolve_pull_capability(
 
     Priority for capability: explicit ``body.capability`` → the registry row's
     first capability → the curated entry's capability. ``comfyui_subdir`` comes
-    from the curated entry only. Returns ``(None, None)`` for an unknown ad-hoc
-    model so :func:`run_pull` falls back to the legacy flat layout.
+    from the curated entry in EVERY branch — it used to be consulted only for
+    an unknown model, so RE-pulling an already-registered image model (the
+    repair path for deleted checkpoint bytes) dropped the subdir and landed
+    the safetensors under ``<store>/image/<id>/model.gguf``, where ComfyUI
+    never finds it. Returns ``(None, None)`` for an unknown ad-hoc model so
+    :func:`run_pull` falls back to the legacy flat layout.
     """
+    curated = get_curated(model_id)
+    curated_subdir = (
+        ((getattr(curated, "comfyui_subdir", "") or "").strip() or None)
+        if curated is not None
+        else None
+    )
+
     if isinstance(body, dict):
         cap_raw = body.get("capability")
         if isinstance(cap_raw, str) and cap_raw.strip():
-            return cap_raw.strip(), None
+            return cap_raw.strip(), curated_subdir
 
     try:
         existing = request.app.state.model_registry.get(model_id)
         caps = getattr(existing, "capabilities", None) or []
         if caps:
-            return str(caps[0]), None
+            return str(caps[0]), curated_subdir
     except Exception:
         pass
 
-    curated = get_curated(model_id)
     if curated is not None:
-        subdir = (getattr(curated, "comfyui_subdir", "") or "").strip() or None
-        return (curated.capability or None), subdir
+        return (curated.capability or None), curated_subdir
     return None, None
 
 
