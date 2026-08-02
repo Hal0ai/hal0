@@ -1248,9 +1248,7 @@ def _register_pulled(
     merged_meta = dict(existing.metadata)
     merged_meta.update(fresh_meta)
     updates["metadata"] = merged_meta
-    if curated_template and not (
-        existing.defaults is not None and existing.defaults.chat_template
-    ):
+    if curated_template and not (existing.defaults is not None and existing.defaults.chat_template):
         merged_defaults = (
             existing.defaults.model_copy(update={"chat_template": curated_template})
             if existing.defaults is not None
