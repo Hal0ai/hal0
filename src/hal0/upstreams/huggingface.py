@@ -267,7 +267,12 @@ async def fetch_repo(repo: str) -> dict[str, Any]:
     headers = _hf_headers()
 
     meta_url = f"{_HF_MODELS_URL}/{repo}"
-    tree_url = f"{_HF_MODELS_URL}/{repo}/tree/main"
+    # ``recursive=true`` matters: repos routinely nest the mmproj sidecar in a
+    # subdirectory (e.g. ``vision/Foo.mmproj``) and quants under per-quant
+    # folders. The non-recursive listing only returns root entries, so those
+    # files never reached the variant list and the vision picker claimed the
+    # repo ships no mmproj (same param :mod:`hal0.registry.update_check` uses).
+    tree_url = f"{_HF_MODELS_URL}/{repo}/tree/main?recursive=true"
     try:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(_INSPECT_TIMEOUT_SECONDS),
