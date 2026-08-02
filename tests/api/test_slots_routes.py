@@ -738,6 +738,69 @@ def test_put_config_pinned_round_trips(
     assert cfg.get("pinned") is False
 
 
+# ── autoload/priority (spec-2026-08-02): unit rerender + value validation ───
+
+
+def test_put_config_autoload_triggers_unit_rerender(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PUT {autoload: false} rewrites the on-disk Quadlet unit immediately —
+    otherwise a reboot before the next load still boot-starts the slot."""
+    from hal0.api.routes import slots as slots_routes
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        slots_routes, "_rerender_slot_unit_best_effort", lambda cfg: calls.append(cfg)
+    )
+    resp = isolated_client.put("/api/slots/chat/config", json={"autoload": False})
+    assert resp.status_code == 200, resp.text
+    assert len(calls) == 1
+
+
+def test_put_config_priority_skips_unit_rerender(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0.api.routes import slots as slots_routes
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        slots_routes, "_rerender_slot_unit_best_effort", lambda cfg: calls.append(cfg)
+    )
+    resp = isolated_client.put("/api/slots/chat/config", json={"priority": 10})
+    assert resp.status_code == 200, resp.text
+    assert calls == []
+    cfg = isolated_client.get("/api/slots/chat/config").json()
+    assert cfg.get("priority") == 10
+
+
+@pytest.mark.parametrize("bad", [-1, 101, "high", 3.5, True])
+def test_put_config_priority_out_of_range_rejected(
+    bad: object,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    resp = isolated_client.put("/api/slots/chat/config", json={"priority": bad})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "validation.invalid_value"
+
+
+def test_put_config_autoload_must_be_bool(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    resp = isolated_client.put("/api/slots/chat/config", json={"autoload": "yes"})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "validation.invalid_value"
+
+
 def test_binding_a_second_npu_model_surfaces_conflict(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
