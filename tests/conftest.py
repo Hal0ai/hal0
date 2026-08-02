@@ -273,3 +273,18 @@ def tmp_hal0_home(tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("HAL0_HOME", home)
     monkeypatch.setenv("HAL0_OVERRIDE_DIR", "hal0_home")
     return home
+
+
+@pytest.fixture(autouse=True)
+def _clear_image_present_cache():
+    """Reset slot_view's process-global image-presence TTL cache per test.
+
+    The cache exists so the dashboard's 2.5 s poll doesn't re-run
+    ``podman image inspect`` per slot per poll; across tests it would leak
+    one test's patched ``image_present`` answer into the next.
+    """
+    from hal0 import slot_view
+
+    slot_view._image_present_cache.clear()
+    yield
+    slot_view._image_present_cache.clear()

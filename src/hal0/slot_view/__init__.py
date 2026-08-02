@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -437,6 +438,25 @@ _PROBE_TIMEOUT_S = 8.0
 #: deployment finishes in one wave.
 _PROBE_CONCURRENCY = 8
 
+#: ``podman image inspect`` answers ("is this image present on disk?") change
+#: only when an image is pulled or pruned — nowhere near the dashboard's
+#: 2.5 s poll cadence. Cache per image ref so a 20-slot box sharing 3 images
+#: pays 3 inspects per TTL window instead of 20 per poll. Kept short enough
+#: that a just-finished pull flips missing→present within one refresh.
+_IMAGE_PRESENT_TTL_S = 15.0
+_image_present_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _image_present_cached(cp: Any, image: str) -> bool:
+    """TTL-cached ``cp.image_present`` (subprocess-backed, executor-called)."""
+    now = time.monotonic()
+    hit = _image_present_cache.get(image)
+    if hit is not None and now - hit[0] < _IMAGE_PRESENT_TTL_S:
+        return hit[1]
+    present = bool(cp.image_present(image))
+    _image_present_cache[image] = (time.monotonic(), present)
+    return present
+
 
 async def container_enrichment(
     configs: list[dict[str, Any]],
@@ -604,16 +624,22 @@ async def container_enrichment(
         # image_mismatch against the slot's declared profile image. Replaces the
         # fragile /proc actual_backend sniff. Degrades silently - never 500
         # the hot path.
-        try:
-            from hal0.providers.container import _image_mismatch
+        # Only a live container can have a running image — skip the podman
+        # inspect for stopped/crashed slots entirely. On a box where most
+        # slots are offline this was the bulk of the probe's subprocess
+        # spawns, and its answer was always None (#1507 latency follow-up).
+        running_image = None
+        if container_status in ("running", "starting"):
+            try:
+                from hal0.providers.container import _image_mismatch
 
-            cp = _resolve_container_provider(provider)
-            # By CONFIG: the container is named after the instance token
-            # (#1417) — a bare name inspected a container that never exists on
-            # an id-keyed box, leaving the image backend-of-record inert.
-            running_image = await loop.run_in_executor(None, cp.running_image, cfg)
-        except Exception:
-            running_image = None
+                cp = _resolve_container_provider(provider)
+                # By CONFIG: the container is named after the instance token
+                # (#1417) — a bare name inspected a container that never exists on
+                # an id-keyed box, leaving the image backend-of-record inert.
+                running_image = await loop.run_in_executor(None, cp.running_image, cfg)
+            except Exception:
+                running_image = None
         if running_image:
             entry["actual_image"] = running_image
             if image:
@@ -628,7 +654,7 @@ async def container_enrichment(
         elif image:
             try:
                 cp = _resolve_container_provider(provider)
-                present = await loop.run_in_executor(None, cp.image_present, image)
+                present = await loop.run_in_executor(None, _image_present_cached, cp, image)
                 entry["image_status"] = "present" if present else "missing"
             except Exception:
                 entry["image_status"] = "missing"

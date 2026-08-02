@@ -23,6 +23,13 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- `GET /api/slots` latency cut sharply on wide boxes (#1507 follow-up):
+  the per-slot probe no longer runs `podman inspect` for stopped slots,
+  `podman image inspect` answers are TTL-cached per image ref, and the
+  whole snapshot is served single-flight with a 2 s TTL (any slot
+  mutation invalidates it immediately) so overlapping dashboard polls
+  stop multiplying the subprocess fan-out.
+
 - Slots page no longer stalls while the activity log backfills: the SSE
   stream replayed the full 1000-row durable backlog one frame at a time on
   every fresh connect, and the pane re-rendered once per frame. The stream
