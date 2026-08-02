@@ -24,6 +24,7 @@ from typing import Any
 
 __all__ = [
     "NPU_MODALITY_KEY",
+    "autoload_enabled",
     "claims_npu_anchor",
     "is_activated",
     "npu_anchor_config",
@@ -69,6 +70,23 @@ def is_activated(cfg: dict[str, Any] | None) -> bool:
     can see and configure it, but nothing routes to it and no unit is written.
     """
     return bool(slot_model_id(cfg))
+
+
+def autoload_enabled(cfg: dict[str, Any] | None) -> bool:
+    """Effective boot-start setting for a RAW slot TOML dict (spec 2026-08-02).
+
+    Mirror of ``SlotConfig._derive_autoload`` for the raw-dict readers
+    (unit render, slot_view lift): an explicit ``autoload`` key wins;
+    an absent key falls back to the legacy implicit signal — a bound
+    model (:func:`is_activated`) — so pre-field TOMLs keep their boot
+    behavior. Same raw-dict contract as :func:`hal0.slots.reaper.is_pinned`.
+    """
+    if not isinstance(cfg, dict):
+        return False
+    raw = cfg.get("autoload")
+    if raw is not None:
+        return bool(raw)
+    return is_activated(cfg)
 
 
 def claims_npu_anchor(cfg: dict[str, Any] | None) -> bool:

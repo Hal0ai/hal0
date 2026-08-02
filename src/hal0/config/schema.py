@@ -563,6 +563,33 @@ class SlotConfig(BaseModel):
             "existing behavior for every slot that doesn't set it."
         ),
     )
+    autoload: bool | None = Field(
+        default=None,
+        description=(
+            "Explicit boot-start setting (spec 2026-08-02). True → the "
+            "generated Quadlet unit carries [Install] WantedBy=hal0.target "
+            "and the slot starts at boot; False → the unit exists but "
+            "nothing starts it automatically (manual load/swap only). "
+            "None (key absent on disk) is the migration shim: derived from "
+            "the legacy implicit signal — non-empty [model].default — by "
+            "_derive_autoload below, so pre-field TOMLs keep their boot "
+            "behavior. API-created slots always persist an explicit value "
+            "(create route defaults it to false)."
+        ),
+    )
+    priority: int = Field(
+        default=50,
+        ge=0,
+        le=100,
+        description=(
+            "Eviction priority (spec 2026-08-02): lower evicts first, "
+            "last_used breaks ties. Orders victims in pressure eviction "
+            "(SlotReaper.pressure_evict_once) and pre-load eviction "
+            "(preload_evict). Replaces the deprecated lru=true opt-in — "
+            "every non-pinned slot is now a candidate. 100 is NOT a pin "
+            "(evicted last, still evictable); use `pinned` to exempt."
+        ),
+    )
 
     # Typed [server] subsection.  See ServerConfig + the round-trip
     # validator/serializer below: on load we hoist the [server] table out
@@ -756,6 +783,18 @@ class SlotConfig(BaseModel):
                 )
             new_data["device"] = mapped
         return new_data
+
+    @model_validator(mode="after")
+    def _derive_autoload(self) -> SlotConfig:
+        """Resolve the migration shim: absent key → legacy implicit signal.
+
+        A TOML written before the field existed boot-started iff it had a
+        model bound (#1369 activation semantics); deriving here means the
+        next save writes the value back explicitly.
+        """
+        if self.autoload is None:
+            self.autoload = bool(self.model.default)
+        return self
 
     @model_serializer(mode="wrap")
     def _tuck_server_into_extra(self, handler: Any) -> dict[str, Any]:

@@ -104,6 +104,27 @@ def is_pinned(canonical_name: str, cfg: dict[str, Any] | None) -> bool:
     return canonical_name in _PINNED_BY_DEFAULT
 
 
+_DEFAULT_EVICTION_PRIORITY: int = 50
+
+
+def eviction_priority(cfg: dict[str, Any] | None) -> int:
+    """Effective eviction priority for a RAW slot TOML dict (0-100).
+
+    Lower evicts first; ties fall back to LRU order at the call sites.
+    Defensive by design — the sweep must never crash on a hand-authored
+    TOML: a missing/bool/non-int value falls back to the default and an
+    out-of-range int is clamped. The pydantic paths (SlotConfig ge/le)
+    hard-reject instead; this is the fail-open mirror, same contract as
+    :func:`is_pinned` reading the raw dict.
+    """
+    if not isinstance(cfg, dict):
+        return _DEFAULT_EVICTION_PRIORITY
+    raw = cfg.get("priority")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return _DEFAULT_EVICTION_PRIORITY
+    return max(0, min(100, raw))
+
+
 def probe_host_free_mb() -> float:
     """Return free host memory in MiB, GTT-aware where possible (§21.10).
 
@@ -472,12 +493,14 @@ class SlotReaper:
 
 
 __all__ = [
+    "_DEFAULT_EVICTION_PRIORITY",
     "_EVICT_AFTER_S",
     "_IDLE_AFTER_S",
     "_IDLE_MONITOR_INTERVAL_S",
     "_PINNED_BY_DEFAULT",
     "ReaperHost",
     "SlotReaper",
+    "eviction_priority",
     "is_pinned",
     "probe_host_free_mb",
     "probe_host_total_mb",
