@@ -117,8 +117,12 @@ def test_select_orders_by_priority_then_lru() -> None:
     newer low-priority one is selected first."""
     cands = [
         CandidateSlot(name="hi", last_used=100.0, footprint_mb=4000.0, eligible=True, priority=90),
-        CandidateSlot(name="lo-new", last_used=900.0, footprint_mb=4000.0, eligible=True, priority=10),
-        CandidateSlot(name="lo-old", last_used=100.0, footprint_mb=4000.0, eligible=True, priority=10),
+        CandidateSlot(
+            name="lo-new", last_used=900.0, footprint_mb=4000.0, eligible=True, priority=10
+        ),
+        CandidateSlot(
+            name="lo-old", last_used=100.0, footprint_mb=4000.0, eligible=True, priority=10
+        ),
     ]
     plan = select_eviction_order(cands, needed_mb=7000.0, headroom_mb=1000.0, free_mb=0.0)
     assert [c.name for c in plan.selected] == ["lo-old", "lo-new"]
@@ -127,8 +131,14 @@ def test_select_orders_by_priority_then_lru() -> None:
 
 def test_select_ineligible_never_selected_regardless_of_priority() -> None:
     cands = [
-        CandidateSlot(name="pinned", last_used=1.0, footprint_mb=9000.0, eligible=False,
-                      reason="pinned", priority=0),
+        CandidateSlot(
+            name="pinned",
+            last_used=1.0,
+            footprint_mb=9000.0,
+            eligible=False,
+            reason="pinned",
+            priority=0,
+        ),
         CandidateSlot(name="ok", last_used=2.0, footprint_mb=9000.0, eligible=True, priority=100),
     ]
     plan = select_eviction_order(cands, needed_mb=8000.0, headroom_mb=0.0, free_mb=0.0)
