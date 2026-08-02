@@ -21,7 +21,10 @@ auth](#enabling-auth)). This is a deliberate v1.0 decision: an earlier
 auto-on-when-non-loopback design locked operators out of a dashboard that
 shipped no login UI. hal0 still doesn't terminate TLS or manage a user
 directory — for that, put a reverse proxy in front (see [TLS still needs a
-proxy](#tls-still-needs-a-proxy)).
+proxy](#tls-still-needs-a-proxy)). And if you installed the OpenWebUI
+companion there is a **second** listener — a full chat UI on `:3001` that
+this auth model does not cover at all; see
+[The second listener](#the-second-listener-openwebui-on-3001).
 </Aside>
 
 ## Tiers and credential resolution
@@ -284,6 +287,47 @@ If your proxy forwards `X-Forwarded-For`, set `HAL0_TRUST_FORWARDED_FOR=true`
 (see [Rate limiting](#rate-limiting)) once you've confirmed the proxy itself
 strips any client-supplied value — otherwise treat hal0's own admin-key auth
 as the access control and skip proxy-level basic auth entirely.
+
+## The second listener: OpenWebUI on :3001
+
+If `hal0-openwebui` is installed, it publishes a complete chat UI on port
+`3001` with `WEBUI_AUTH=False` — no login page. Anyone who can reach it can
+talk to your models and read every stored conversation
+(`/var/lib/hal0/openwebui`). It sits entirely outside hal0's own auth model:
+enabling enforcement and hardening `:8080`, then stopping there, leaves it
+open.
+
+Two knobs, both in `/etc/hal0/openwebui.env`. Hand edits to that file are
+preserved across install and upgrade runs, so editing it is a supported way
+to set them; `systemctl restart hal0-openwebui` to apply.
+
+**Bind address.** `HAL0_OWUI_BIND_HOST` is what the unit publishes on. The
+installer seeds it from the same `HAL0_BIND_HOST` choice that drives
+`hal0-api`, so binding hal0 to loopback takes both surfaces off the LAN:
+
+```ini
+# /etc/hal0/openwebui.env
+HAL0_OWUI_BIND_HOST=127.0.0.1
+```
+
+**Trusted-header SSO.** If your proxy authenticates users and injects their
+address as a header, OpenWebUI can consume it. Set the header name — that
+alone turns its auth on and wires it up:
+
+```ini
+# /etc/hal0/openwebui.env
+WEBUI_AUTH=True
+WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-Forwarded-Email
+```
+
+or, at install time, `HAL0_OWUI_TRUSTED_EMAIL_HEADER=X-Forwarded-Email`
+in the installer's environment.
+
+<Aside type="caution">
+Trusted-header auth is only as good as the proxy in front of it. If the port
+is still reachable directly, a client can send the header itself and pick any
+identity. Bind to loopback (or firewall the port) whenever you enable it.
+</Aside>
 
 ## See also
 
