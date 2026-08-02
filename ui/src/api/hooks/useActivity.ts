@@ -49,6 +49,8 @@ export type ActivitySeverity = 'info' | 'warn' | 'error' | 'ok'
 export const ACTIVITY_RING_MAX = 200
 /** Debounce SSE reconnect on rapid filter chip toggling. */
 const SSE_RECONNECT_DEBOUNCE_MS = 200
+/** Coalesce a burst of SSE frames (the connect backfill) into one render. */
+const FRAME_FLUSH_MS = 50
 
 // Module-level ring cache keyed by filter set. The ActivityLog sidebar is
 // mounted inside several early-return branches of SlotsView (loading / empty
@@ -232,17 +234,56 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
     sinceRef.current = cached.reduce((mx, r) => (r.id != null && r.id > mx ? r.id : mx), 0)
   }
 
+  // Frame batching: the connect backfill arrives as one SSE frame per record
+  // (up to the ring cap), and a setState per frame re-rendered the whole
+  // slots page once per record — the "activity log blocks the page load"
+  // jank. Frames buffer here and flush through ONE setRecords per
+  // FRAME_FLUSH_MS window instead.
+  const pendingRef = useRef<ActivityRecord[]>([])
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Merge a frame batch into a newest-first ring: dedup by id (durable
+  // backfill can overlap a reconnect replay, and a remount rehydrates from
+  // the cache before the SSE replays), clamp to the cap. Null = no change.
+  const mergeBatch = (
+    prev: ActivityRecord[],
+    batch: ActivityRecord[],
+  ): ActivityRecord[] | null => {
+    const seen = new Set(prev.map((r) => r.id))
+    const add: ActivityRecord[] = []
+    for (const r of batch) {
+      if (r.id != null) {
+        if (seen.has(r.id)) continue
+        seen.add(r.id)
+      }
+      add.push(r)
+    }
+    if (!add.length) return null
+    // Frames arrive oldest→newest; the ring is newest-first.
+    add.reverse()
+    const next = [...add, ...prev]
+    return next.length > ACTIVITY_RING_MAX ? next.slice(0, ACTIVITY_RING_MAX) : next
+  }
+
+  const flush = () => {
+    flushTimerRef.current = null
+    const batch = pendingRef.current
+    pendingRef.current = []
+    if (!batch.length) return
+    setRecords((prev) => {
+      const merged = mergeBatch(prev, batch)
+      if (merged == null) return prev
+      _ringCache.set(filterKey, merged)
+      return merged
+    })
+  }
+
   const push = (record: ActivityRecord) => {
     if (record.id != null && record.id > sinceRef.current) sinceRef.current = record.id
-    setRecords((prev) => {
-      // Dedup by id (durable backfill can overlap a reconnect replay, and a
-      // remount rehydrates from the cache before the SSE replays).
-      if (record.id != null && prev.some((r) => r.id === record.id)) return prev
-      const next = [record, ...prev]
-      const clamped = next.length > ACTIVITY_RING_MAX ? next.slice(0, ACTIVITY_RING_MAX) : next
-      _ringCache.set(filterKey, clamped)
-      return clamped
-    })
+    pendingRef.current.push(record)
+    if (flushTimerRef.current == null) {
+      flushTimerRef.current = setTimeout(flush, FRAME_FLUSH_MS)
+    }
   }
 
   useEffect(() => {
@@ -262,10 +303,16 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
       try {
         // Resume from the cursor unless the caller pinned its own `since`
         // (then that value IS the contract and must not be overridden).
+        // Always cap the connect backfill at the ring size (unless the
+        // caller pinned a limit): the server would otherwise replay its
+        // full 1000-row durable backlog one frame at a time, most of which
+        // the ring immediately discards.
+        const effective =
+          filters.limit != null ? filters : { ...filters, limit: ACTIVITY_RING_MAX }
         const query =
           filters.since != null || sinceRef.current <= 0
-            ? buildActivityQuery(filters)
-            : buildActivityQuery({ ...filters, since: sinceRef.current })
+            ? buildActivityQuery(effective)
+            : buildActivityQuery({ ...effective, since: sinceRef.current })
         const url = `${ENDPOINTS.activityStream}${query}`
         esRef.current = new EventSource(url)
       } catch {
@@ -283,6 +330,7 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
             // persistent cache, else a stale ring would rehydrate on remount).
             if (epochRef.current != null) {
               setRecords([])
+              pendingRef.current = []
               _ringCache.delete(filterKey)
               // Ids restart with the new epoch — the old cursor is meaningless.
               sinceRef.current = 0
@@ -319,6 +367,20 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
       cancelled = true
       clearTimeout(debounceTimer)
       if (backoffTimer) clearTimeout(backoffTimer)
+      if (flushTimerRef.current != null) {
+        clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
+      // Don't drop buffered frames on teardown — a setState here wouldn't
+      // run its updater (unmounting), so merge straight into the persistent
+      // cache: the remounted pane (SlotsView swaps panes on /api/slots
+      // resolve) rehydrates complete and the cursor stays truthful.
+      const batch = pendingRef.current
+      pendingRef.current = []
+      if (batch.length) {
+        const merged = mergeBatch(_ringCache.get(filterKey) ?? [], batch)
+        if (merged != null) _ringCache.set(filterKey, merged)
+      }
       if (esRef.current) {
         esRef.current.close()
         esRef.current = null

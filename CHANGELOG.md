@@ -23,6 +23,12 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- Slots page no longer stalls while the activity log backfills: the SSE
+  stream replayed the full 1000-row durable backlog one frame at a time on
+  every fresh connect, and the pane re-rendered once per frame. The stream
+  now takes a `limit` (the pane asks for its 200-row ring cap) and the
+  client coalesces frame bursts into one render per 50ms window.
+
 - hal0-brain tool-bearing requests no longer 500 with "Unknown (built-in)
   filter 'min'": the GGUF-embedded chat template uses the `|min` filter,
   which llama-server's jinja engine (minja) lacks. A corrected template
