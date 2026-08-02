@@ -2364,8 +2364,12 @@ select.npu-sel {
   border-bottom: 1px solid var(--line-soft);
 }
 .s-row:last-child { border-bottom: none; }
-.s-row .k { font-size: 13px; color: var(--fg); display: flex; flex-direction: column; gap: 3px; }
-.s-row .k .sub { font-family: var(--geist); font-size: 11.5px; color: var(--fg-4); font-weight: 400; }
+/* Row direction so SRow's FieldInfoIcon sits inline beside the label —
+   the same fix .form-lbl got for the model/slot drawers. The column
+   layout predates FieldInfoIcon (sub was a text line under the label);
+   any legacy text .sub still wraps to its own full-width line. */
+.s-row .k { font-size: 13px; color: var(--fg); display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 3px; }
+.s-row .k .sub { font-family: var(--geist); font-size: 11.5px; color: var(--fg-4); font-weight: 400; flex: 0 0 100%; }
 .s-row .v { font-family: var(--jbm); font-size: 12.5px; color: var(--fg-2); }
 .s-row .v.mono { font-family: var(--jbm); }
 .s-row .ac { display: flex; gap: 6px; }
