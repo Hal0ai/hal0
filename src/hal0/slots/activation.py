@@ -1,16 +1,22 @@
 """The slot activation predicate — one owner for "is this slot live config?".
 
 #1369 removed ``SlotConfig.enabled``: a slot is activated by **binding a
-model**, never by a separate boolean. Boot autostart is the Quadlet
-``[Install] WantedBy=hal0.target`` stanza, which only exists because
-:meth:`hal0.slots.manager.SlotManager.load` refuses to write a unit for a
-model-less slot — so ``[model].default`` was always the real signal, and
-every routability check that consulted ``enabled`` was immediately followed
-by a model-presence gate anyway.
+model**, never by a separate boolean. Boot autostart used to ride the same
+signal — the Quadlet ``[Install] WantedBy=hal0.target`` stanza existed
+whenever :meth:`hal0.slots.manager.SlotManager.load` had a model to write a
+unit for. Spec 2026-08-02 split the two: boot autostart is now the explicit,
+independently-gated ``autoload`` field — this module owns
+:func:`autoload_enabled`, the raw-dict predicate that mirrors
+``SlotConfig._derive_autoload`` (explicit key wins; an absent key falls back
+to the legacy implicit signal, a bound model, so pre-field TOMLs keep their
+boot behaviour). Activation itself is unchanged: ``[model].default`` is
+still the real routability/loadability signal, and every check that used to
+consult ``enabled`` was immediately followed by a model-presence gate
+anyway.
 
-Keeping that predicate in one place stops the ~8 call sites (routing, the
-/v1 listing helpers, the slot-view aggregator, the NPU exclusivity guard,
-the dispatcher's NPU swap tracker) from each re-deriving
+Keeping the activation predicate in one place stops the ~8 call sites
+(routing, the /v1 listing helpers, the slot-view aggregator, the NPU
+exclusivity guard, the dispatcher's NPU swap tracker) from each re-deriving
 ``(cfg.get("model") or {}).get("default")`` with subtly different
 None/whitespace handling.
 

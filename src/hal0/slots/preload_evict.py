@@ -8,9 +8,10 @@ what's already resident — the box can OOM before the next sweep tick.
 
 This module adds the missing synchronous gate: before a slot starts, estimate
 the incoming model's footprint and, if projected free memory is short, evict
-idle/LRU-eligible resident slots — in LRU order — until it fits. It
-deliberately REUSES existing machinery rather than inventing a second,
-divergent notion of "fits" or "evictable":
+idle, non-pinned resident slots — lowest eviction ``priority`` first,
+least-recently-used as the tie-break within a tier (spec 2026-08-02) — until
+it fits. It deliberately REUSES existing machinery rather than inventing a
+second, divergent notion of "fits" or "evictable":
 
   - Footprint estimate: :func:`hal0.slots.capacity.estimate_file_size_kv_mb`
     (registry file size + coarse KV-cache estimate) — the same formula
@@ -27,10 +28,11 @@ divergent notion of "fits" or "evictable":
 Two layers, so the decision logic is unit-testable without spinning
 containers:
 
-  - :func:`select_eviction_order` is a PURE function: given an LRU-ordered
-    candidate list (with pre-computed footprint estimates) and how much is
-    needed, it decides which candidates to evict and whether the result
-    will fit. No I/O, no SlotManager.
+  - :func:`select_eviction_order` is a PURE function: given a candidate list
+    (with pre-computed footprint estimates) and how much is needed, it
+    decides which candidates to evict — sorted lowest-priority-first,
+    least-recently-used as the tie-break — and whether the result will fit.
+    No I/O, no SlotManager.
   - :func:`admit` is the async orchestrator :meth:`SlotManager.load` calls:
     gathers live candidates, calls :func:`select_eviction_order`, executes
     the plan against the real manager (real unloads, re-probing real free

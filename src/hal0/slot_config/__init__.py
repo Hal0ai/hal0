@@ -205,7 +205,10 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
 #:
 #:   - ``type``           — slot kind (llm/embedding/…), read all over manager/routing.
 #:   - ``default``        — SC-4 per-type default flag, read by default_slot_for.
-#:   - ``lru``            — pressure-eviction eligibility (#903).
+#:   - ``lru``            — retired eviction opt-in (#903, spec 2026-08-02).
+#:     Tolerated for back-compat only: the key is ignored (every non-pinned
+#:     slot is now a pressure/pre-load eviction candidate, ordered by
+#:     ``priority``), with a one-time deprecation warning.
 #:   - ``default_voice`` / ``default_language`` — TTS engine extras written by
 #:     the dashboard voice settings (PUT /api/slots/tts/config).
 #:   - ``slot``           — the nested on-disk [slot] table shape (hoisted on load).

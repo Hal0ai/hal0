@@ -28,10 +28,25 @@ applying. Add those subsections to a version's section to surface them; see
   implies boot start; existing slots with a bound model migrate as
   `true`, so upgrade changes nothing until toggled.
 - Slots: eviction `priority` (0–100, default 50, drawer field) — memory
-  pressure and pre-load eviction now unload the lowest-priority slot
-  first (least-recently-used within a tier). The `lru = true` opt-in is
-  retired: every non-pinned slot is evictable; the key is ignored with a
-  one-time deprecation warning. `pinned` still exempts entirely.
+  pressure and pre-load eviction unload the lowest-priority slot first
+  (least-recently-used as the tie-break within a tier). `pinned` still
+  exempts a slot entirely.
+
+### Breaking
+
+- The `lru = true` eviction opt-in is retired. Memory-pressure and
+  pre-load eviction used to only ever touch a slot that explicitly set
+  `lru = true`; now every non-pinned resident slot is a candidate,
+  ordered by the new `priority` field. The key is still accepted in slot
+  TOML but ignored, with a one-time deprecation warning — remove it and
+  use `priority`/`pinned` instead. Practically: on a stock box that never
+  set `lru = true` on anything, pressure and pre-load eviction go from
+  inert (nothing was ever eligible) to ACTIVE the moment host memory gets
+  tight. Also note `idle_timeout_s = 0` never exempted a slot from
+  pressure or pre-load eviction — it only ever disabled that one slot's
+  idle-TTL path — and that distinction now matters more than it used to.
+  `pinned` (plus the built-in `agent`/`utility`/`npu` anchors) is the only
+  exemption from pressure and pre-load eviction.
 
 ### Fixed
 

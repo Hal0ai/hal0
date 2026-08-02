@@ -88,8 +88,8 @@ def test_select_cannot_fit_reports_shortfall() -> None:
 
 
 def test_select_never_evicts_ineligible_candidates() -> None:
-    """A pinned/non-lru/serving candidate is never selected — even when it
-    is the oldest AND the largest — because the planner itself enforces
+    """A pinned/serving/not-resident candidate is never selected — even when
+    it is the oldest AND the largest — because the planner itself enforces
     eligibility, not just whatever gathered the candidate list."""
     candidates = [
         CandidateSlot(
@@ -208,13 +208,15 @@ async def test_load_evicts_idle_lru_slot_to_make_room(
     container_stub: FakeContainerProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A load that wouldn't otherwise fit evicts the idle lru-eligible slot
-    first, then proceeds — no reactive-only wait for the pressure sweeper."""
+    """A load that wouldn't otherwise fit evicts the idle, non-pinned
+    resident slot first, then proceeds — no reactive-only wait for the
+    pressure sweeper. `lru=True` is set on both slots to confirm the
+    retired key is tolerated (and ignored) rather than required."""
     _write_slot(slot_root, "rerank", port=8090, lru=True)
     _write_slot(slot_root, "embed", port=8091, lru=True)
     sm = SlotManager(preload_evict_headroom_mb=0.0)
     await sm.load("rerank")
-    sm._last_used[sm._key("rerank")] = 0.0  # idle long enough to be lru-eligible
+    sm._last_used[sm._key("rerank")] = 0.0  # idle long enough to be evicted
 
     monkeypatch.setattr(sm, "_resolve_model_info", _stub_model_info(4000.0))
     free_readings = [1000.0, 6000.0]  # short before eviction, plenty after
