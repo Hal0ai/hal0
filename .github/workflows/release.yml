@@ -597,9 +597,11 @@ jobs:
           # canonical copy rather than failing the whole publication.
           BODY_CAP=120000
           if [[ "$(wc -c < "${NOTES_FILE}")" -gt "${BODY_CAP}" ]]; then
-            TRAILER="
-
-*Truncated — full notes in [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/CHANGELOG.md) and as RELEASE_NOTES.md inside the release tarball.*"
+            # $'…' single-line form on purpose: a multi-line string literal
+            # whose continuation lines start at column 0 would terminate this
+            # YAML literal block (tests/release/test_workflow_contract.py
+            # parses this file and would fail on it).
+            TRAILER=$'\n\n*Truncated — full notes in [CHANGELOG.md](https://github.com/'"${GITHUB_REPOSITORY}"$'/blob/'"${TAG}"$'/CHANGELOG.md) and as RELEASE_NOTES.md inside the release tarball.*'
             head -c $(( BODY_CAP - ${#TRAILER} )) "${NOTES_FILE}" \
               | sed '$ d' > "${NOTES_FILE}.capped"
             printf '%s' "${TRAILER}" >> "${NOTES_FILE}.capped"
