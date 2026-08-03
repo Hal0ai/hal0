@@ -212,6 +212,60 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
     expect(posts[0]).toBe('POST')
   })
 
+  test('running engine shows the Stop control + a state-typed pill; Stop drives switchover then img unload', async ({ page }) => {
+    const switches: any[] = []
+    const unloads: string[] = []
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Idle()))
+    await page.route('**/api/comfyui/switchover', async (route: any) => {
+      switches.push(JSON.parse(route.request().postData() || '{}'))
+      return json(route, { status: 'accepted' }, 202)
+    })
+    await page.route('**/api/slots/img/unload', (route: any) => {
+      unloads.push(route.request().method())
+      return json(route, {})
+    })
+
+    await gotoImageTab(page)
+
+    // Running indicator: pill carries the live engine state.
+    const pill = page.getByTestId('comfy-engine-pill')
+    await expect(pill).toBeVisible()
+    await expect(pill).toHaveAttribute('data-state', 'running')
+    await expect(pill).toContainText('running')
+
+    // Stop is offered while the engine is up; Start is not.
+    const stopBtn = page.getByTestId('comfy-stop')
+    await expect(stopBtn).toBeVisible()
+    await expect(page.getByTestId('comfy-start')).toHaveCount(0)
+
+    await stopBtn.click()
+    await expect.poll(() => switches.length, { timeout: 5_000 }).toBeGreaterThan(0)
+    expect(switches[0]).toMatchObject({ mode: 'inference' })
+    // The switchover leaves the container up by design — Stop follows with a
+    // real img slot unload so the engine actually goes down.
+    await expect.poll(() => unloads.length, { timeout: 5_000 }).toBeGreaterThan(0)
+    expect(unloads[0]).toBe('POST')
+  })
+
+  test('stopped engine shows Start (no Stop) and a neutral stopped pill', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) =>
+      json(route, {
+        ...comfyV2Idle(),
+        mode: 'inference',
+        reachable: false,
+        engine: 'stopped',
+        arbiter: { mode: 'llm', pinned: false, saved_llm_slots: [], idle_restore_at: null },
+      }),
+    )
+    await gotoImageTab(page)
+
+    const pill = page.getByTestId('comfy-engine-pill')
+    await expect(pill).toHaveAttribute('data-state', 'stopped')
+    await expect(pill).toContainText('stopped')
+    await expect(page.getByTestId('comfy-start')).toBeVisible()
+    await expect(page.getByTestId('comfy-stop')).toHaveCount(0)
+  })
+
   // ── 7. Idle state: empty queue renders in-flow (no overlay lockup) ────────
 
   test('idle: empty-queue state renders in-flow, no click-blocking overlay', async ({ page }) => {

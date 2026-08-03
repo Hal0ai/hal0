@@ -23,6 +23,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- Image Gen pane: proper engine lifecycle controls and running indicators.
+  The header pill is state-typed off the live engine (stopped / starting /
+  running / generating·% / error) with matching colors, and a Stop button
+  appears while the engine is up — it drives the GPU-arbiter switchover
+  back to inference mode (restoring the LLM slots) and then unloads the img
+  slot so the container actually goes down. Start/Restart/Logs unchanged.
+
+### Added
+
 - Slots: explicit `autoload` setting — a slot starts at boot only when
   `autoload = true` (slot drawer toggle). Binding a model no longer
   implies boot start; existing slots with a bound model migrate as
