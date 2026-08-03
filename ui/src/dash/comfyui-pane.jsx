@@ -101,6 +101,7 @@ const CIcons = {
       <rect x="4" y="4" width="8" height="8" rx="1" />
     </CI>
   ),
+  start: <CI d="M5 3.5l7 4.5-7 4.5V3.5z" fill="currentColor" sw="0" />,
   refresh: (
     <CI>
       <path d="M14 8a6 6 0 1 1-2-4.5" />
@@ -457,9 +458,10 @@ function CardHead({
             style per the operator's ask. */}
         <span className="foot-ctrls">
           {engineStopped && onStart && (
-            <button className="btn ghost sm" data-testid="comfy-start"
+            <button className="sctrl start" data-testid="comfy-start"
+              title={startBusy ? 'Starting…' : 'Start engine'}
               disabled={startBusy} onClick={onStart}>
-              {startBusy ? 'starting…' : 'Start'}
+              <Ci name="start" size={12} />
             </button>
           )}
           {/* Stop = arbiter switchover to inference mode: frees ComfyUI's
@@ -468,9 +470,10 @@ function CardHead({
               backend refuses to drop a busy render queue, so a stop during
               a render surfaces its error instead of killing the job. */}
           {engineUp && onStop && (
-            <button className="btn ghost sm" data-testid="comfy-stop"
+            <button className="sctrl stop" data-testid="comfy-stop"
+              title={stopBusy ? 'Stopping…' : 'Stop engine — restores LLM slots'}
               disabled={stopBusy} onClick={onStop}>
-              {stopBusy ? 'stopping…' : 'Stop'}
+              <Ci name="stop" size={12} />
             </button>
           )}
           <button className="sctrl restart" title="Restart" onClick={onRestart}><Ci name="refresh" size={12} /></button>

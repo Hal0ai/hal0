@@ -189,7 +189,7 @@ test.describe('ImageGen V2 render-hero pane', () => {
   // backing mutation (only restart/logs are wired) — removed as a dead
   // control rather than left silently doing nothing on a GPU-exclusive
   // engine. Pin its absence so it doesn't come back un-wired.
-  test('footer identity + header controls render (no dead Stop button)', async ({ page }) => {
+  test('footer identity + header controls render (Stop is wired, icon-style)', async ({ page }) => {
     await gotoImageTab(page)
     const pane = page.locator('.comfy-v2-pane')
 
@@ -200,8 +200,10 @@ test.describe('ImageGen V2 render-hero pane', () => {
     // restart control — still in the header far right
     const head = pane.locator('.wcard-h')
     await expect(head.locator('.sctrl.restart')).toBeVisible()
-    // the un-wired "Stop container" button must not be rendered (#1470)
-    await expect(head.locator('.sctrl.stop')).toHaveCount(0)
+    // #1470 removed a DEAD Stop button; it is back as a wired icon control
+    // (arbiter switchover + img unload behind it — comfyui-arbiter-v3 spec
+    // covers the wiring). The engine is up in this mock, so it renders.
+    await expect(head.getByTestId('comfy-stop')).toBeVisible()
   })
 
   // ── 7. Empty-queue state: NO click-blocking overlay ─────────────────────

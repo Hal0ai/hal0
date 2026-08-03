@@ -465,6 +465,9 @@
 .comfy-page .sctrl:hover { border-color: var(--line-strong); background: var(--bg-3); color: var(--fg-2); }
 .comfy-page .sctrl.stop    { color: var(--err);  border-color: var(--err-line); }
 .comfy-page .sctrl.stop:hover    { background: var(--err-soft); }
+.comfy-page .sctrl.start   { color: var(--ok, #4caf7d); border-color: var(--ok-line, rgba(76,175,125,.4)); }
+.comfy-page .sctrl.start:hover   { background: var(--ok-soft, rgba(76,175,125,.12)); }
+.comfy-page .sctrl:disabled { opacity: .5; cursor: default; }
 .comfy-page .sctrl.restart { color: var(--info); border-color: var(--info-line); }
 .comfy-page .sctrl.restart:hover { background: var(--info-soft); }
 .comfy-page .sctrl.acc { color: var(--comfy); border-color: var(--comfy-line); }
