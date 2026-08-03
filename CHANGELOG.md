@@ -23,6 +23,21 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- Moonshine reinstated as hal0's CPU STT engine, packaged as its own
+  toolbox image (`hal0-toolbox-moonshine:v1`). `voice.stt` is now a
+  device-keyed engine switch exactly like `voice.tts`: `cpu` runs
+  Moonshine, `npu` runs whisper-v3:turbo via the FLM trio, and GPU
+  devices resolve to no STT engine (previously a fall-through bug handed
+  the `stt` slot the wrong llama chat profile). Moonshine's weights are
+  operator-staged under the model store and preflighted at slot spawn,
+  failing loudly by name (`slot.weights_missing`) instead of 500ing on
+  first request. This supersedes the `[v0.2.0]` "Moonshine STT retired in
+  favour of `whisper.cpp`" entry below — that justification never held,
+  since `whisper.cpp` never shipped as a standalone CPU service. See
+  [`docs/adr/0001-moonshine-cpu-stt-reinstatement.md`](docs/adr/0001-moonshine-cpu-stt-reinstatement.md).
+
+### Added
+
 - Image Gen pane: proper engine lifecycle controls and running indicators.
   The header pill is state-typed off the live engine (stopped / starting /
   running / generating·% / error) with matching colors, and a Stop button
