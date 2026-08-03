@@ -38,6 +38,7 @@ import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 import { slotModelRow } from './slots/slot-shared.js'
+import { useCardReorder } from './slots/card-order.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the copy this file used to carry (and the verbatim clones in slot-list.jsx
 // and npu-pane.jsx).
@@ -154,6 +155,34 @@ function SubLabel({ icon, note, children }) {
         </>
       )}
     </div>
+  )
+}
+
+// ── card grip ───────────────────────────────────────────────────────────
+// Drag handle for reordering the slot cards — a small dotted tab hanging from
+// the top-centre edge of the card, in the same border/`--bg-2` chrome as the
+// rest of the card. Rest state is faint; it comes up on card hover and on
+// keyboard focus. Arrow keys move the card one place (the accessible path, and
+// the only one on touch — native HTML5 DnD is pointer-only).
+function CardGrip({ name, grip }) {
+  return (
+    <button
+      type="button"
+      className="card-grip"
+      title="Drag to reorder — or use the arrow keys"
+      aria-label={`Reorder ${name} — drag, or use the arrow keys`}
+      data-testid={`infer-grip-${name}`}
+      {...grip}
+    >
+      <svg width="16" height="8" viewBox="0 0 16 8" fill="currentColor" aria-hidden="true">
+        {[3, 8, 13].map((cx) => (
+          <React.Fragment key={cx}>
+            <circle cx={cx} cy="3" r="1" />
+            <circle cx={cx} cy="6" r="1" />
+          </React.Fragment>
+        ))}
+      </svg>
+    </button>
   )
 }
 
@@ -348,7 +377,13 @@ export function slotCtrlPhase(slot) {
 //               from their modality toggle, not the slot's own state).
 //   onEditModel / modelName — inline model-edit affordance. Omit both and the
 //               model row renders exactly as before (the NPU stack does).
-export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit, onEditModel, modelName }) {
+//   grip / dragging / dropProps — drag-to-reorder wiring (see slots/card-order).
+//               Omit `grip` and the card carries no handle at all, which is how
+//               every non-reorderable caller renders it.
+export function SlotScard({
+  s, ind, full, modelNode, controls, phase, onEdit, onEditModel, modelName,
+  grip, dragging, dropProps,
+}) {
   const dot = dotCls(ind)
   const ph = phase || slotCtrlPhase(s)
   // A live-ish card whose /api/slots enrichment hasn't landed yet (bare
@@ -362,9 +397,14 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit, on
   const ttft = typeof s.metrics?.ttft === 'number' && s.metrics.ttft > 0 ? s.metrics.ttft : null
   return (
     <div
-      className={'scard ' + dot + (ph === 'off' ? ' dim' : '') + (pending ? ' pending' : '')}
+      className={
+        'scard ' + dot + (ph === 'off' ? ' dim' : '') + (pending ? ' pending' : '') +
+        (dragging ? ' dragging' : '')
+      }
       data-testid={`infer-slot-${s.name}`}
+      {...(dropProps || {})}
     >
+      {grip}
       <div className="scard-h">
         <span className={'sdot ' + dot} title={ind.tooltip} />
         <span className="snm">{s.name}</span>
@@ -432,6 +472,9 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit, on
 }
 
 function SlotCards({ rows, full, models, busyName, handlers, loading, modelRows }) {
+  // Operator-arranged order + drag wiring. Called before the early returns so
+  // the hook order is stable across the loading/empty/populated renders.
+  const reorder = useCardReorder('inference.chat', rows)
   if (!rows.length) {
     if (loading)
       return (
@@ -445,7 +488,7 @@ function SlotCards({ rows, full, models, busyName, handlers, loading, modelRows 
   }
   return (
     <div className={'scards ' + (full ? 'full' : 'compact')}>
-      {rows.map(({ s, ind }) => {
+      {reorder.rows.map(({ s, ind }) => {
         const busy = busyName === s.name
         const modelNode = full ? (
           <ModelPicker
@@ -491,6 +534,9 @@ function SlotCards({ rows, full, models, busyName, handlers, loading, modelRows 
               handlers.onEditModel ? () => handlers.onEditModel(s) : undefined
             }
             modelName={modelRow ? modelRow.longName || modelRow.name || modelRow.id : ''}
+            grip={<CardGrip name={s.name} grip={reorder.gripProps(s.name)} />}
+            dragging={reorder.dragName === s.name}
+            dropProps={reorder.dropProps(s.name)}
           />
         )
       })}
@@ -501,11 +547,16 @@ function SlotCards({ rows, full, models, busyName, handlers, loading, modelRows 
 // Utility tier — compact mini cards for the support slots (embed / rerank /
 // voice). No meta row, no model picker: just the dot + name + port header and
 // a minimal model + Start/Stop/Restart control cluster (SlotControls compact).
-function MiniCard({ s, ind, busy, handlers }) {
+function MiniCard({ s, ind, busy, handlers, grip, dragging, dropProps }) {
   const dot = dotCls(ind)
   const ph = slotCtrlPhase(s)
   return (
-    <div className={'mcard ' + dot} data-testid={`infer-slot-${s.name}`}>
+    <div
+      className={'mcard ' + dot + (dragging ? ' dragging' : '')}
+      data-testid={`infer-slot-${s.name}`}
+      {...(dropProps || {})}
+    >
+      {grip}
       <div className="mcard-h">
         <span className={'sdot ' + dot} title={ind.tooltip} />
         <span className="snm">{s.name}</span>
@@ -533,16 +584,22 @@ function MiniCard({ s, ind, busy, handlers }) {
 }
 
 function MiniCards({ rows, busyName, handlers }) {
+  // Utility tier arranges independently of the headline tier — its own scope
+  // key. Hook first: `rows` can be empty on the very first render.
+  const reorder = useCardReorder('inference.util', rows)
   if (!rows.length) return null
   return (
     <div className="util-mini">
-      {rows.map(({ s, ind }) => (
+      {reorder.rows.map(({ s, ind }) => (
         <MiniCard
           key={s.name}
           s={s}
           ind={ind}
           busy={busyName === s.name}
           handlers={handlers}
+          grip={<CardGrip name={s.name} grip={reorder.gripProps(s.name)} />}
+          dragging={reorder.dragName === s.name}
+          dropProps={reorder.dropProps(s.name)}
         />
       ))}
     </div>
