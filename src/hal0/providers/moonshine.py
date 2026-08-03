@@ -359,6 +359,11 @@ class MoonshineProvider(Provider):
         """
         url = f"http://127.0.0.1:{port}/v1/audio/transcriptions"
         file_part = body.get("file")
+        if file_part is None:
+            raise MoonshineInferError(
+                "transcription body carries no 'file' part",
+                details={"port": port},
+            )
         data = {k: v for k, v in body.items() if k != "file" and v is not None}
         try:
             async with httpx.AsyncClient(timeout=_INFER_TIMEOUT) as client:
