@@ -22,7 +22,7 @@ from hal0.config.schema import (
 )
 
 # The 1.0 catalog is intentionally small: workload/runtime-family seeds only.
-_EXPECTED_PROFILE_COUNT = 16
+_EXPECTED_PROFILE_COUNT = 17
 _EXPECTED_STACK_SLUGS = {"saber", "forge", "pi"}
 
 

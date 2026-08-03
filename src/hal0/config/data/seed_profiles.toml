@@ -1,4 +1,4 @@
-# hal0 1.0 seeded profile catalog (16 profiles total).
+# hal0 1.0 seeded profile catalog (17 profiles total).
 #
 # Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md §4:
 # Profiles are device-agnostic logical-tune TEMPLATES — they carry only
@@ -81,6 +81,17 @@ quant = "W4ABF16"
 flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
 mtp = false
 intent = "Kokoro TTS"
+quant = ""
+
+[profile.moonshine]
+# Moonshine STT (CPU ONNX). Weights are operator-staged under the model
+# store (SELF_MANAGED_PROVIDERS — multi-file ONNX bundle, not registry-
+# pulled). --model_arch picks the checkpoint family the server loads;
+# --model_path points at the staged bundle root (the server resolves the
+# quantized/<variant> leaf itself).
+flags = "--model_path /mnt/ai-models/local/moonshine --model_arch small_streaming"
+mtp = false
+intent = "Moonshine STT (CPU)"
 quant = ""
 
 [profile.qwen3-tts]

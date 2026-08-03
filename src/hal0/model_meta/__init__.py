@@ -183,7 +183,14 @@ DEVICE_CLASSES: tuple[str, ...] = ("gpu", "cpu", "npu", "img")
 #: Profile runtime families. MUST stay in sync with the
 #: ``hal0.profiles.RuntimeFamily`` Literal (a Literal can't be built from a
 #: runtime tuple; tests/model_meta assert the two match).
-RUNTIME_FAMILIES: tuple[str, ...] = ("llama-server", "flm", "kokoro", "qwen3tts", "comfyui")
+RUNTIME_FAMILIES: tuple[str, ...] = (
+    "llama-server",
+    "flm",
+    "kokoro",
+    "qwen3tts",
+    "moonshine",
+    "comfyui",
+)
 
 #: Legacy ``backend`` token → canonical ``device``. Used by the SlotConfig
 #: and CapabilitySelection promote-then-drop shims (auto-promote a legacy

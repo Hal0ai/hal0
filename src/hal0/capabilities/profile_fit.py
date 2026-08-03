@@ -33,6 +33,19 @@ def profile_name_for_fit(capability: str, device: str) -> str | None:
     if capability == "tts":
         # Engine switch within the tts slot — GPU resolves Qwen3, CPU Kokoro.
         return tts_profile_for_device(device)
+    if capability == "stt":
+        # Device-keyed STT engine switch (mirrors tts): NPU → the FLM trio,
+        # CPU → Moonshine. There is deliberately NO GPU branch — hal0 ships
+        # no GPU STT engine, and falling through to the generic GPU branch
+        # below would hand the stt slot a llama chat profile (wrong runtime
+        # family; the slot would never start the STT image). If a second CPU
+        # STT engine ever lands, this device-keyed rule stops discriminating
+        # and `provider` must become part of the selection (see the ADR).
+        if device == "npu":
+            return DEVICE_DEFAULT_PROFILES.get("npu")
+        if device == "cpu":
+            return "moonshine"
+        return None
     if device == "npu":
         return DEVICE_DEFAULT_PROFILES.get("npu")
     if capability == "embed" and device in {"gpu-rocm", "gpu-vulkan"}:

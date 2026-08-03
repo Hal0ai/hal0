@@ -40,7 +40,7 @@ from hal0.errors import Conflict, NotFound
 
 log = logging.getLogger(__name__)
 
-RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "comfyui"]
+RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui"]
 SlotType = Literal["llm", "embedding", "reranking", "transcription", "tts", "image"]
 
 _PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -110,8 +110,9 @@ def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
     spec-hw-slot-ownership §3: profiles carry no ``image`` anymore, so the old
     exact-image→``RUNNER_IMAGES`` lookup and the image-substring sniffs are gone.
     The runtime family is a structural fact: ``device_class`` pins the
-    single-purpose runtimes (``img`` → comfyui, ``npu`` → flm), and the two TTS
-    engines (kokoro / qwen3tts) — which share a ``cpu`` device_class with a plain
+    single-purpose runtimes (``img`` → comfyui, ``npu`` → flm), and the
+    name-keyed CPU engines — the two TTS engines (kokoro / qwen3tts) plus the
+    moonshine STT engine, which share a ``cpu`` device_class with a plain
     llama-server CPU profile and so can only be told apart by name — key off
     their seed slug. Mirrors the model-side backends-driven classification in
     :func:`hal0.model_meta.modality.derive_modalities` (a structural signal, not
@@ -124,6 +125,8 @@ def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
         return "qwen3tts"
     if name == "kokoro":
         return "kokoro"
+    if name == "moonshine":
+        return "moonshine"
     if name == "comfyui" or profile.device_class == "img":
         return "comfyui"
     return "llama-server"
@@ -134,6 +137,8 @@ def _supported_slot_types(runtime_family: RuntimeFamily) -> tuple[SlotType, ...]
         return ("llm", "embedding", "transcription")
     if runtime_family in ("kokoro", "qwen3tts"):
         return ("tts",)
+    if runtime_family == "moonshine":
+        return ("transcription",)
     if runtime_family == "comfyui":
         return ("image",)
     return ("llm", "embedding", "reranking")
