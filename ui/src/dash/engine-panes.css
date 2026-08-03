@@ -997,6 +997,55 @@
 :is(.infer-pane, .npu-pane) .scard.dim {
   opacity: 0.55;
 }
+/* ─── Drag-to-reorder grip ───────────────────────────────────────────────
+   A dotted tab hanging from the top-centre edge of a slot card, in the card's
+   own border + --bg-2 chrome. Faint at rest so a grid of cards stays quiet;
+   full strength on card hover, grip hover, and keyboard focus. Only rendered
+   on the reorderable Inference-pane cards (see slots/card-order.js). */
+.infer-pane .card-grip {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 13px;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-top: 0;
+  border-radius: 0 0 var(--rad-sm) var(--rad-sm);
+  background: var(--bg-2);
+  color: var(--fg-5);
+  cursor: grab;
+  opacity: 0.4;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.infer-pane :is(.scard, .mcard):hover .card-grip {
+  opacity: 1;
+}
+.infer-pane .card-grip:hover,
+.infer-pane .card-grip:focus-visible {
+  opacity: 1;
+  color: var(--fg-2);
+  border-color: var(--line-strong);
+}
+.infer-pane .card-grip:active {
+  cursor: grabbing;
+}
+/* The card being dragged — its live position in the grid already previews the
+   drop, so the source only needs to read as "in flight". */
+.infer-pane :is(.scard, .mcard).dragging {
+  opacity: 0.4;
+  border-style: dashed;
+}
+.infer-pane :is(.scard, .mcard).dragging:hover {
+  transform: none;
+  box-shadow: none;
+}
+
 :is(.infer-pane, .npu-pane) .scard-h {
   display: flex;
   align-items: center;
