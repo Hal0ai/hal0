@@ -669,6 +669,13 @@ def _flat_rows_for_capability(
         seen.add(key)
         rows.append(tts_row)
 
+    for stt_row in _stt_rows_for_capability(capability, registry=registry):
+        key = (stt_row["id"], stt_row["backend"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(stt_row)
+
     return rows
 
 
@@ -741,6 +748,50 @@ def _registry_downloaded(model_id: str, *, registry: ModelRegistry | None) -> bo
         return Path(reg_path).exists()
     except OSError:
         return False
+
+
+#: The one CPU STT engine surfaced directly (mirrors ``_TTS_ENGINES``). The
+#: seeded id matches ``moonshine-small-streaming-en`` in
+#: ``seeds/haloai_models.json`` exactly — that HaloaiModel entry is
+#: otherwise skipped from the flat fan-out (see ``_flat_rows_for_capability``
+#: docstring: HaloaiModel rows surface no download path / working route on a
+#: standalone install), so this injects the picker row directly instead,
+#: the same way :func:`_tts_rows_for_capability` injects its two engines.
+#: NPU stt is NOT here — it fans out through :func:`_flm_rows_for_capability`
+#: (the FLM trio), same split as embed.
+_STT_ENGINE_ID = "moonshine-small-streaming-en"
+
+
+def _stt_rows_for_capability(
+    capability: str,
+    *,
+    registry: ModelRegistry | None = None,
+) -> list[dict[str, Any]]:
+    """Enumerate the CPU Moonshine engine for the voice.stt picker.
+
+    Device-keyed STT engine switch (mirrors TTS): CPU runs the standalone
+    Moonshine engine (this row); NPU is served coresident by the FLM trio
+    (:func:`_flm_rows_for_capability`) — there is no GPU STT engine.
+    Moonshine's weights are operator-staged (multi-file ONNX bundle, not
+    registry-pulled), so ``downloaded`` comes from a registry lookup like
+    :func:`_registry_downloaded` handles for ``qwen3-tts`` and ``pullable``
+    is always False — mirrors how :func:`_tts_rows_for_capability` treats
+    the self-managed Qwen3-TTS engine.
+    """
+    if capability != "stt":
+        return []
+
+    return [
+        {
+            "id": _STT_ENGINE_ID,
+            "backend": "cpu",
+            "provider": "moonshine",
+            "size_gb": 0.0,
+            "capabilities": ["stt"],
+            "downloaded": _registry_downloaded(_STT_ENGINE_ID, registry=registry),
+            "pullable": False,
+        }
+    ]
 
 
 def _profile_for_fit(capability: str, device: str) -> ResolvedProfile | None:
