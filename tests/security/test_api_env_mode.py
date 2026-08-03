@@ -2,8 +2,7 @@
 
 The live box carried ``644 hal0:hal0`` on ``/etc/hal0/api.env`` while that
 file held ``HF_TOKEN``, ``MINIMAX_API_KEY``, ``OPENROUTER_API_KEY``,
-``HERMES_SESSION_TOKEN`` and ``HAL0_TURNSTONE_TOKEN`` — every local account
-could read them.
+and ``HERMES_SESSION_TOKEN`` — every local account could read them.
 
 FOUR writers disagreed:
 

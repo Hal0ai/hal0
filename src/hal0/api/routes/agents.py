@@ -56,9 +56,9 @@ async def _unit_active(name: str) -> bool | None:
     Delegates to the single systemctl seam in :mod:`hal0.api.agents.restart`
     (module attribute, not a from-import, so the probe stays patchable in
     tests). Agents outside that module's registry have no ``hal0-agent@``
-    template unit — Pi is a CLI tool, Turnstone runs its own server — so
-    probing them would answer "inactive" about a unit that was never meant to
-    exist. They report ``None`` (unknown) instead.
+    template unit — Pi, for instance, is a CLI tool — so probing them would
+    answer "inactive" about a unit that was never meant to exist. They report
+    ``None`` (unknown) instead.
     """
     if name not in agent_restart.KNOWN_AGENT_IDS:
         return None

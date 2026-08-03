@@ -138,10 +138,10 @@ def test_set_of_a_protected_key_is_refused(
 def test_protected_refusal_names_the_key_but_never_its_value(
     client: TestClient, tmp_hal0_home: str
 ) -> None:
-    _seed(tmp_hal0_home, "HAL0_TURNSTONE_TOKEN")
-    r = client.delete("/api/secrets/HAL0_TURNSTONE_TOKEN")
+    _seed(tmp_hal0_home, "HAL0_SESSION_TOKEN")
+    r = client.delete("/api/secrets/HAL0_SESSION_TOKEN")
     assert r.status_code == 403
-    assert "HAL0_TURNSTONE_TOKEN" in r.text
+    assert "HAL0_SESSION_TOKEN" in r.text
     assert "value-for-" not in r.text
 
 

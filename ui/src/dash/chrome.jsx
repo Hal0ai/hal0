@@ -815,12 +815,6 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
       title: serviceById.hermes?.detail || (serviceHealth.pending ? 'service health pending' : 'hermes down'),
     },
     {
-      id: 'turnstone',
-      label: 'turnstone',
-      tone: serviceHealth.pending ? 'warn' : serviceById.turnstone?.up ? 'up' : 'err',
-      title: serviceById.turnstone?.detail || (serviceHealth.pending ? 'service health pending' : 'turnstone down'),
-    },
-    {
       id: 'openwebui',
       label: 'openwebui',
       tone: serviceHealth.pending ? 'warn' : serviceById.openwebui?.up ? 'up' : 'err',
