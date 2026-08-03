@@ -79,37 +79,6 @@ function _piCoderIdentity() {
   };
 }
 
-// ── static (curated) identity for the live Turnstone card ────────────
-// Turnstone is a self-hosted orchestration platform running its own server
-// on loopback :9129; it routes every model through the hal0-api gateway and
-// mounts hal0-memory + hal0-admin over MCP. Like Pi it has no dedicated
-// backing slot — `model` is the default gateway virtual its config maps to.
-function _turnstoneIdentity() {
-  return {
-    id: "turnstone",
-    name: "Turnstone",
-    model: "hal0/agent",
-    role: "tool-using orchestration · judged · multi-workstream",
-    rarity: 3,
-    el: "#4fa9c9",
-    elGlow: "rgba(79,169,201,0.18)",
-    logo: (window.__hal0AgentArt && window.__hal0AgentArt.turnstone) || "",
-    logoScale: 0.7,
-    abilities: [
-      { name: "Local Routing", cost: 1, desc: "Maps every live hal0 slot to a model alias — all inference stays on the box.", pow: "70" },
-      { name: "Intent Judge", cost: 2, desc: "An LLM grades every tool call for risk before it runs; destructive acts gate for approval.", pow: "80" },
-      { name: "Workstreams", cost: 3, desc: "Runs parallel tool-using sessions with its own memory bank and MCP tools.", pow: "85" },
-    ],
-    skills: [
-      { l: "mcp tools", key: true },
-      { l: "memory", key: true },
-      { l: "judge · approvals", key: true },
-      { l: "web · search" },
-      { l: "server · sse" },
-    ],
-  };
-}
-
 // ── roadmap (coming-soon) cards — curated dummy content ─────────────
 function _lockedRoster() {
   const art = window.__hal0AgentArt || {};
@@ -164,7 +133,7 @@ function _primarySlot(slots) {
 //   false → down (red), and the card's Restart action is the way out
 //   null / absent → unknown (grey). Unobservable is NOT healthy: an older
 //           backend, a host without systemd, or an agent with no template unit
-//           (Pi is a CLI tool, Turnstone runs its own server) all land here.
+//           (Pi is a CLI tool) all land here.
 function _derive(agentRec, slot) {
   if (!agentRec) return { cls: "offline", label: "not installed" };
   const status = String(agentRec.status || "").toLowerCase();
@@ -224,21 +193,18 @@ function AgentsOverview() {
   // throughput/ctx from (_derive/_health both tolerate a null slot: status
   // falls back to "ready"/"not installed"/"down" off the AgentRecord alone,
   // health renders "—" placeholders).
-  // #1472: Pi and Turnstone used to look themselves up in GET /api/agents and
-  // run the result through _derive. That lookup can never hit: BUNDLED_AGENTS
-  // is ("hermes",) (src/hal0/agents/manager.py) and POST /api/agents/install
-  // 404s any other name, so no AgentRecord for pi-coder or turnstone is
-  // constructible. _derive(null, null) answers "not installed", which reads as
-  // "installable, just not installed yet" — the one thing that is not true.
-  // Both are roadmap entries; label them the way the legend already labels
-  // roadmap cards, and drop the dead lookup rather than leave wiring that
-  // implies a signal exists. Restore the probe when either is genuinely
-  // installable (Turnstone: loopback :9129 health; Pi: pi-coder driver config).
+  // #1472: Pi used to look itself up in GET /api/agents and run the result
+  // through _derive. That lookup can never hit: BUNDLED_AGENTS is ("hermes",)
+  // (src/hal0/agents/manager.py) and POST /api/agents/install 404s any other
+  // name, so no AgentRecord for pi-coder is constructible. _derive(null, null)
+  // answers "not installed", which reads as "installable, just not installed
+  // yet" — the one thing that is not true. Pi is a roadmap entry; label it the
+  // way the legend already labels roadmap cards, and drop the dead lookup
+  // rather than leave wiring that implies a signal exists. Restore the probe
+  // when it is genuinely installable (pi-coder driver config).
   const ROADMAP_STATUS = { cls: "soon", label: "on the roadmap" };
   const { cls: piStatusCls, label: piStatusLabel } = ROADMAP_STATUS;
   const piHealth = _health(null);
-  const { cls: tsStatusCls, label: tsStatusLabel } = ROADMAP_STATUS;
-  const tsHealth = _health(null);
 
   const onRestart = () => {
     if (!restart || restartState === "busy") return;
@@ -264,18 +230,18 @@ function AgentsOverview() {
     <div className="agents-overview" data-testid="agents-overview">
       <div className="ao-head">
         <div className="ao-eye">hal0 · agent library</div>
-        {/* #1472: this claimed Hermes, Pi and Turnstone were all "live —
-            their cards stream real install/endpoint status". Only Hermes can
-            be: BUNDLED_AGENTS is ("hermes",) and POST /api/agents/install
-            404s any other name, so no AgentRecord for pi-coder or turnstone
-            can exist and both cards were permanently "not installed" — which
-            reads as "installable, just not installed yet". They are on the
-            roadmap like the rest; say that instead of contradicting the
-            page's own legend. */}
+        {/* #1472: this claimed Hermes and Pi were both "live — their cards
+            stream real install/endpoint status". Only Hermes can be:
+            BUNDLED_AGENTS is ("hermes",) and POST /api/agents/install 404s
+            any other name, so no AgentRecord for pi-coder can exist and the
+            card was permanently "not installed" — which reads as
+            "installable, just not installed yet". It is on the roadmap like
+            the rest; say that instead of contradicting the page's own
+            legend. */}
         <p className="ao-sub">
           Every agent in the runtime as a collectible card. <b>Hermes</b> is live — its card
           streams real install/endpoint status and flips to abilities, skills, and quick
-          actions. <b>Pi</b> and <b>Turnstone</b> are on the roadmap alongside the rest.
+          actions. <b>Pi</b> is on the roadmap alongside the rest.
         </p>
         <div className="ao-legend">
           <span className="ao-lz"><span className="d serving" />Serving <span className="k">· live, wired</span></span>
@@ -301,14 +267,6 @@ function AgentsOverview() {
             health={piHealth}
             statusCls={piStatusCls}
             statusLabel={piStatusLabel}
-          />
-        )}
-        {LiveAgentCard && (
-          <LiveAgentCard
-            agent={_turnstoneIdentity()}
-            health={tsHealth}
-            statusCls={tsStatusCls}
-            statusLabel={tsStatusLabel}
           />
         )}
         {LockedAgentCard && _lockedRoster().map((a) => <LockedAgentCard key={a.id} agent={a} />)}
