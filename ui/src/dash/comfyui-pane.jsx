@@ -24,6 +24,7 @@ import {
   COMFYUI_FALLBACK,
 } from '@/api/hooks/useComfyui'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { useSlotUnload } from '@/api/hooks/useSlots'
 import { ENDPOINTS } from '@/api/endpoints'
 
 const { useState, useEffect, useRef } = React
@@ -394,15 +395,37 @@ export const COMFYUI_V2_MOCK = {
 }
 
 // ── Card header ───────────────────────────────────────────────────────────────
-// #1470: the header used to also render a "Stop container" button, but
-// nothing wired an onStop handler (the sole call site below never passed
-// one) and no stop mutation exists in useComfyui.ts (only cancel/restart/
-// switchover/pin). A control that silently no-ops on a GPU-exclusive engine
-// is worse than none, so it's removed rather than wired to a speculative
-// endpoint; switching away from generation mode already has a real path via
-// the arbiter switchover (mode=inference).
-function CardHead({ run, pct, onRestart, onLogs, onStart, engineStopped, startBusy }) {
+// #1470 removed a dead "Stop container" button (nothing wired onStop). The
+// control is back with a REAL path behind it: Stop drives the GPU-arbiter
+// switchover to inference mode (free ComfyUI's models, reload the saved LLM
+// set) — the exact inverse of Start's mode=generation. The status pill is
+// state-typed off the live engine field (stopped/starting/running/
+// generating/error) instead of collapsing everything non-generating to
+// "idle", so the operator can actually see the engine running.
+function CardHead({
+  run,
+  pct,
+  onRestart,
+  onLogs,
+  onStart,
+  onStop,
+  engineStopped,
+  engineState,
+  startBusy,
+  stopBusy,
+}) {
   const hasRun = run != null
+  const pillState = hasRun ? 'generating' : engineState || 'stopped'
+  const pillLabel = hasRun
+    ? `generating · ${Math.round(pct)}%`
+    : pillState === 'running'
+      ? 'running'
+      : pillState === 'starting'
+        ? 'starting…'
+        : pillState === 'error'
+          ? 'error'
+          : 'stopped'
+  const engineUp = !engineStopped && (engineState === 'running' || engineState === 'generating' || hasRun)
   return (
     <div className="engine-h wcard-h">
       <span className="engine-glyph"><Ci name="comfy" size={16} /></span>
@@ -413,9 +436,13 @@ function CardHead({ run, pct, onRestart, onLogs, onStart, engineStopped, startBu
         <span className="dim">·</span>
         <span className="meta">docker</span>
       </span>
-      <span className={'epill' + (hasRun ? ' generating' : '')}>
+      <span
+        className={'epill' + (hasRun ? ' generating' : '')}
+        data-state={pillState}
+        data-testid="comfy-engine-pill"
+      >
         <span className="dot" />
-        {hasRun ? `generating · ${Math.round(pct)}%` : (engineStopped ? 'stopped' : 'idle')}
+        {pillLabel}
       </span>
       <span className="grow" />
       <span className="eh-right">
@@ -433,6 +460,17 @@ function CardHead({ run, pct, onRestart, onLogs, onStart, engineStopped, startBu
             <button className="btn ghost sm" data-testid="comfy-start"
               disabled={startBusy} onClick={onStart}>
               {startBusy ? 'starting…' : 'Start'}
+            </button>
+          )}
+          {/* Stop = arbiter switchover to inference mode: frees ComfyUI's
+              models and reloads the saved LLM set — the honest inverse of
+              Start. Only rendered while the engine is actually up; the
+              backend refuses to drop a busy render queue, so a stop during
+              a render surfaces its error instead of killing the job. */}
+          {engineUp && onStop && (
+            <button className="btn ghost sm" data-testid="comfy-stop"
+              disabled={stopBusy} onClick={onStop}>
+              {stopBusy ? 'stopping…' : 'Stop'}
             </button>
           )}
           <button className="sctrl restart" title="Restart" onClick={onRestart}><Ci name="refresh" size={12} /></button>
@@ -490,8 +528,11 @@ export function ImageGenCard({
   onRestart,
   onLogs,
   onStart,
+  onStop,
   engineStopped,
+  engineState,
   startBusy,
+  stopBusy,
   comfyBaseUrl,
 }) {
   const { engine, run, queue, gtt, ram, stats, inventory } = mock
@@ -532,7 +573,8 @@ export function ImageGenCard({
   return (
     <div className="engine wcard active">
       <CardHead run={run} pct={pct} onRestart={onRestart} onLogs={onLogs}
-        onStart={onStart} engineStopped={engineStopped} startBusy={startBusy} />
+        onStart={onStart} onStop={onStop} engineStopped={engineStopped}
+        engineState={engineState} startBusy={startBusy} stopBusy={stopBusy} />
       <div className="wcard-b">
 
         {/* Render-active notice — moved out of the card header so it sits
@@ -789,7 +831,49 @@ export function ComfyuiPane() {
     !override && liveStatus != null &&
     (liveStatus.engine === 'stopped' || liveStatus.engine === 'error') &&
     !liveStatus.switchover?.active
+  // Live engine state for the header pill + Stop gating. A switchover in
+  // flight reads as "starting" (either direction — the pill's job is "the
+  // engine is mid-transition, hands off"). The e2e mock override derives
+  // from its own run field so deterministic tests stay self-contained.
+  const engineState = override
+    ? (override.run ? 'generating' : 'running')
+    : liveStatus?.switchover?.active
+      ? 'starting'
+      : (liveStatus?.engine ?? 'stopped')
   const startBusy = switchoverMutation.isPending || !!liveStatus?.switchover?.active
+  const unloadMutation = useSlotUnload()
+  const stopBusy = startBusy || unloadMutation.isPending
+  const toast = (msg, kind) =>
+    typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
+  const startEngine = () =>
+    switchoverMutation.mutate(
+      { mode: 'generation' },
+      {
+        onError: (err) => toast(`Start failed: ${err?.message || 'switchover error'}`, 'error'),
+        onSuccess: () =>
+          toast('Bringing ComfyUI up — handing the iGPU to generation mode', 'info'),
+      },
+    )
+  // Stop = two honest steps. The arbiter switchover to inference frees
+  // ComfyUI's VRAM and restores the saved LLM set but DELIBERATELY leaves
+  // the container up (fast switch-back) — so a Stop that only switched
+  // modes would leave the pill green and the operator confused. Follow it
+  // with a real slot unload so the img container actually goes down. The
+  // switchover refuses to drop a busy render queue, so an active render
+  // surfaces an error instead of being killed.
+  const stopEngine = () =>
+    switchoverMutation.mutate(
+      { mode: 'inference' },
+      {
+        onError: (err) => toast(`Stop failed: ${err?.message || 'switchover error'}`, 'error'),
+        onSuccess: () =>
+          unloadMutation.mutate('img', {
+            onError: (err) =>
+              toast(`Stop failed: ${err?.message || 'img slot unload error'}`, 'error'),
+            onSuccess: () => toast('ComfyUI stopped — LLM slots restored', 'info'),
+          }),
+      },
+    )
 
   // Resolve the browser-reachable ComfyUI base URL. The authoritative source
   // is /api/config/urls → `comfyui` (HAL0_COMFYUI_PUBLIC_URL, or
@@ -813,9 +897,12 @@ export function ComfyuiPane() {
         mock={paneData}
         onCancel={() => cancelMutation.mutate()}
         onRestart={() => restartMutation.mutate()}
-        onStart={() => switchoverMutation.mutate({ mode: 'generation' })}
+        onStart={startEngine}
+        onStop={stopEngine}
         engineStopped={engineStopped}
+        engineState={engineState}
         startBusy={startBusy}
+        stopBusy={stopBusy}
         onLogs={() => {
           // Fetch logs and open in a basic alert for now; a logs drawer is a
           // future enhancement (the endpoint is wired, UI depth TBD).

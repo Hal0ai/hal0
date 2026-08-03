@@ -98,6 +98,15 @@
   box-shadow: 0 0 8px var(--comfy);
   animation: pulse 1.4s ease-in-out infinite;
 }
+/* Engine-state variants (data-state set by CardHead): running = healthy
+   resident engine (green), starting = transitional (amber), error = red.
+   "stopped" keeps the neutral base style. */
+.comfy-page .epill[data-state="running"] { color: var(--ok, #4caf7d); border-color: var(--ok-line, rgba(76,175,125,.4)); }
+.comfy-page .epill[data-state="running"] .dot { background: var(--ok, #4caf7d); }
+.comfy-page .epill[data-state="starting"] { color: var(--warn, #d9a441); border-color: var(--warn-line, rgba(217,164,65,.4)); }
+.comfy-page .epill[data-state="starting"] .dot { background: var(--warn, #d9a441); animation: pulse 1.4s ease-in-out infinite; }
+.comfy-page .epill[data-state="error"] { color: var(--err, #d9534f); border-color: var(--err-line, rgba(217,83,79,.4)); }
+.comfy-page .epill[data-state="error"] .dot { background: var(--err, #d9534f); }
 
 /* ── Device pill ────────────────────────────────────────────────────────────── */
 .comfy-page .cf-pill {
