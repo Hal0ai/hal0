@@ -244,6 +244,59 @@ def test_exit_code_mapping() -> None:
     assert da._exit_code([_c("fail", critical=True)]) == 2
 
 
+# ── check_voice_stt_weights ───────────────────────────────────────────────────
+
+
+class _StubProfile:
+    def __init__(self, flags: str) -> None:
+        self.resolved_flags = flags
+
+
+class _StubCatalog:
+    def __init__(self, flags: str | None) -> None:
+        self._flags = flags
+
+    def resolve(self, name: str):
+        if self._flags is None:
+            raise KeyError(name)
+        return _StubProfile(self._flags)
+
+
+def _stt_weights_with(monkeypatch: pytest.MonkeyPatch, flags: str | None) -> Check:
+    import hal0.profiles as profiles_mod
+
+    monkeypatch.setattr(profiles_mod, "ProfileCatalog", lambda: _StubCatalog(flags))
+    return da.check_voice_stt_weights()
+
+
+def test_stt_weights_missing_bundle_fails_by_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    missing = tmp_path / "moonshine"
+    c = _stt_weights_with(monkeypatch, f"--model_path {missing} --model_arch small_streaming")
+    assert c.status == "fail"
+    assert str(missing) in c.detail
+
+
+def test_stt_weights_empty_path_warns_hf_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    c = _stt_weights_with(monkeypatch, "--model_arch small_streaming")
+    assert c.status == "warn"
+    assert "HuggingFace" in c.detail
+
+
+def test_stt_weights_staged_bundle_passes(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    leaf = tmp_path / "moonshine" / "quantized" / "small-streaming-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encode_model.ort").write_bytes(b"\0")
+    c = _stt_weights_with(monkeypatch, f"--model_path {tmp_path / 'moonshine'}")
+    assert c.status == "pass"
+
+
+def test_stt_weights_profile_absent_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    c = _stt_weights_with(monkeypatch, None)
+    assert c.status == "pass"
+
+
 # ── build_all_checks orchestration ────────────────────────────────────────────
 
 
@@ -282,17 +335,22 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
     # Privileged seams (#1465): probed against the real filesystem otherwise,
     # which is neither present nor relevant in CI — pretend all installed.
     monkeypatch.setattr(da, "probe_seams", lambda: [])
+    # Moonshine weights row (stt-weights) preflights a real filesystem path
+    # via the provider helper; neutralise it so this composition test asserts
+    # the row list, not the host's staged-weights state.
+    monkeypatch.setattr("hal0.providers.moonshine.check_moonshine_weights", lambda _p: None)
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 7 extras.
-    assert keys[-7:] == [
+    # 7 verify rows + 8 extras.
+    assert keys[-8:] == [
         "auth",
         "models",
         "migrations",
         "ports",
         "hal0_target",
         "secret-modes",
+        "stt-weights",
         "seams",
     ]
     assert "api" in keys and "runners" in keys

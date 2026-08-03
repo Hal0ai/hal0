@@ -70,6 +70,7 @@ from hal0.config.schema import (
     resolve_chat_template,
     resolve_profile_flags,
 )
+from hal0.errors import Hal0Error
 from hal0.http_client import async_client
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
@@ -94,6 +95,17 @@ from hal0.system.seam import SystemCtlSeam
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
 ContainerSpec = RuntimeLaunchPlan
+
+
+class UnknownRuntimeFamilyError(Hal0Error):
+    """A slot profile resolved to a runtime family with no dispatch branch.
+
+    Raised by :func:`_spec_provider_for` instead of silently falling through
+    to the llama-server default (which would spawn the wrong binary).
+    """
+
+    code = "slot.unknown_runtime_family"
+    status = 500
 
 
 def _artefact_token(slot: Mapping[str, Any] | str) -> str:
@@ -1036,10 +1048,29 @@ def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
         from hal0.providers.kokoro import KokoroProvider
 
         return KokoroProvider()
+    # Moonshine (CPU STT). NPU transcription never reaches here — the FLM
+    # branch above matches on family/device first, so this generic
+    # ``slot_type == "transcription"`` fallback (for profile-less stt slots)
+    # can only mean the CPU engine, mirroring the tts → Kokoro fallback.
+    if family == "moonshine" or slot_type == "transcription":
+        from hal0.providers.moonshine import MoonshineProvider
+
+        return MoonshineProvider()
     if family == "comfyui" or provider == "comfyui" or slot_type == "image":
         from hal0.providers.comfyui import ComfyUIProvider
 
         return ComfyUIProvider()
+    if family not in (None, "llama-server"):
+        # A runtime family with no dispatch branch above. This can only
+        # happen when someone extends the RuntimeFamily literal without
+        # teaching this resolver about it — silently falling through to the
+        # llama-server default would spawn the wrong binary, so fail loudly
+        # instead (the F3 fragility, made explicit).
+        raise UnknownRuntimeFamilyError(
+            f"no provider is registered for runtime family {family!r} — "
+            "extend _spec_provider_for alongside the RuntimeFamily literal",
+            details={"runtime_family": family, "slot_type": slot_type},
+        )
     return None
 
 

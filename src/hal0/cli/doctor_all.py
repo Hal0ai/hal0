@@ -119,6 +119,57 @@ def check_secret_file_modes() -> Check:
     return Check("secret-modes", "Secret file modes", _PASS, "secret files are owner-only")
 
 
+def check_voice_stt_weights() -> Check:
+    """Moonshine STT weights preflight — the same rule slot spawn enforces.
+
+    The moonshine ONNX bundle is operator-staged (multi-file, not registry-
+    pulled), so a fresh box can configure the stt slot and only find out the
+    weights are missing when the container 500s. This row runs
+    :func:`hal0.providers.moonshine.check_moonshine_weights` against the
+    profile-baked ``--model_path`` so the gap is named here first. An empty
+    ``--model_path`` is the in-container HuggingFace auto-download path —
+    legitimate but slow on first start, so it warns rather than fails.
+    """
+    import shlex
+
+    from hal0.errors import Hal0Error
+    from hal0.profiles import ProfileCatalog
+    from hal0.providers.moonshine import check_moonshine_weights
+
+    try:
+        profile = ProfileCatalog().resolve("moonshine")
+    except Exception:
+        return Check(
+            "stt-weights",
+            "Moonshine weights",
+            _PASS,
+            "moonshine profile absent — nothing to preflight",
+        )
+    tokens = shlex.split(profile.resolved_flags or "")
+    model_path = ""
+    for i, tok in enumerate(tokens[:-1]):
+        if tok == "--model_path":
+            model_path = tokens[i + 1]
+    if not model_path:
+        return Check(
+            "stt-weights",
+            "Moonshine weights",
+            _WARN,
+            "no --model_path in the moonshine profile — first slot start will "
+            "auto-download from HuggingFace inside the container (slow, needs egress)",
+        )
+    try:
+        check_moonshine_weights(model_path)
+    except Hal0Error as exc:
+        return Check("stt-weights", "Moonshine weights", _FAIL, str(exc))
+    return Check(
+        "stt-weights",
+        "Moonshine weights",
+        _PASS,
+        f"staged bundle present at {model_path}",
+    )
+
+
 def check_model_store(
     models: Any,
     *,
@@ -387,6 +438,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_ports(_get_any("/api/slots", base, timeout=SLOTS_PROBE_TIMEOUT_S)),
         check_hal0_target(),
         check_secret_file_modes(),
+        check_voice_stt_weights(),
         check_seams(),
     ]
     return verify_rows + extra_rows
