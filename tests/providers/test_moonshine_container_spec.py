@@ -35,8 +35,8 @@ def bundle(tmp_path) -> Any:
     """A staged-looking moonshine bundle: root/quantized/<variant>/ with weights."""
     leaf = tmp_path / "moonshine" / "quantized" / "small-streaming-en"
     leaf.mkdir(parents=True)
-    (leaf / "encode_model.ort").write_bytes(b"\0")
-    (leaf / "decode_model.ort").write_bytes(b"\0")
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+    (leaf / "decoder_model_merged.ort").write_bytes(b"\0")
     return tmp_path / "moonshine"
 
 
@@ -136,6 +136,32 @@ def test_preflight_rejects_dir_without_weights(tmp_path) -> None:
     with pytest.raises(MoonshineWeightsMissingError) as exc_info:
         check_moonshine_weights(str(empty))
     assert str(empty) in str(exc_info.value)
+
+
+def test_preflight_rejects_streaming_only_bundle(tmp_path) -> None:
+    """Live gotcha (lxc105): the streaming-SDK file set (encoder.ort /
+    frontend.ort) is NOT loadable by this image — the server resolves
+    encoder_model.{ort,onnx}. Accepting it produced a container that started
+    and then failed every transcription."""
+    streaming = tmp_path / "moonshine" / "quantized"
+    streaming.mkdir(parents=True)
+    for name in ("encoder.ort", "frontend.ort", "cross_kv.ort", "tokenizer.bin"):
+        (streaming / name).write_bytes(b"\0")
+    with pytest.raises(MoonshineWeightsMissingError) as exc_info:
+        check_moonshine_weights(str(tmp_path / "moonshine"))
+    assert "streaming" in str(exc_info.value).lower()
+
+
+def test_leaf_resolves_bundle_nested_without_variant_dir(tmp_path) -> None:
+    """The staged tree also uses <root>/quantized/ directly (no <variant>
+    subdir) — the resolver must find the encoder there too."""
+    from hal0.providers.moonshine import _resolve_model_leaf
+
+    leaf = tmp_path / "base-en" / "quantized"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+    resolved = _resolve_model_leaf(str(tmp_path / "base-en"), "base-en")
+    assert resolved == str(leaf)
 
 
 def test_preflight_allows_empty_path_hf_fallback() -> None:

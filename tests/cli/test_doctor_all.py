@@ -287,7 +287,7 @@ def test_stt_weights_empty_path_warns_hf_fallback(monkeypatch: pytest.MonkeyPatc
 def test_stt_weights_staged_bundle_passes(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     leaf = tmp_path / "moonshine" / "quantized" / "small-streaming-en"
     leaf.mkdir(parents=True)
-    (leaf / "encode_model.ort").write_bytes(b"\0")
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
     c = _stt_weights_with(monkeypatch, f"--model_path {tmp_path / 'moonshine'}")
     assert c.status == "pass"
 

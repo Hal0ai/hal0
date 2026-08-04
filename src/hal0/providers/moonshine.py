@@ -109,26 +109,67 @@ def _derive_arch_from_variant(variant: str) -> str:
     return norm if norm in _VALID_ARCHS else ""
 
 
+#: The encoder file the in-container loader resolves. ``moonshine_server``'s
+#: ``_detect_local_format`` looks for exactly ``encoder_model.{ort,onnx}`` in
+#: the directory it is handed (MoonshineOnnxModel builds
+#: ``f"{models_dir}/encoder_model.{fmt}"``), so THIS is the marker that makes
+#: a directory a usable bundle — not "contains some .ort file".
+#:
+#: Live gotcha (lxc105, 2026-08-03): the operator-staged tree carries both
+#: layouts. ``base-en/quantized/base-en/`` holds ``encoder_model.ort`` and is
+#: loadable; the *streaming* variants hold ``encoder.ort`` / ``frontend.ort``
+#: — a different, streaming-SDK file set this server cannot consume. Matching
+#: on any ``*.ort`` accepted those and produced a container that started and
+#: then failed every transcription.
+_ENCODER_STEMS: tuple[str, ...] = ("encoder_model.ort", "encoder_model.onnx")
+
+
+def _is_loadable_bundle(directory: Path) -> bool:
+    """True iff ``directory`` holds the encoder file the loader resolves."""
+    return any((directory / name).is_file() for name in _ENCODER_STEMS)
+
+
+def _find_loadable_bundle(root: Path) -> Path | None:
+    """Search ``root`` for the directory holding ``encoder_model.{ort,onnx}``.
+
+    Returns the first match, preferring the shallowest (``root`` itself, then
+    its ``quantized`` layouts). ``None`` when the tree holds no bundle this
+    server can load.
+    """
+    if _is_loadable_bundle(root):
+        return root
+    for name in _ENCODER_STEMS:
+        matches = sorted(root.rglob(name), key=lambda p: len(p.parts))
+        if matches:
+            return matches[0].parent
+    return None
+
+
 def _resolve_model_leaf(model_path: str, variant: str) -> str:
     """Pick the directory the moonshine ONNX loader actually wants.
 
-    The staged layout keeps weights under ``<root>/quantized/<variant>/``
-    (decoder/encoder/tokenizer files). A --model_path pointing at ``<root>``
-    would make the in-container loader fall back to downloading from HF.
-    Prefer the leaf when it exists; otherwise return the input unchanged.
+    Staged trees nest the weights under ``<root>/quantized/…`` — sometimes
+    ``quantized/<variant>/``, sometimes ``quantized/`` directly. A
+    ``--model_path`` pointing at ``<root>`` makes the in-container loader
+    fall back to downloading from HuggingFace, so resolve to the leaf that
+    actually holds ``encoder_model.{ort,onnx}``. The ``variant`` hint is
+    tried first (cheap, exact); otherwise we search the tree. Returns the
+    input unchanged when nothing loadable is found — the preflight below is
+    what turns that into a named error.
     """
     if not model_path:
         return ""
     candidate = Path(model_path)
     if not candidate.is_dir():
         return model_path
-    if any(candidate.glob("*.ort")) or any(candidate.glob("*.onnx")):
+    if _is_loadable_bundle(candidate):
         return str(candidate)
     if variant:
-        leaf = candidate / "quantized" / variant
-        if leaf.is_dir() and (any(leaf.glob("*.ort")) or any(leaf.glob("*.onnx"))):
-            return str(leaf)
-    return model_path
+        hinted = candidate / "quantized" / variant
+        if hinted.is_dir() and _is_loadable_bundle(hinted):
+            return str(hinted)
+    found = _find_loadable_bundle(candidate)
+    return str(found) if found is not None else model_path
 
 
 def check_moonshine_weights(model_path: str) -> None:
@@ -150,12 +191,13 @@ def check_moonshine_weights(model_path: str) -> None:
             "in-container HuggingFace fallback",
             details={"model_path": model_path},
         )
-    has_weights = any(root.rglob("*.ort")) or any(root.rglob("*.onnx"))
-    if not has_weights:
+    if _find_loadable_bundle(root) is None:
         raise MoonshineWeightsMissingError(
-            f"moonshine weights directory {model_path} contains no .ort/.onnx "
-            "files — expected the staged bundle at <root>/quantized/<variant>/ "
-            "(e.g. quantized/small-streaming-en/)",
+            f"moonshine weights directory {model_path} holds no loadable bundle "
+            "— the server resolves encoder_model.ort / encoder_model.onnx, and "
+            "no directory under this root has one. A streaming-SDK bundle "
+            "(encoder.ort / frontend.ort) is NOT loadable by this image; stage "
+            "a non-streaming variant such as base-en/quantized/base-en/",
             details={"model_path": model_path},
         )
 
