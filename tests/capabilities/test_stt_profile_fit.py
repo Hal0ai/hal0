@@ -54,3 +54,25 @@ def test_tts_rule_unchanged() -> None:
     assert profile_name_for_fit("tts", "cpu") == "kokoro"
     assert profile_name_for_fit("tts", "gpu-rocm") == "qwen3-tts"
     assert profile_name_for_fit("tts", "gpu-vulkan") == "qwen3-tts"
+
+
+def test_stt_provider_without_a_runtime_resolves_no_profile() -> None:
+    """A provider hal0 has no runtime profile for must not inherit the CPU
+    engine's profile.
+
+    Live defect (lxc105): the picker offers Whisper-Large-v3-Turbo under
+    provider ``whispercpp`` (a curated surfacing decision from #514 with no
+    runtime behind it). The device-only rule handed that cpu row Moonshine's
+    profile, which would have pointed MoonshineProvider at a Whisper GGUF it
+    cannot load.
+    """
+    assert profile_name_for_fit("stt", "cpu", "whispercpp") is None
+    assert profile_name_for_fit("stt", "gpu-vulkan", "whispercpp") is None
+
+
+def test_stt_known_providers_still_resolve() -> None:
+    assert profile_name_for_fit("stt", "cpu", "moonshine") == "moonshine"
+    assert profile_name_for_fit("stt", "npu", "flm") == DEVICE_DEFAULT_PROFILES["npu"]
+    # No provider named (the common partial-selection case) keeps the
+    # device-keyed default.
+    assert profile_name_for_fit("stt", "cpu") == "moonshine"

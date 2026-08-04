@@ -706,7 +706,11 @@ class SlotConfigStore:
             return None
         from hal0.capabilities.profile_fit import profile_name_for_fit
 
-        return profile_name_for_fit(slot_selection.child, slot_selection.selection.device)
+        return profile_name_for_fit(
+            slot_selection.child,
+            slot_selection.selection.device,
+            slot_selection.selection.provider or "",
+        )
 
 
 # ── file-state IO ────────────────────────────────────────────────────────────

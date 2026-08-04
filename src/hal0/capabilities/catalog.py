@@ -796,7 +796,7 @@ def _stt_rows_for_capability(
     ]
 
 
-def _profile_for_fit(capability: str, device: str) -> ResolvedProfile | None:
+def _profile_for_fit(capability: str, device: str, provider: str = "") -> ResolvedProfile | None:
     """Infer the profile implied by a picker backend.
 
     Mirrors CapabilityOrchestrator's conservative inference so picker and
@@ -808,7 +808,7 @@ def _profile_for_fit(capability: str, device: str) -> ResolvedProfile | None:
     # module, so a top-level import here would be circular.
     from hal0.capabilities.profile_fit import profile_name_for_fit
 
-    profile_name = profile_name_for_fit(capability, device)
+    profile_name = profile_name_for_fit(capability, device, provider)
     if not profile_name:
         return None
     try:
@@ -833,7 +833,7 @@ def _row_with_model_fit(
     if slot_type is None:
         return row
     backend_id = str(row.get("backend") or "")
-    profile = _profile_for_fit(capability, backend_id)
+    profile = _profile_for_fit(capability, backend_id, str(row.get("provider") or ""))
     registry_for_fit = None
     if registry is not None:
         try:

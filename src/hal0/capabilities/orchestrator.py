@@ -724,7 +724,7 @@ class CapabilityOrchestrator:
         # it); ``profile_name_for_fit`` returns ``None`` for any device this
         # branch could see beyond cpu, so the stamp only ever fires there.
         elif child == "stt":
-            stt_profile = profile_name_for_fit("stt", selection.device)
+            stt_profile = profile_name_for_fit("stt", selection.device, selection.provider or "")
             if stt_profile is not None:
                 cfg_dict["profile"] = stt_profile
         try:
