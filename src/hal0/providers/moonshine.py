@@ -35,6 +35,7 @@ No devices / group_add:
 
 from __future__ import annotations
 
+import os
 import shlex
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,7 @@ import httpx
 from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
-from hal0.providers.base import ContainerSpec, Provider
+from hal0.providers.base import ContainerSpec, Mount, Provider
 from hal0.runners import RUNNER_IMAGES
 
 # Sourced from the runner-image registry (§7.1b / ML-4) so the literal tag
@@ -202,6 +203,38 @@ def check_moonshine_weights(model_path: str) -> None:
         )
 
 
+def _extra_weight_mounts(model_path: str, store_root: str | Path) -> list[Mount]:
+    """Identical-path read-only mounts for weights staged outside the store.
+
+    The slot mounts ``model_store_root()``, but an operator-staged bundle can
+    legitimately live elsewhere — and does: on a box whose ``[models].roots``
+    is ``/var/lib/hal0/models``, a bundle under ``/mnt/ai-models`` is simply
+    not inside the mount, so the container sees nothing and the loader
+    silently falls back to a HuggingFace download.
+
+    Mount the resolved path (and its realpath, so a symlink into a separate
+    tree resolves in-container too) at the same absolute path, skipping
+    anything already covered by the store mount. This restores the behaviour
+    of the pre-#620 provider, which mounted the model dir plus its realpath
+    parent for exactly this reason.
+    """
+    if not model_path:
+        return []
+    root = str(store_root).rstrip("/")
+
+    def _covered(path: str) -> bool:
+        return path == root or path.startswith(root + "/")
+
+    out: list[Mount] = []
+    seen: set[str] = set()
+    for candidate in (model_path, os.path.realpath(model_path)):
+        if not candidate.startswith("/") or _covered(candidate) or candidate in seen:
+            continue
+        seen.add(candidate)
+        out.append(Mount(candidate, candidate, read_only=True, selinux="z"))
+    return out
+
+
 def _flag_value(tokens: list[str], flag: str) -> str:
     """Return the value following ``flag`` in an argv token list, or ""."""
     for i, tok in enumerate(tokens[:-1]):
@@ -354,6 +387,8 @@ class MoonshineProvider(Provider):
         ]
 
         store_root = model_store_root()
+        mounts = [model_store_module.mount_for(store_root, read_only=True)]
+        mounts.extend(_extra_weight_mounts(model_path, store_root))
 
         return ContainerSpec(
             image=self.image_ref(slot_cfg),
@@ -361,8 +396,10 @@ class MoonshineProvider(Provider):
             env={},
             # Model store mounted read-only via the shared `mount_for`
             # factory (ML-3) — identical-path so --model_path resolves
-            # in-container without translation.
-            mounts=[model_store_module.mount_for(store_root, read_only=True)],
+            # in-container without translation. Weights staged OUTSIDE the
+            # store root get their own identical-path mount (see
+            # :func:`_extra_weight_mounts`).
+            mounts=mounts,
             # CPU-only: no GPU devices or supplementary groups required.
             devices=[],
             cap_add=[],

@@ -89,7 +89,7 @@ quant = ""
 # pulled). --model_arch picks the checkpoint family the server loads;
 # --model_path points at the staged bundle root (the server resolves the
 # quantized/<variant> leaf itself).
-flags = "--model_path /mnt/ai-models/local/moonshine --model_arch small_streaming"
+flags = "--model_path /mnt/ai-models/local/moonshine --model_arch base"
 mtp = false
 intent = "Moonshine STT (CPU)"
 quant = ""

@@ -203,3 +203,54 @@ def test_profile_baked_path_is_leaf_resolved(tmp_path, monkeypatch) -> None:
     c = spec.command
     assert c[c.index("--model_path") + 1] == str(leaf)
     assert shlex.join(c).count("--model_path") == 1
+
+
+def test_weights_outside_store_root_get_their_own_mount(tmp_path, monkeypatch) -> None:
+    """Live gotcha (lxc105): the box's model store is /var/lib/hal0/models
+    while the staged bundle sits under /mnt/ai-models — outside the mount,
+    so the container saw nothing and fell back to a network download.
+    Weights outside the store root get an identical-path read-only mount.
+    """
+    from hal0.providers import moonshine as ms
+
+    store = tmp_path / "store"
+    store.mkdir()
+    leaf = tmp_path / "elsewhere" / "moonshine" / "quantized" / "base-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+
+    class _Profile:
+        resolved_flags = f"--model_path {tmp_path / 'elsewhere' / 'moonshine'} --model_arch base"
+
+    monkeypatch.setattr(
+        "hal0.profiles.ProfileCatalog",
+        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
+    )
+    monkeypatch.setattr(ms, "model_store_root", lambda: str(store))
+
+    spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
+    sources = {m.source for m in spec.mounts}
+    assert str(store) in sources
+    assert str(leaf) in sources, f"weights outside the store root were not mounted: {sources}"
+    assert all(m.read_only for m in spec.mounts)
+
+
+def test_weights_inside_store_root_add_no_extra_mount(tmp_path, monkeypatch) -> None:
+    from hal0.providers import moonshine as ms
+
+    store = tmp_path / "store"
+    leaf = store / "asr" / "moonshine" / "quantized" / "base-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+
+    class _Profile:
+        resolved_flags = f"--model_path {store / 'asr' / 'moonshine'} --model_arch base"
+
+    monkeypatch.setattr(
+        "hal0.profiles.ProfileCatalog",
+        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
+    )
+    monkeypatch.setattr(ms, "model_store_root", lambda: str(store))
+
+    spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
+    assert [m.source for m in spec.mounts] == [str(store)]
