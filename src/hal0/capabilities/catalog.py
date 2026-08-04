@@ -750,16 +750,18 @@ def _registry_downloaded(model_id: str, *, registry: ModelRegistry | None) -> bo
         return False
 
 
-#: The one CPU STT engine surfaced directly (mirrors ``_TTS_ENGINES``). The
-#: seeded id matches ``moonshine-small-streaming-en`` in
-#: ``seeds/haloai_models.json`` exactly — that HaloaiModel entry is
-#: otherwise skipped from the flat fan-out (see ``_flat_rows_for_capability``
-#: docstring: HaloaiModel rows surface no download path / working route on a
-#: standalone install), so this injects the picker row directly instead,
-#: the same way :func:`_tts_rows_for_capability` injects its two engines.
+#: The one CPU STT engine surfaced directly (mirrors ``_TTS_ENGINES``).
+#:
+#: The id is what ``moonshine_server`` actually advertises on ``/v1/models``
+#: for the bundle hal0 can load: ``moonshine-<arch>-en`` with the default
+#: ``base`` arch. It deliberately does NOT reuse the
+#: ``moonshine-small-streaming-en`` HaloaiModel seed row — that id names a
+#: STREAMING bundle, whose file set this toolbox image cannot load at all
+#: (see ``providers.moonshine._ENCODER_STEMS``), so advertising it would
+#: hand the operator a pick that can never serve a request.
 #: NPU stt is NOT here — it fans out through :func:`_flm_rows_for_capability`
 #: (the FLM trio), same split as embed.
-_STT_ENGINE_ID = "moonshine-small-streaming-en"
+_STT_ENGINE_ID = "moonshine-base-en"
 
 
 def _stt_rows_for_capability(

@@ -49,7 +49,7 @@ def _no_flm_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_voice_stt_catalog_includes_moonshine_engine(tmp_hal0_home: str) -> None:
     rows = models_for_capability("stt", registry=None)
-    moonshine = next((r for r in rows if r["id"] == "moonshine-small-streaming-en"), None)
+    moonshine = next((r for r in rows if r["id"] == "moonshine-base-en"), None)
     assert moonshine is not None, f"moonshine engine missing from voice.stt catalog: {rows!r}"
     backends = {b["id"]: b for b in moonshine["backends"]}
     assert "cpu" in backends, f"moonshine row carries no cpu backend: {moonshine!r}"
@@ -64,7 +64,7 @@ def test_voice_stt_catalog_includes_moonshine_engine(tmp_hal0_home: str) -> None
 def test_voice_stt_catalog_moonshine_not_offered_on_gpu(tmp_hal0_home: str) -> None:
     """Regression: hal0 ships no GPU STT engine — moonshine must not fan out there."""
     rows = models_for_capability("stt", registry=None)
-    moonshine = next((r for r in rows if r["id"] == "moonshine-small-streaming-en"), None)
+    moonshine = next((r for r in rows if r["id"] == "moonshine-base-en"), None)
     assert moonshine is not None
     backends = {b["id"] for b in moonshine["backends"]}
     assert "gpu-vulkan" not in backends
@@ -94,7 +94,7 @@ def _write_stt_slot(home: str, *, device: str, profile: str, provider: str = "mo
                 f'provider = "{provider}"',
                 "port = 8084",
                 "[model]",
-                'default = "moonshine-small-streaming-en"',
+                'default = "moonshine-base-en"',
                 "",
             ]
         ),
@@ -117,7 +117,7 @@ def test_apply_selecting_cpu_moonshine_writes_profile_and_provider(
         {
             "device": "cpu",
             "provider": "moonshine",
-            "model": "moonshine-small-streaming-en",
+            "model": "moonshine-base-en",
             "enabled": True,
         }
     )
@@ -128,7 +128,7 @@ def test_apply_selecting_cpu_moonshine_writes_profile_and_provider(
     assert on_disk["profile"] == "moonshine", f"engine profile not stamped: {on_disk!r}"
     assert on_disk["provider"] == "moonshine", on_disk
     assert on_disk["device"] == "cpu", on_disk
-    assert on_disk["model"]["default"] == "moonshine-small-streaming-en", on_disk
+    assert on_disk["model"]["default"] == "moonshine-base-en", on_disk
     assert on_disk["name"] == "stt", "slot must not move/rename"
     # Only one slot file exists — the selection reconciled in place.
     slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
@@ -147,7 +147,7 @@ def test_apply_disabled_stt_selection_does_not_rewrite_engine(tmp_hal0_home: str
         {
             "device": "cpu",
             "provider": "moonshine",
-            "model": "moonshine-small-streaming-en",
+            "model": "moonshine-base-en",
             "enabled": False,
         }
     )
@@ -319,7 +319,7 @@ async def test_apply_npu_stt_drives_flm_trio_without_slot_spawn(
                 "[selections.voice.stt]",
                 'device = "cpu"',
                 'provider = "moonshine"',
-                'model = "moonshine-small-streaming-en"',
+                'model = "moonshine-base-en"',
                 "enabled = true",
                 "",
             ]
@@ -416,3 +416,17 @@ async def test_apply_gpu_device_for_stt_is_a_typed_error(
     on_disk = _read_stt_slot(tmp_hal0_home)
     assert on_disk["profile"] == "moonshine"
     assert on_disk["device"] == "cpu"
+
+
+def test_stt_engine_id_is_the_served_non_streaming_id(tmp_hal0_home: str) -> None:
+    """The picker must advertise the id the server actually serves.
+
+    ``moonshine-small-streaming-en`` (the HaloaiModel seed id) names a
+    streaming bundle the toolbox image cannot load — offering it would be a
+    pick that never serves a request. The server advertises
+    ``moonshine-<arch>-en`` for the loadable non-streaming bundle.
+    """
+    rows = models_for_capability("stt", registry=None)
+    ids = {r["id"] for r in rows}
+    assert "moonshine-base-en" in ids
+    assert "moonshine-small-streaming-en" not in ids
