@@ -122,10 +122,28 @@ def test_slot_port_override_wins(bundle) -> None:
 # ── Weight preflight (spawn fails by artifact name, not first-request 500) ─────
 
 
-def test_spec_preflight_names_missing_bundle(tmp_path) -> None:
+def test_spec_preflight_names_missing_bundle(tmp_path, monkeypatch) -> None:
+    """Spawn fails by artifact name when the staged bundle is absent.
+
+    The path preflighted is the profile's — a registry path that holds no
+    loadable bundle is ignored (see
+    ``test_non_bundle_registry_path_falls_back_to_profile``), so the error
+    must name the operator-facing path, not the stray registry one.
+    """
+    from hal0.providers import moonshine as ms
+
     missing = tmp_path / "nope" / "moonshine"
+
+    class _Profile:
+        resolved_flags = f"--model_path {missing} --model_arch base"
+
+    monkeypatch.setattr(
+        "hal0.profiles.ProfileCatalog",
+        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
+    )
+
     with pytest.raises(MoonshineWeightsMissingError) as exc_info:
-        MoonshineProvider().container_spec(_slot_cfg(), {"path": str(missing)})
+        ms.MoonshineProvider().container_spec(_slot_cfg(), {})
     assert str(missing) in str(exc_info.value)
     assert exc_info.value.code == "slot.weights_missing"
 
@@ -254,3 +272,30 @@ def test_weights_inside_store_root_add_no_extra_mount(tmp_path, monkeypatch) -> 
 
     spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
     assert [m.source for m in spec.mounts] == [str(store)]
+
+
+def test_non_bundle_registry_path_falls_back_to_profile(tmp_path, monkeypatch) -> None:
+    """Live gotcha (lxc105): a self-managed transcription slot's registry
+    lookup returned an unrelated VibeVoice .gguf. A non-loadable registry
+    path must not displace the operator-staged bundle in the profile."""
+    from hal0.providers import moonshine as ms
+
+    staged = tmp_path / "moonshine"
+    leaf = staged / "quantized" / "base-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+    stray = tmp_path / "asr" / "VibeVoice-ASR-BitNet"
+    stray.mkdir(parents=True)
+    (stray / "model.gguf").write_bytes(b"\0")
+
+    class _Profile:
+        resolved_flags = f"--model_path {staged} --model_arch base"
+
+    monkeypatch.setattr(
+        "hal0.profiles.ProfileCatalog",
+        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
+    )
+
+    spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {"path": str(stray / "model.gguf")})
+    c = spec.command
+    assert c[c.index("--model_path") + 1] == str(leaf)

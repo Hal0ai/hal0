@@ -35,6 +35,7 @@ No devices / group_add:
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 from pathlib import Path
@@ -51,6 +52,8 @@ from hal0.runners import RUNNER_IMAGES
 # Sourced from the runner-image registry (§7.1b / ML-4) so the literal tag
 # lives in exactly one place (hal0.runners.RUNNER_IMAGES["moonshine"].image).
 # Kept as a module attribute for back-compat imports.
+log = logging.getLogger(__name__)
+
 _DEFAULT_MOONSHINE_IMAGE = RUNNER_IMAGES["moonshine"].image
 
 # Default profile name if the slot TOML omits one.
@@ -332,11 +335,24 @@ class MoonshineProvider(Provider):
         profile = ProfileCatalog().resolve(profile_name)
         flag_tokens = shlex.split(profile.resolved_flags) if profile.resolved_flags.strip() else []
 
-        # Registry-bound model path (self-managed slots usually have none)
-        # beats the profile-baked --model_path.
+        # A registry-bound model path beats the profile-baked --model_path,
+        # but ONLY when it resolves to a bundle this engine can actually
+        # load. Moonshine is a SELF_MANAGED_PROVIDER: the slot needs no
+        # model_id, so whatever the manager resolved for a transcription
+        # slot may be an unrelated ASR artifact. Live case (lxc105): the
+        # lookup handed back a VibeVoice `.gguf`, which would have replaced
+        # a perfectly good staged ONNX bundle with a path this server can
+        # never load. Falling back to the profile keeps the engine's own
+        # operator-staged weights authoritative.
         metadata = model_info.get("metadata") or {}
         variant = str(metadata.get("variant", ""))
         registry_path = str(model_info.get("path") or "")
+        if registry_path and _find_loadable_bundle(Path(registry_path)) is None:
+            log.info(
+                "moonshine.registry_path_ignored path=%s reason=not_a_loadable_bundle",
+                registry_path,
+            )
+            registry_path = ""
         if registry_path:
             model_path = _resolve_model_leaf(registry_path, variant)
             arch = (
