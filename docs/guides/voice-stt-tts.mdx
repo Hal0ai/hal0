@@ -117,6 +117,32 @@ rather than starting a container that 500s on the first request. The
 `tts` slot additionally mounts a writable cache directory for
 kernel/tokenizer caches.
 
+### Staging the Moonshine weights
+
+The bundle is a directory the loader reads directly — it resolves
+`encoder_model.ort` (or `.onnx`) plus `decoder_model_merged.*` and the
+tokenizer inside whatever directory it is handed. Two consequences:
+
+- **Stage a non-streaming variant.** The `base-en` bundle has the file
+  names the loader wants. The *streaming* bundles (`small-streaming-en`,
+  `medium-streaming-en`) ship a different file set (`encoder.ort`,
+  `frontend.ort`, `adapter.ort`) belonging to the Moonshine streaming SDK,
+  which this image does not consume. Pointing the slot at one is rejected
+  at spawn with `slot.weights_missing` naming the streaming case.
+- **Point `--model_path` anywhere sensible.** hal0 walks the tree to find
+  the directory holding the encoder, so both `…/base-en` and
+  `…/base-en/quantized/base-en` work. If the resolved path is outside the
+  model store root, the slot mounts it read-only at the same absolute path
+  (plus the symlink target, if any) so the container can read it.
+
+Verify staging before enabling the capability:
+
+```sh
+hal0 doctor all --json | jq '.[] | select(.key == "stt-weights")'
+```
+
+A `pass` names the staged path; a `fail` names exactly what is missing.
+
 ### How the CPU STT path works (Moonshine)
 
 Enabling `voice.stt` with `backend=cpu` spawns the `stt` slot's own

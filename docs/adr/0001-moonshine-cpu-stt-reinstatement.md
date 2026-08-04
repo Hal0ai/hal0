@@ -62,12 +62,28 @@ second slot, no `provider` selection — the device alone picks the engine.
    Vibevoice (see the three resolution paths noted in
    `docs/reference/model-roster-benchmark.mdx`). Rather than block on a
    schema redesign, Moonshine's resolution ships now: the operator stages
-   the bundle under the model store (default
-   `/mnt/ai-models/local/moonshine`, leaf layout `quantized/<variant>/`,
-   e.g. `quantized/small-streaming-en/`), and
-   both slot spawn and `hal0 doctor` preflight the path — a missing or
-   empty bundle fails loudly, by name (`slot.weights_missing`), instead of
-   starting a container that 500s on the first real request.
+   the bundle (default `/mnt/ai-models/local/moonshine`; hal0 walks the tree
+   for the directory holding `encoder_model.{ort,onnx}`, so both the root
+   and a `quantized/<variant>/` leaf work), and both slot spawn and
+   `hal0 doctor` preflight the path — a missing or unusable bundle fails
+   loudly, by name (`slot.weights_missing`), instead of starting a container
+   that 500s on the first real request.
+
+   Live validation on lxc105 (2026-08-03) sharpened three points of this
+   decision, each now covered by a regression test:
+   - **Only non-streaming variants are usable.** The streaming bundles ship
+     the Moonshine streaming SDK's file set (`encoder.ort`, `frontend.ort`),
+     which this image cannot load. The preflight names that case rather than
+     accepting any `*.ort` file.
+   - **Staged weights may sit outside the model store root.** A box whose
+     `[models].roots` is `/var/lib/hal0/models` can legitimately stage under
+     `/mnt/ai-models`; the slot mounts the resolved path (and its realpath)
+     identical-path read-only so the container can read it.
+   - **A registry path only wins when it is a Moonshine bundle.** Because
+     the provider is self-managed, the manager's model lookup for a
+     transcription slot may return an unrelated ASR artifact (it returned a
+     VibeVoice `.gguf`); such a path is ignored in favour of the staged
+     bundle.
 
 4. **This supersedes the `[v0.2.0]` retirement claim.** "Moonshine STT
    retired in favour of `whisper.cpp`" is no longer accurate on either
