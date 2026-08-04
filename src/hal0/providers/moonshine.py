@@ -328,7 +328,19 @@ class MoonshineProvider(Provider):
                 cleaned.append(tok)
             flag_tokens = [*cleaned, "--model_path", model_path, "--model_arch", arch]
         else:
-            model_path = _flag_value(flag_tokens, "--model_path")
+            # The profile-baked path needs the SAME leaf resolution as a
+            # registry-bound one: operators stage the tree root (the natural
+            # thing to write in a profile), while the loader wants the
+            # directory that actually holds encoder_model.{ort,onnx}. Without
+            # this the container silently falls back to a HuggingFace
+            # download despite the weights sitting right there on disk.
+            raw_path = _flag_value(flag_tokens, "--model_path")
+            model_path = _resolve_model_leaf(raw_path, _flag_value(flag_tokens, "--model_arch"))
+            if model_path != raw_path:
+                flag_tokens = [
+                    model_path if (i and flag_tokens[i - 1] == "--model_path") else tok
+                    for i, tok in enumerate(flag_tokens)
+                ]
 
         # Spawn preflight: fail by artifact name, not by first-request 500.
         check_moonshine_weights(model_path)

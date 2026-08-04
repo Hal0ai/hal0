@@ -171,3 +171,35 @@ def test_preflight_allows_empty_path_hf_fallback() -> None:
 
 def test_preflight_accepts_staged_bundle(bundle) -> None:
     check_moonshine_weights(str(bundle))  # must not raise
+
+
+def test_profile_baked_path_is_leaf_resolved(tmp_path, monkeypatch) -> None:
+    """A self-managed slot (no registry path) must still get the loadable leaf.
+
+    Live gotcha (lxc105): operators stage the tree ROOT in the profile — the
+    natural thing to write — while the loader wants the directory holding
+    encoder_model.{ort,onnx}. Without resolution the container silently
+    downloads from HuggingFace despite the weights being on disk.
+    """
+    import shlex
+
+    from hal0.providers import moonshine as ms
+
+    root = tmp_path / "moonshine"
+    leaf = root / "quantized" / "base-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+
+    class _Profile:
+        resolved_flags = f"--model_path {root} --model_arch base"
+
+    class _Catalog:
+        def resolve(self, _name):
+            return _Profile()
+
+    monkeypatch.setattr("hal0.profiles.ProfileCatalog", lambda: _Catalog())
+
+    spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
+    c = spec.command
+    assert c[c.index("--model_path") + 1] == str(leaf)
+    assert shlex.join(c).count("--model_path") == 1
