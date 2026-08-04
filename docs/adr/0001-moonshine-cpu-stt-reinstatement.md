@@ -119,3 +119,21 @@ dispatcher, and is not part of the public API surface.
   outperforms it on every host Moonshine currently serves, or a curated
   multi-file-bundle resolution path landing that makes the operator-staging
   step unnecessary — neither has happened yet.
+
+## Open item, surfaced but not settled here
+
+The capability picker still offers `Whisper-Large-v3-Turbo` for `voice.stt`
+under provider `whispercpp`. Two parts of the tree disagree about whether it
+should: `tests/capabilities/test_stt_curation.py` (#514) asserts the row must
+be visible and must fan out to a real host backend, while
+`registry/curated.py`'s own TODO records that no whisper.cpp runtime exists —
+no toolbox image, no provider, no runtime family — so the pick cannot serve a
+request on any host.
+
+This ADR does not resolve that. It only removes the way the STT engine switch
+made it *worse*: a device-keyed profile rule handed those `cpu` rows
+Moonshine's profile, which would have started `MoonshineProvider` against a
+Whisper GGUF. `profile_name_for_fit` now resolves no profile for an STT
+provider hal0 has no runtime for, so the row is inert rather than actively
+mis-wired. Deciding whether to ship a whisper.cpp toolbox image or drop the
+curated surfacing belongs to whoever revisits #514.
