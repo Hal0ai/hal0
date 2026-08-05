@@ -74,6 +74,7 @@ works regardless of which device a slot targets:
 | `flm` | FLM inference on the NPU (chat/embed/STT) |
 | `kokoro` | Text-to-speech (Kokoro), CPU |
 | `qwen3-tts` | Text-to-speech (Qwen3-TTS), GPU |
+| `moonshine` | Speech-to-text (Moonshine), CPU |
 | `comfyui` | Image generation (ComfyUI) |
 | `brain` | The hal0-brain steward workload (small tool-routing model) |
 | `chadrock-dense` / `chadrock-moe` | Family-tuned recipes for specific dense/MoE model cards (ROCmFP4, MTP, mmproj) |
@@ -125,7 +126,7 @@ A `ProfileConfig` still carries two optional fields, `device_class` and
 `backend`, for back-compat — but as of v1.0 they are **inert match-only fit
 hints**, not a source of runtime configuration:
 
-- None of the 16 shipped seed profiles set either field — they're
+- None of the 17 shipped seed profiles set either field — they're
   device-agnostic by construction.
 - When set (on a hand-authored or pre-1.0 profile), `device_class` is
   consulted only as a **fit-check** signal (surfacing a

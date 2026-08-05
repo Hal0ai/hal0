@@ -669,6 +669,13 @@ def _flat_rows_for_capability(
         seen.add(key)
         rows.append(tts_row)
 
+    for stt_row in _stt_rows_for_capability(capability, registry=registry):
+        key = (stt_row["id"], stt_row["backend"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(stt_row)
+
     return rows
 
 
@@ -743,7 +750,53 @@ def _registry_downloaded(model_id: str, *, registry: ModelRegistry | None) -> bo
         return False
 
 
-def _profile_for_fit(capability: str, device: str) -> ResolvedProfile | None:
+#: The one CPU STT engine surfaced directly (mirrors ``_TTS_ENGINES``).
+#:
+#: The id is what ``moonshine_server`` actually advertises on ``/v1/models``
+#: for the bundle hal0 can load: ``moonshine-<arch>-en`` with the default
+#: ``base`` arch. It deliberately does NOT reuse the
+#: ``moonshine-small-streaming-en`` HaloaiModel seed row — that id names a
+#: STREAMING bundle, whose file set this toolbox image cannot load at all
+#: (see ``providers.moonshine._ENCODER_STEMS``), so advertising it would
+#: hand the operator a pick that can never serve a request.
+#: NPU stt is NOT here — it fans out through :func:`_flm_rows_for_capability`
+#: (the FLM trio), same split as embed.
+_STT_ENGINE_ID = "moonshine-base-en"
+
+
+def _stt_rows_for_capability(
+    capability: str,
+    *,
+    registry: ModelRegistry | None = None,
+) -> list[dict[str, Any]]:
+    """Enumerate the CPU Moonshine engine for the voice.stt picker.
+
+    Device-keyed STT engine switch (mirrors TTS): CPU runs the standalone
+    Moonshine engine (this row); NPU is served coresident by the FLM trio
+    (:func:`_flm_rows_for_capability`) — there is no GPU STT engine.
+    Moonshine's weights are operator-staged (multi-file ONNX bundle, not
+    registry-pulled), so ``downloaded`` comes from a registry lookup like
+    :func:`_registry_downloaded` handles for ``qwen3-tts`` and ``pullable``
+    is always False — mirrors how :func:`_tts_rows_for_capability` treats
+    the self-managed Qwen3-TTS engine.
+    """
+    if capability != "stt":
+        return []
+
+    return [
+        {
+            "id": _STT_ENGINE_ID,
+            "backend": "cpu",
+            "provider": "moonshine",
+            "size_gb": 0.0,
+            "capabilities": ["stt"],
+            "downloaded": _registry_downloaded(_STT_ENGINE_ID, registry=registry),
+            "pullable": False,
+        }
+    ]
+
+
+def _profile_for_fit(capability: str, device: str, provider: str = "") -> ResolvedProfile | None:
     """Infer the profile implied by a picker backend.
 
     Mirrors CapabilityOrchestrator's conservative inference so picker and
@@ -755,7 +808,7 @@ def _profile_for_fit(capability: str, device: str) -> ResolvedProfile | None:
     # module, so a top-level import here would be circular.
     from hal0.capabilities.profile_fit import profile_name_for_fit
 
-    profile_name = profile_name_for_fit(capability, device)
+    profile_name = profile_name_for_fit(capability, device, provider)
     if not profile_name:
         return None
     try:
@@ -780,7 +833,7 @@ def _row_with_model_fit(
     if slot_type is None:
         return row
     backend_id = str(row.get("backend") or "")
-    profile = _profile_for_fit(capability, backend_id)
+    profile = _profile_for_fit(capability, backend_id, str(row.get("provider") or ""))
     registry_for_fit = None
     if registry is not None:
         try:

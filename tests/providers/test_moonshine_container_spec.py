@@ -1,0 +1,301 @@
+"""Moonshine STT container spec (CPU-only, mirrors the kokoro spec contract)."""
+
+from typing import Any
+
+import pytest
+
+from hal0.providers.container import _render_quadlet_from_plan
+from hal0.providers.moonshine import (
+    MoonshineProvider,
+    MoonshineWeightsMissingError,
+    check_moonshine_weights,
+)
+
+
+def _render_from_spec(token, spec, *, publish_host="127.0.0.1"):
+    return _render_quadlet_from_plan(token, spec, publish_host=publish_host)
+
+
+def _exec(unit):
+    for line in unit.splitlines():
+        if line.startswith("Exec="):
+            return line[len("Exec=") :]
+    raise AssertionError("Exec not found")
+
+
+@pytest.fixture(autouse=True)
+def _pin_model_store(monkeypatch) -> None:
+    """Pin the store resolver to the literal /mnt/ai-models mount source
+    (same rationale as the kokoro spec module)."""
+    monkeypatch.setenv("HAL0_MODEL_STORE", "/mnt/ai-models")
+
+
+@pytest.fixture()
+def bundle(tmp_path) -> Any:
+    """A staged-looking moonshine bundle: root/quantized/<variant>/ with weights."""
+    leaf = tmp_path / "moonshine" / "quantized" / "small-streaming-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+    (leaf / "decoder_model_merged.ort").write_bytes(b"\0")
+    return tmp_path / "moonshine"
+
+
+def _slot_cfg(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "name": "stt",
+        "port": 8089,
+        "device": "cpu",
+        "type": "transcription",
+        "runtime": "container",
+        "profile": "moonshine",
+    }
+    base.update(overrides)
+    return base
+
+
+def _model_info(bundle) -> dict[str, Any]:
+    return {
+        "path": str(bundle),
+        "metadata": {"variant": "small-streaming-en"},
+    }
+
+
+def test_spec_has_no_gpu_devices_or_groups(bundle) -> None:
+    spec = MoonshineProvider().container_spec(_slot_cfg(), _model_info(bundle))
+    assert spec.devices == []
+    assert spec.group_add == []
+
+
+def test_spec_command_carries_port_host_model_path_and_arch(bundle) -> None:
+    spec = MoonshineProvider().container_spec(_slot_cfg(), _model_info(bundle))
+    c = spec.command
+    assert c[c.index("--port") + 1] == "8089"
+    assert c[c.index("--host") + 1] == "0.0.0.0"
+    # Registry path beats the profile-baked default AND resolves the
+    # quantized/<variant> leaf so the in-container loader can't fall back
+    # to a network download.
+    assert c[c.index("--model_path") + 1] == str(bundle / "quantized" / "small-streaming-en")
+    assert c[c.index("--model_arch") + 1] == "small_streaming"
+
+
+def test_spec_mounts_model_store_ro_and_publishes_loopback(bundle) -> None:
+    spec = MoonshineProvider().container_spec(_slot_cfg(), _model_info(bundle))
+    ai_mount = next(m for m in spec.mounts if m.source == "/mnt/ai-models")
+    assert ai_mount.read_only is True
+    assert ai_mount.target == "/mnt/ai-models"
+    assert spec.port == 8089
+    assert spec.network_mode == ""
+
+
+def test_spec_security_opts_for_lxc(bundle) -> None:
+    spec = MoonshineProvider().container_spec(_slot_cfg(), _model_info(bundle))
+    assert "apparmor=unconfined" in spec.security_opt
+    assert "seccomp=unconfined" in spec.security_opt
+
+
+def test_renderer_no_device_args_publish_volume_command(bundle) -> None:
+    spec = MoonshineProvider().container_spec(_slot_cfg(), _model_info(bundle))
+    unit = _render_from_spec("stt", spec)
+    lines = unit.splitlines()
+
+    assert not any(line.startswith("AddDevice=") for line in lines), (
+        "CPU slot must not pass any device nodes"
+    )
+    assert "PublishPort=127.0.0.1:8089:8089" in lines
+    assert "Volume=/mnt/ai-models:/mnt/ai-models:ro" in unit
+    exec_argv = _exec(unit)
+    assert "--model_path" in exec_argv
+    assert "--model_arch" in exec_argv
+    assert "8089" in exec_argv
+
+
+def test_slot_port_override_wins(bundle) -> None:
+    spec = MoonshineProvider().container_spec(_slot_cfg(port=8098), _model_info(bundle))
+    c = spec.command
+    assert c[c.index("--port") + 1] == "8098"
+    assert spec.port == 8098
+
+    unit = _render_from_spec("stt", spec)
+    assert "PublishPort=127.0.0.1:8098:8098" in unit.splitlines()
+
+
+# ── Weight preflight (spawn fails by artifact name, not first-request 500) ─────
+
+
+def test_spec_preflight_names_missing_bundle(tmp_path, monkeypatch) -> None:
+    """Spawn fails by artifact name when the staged bundle is absent.
+
+    The path preflighted is the profile's — a registry path that holds no
+    loadable bundle is ignored (see
+    ``test_non_bundle_registry_path_falls_back_to_profile``), so the error
+    must name the operator-facing path, not the stray registry one.
+    """
+    from hal0.providers import moonshine as ms
+
+    missing = tmp_path / "nope" / "moonshine"
+
+    class _Profile:
+        resolved_flags = f"--model_path {missing} --model_arch base"
+
+    monkeypatch.setattr(
+        "hal0.profiles.ProfileCatalog",
+        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
+    )
+
+    with pytest.raises(MoonshineWeightsMissingError) as exc_info:
+        ms.MoonshineProvider().container_spec(_slot_cfg(), {})
+    assert str(missing) in str(exc_info.value)
+    assert exc_info.value.code == "slot.weights_missing"
+
+
+def test_preflight_rejects_dir_without_weights(tmp_path) -> None:
+    empty = tmp_path / "moonshine"
+    empty.mkdir()
+    with pytest.raises(MoonshineWeightsMissingError) as exc_info:
+        check_moonshine_weights(str(empty))
+    assert str(empty) in str(exc_info.value)
+
+
+def test_preflight_rejects_streaming_only_bundle(tmp_path) -> None:
+    """Live gotcha (lxc105): the streaming-SDK file set (encoder.ort /
+    frontend.ort) is NOT loadable by this image — the server resolves
+    encoder_model.{ort,onnx}. Accepting it produced a container that started
+    and then failed every transcription."""
+    streaming = tmp_path / "moonshine" / "quantized"
+    streaming.mkdir(parents=True)
+    for name in ("encoder.ort", "frontend.ort", "cross_kv.ort", "tokenizer.bin"):
+        (streaming / name).write_bytes(b"\0")
+    with pytest.raises(MoonshineWeightsMissingError) as exc_info:
+        check_moonshine_weights(str(tmp_path / "moonshine"))
+    assert "streaming" in str(exc_info.value).lower()
+
+
+def test_leaf_resolves_bundle_nested_without_variant_dir(tmp_path) -> None:
+    """The staged tree also uses <root>/quantized/ directly (no <variant>
+    subdir) — the resolver must find the encoder there too."""
+    from hal0.providers.moonshine import _resolve_model_leaf
+
+    leaf = tmp_path / "base-en" / "quantized"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+    resolved = _resolve_model_leaf(str(tmp_path / "base-en"), "base-en")
+    assert resolved == str(leaf)
+
+
+def test_preflight_allows_empty_path_hf_fallback() -> None:
+    """No --model_path → the in-container HuggingFace fallback is legal."""
+    check_moonshine_weights("")  # must not raise
+
+
+def test_preflight_accepts_staged_bundle(bundle) -> None:
+    check_moonshine_weights(str(bundle))  # must not raise
+
+
+def test_profile_baked_path_is_leaf_resolved(tmp_path, monkeypatch) -> None:
+    """A self-managed slot (no registry path) must still get the loadable leaf.
+
+    Live gotcha (lxc105): operators stage the tree ROOT in the profile — the
+    natural thing to write — while the loader wants the directory holding
+    encoder_model.{ort,onnx}. Without resolution the container silently
+    downloads from HuggingFace despite the weights being on disk.
+    """
+    import shlex
+
+    from hal0.providers import moonshine as ms
+
+    root = tmp_path / "moonshine"
+    leaf = root / "quantized" / "base-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+
+    class _Profile:
+        resolved_flags = f"--model_path {root} --model_arch base"
+
+    class _Catalog:
+        def resolve(self, _name):
+            return _Profile()
+
+    monkeypatch.setattr("hal0.profiles.ProfileCatalog", lambda: _Catalog())
+
+    spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
+    c = spec.command
+    assert c[c.index("--model_path") + 1] == str(leaf)
+    assert shlex.join(c).count("--model_path") == 1
+
+
+def test_weights_outside_store_root_get_their_own_mount(tmp_path, monkeypatch) -> None:
+    """Live gotcha (lxc105): the box's model store is /var/lib/hal0/models
+    while the staged bundle sits under /mnt/ai-models — outside the mount,
+    so the container saw nothing and fell back to a network download.
+    Weights outside the store root get an identical-path read-only mount.
+    """
+    from hal0.providers import moonshine as ms
+
+    store = tmp_path / "store"
+    store.mkdir()
+    leaf = tmp_path / "elsewhere" / "moonshine" / "quantized" / "base-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+
+    class _Profile:
+        resolved_flags = f"--model_path {tmp_path / 'elsewhere' / 'moonshine'} --model_arch base"
+
+    monkeypatch.setattr(
+        "hal0.profiles.ProfileCatalog",
+        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
+    )
+    monkeypatch.setattr(ms, "model_store_root", lambda: str(store))
+
+    spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
+    sources = {m.source for m in spec.mounts}
+    assert str(store) in sources
+    assert str(leaf) in sources, f"weights outside the store root were not mounted: {sources}"
+    assert all(m.read_only for m in spec.mounts)
+
+
+def test_weights_inside_store_root_add_no_extra_mount(tmp_path, monkeypatch) -> None:
+    from hal0.providers import moonshine as ms
+
+    store = tmp_path / "store"
+    leaf = store / "asr" / "moonshine" / "quantized" / "base-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+
+    class _Profile:
+        resolved_flags = f"--model_path {store / 'asr' / 'moonshine'} --model_arch base"
+
+    monkeypatch.setattr(
+        "hal0.profiles.ProfileCatalog",
+        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
+    )
+    monkeypatch.setattr(ms, "model_store_root", lambda: str(store))
+
+    spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
+    assert [m.source for m in spec.mounts] == [str(store)]
+
+
+def test_non_bundle_registry_path_falls_back_to_profile(tmp_path, monkeypatch) -> None:
+    """Live gotcha (lxc105): a self-managed transcription slot's registry
+    lookup returned an unrelated VibeVoice .gguf. A non-loadable registry
+    path must not displace the operator-staged bundle in the profile."""
+    from hal0.providers import moonshine as ms
+
+    staged = tmp_path / "moonshine"
+    leaf = staged / "quantized" / "base-en"
+    leaf.mkdir(parents=True)
+    (leaf / "encoder_model.ort").write_bytes(b"\0")
+    stray = tmp_path / "asr" / "VibeVoice-ASR-BitNet"
+    stray.mkdir(parents=True)
+    (stray / "model.gguf").write_bytes(b"\0")
+
+    class _Profile:
+        resolved_flags = f"--model_path {staged} --model_arch base"
+
+    monkeypatch.setattr(
+        "hal0.profiles.ProfileCatalog",
+        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
+    )
+
+    spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {"path": str(stray / "model.gguf")})
+    c = spec.command
+    assert c[c.index("--model_path") + 1] == str(leaf)

@@ -53,7 +53,7 @@ curl -fsSL https://hal0.dev/install.sh | bash
 > virtual (code-defined, self-healing on upgrade) with dedicated
 > embed/rerank lanes and a model×profile×slot MTP decision; models carry
 > a preferred runtime profile, interrupted pulls resume, and voice runs
-> end-to-end (NPU STT + Kokoro or GPU Qwen3-TTS). The one-liner creates
+> end-to-end (NPU or CPU/Moonshine STT + Kokoro or GPU Qwen3-TTS). The one-liner creates
 > every capability slot and pulls the `brain` steward model; the rest of
 > the slots land model-less, so you assign models from the dashboard (or
 > `hal0 model pull` + `hal0 slot load`) with no surprise downloads. See
@@ -276,7 +276,7 @@ pins the container image and flag bundle for each backend.
 |--------------------------|----------------------------------|---------------------|--------------------------------------------------------------|
 | chat + embed + rerank    | `rocm` / `rocm-dnse` / `rocm-moe` / `vulkan` / `cuda` (experimental) | ROCm / Vulkan / CUDA / CPU | ROCm FP4 fork baked into the image; MTP via `--spec-type draft-mtp` on the `rocm-dnse`/`rocm-moe` profiles |
 | chat + STT + embed (NPU) | `flm` (`hal0-toolbox-flm`)  | AMD XDNA (opt-in)   | FLM trio: one container, `[npu] asr/embed` toggles, ~2 GB NPU mem |
-| transcription            | whisper.cpp in toolbox image     | Vulkan / CPU        | `stt` slot                                                   |
+| transcription            | `stt` (`hal0-toolbox-moonshine`) / FLM trio above | CPU / AMD XDNA | `voice.stt` switches Moonshine (CPU) ⇄ FLM's whisper-v3:turbo (NPU) without reconfiguring the slot; no GPU STT engine |
 | TTS                      | `tts` (`hal0-toolbox-kokoro`) / `tts-qwen3` (`hal0-toolbox-qwen3tts`) | CPU / ROCm | `voice.tts` switches Kokoro (CPU) ⇄ Qwen3-TTS (GPU) without reconfiguring the slot |
 | image                    | `comfyui` (`docker.io/kyuz0/amd-strix-halo-comfyui`) | ROCm | Exclusive GPU via arbiter; SD Turbo / Flux-2-Klein-9B        |
 

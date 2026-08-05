@@ -26,7 +26,7 @@ from hal0.runners import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-_REAL_FAMILIES = {"llama-server", "flm", "kokoro", "qwen3tts", "comfyui"}
+_REAL_FAMILIES = {"llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui"}
 _REAL_DEVICE_CLASSES = {"gpu", "cpu", "npu", "img"}
 
 
@@ -38,6 +38,7 @@ def test_registry_has_every_expected_key() -> None:
         "cpu",
         "flm",
         "kokoro",
+        "moonshine",
         "qwen3tts",
         "comfyui",
     }

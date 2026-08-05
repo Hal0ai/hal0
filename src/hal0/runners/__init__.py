@@ -62,7 +62,7 @@ from hal0.errors import NotFound
 #: a runner's family), and a module-level import the other way would risk
 #: a cycle the first time either side changes its import shape. The value
 #: set is the same vocabulary as ``hal0.profiles.RuntimeFamily``.
-RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "comfyui"]
+RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui"]
 
 #: Bundled default image tags for the single-purpose runtimes. Literal
 #: constants live HERE (not duplicated in each provider module) — a
@@ -70,6 +70,7 @@ RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "comfyui"]
 #: imports it from :data:`RUNNER_IMAGES` instead of redefining the string.
 _FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
 _KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
+_MOONSHINE_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1"
 _QWEN3TTS_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1"
 _COMFYUI_IMAGE = "docker.io/kyuz0/amd-strix-halo-comfyui:latest"
 
@@ -181,6 +182,17 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "kokoro",
         supported_backends=("cpu",),
         format_arch="kokoro",
+    ),
+    "moonshine": Runner(
+        "moonshine",
+        _MOONSHINE_IMAGE,
+        "moonshine",
+        RunnerSupports(),
+        "cpu",
+        None,
+        "moonshine",
+        supported_backends=("cpu",),
+        format_arch="onnx",
     ),
     "qwen3tts": Runner(
         "qwen3tts",

@@ -233,8 +233,16 @@ with wave.open(\"$TMP/t.wav\",\"wb\") as w:
     w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
     w.writeframes(b\"\".join(struct.pack(\"<h\", int(32000*math.sin(2*math.pi*440*i/16000))) for i in range(16000)))
 "
+        # The served id is moonshine-<arch>-en (moonshine_server /v1/models),
+        # NOT moonshine-<arch> — a bare "moonshine-base" falls through the
+        # router to an upstream that answers 501 "does not support audio
+        # input", so this row could never pass as written. Auth header is
+        # required on any box with HAL0_ADMIN_KEY set (unauthenticated is
+        # 401); it is sourced from api.env the same way an operator would.
+        set +u; [ -r /etc/hal0/api.env ] && . /etc/hal0/api.env; set -u
         curl -fsS -m 30 '"${REMOTE_HAL0_API}"'/v1/audio/transcriptions \
-            -F file=@$TMP/t.wav -F model=moonshine-base \
+            ${HAL0_ADMIN_KEY:+-H "Authorization: Bearer $HAL0_ADMIN_KEY"} \
+            -F file=@$TMP/t.wav -F model=moonshine-base-en \
             -o $TMP/out.json
         rm -rf $TMP
     '; then

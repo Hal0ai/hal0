@@ -413,6 +413,19 @@ class CapabilityOrchestrator:
                 details={"slot": slot, "child": child, "partial": partial},
             ) from exc
 
+        # voice.stt is a device-keyed engine switch with engines on cpu
+        # (moonshine) and npu (FLM whisper) ONLY — hal0 ships no GPU STT
+        # engine. Reject a GPU device with a typed error here; the historical
+        # behaviour (falling through profile inference) handed the stt slot a
+        # llama chat profile, which could never start an STT image.
+        if child == "stt" and merged.device.startswith("gpu"):
+            raise BadRequest(
+                f"no STT engine exists for device {merged.device!r} — "
+                "voice.stt runs on 'cpu' (moonshine) or 'npu' (FLM whisper)",
+                code="capability.no_engine_for_device",
+                details={"slot": slot, "child": child, "device": merged.device},
+            )
+
         # Validate the model against the catalog when one is set + the
         # caller didn't explicitly clear it. We don't fail when the model
         # is empty — that's the "unset" state.
@@ -701,6 +714,19 @@ class CapabilityOrchestrator:
             cfg_dict["type"] = "tts"
             cfg_dict["runtime"] = "container"
             cfg_dict["profile"] = tts_profile_for_device(selection.device)
+        # voice.stt engine switch (moonshine reinstatement): a (re)created cpu
+        # stt slot carries the Moonshine profile explicitly, mirroring the tts
+        # mechanism above, rather than relying on MoonshineProvider's own
+        # profile-less default (belt-and-suspenders — the slot's on-disk shape
+        # then already matches what a reconciled EXISTING slot would carry via
+        # SlotConfigStore._engine_profile_for). The npu case never reaches
+        # here (`_apply_npu_trio_modality` / `_ensure_slot_exists_npu` handle
+        # it); ``profile_name_for_fit`` returns ``None`` for any device this
+        # branch could see beyond cpu, so the stamp only ever fires there.
+        elif child == "stt":
+            stt_profile = profile_name_for_fit("stt", selection.device, selection.provider or "")
+            if stt_profile is not None:
+                cfg_dict["profile"] = stt_profile
         try:
             await self._slot_manager.create(slot_name, cfg_dict)
         except Exception as exc:

@@ -19,6 +19,7 @@ CANONICAL_PROFILES = {
     "chadrock-moe",
     "thinking",
     "coding",
+    "moonshine",
 }
 
 

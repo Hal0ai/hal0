@@ -1,6 +1,6 @@
 ---
 title: Speech to text and text to speech
-description: "Enable hal0's voice capability with hal0 capabilities set: transcription via whisper-class models on the XDNA NPU (FLM), synthesis via Kokoro (CPU) or Qwen3-TTS (GPU), then call /v1/audio/transcriptions and /v1/audio/speech."
+description: "Enable hal0's voice capability with hal0 capabilities set: transcription via Moonshine (CPU) or whisper-class models on the XDNA NPU (FLM), synthesis via Kokoro (CPU) or Qwen3-TTS (GPU), then call /v1/audio/transcriptions and /v1/audio/speech."
 sidebar:
   order: 80
 ---
@@ -9,9 +9,12 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 
 hal0 exposes two voice directions through OpenAI-compatible endpoints:
 
-- **Speech-to-text** (`POST /v1/audio/transcriptions`) — served by
-  FastFlowLM (FLM) on the XDNA NPU, co-loaded with the chat model in one
-  FLM process (the "NPU trio": chat + STT + embed).
+- **Speech-to-text** (`POST /v1/audio/transcriptions`) — served from the
+  single canonical `stt` slot, which can run **either** engine: Moonshine
+  (ONNX) on CPU, or whisper-v3:turbo on the XDNA NPU, co-loaded with the
+  chat model in one FLM process (the "NPU trio": chat + STT + embed).
+  Choosing a device swaps which engine the `stt` slot runs — there's no
+  separate slot to configure.
 - **Text-to-speech** (`POST /v1/audio/speech`) — served from the single
   canonical `tts` slot, which can run **either** engine: Kokoro-82M ONNX
   on CPU, or Qwen3-TTS on GPU (ROCm, native gfx1151). Choosing a device
@@ -19,7 +22,10 @@ hal0 exposes two voice directions through OpenAI-compatible endpoints:
   configure.
 
 Both are children of the **`voice`** capability: `voice.stt` maps to the
-`stt` slot and `voice.tts` maps to the `tts` slot.
+`stt` slot and `voice.tts` maps to the `tts` slot. Both children are
+now device-keyed engine switches with the same shape — see
+[ADR-0001](/docs/adr/0001-moonshine-cpu-stt-reinstatement/) for why `stt`
+was redesigned to match `tts` here.
 
 ## Enable the voice capability
 
@@ -32,12 +38,21 @@ Or over the API, which accepts any subset of `{ backend, provider, model,
 enabled }`:
 
 <Tabs>
+<TabItem label="Speech-to-text (CPU, Moonshine)">
+
+```sh
+curl -X POST http://localhost:8080/api/capabilities/voice/stt \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "backend": "cpu", "provider": "moonshine"}'
+```
+
+</TabItem>
 <TabItem label="Speech-to-text (NPU, FLM)">
 
 ```sh
 curl -X POST http://localhost:8080/api/capabilities/voice/stt \
   -H 'Content-Type: application/json' \
-  -d '{"enabled": true, "backend": "npu"}'
+  -d '{"enabled": true, "backend": "npu", "provider": "flm"}'
 ```
 
 </TabItem>
@@ -62,12 +77,28 @@ curl -X POST http://localhost:8080/api/capabilities/voice/tts \
 </Tabs>
 
 <Aside type="note">
-STT runs on the XDNA NPU via the FLM container — there is no CPU-only STT
-backend in hal0. TTS runs from the single `tts` slot on either engine:
-Kokoro (CPU, ONNX) or Qwen3-TTS (GPU, ROCm) — picking a device in the
-`voice.tts` picker swaps the engine in place, it does not add a second
-slot.
+STT runs from the single `stt` slot on either engine: Moonshine (CPU,
+ONNX) or whisper-v3:turbo via the XDNA NPU's FLM trio — picking a device in
+the `voice.stt` picker swaps the engine in place, it does not add a second
+slot. GPU devices carry **no** STT engine: hal0 ships no GPU STT backend,
+so selecting a GPU device for `voice.stt` returns a typed error instead of
+silently loading the wrong profile. TTS runs from the single `tts` slot on
+either engine: Kokoro (CPU, ONNX) or Qwen3-TTS (GPU, ROCm) — picking a
+device in the `voice.tts` picker swaps the engine in place the same way.
 </Aside>
+
+### The `voice.stt` engine switch
+
+| Device | Provider | Runs on |
+| --- | --- | --- |
+| `cpu` | `moonshine` | CPU (ONNX) |
+| `npu` | `flm` | XDNA NPU, coresident with chat + embed in the FLM trio |
+
+There is deliberately no GPU row — hal0 ships no GPU STT engine. This is a
+two-engine, two-device special case, not a general `provider` selector: if
+a second CPU (or GPU) STT engine ever lands, `device` alone stops being
+enough to disambiguate and `provider` must become a first-class part of
+capability selection (see [ADR-0001](/docs/adr/0001-moonshine-cpu-stt-reinstatement/)).
 
 ### The `voice.tts` engine switch
 
@@ -76,10 +107,55 @@ slot.
 | `cpu` | `kokoro` | CPU (ONNX) |
 | `gpu-rocm` | `qwen3tts` | Strix Halo iGPU (ROCm, native gfx1151) |
 
-Selecting a device rewrites which provider the `tts` slot loads — the
-slot itself doesn't move. Both engines' weights are operator-staged (not
-pulled through the hal0 registry); the slot mounts a writable cache
-directory for kernel/tokenizer caches.
+Selecting a device rewrites which provider the `tts` (or `stt`) slot
+loads — the slot itself doesn't move. Kokoro, Qwen3-TTS, and Moonshine
+weights are all operator-staged (not pulled through the hal0 registry;
+whisper-v3:turbo on the FLM/NPU path resolves through FastFlowLM's own
+model handling instead). Moonshine's weights preflight at slot spawn — a
+missing or empty bundle fails loudly, by name (`slot.weights_missing`),
+rather than starting a container that 500s on the first request. The
+`tts` slot additionally mounts a writable cache directory for
+kernel/tokenizer caches.
+
+### Staging the Moonshine weights
+
+The bundle is a directory the loader reads directly — it resolves
+`encoder_model.ort` (or `.onnx`) plus `decoder_model_merged.*` and the
+tokenizer inside whatever directory it is handed. Two consequences:
+
+- **Stage a non-streaming variant.** The `base-en` bundle has the file
+  names the loader wants. The *streaming* bundles (`small-streaming-en`,
+  `medium-streaming-en`) ship a different file set (`encoder.ort`,
+  `frontend.ort`, `adapter.ort`) belonging to the Moonshine streaming SDK,
+  which this image does not consume. Pointing the slot at one is rejected
+  at spawn with `slot.weights_missing` naming the streaming case.
+- **Point `--model_path` anywhere sensible.** hal0 walks the tree to find
+  the directory holding the encoder, so both `…/base-en` and
+  `…/base-en/quantized/base-en` work. If the resolved path is outside the
+  model store root, the slot mounts it read-only at the same absolute path
+  (plus the symlink target, if any) so the container can read it.
+
+Verify staging before enabling the capability:
+
+```sh
+hal0 doctor all --json | jq '.[] | select(.key == "stt-weights")'
+```
+
+A `pass` names the staged path; a `fail` names exactly what is missing.
+
+### How the CPU STT path works (Moonshine)
+
+Enabling `voice.stt` with `backend=cpu` spawns the `stt` slot's own
+container from the `hal0-toolbox-moonshine` image (`MoonshineProvider`),
+distinct from the NPU path below — it's a standalone process, not a
+co-loaded FLM role. The container wraps an OpenAI-compatible FastAPI
+server (`POST /v1/audio/transcriptions`, `GET /v1/models`, `GET /health`).
+It also exposes `WS /v1/audio/stream` for live PCM16 (16 kHz mono)
+streaming transcription — this endpoint is **in-container only** and is
+**not** routed by the hal0 dispatcher; it isn't part of the public `/v1/*`
+surface. hal0 binds `0.0.0.0:8080` with no built-in auth by design
+(LAN-trust posture); voice endpoints accept file uploads on that
+unauthenticated bind.
 
 ### How the NPU STT path works
 

@@ -61,6 +61,48 @@ def test_spec_provider_comfyui_returns_comfyui() -> None:
         assert isinstance(_spec_provider_for(cfg), ComfyUIProvider), cfg
 
 
+def test_spec_provider_transcription_type_returns_moonshine() -> None:
+    from hal0.providers.moonshine import MoonshineProvider
+
+    result = _spec_provider_for({"device": "cpu", "type": "transcription"})
+    assert isinstance(result, MoonshineProvider)
+
+
+def test_spec_provider_moonshine_profile_returns_moonshine() -> None:
+    from hal0.providers.moonshine import MoonshineProvider
+
+    result = _spec_provider_for({"device": "cpu", "profile": "moonshine"})
+    assert isinstance(result, MoonshineProvider)
+
+
+def test_npu_transcription_wins_over_moonshine() -> None:
+    """device=npu transcription is the FLM trio, never the CPU engine."""
+    from hal0.providers.flm import FLMProvider
+
+    result = _spec_provider_for({"device": "npu", "type": "transcription"})
+    assert isinstance(result, FLMProvider)
+
+
+def test_unknown_runtime_family_fails_loudly() -> None:
+    """A RuntimeFamily extension without a dispatch branch must not silently
+    fall through to the llama-server default (the F3 fragility)."""
+    from unittest.mock import patch as _patch
+
+    import pytest as _pytest
+
+    from hal0.providers.container import UnknownRuntimeFamilyError
+
+    with (
+        _patch(
+            "hal0.providers.container._profile_runtime_family",
+            return_value="quantumfoo",
+        ),
+        _pytest.raises(UnknownRuntimeFamilyError) as exc_info,
+    ):
+        _spec_provider_for({"device": "cpu", "profile": "whatever"})
+    assert "quantumfoo" in str(exc_info.value)
+
+
 def test_spec_provider_gpu_returns_none() -> None:
     result = _spec_provider_for({"device": "gpu-rocm", "profile": "chat"})
     assert result is None

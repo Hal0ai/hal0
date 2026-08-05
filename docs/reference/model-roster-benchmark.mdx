@@ -59,11 +59,17 @@ the first-run wizard's model cards render via `GET /api/install/curated-models`.
 | `tags`, `notes` | — |
 
 <Aside type="caution">
-STT/TTS curated picks are not implemented as of this writing — moonshine, kokoro, and
-vibevoice can't be expressed in the current single-file GGUF/safetensors/checkpoint
-curated schema (they ship as multi-file ONNX/PyTorch bundles). This is a documented
-open item in source with three possible resolution paths, none landed. Don't document
-a curated STT/TTS pick flow as existing.
+STT/TTS curated picks are not implemented as of this writing — kokoro and vibevoice
+can't be expressed in the current single-file GGUF/safetensors/checkpoint curated
+schema (they ship as multi-file ONNX/PyTorch bundles). This is a documented open item
+in source with three possible resolution paths, none landed for those two. Don't
+document a curated STT/TTS pick flow as existing for kokoro or vibevoice.
+
+Moonshine's resolution is decided (it doesn't wait on the curated-schema redesign):
+weights are operator-staged under the model store rather than registry-pulled, and
+both slot spawn and `hal0 doctor` preflight the staged path, failing loudly and by
+name (`slot.weights_missing`) instead of starting a container that 500s on first
+request. See [ADR-0001](/docs/adr/0001-moonshine-cpu-stt-reinstatement/).
 </Aside>
 
 ## Hardware-driven recommendation

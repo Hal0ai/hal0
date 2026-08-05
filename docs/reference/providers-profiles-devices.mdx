@@ -24,6 +24,7 @@ process. Concrete implementations:
 | `ComfyUIProvider` | `providers/comfyui.py` | Image generation. |
 | `KokoroProvider` | `providers/kokoro.py` | TTS. |
 | `Qwen3TTSProvider` | `providers/qwen3tts.py` | TTS. |
+| `MoonshineProvider` | `providers/moonshine.py` | STT (CPU, ONNX). |
 
 Every `Provider` is stateless — no per-slot mutable state lives on the instance.
 Abstract methods: `build_env()`, `start_cmd()`, `health()`, `infer()`,
@@ -112,11 +113,19 @@ still referenced by a slot or by a model's `defaults.profile`). Seed profiles ar
 only cloned.
 
 A resolved profile (`ResolvedProfile`) adds derived fields: `runtime_family`
-(`llama-server, flm, kokoro, qwen3tts, comfyui` — classified structurally off name and
-`device_class`, not by sniffing an image string), `supported_slot_types` (e.g. `flm` →
-`llm, embedding, transcription`; `kokoro`/`qwen3tts` → `tts`; `comfyui` → `image`;
-everything else → `llm, embedding, reranking`), `used_by` (slot names referencing the
-profile), and static `tps`/`rtf` numbers from the bench table.
+(`llama-server, flm, kokoro, qwen3tts, moonshine, comfyui` — classified structurally off
+name and `device_class`, not by sniffing an image string), `supported_slot_types` (e.g.
+`flm` → `llm, embedding, transcription`; `kokoro`/`qwen3tts` → `tts`; `moonshine` →
+`transcription`; `comfyui` → `image`; everything else → `llm, embedding, reranking`),
+`used_by` (slot names referencing the profile), and static `tps`/`rtf` numbers from the
+bench table.
+
+The seeded `moonshine` profile (device `cpu`) is the STT sibling of the seeded `kokoro`
+profile: `runtime_family = "moonshine"`, `supported_slot_types = ("transcription",)`,
+image `ghcr.io/hal0ai/hal0-toolbox-moonshine:v1` (resolved via `RUNNER_IMAGES["moonshine"]`,
+digest pinned in `manifest.json`), and self-managed (operator-staged) weights — see
+[Voice: STT and TTS](/docs/guides/voice-stt-tts/) and
+[ADR-0001](/docs/adr/0001-moonshine-cpu-stt-reinstatement/).
 
 ## Device taxonomy
 

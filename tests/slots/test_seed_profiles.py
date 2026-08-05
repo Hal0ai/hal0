@@ -4,7 +4,8 @@ Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md:
 - Every profile must have: name (implicit via [profile.<name>]), flags, intent.
 - `device_class` field is REMOVED (slot owns device).
 - `flags` must NOT contain SLOT_HARDWARE_FLAGS or operational flags.
-- Profile names match the 1.0 catalog (16 total — 11 kept + 5 new for 1.0).
+- Profile names match the 1.0 catalog (17 total — 11 kept + 5 new for 1.0
+  + moonshine, reinstated post-1.0-freeze; see docs/adr/0001).
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ OPERATIONAL_FLAG_FRAGMENTS = (
     "--no-mmap",
 )
 
-ALL_16_PROFILES = [
+ALL_17_PROFILES = [
     "profile.chat",
     "profile.chat-long-context",
     "profile.dense",
@@ -53,6 +54,7 @@ ALL_16_PROFILES = [
     "profile.flm",
     "profile.kokoro",
     "profile.qwen3-tts",
+    "profile.moonshine",
     "profile.comfyui",
     # New for 1.0 (per spec §4.2):
     "profile.brain",
@@ -78,14 +80,14 @@ def test_seed_profiles_loads() -> None:
     assert len(profiles) >= 11, f"expected ≥11 profiles, got {len(profiles)}: {list(profiles)}"
 
 
-def test_catalog_has_exactly_16_profiles() -> None:
-    """1.0 catalog is exactly 16 profiles (11 kept + 5 new)."""
+def test_catalog_has_exactly_17_profiles() -> None:
+    """1.0 catalog is exactly 17 profiles (11 kept + 5 new + moonshine)."""
     profiles = _load_seed_profiles()
     names = sorted(profiles)
-    assert names == sorted(ALL_16_PROFILES), f"catalog profiles out of order or missing: {names}"
+    assert names == sorted(ALL_17_PROFILES), f"catalog profiles out of order or missing: {names}"
 
 
-@pytest.mark.parametrize("profile_name", ALL_16_PROFILES)
+@pytest.mark.parametrize("profile_name", ALL_17_PROFILES)
 def test_every_seed_profile_is_device_agnostic(profile_name: str) -> None:
     profiles = _load_seed_profiles()
     assert profile_name in profiles, f"missing {profile_name}"
@@ -95,7 +97,7 @@ def test_every_seed_profile_is_device_agnostic(profile_name: str) -> None:
     )
 
 
-@pytest.mark.parametrize("profile_name", ALL_16_PROFILES)
+@pytest.mark.parametrize("profile_name", ALL_17_PROFILES)
 def test_all_profiles_have_no_hardware_flags(profile_name: str) -> None:
     profiles = _load_seed_profiles()
     flags = profiles[profile_name].get("flags", "")
@@ -105,7 +107,7 @@ def test_all_profiles_have_no_hardware_flags(profile_name: str) -> None:
         )
 
 
-@pytest.mark.parametrize("profile_name", ALL_16_PROFILES)
+@pytest.mark.parametrize("profile_name", ALL_17_PROFILES)
 def test_all_profiles_have_no_operational_flags(profile_name: str) -> None:
     profiles = _load_seed_profiles()
     flags = profiles[profile_name].get("flags", "")
@@ -115,7 +117,7 @@ def test_all_profiles_have_no_operational_flags(profile_name: str) -> None:
         )
 
 
-@pytest.mark.parametrize("profile_name", ALL_16_PROFILES)
+@pytest.mark.parametrize("profile_name", ALL_17_PROFILES)
 def test_all_profiles_have_no_managed_or_hardware_flags(profile_name: str) -> None:
     """§21.7 regression tripwire: a seed's flags must never carry a flag hal0
     owns (managed denylist: --model/--ctx-size/-c/--host/--port/-ngl/--alias)
@@ -134,7 +136,7 @@ def test_all_profiles_have_no_managed_or_hardware_flags(profile_name: str) -> No
     assert not removed, f"{profile_name} flags carry hal0-owned flag(s) {removed}: {flags}"
 
 
-@pytest.mark.parametrize("profile_name", ALL_16_PROFILES)
+@pytest.mark.parametrize("profile_name", ALL_17_PROFILES)
 def test_all_profiles_have_intent(profile_name: str) -> None:
     profiles = _load_seed_profiles()
     assert "intent" in profiles[profile_name], f"{profile_name} missing intent"

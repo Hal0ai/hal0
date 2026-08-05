@@ -635,13 +635,15 @@ class SlotConfigStore:
         ``before`` snapshot) or a disable-only reconcile could break the
         commit diff / rollback.
 
-        voice.tts engine switch (follow-up to #972): the two TTS engines
-        (Kokoro CPU / Qwen3-TTS GPU) live in the SAME ``tts`` slot, selected
-        by device. The device alone is not enough to start the right engine —
-        the slot's ``profile`` is what ``container._spec_provider_for`` resolves
-        to a runtime family. So for the ``tts`` child we also derive and write
-        the engine's ``profile`` (cpu → ``kokoro``, gpu → ``qwen3-tts``); without
-        this the slot would keep Kokoro's profile and never spawn Qwen3.
+        voice.tts / voice.stt engine switches (tts: follow-up to #972; stt:
+        moonshine reinstatement): both are device-keyed engine selections
+        living in a SINGLE slot (``tts`` / ``stt``) — the device alone is not
+        enough to start the right engine, since the slot's ``profile`` is
+        what ``container._spec_provider_for`` resolves to a runtime family.
+        So for those two children we also derive and write the engine's
+        ``profile`` (tts: cpu → ``kokoro``, gpu → ``qwen3-tts``; stt: cpu →
+        ``moonshine``, npu → the FLM profile) — without this the slot would
+        keep its previous engine's profile and never spawn the new one.
         """
         selection = slot_selection.selection
         if raw_before is None:
@@ -669,34 +671,46 @@ class SlotConfigStore:
             if selection.model:
                 updates["model"] = {"default": selection.model}
 
-            # TTS engine switch: derive the slot profile from the picked device
-            # so the GPU/CPU choice actually swaps the provider inside the one
-            # tts slot.
-            tts_profile = self._tts_profile_for(slot_selection)
-            if tts_profile is not None:
-                updates["profile"] = tts_profile
+            # tts/stt engine switch: derive the slot profile from the picked
+            # device so the GPU/CPU (tts) or CPU/NPU (stt) choice actually
+            # swaps the provider inside the one tts/stt slot.
+            engine_profile = self._engine_profile_for(slot_selection)
+            if engine_profile is not None:
+                updates["profile"] = engine_profile
 
         # The one-level [model] merge + #585 ctx_size fold is the shared,
         # copy-safe primitive (SC-11) — ``raw_before`` (the ChangeSet's
         # ``before`` snapshot) is never mutated.
         return merge_slot_config(raw_before, updates)
 
-    @staticmethod
-    def _tts_profile_for(slot_selection: SlotSelection) -> str | None:
-        """Engine profile a voice.tts selection implies, or ``None``.
+    #: Children whose device selection is an engine switch WITHIN one slot
+    #: (as opposed to a device that just changes which GPU backend the same
+    #: engine runs on). Every other capability leaves the slot's profile
+    #: untouched (most have none).
+    _ENGINE_SWITCH_CHILDREN: frozenset[str] = frozenset({"tts", "stt"})
 
-        Only the ``tts`` child carries an engine switch — every other
-        capability leaves the slot's profile untouched (most have none). The
-        canonical (device → profile) mapping lives in
-        :func:`hal0.capabilities.catalog.tts_profile_for_device`; imported
+    @classmethod
+    def _engine_profile_for(cls, slot_selection: SlotSelection) -> str | None:
+        """Engine profile a voice.tts/voice.stt selection implies, or ``None``.
+
+        Both children pick their runtime engine via the selected device
+        (tts: cpu → Kokoro, gpu → Qwen3-TTS; stt: cpu → Moonshine, npu → the
+        FLM trio). The canonical ``(capability, device) → profile`` mapping
+        is the ONE rule shared with the picker/apply-time fit inference —
+        :func:`hal0.capabilities.profile_fit.profile_name_for_fit` — imported
         lazily here to keep this module import-light (the cycle the module
-        docstring guards against).
+        docstring guards against). ``child`` names line up 1:1 with the
+        capability strings that function expects for both tts and stt.
         """
-        if slot_selection.child != "tts":
+        if slot_selection.child not in cls._ENGINE_SWITCH_CHILDREN:
             return None
-        from hal0.capabilities.catalog import tts_profile_for_device
+        from hal0.capabilities.profile_fit import profile_name_for_fit
 
-        return tts_profile_for_device(slot_selection.selection.device)
+        return profile_name_for_fit(
+            slot_selection.child,
+            slot_selection.selection.device,
+            slot_selection.selection.provider or "",
+        )
 
 
 # ── file-state IO ────────────────────────────────────────────────────────────

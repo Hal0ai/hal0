@@ -17,8 +17,13 @@ from __future__ import annotations
 from hal0.capabilities.catalog import tts_profile_for_device
 from hal0.config.schema import DEVICE_DEFAULT_PROFILES
 
+#: STT providers hal0 actually has a runtime profile for. A selection naming
+#: anything else resolves NO profile rather than inheriting the CPU engine's
+#: (see the ``stt`` branch below).
+_STT_PROVIDERS_WITH_PROFILES: frozenset[str] = frozenset({"moonshine", "flm"})
 
-def profile_name_for_fit(capability: str, device: str) -> str | None:
+
+def profile_name_for_fit(capability: str, device: str, provider: str = "") -> str | None:
     """Infer the runtime profile name implied by a picker/apply selection.
 
     Keeps inference conservative: use profiles where the device/capability
@@ -33,6 +38,29 @@ def profile_name_for_fit(capability: str, device: str) -> str | None:
     if capability == "tts":
         # Engine switch within the tts slot — GPU resolves Qwen3, CPU Kokoro.
         return tts_profile_for_device(device)
+    if capability == "stt":
+        # Device-keyed STT engine switch (mirrors tts): NPU → the FLM trio,
+        # CPU → Moonshine. There is deliberately NO GPU branch — hal0 ships
+        # no GPU STT engine, and falling through to the generic GPU branch
+        # below would hand the stt slot a llama chat profile (wrong runtime
+        # family; the slot would never start the STT image). If a second CPU
+        # STT engine ever lands, this device-keyed rule stops discriminating
+        # and `provider` must become part of the selection (see the ADR).
+        #
+        # ``provider`` is honoured NARROWLY here: a caller that names an
+        # engine hal0 has no profile for gets ``None`` instead of the CPU
+        # engine's profile. Live case (lxc105): the picker offers
+        # Whisper-Large-v3-Turbo under provider ``whispercpp`` (a curated
+        # surfacing decision from #514, with no runtime behind it), and the
+        # device-only rule handed that row Moonshine's profile — a slot that
+        # would point MoonshineProvider at a Whisper GGUF it cannot load.
+        if provider and provider not in _STT_PROVIDERS_WITH_PROFILES:
+            return None
+        if device == "npu":
+            return DEVICE_DEFAULT_PROFILES.get("npu")
+        if device == "cpu":
+            return "moonshine"
+        return None
     if device == "npu":
         return DEVICE_DEFAULT_PROFILES.get("npu")
     if capability == "embed" and device in {"gpu-rocm", "gpu-vulkan"}:
