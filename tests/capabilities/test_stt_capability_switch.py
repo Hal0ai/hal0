@@ -394,6 +394,7 @@ async def test_apply_npu_stt_drives_flm_trio_without_slot_spawn(
     # 6. Still exactly one stt slot file — no new/renamed file appeared.
     assert [p.name for p in slots_dir.glob("*.toml")] == ["stt.toml"]
 
+
 async def test_apply_gpu_device_for_stt_is_a_typed_error(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

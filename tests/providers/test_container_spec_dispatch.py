@@ -92,10 +92,13 @@ def test_unknown_runtime_family_fails_loudly() -> None:
 
     from hal0.providers.container import UnknownRuntimeFamilyError
 
-    with _patch(
-        "hal0.providers.container._profile_runtime_family",
-        return_value="quantumfoo",
-    ), _pytest.raises(UnknownRuntimeFamilyError) as exc_info:
+    with (
+        _patch(
+            "hal0.providers.container._profile_runtime_family",
+            return_value="quantumfoo",
+        ),
+        _pytest.raises(UnknownRuntimeFamilyError) as exc_info,
+    ):
         _spec_provider_for({"device": "cpu", "profile": "whatever"})
     assert "quantumfoo" in str(exc_info.value)
 
