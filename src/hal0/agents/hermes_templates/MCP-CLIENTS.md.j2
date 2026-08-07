@@ -16,6 +16,33 @@ Connect external tools (Claude Code, OpenWebUI, etc.) to hal0's MCP servers.
 
 **Important:** hal0 MCP servers only support plain HTTP POST transport. Do NOT use `streamable-http` or SSE — these will fail with HTTP 406 or 405.
 
+## Authentication
+
+Both mounts are **token-gated whenever hal0's network auth is armed** (`hal0 auth status` shows whether it's on for this box; off by default on a fresh loopback/LAN install).
+
+| Mount | Tier | Satisfied by |
+|-------|------|--------------|
+| `/mcp/admin` | ADMIN | `HAL0_ADMIN_KEY` only |
+| `/mcp/memory` | CLIENT | `HAL0_ADMIN_KEY` **or** `HAL0_CLIENT_KEY` |
+
+Send the key as a bearer header on every request:
+
+```
+Authorization: Bearer <key>
+```
+
+Both keys live in `/etc/hal0/api.env` on this host (owner-only, `0600`) — read them out-of-band; `hal0 auth status` reports only whether a key is configured, never its value.
+
+**`X-hal0-Agent` is identity, not a credential.** It stamps the audit trail and routes the `private:<agent>` memory namespace — it carries no auth weight and does not substitute for `Authorization`. When auth is on, a request with a valid `X-hal0-Agent` but no bearer still gets a bare `401`.
+
+### Rotating a key
+
+```bash
+hal0 auth rotate admin    # or: hal0 auth rotate client
+```
+
+A rotation is **not** live-propagated into an already-rendered client config. hal0's own bundled Hermes picks up the new key on the next `hal0 agent bootstrap hermes --repair`; any other client (this file's examples included) needs its saved `Authorization` header updated by hand.
+
 ## Quick Start
 
 > **Planned:** a `hal0 connect <client>` helper that auto-discovers MCP
@@ -38,6 +65,26 @@ Connect external tools (Claude Code, OpenWebUI, etc.) to hal0's MCP servers.
     "hal0-memory": {
       "type": "http",
       "url": "http://127.0.0.1:8080/mcp/memory/mcp"
+    }
+  }
+}
+```
+
+If [Authentication](#authentication) is armed on this box, add a `headers`
+block to each server (the admin key satisfies both mounts):
+
+```json
+{
+  "mcpServers": {
+    "hal0-admin": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp/admin/mcp",
+      "headers": { "Authorization": "Bearer <HAL0_ADMIN_KEY>" }
+    },
+    "hal0-memory": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp/memory/mcp",
+      "headers": { "Authorization": "Bearer <HAL0_ADMIN_KEY>" }
     }
   }
 }
@@ -67,20 +114,24 @@ Any MCP-compatible client with HTTP transport support. Key requirements:
 
 ## Verification
 
-Test a connection manually:
+Test a connection manually (add `-H "Authorization: Bearer <key>"` when auth is armed):
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/mcp/admin/mcp \
   -H "Content-Type: application/json" \
+  -H "X-hal0-Agent: my-agent" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' | jq '.result.tools | length'
 ```
 
-Should return the tool count (typically 25+ for admin, 5 for memory).
+Should return the tool count (typically 25+ for admin, 5 for memory). A bare
+`401` with no body means the box requires auth and the request above needs
+the `Authorization` header — see [Authentication](#authentication).
 
 ## Troubleshooting
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
+| HTTP 401 Unauthorized | Auth is armed on this box and the request carried no (or a stale) `Authorization` bearer | Add `Authorization: Bearer <key>` — see [Authentication](#authentication); if this is hal0's own Hermes, run `hal0 agent bootstrap hermes --repair` |
 | HTTP 405 Method Not Allowed | URL missing `/mcp` suffix (e.g. `/mcp/admin`) | Use full path: `/mcp/admin/mcp` |
 | HTTP 406 Not Acceptable | Using `streamable-http` transport (sends GET + POST) | Use `http` transport (POST-only) |
 | Connection refused | hal0 API not running | `systemctl status hal0-api` |

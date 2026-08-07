@@ -8,8 +8,9 @@
 # that live in root:root directories:
 #   * the outbound secrets vault /var/lib/hal0/secrets/agents/<agent>.env
 #     (0600 root:root — pid1/root reads it as the unit's EnvironmentFile), and
-#   * the non-secret driver env /etc/hal0/agents/<agent>.env (0644 root:root —
-#     hal0 API/MCP URLs the hermes wrapper sources).
+#   * the driver env /etc/hal0/agents/<agent>.env (0600 root:root — hal0
+#     API/MCP URLs, plus HAL0_MCP_TOKEN, the agent's inbound MCP bearer,
+#     when a box service key is resolvable).
 # An unprivileged provisioner cannot write into those root-owned dirs, so it
 # delegates exactly those two writes here, just like hal0-slotctl delegates the
 # slot-unit + systemctl ops.
@@ -83,14 +84,20 @@ except BaseException:
 ' "$secrets"
     ;;
   write-driver-env)
-    # stdin = full driver-env body (non-secret URLs). Atomic, 0644 root:root.
+    # stdin = full driver-env body (hal0 API/MCP URLs, plus HAL0_MCP_TOKEN
+    # when a box service key is resolvable — a live secret). Atomic, 0600
+    # root:root: only pid1 needs to read this as the unit's
+    # EnvironmentFile= (the hal0-owned child process inherits the values via
+    # its already-materialised env, never by re-reading the file — see
+    # cli/agent_shim.py _build_hermes_env), so tightening off the old 0644
+    # (back when this file carried only non-secret URLs) costs nothing.
     install -d -m 0755 -o root -g root /etc/hal0/agents
-    umask 022
+    umask 077
     tmp="$(mktemp "${driver}.XXXXXX")"
     trap 'rm -f "$tmp"' EXIT
     cat > "$tmp"
     chown root:root "$tmp"
-    chmod 0644 "$tmp"
+    chmod 0600 "$tmp"
     mv -f "$tmp" "$driver"
     trap - EXIT
     ;;
@@ -98,8 +105,9 @@ except BaseException:
     # stdin = full seed TOML body (the manager seed / MCP allow-list). The caller
     # read-merged the existing file (it is 0644 world-readable, so an unprivileged
     # caller can read it) and sends the complete result here; only the WRITE lands
-    # in root:root /etc/hal0/agents. Atomic, 0644 root:root — same dir + perms as
-    # write-driver-env.
+    # in root:root /etc/hal0/agents. Atomic, 0644 root:root — no secret VALUES
+    # live here (auth.env names an env var, never the token itself), so this one
+    # stays world-readable, unlike write-driver-env above.
     install -d -m 0755 -o root -g root /etc/hal0/agents
     umask 022
     tmp="$(mktemp "${seed}.XXXXXX")"

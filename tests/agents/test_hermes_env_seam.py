@@ -2,10 +2,11 @@
 
 The provisioner writes two .env files into directories the hardened model pins
 root:root — the secrets vault (/var/lib/hal0/secrets/agents/hermes.env) and the
-driver env (/etc/hal0/agents/hermes.env). When hal0-api runs unprivileged it
-can't write those dirs, so ``_write_secrets_env`` / ``_write_driver_env`` branch
-on euid: root writes directly (+ re-pins root:root), non-root delegates to
-``sudo -n hal0-agentenv``.
+driver env (/etc/hal0/agents/hermes.env, which may also carry HAL0_MCP_TOKEN —
+see test_hermes_provision_mcp_auth.py for that half of the contract). When
+hal0-api runs unprivileged it can't write those dirs, so ``_write_secrets_env``
+/ ``_write_driver_env`` branch on euid: root writes directly (+ re-pins
+root:root), non-root delegates to ``sudo -n hal0-agentenv``.
 
 These tests assert both branches. The autouse ``_euid_root_by_default`` fixture
 (conftest) makes euid==0 the default; the seam tests override to non-root.
@@ -118,7 +119,7 @@ def test_voice_wire_surfaces_seam_failure_as_fail(monkeypatch: pytest.MonkeyPatc
 def test_driver_env_nonroot_routes_through_seam(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """euid!=0: the non-secret driver env is written via the seam too."""
+    """euid!=0: the driver env is written via the seam too."""
     # Point at a non-existent path so the hash-skip doesn't early-return.
     monkeypatch.setattr(hp, "DRIVER_ENV_PATH", tmp_path / "agents" / "hermes.env")
     monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
@@ -140,6 +141,8 @@ def test_driver_env_root_writes_directly(tmp_path: Path, monkeypatch: pytest.Mon
     target = tmp_path / "agents" / "hermes.env"
     monkeypatch.setattr(hp, "DRIVER_ENV_PATH", target)
     monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.delenv("HAL0_CLIENT_KEY", raising=False)
     state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), agent_id="hermes-agent")
     with patch.object(hp.subprocess, "run") as run:
         path, wrote = hp._write_driver_env(state)
@@ -147,6 +150,80 @@ def test_driver_env_root_writes_directly(tmp_path: Path, monkeypatch: pytest.Mon
     assert wrote is True
     assert path.exists()
     assert "HAL0_API_URL=" in path.read_text()
+    # Tightened unconditionally now that this file can carry a secret — even
+    # on a keyless box, so a later key-armed re-run never finds a stale 0644.
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_driver_env_includes_mcp_token_when_key_resolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resolvable box admin key lands as HAL0_MCP_TOKEN in the driver env —
+    the env var name AgentMCPClient.token_for() reads per auth.env in the
+    seed TOML (see test_hermes_provision_mcp_auth.py)."""
+    target = tmp_path / "agents" / "hermes.env"
+    monkeypatch.setattr(hp, "DRIVER_ENV_PATH", target)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "driver-env-admin-key")
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), agent_id="hermes-agent")
+    hp._write_driver_env(state)
+    body = target.read_text()
+    assert "HAL0_MCP_TOKEN=driver-env-admin-key" in body
+    assert (target.stat().st_mode & 0o777) == 0o600
+
+
+def test_driver_env_omits_mcp_token_when_no_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auth OFF (no resolvable key): the file still writes, just tokenless."""
+    target = tmp_path / "agents" / "hermes.env"
+    monkeypatch.setattr(hp, "DRIVER_ENV_PATH", target)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.delenv("HAL0_CLIENT_KEY", raising=False)
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), agent_id="hermes-agent")
+    path, wrote = hp._write_driver_env(state)
+    assert wrote is True
+    assert "HAL0_MCP_TOKEN" not in path.read_text()
+
+
+def test_driver_env_self_heals_perms_on_content_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing 0644 file (written by an older build) gets re-tightened
+    to 0600 even when the content hash-skip fires — the skip branch must not
+    leave a stale world-readable mode once this file can carry a secret."""
+    target = tmp_path / "agents" / "hermes.env"
+    target.parent.mkdir(parents=True)
+    monkeypatch.setattr(hp, "DRIVER_ENV_PATH", target)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.delenv("HAL0_CLIENT_KEY", raising=False)
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), agent_id="hermes-agent")
+    # First run establishes the (tokenless) content + mode.
+    hp._write_driver_env(state)
+    target.chmod(0o644)  # simulate an older build's world-readable artifact
+    path, wrote = hp._write_driver_env(state)
+    assert wrote is False  # content unchanged — hash-skip branch
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_driver_env_token_rotates_on_rerun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rotated HAL0_ADMIN_KEY reaches the next bootstrap/--repair run —
+    same self-healing contract as the config.yaml bearer."""
+    target = tmp_path / "agents" / "hermes.env"
+    monkeypatch.setattr(hp, "DRIVER_ENV_PATH", target)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), agent_id="hermes-agent")
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "key-before-rotation")
+    hp._write_driver_env(state)
+    assert "HAL0_MCP_TOKEN=key-before-rotation" in target.read_text()
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "key-after-rotation")
+    path, wrote = hp._write_driver_env(state)
+    assert wrote is True
+    assert "HAL0_MCP_TOKEN=key-after-rotation" in path.read_text()
 
 
 # ── seed TOML (manager seed / MCP allow-list) ────────────────────────────────

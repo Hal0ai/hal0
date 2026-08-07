@@ -57,11 +57,12 @@ connect to directly:
   stacks, config, hardware probes. Its `memory_*` tools route in-process
   to the memory server.
 
-<Aside type="caution">
-hal0 has **no built-in network auth** (ADR-0012). The MCP mounts are
-reachable to anything that can reach the API. Run hal0 on a trusted LAN
-or behind your own reverse proxy — do not expose `/mcp/*` to the
-internet.
+<Aside type="note">
+hal0 supports optional static-key network auth (`hal0 auth status` / `hal0
+auth rotate`) — **off by default** on a fresh loopback/LAN install. When
+it's armed, both MCP mounts are token-gated — see
+[Authenticate](#authenticate) below. Auth or not, run hal0 on a trusted LAN
+or behind your own reverse proxy — do not expose `/mcp/*` to the internet.
 </Aside>
 
 ### Connect
@@ -72,6 +73,55 @@ Point your MCP client at the mount URL on the hal0 host:
 http://localhost:8080/mcp/admin
 http://localhost:8080/mcp/memory
 ```
+
+### Authenticate
+
+Both mounts are token-gated whenever auth is armed on the box:
+
+| Mount | Tier | Satisfied by |
+|-------|------|--------------|
+| `/mcp/admin` | ADMIN | `HAL0_ADMIN_KEY` only |
+| `/mcp/memory` | CLIENT | `HAL0_ADMIN_KEY` **or** `HAL0_CLIENT_KEY` |
+
+Send the key as a bearer header on every request:
+
+```
+Authorization: Bearer <key>
+```
+
+Both keys live in `/etc/hal0/api.env` on the host (owner-only, mode
+`0600`) — read them out-of-band; `hal0 auth status` reports only whether a
+key is configured, never its value.
+
+```sh
+TOKEN=$(sudo grep '^HAL0_ADMIN_KEY=' /etc/hal0/api.env | cut -d= -f2)
+curl -s -X POST http://localhost:8080/mcp/admin/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-hal0-Agent: my-agent" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' | jq '.result.tools | length'
+```
+
+A bare `401` with no body means the box requires auth and the request
+above needs a valid `Authorization` header.
+
+**Rotate a key:**
+
+```sh
+hal0 auth rotate admin    # or: hal0 auth rotate client
+```
+
+A rotation is **not** live-propagated into an already-saved client config —
+update each client's stored `Authorization` header by hand. hal0's own
+bundled Hermes is the one exception: it re-reads the current key on the
+next `hal0 agent bootstrap hermes --repair`.
+
+<Aside type="tip">
+`X-hal0-Agent` is caller **identity**, not a credential — it stamps the
+audit trail and routes the `private:<agent>` memory namespace, but carries
+no auth weight on its own. When auth is on, a request with a valid
+`X-hal0-Agent` and no `Authorization` bearer still gets a bare `401`.
+</Aside>
 
 ### Identify with X-hal0-Agent
 
@@ -108,6 +158,46 @@ HAL0_MCP_ALLOWED_HOSTS=hal0.local:8080,hal0.local:*
 
 See [Edit configuration](/docs/guides/configure) for where these env keys
 live.
+
+### Remote client (workstation Hermes/Claude)
+
+Connecting **from a workstation to a hal0 box on the LAN** — rather than a
+client running on the box itself — needs three things: the box's
+hostname/IP [widened into the allowlist](#widen-the-host-and-origin-allowlists)
+above, the mount URL pointed at the box instead of `127.0.0.1`, and — if
+[auth is armed](#authenticate) — the bearer header.
+
+A workstation Hermes' `config.yaml` (the same `mcp_servers.*` shape `hal0
+agent bootstrap hermes` renders for the box's own bundled agent):
+
+```yaml
+mcp_servers:
+  hal0-admin:
+    type: http
+    url: http://<host>:8080/mcp/admin/mcp
+    timeout: 60
+    headers:
+      X-hal0-Agent: my-workstation-hermes
+      Authorization: Bearer <key>   # omit entirely when auth is off
+  hal0-memory:
+    type: http
+    url: http://<host>:8080/mcp/memory/mcp
+    timeout: 30
+    headers:
+      X-hal0-Agent: my-workstation-hermes
+      X-hal0-Private: "1"
+      Authorization: Bearer <key>   # omit entirely when auth is off
+```
+
+A workstation Claude Code (`~/.claude/settings.json`) uses the same
+`headers` shape — see the `hal0-admin` / `hal0-memory` example in
+`/etc/hal0/MCP-CLIENTS.md` on the box (swap `127.0.0.1` for `<host>`).
+
+Replace `<host>` with the hal0 box's LAN hostname or IP, and `<key>` with
+the value read from `/etc/hal0/api.env` **on the hal0 box** — never commit
+it into a workstation dotfile checked into git. `HAL0_ADMIN_KEY` satisfies
+both mounts; a client-tier `HAL0_CLIENT_KEY` only satisfies `/mcp/memory`
+(see the [tier table above](#authenticate)).
 
 ### Memory tools (`/mcp/memory`)
 

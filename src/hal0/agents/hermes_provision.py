@@ -2101,8 +2101,16 @@ def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
             )
             results[name] = {"status": "skipped_by_allowlist"}
             continue
+        # _probe_mcp_server's contract wants the MOUNT ROOT — it appends
+        # "/mcp" itself (see its docstring + _smoke_admin_tools_list, which
+        # both pass ".../mcp/admin"). entry["url"] is instead the FULL
+        # transport URL (".../mcp/admin/mcp" — correct as-is for
+        # config.yaml's mcp_servers.<name>.url), so passing it through
+        # unstripped double-appends "/mcp" and 404s every probe,
+        # unconditionally, on every bootstrap run. Strip the one trailing
+        # "/mcp" _default_mcp_servers() always adds before probing.
         probe = ctx.io.probe_mcp_server(
-            entry["url"], agent_id=state.agent_id, private=entry["private"]
+            entry["url"].removesuffix("/mcp"), agent_id=state.agent_id, private=entry["private"]
         )
         if not probe["ok"]:
             warnings.append(f"{name}: {probe['error']}")
@@ -3067,8 +3075,8 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
 
     Mirrors the top-level ``_default_mcp_servers`` admin + memory pair but scoped
     to the brain identity (``X-hal0-Agent: hermes__hal0-brain``); memory is
-    private (its own 3-tier bank). google_workspace/hal0-browser are
-    deliberately NOT included — the steward gets platform control + memory only.
+    private (its own 3-tier bank). Deliberately just these two — the steward
+    gets platform control + memory only, not any other MCP surface.
 
     The ``/mcp`` mount is ADMIN-classed (security/exposure.py), so — same as
     the top-level overlay — a bearer is attached from the box service identity
@@ -4795,14 +4803,57 @@ def _seed_payload(state: BootstrapState) -> dict[str, Any]:
     }
 
 
+# Builtin MCP servers every hermes install must be able to reach — the
+# [mcp.servers.<name>] seed-TOML counterpart of _default_mcp_servers()'s two
+# entries (that one shapes config.yaml; this one shapes AgentMCPClient's
+# policy file). `url` is deliberately omitted: MCPServerConfig.url is
+# required only for non-builtin servers (schema.py url_required_for_external)
+# — hal0 already knows where its own /mcp/admin + /mcp/memory mounts live.
+_BUILTIN_MCP_SERVER_NAMES: tuple[str, ...] = ("hal0-admin", "hal0-memory")
+
+
+def _builtin_mcp_seed_servers() -> dict[str, dict[str, Any]]:
+    """The ``[mcp.servers.hal0-admin]`` / ``[mcp.servers.hal0-memory]`` blocks
+    the seed TOML needs so two things work:
+
+    * :meth:`hal0.agents.mcp_client.AgentMCPClient.token_for` can resolve a
+      bearer for in-platform callers — it reads ``auth.kind``/``auth.env``
+      straight off this file.
+    * :func:`_phase_mcp_wire`'s allow-list gate (ADR-0013) doesn't filter the
+      builtins out. ``_load_agent_allowlist`` treats a present-but-empty
+      ``[mcp.servers]`` table as "nothing is allowed" (not "no restriction" —
+      that reading only applies when the whole seed file is absent), and the
+      seed TOML always exists once install_artifacts has run once. Without
+      this, every mcp_wire probe silently reports both builtins
+      ``skipped_by_allowlist`` forever, so the live handshake that would
+      catch a broken/missing bearer never runs — the exact silent-401 class
+      the ``doctor`` MCP check now guards against.
+
+    ``auth`` is attached only when a box service key is currently resolvable
+    (mirrors ``_build_config_overlay``'s bearer resolution): on a keyless/dev
+    box the entries still register (so mcp_wire can probe them tokenless) but
+    carry no auth block, matching ``AgentAuthConfig``'s ``kind="none"``
+    default — no failure, just tokenless, same as every other auth-optional
+    site in this module.
+    """
+    from hal0.service_identity import service_key
+
+    bearer = service_key(prefer="admin")
+    block: dict[str, Any] = {"builtin": True, "enabled": True}
+    if bearer:
+        block = {**block, "auth": {"kind": "bearer-from-env", "env": "HAL0_MCP_TOKEN"}}
+    return {name: dict(block) for name in _BUILTIN_MCP_SERVER_NAMES}
+
+
 def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool]:
     """Write/merge the manager seed at :data:`INSTALL_SEED_PATH`.
 
     The seed file doubles as the MCP allow-list (``[mcp.servers.*]``), so we
-    deep-merge: refresh ``[agent]`` + ``data_dir`` while preserving any
-    operator-added server blocks. Returns ``(path, wrote)`` — ``wrote`` is
-    ``False`` when an existing ``[agent]`` block already carried an
-    ``installed_at`` and ``repair`` is off (idempotent no-op on re-run).
+    deep-merge: refresh ``[agent]`` + ``data_dir`` + the two builtin
+    ``[mcp.servers.*]`` blocks (:func:`_builtin_mcp_seed_servers`) while
+    preserving any operator-added server blocks. Returns ``(path, wrote)`` —
+    ``wrote`` is ``False`` when an existing ``[agent]`` block already carried
+    an ``installed_at`` and ``repair`` is off (idempotent no-op on re-run).
     """
     import tomllib
 
@@ -4825,6 +4876,15 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
     merged["agent"] = payload["agent"]
     merged["data_dir"] = payload["data_dir"]
 
+    # Refresh (never remove) the two builtin [mcp.servers.*] blocks — merge at
+    # the per-server level so any operator-added server (e.g.
+    # [mcp.servers.custom]) survives untouched.
+    mcp_block = dict(existing.get("mcp") or {})
+    servers_block = dict(mcp_block.get("servers") or {})
+    servers_block.update(_builtin_mcp_seed_servers())
+    mcp_block["servers"] = servers_block
+    merged["mcp"] = mcp_block
+
     body = tomli_w.dumps(merged)
     if os.geteuid() == 0:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -4844,25 +4904,53 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
 def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
     """Write the driver env file at :data:`DRIVER_ENV_PATH`.
 
-    Mirrors ``HermesDriver._write_env_file``: the wrapper sources this on
-    every invocation for the hal0 API URL + MCP endpoints. Content is
-    deterministic, so a hash-equal file is left untouched. Returns
-    ``(path, wrote)``.
+    Mirrors ``HermesDriver._write_env_file``: the systemd unit's
+    ``EnvironmentFile=-/etc/hal0/agents/%i.env`` sources this into the
+    ``hal0-agent@hermes`` process env on every start — the hal0 API URL, the
+    MCP endpoint URLs, and (when a box service key is resolvable)
+    ``HAL0_MCP_TOKEN``, the bearer :class:`hal0.agents.mcp_client.AgentMCPClient`
+    resolves for in-platform MCP callers via ``auth.env`` in the seed TOML
+    (:func:`_builtin_mcp_seed_servers`). Content is deterministic, so a
+    hash-equal file is left untouched — a rotated key naturally changes the
+    content and is picked up on the next bootstrap/``--repair`` run, same
+    posture as the config.yaml bearer (:func:`_build_config_overlay`).
+
+    Once this file can carry a live secret, its mode always lands ``0600``
+    (root:root — read by pid1 as the unit's EnvironmentFile, never by the
+    unprivileged hal0 user directly; see :func:`_build_hermes_env` in
+    ``cli/agent_shim.py``, which forwards ``os.environ`` rather than
+    re-reading the file). Auth OFF (no resolvable key) still writes the file
+    — just without the token line — so a keyless/dev box never fails here.
+    Returns ``(path, wrote)``.
     """
+    from hal0.service_identity import service_key
+
     api_base = HAL0_API_URL.rstrip("/")
-    body = (
-        "# hal0 — Hermes-Agent env (managed by hal0; safe to edit)\n"
-        f"HAL0_API_URL={api_base}\n"
-        f"HAL0_MCP_ADMIN_URL={api_base}/mcp/admin\n"
-        f"HAL0_MCP_MEMORY_URL={api_base}/mcp/memory\n"
-    )
+    lines = [
+        "# hal0 — Hermes-Agent env (managed by hal0; safe to edit)",
+        f"HAL0_API_URL={api_base}",
+        f"HAL0_MCP_ADMIN_URL={api_base}/mcp/admin",
+        f"HAL0_MCP_MEMORY_URL={api_base}/mcp/memory",
+    ]
+    token = service_key(prefer="admin")
+    if token:
+        lines.append(f"HAL0_MCP_TOKEN={token}")
+    body = "\n".join(lines) + "\n"
     path = DRIVER_ENV_PATH
     if path.exists():
         try:
-            if path.read_text(encoding="utf-8") == body:
-                return path, False
+            unchanged = path.read_text(encoding="utf-8") == body
         except OSError:
-            pass
+            unchanged = False
+        if unchanged:
+            # Re-tighten perms even on a no-op content match — self-heals a
+            # file written 0644 by an older build now that it may carry a
+            # secret. geteuid()==0 only; the seam path re-asserts 0600 on
+            # every write regardless (see installer/wrappers/hal0-agentenv).
+            if os.geteuid() == 0:
+                with contextlib.suppress(OSError):
+                    path.chmod(0o600)
+            return path, False
     if os.geteuid() == 0:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".env.tmp")
@@ -4870,9 +4958,12 @@ def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
         os.replace(tmp, path)
         with contextlib.suppress(OSError):
             os.chown(path, 0, 0)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
     else:
         # Driver env lives in root:root /etc/hal0/agents — delegate the write
-        # to the seam (it builds the path from the validated agent name).
+        # to the seam (it builds the path from the validated agent name and
+        # pins 0600 — see installer/wrappers/hal0-agentenv `write-driver-env`).
         _privileged_env_write("write-driver-env", body)
     return path, True
 

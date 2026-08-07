@@ -42,8 +42,15 @@ def artifact_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
     return hp.BootstrapState(hermes_home=str(hermes_home), agent_id="hermes-agent")
 
 
-def test_phase_writes_all_three_artifacts(artifact_state: hp.BootstrapState) -> None:
+def test_phase_writes_all_three_artifacts(
+    artifact_state: hp.BootstrapState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A fresh run leaves seed TOML + driver env + runtime.json on disk."""
+    # Deterministic: this phase now branches on the box service key, so pin
+    # the ambient auth posture rather than inheriting whatever the test
+    # process/host happens to carry.
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.delenv("HAL0_CLIENT_KEY", raising=False)
     result = hp._phase_install_artifacts(hp._StepCtx(state=artifact_state))
     assert result.status is hp.PhaseStatus.OK
 
@@ -62,16 +69,58 @@ def test_phase_writes_all_three_artifacts(artifact_state: hp.BootstrapState) -> 
     assert seed["agent"]["version_pin"] is False
     assert seed["data_dir"]
 
+    # The two builtin MCP servers are registered so mcp_wire's allow-list
+    # gate (ADR-0013) doesn't filter them out, and AgentMCPClient has a
+    # server to resolve tools/auth against. No admin key on this box (see
+    # delenv above) → no auth block, matching AgentAuthConfig's kind="none"
+    # default — tokenless, not absent.
+    servers = seed["mcp"]["servers"]
+    assert servers["hal0-admin"]["builtin"] is True
+    assert servers["hal0-admin"]["enabled"] is True
+    assert servers["hal0-memory"]["builtin"] is True
+    assert "auth" not in servers["hal0-admin"]
+
     # Driver env carries the canonical hal0 API URL the wrapper sources.
     env_body = env_path.read_text(encoding="utf-8")
     assert "HAL0_API_URL=" in env_body
     assert "HAL0_MCP_ADMIN_URL=" in env_body
     assert "HAL0_MCP_MEMORY_URL=" in env_body
+    assert "HAL0_MCP_TOKEN" not in env_body  # keyless box — see delenv above
 
     # runtime.json carries a non-empty token + is 0600.
     data = json.loads(runtime_path.read_text(encoding="utf-8"))
     assert isinstance(data["token"], str) and data["token"]
     assert (runtime_path.stat().st_mode & 0o777) == 0o600
+
+
+def test_phase_wires_builtin_mcp_auth_when_key_resolvable(
+    artifact_state: hp.BootstrapState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a box admin key present, both artifacts carry the bearer wiring:
+    the seed TOML declares auth.kind=bearer-from-env/env=HAL0_MCP_TOKEN, and
+    the driver env actually sets that variable — the two halves
+    AgentMCPClient.token_for() needs together."""
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "install-artifacts-admin-key")
+    monkeypatch.delenv("HAL0_CLIENT_KEY", raising=False)
+    hp._phase_install_artifacts(hp._StepCtx(state=artifact_state))
+
+    seed = tomllib.loads(hp.INSTALL_SEED_PATH.read_text(encoding="utf-8"))
+    for name in ("hal0-admin", "hal0-memory"):
+        auth = seed["mcp"]["servers"][name]["auth"]
+        assert auth["kind"] == "bearer-from-env"
+        assert auth["env"] == "HAL0_MCP_TOKEN"
+
+    env_body = hp.DRIVER_ENV_PATH.read_text(encoding="utf-8")
+    assert "HAL0_MCP_TOKEN=install-artifacts-admin-key" in env_body
+    assert (hp.DRIVER_ENV_PATH.stat().st_mode & 0o777) == 0o600
+
+    # And the declared shape actually round-trips through AgentMCPClient.
+    from hal0.agents.mcp_client import AgentMCPClient
+
+    monkeypatch.setenv("HAL0_MCP_TOKEN", "install-artifacts-admin-key")
+    client = AgentMCPClient.from_config_file(hp.INSTALL_SEED_PATH)
+    assert client.token_for("hal0-admin") == "install-artifacts-admin-key"
+    assert client.token_for("hal0-memory") == "install-artifacts-admin-key"
 
 
 def test_token_is_stable_across_reruns(artifact_state: hp.BootstrapState) -> None:
@@ -101,7 +150,8 @@ def test_repair_rotates_token(artifact_state: hp.BootstrapState) -> None:
 
 def test_seed_write_preserves_operator_mcp_servers(artifact_state: hp.BootstrapState) -> None:
     """The seed TOML doubles as the MCP allow-list — the write must merge,
-    never clobber, any operator-added ``[mcp.servers.*]`` blocks."""
+    never clobber, any operator-added ``[mcp.servers.*]`` blocks, and must
+    land the two builtins (hal0-admin, hal0-memory) alongside them."""
     seed_path = hp.INSTALL_SEED_PATH
     seed_path.parent.mkdir(parents=True, exist_ok=True)
     seed_path.write_text(
@@ -112,6 +162,8 @@ def test_seed_write_preserves_operator_mcp_servers(artifact_state: hp.BootstrapS
 
     seed = tomllib.loads(seed_path.read_text(encoding="utf-8"))
     assert seed["mcp"]["servers"]["custom"]["url"] == "http://127.0.0.1:9000/mcp"
+    assert seed["mcp"]["servers"]["hal0-admin"]["builtin"] is True
+    assert seed["mcp"]["servers"]["hal0-memory"]["builtin"] is True
     # And the agent block was still written.
     assert seed["agent"]["name"] == "hermes"
 
