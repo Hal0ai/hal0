@@ -51,7 +51,21 @@ RAM, disk, storage, and bridge instead of accepting the defaults.
 
 To get the iGPU and XDNA NPU into a container, create the LXC yourself and
 forward the accelerator device nodes from the host (PVE 8.2+ `devN`
-syntax). Append this to `/etc/pve/lxc/<CTID>.conf` on the host:
+syntax). A minimal, generic starting point:
+
+```sh
+pct create <CTID> local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
+  --unprivileged 1 --cores 4 --memory 8192 --rootfs local-lvm:20
+```
+
+(the quick-path script in §2 automates exactly this step, plus the
+hal0 bootstrap, in one command). This GPU/NPU passthrough recipe
+assumes an **unprivileged** CT — the `devN` gid-mapping mechanism below
+is designed for the unprivileged uid/gid shift; the AppArmor purge note
+later in this section applies only when you're migrating an older
+**privileged** CT onto this path.
+
+Append this to `/etc/pve/lxc/<CTID>.conf` on the host:
 
 ```ini
 # /etc/pve/lxc/<CTID>.conf
@@ -76,7 +90,8 @@ render` can silently resolve to the wrong group.
 
 hal0's own preflight checks for exactly this device layout inside an LXC
 and prints the same `dev0`/`dev1`/`dev2` remedy if the nodes or gid mapping
-are missing or wrong — run `hal0 doctor` after passthrough to confirm.
+are missing or wrong — after installing hal0 inside the CT (§4 below),
+`hal0 doctor` will confirm the devices are visible.
 
 ### PVE keyring sysctls
 
@@ -98,8 +113,8 @@ GPU/NPU passthrough needs an unconfined AppArmor profile
 (`lxc.apparmor.profile: unconfined` in the container's `.conf`) for the
 container runtime to launch slots inside the LXC. If you previously ran a
 **privileged** container for this, purge that config when moving to the
-unprivileged path above — an unconfined profile on a privileged container
-is a wider trust boundary than you need.
+unprivileged CT this section assumes — an unconfined profile on a
+privileged container is a wider trust boundary than you need.
 
 ### Unprivileged podman network fix
 
@@ -147,6 +162,10 @@ Open a shell in the container and run the standard bootstrap:
 pct enter <CTID>
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
+
+No `sudo` needed here — `pct enter` drops you in as root inside the
+container, and minimal CT templates often don't even have `sudo`
+installed.
 
 See [Install hal0](/docs/getting-started/install/) for the full sequence,
 every environment variable, and what the 16-step installer does. On a
