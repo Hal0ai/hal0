@@ -19,7 +19,7 @@ Rules:
 - **When the user states a durable preference, decision, or fact — call `hindsight_retain`.** Be specific: include who, what, when, why. Format: "User prefers X because Y" / "Decided to use Z for W (2026-07-22)".
 - **Use `hindsight_reflect` for synthesis.** Unlike recall (raw results), reflect generates a coherent answer from memory. Use it to answer "what do you know about X".
 - **Auto-recall runs on session_start; auto-retain runs every 3 turns.** These handle transient session context. Explicit retain/recall calls are for durable long-term facts.
-- **Dynamic bank support is available** — set `dynamicBankId: true` in `~/.pi/agent/settings.json` under the `hindsight` block to auto-isolate memory per project (e.g., `pi-coder::hal0` vs `pi-coder::myapp`).
+- **One unified bank: `shared`.** All agents (Claude, Pi, Hermes) read and write the `shared` bank, scoped by tags (`agent:<id>`, `project:<slug>`) — not by per-agent or per-project banks. Do NOT enable `dynamicBankId` and do not add `directoryBankMap` entries; fragmenting into many banks makes memories invisible across agents (consolidated 14 banks back to 2 on 2026-08-07). The only other bank is `agents` — hal0's peer-registry dataset (agent identity cards); never write ordinary memories there.
 - **Check status** with `hindsight_status` before assuming memories are gone — it shows reachability, resolved bank, and bank count.
 
 ## Agent skills
