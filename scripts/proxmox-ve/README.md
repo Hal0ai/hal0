@@ -2,7 +2,7 @@
 
 One-line helper that creates an unprivileged Debian 13 LXC and runs the
 standard hal0 bootstrap inside it. Aimed at homelab Proxmox hosts that
-just want to try hal0 — see the [Strix Halo passthrough recipe](../../docs/internal/)
+just want to try hal0 — see the [Strix Halo passthrough recipe](../../docs/getting-started/proxmox.mdx)
 for the privileged-LXC + iGPU/NPU setup that powers production hal0.
 
 ## Quick start

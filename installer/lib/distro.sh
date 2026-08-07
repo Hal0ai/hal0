@@ -114,6 +114,6 @@ python_venv_hint() {
         arch) pkg_install_cmd python ;;
         suse) pkg_install_cmd python3 python3-pip ;;
         alpine) pkg_install_cmd python3 ;;
-        *) printf '%s\n' "install Python 3.11+ (with the venv stdlib module) from your distribution" ;;
+        *) printf '%s\n' "install Python 3.12+ (with the venv stdlib module) from your distribution" ;;
     esac
 }

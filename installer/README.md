@@ -12,11 +12,14 @@ sudo bash installer/install.sh
 sudo bash installer/install.sh --models-dir=/mnt/ai-models
 ```
 
-> The one-liner `curl -fsSL https://hal0.dev/install.sh | bash` is the
+> The one-liner `curl -fsSL https://hal0.dev/install.sh | sudo bash` is the
 > primary install path as of v0.1.0-alpha — it fetches the signed
 > release tarball, cosign-verifies against the workflow OIDC identity,
 > and hands off to this `install.sh`. `git clone` + `sudo bash` still
-> works for development against a checkout.
+> works for development against a checkout. The one-liner is served by
+> `installer/bootstrap.sh`, which reads `HAL0_CHANNEL` (`stable` —
+> default —, `preview`, or `nightly`) to pick which signed release
+> manifest to fetch; `install.sh` itself has no channel concept.
 
 hal0's inference runtime is **container-based**: every inference slot
 runs as its own podman container supervised by a per-slot systemd unit
@@ -41,7 +44,7 @@ install (GPU/Vulkan/ROCm and CPU paths are fully supported everywhere).
 
 ## What the installer does
 
-1. **Pre-flight checks** — confirms Python 3.11–3.14 is on `$PATH`, systemd is present (skipped in `--dev`), x86_64 arch, disk space, and free ports.
+1. **Pre-flight checks** — confirms a Python 3.12+ interpreter is on `$PATH` (auto-installed when `HAL0_PY_AUTOINSTALL=1`), systemd is present (skipped in `--dev`), x86_64 arch, disk space, and free ports.
 2. **Privilege model** — runs as `root` (re-execs under `sudo` if needed); `hal0-api` runs as `root` so it can apply updates, write systemd drop-ins, and restart services directly. The slot inference containers (podman) are the sandbox boundary for models. A dedicated `hal0` system user runs the non-root services (agents, hermes-gateway, hindsight-api).
 3. **Layout** — code under `/usr/lib/hal0/hal0-<version>` with a `current` symlink and a shared venv (`hal0 update` swaps the symlink atomically); config in `/etc/hal0/`; state in `/var/lib/hal0/{models,registry,slots,openwebui,cache}`. In `--dev` everything lands under `$PWD/.hal0ai/` instead.
 4. **Installs hal0** — creates the shared venv and `pip install`s the release tree into it (editable in `--dev`), then links `/usr/local/bin/hal0` + `/usr/local/bin/hal0-agent`.
@@ -90,6 +93,9 @@ These are the variables `installer/install.sh` actually reads:
 | `HAL0_MODELS_DIR` | _(unset)_ | Absolute path where model pulls land; same as `--models-dir=PATH`. When unset, models live at `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`). |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
 | `HAL0_SKIP_FLM_SHA` | _(unset)_ | Set to `1` to accept an unpinned FastFlowLM `.deb` checksum (placeholder pin only — a real mismatch always refuses) |
+| `HAL0_NONINTERACTIVE` | _(unset)_ | Set to `1` to force flag/env defaults everywhere, skipping the interactive models-dir / HuggingFace-token prompts even on a TTY |
+| `HAL0_PY_AUTOINSTALL` | _(unset)_ | Set to `1` to let the installer auto-install a compatible `python3.12` when the default `python3` is below hal0's floor |
+| `HAL0_SKIP_HINDSIGHT` | _(unset)_ | Set to `1` to skip installing/starting the `hindsight-api` memory service |
 | `HAL0_OPENWEBUI_PORT` † | `3001` | OpenWebUI host port — **dev mode only** |
 
 † `HAL0_OPENWEBUI_PORT` is honored by `scripts/dev-bootstrap.sh` (the dev-mode launcher). The installed `hal0-openwebui.service` hardcodes `:3001`; to change it post-install, edit `/etc/systemd/system/hal0-openwebui.service` and reload.

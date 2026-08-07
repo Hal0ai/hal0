@@ -31,7 +31,7 @@ shared inference daemon; no extra process to babysit.
 > finishes, open the dashboard and assign models to slots.
 
 ```sh
-curl -fsSL https://hal0.dev/install.sh | bash
+curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
 > **Status:** **v0.9.4 — public beta.** Container-runtime era,
@@ -213,7 +213,7 @@ be evicted out from under a streaming request.
 - **Atomic self-update with rollback** — `hal0 update --channel
   stable|preview|nightly`. Cosign-verified tarballs swap a
   `/usr/lib/hal0/current` symlink; `--rollback` reverts.
-- **One-line install** — `curl -fsSL https://hal0.dev/install.sh | bash`
+- **One-line install** — `curl -fsSL https://hal0.dev/install.sh | sudo bash`
   creates every capability slot and its wiring automatically. The only
   model it downloads is the `brain` steward; every other slot lands
   model-less for you to fill from the dashboard. Piped through `bash`
@@ -294,7 +294,7 @@ TOML fields, profiles, GPU arbiter, and day-2 commands — see
 ## Hardware
 
 Linux + systemd is the only hard requirement
-([`installer/install.sh:246`](./installer/install.sh)). macOS and Windows
+([`installer/lib/preflight.sh`](./installer/lib/preflight.sh), `preflight_systemd`). macOS and Windows
 are not in scope for v1.
 
 | Tier            | Hardware                                                                  | Status |

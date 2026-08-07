@@ -741,7 +741,7 @@ preflight_podman_forward() {
 # Test seams (only consulted here, never set in production): HAL0_GPU_DRI_GLOB,
 # HAL0_GPU_CONTAINER_OVERRIDE, HAL0_GPU_RENDER_GID_OVERRIDE,
 # HAL0_GPU_RENDER_GROUP_OVERRIDE, HAL0_GPU_USER_OVERRIDE.
-# See docs/guides/proxmox.md for the full walkthrough.
+# See docs/getting-started/proxmox.mdx for the full walkthrough.
 HAL0_GPU_RC_BROKEN_GID=3
 HAL0_GPU_RC_NO_DEVICE=4
 preflight_gpu() {
@@ -774,7 +774,7 @@ preflight_gpu() {
             warn "    dev0: /dev/dri/renderD128,gid=<render gid INSIDE this container>"
             warn "    dev1: /dev/kfd                    # ROCm compute (optional)"
             warn "    dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)"
-            warn "  then: pct stop <CTID> && pct start <CTID>. Full guide: docs/guides/proxmox.md"
+            warn "  then: pct stop <CTID> && pct start <CTID>. Full guide: https://hal0.dev/docs/getting-started/proxmox/"
             # Gated install: no devices in an LXC is the opt-in CPU-only case.
             [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_DEVICE}"
         else
