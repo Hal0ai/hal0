@@ -1,0 +1,108 @@
+# Mirror hal0:installer/bootstrap.sh → Hal0ai/hal0-web:public/install.sh, the
+# file served at https://hal0.dev/install.sh. bootstrap.sh is the canonical
+# copy; its own header asks the author to "sync the other in the same PR", and
+# that hand-sync has drifted before (the served copy sat 5 hardening commits
+# behind, with warn-only cosign and a different manifest URL). This closes it.
+#
+# Setup: reuses `HALO_WEB_MIRROR_TOKEN` (see mirror-docs.yml).
+#
+# Publish gate — why this does not just push on every main commit:
+#   The canonical bootstrap is fail-closed. It authenticates the channel
+#   manifest against a sibling Sigstore bundle (`<channel>.json.bundle`) before
+#   parsing it. Releases at or after v1.0.0-rc.1 publish that bundle; v0.9.8 —
+#   the manifest `stable` still points at — does not. Publishing the canonical
+#   script while `stable` lacks a bundle would break every one-line install.
+#
+#   So the job refuses to publish until the live stable manifest has its
+#   sibling bundle. The gate opens by itself the moment a signed stable release
+#   (v1.0.0) is published, and `release: published` re-runs it at that instant.
+#   Override with the `force` input only if you know the gate is stale.
+
+name: mirror-bootstrap
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "installer/bootstrap.sh"
+      - ".github/workflows/mirror-bootstrap.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Publish even if the stable manifest has no sibling Sigstore bundle"
+        type: boolean
+        default: false
+
+concurrency:
+  group: mirror-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hal0 (source)
+        uses: actions/checkout@v4
+        with:
+          path: hal0
+
+      - name: Gate on a signed stable manifest
+        id: gate
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          bundle_url="https://releases.hal0.dev/stable.json.bundle"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' -L --retry 3 --retry-delay 2 "${bundle_url}" || echo 000)"
+
+          if [ "${code}" = "200" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Stable manifest is signed (${bundle_url} → 200). Publishing."
+            exit 0
+          fi
+
+          if [ "${FORCE}" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::${bundle_url} → ${code}, but force=true. Publishing anyway."
+            exit 0
+          fi
+
+          echo "publish=false" >> "$GITHUB_OUTPUT"
+          printf '::warning::%s\n' "${bundle_url} -> ${code}. The stable channel is not signed yet, so publishing the canonical fail-closed bootstrap would break the one-line install. Skipping. This gate opens by itself once a signed stable release is published."
+
+      - name: Checkout Hal0ai/hal0-web (target)
+        if: steps.gate.outputs.publish == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Hal0ai/hal0-web
+          token: ${{ secrets.HALO_WEB_MIRROR_TOKEN }}
+          path: hal0-web
+
+      - name: Sync bootstrap.sh → public/install.sh
+        if: steps.gate.outputs.publish == 'true'
+        run: |
+          install -m 0644 hal0/installer/bootstrap.sh hal0-web/public/install.sh
+          # A syntax error here is served to every new user's shell.
+          bash -n hal0-web/public/install.sh
+
+      - name: Commit + push
+        if: steps.gate.outputs.publish == 'true'
+        working-directory: hal0-web
+        run: |
+          git config user.name  "hal0-docs-mirror[bot]"
+          git config user.email "hal0-docs-mirror@users.noreply.github.com"
+
+          if [ -z "$(git status --porcelain public/install.sh)" ]; then
+            echo "public/install.sh already matches bootstrap.sh. Nothing to push."
+            exit 0
+          fi
+
+          source_sha="${{ github.sha }}"
+          git add public/install.sh
+          git commit -m "chore: mirror install.sh from hal0@${source_sha:0:7}
+
+          Auto-synced from Hal0ai/hal0:installer/bootstrap.sh at ${source_sha}.
+          See .github/workflows/mirror-bootstrap.yml in hal0."
+
+          git push origin HEAD:master

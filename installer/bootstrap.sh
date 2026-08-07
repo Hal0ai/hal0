@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
 # ⚠️  This file is MIRRORED between two locations and must stay identical:
-#       - Hal0ai/hal0:installer/bootstrap.sh   (canonical)
+#       - Hal0ai/hal0:installer/bootstrap.sh   (canonical — edit here)
 #       - Hal0ai/hal0-web:public/install.sh    (served at https://hal0.dev/install.sh)
-#     When you edit one, sync the other in the same PR.
+#     .github/workflows/mirror-bootstrap.yml publishes this file to the web copy
+#     on every main push, gated on the stable channel manifest being signed.
+#     Never hand-edit the web copy; it is overwritten.
 #
 # hal0 one-line installer — fetch, verify, unpack, hand off to install.sh.
 #
