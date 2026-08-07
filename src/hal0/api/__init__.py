@@ -965,6 +965,8 @@ class BootState:
     refresh_task: asyncio.Task[None] | None = None
     stop_refresh_task: Any = None
     stop_gpu_arbiter_idle_loop: Any = None
+    memory_reprobe_task: asyncio.Task[None] | None = None
+    stop_memory_reprobe_task: Any = None
     omni_router_client: httpx.AsyncClient | None = None
     boot_report: BootReport = field(default_factory=BootReport)
 
@@ -1611,6 +1613,35 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
 
     ctx.stop_gpu_arbiter_idle_loop = _stop_gpu_arbiter_idle_loop
 
+    # Memory provider self-heal loop (#1613). Armed only when create_app
+    # wrapped a boot-degraded provider in SelfHealingMemoryProvider; polls
+    # until the hindsight engine answers a probe, then the shell swaps its
+    # delegate in place and the loop exits. The probe is sync + bounded
+    # (HAL0_HINDSIGHT_PROBE_TIMEOUT_S), run off-loop via to_thread.
+    ctx.memory_reprobe_task = None
+    _mem_provider = getattr(app.state, "memory_provider", None)
+    if hasattr(_mem_provider, "try_heal"):
+        _reprobe_interval = float(
+            os.environ.get("HAL0_MEMORY_REPROBE_INTERVAL_S", "30") or "30"
+        )
+
+        async def _memory_reprobe_loop(provider: Any = _mem_provider) -> None:
+            while True:
+                await asyncio.sleep(_reprobe_interval)
+                if await asyncio.to_thread(provider.try_heal):
+                    return
+
+        ctx.memory_reprobe_task = asyncio.create_task(_memory_reprobe_loop())
+        log.info("hal0.memory.reprobe_loop_started", interval_s=_reprobe_interval)
+
+    async def _stop_memory_reprobe_task() -> None:
+        if ctx.memory_reprobe_task is not None:
+            ctx.memory_reprobe_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ctx.memory_reprobe_task
+
+    ctx.stop_memory_reprobe_task = _stop_memory_reprobe_task
+
     # OmniRouter (PR-16). Client-side OpenAI
     # tool-calling loop. Wired here so the /v1/chat/completions route
     # can pick it up via ``request.app.state.omni_router`` when a
@@ -1901,6 +1932,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await stack.enter_async_context(mgr.run())
             stack.push_async_callback(ctx.stop_refresh_task)
             stack.push_async_callback(ctx.stop_gpu_arbiter_idle_loop)
+            stack.push_async_callback(ctx.stop_memory_reprobe_task)
             ctx.metrics_service.start()
             stack.push_async_callback(ctx.metrics_service.stop)
             yield
@@ -2320,9 +2352,25 @@ def create_app() -> FastAPI:
         log.info("hal0.memory.disabled", reason="memory.enabled=false")
     else:
         try:
-            from hal0.memory import provider_from_config
+            from hal0.memory import SelfHealingMemoryProvider, provider_from_config
 
             memory_provider = provider_from_config(create_app_cfg)
+            # #1613: a degraded boot result (hindsight lost the boot race,
+            # pgvector fallback) used to be permanent because every consumer
+            # below captures this object. Wrap ONLY the degraded case in the
+            # self-healing shell; the lifespan polls try_heal() until the
+            # durable engine answers. Deliberate pgvector config is not a
+            # degradation — no shell, no re-probe loop.
+            engine_cfg = str(
+                getattr(create_app_cfg.memory, "engine", "hindsight") or "hindsight"
+            ).lower()
+            if engine_cfg != "pgvector" and getattr(memory_provider, "degraded", False):
+                memory_provider = SelfHealingMemoryProvider(memory_provider, create_app_cfg)
+                log.warning(
+                    "hal0.memory.boot_degraded",
+                    detail="hindsight unreachable at boot — pgvector fallback active, "
+                    "self-heal re-probe armed",
+                )
         except Exception as exc:  # pragma: no cover — defensive
             log.warning("hal0.memory.init_failed", error=str(exc))
     app.state.memory_provider = memory_provider
