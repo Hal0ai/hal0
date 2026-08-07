@@ -1328,7 +1328,12 @@ def _default_mcp_servers() -> list[dict[str, Any]]:
             "url": "http://127.0.0.1:8080/mcp/memory/mcp",
             "type": "http",
             "private": True,
-            "timeout": 30,
+            # memory_reflect is an agentic LLM loop on the engine side — on the
+            # reference box a single reflect legitimately runs 5-9 minutes, so a
+            # short per-server timeout guarantees a spurious client-side failure
+            # while the engine finishes the job anyway (matches the client-side
+            # HAL0_MEMORY_REFLECT_TIMEOUT_S=900 default in memory/hindsight_client).
+            "timeout": 900,
             "usage_hint": (
                 "read/write persistent context across sessions. Use when the operator "
                 "references prior conversations or asks you to remember a fact."

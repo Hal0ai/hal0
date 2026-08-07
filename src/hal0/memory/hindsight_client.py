@@ -25,6 +25,13 @@ DEFAULT_API_KEY = "hal0-local-noauth"
 DEFAULT_PROBE_TIMEOUT_S = 2.0
 PROBE_TIMEOUT_ENV = "HAL0_HINDSIGHT_PROBE_TIMEOUT_S"
 
+#: Read budget for ``/reflect`` only. Reflect is an agentic LLM loop on the
+#: engine side — on the reference box (4B utility model, 33-65k-token
+#: prompts) a single reflect legitimately runs 5-9 minutes, so the
+#: client-wide 120s read timeout guarantees a spurious failure while the
+#: engine goes on to finish the job. Overridable for slower boxes.
+REFLECT_TIMEOUT_S = float(os.environ.get("HAL0_MEMORY_REFLECT_TIMEOUT_S", "900") or "900")
+
 
 class HindsightUnreachable(RuntimeError):
     """The Hindsight daemon did not answer a health probe.
@@ -245,7 +252,10 @@ class HindsightRestClient:
         if exclude_mental_model_ids is not None:
             body["exclude_mental_model_ids"] = list(exclude_mental_model_ids)
         return await self.request_json(
-            "POST", f"/v1/default/banks/{bank_id}/reflect", json_body=body
+            "POST",
+            f"/v1/default/banks/{bank_id}/reflect",
+            json_body=body,
+            timeout_s=REFLECT_TIMEOUT_S,
         )
 
     async def list_memories(self, *, bank_id, limit=50, offset=0, types=None, query=None):
@@ -542,12 +552,15 @@ class HindsightRestClient:
         *,
         params: dict[str, Any] | None = None,
         json_body: Any | None = None,
+        timeout_s: float | None = None,
     ) -> Any:
         """Generic authenticated forward to any Hindsight REST path.
 
         The admin surface (/api/memory/banks/*) funnels its allowlisted
         passthrough through here so auth + base-url live in one place.
         Raises ``httpx.HTTPStatusError`` on non-2xx (callers map status).
+        ``timeout_s`` overrides the client-wide 120s read budget for the
+        few endpoints whose latency is dominated by an agentic LLM loop.
         """
         resp = await self._http.request(
             method,
@@ -555,6 +568,13 @@ class HindsightRestClient:
             headers=self._headers(),
             params=params,
             json=json_body,
+            timeout=(
+                httpx.Timeout(timeout_s, connect=3.0)
+                if timeout_s is not None
+                # httpx treats an explicit ``timeout=None`` as "no timeout at
+                # all"; the sentinel keeps the client-wide default instead.
+                else httpx.USE_CLIENT_DEFAULT
+            ),
         )
         resp.raise_for_status()
         if not resp.content:
