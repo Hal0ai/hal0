@@ -210,6 +210,13 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
         # (drops a pending cell before it runs).
         "model_pull_delete",
         "bench_queue_delete",
+        # Platform-management expansion (§4.3 follow-on buildout): each
+        # removes a resource outright. mcp_server_uninstall drops an
+        # installed-server record; comfyui_render_cancel clears the render
+        # queue outright; npu_backend_unload deletes the dynamic slot.
+        "mcp_server_uninstall",
+        "comfyui_render_cancel",
+        "npu_backend_unload",
     }
     destructive_per_annotation = {
         name for name, ann in admin._ANNOTATIONS.items() if ann.destructiveHint
@@ -217,13 +224,31 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
     assert destructive_per_annotation == destructive_per_adr
 
 
-def test_open_world_tools_are_the_hf_surface_only() -> None:
-    """Exactly three tools reach outside hal0's own surface — all of
-    them HuggingFace-facing: pull downloads weights, update re-pulls in
-    place, inspect fetches repo metadata. Anything else with
-    openWorldHint=True needs a deliberate ADR update."""
+def test_open_world_tools_are_the_documented_set() -> None:
+    """Every tool that reaches outside hal0's own surface is enumerated
+    here explicitly. The original three are HuggingFace-facing (pull
+    downloads weights, update re-pulls in place, inspect fetches repo
+    metadata); the platform-management expansion adds: updater_check
+    (fetches the release manifest), hf_search (HF Hub search API),
+    comfyui_models_fetch (background HF-adjacent model downloads),
+    slot_pull_image (container-image pull from a registry),
+    runner_image_sync (GHCR discovery probe), mcp_server_install
+    (may fetch a manifest from an arbitrary URL), and profile_generate
+    (reaches HuggingFace when given hf_repo, like model_inspect).
+    Anything else with openWorldHint=True needs a deliberate ADR update."""
     open_world = {name for name, ann in admin._ANNOTATIONS.items() if ann.openWorldHint}
-    assert open_world == {"model_pull", "model_update", "model_inspect"}
+    assert open_world == {
+        "model_pull",
+        "model_update",
+        "model_inspect",
+        "updater_check",
+        "hf_search",
+        "comfyui_models_fetch",
+        "slot_pull_image",
+        "runner_image_sync",
+        "mcp_server_install",
+        "profile_generate",
+    }
 
 
 @pytest.mark.asyncio
