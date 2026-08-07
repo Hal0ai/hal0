@@ -55,7 +55,14 @@ Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
 # overrides this value, so the operator can repoint extraction without editing this
 # installer-owned unit.
 Environment=HINDSIGHT_API_LLM_MODEL=hal0/utility
+# Placeholder credential for the auth-off posture only. Once KB-1 auth is on,
+# /v1 requires a CLIENT-tier bearer and this placeholder 401s every
+# extraction/reflect call (silent retain failure). The real key lives in
+# /etc/hal0/hindsight-llm.env — written by install.sh when a box key exists
+# and kept fresh by `hal0 auth rotate` — and, being an EnvironmentFile,
+# overrides the placeholder below at unit start.
 Environment=HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth
+EnvironmentFile=-/etc/hal0/hindsight-llm.env
 # Generous timeout retained: covers utility-slot cold starts + long reflects.
 Environment=HINDSIGHT_API_LLM_TIMEOUT=300
 # Skip the blocking startup LLM verification. On a fresh box no model is loaded

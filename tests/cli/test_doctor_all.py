@@ -496,11 +496,16 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "check_hermes_mcp_config_auth",
         lambda **_kw: Check("hermes_mcp_auth", "Hermes MCP config auth", "pass", "stubbed"),
     )
+    monkeypatch.setattr(
+        da,
+        "check_hindsight_llm_auth",
+        lambda **_kw: Check("hindsight_llm_auth", "Memory engine LLM auth", "pass", "stubbed"),
+    )
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 10 extras.
-    assert keys[-10:] == [
+    # 7 verify rows + 11 extras.
+    assert keys[-11:] == [
         "auth",
         "models",
         "migrations",
@@ -511,9 +516,66 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "seams",
         "mcp_mounts",
         "hermes_mcp_auth",
+        "hindsight_llm_auth",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
+
+
+# ── hindsight LLM auth (engine-side silent-401 guard) ────────────────────────
+
+
+def test_hindsight_llm_auth_passes_when_engine_not_installed(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    check = da.check_hindsight_llm_auth(
+        auth={"auth_required": True},
+        unit_path=tmp_path / "missing.service",
+        env_path=tmp_path / "hindsight-llm.env",
+    )
+    assert check.status == "pass"
+
+
+def test_hindsight_llm_auth_passes_when_auth_off(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n")
+    check = da.check_hindsight_llm_auth(
+        auth={"auth_required": False}, unit_path=unit, env_path=tmp_path / "hindsight-llm.env"
+    )
+    assert check.status == "pass"
+
+
+def test_hindsight_llm_auth_fails_on_missing_or_placeholder_key(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n")
+    env = tmp_path / "hindsight-llm.env"
+    # Missing file.
+    check = da.check_hindsight_llm_auth(auth={"auth_required": True}, unit_path=unit, env_path=env)
+    assert check.status == "fail"
+    assert "restart hindsight-api" in check.detail
+    # Placeholder value.
+    env.write_text("HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth\n")
+    check = da.check_hindsight_llm_auth(auth={"auth_required": True}, unit_path=unit, env_path=env)
+    assert check.status == "fail"
+
+
+def test_hindsight_llm_auth_passes_on_current_key_fails_on_stale(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n")
+    env = tmp_path / "hindsight-llm.env"
+    env.write_text("HINDSIGHT_API_LLM_API_KEY=live-key-123\n")
+    monkeypatch.setattr(
+        "hal0.service_identity.keys_from_api_env", lambda: {"HAL0_CLIENT_KEY": "live-key-123"}
+    )
+    check = da.check_hindsight_llm_auth(auth={"auth_required": True}, unit_path=unit, env_path=env)
+    assert check.status == "pass"
+
+    monkeypatch.setattr(
+        "hal0.service_identity.keys_from_api_env", lambda: {"HAL0_CLIENT_KEY": "rotated-away"}
+    )
+    check = da.check_hindsight_llm_auth(auth={"auth_required": True}, unit_path=unit, env_path=env)
+    assert check.status == "fail"
+    assert "stale" in check.detail
 
 
 # ── command ───────────────────────────────────────────────────────────────────

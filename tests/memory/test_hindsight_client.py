@@ -252,6 +252,27 @@ async def test_reflect_posts_to_reflect_endpoint():
     assert out == {"text": "an answer"}
 
 
+@pytest.mark.asyncio
+async def test_reflect_carries_long_read_timeout():
+    """Reflect is an engine-side agentic LLM loop that legitimately runs for
+    minutes; the client-wide 120s read budget must not apply to it."""
+    from hal0.memory.hindsight_client import REFLECT_TIMEOUT_S
+
+    seen: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"text": "ok"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9177") as http:
+        client = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+        await client.reflect(bank_id="shared", query="q")
+
+    assert seen["timeout"]["read"] == REFLECT_TIMEOUT_S
+    assert REFLECT_TIMEOUT_S >= 600
+
+
 # ── single-memory curation ───────────────────────────────────────────────────
 
 
