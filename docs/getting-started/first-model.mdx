@@ -1,23 +1,25 @@
 ---
 title: Load your first model
-description: Pull a model from Hugging Face into hal0's local registry and assign it to a slot — via the hal0 setup TUI or directly with the hal0 model CLI.
+description: Pull a model from Hugging Face into hal0's local registry and assign it to a slot — via the dashboard or the hal0 model CLI.
 sidebar:
   order: 30
 ---
 
 import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-Models in hal0 live in a local registry, the single source of truth for
-Hugging Face coordinates, SHA-256 digests, and curated filenames. You can
-populate it through the `hal0 setup` TUI or directly from the CLI.
+The installer seeds slots and starts services — there is no setup wizard in
+v1.0. Models in hal0 live in a local registry, the single source of truth for
+Hugging Face coordinates, SHA-256 digests, and curated filenames. Populate it
+from the dashboard or directly from the CLI.
 
-## Via `hal0 setup`
+## Via the dashboard
 
-If you ran [first-run setup](/docs/getting-started/setup/) and picked models
-for the Main and/or Agent slot, hal0 already seeded the registry and kicked
-off background pulls for each pick. Re-run `hal0 setup` any time to add more
-slots, models, or extensions; when a pull completes, its slot is ready to
-start. Nothing more is required.
+Open the dashboard at `http://<host>:8080` and use the **Models** view to
+pull a curated pick and assign it to a slot — the largest-that-fits-your-RAM
+picks are ranked first, with one starred as recommended, filtered to hal0's
+curated model catalogue so anything you pick already validates against the
+registry. Slot assignment happens from the same view: pick a slot, pick a
+model, apply.
 
 ## Via the CLI
 
@@ -64,6 +66,15 @@ flow is **list → pull → assign**.
    always-seeded default/anchor slot (see [Slots](/docs/concepts/slots)); swap
    in `utility` or any other slot name you've created instead. Start the
    slot afterward (see [Manage slots](/docs/guides/manage-slots/)).
+
+4. **Verify the slot is up**:
+
+   ```sh
+   hal0 status
+   ```
+
+   Confirms the slot's state machine reached its running state with the
+   assigned model loaded.
 
 </Steps>
 
