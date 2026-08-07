@@ -1,0 +1,171 @@
+---
+title: Install hal0
+description: Install hal0 with one command — the bootstrap verifies the release with SHA-256 (and cosign, when available), installs podman, seeds default slot config, and starts the API.
+sidebar:
+  order: 10
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 installs from a single command. The bootstrap script is the trust
+boundary: it fetches the release manifest, verifies the tarball, unpacks
+it, and hands off to the real installer.
+
+```sh
+curl -fsSL https://hal0.dev/install.sh | bash
+```
+
+<Aside type="note">
+The installer needs root to write to `/etc`, `/usr/lib`, and the systemd
+unit directory. When piped through `bash` without `sudo`, it re-execs
+itself under `sudo` automatically. You can also run it explicitly:
+`curl -fsSL https://hal0.dev/install.sh | sudo bash`.
+</Aside>
+
+## Requirements
+
+- **Linux, x86_64** — hal0 ships amd64-only binaries (the FastFlowLM
+  `.deb` and the toolbox container images). ARM and macOS/Windows are not
+  supported.
+- **systemd** — `systemctl` must be on `PATH` (outside `--dev` mode).
+- **Python ≥ 3.12** — the package requires 3.12+; the installer is tested
+  on 3.11–3.14 and builds a dedicated virtualenv.
+- **A container runtime** — every inference slot runs in a container. The
+  installer auto-installs **podman** if no runtime is found.
+- **~20 GB free disk** under the data directory, plus free ports `8080`
+  (API) and `3001` (OpenWebUI).
+
+Supported package managers for auto-installing prerequisites (podman, the
+Python venv stdlib): **apt** (Debian/Ubuntu), **dnf**/**yum** (Fedora),
+**pacman** (Arch), **zypper** (openSUSE), and **apk** (Alpine).
+
+<Aside type="caution" title="NVIDIA / CUDA">
+hal0 is tuned for the AMD Strix Halo iGPU + XDNA NPU; ROCm is AMD-only,
+so GPU acceleration on other hardware runs through the generic **Vulkan**
+profile (works on AMD/NVIDIA/Intel). An experimental `cuda` profile also
+ships (the upstream `llama.cpp:server-cuda` image, needs
+`nvidia-container-toolkit`/CDI on the host) — it isn't part of the
+one-line installer's automatic hardware seeding, so assign it to a slot
+manually from the dashboard after install.
+</Aside>
+
+## What the bootstrap does
+
+<Steps>
+
+1. **Fetch the release manifest** — by default the latest `stable.json`
+   from GitHub Releases. Override with `HAL0_RELEASES_URL` or pick a
+   channel with `HAL0_CHANNEL`.
+
+2. **Download and SHA-256-verify the tarball** against the digest in the
+   manifest. A mismatch aborts the install.
+
+3. **Cosign keyless verify, when available** — if `cosign` is on `PATH`,
+   the Fulcio-issued certificate and signature are checked against the
+   workflow OIDC identity declared in the manifest; a failed check aborts
+   the install. If `cosign` is **not** installed, the bootstrap proceeds
+   on the SHA-256 check alone with a loud warning — cosign is no longer a
+   hard requirement for the one-line install. Set
+   `HAL0_INSTALL_REQUIRE_COSIGN=1` to restore the old strict behavior
+   (fail instead of warn when cosign is missing).
+
+4. **Unpack and hand off** to `installer/install.sh`, which runs
+   pre-flight checks, installs podman + the Python venv, builds the
+   dashboard, writes config and systemd units, runs first-run setup
+   (`hal0 setup --auto --no-pull --no-extensions`) to seed a
+   hardware-recommended slot configuration, and starts the API.
+
+</Steps>
+
+## Environment variables and flags
+
+The installer reads several environment variables and accepts a few
+flags:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HAL0_PREFIX` | `/usr/lib/hal0` | Installation root (FHS layout with a versioned dir + `current` symlink) |
+| `HAL0_PORT` | `8080` | API bind port |
+| `HAL0_MODELS_DIR` | `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`) | Where Hugging Face pulls land |
+| `HAL0_PYTHON` | `python3` | Python interpreter to build the venv from |
+| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip first-run automatic setup (hardware-recommended slot seed) |
+| `HAL0_INSTALL_REQUIRE_COSIGN` | _(unset)_ | Set to `1` to make the bootstrap refuse the install outright when `cosign` isn't present, instead of warning and proceeding on the SHA-256 check alone |
+
+| Flag | Effect |
+|---|---|
+| `--dev` | Local-only editable install under `$PWD/.hal0ai` — no systemd, no host package changes |
+| `--no-start` | Set everything up but do not enable/start the units |
+| `--models-dir=PATH` | Absolute path where pulls land (same as `HAL0_MODELS_DIR`) |
+
+<Aside type="tip">
+The model pull directory must be an **absolute** path. When not specified,
+the installer defaults to `/var/lib/hal0/models` non-interactively. You
+can change it later through `hal0 setup`.
+</Aside>
+
+## Verify the install
+
+Once the installer finishes, check system and slot status:
+
+```sh
+hal0 status
+```
+
+Re-run the full pre-flight set (architecture, systemd, Python, container
+runtime, disk, ports) any time:
+
+```sh
+hal0 doctor
+```
+
+Re-run hardware detection (CPU, RAM, GPU, NPU) on its own with:
+
+```sh
+hal0 probe
+```
+
+The API listens on `http://localhost:8080`. Service-level checks:
+
+```sh
+systemctl status hal0-api
+systemctl list-units 'hal0-slot@*'
+journalctl -fu hal0-api
+```
+
+## Uninstall
+
+The CLI wraps `installer/uninstall.sh`:
+
+```sh
+hal0 uninstall          # conservative: keep /etc/hal0 + models/registry
+hal0 uninstall --purge  # clean slate: also wipe config, data, user, images
+```
+
+The **conservative default** stops services and removes code, units,
+venvs, binaries, and every hal0 podman container, but keeps `/etc/hal0`
+(config) and the data directory (models, registry, OpenWebUI state) so a
+re-install reuses them. `--keep-data` is a legacy alias for this same
+default — it's kept for back-compat, not because the default changed.
+
+`--purge` (alias `--clean-slate`) additionally removes the config and
+data directories, the `hal0` system user and group, and all hal0/toolbox
+podman images. It prompts for a typed `DELETE` confirmation unless you pass
+`--force` (or set `HAL0_FORCE=1`).
+
+<Aside type="note">
+`--purge` deliberately leaves general-purpose host packages installed —
+podman itself, `libxrt-npu2`, ffmpeg, and boost — since other software
+may depend on them.
+</Aside>
+
+## Next steps
+
+First-run setup already seeded a hardware-recommended slot and profile
+during install. From here:
+
+- Run the interactive **`hal0 setup`** TUI to pick real models and
+  extensions — see [First-run setup](/docs/getting-started/setup/).
+- Pull a model and assign it to a slot — see
+  [Load your first model](/docs/getting-started/first-model/).
+- Open the dashboard at `http://<host>:8080/` to manage slots, profiles,
+  and stacks.
