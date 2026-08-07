@@ -57,7 +57,7 @@ curl -fsSL https://hal0.dev/install.sh | bash
 > every capability slot and pulls the `brain` steward model; the rest of
 > the slots land model-less, so you assign models from the dashboard (or
 > `hal0 model pull` + `hal0 slot load`) with no surprise downloads. See
-> [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
+> [`CHANGELOG.md`](./CHANGELOG.md) for what ships in each release.
 
 ## Screenshots
 
@@ -318,8 +318,7 @@ hal0/
 │   ├── etc-hal0/     # seed slot TOMLs (flm, tts, rerank, utility, img) + profiles.toml
 │   └── systemd/      # hal0-agent@ template units
 ├── tests/            # pytest suite (α unit, β integration, γ release-gate)
-├── docs/             # user docs (mirror of hal0.dev/docs); dev docs under docs/internal/
-└── PLAN.md           # roadmap + history
+├── docs/             # user docs (mirror of hal0.dev/docs) + docs/adr/; dev notes in docs/.devdocs/ (local-only)
 ```
 
 The model catalog lives at `/var/lib/hal0/registry/registry.toml` —
@@ -481,8 +480,8 @@ Apache 2.0. See [`LICENSE`](./LICENSE).
 
 ## Contributing
 
-The contribution model is still being decided
-([`PLAN.md`](./PLAN.md) §16). File issues for discussion; PRs aren't
+The contribution model is still being decided.
+File issues for discussion; PRs aren't
 being accepted from outside contributors yet. See
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the test tiers and the
 eventual flow. For questions and general chat, join the

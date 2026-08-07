@@ -4,7 +4,7 @@ This is hal0's single authoritative internal document. It covers the
 architecture, the project glossary, the bundled-agent subsystem, and how
 work lands in this repo. For the user-facing shape (install, ports,
 filesystem layout) see [`docs/getting-started/install.mdx`](./docs/getting-started/install.mdx).
-For scope and roadmap see [`PLAN.md`](./PLAN.md). Published operator docs
+Scope/roadmap live in the maintainer planning doc (`docs/.devdocs/PLAN.md`, local-only). Published operator docs
 live under `docs/` (Starlight `.mdx`).
 
 > **One authoritative doc.** This file replaces the former split across
@@ -422,7 +422,7 @@ When in doubt, ask which sense applies before writing the word.
 ### Agents subsystem (stripped first-party runtime)
 
 **Stripped.** Previously a haloai-style first-party agent runtime
-(PLAN.md §1 Strip listed it as gone). The product-sense bundled agents
+(the planning doc §1 Strip listed it as gone). The product-sense bundled agents
 (above) are NOT a revival — they're third-party bundled apps with a
 fundamentally different architecture. Do not reintroduce the first-party
 runtime.
@@ -508,7 +508,7 @@ Overloaded THREE ways. Default to sense (3) in hal0 product context.
 1. **Claude Code skills** — the markdown + YAML-frontmatter format Claude
    Code itself uses (e.g. `~/.claude/skills/`). Internal tooling for dev
    sessions; not a hal0 product feature.
-2. **stripped haloai skills subsystem** — historical, gone (PLAN.md §1
+2. **stripped haloai skills subsystem** — historical, gone (planning doc §1
    Strip section). Do not reintroduce.
 3. **hal0 platform skills** = MCP tools exposed by the admin MCP server.
    An agent calling `/mcp/admin` sees `slot_list`, `model_swap`, etc. as
@@ -916,7 +916,7 @@ proxy) — at the time this rode on the Lemonade runtime, since replaced by
 the per-slot container runtime (#687), (4) Admin/auth simplification
 (FastAPI owns auth, Caddy collapsed to TLS-only or removed), (5) Advanced
 memory + MCP client side (memory graph + Memify + federation + per-agent
-external MCP allow-list). See PLAN.md §1 v0.3 + §15 Phase 10.
+external MCP allow-list). See the planning doc §1 v0.3 + §15 Phase 10.
 
 ### composer
 
@@ -1243,7 +1243,7 @@ in `CLAUDE.md`.
 
 ## See also
 
-- [`PLAN.md`](./PLAN.md) — v1 scope, modules ported from haloai, milestones
+- `docs/.devdocs/PLAN.md` (local-only) — v1 scope, modules ported from haloai, milestones
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — tests, PR workflow, anti-scar rules
 - [`docs/reference/slot-lifecycle.mdx`](./docs/reference/slot-lifecycle.mdx) — slot lifecycle state machine
 - [`docs/concepts/architecture.mdx`](./docs/concepts/architecture.mdx) — control plane + dispatcher routing

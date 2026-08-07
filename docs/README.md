@@ -17,14 +17,15 @@ The `.mdx` extension is preserved verbatim — the files import Starlight
 components (`Card`, `Tabs`, `Steps`, …) that only render inside the
 website build. GitHub renders the surrounding markdown body fine.
 
-## `docs/internal/` — repo-only architecture docs
+## `docs/adr/` — Architecture Decision Records
 
-Hand-maintained, not on the website. Lives with the code so PRs can
-update implementation notes and architectural decisions in the same
-commit.
+Hand-maintained and tracked. Lives with the code so PRs can update
+architectural decisions in the same commit.
 
-- `internal/adr/` — Architecture Decision Records.
-- `internal/api-errors.md` — error envelope contract.
-- `internal/migration.md` — haloai → hal0 migration playbook.
-- `internal/models-slots-impl-plan.md` — slot/model registry impl plan.
-- `internal/release-manifest.md` — `hal0.releases.v1` manifest schema.
+## `docs/.devdocs/` — developer docs (local-only, gitignored)
+
+Maintainer/agent-internal material that is not part of the public repo:
+planning docs (`PLAN.md`), agent workflow notes (`agents/`), handoffs
+(`rework/`), plans/specs from agent sessions (`superpowers/`), internal
+audits (`internal/`), and historical snapshots (`archive/`). These files
+live only on developer machines and are excluded by `.gitignore`.

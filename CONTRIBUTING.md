@@ -2,7 +2,7 @@
 
 hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.8.2b3** — the
 container-runtime line (one podman container per slot). The contribution model is still
-being decided (see [`PLAN.md`](./PLAN.md) §16).
+being decided.
 <!-- TODO(human): flip the next line to open the external-PR merge window
      when ready (audit Q6.3 / #630). Timing is the maintainer's call. -->
 External PRs aren't being merged yet; please open issues for discussion.
@@ -13,7 +13,7 @@ When the model opens up, the shape will be:
   Origin; see [below](#developer-certificate-of-origin-dco))
 - One PR per feature; small, reviewable diffs
 - Run `make lint test` before pushing
-- Update `PLAN.md` if your change moves the v0.1 scope
+- Update the maintainer planning doc (`docs/.devdocs/PLAN.md`, local-only) if your change moves the scope
 - Slot/dispatcher/provider changes require both unit and integration
   tests (Tier-1 reliability is non-negotiable)
 - UI changes need Playwright coverage for any new critical path
@@ -118,7 +118,7 @@ Signed-off-by: Jane Developer <jane@example.com>
 
 ## Test tiers
 
-hal0's test strategy (PLAN §10) is three tiers, each with a different
+hal0's test strategy is three tiers, each with a different
 cadence and a different runtime ceiling. Every PR runs the unit + the
 integration tier; the release-gate tier is `hal0-test` LXC territory and
 is the last gate before a tagged release.
@@ -161,7 +161,7 @@ cases in `tests/slots/test_integration.py`:
 2. `test_state_transitions_visible_via_stream` — slot state stream sees `starting → warming → ready` (from `/v1/health` polling + Lemonade `/logs/stream` events)
 3. `test_full_state_machine_round_trip_via_stream` — full round-trip incl. `unloading → offline`
 
-Wall-clock budget: ≤12 minutes (PLAN §10, Integration β). Lemonade's
+Wall-clock budget: ≤12 minutes (Integration β). Lemonade's
 embeddable tarball is layer-cached via GHA so cold-cache runs are
 ~10 min, hot-cache ~4.
 
@@ -214,7 +214,7 @@ If any of these fail, fix and re-run before `git tag`.
 ## E2E tests
 
 The `ui/tests/e2e/` Playwright suite covers the seven critical paths
-from PLAN §10 (E2E γ) — FirstRun wizard, slot lifecycle, model
+(E2E γ) — FirstRun wizard, slot lifecycle, model
 management, settings + restart banner, logs SSE tail, hardware probe,
 update banner. All seven run on every PR via
 `.github/workflows/playwright.yml` in <8 minutes against mocked
@@ -281,7 +281,7 @@ toward the fleet average?", start in the TUI.
 
 Release-candidate bands change by channel count and aren't the right
 lens for triaging *one* patch. Use this decision tree for every PR
-that lands on `main` (PLAN §21.15, channel-count-independent per D8).
+that lands on `main` (channel-count-independent per D8).
 Each question is yes/no; route at the first "yes" or fall through to
 **decline**.
 

@@ -112,7 +112,7 @@ own auth + TLS at the edge. A recipe lives at
 [`docs/operate/auth.mdx`](../docs/operate/auth.mdx).
 
 Identity at the application layer is the `X-hal0-Agent` request
-header; see [`docs/agents/identity.md`](../docs/agents/identity.md)
+header; see [`docs/.devdocs/agents/identity.md`](../docs/.devdocs/agents/identity.md)
 for the agent-identity model and how to set the header from a
 programmatic client.
 

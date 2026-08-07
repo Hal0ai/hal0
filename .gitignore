@@ -86,9 +86,14 @@ docs/**/handoff-*.md
 /.handoff-*.md
 tests/release-gate-report.json
 
-# Internal lab docs (topology, ADRs, codebase audits, brain-redesign notes) —
-# local-only; kept out of public history so no IP scrubbing is needed.
+# Developer/agent-internal docs (planning, handoffs, agent workflow notes,
+# internal audits) — local-only; public-facing docs are the hal0-web mirror
+# under docs/*.mdx plus docs/adr/. No IP scrubbing needed for local notes.
+docs/.devdocs/
 docs/internal/
+
+# Internal test-harness ops log (lab-host run tables)
+tests/harness/FINDINGS.md
 
 # OS
 Thumbs.db
