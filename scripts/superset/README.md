@@ -13,7 +13,7 @@ in this repo checkout — run these steps locally, not from a Cowork sandbox.
 - Superset CLI installed and signed in: `superset auth login`.
 - Superset desktop app installed.
 - hal0 registered as a local Superset project (see
-  `docs/agents/superset-integration.md` "One-time setup") — grab its id with
+  `docs/.devdocs/agents/superset-integration.md` "One-time setup") — grab its id with
   `superset projects list`.
 
 ## Install

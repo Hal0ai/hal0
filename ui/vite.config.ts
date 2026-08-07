@@ -19,7 +19,7 @@ const hmrHost = process.env.VITE_HMR_HOST
 function apiProxy() {
   return {
     // Override with VITE_API_TARGET to validate the dev UI against a remote
-    // hal0-api (e.g. CT105 at http://10.0.1.142:8080) without a deploy.
+    // hal0-api (e.g. http://192.0.2.10:8080) without a deploy.
     target: process.env.VITE_API_TARGET || 'http://127.0.0.1:8080',
     changeOrigin: true,
   }

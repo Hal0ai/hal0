@@ -1,7 +1,7 @@
 Triage hal0's open GitHub issues and keep the Linear mirror honest.
 
-Ground rules (from `docs/agents/issue-tracker.md` and
-`docs/agents/triage-labels.md`): GitHub Issues are the single source of
+Ground rules (from `docs/.devdocs/agents/issue-tracker.md` and
+`docs/.devdocs/agents/triage-labels.md`): GitHub Issues are the single source of
 truth. Never create or resolve work in Linear alone — Linear (team "Hal0")
 is a read-only mirror. The five canonical triage labels are `needs-triage`,
 `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`.
@@ -28,7 +28,7 @@ Do the following, in order:
    `thinmintdev`) for anything that exists **only** in Linear. If found,
    create the matching GitHub issue (cross-reference the `HAL0-N`
    identifier in the body) before doing anything else with it — per
-   `docs/agents/issue-tracker.md`, GitHub is canonical the moment an item is
+   `docs/.devdocs/agents/issue-tracker.md`, GitHub is canonical the moment an item is
    actionable.
 5. Post a short summary as the automation's output: counts by new label,
    and a bullet per issue that changed state with a one-line reason. No

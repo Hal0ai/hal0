@@ -26,16 +26,16 @@ Rules:
 
 ### Issue tracker
 
-Issues live in GitHub Issues (`gh` CLI); Linear is a read-only mirror — migrate any Linear-only item into GitHub and work from git. See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues (`gh` CLI); Linear is a read-only mirror — migrate any Linear-only item into GitHub and work from git. See `docs/.devdocs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-The five canonical triage labels, unmodified (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+The five canonical triage labels, unmodified (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/.devdocs/agents/triage-labels.md`.
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root (created lazily). See `docs/agents/domain.md`.
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root (created lazily). See `docs/.devdocs/agents/domain.md`.
 
 ### Superset.sh
 
-Local dev-agent workspaces (git worktrees + Claude/Codex/etc. sessions), wired to the Hal0 Linear mirror and GitHub Issues. See `docs/agents/superset-integration.md`.
+Local dev-agent workspaces (git worktrees + Claude/Codex/etc. sessions), wired to the Hal0 Linear mirror and GitHub Issues. See `docs/.devdocs/agents/superset-integration.md`.

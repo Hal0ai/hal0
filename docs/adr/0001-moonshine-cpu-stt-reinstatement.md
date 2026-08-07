@@ -13,8 +13,8 @@ the Lemonade rollback: `whisper.cpp` was never shipped as a standalone CPU
 toolbox service. The only Whisper hal0 actually runs is `whisper-v3:turbo`
 inside the FastFlowLM (FLM) NPU trio — chat + transcription + embedding
 coresident in one `flm serve` process on AMD XDNA hardware. `whisper.cpp` as
-a general-purpose CPU service is on the PLAN.md strip list (§"Strip (gone
-for good unless re-justified)", `PLAN.md:333-339`) alongside Vibevoice and
+a general-purpose CPU service is on the planning-doc strip list (docs/.devdocs/PLAN.md) (§"Strip (gone
+for good unless re-justified)", `docs/.devdocs/PLAN.md:333-339`) alongside Vibevoice and
 Infinity, and was never re-justified.
 
 The practical result: any host without the XDNA NPU — CPU-only x86_64, or

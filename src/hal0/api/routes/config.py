@@ -149,7 +149,7 @@ def _comfyui_link(request: Request) -> str:
 
     ``HAL0_COMFYUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins when
     defined — it's how a reverse-proxy deploy declares a clean HTTPS
-    hostname (e.g. ``https://comfyui.thinmint.dev``). That matters because
+    hostname (e.g. ``https://comfyui.example.com``). That matters because
     an HTTPS dashboard opening the bare ``http://<host>:8188`` fallback is
     blocked by the browser as mixed content, so the workflow links appear
     dead. Without the env var we fall back to ``http://<host>:8188`` on the
