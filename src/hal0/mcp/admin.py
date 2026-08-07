@@ -118,7 +118,7 @@ more tool names here (guaranteed to drift), see :data:`TOOL_DESCRIPTIONS`
 for the single source of truth, or grep this module for "Platform-
 management expansion" section markers in each table below.
 
-The memory_* tools (26 total — the legacy 5 plus the Hindsight 0.8.4
+The memory_* tools (26 total — the original 5 plus the Hindsight 0.8.4
 parity buildout's reflect/curate/history, mental-model CRUD+refresh,
 directive CRUD, operation list/get/cancel/retry, and tags/bank-stats/
 bank-consolidate) are delegates that forward into :mod:`hal0.mcp.memory`

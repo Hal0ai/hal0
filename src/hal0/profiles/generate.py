@@ -218,9 +218,7 @@ def _pick_variant(variants: list[dict[str, Any]]) -> dict[str, Any] | None:
     reasonable middle-of-the-road pick rather than the smallest/largest.
     """
     real = [
-        v
-        for v in variants
-        if not v.get("flm") and "mmproj" not in str(v.get("id", "")).lower()
+        v for v in variants if not v.get("flm") and "mmproj" not in str(v.get("id", "")).lower()
     ]
     if not real:
         return variants[0] if variants else None

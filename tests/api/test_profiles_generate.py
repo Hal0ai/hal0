@@ -97,9 +97,7 @@ def test_generate_requires_a_source(client: TestClient) -> None:
 
 
 def test_generate_rejects_both_sources(client: TestClient) -> None:
-    r = client.post(
-        "/api/profiles/generate", json={"model_id": "a", "hf_repo": "org/b"}
-    )
+    r = client.post("/api/profiles/generate", json={"model_id": "a", "hf_repo": "org/b"})
     assert r.status_code == 422
 
 
@@ -132,15 +130,11 @@ def test_generate_model_id_not_found(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "model.not_found"
 
 
-def test_generate_never_writes_to_the_catalog(
-    client: TestClient, registry: ModelRegistry
-) -> None:
+def test_generate_never_writes_to_the_catalog(client: TestClient, registry: ModelRegistry) -> None:
     registry.add(Model(id="m1", path="/models/m1.gguf", capabilities=["chat"]))
 
     before = {p["name"] for p in client.get("/api/profiles").json()}
-    r = client.post(
-        "/api/profiles/generate", json={"model_id": "m1", "name": "my-draft-profile"}
-    )
+    r = client.post("/api/profiles/generate", json={"model_id": "m1", "name": "my-draft-profile"})
     assert r.status_code == 200, r.text
     after = {p["name"] for p in client.get("/api/profiles").json()}
     assert before == after
@@ -150,9 +144,7 @@ def test_generate_never_writes_to_the_catalog(
 # ── hf_repo path ─────────────────────────────────────────────────────────────
 
 
-def test_generate_hf_repo_happy_path(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_generate_hf_repo_happy_path(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     handler = _hf_handler(
         meta={"tags": ["text-generation"]},
         tree=[{"path": "qwen3-8b-q4_k_m.gguf", "size": 5_000_000_000}],
@@ -208,9 +200,7 @@ def test_generate_use_llm_success(client: TestClient, monkeypatch: pytest.Monkey
     )
     _patch_both(monkeypatch, handler)
 
-    r = client.post(
-        "/api/profiles/generate", json={"hf_repo": "org/repo", "use_llm": True}
-    )
+    r = client.post("/api/profiles/generate", json={"hf_repo": "org/repo", "use_llm": True})
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["profile"]["profile"]["intent"] == "Fast local chat with tool use."
@@ -229,9 +219,7 @@ def test_generate_use_llm_unavailable_degrades_gracefully(
     )
     _patch_both(monkeypatch, handler)
 
-    r = client.post(
-        "/api/profiles/generate", json={"hf_repo": "org/repo", "use_llm": True}
-    )
+    r = client.post("/api/profiles/generate", json={"hf_repo": "org/repo", "use_llm": True})
     assert r.status_code == 200, r.text
     data = r.json()
     assert any("LLM summarization unavailable" in w for w in data["warnings"])

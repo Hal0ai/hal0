@@ -519,7 +519,7 @@ _ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
         "slot_status",
         "model_list",
         "hardware_probe",
-        # memory_* (all 26 — the legacy 5 plus the Hindsight 0.8.4 parity
+        # memory_* (all 26 — the original 5 plus the Hindsight 0.8.4 parity
         # buildout's reflect/curate/history, mental-model CRUD+refresh,
         # directive CRUD, operations, tags/bank-stats/consolidate) ride the
         # profile's own namespace (private:hermes__hal0-brain) via Hindsight,
