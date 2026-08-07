@@ -15,6 +15,17 @@ class FakeHindsightClient:
         self.recalled: list[dict] = []
         self.deleted: list[str] = []
         self._facts_by_bank: dict[str, list[dict]] = {}
+        #: keyed by bank_id — response-level recall enrichment a test can seed.
+        self._entities_by_bank: dict[str, dict] = {}
+        self._chunks_by_bank: dict[str, dict] = {}
+        self._source_facts_by_bank: dict[str, dict] = {}
+        #: capability-surface call logs + canned stores, extended by test cases.
+        self.reflected: list[dict] = []
+        self.updated_memories: list[dict] = []
+        self.mental_models: dict[str, dict] = {}
+        self.directives: dict[str, dict] = {}
+        self.operations: dict[str, dict] = {}
+        self.consolidated: list[str] = []
 
     async def retain(
         self,
@@ -26,6 +37,7 @@ class FakeHindsightClient:
         metadata=None,
         tags=None,
         timestamp=None,
+        **kwargs,
     ):
         self.retained.append(
             {
@@ -33,6 +45,7 @@ class FakeHindsightClient:
                 "document_id": document_id,
                 "content": content,
                 "tags": list(tags or []),
+                **kwargs,
             }
         )
         self._facts_by_bank.setdefault(bank_id, []).append(
@@ -51,9 +64,115 @@ class FakeHindsightClient:
             "operation_id": "op-test",
         }
 
-    async def recall(self, *, bank_id, query, types=None, max_tokens=4096, tags=None):
-        self.recalled.append({"bank_id": bank_id, "query": query, "types": types})
-        return {"results": list(self._facts_by_bank.get(bank_id, []))}
+    async def recall(self, *, bank_id, query, types=None, max_tokens=4096, tags=None, **kwargs):
+        self.recalled.append({"bank_id": bank_id, "query": query, "types": types, **kwargs})
+        return {
+            "results": list(self._facts_by_bank.get(bank_id, [])),
+            "entities": self._entities_by_bank.get(bank_id) or {},
+            "chunks": self._chunks_by_bank.get(bank_id) or {},
+            "source_facts": self._source_facts_by_bank.get(bank_id) or {},
+        }
+
+    # ── capability surface (reflect / curate / mental models / directives /
+    #    operations / tags / stats / consolidate) ────────────────────────
+
+    async def reflect(self, *, bank_id, query, **kwargs):
+        self.reflected.append({"bank_id": bank_id, "query": query, **kwargs})
+        return {"text": f"reflection on {query!r}"}
+
+    async def get_memory(self, *, bank_id, memory_id):
+        for fact in self._facts_by_bank.get(bank_id, []):
+            if fact.get("document_id") == memory_id or fact.get("id") == memory_id:
+                return dict(fact)
+        return {"id": memory_id, "tags": []}
+
+    async def update_memory(self, *, bank_id, memory_id, **kwargs):
+        self.updated_memories.append({"bank_id": bank_id, "memory_id": memory_id, **kwargs})
+        return {"id": memory_id, **{k: v for k, v in kwargs.items() if v is not None}}
+
+    async def memory_history(self, *, bank_id, memory_id):
+        return {"items": [{"memory_id": memory_id, "bank_id": bank_id}]}
+
+    async def list_mental_models(self, *, bank_id, **kwargs):
+        return {"items": [m for m in self.mental_models.values() if m["bank_id"] == bank_id]}
+
+    async def get_mental_model(self, *, bank_id, mental_model_id):
+        return self.mental_models.get(mental_model_id, {"id": mental_model_id, "bank_id": bank_id})
+
+    async def create_mental_model(self, *, bank_id, name, source_query, id=None, **kwargs):
+        mm_id = id or f"mm-{len(self.mental_models) + 1}"
+        self.mental_models[mm_id] = {
+            "id": mm_id,
+            "bank_id": bank_id,
+            "name": name,
+            "source_query": source_query,
+        }
+        return {"mental_model_id": mm_id, "operation_id": "op-mm"}
+
+    async def update_mental_model(self, *, bank_id, mental_model_id, **kwargs):
+        existing = self.mental_models.setdefault(
+            mental_model_id, {"id": mental_model_id, "bank_id": bank_id}
+        )
+        existing.update({k: v for k, v in kwargs.items() if v is not None})
+        return dict(existing)
+
+    async def delete_mental_model(self, *, bank_id, mental_model_id):
+        self.mental_models.pop(mental_model_id, None)
+        return {"success": True}
+
+    async def refresh_mental_model(self, *, bank_id, mental_model_id):
+        return {"operation_id": "op-refresh", "status": "queued"}
+
+    async def list_directives(self, *, bank_id, **kwargs):
+        return {"items": [d for d in self.directives.values() if d["bank_id"] == bank_id]}
+
+    async def get_directive(self, *, bank_id, directive_id):
+        return self.directives.get(directive_id, {"id": directive_id, "bank_id": bank_id})
+
+    async def create_directive(self, *, bank_id, name, content, **kwargs):
+        d_id = f"dir-{len(self.directives) + 1}"
+        self.directives[d_id] = {"id": d_id, "bank_id": bank_id, "name": name, "content": content}
+        return dict(self.directives[d_id])
+
+    async def update_directive(self, *, bank_id, directive_id, **kwargs):
+        existing = self.directives.setdefault(
+            directive_id, {"id": directive_id, "bank_id": bank_id}
+        )
+        existing.update({k: v for k, v in kwargs.items() if v is not None})
+        return dict(existing)
+
+    async def delete_directive(self, *, bank_id, directive_id):
+        self.directives.pop(directive_id, None)
+        return {"success": True}
+
+    async def list_operations(self, *, bank_id, **kwargs):
+        return {"operations": [o for o in self.operations.values() if o["bank_id"] == bank_id]}
+
+    async def get_operation(self, *, bank_id, operation_id, **kwargs):
+        return self.operations.get(
+            operation_id, {"operation_id": operation_id, "bank_id": bank_id, "status": "completed"}
+        )
+
+    async def cancel_operation(self, *, bank_id, operation_id):
+        return {"success": True, "operation_id": operation_id}
+
+    async def retry_operation(self, *, bank_id, operation_id):
+        return {"success": True, "operation_id": operation_id}
+
+    async def list_tags(self, *, bank_id, **kwargs):
+        tags: dict[str, int] = {}
+        for fact in self._facts_by_bank.get(bank_id, []):
+            for t in fact.get("tags") or []:
+                tags[t] = tags.get(t, 0) + 1
+        items = [{"tag": t, "count": c} for t, c in tags.items()]
+        return {"items": items, "total": len(items), "limit": 100, "offset": 0}
+
+    async def bank_stats(self, *, bank_id, **kwargs):
+        return {"bank_id": bank_id, "total_nodes": len(self._facts_by_bank.get(bank_id, []))}
+
+    async def consolidate(self, *, bank_id):
+        self.consolidated.append(bank_id)
+        return {"operation_id": "op-consolidate", "deduplicated": False}
 
     async def delete_document(self, *, bank_id, document_id):
         self.deleted.append(document_id)
@@ -94,7 +213,19 @@ async def test_add_routes_to_retain_under_mapped_bank():
     fake = FakeHindsightClient()
     p = HindsightProvider(client=fake, client_id="hermes")
     res = await p.add("Alice works at Google", dataset="private:hermes", client_id="hermes")
-    assert set(res) == {"id", "timestamp", "operation_id"}
+    # items_count/operation_ids are surfaced whenever the engine reports them
+    # (RetainResponse.items_count is a required field) — no longer dropped.
+    assert (
+        {"id", "timestamp", "operation_id"}
+        <= set(res)
+        <= {
+            "id",
+            "timestamp",
+            "operation_id",
+            "operation_ids",
+            "items_count",
+        }
+    )
     assert fake.retained[0]["bank_id"] == "private__hermes"
     # The returned id IS the document_id (the join key), not a fact id.
     assert fake.retained[0]["document_id"] == res["id"]
@@ -453,3 +584,423 @@ async def test_list_items_last_page_has_no_cursor():
     page = await p.list_items(dataset="shared", limit=10, client_id="hermes")
     assert len(page["items"]) == 2
     assert page["next_cursor"] is None
+
+
+# ── recall modernization: native scores, entities/chunks/source_facts ───────
+
+
+@pytest.mark.asyncio
+async def test_recall_uses_native_final_score_and_skips_fallback_rerank():
+    """A stale comment used to claim Hindsight recall returns no numeric
+    score. 0.8.x does (RecallScores.final) — use it, and skip the :8086
+    fallback reranker entirely when the union already carries one."""
+
+    class _RerankShouldNotRun:
+        async def rerank(self, query, documents):
+            raise AssertionError("fallback reranker must not run when native scores are present")
+
+    fake = FakeHindsightClient()
+    fake._facts_by_bank["shared"] = [
+        {"document_id": "d1", "text": "low", "type": "world", "tags": [], "scores": {"final": 0.2}},
+        {
+            "document_id": "d2",
+            "text": "high",
+            "type": "world",
+            "tags": [],
+            "scores": {"final": 0.9},
+        },
+    ]
+    p = HindsightProvider(client=fake, client_id="hermes", reranker=_RerankShouldNotRun())
+
+    out = await p.recall("q", dataset="shared", client_id="hermes")
+    assert [i["text"] for i in out] == ["high", "low"]
+    assert [i["score"] for i in out] == [0.9, 0.2]
+
+
+@pytest.mark.asyncio
+async def test_recall_falls_back_to_reranker_when_engine_supplies_no_scores():
+    """Older Hindsight (no ``scores`` field) — the :8086 fallback must still
+    run, matching pre-modernization behaviour."""
+    fake = FakeHindsightClient()
+    fake._facts_by_bank["shared"] = [
+        {"document_id": "d1", "text": "a", "type": "world", "tags": []},
+        {"document_id": "d2", "text": "b", "type": "world", "tags": []},
+    ]
+    p = HindsightProvider(client=fake, client_id="hermes", reranker=FakeReranker())
+
+    out = await p.recall("q", dataset="shared", client_id="hermes")
+    # FakeReranker reverses order — proves the fallback ran.
+    assert [i["score"] for i in out] == [2.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_recall_returns_list_compatible_results_with_entities_chunks_attrs():
+    """``recall()``'s return is a list byte-for-byte (every existing caller
+    keeps working) AND carries the response-level enrichment as attributes."""
+    fake = FakeHindsightClient()
+    fake._facts_by_bank["shared"] = [
+        {"document_id": "d1", "text": "Alice works at Google", "type": "world", "tags": []}
+    ]
+    fake._entities_by_bank["shared"] = {"Alice": {"entity_id": "e1", "canonical_name": "Alice"}}
+    fake._chunks_by_bank["shared"] = {"c1": {"id": "c1", "text": "chunk text", "chunk_index": 0}}
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.recall("Alice", dataset="shared", client_id="hermes")
+    assert isinstance(out, list)
+    assert out == [
+        {
+            "id": "d1",
+            "text": "Alice works at Google",
+            "timestamp": out[0]["timestamp"],
+            "dataset": "shared",
+            "tags": [],
+            "source": None,
+            "metadata": {},
+            "score": None,
+            "type": "world",
+            "entities": None,
+            "source_fact_ids": None,
+        }
+    ]
+    assert out.entities == {"Alice": {"entity_id": "e1", "canonical_name": "Alice"}}
+    assert out.chunks == {"c1": {"id": "c1", "text": "chunk text", "chunk_index": 0}}
+    assert out.source_facts is None  # nothing seeded -> omitted, not an empty dict
+
+
+@pytest.mark.asyncio
+async def test_recall_merges_entities_across_fanned_out_banks():
+    fake = FakeHindsightClient()
+    fake._facts_by_bank["shared"] = [{"document_id": "d1", "text": "shared", "tags": []}]
+    fake._facts_by_bank["private__hermes"] = [{"document_id": "d2", "text": "priv", "tags": []}]
+    fake._entities_by_bank["shared"] = {"A": {"entity_id": "a"}}
+    fake._entities_by_bank["private__hermes"] = {"B": {"entity_id": "b"}}
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.recall("q", dataset="shared", client_id="hermes")
+    assert out.entities == {"A": {"entity_id": "a"}, "B": {"entity_id": "b"}}
+
+
+@pytest.mark.asyncio
+async def test_recall_forwards_extended_knobs_only_when_set():
+    """Mirrors the existing tags_match convention: unset knobs never reach
+    the client, so a narrow fake (no **kwargs) stays compatible."""
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    await p.recall("q", dataset="shared", client_id="hermes")
+    call = fake.recalled[0]
+    for key in (
+        "tags_match",
+        "tag_groups",
+        "budget",
+        "prefer_observations",
+        "include",
+        "query_timestamp",
+        "min_scores",
+    ):
+        assert key not in call
+
+    fake.recalled.clear()
+    await p.recall(
+        "q",
+        dataset="shared",
+        client_id="hermes",
+        tag_groups=[{"tags": ["x"], "match": "any"}],
+        budget="high",
+        prefer_observations=True,
+        include={"chunks": {}},
+        query_timestamp="2026-01-01",
+        min_scores={"final": 0.1},
+    )
+    call = fake.recalled[0]
+    assert call["tag_groups"] == [{"tags": ["x"], "match": "any"}]
+    assert call["budget"] == "high"
+    assert call["prefer_observations"] is True
+    assert call["include"] == {"chunks": {}}
+    assert call["query_timestamp"] == "2026-01-01"
+    assert call["min_scores"] == {"final": 0.1}
+
+
+@pytest.mark.asyncio
+async def test_search_forwards_tag_groups_and_min_scores_to_recall():
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    await p.search(
+        "q",
+        dataset="shared",
+        client_id="hermes",
+        tag_groups=[{"tags": ["x"], "match": "any"}],
+        min_scores={"final": 0.5},
+    )
+    assert fake.recalled[0]["tag_groups"] == [{"tags": ["x"], "match": "any"}]
+    assert fake.recalled[0]["min_scores"] == {"final": 0.5}
+
+
+# ── add() modernization: RetainRequest full shape + sync ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_add_forwards_retain_shape_only_when_set():
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    await p.add("plain", dataset="shared", client_id="hermes")
+    rec = fake.retained[0]
+    for key in ("entities", "observation_scopes", "strategy", "update_mode", "sync"):
+        assert key not in rec
+
+    await p.add(
+        "rich",
+        dataset="shared",
+        client_id="hermes",
+        entities=[{"text": "Alice"}],
+        observation_scopes="shared",
+        strategy="fast",
+        update_mode="append",
+        sync=True,
+    )
+    rec = fake.retained[1]
+    assert rec["entities"] == [{"text": "Alice"}]
+    assert rec["observation_scopes"] == "shared"
+    assert rec["strategy"] == "fast"
+    assert rec["update_mode"] == "append"
+    assert rec["sync"] is True
+
+
+@pytest.mark.asyncio
+async def test_add_surfaces_items_count_and_operation_ids():
+    class _MultiOpClient(FakeHindsightClient):
+        async def retain(self, **kwargs):
+            await super().retain(**kwargs)
+            return {
+                "success": True,
+                "bank_id": kwargs["bank_id"],
+                "items_count": 3,
+                "async": True,
+                "operation_ids": ["op-a", "op-b"],
+            }
+
+    p = HindsightProvider(client=_MultiOpClient(), client_id="hermes")
+    res = await p.add("x", dataset="shared", client_id="hermes")
+    assert res["items_count"] == 3
+    assert res["operation_ids"] == ["op-a", "op-b"]
+    # operation_id mirrors the first entry per RetainResponse's back-compat rule
+    # only when the engine actually sets it — this fake doesn't, so it's absent.
+    assert "operation_id" not in res
+
+
+# ── reflect: single-bank resolution ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reflect_resolves_single_bank():
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.reflect("what do you know?", dataset="private:hermes", client_id="hermes")
+    assert out["text"] == "reflection on 'what do you know?'"
+    assert fake.reflected[0]["bank_id"] == "private__hermes"
+    assert fake.reflected[0]["query"] == "what do you know?"
+
+
+@pytest.mark.asyncio
+async def test_reflect_default_dataset_is_shared_bank():
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+    await p.reflect("q", client_id="hermes")
+    assert fake.reflected[0]["bank_id"] == "shared"
+
+
+# ── curate / memory_history: non-destructive correction path ────────────────
+
+
+@pytest.mark.asyncio
+async def test_curate_patches_the_resolved_bank():
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    await p.curate(
+        "fact-1", dataset="shared", client_id="hermes", state="invalidated", reason="wrong"
+    )
+    call = fake.updated_memories[0]
+    assert call["bank_id"] == "shared"
+    assert call["memory_id"] == "fact-1"
+    assert call["state"] == "invalidated"
+    assert call["reason"] == "wrong"
+
+
+@pytest.mark.asyncio
+async def test_curate_legacy_mode_skips_visibility_check():
+    """Pre-unified multi-bank mode: bank isolation already protects — no
+    extra GET-before-PATCH round trip."""
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes", unified_bank=False)
+    await p.curate("fact-1", dataset="shared", client_id="hermes", text="fixed")
+    assert fake.updated_memories  # succeeded without a get_memory call
+
+
+@pytest.mark.asyncio
+async def test_curate_unified_mode_rejects_foreign_private_memory():
+    """A caller must not curate another agent's private memory by guessing
+    its id — same fail-closed posture as delete's visibility gate."""
+    fake = FakeHindsightClient()
+    fake._facts_by_bank["shared"] = [
+        {
+            "document_id": "d1",
+            "id": "fact-1",
+            "text": "secret",
+            "tags": ["visibility:private", "agent:other"],
+        }
+    ]
+    p = HindsightProvider(client=fake, client_id="hermes", unified_bank=True)
+
+    with pytest.raises(PermissionError):
+        await p.curate("fact-1", dataset="shared", client_id="hermes", text="tampered")
+    assert not fake.updated_memories
+
+
+@pytest.mark.asyncio
+async def test_curate_unified_mode_allows_own_private_memory():
+    fake = FakeHindsightClient()
+    fake._facts_by_bank["shared"] = [
+        {
+            "document_id": "d1",
+            "id": "fact-1",
+            "text": "secret",
+            "tags": ["visibility:private", "agent:hermes"],
+        }
+    ]
+    p = HindsightProvider(client=fake, client_id="hermes", unified_bank=True)
+
+    await p.curate("fact-1", dataset="shared", client_id="hermes", text="corrected")
+    assert fake.updated_memories[0]["memory_id"] == "fact-1"
+
+
+@pytest.mark.asyncio
+async def test_memory_history_returns_engine_payload():
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+    out = await p.memory_history("fact-1", dataset="shared", client_id="hermes")
+    assert out["items"][0]["memory_id"] == "fact-1"
+
+
+# ── mental models ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_mental_model_create_get_update_delete_refresh_round_trip():
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    created = await p.create_mental_model(
+        name="Team prefs",
+        source_query="How does the team communicate?",
+        dataset="shared",
+        client_id="hermes",
+    )
+    mm_id = created["mental_model_id"]
+    assert fake.mental_models[mm_id]["bank_id"] == "shared"
+
+    fetched = await p.get_mental_model(mm_id, dataset="shared", client_id="hermes")
+    assert fetched["name"] == "Team prefs"
+
+    updated = await p.update_mental_model(
+        mm_id, dataset="shared", client_id="hermes", name="Renamed"
+    )
+    assert updated["name"] == "Renamed"
+
+    refreshed = await p.refresh_mental_model(mm_id, dataset="shared", client_id="hermes")
+    assert refreshed["operation_id"] == "op-refresh"
+
+    listed = await p.list_mental_models(dataset="shared", client_id="hermes")
+    assert any(m["id"] == mm_id for m in listed["items"])
+
+    await p.delete_mental_model(mm_id, dataset="shared", client_id="hermes")
+    assert mm_id not in fake.mental_models
+
+
+# ── directives ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_directive_create_list_update_delete_round_trip():
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    created = await p.create_directive(
+        name="Be terse", content="Prefer short answers.", dataset="shared", client_id="hermes"
+    )
+    d_id = created["id"]
+
+    listed = await p.list_directives(dataset="shared", client_id="hermes")
+    assert any(d["id"] == d_id for d in listed["items"])
+
+    fetched = await p.get_directive(d_id, dataset="shared", client_id="hermes")
+    assert fetched["content"] == "Prefer short answers."
+
+    updated = await p.update_directive(d_id, dataset="shared", client_id="hermes", priority=5)
+    assert updated["priority"] == 5
+
+    await p.delete_directive(d_id, dataset="shared", client_id="hermes")
+    remaining = await p.list_directives(dataset="shared", client_id="hermes")
+    assert not any(d["id"] == d_id for d in remaining["items"])
+
+
+# ── async operations ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_operation_get_list_cancel_retry():
+    fake = FakeHindsightClient()
+    fake.operations["op-1"] = {"operation_id": "op-1", "bank_id": "shared", "status": "failed"}
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    got = await p.get_operation("op-1", dataset="shared", client_id="hermes")
+    assert got["status"] == "failed"
+
+    listed = await p.list_operations(dataset="shared", client_id="hermes")
+    assert any(o["operation_id"] == "op-1" for o in listed["operations"])
+
+    cancelled = await p.cancel_operation("op-1", dataset="shared", client_id="hermes")
+    assert cancelled["success"] is True
+
+    retried = await p.retry_operation("op-1", dataset="shared", client_id="hermes")
+    assert retried["success"] is True
+
+
+# ── tags / bank stats / consolidation ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_tags_reflects_stored_facts():
+    fake = FakeHindsightClient()
+    await fake.retain(bank_id="shared", content="x", document_id="d1", tags=["alpha", "beta"])
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.list_tags(dataset="shared", client_id="hermes")
+    tags = {item["tag"] for item in out["items"]}
+    assert {"alpha", "beta"} <= tags
+
+
+@pytest.mark.asyncio
+async def test_bank_stats_resolves_single_bank():
+    fake = FakeHindsightClient()
+    await fake.retain(bank_id="private__hermes", content="x", document_id="d1", tags=[])
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.bank_stats(dataset="private:hermes", client_id="hermes")
+    assert out["bank_id"] == "private__hermes"
+    assert out["total_nodes"] == 1
+
+
+@pytest.mark.asyncio
+async def test_consolidate_real_implementation_hits_engine():
+    """Overrides the ABC's ``{"status": "unsupported"}`` stub — this is the
+    'real consolidate replacing stub' requirement."""
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.consolidate(dataset="shared", client_id="hermes")
+    assert out == {"operation_id": "op-consolidate", "deduplicated": False}
+    assert fake.consolidated == ["shared"]

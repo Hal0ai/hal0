@@ -18,6 +18,12 @@ class RecallProvider(FakeMemoryProvider):
         dataset="shared",
         tags=None,
         tags_match=None,
+        tag_groups=None,
+        budget="mid",
+        prefer_observations=False,
+        include=None,
+        query_timestamp=None,
+        min_scores=None,
         client_id=None,
     ):
         return [

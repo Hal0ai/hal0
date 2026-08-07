@@ -23,6 +23,30 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- Memory MCP surface brought to feature parity with the live Hindsight
+  0.8.4 server: `memory_reflect` (LLM-backed synthesis over memory),
+  `memory_curate`/`memory_history` (the non-destructive "this is wrong"
+  correction path — edit or reversibly invalidate a single fact), mental
+  model tools (`memory_mental_model_list`/`_get`/`_create`/`_update`/
+  `_delete`/`_refresh`), directive tools (`memory_directive_list`/`_get`/
+  `_create`/`_update`/`_delete`), async-operation tools
+  (`memory_operation_list`/`_get`/`_cancel`/`_retry` — retain is async by
+  default, so these are the poll target for `memory_add`'s `operation_id`),
+  and bank introspection (`memory_tags_list`, `memory_bank_stats`,
+  `memory_bank_consolidate`). `memory_add` gained `entities`/
+  `observation_scopes`/`strategy`/`update_mode`/`sync` (Hindsight's full
+  `RetainRequest` item shape) and now surfaces `operation_ids`/`items_count`
+  instead of dropping them. `memory_recall` gained `tag_groups`/`budget`/
+  `prefer_observations`/`include`/`query_timestamp`/`min_scores`, and its
+  results now carry the engine's native per-result relevance score plus
+  optional `entities`/`chunks`/`source_facts` response enrichment — a stale
+  comment claiming "Hindsight recall returns no numeric score" is fixed.
+  `memory_search` gained `tag_groups`/`min_scores`. Every new destructive
+  tool (`memory_mental_model_delete`, `memory_directive_delete`) goes
+  through the same operator-approval gate as a bulk `memory_delete`; no
+  destructive bank-level operation (delete/clear a whole bank) is exposed
+  over MCP.
+
 - Moonshine reinstated as hal0's CPU STT engine, packaged as its own
   toolbox image (`hal0-toolbox-moonshine:v1`). `voice.stt` is now a
   device-keyed engine switch exactly like `voice.tts`: `cpu` runs

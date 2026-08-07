@@ -43,6 +43,9 @@ def test_add_signature_matches_call_sites():
     sig = inspect.signature(MemoryProvider.add)
     params = list(sig.parameters)
     # Mirrors the REST/MCP callers (routes/memory.py + mcp/memory.py).
+    # entities/observation_scopes/strategy/update_mode/sync mirror
+    # Hindsight's RetainRequest item shape (retain modernization) — additive,
+    # keyword-only-by-convention params after document_id.
     assert params == [
         "self",
         "text",
@@ -52,6 +55,11 @@ def test_add_signature_matches_call_sites():
         "metadata",
         "client_id",
         "document_id",
+        "entities",
+        "observation_scopes",
+        "strategy",
+        "update_mode",
+        "sync",
     ]
 
 

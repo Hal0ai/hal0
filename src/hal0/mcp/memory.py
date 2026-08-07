@@ -128,6 +128,71 @@ def _optional(args: dict[str, Any], key: str, type_: type) -> Any:
     return value
 
 
+def _optional_dict(args: dict[str, Any], key: str) -> dict[str, Any] | None:
+    if key not in args or args[key] is None:
+        return None
+    value = args[key]
+    if not isinstance(value, dict):
+        raise MemorySchemaError(f"arg {key!r} must be dict or null, got {type(value).__name__}")
+    return value
+
+
+def _optional_list(args: dict[str, Any], key: str) -> list[Any] | None:
+    if key not in args or args[key] is None:
+        return None
+    value = args[key]
+    if not isinstance(value, list):
+        raise MemorySchemaError(f"arg {key!r} must be list or null, got {type(value).__name__}")
+    return value
+
+
+def _optional_bool(args: dict[str, Any], key: str, *, default: bool | None = None) -> bool | None:
+    if key not in args or args[key] is None:
+        return default
+    value = args[key]
+    if not isinstance(value, bool):
+        raise MemorySchemaError(f"arg {key!r} must be bool or null, got {type(value).__name__}")
+    return value
+
+
+def _optional_int(args: dict[str, Any], key: str) -> int | None:
+    if key not in args or args[key] is None:
+        return None
+    value = args[key]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise MemorySchemaError(f"arg {key!r} must be int or null, got {type(value).__name__}")
+    return value
+
+
+def _optional_entities(args: dict[str, Any], key: str = "entities") -> list[dict[str, Any]] | None:
+    """``entities``: ``[{"text": ..., "type": ...}, ...]`` — light shape check
+    (every item is a dict carrying a non-empty ``text``); the engine owns the
+    rest of EntityInput validation."""
+    value = _optional_list(args, key)
+    if value is None:
+        return None
+    for item in value:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"]:
+            raise MemorySchemaError(f"arg {key!r} items must be {{'text': str, ...}}")
+    return value
+
+
+def _optional_id(args: dict[str, Any], key: str, *, required: bool = True) -> str | None:
+    """A per-fact/directive/mental-model/operation id — same bounded
+    identity grammar as ``document_id`` since it lands in an engine URL
+    path segment."""
+    value = args.get(key)
+    if value is None:
+        if required:
+            raise MemorySchemaError(f"missing required arg {key!r}")
+        return None
+    if not isinstance(value, str) or not _AGENT_ID_LIKE.match(value):
+        raise MemorySchemaError(
+            f"arg {key!r} must match the identity grammar (alnum/-/_ ≤64 chars)"
+        )
+    return value
+
+
 def _normalise_tags(value: Any) -> list[str]:
     """Tags may arrive as None, list, or stringified CSV (some MCP clients
     don't speak JSON-array literals well). Normalise to list[str] (possibly
@@ -198,6 +263,26 @@ def _iso_now() -> str:
     return datetime.now(tz=UTC).isoformat()
 
 
+def _envelope_safe(result: Any, *, list_key: str = "result") -> dict[str, Any]:
+    """Coerce a provider/engine payload into the tool's return dict, renaming
+    a top-level ``status`` key to ``operation_status`` first.
+
+    ``make_dispatcher``'s outer envelope is ``{"status": "ok", **payload}`` —
+    a handler payload that itself carries a ``status`` key (Hindsight's
+    ``OperationStatusResponse``/``AsyncOperationSubmitResponse`` both do:
+    pending/processing/completed/failed/...) would silently overwrite "ok"
+    with the engine's own status, which every existing caller reads as
+    "the MCP call failed". Renaming avoids the collision without losing the
+    information — it is still returned, just not under the contended key.
+    """
+    if not isinstance(result, dict):
+        return {list_key: result}
+    out = dict(result)
+    if "status" in out:
+        out["operation_status"] = out.pop("status")
+    return out
+
+
 # ── Tool implementations ─────────────────────────────────────────────────────
 #
 # Each helper returns the JSON payload an MCP client should see. They
@@ -212,8 +297,9 @@ async def _memory_add(
     client_id: str | None,
     private: bool,
 ) -> dict[str, Any]:
-    """memory_add(text, dataset?, tags?, metadata?, document_id?)
-    → {id, timestamp, operation_id?}.
+    """memory_add(text, dataset?, tags?, metadata?, document_id?, entities?,
+    observation_scopes?, strategy?, update_mode?, sync?)
+    → {id, timestamp, operation_id?, operation_ids?, items_count?}.
 
     Schema:
       - ``text``: required, non-empty str.
@@ -224,12 +310,24 @@ async def _memory_add(
       - ``document_id``: optional engine grouping key — reuse one id
         across adds to upsert the same logical document (conversation
         evolution). Same identity grammar as agent ids.
+      - ``entities``: optional ``[{"text": ..., "type": ...}, ...]`` to
+        combine with auto-extracted entities.
+      - ``observation_scopes``: how to scope observations during
+        consolidation (``"per_tag"|"combined"|"all_combinations"|"shared"``
+        or a list of tag-lists) — engine-native, forwarded as-is.
+      - ``strategy``: named retain strategy overriding the bank default.
+      - ``update_mode``: ``"replace"`` (default) or ``"append"`` when
+        ``document_id`` names an existing document.
+      - ``sync``: ``true`` waits for extraction before returning (no
+        ``operation_id``, but ``items_count`` reflects the finished write);
+        ``false`` (default) is the existing fire-and-forget path.
       - ``source``: NOT accepted from the caller. Server-injected from
         ``client_id`` so callers cannot lie about their identity,
         keeping the audit trail grounded.
 
-    ``operation_id`` appears when the engine ingests asynchronously
-    (Hindsight retain) — poll it via the engine-admin operations surface.
+    ``operation_id``/``operation_ids``/``items_count`` appear whenever the
+    engine reports them (Hindsight retain is async by default) — poll
+    ``memory_operation_get``/``memory_operation_list`` to track completion.
     """
     text = _require(args, "text", str)
     if not text.strip():
@@ -249,6 +347,13 @@ async def _memory_add(
     document_id = _optional(args, "document_id", str)
     if document_id is not None and not _AGENT_ID_LIKE.match(document_id):
         raise MemorySchemaError("document_id must match the identity grammar (alnum/-/_ ≤64 chars)")
+    entities = _optional_entities(args)
+    observation_scopes = args.get("observation_scopes")
+    strategy = _optional(args, "strategy", str)
+    update_mode = _optional(args, "update_mode", str)
+    if update_mode is not None and update_mode not in ("replace", "append"):
+        raise MemorySchemaError("update_mode must be 'replace' or 'append'")
+    sync = _optional_bool(args, "sync", default=False)
     source = client_id or "anonymous"
     result = await wrapper.add(
         text=text,
@@ -258,6 +363,11 @@ async def _memory_add(
         metadata=metadata_raw,
         client_id=client_id,
         document_id=document_id,
+        entities=entities,
+        observation_scopes=observation_scopes,
+        strategy=strategy,
+        update_mode=update_mode,
+        sync=bool(sync),
     )
     out = {
         "id": result["id"],
@@ -265,6 +375,10 @@ async def _memory_add(
     }
     if result.get("operation_id"):
         out["operation_id"] = result["operation_id"]
+    if result.get("operation_ids"):
+        out["operation_ids"] = result["operation_ids"]
+    if isinstance(result.get("items_count"), int):
+        out["items_count"] = result["items_count"]
     return out
 
 
@@ -276,15 +390,19 @@ async def _memory_search(
     private: bool,
 ) -> dict[str, Any]:
     """memory_search(query, limit=10, dataset="shared"|list, tags=[],
-                     before=null, after=null) → {results}.
+                     before=null, after=null, tag_groups=null, min_scores=null)
+    → {results}.
 
     MemoryProvider contract::
 
-        await provider.search(query, limit, dataset, tags, before, after)
-            -> list[ItemDict]
+        await provider.search(query, limit, dataset, tags, before, after,
+                               tag_groups=..., min_scores=...) -> list[ItemDict]
 
     ``dataset`` MAY be a list — a private-mode client sees both
-    ``shared`` + their own ``private:<client_id>``.
+    ``shared`` + their own ``private:<client_id>``. ``tag_groups``/
+    ``min_scores`` are Hindsight-native recall filters (boolean tag
+    expressions / per-stage score floors) forwarded verbatim; engines
+    without them ignore both.
     """
     query = _require(args, "query", str)
     if not query.strip():
@@ -301,6 +419,8 @@ async def _memory_search(
     tags = _normalise_tags(args.get("tags"))
     before = _optional(args, "before", str)
     after = _optional(args, "after", str)
+    tag_groups = _optional_list(args, "tag_groups")
+    min_scores = _optional_dict(args, "min_scores")
     results = await wrapper.search(
         query=query,
         limit=limit_raw,
@@ -308,6 +428,8 @@ async def _memory_search(
         tags=tags,
         before=before,
         after=after,
+        tag_groups=tag_groups,
+        min_scores=min_scores,
         client_id=client_id,
     )
     return {"results": list(results)}
@@ -392,12 +514,20 @@ async def _memory_recall(
     client_id: str | None,
     private: bool,
 ) -> dict[str, Any]:
-    """memory_recall(query, max_tokens=4096, types?, dataset?, tags?) → {results}.
+    """memory_recall(query, max_tokens=4096, types?, dataset?, tags?,
+    tags_match?, tag_groups?, budget?, prefer_observations?, include?,
+    query_timestamp?, min_scores?) → {results, entities?, chunks?,
+    source_facts?}.
 
     The Hindsight-preferred retrieval path: token-budgeted, observation
-    hierarchy, no numeric score. Provider.recall falls back to search on
-    engines without a richer recall (ABC default), so this tool is safe
-    regardless of active engine.
+    hierarchy, native ranking score when the engine supplies one.
+    Provider.recall falls back to search on engines without a richer
+    recall (ABC default), so this tool is safe regardless of active engine.
+
+    ``entities``/``chunks``/``source_facts`` — response-level enrichment
+    (entity mental-model snapshots, raw chunk text, observation provenance)
+    — appear only when the engine returned them (``include`` controls what
+    Hindsight computes; entities are included by default).
     """
     query = _require(args, "query", str)
     if not query.strip():
@@ -414,6 +544,14 @@ async def _memory_recall(
     tags = _normalise_tags(args.get("tags"))
     types = args.get("types")
     tags_match = _optional(args, "tags_match", str)
+    tag_groups = _optional_list(args, "tag_groups")
+    budget = _optional(args, "budget", str)
+    if budget is not None and budget not in ("low", "mid", "high"):
+        raise MemorySchemaError("budget must be 'low' | 'mid' | 'high'")
+    prefer_observations = _optional_bool(args, "prefer_observations", default=False)
+    include = _optional_dict(args, "include")
+    query_timestamp = _optional(args, "query_timestamp", str)
+    min_scores = _optional_dict(args, "min_scores")
     results = await wrapper.recall(
         query=query,
         types=types,
@@ -421,9 +559,527 @@ async def _memory_recall(
         dataset=dataset,
         tags=tags,
         tags_match=tags_match,
+        tag_groups=tag_groups,
+        budget=budget or "mid",
+        prefer_observations=bool(prefer_observations),
+        include=include,
+        query_timestamp=query_timestamp,
+        min_scores=min_scores,
         client_id=client_id,
     )
-    return {"results": list(results)}
+    out: dict[str, Any] = {"results": list(results)}
+    entities = getattr(results, "entities", None)
+    if entities:
+        out["entities"] = entities
+    chunks = getattr(results, "chunks", None)
+    if chunks:
+        out["chunks"] = chunks
+    source_facts = getattr(results, "source_facts", None)
+    if source_facts:
+        out["source_facts"] = source_facts
+    return out
+
+
+# ── Reflect (LLM-backed synthesis) ───────────────────────────────────────────
+
+
+async def _memory_reflect(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_reflect(query, dataset?, budget?, max_tokens?, fact_types?,
+    tags?, tags_match?, tag_groups?, exclude_mental_models?,
+    exclude_mental_model_ids?, include?, response_schema?)
+    → {text, based_on?, structured_output?, usage?, trace?}.
+
+    LLM-backed synthesis over the bank's memory. Reflect operates on exactly
+    one bank (no cross-bank merge — there is no server-side cross-bank
+    reflect and merging LLM narratives wouldn't mean anything), resolved via
+    the same single-namespace ACL ``memory_add`` uses for its write target.
+
+    Engines without a reflect capability (the PgVector degrade fallback)
+    answer ``{status: "unsupported"}`` rather than erroring — the ABC default
+    is a safe no-op, so this tool is always callable regardless of engine.
+    """
+    query = _require(args, "query", str)
+    if not query.strip():
+        raise MemorySchemaError("query must be non-empty")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    budget = _optional(args, "budget", str)
+    if budget is not None and budget not in ("low", "mid", "high"):
+        raise MemorySchemaError("budget must be 'low' | 'mid' | 'high'")
+    max_tokens = args.get("max_tokens", 4096)
+    if not isinstance(max_tokens, int) or max_tokens < 1 or max_tokens > 32768:
+        raise MemorySchemaError("max_tokens must be 1..32768")
+    fact_types = _optional_list(args, "fact_types")
+    tags = _normalise_tags(args.get("tags"))
+    tags_match = _optional(args, "tags_match", str)
+    tag_groups = _optional_list(args, "tag_groups")
+    exclude_mental_models = _optional_bool(args, "exclude_mental_models", default=False)
+    exclude_mental_model_ids = _optional_list(args, "exclude_mental_model_ids")
+    include = _optional_dict(args, "include")
+    response_schema = _optional_dict(args, "response_schema")
+    result = await wrapper.reflect(
+        query=query,
+        dataset=dataset,
+        client_id=client_id,
+        budget=budget or "low",
+        max_tokens=max_tokens,
+        fact_types=fact_types,
+        tags=tags or None,
+        tags_match=tags_match,
+        tag_groups=tag_groups,
+        exclude_mental_models=bool(exclude_mental_models),
+        exclude_mental_model_ids=exclude_mental_model_ids,
+        include=include,
+        response_schema=response_schema,
+    )
+    return dict(result) if isinstance(result, dict) else {"text": str(result)}
+
+
+# ── Single-memory curation (non-destructive "this is wrong" path) ───────────
+
+
+async def _memory_curate(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_curate(id, dataset?, text?, context?, occurred_start?,
+    occurred_end?, fact_type?, entities?, state?, reason?) → the updated
+    memory unit.
+
+    Edits a single memory unit's text/context/occurred-range/fact_type/
+    entities, or soft-invalidates/reverts it via ``state``
+    (``"invalidated"``|``"valid"`` — reversible either way). This is the
+    non-destructive correction path, distinct from ``memory_delete``.
+
+    ``id`` is the PER-FACT id (``RecallResult.id`` / ``metadata.fact_id`` on
+    a search/recall/list item) — NOT the ``document_id`` ``memory_add``/
+    ``memory_delete`` address. ``entities`` here replaces the fact's entity
+    list by NAME (``list[str]``) — different shape from ``memory_add``'s
+    ``entities`` (which combines ``{"text":...}`` objects with extraction).
+    """
+    memory_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    text = _optional(args, "text", str)
+    context = _optional(args, "context", str)
+    occurred_start = _optional(args, "occurred_start", str)
+    occurred_end = _optional(args, "occurred_end", str)
+    fact_type = _optional(args, "fact_type", str)
+    if fact_type is not None and fact_type not in ("world", "experience"):
+        raise MemorySchemaError("fact_type must be 'world' | 'experience'")
+    entities = _optional_list(args, "entities")
+    if entities is not None and not all(isinstance(e, str) for e in entities):
+        raise MemorySchemaError("arg 'entities' items must be str (entity names) for memory_curate")
+    state = _optional(args, "state", str)
+    if state is not None and state not in ("invalidated", "valid"):
+        raise MemorySchemaError("state must be 'invalidated' | 'valid'")
+    reason = _optional(args, "reason", str)
+    if all(
+        v is None for v in (text, context, occurred_start, occurred_end, fact_type, entities, state)
+    ):
+        raise MemorySchemaError("memory_curate requires at least one field to change")
+    result = await wrapper.curate(
+        memory_id,
+        dataset=dataset,
+        client_id=client_id,
+        text=text,
+        context=context,
+        occurred_start=occurred_start,
+        occurred_end=occurred_end,
+        fact_type=fact_type,
+        entities=entities,
+        state=state,
+        reason=reason,
+    )
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_history(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_history(id, dataset?) → the memory unit's curation history."""
+    memory_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.memory_history(memory_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"history": result}
+
+
+# ── Mental models ─────────────────────────────────────────────────────────
+
+
+async def _memory_mental_model_list(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_mental_model_list(dataset?, tags?, tags_match?, detail?,
+    limit?, offset?) → {items: [...]}."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    tags = _normalise_tags(args.get("tags"))
+    tags_match = _optional(args, "tags_match", str)
+    detail = _optional(args, "detail", str)
+    limit = _optional_int(args, "limit")
+    offset = _optional_int(args, "offset")
+    result = await wrapper.list_mental_models(
+        dataset=dataset,
+        client_id=client_id,
+        tags=tags or None,
+        tags_match=tags_match,
+        detail=detail,
+        limit=limit,
+        offset=offset,
+    )
+    return dict(result) if isinstance(result, dict) else {"items": result}
+
+
+async def _memory_mental_model_get(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_mental_model_get(id, dataset?) → one mental model."""
+    mm_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.get_mental_model(mm_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_mental_model_create(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_mental_model_create(name, source_query, dataset?, id?, tags?,
+    max_tokens?, trigger?) → {mental_model_id, operation_id} (the initial
+    content generation runs as an async refresh)."""
+    name = _require(args, "name", str)
+    source_query = _require(args, "source_query", str)
+    if not name.strip() or not source_query.strip():
+        raise MemorySchemaError("name and source_query must be non-empty")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    custom_id = _optional_id(args, "id", required=False)
+    tags = _normalise_tags(args.get("tags"))
+    max_tokens = args.get("max_tokens", 2048)
+    if not isinstance(max_tokens, int) or max_tokens < 256 or max_tokens > 8192:
+        raise MemorySchemaError("max_tokens must be 256..8192")
+    trigger = _optional_dict(args, "trigger")
+    result = await wrapper.create_mental_model(
+        name=name,
+        source_query=source_query,
+        dataset=dataset,
+        client_id=client_id,
+        id=custom_id,
+        tags=tags,
+        max_tokens=max_tokens,
+        trigger=trigger,
+    )
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_mental_model_update(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_mental_model_update(id, dataset?, name?, source_query?,
+    max_tokens?, tags?, trigger?) → the updated mental model."""
+    mm_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    name = _optional(args, "name", str)
+    source_query = _optional(args, "source_query", str)
+    max_tokens = _optional_int(args, "max_tokens")
+    if max_tokens is not None and not (256 <= max_tokens <= 8192):
+        raise MemorySchemaError("max_tokens must be 256..8192")
+    tags_raw = args.get("tags")
+    tags = _normalise_tags(tags_raw) if tags_raw is not None else None
+    trigger = _optional_dict(args, "trigger")
+    result = await wrapper.update_mental_model(
+        mm_id,
+        dataset=dataset,
+        client_id=client_id,
+        name=name,
+        source_query=source_query,
+        max_tokens=max_tokens,
+        tags=tags,
+        trigger=trigger,
+    )
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_mental_model_delete(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_mental_model_delete(id, dataset?) → destructive; gated
+    (see ``_LOCAL_GATED_TOOLS``)."""
+    mm_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.delete_mental_model(mm_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_mental_model_refresh(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_mental_model_refresh(id, dataset?) → {operation_id,
+    operation_status} (async — poll with memory_operation_get). The engine's
+    own ``status`` field is renamed to ``operation_status`` — see
+    :func:`_envelope_safe`."""
+    mm_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.refresh_mental_model(mm_id, dataset=dataset, client_id=client_id)
+    return _envelope_safe(result)
+
+
+# ── Directives ───────────────────────────────────────────────────────────
+
+
+async def _memory_directive_list(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_directive_list(dataset?, tags?, tags_match?, active_only?,
+    limit?, offset?) → {items: [...]}."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    tags = _normalise_tags(args.get("tags"))
+    tags_match = _optional(args, "tags_match", str)
+    active_only = _optional_bool(args, "active_only")
+    limit = _optional_int(args, "limit")
+    offset = _optional_int(args, "offset")
+    result = await wrapper.list_directives(
+        dataset=dataset,
+        client_id=client_id,
+        tags=tags or None,
+        tags_match=tags_match,
+        active_only=active_only,
+        limit=limit,
+        offset=offset,
+    )
+    return dict(result) if isinstance(result, dict) else {"items": result}
+
+
+async def _memory_directive_get(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_directive_get(id, dataset?) → one directive."""
+    d_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.get_directive(d_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_directive_create(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_directive_create(name, content, dataset?, priority?,
+    is_active?, tags?) → the created directive."""
+    name = _require(args, "name", str)
+    content = _require(args, "content", str)
+    if not name.strip() or not content.strip():
+        raise MemorySchemaError("name and content must be non-empty")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    priority = args.get("priority", 0)
+    if not isinstance(priority, int) or isinstance(priority, bool):
+        raise MemorySchemaError("priority must be int")
+    is_active = _optional_bool(args, "is_active", default=True)
+    tags = _normalise_tags(args.get("tags"))
+    result = await wrapper.create_directive(
+        name=name,
+        content=content,
+        dataset=dataset,
+        client_id=client_id,
+        priority=priority,
+        is_active=bool(is_active),
+        tags=tags,
+    )
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_directive_update(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_directive_update(id, dataset?, name?, content?, priority?,
+    is_active?, tags?) → the updated directive."""
+    d_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    name = _optional(args, "name", str)
+    content = _optional(args, "content", str)
+    priority = _optional_int(args, "priority")
+    is_active = _optional_bool(args, "is_active")
+    tags_raw = args.get("tags")
+    tags = _normalise_tags(tags_raw) if tags_raw is not None else None
+    result = await wrapper.update_directive(
+        d_id,
+        dataset=dataset,
+        client_id=client_id,
+        name=name,
+        content=content,
+        priority=priority,
+        is_active=is_active,
+        tags=tags,
+    )
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_directive_delete(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_directive_delete(id, dataset?) → destructive; gated
+    (see ``_LOCAL_GATED_TOOLS``)."""
+    d_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.delete_directive(d_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+# ── Async operations (so memory_add's async retain is pollable) ────────────
+
+
+async def _memory_operation_list(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_operation_list(dataset?, status?, type?, limit?, offset?,
+    exclude_parents?) → {operations: [...]}."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    status = _optional(args, "status", str)
+    if status is not None and status not in (
+        "pending",
+        "processing",
+        "completed",
+        "failed",
+        "cancelled",
+    ):
+        raise MemorySchemaError(
+            "status must be one of pending|processing|completed|failed|cancelled"
+        )
+    op_type = _optional(args, "type", str)
+    limit = _optional_int(args, "limit")
+    offset = _optional_int(args, "offset")
+    exclude_parents = _optional_bool(args, "exclude_parents")
+    result = await wrapper.list_operations(
+        dataset=dataset,
+        client_id=client_id,
+        status=status,
+        type=op_type,
+        limit=limit,
+        offset=offset,
+        exclude_parents=exclude_parents,
+    )
+    return dict(result) if isinstance(result, dict) else {"operations": result}
+
+
+async def _memory_operation_get(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_operation_get(id, dataset?, include_payload?) → one operation's
+    status as ``operation_status`` (poll target for memory_add/
+    mental_model_refresh/consolidate). The engine's own ``status`` field is
+    renamed to ``operation_status`` — see :func:`_envelope_safe`; it would
+    otherwise collide with the MCP envelope's own ``status: "ok"``."""
+    op_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    include_payload = _optional_bool(args, "include_payload")
+    result = await wrapper.get_operation(
+        op_id, dataset=dataset, client_id=client_id, include_payload=include_payload
+    )
+    return _envelope_safe(result)
+
+
+async def _memory_operation_cancel(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_operation_cancel(id, dataset?) → aborts in-flight work; does
+    NOT delete any memory already retained, so it is not gated like
+    memory_delete."""
+    op_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.cancel_operation(op_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_operation_retry(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_operation_retry(id, dataset?) → re-queues a failed operation."""
+    op_id = _optional_id(args, "id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.retry_operation(op_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+# ── Tags / bank stats ────────────────────────────────────────────────────
+
+
+async def _memory_tags_list(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_tags_list(dataset?, q?, source?, limit?, offset?) →
+    {items: [{tag, count}, ...]}."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    q = _optional(args, "q", str)
+    source = _optional(args, "source", str)
+    limit = _optional_int(args, "limit")
+    offset = _optional_int(args, "offset")
+    result = await wrapper.list_tags(
+        dataset=dataset, client_id=client_id, q=q, source=source, limit=limit, offset=offset
+    )
+    return dict(result) if isinstance(result, dict) else {"items": result}
+
+
+async def _memory_bank_stats(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_bank_stats(dataset?, refresh?) → node/link/observation/
+    operation counts for the resolved bank. Read-only — no destructive bank
+    ops (delete/clear) are exposed via MCP."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    refresh = _optional_bool(args, "refresh")
+    result = await wrapper.bank_stats(dataset=dataset, client_id=client_id, refresh=refresh)
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+async def _memory_bank_consolidate(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_bank_consolidate(dataset?) → {operation_id, deduplicated}
+    (async — poll with memory_operation_get). Triggers the engine's
+    world/experience → observation consolidation pass early instead of
+    waiting for its normal trigger; not destructive (source facts are kept,
+    only new/merged observations are derived)."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.consolidate(dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"result": result}
 
 
 _MEMORY_HANDLERS = {
@@ -432,6 +1088,27 @@ _MEMORY_HANDLERS = {
     "memory_list": _memory_list,
     "memory_delete": _memory_delete,
     "memory_recall": _memory_recall,
+    "memory_reflect": _memory_reflect,
+    "memory_curate": _memory_curate,
+    "memory_history": _memory_history,
+    "memory_mental_model_list": _memory_mental_model_list,
+    "memory_mental_model_get": _memory_mental_model_get,
+    "memory_mental_model_create": _memory_mental_model_create,
+    "memory_mental_model_update": _memory_mental_model_update,
+    "memory_mental_model_delete": _memory_mental_model_delete,
+    "memory_mental_model_refresh": _memory_mental_model_refresh,
+    "memory_directive_list": _memory_directive_list,
+    "memory_directive_get": _memory_directive_get,
+    "memory_directive_create": _memory_directive_create,
+    "memory_directive_update": _memory_directive_update,
+    "memory_directive_delete": _memory_directive_delete,
+    "memory_operation_list": _memory_operation_list,
+    "memory_operation_get": _memory_operation_get,
+    "memory_operation_cancel": _memory_operation_cancel,
+    "memory_operation_retry": _memory_operation_retry,
+    "memory_tags_list": _memory_tags_list,
+    "memory_bank_stats": _memory_bank_stats,
+    "memory_bank_consolidate": _memory_bank_consolidate,
 }
 
 
@@ -451,14 +1128,36 @@ _PENDING_APPROVAL_DETAIL = (
 )
 
 
+#: Destructive new tools this module owns that ``hal0.mcp.admin``'s
+#: GATED_TOOLS/is_gated doesn't yet classify (admin.py's catalog is a
+#: hardcoded frozenset maintained on the admin side; wiring these tool
+#: names into it — so they also gate when reached via the /mcp/admin
+#: mount — is a follow-up there). Gating them here keeps the standalone
+#: /mcp/memory mount safe regardless of when that catalog update lands:
+#: a bank wipe of a mental model or directive is exactly the kind of call
+#: the approval-gate pattern (memory_delete) exists for. Non-destructive
+#: writes (create/update/refresh, memory_curate's reversible invalidate,
+#: memory_operation_cancel) stay autonomous, same posture as memory_add.
+_LOCAL_GATED_TOOLS: frozenset[str] = frozenset(
+    {
+        "memory_mental_model_delete",
+        "memory_directive_delete",
+    }
+)
+
+
 def _needs_approval(tool: str, args: dict[str, Any], *, client_id: str | None = None) -> bool:
     """True when this memory call must gate through the approval queue.
 
     Delegates to ``admin.is_gated`` so ``/mcp/memory`` and ``/mcp/admin``
     can never drift on what counts as a bulk delete. ``client_id`` lets
     the namespace check (#8) recognise the caller's own ``private:<id>``
-    dataset as autonomous instead of over-gating it.
+    dataset as autonomous instead of over-gating it. ``_LOCAL_GATED_TOOLS``
+    (above) is checked first for tools admin.py's classification doesn't
+    cover yet.
     """
+    if tool in _LOCAL_GATED_TOOLS:
+        return True
     from hal0.mcp.admin import is_gated
 
     return is_gated(tool, args, client_id=client_id)
@@ -586,6 +1285,88 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_recall": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "memory_reflect": ToolAnnotations(
+        # Not idempotent: an LLM synthesis call, re-run may answer differently.
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+    "memory_curate": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_history": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_mental_model_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_mental_model_get": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_mental_model_create": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "memory_mental_model_update": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_mental_model_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_mental_model_refresh": ToolAnnotations(
+        # Not idempotent: regenerates content, which may change each run.
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+    "memory_directive_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_directive_get": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_directive_create": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "memory_directive_update": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_directive_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_operation_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_operation_get": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_operation_cancel": ToolAnnotations(
+        # Aborts in-flight work — mutates operation state, but deletes no
+        # durable memory, so it does not carry the delete-style destructive bit.
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+    "memory_operation_retry": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "memory_tags_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_bank_stats": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_bank_consolidate": ToolAnnotations(
+        # Mutates derived state (observations) but keeps every source fact —
+        # not the delete-style destructive bit, and re-triggering is harmless
+        # (the engine dedupes a pending consolidation task).
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
 }
 
 
@@ -640,8 +1421,10 @@ def build_server(
         name="memory_add",
         description=(
             "Add an item to long-term memory. Returns {id, timestamp} plus "
-            "operation_id when ingestion is asynchronous. Reuse document_id "
-            "across calls to upsert one logical document (e.g. a conversation)."
+            "operation_id/operation_ids/items_count when the engine reports them. "
+            "Reuse document_id across calls to upsert one logical document (e.g. "
+            "a conversation). sync=true waits for extraction instead of the "
+            "default fire-and-forget background ingest."
         ),
         annotations=_ANNOTATIONS["memory_add"],
     )
@@ -651,6 +1434,11 @@ def build_server(
         tags: list[str] | str | None = None,
         metadata: dict[str, Any] | None = None,
         document_id: str | None = None,
+        entities: list[dict[str, Any]] | None = None,
+        observation_scopes: Any = None,
+        strategy: str | None = None,
+        update_mode: str | None = None,
+        sync: bool | None = None,
         args: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await dispatcher(
@@ -662,12 +1450,21 @@ def build_server(
                 tags=tags,
                 metadata=metadata,
                 document_id=document_id,
+                entities=entities,
+                observation_scopes=observation_scopes,
+                strategy=strategy,
+                update_mode=update_mode,
+                sync=sync,
             ),
         )
 
     @server.tool(
         name="memory_search",
-        description="Search long-term memory. Returns {results: [...]}.",
+        description=(
+            "Search long-term memory. Returns {results: [...]}. tag_groups/"
+            "min_scores are Hindsight-native filters (boolean tag expressions / "
+            "per-stage score floors) — ignored by engines without them."
+        ),
         annotations=_ANNOTATIONS["memory_search"],
     )
     async def memory_search(
@@ -677,6 +1474,8 @@ def build_server(
         tags: list[str] | str | None = None,
         before: str | None = None,
         after: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        min_scores: dict[str, float] | None = None,
         args: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await dispatcher(
@@ -689,6 +1488,8 @@ def build_server(
                 tags=tags,
                 before=before,
                 after=after,
+                tag_groups=tag_groups,
+                min_scores=min_scores,
             ),
         )
 
@@ -743,6 +1544,12 @@ def build_server(
         dataset: str | list[str] | None = None,
         tags: list[str] | str | None = None,
         tags_match: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        budget: str | None = None,
+        prefer_observations: bool | None = None,
+        include: dict[str, Any] | None = None,
+        query_timestamp: str | None = None,
+        min_scores: dict[str, float] | None = None,
         args: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await dispatcher(
@@ -755,8 +1562,469 @@ def build_server(
                 dataset=dataset,
                 tags=tags,
                 tags_match=tags_match,
+                tag_groups=tag_groups,
+                budget=budget,
+                prefer_observations=prefer_observations,
+                include=include,
+                query_timestamp=query_timestamp,
+                min_scores=min_scores,
             ),
         )
+
+    @server.tool(
+        name="memory_reflect",
+        description=(
+            "LLM-backed synthesis over memory — ask a question and get a "
+            "written-out answer grounded in recalled facts, not a raw fact "
+            "list. Single-bank (dataset resolves to one namespace, default "
+            "shared). Returns {status: unsupported} on engines without this "
+            "capability instead of erroring."
+        ),
+        annotations=_ANNOTATIONS["memory_reflect"],
+    )
+    async def memory_reflect(
+        query: str | None = None,
+        dataset: str | None = None,
+        budget: str | None = None,
+        max_tokens: int | None = None,
+        fact_types: list[str] | None = None,
+        tags: list[str] | str | None = None,
+        tags_match: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        exclude_mental_models: bool | None = None,
+        exclude_mental_model_ids: list[str] | None = None,
+        include: dict[str, Any] | None = None,
+        response_schema: dict[str, Any] | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_reflect",
+            _merged(
+                args,
+                query=query,
+                dataset=dataset,
+                budget=budget,
+                max_tokens=max_tokens,
+                fact_types=fact_types,
+                tags=tags,
+                tags_match=tags_match,
+                tag_groups=tag_groups,
+                exclude_mental_models=exclude_mental_models,
+                exclude_mental_model_ids=exclude_mental_model_ids,
+                include=include,
+                response_schema=response_schema,
+            ),
+        )
+
+    @server.tool(
+        name="memory_curate",
+        description=(
+            "Edit a memory unit, or soft-invalidate/revert it via state "
+            "('invalidated'|'valid' — reversible). The non-destructive 'this "
+            "is wrong' correction path. id is the PER-FACT id (from a search/"
+            "recall/list result), not memory_add's document_id."
+        ),
+        annotations=_ANNOTATIONS["memory_curate"],
+    )
+    async def memory_curate(
+        id: str | None = None,
+        dataset: str | None = None,
+        text: str | None = None,
+        context: str | None = None,
+        occurred_start: str | None = None,
+        occurred_end: str | None = None,
+        fact_type: str | None = None,
+        entities: list[str] | None = None,
+        state: str | None = None,
+        reason: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_curate",
+            _merged(
+                args,
+                id=id,
+                dataset=dataset,
+                text=text,
+                context=context,
+                occurred_start=occurred_start,
+                occurred_end=occurred_end,
+                fact_type=fact_type,
+                entities=entities,
+                state=state,
+                reason=reason,
+            ),
+        )
+
+    @server.tool(
+        name="memory_history",
+        description="Revision history for one memory unit (curation audit trail).",
+        annotations=_ANNOTATIONS["memory_history"],
+    )
+    async def memory_history(
+        id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher("memory_history", _merged(args, id=id, dataset=dataset))
+
+    @server.tool(
+        name="memory_mental_model_list",
+        description="List a bank's mental models (stored reflect responses).",
+        annotations=_ANNOTATIONS["memory_mental_model_list"],
+    )
+    async def memory_mental_model_list(
+        dataset: str | None = None,
+        tags: list[str] | str | None = None,
+        tags_match: str | None = None,
+        detail: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_mental_model_list",
+            _merged(
+                args,
+                dataset=dataset,
+                tags=tags,
+                tags_match=tags_match,
+                detail=detail,
+                limit=limit,
+                offset=offset,
+            ),
+        )
+
+    @server.tool(
+        name="memory_mental_model_get",
+        description="Get one mental model by id.",
+        annotations=_ANNOTATIONS["memory_mental_model_get"],
+    )
+    async def memory_mental_model_get(
+        id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher("memory_mental_model_get", _merged(args, id=id, dataset=dataset))
+
+    @server.tool(
+        name="memory_mental_model_create",
+        description=(
+            "Create a mental model — a standing question whose answer is kept "
+            "refreshed from memory (e.g. 'what does the user prefer for X'). "
+            "Returns {mental_model_id, operation_id}; the initial content "
+            "generation runs as an async refresh — poll with memory_operation_get."
+        ),
+        annotations=_ANNOTATIONS["memory_mental_model_create"],
+    )
+    async def memory_mental_model_create(
+        name: str | None = None,
+        source_query: str | None = None,
+        dataset: str | None = None,
+        id: str | None = None,
+        tags: list[str] | str | None = None,
+        max_tokens: int | None = None,
+        trigger: dict[str, Any] | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_mental_model_create",
+            _merged(
+                args,
+                name=name,
+                source_query=source_query,
+                dataset=dataset,
+                id=id,
+                tags=tags,
+                max_tokens=max_tokens,
+                trigger=trigger,
+            ),
+        )
+
+    @server.tool(
+        name="memory_mental_model_update",
+        description="Update a mental model's name/source_query/max_tokens/tags/trigger.",
+        annotations=_ANNOTATIONS["memory_mental_model_update"],
+    )
+    async def memory_mental_model_update(
+        id: str | None = None,
+        dataset: str | None = None,
+        name: str | None = None,
+        source_query: str | None = None,
+        max_tokens: int | None = None,
+        tags: list[str] | str | None = None,
+        trigger: dict[str, Any] | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_mental_model_update",
+            _merged(
+                args,
+                id=id,
+                dataset=dataset,
+                name=name,
+                source_query=source_query,
+                max_tokens=max_tokens,
+                tags=tags,
+                trigger=trigger,
+            ),
+        )
+
+    @server.tool(
+        name="memory_mental_model_delete",
+        description="Delete a mental model. Destructive — gated for operator approval.",
+        annotations=_ANNOTATIONS["memory_mental_model_delete"],
+    )
+    async def memory_mental_model_delete(
+        id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher("memory_mental_model_delete", _merged(args, id=id, dataset=dataset))
+
+    @server.tool(
+        name="memory_mental_model_refresh",
+        description=(
+            "Trigger a mental model refresh (async). Returns {operation_id, "
+            "status} — poll with memory_operation_get."
+        ),
+        annotations=_ANNOTATIONS["memory_mental_model_refresh"],
+    )
+    async def memory_mental_model_refresh(
+        id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_mental_model_refresh", _merged(args, id=id, dataset=dataset)
+        )
+
+    @server.tool(
+        name="memory_directive_list",
+        description="List a bank's directives (standing instructions injected into prompts).",
+        annotations=_ANNOTATIONS["memory_directive_list"],
+    )
+    async def memory_directive_list(
+        dataset: str | None = None,
+        tags: list[str] | str | None = None,
+        tags_match: str | None = None,
+        active_only: bool | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_directive_list",
+            _merged(
+                args,
+                dataset=dataset,
+                tags=tags,
+                tags_match=tags_match,
+                active_only=active_only,
+                limit=limit,
+                offset=offset,
+            ),
+        )
+
+    @server.tool(
+        name="memory_directive_get",
+        description="Get one directive by id.",
+        annotations=_ANNOTATIONS["memory_directive_get"],
+    )
+    async def memory_directive_get(
+        id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher("memory_directive_get", _merged(args, id=id, dataset=dataset))
+
+    @server.tool(
+        name="memory_directive_create",
+        description="Create a directive (standing instruction injected into prompts).",
+        annotations=_ANNOTATIONS["memory_directive_create"],
+    )
+    async def memory_directive_create(
+        name: str | None = None,
+        content: str | None = None,
+        dataset: str | None = None,
+        priority: int | None = None,
+        is_active: bool | None = None,
+        tags: list[str] | str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_directive_create",
+            _merged(
+                args,
+                name=name,
+                content=content,
+                dataset=dataset,
+                priority=priority,
+                is_active=is_active,
+                tags=tags,
+            ),
+        )
+
+    @server.tool(
+        name="memory_directive_update",
+        description="Update a directive's name/content/priority/is_active/tags.",
+        annotations=_ANNOTATIONS["memory_directive_update"],
+    )
+    async def memory_directive_update(
+        id: str | None = None,
+        dataset: str | None = None,
+        name: str | None = None,
+        content: str | None = None,
+        priority: int | None = None,
+        is_active: bool | None = None,
+        tags: list[str] | str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_directive_update",
+            _merged(
+                args,
+                id=id,
+                dataset=dataset,
+                name=name,
+                content=content,
+                priority=priority,
+                is_active=is_active,
+                tags=tags,
+            ),
+        )
+
+    @server.tool(
+        name="memory_directive_delete",
+        description="Delete a directive. Destructive — gated for operator approval.",
+        annotations=_ANNOTATIONS["memory_directive_delete"],
+    )
+    async def memory_directive_delete(
+        id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher("memory_directive_delete", _merged(args, id=id, dataset=dataset))
+
+    @server.tool(
+        name="memory_operation_list",
+        description="List async operations (retain, consolidation, refresh, ...).",
+        annotations=_ANNOTATIONS["memory_operation_list"],
+    )
+    async def memory_operation_list(
+        dataset: str | None = None,
+        status: str | None = None,
+        type: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        exclude_parents: bool | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_operation_list",
+            _merged(
+                args,
+                dataset=dataset,
+                status=status,
+                type=type,
+                limit=limit,
+                offset=offset,
+                exclude_parents=exclude_parents,
+            ),
+        )
+
+    @server.tool(
+        name="memory_operation_get",
+        description=(
+            "Get one async operation's status — the poll target for memory_add's "
+            "operation_id, memory_mental_model_refresh, and memory_bank_consolidate."
+        ),
+        annotations=_ANNOTATIONS["memory_operation_get"],
+    )
+    async def memory_operation_get(
+        id: str | None = None,
+        dataset: str | None = None,
+        include_payload: bool | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_operation_get",
+            _merged(args, id=id, dataset=dataset, include_payload=include_payload),
+        )
+
+    @server.tool(
+        name="memory_operation_cancel",
+        description="Cancel a pending/processing operation. Aborts in-flight work only.",
+        annotations=_ANNOTATIONS["memory_operation_cancel"],
+    )
+    async def memory_operation_cancel(
+        id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher("memory_operation_cancel", _merged(args, id=id, dataset=dataset))
+
+    @server.tool(
+        name="memory_operation_retry",
+        description="Re-queue a failed operation.",
+        annotations=_ANNOTATIONS["memory_operation_retry"],
+    )
+    async def memory_operation_retry(
+        id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher("memory_operation_retry", _merged(args, id=id, dataset=dataset))
+
+    @server.tool(
+        name="memory_tags_list",
+        description="List tags in use in a bank, with usage counts.",
+        annotations=_ANNOTATIONS["memory_tags_list"],
+    )
+    async def memory_tags_list(
+        dataset: str | None = None,
+        q: str | None = None,
+        source: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_tags_list",
+            _merged(args, dataset=dataset, q=q, source=source, limit=limit, offset=offset),
+        )
+
+    @server.tool(
+        name="memory_bank_stats",
+        description=(
+            "Node/link/observation/operation counts for a bank. Read-only — no "
+            "destructive bank operations (delete/clear) are exposed via MCP."
+        ),
+        annotations=_ANNOTATIONS["memory_bank_stats"],
+    )
+    async def memory_bank_stats(
+        dataset: str | None = None,
+        refresh: bool | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_bank_stats", _merged(args, dataset=dataset, refresh=refresh)
+        )
+
+    @server.tool(
+        name="memory_bank_consolidate",
+        description=(
+            "Trigger the engine's world/experience → observation consolidation "
+            "pass early. Returns {operation_id, deduplicated} — poll with "
+            "memory_operation_get. Not destructive: source facts are kept."
+        ),
+        annotations=_ANNOTATIONS["memory_bank_consolidate"],
+    )
+    async def memory_bank_consolidate(
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher("memory_bank_consolidate", _merged(args, dataset=dataset))
 
     return server
 

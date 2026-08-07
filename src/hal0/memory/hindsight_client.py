@@ -130,7 +130,19 @@ class HindsightRestClient:
         metadata=None,
         tags=None,
         timestamp=None,
+        entities=None,
+        observation_scopes=None,
+        strategy=None,
+        update_mode=None,
+        sync=False,
     ):
+        """POST one item to ``/memories`` (RetainRequest, single-item shape).
+
+        ``sync=True`` sends ``async: false`` — Hindsight waits for extraction
+        to finish before responding (no ``operation_id``, but a ``usage``
+        block for the extraction LLM call). ``sync=False`` (default) is the
+        existing fire-and-forget background-ingest path.
+        """
         item: dict[str, Any] = {"content": content, "document_id": document_id}
         if context is not None:
             item["context"] = context
@@ -140,7 +152,15 @@ class HindsightRestClient:
             item["tags"] = list(tags)
         if timestamp is not None:
             item["timestamp"] = timestamp
-        body: dict[str, Any] = {"items": [item], "async": True}
+        if entities is not None:
+            item["entities"] = list(entities)
+        if observation_scopes is not None:
+            item["observation_scopes"] = observation_scopes
+        if strategy is not None:
+            item["strategy"] = strategy
+        if update_mode is not None:
+            item["update_mode"] = update_mode
+        body: dict[str, Any] = {"items": [item], "async": not sync}
         resp = await self._http.post(
             f"/v1/default/banks/{bank_id}/memories", headers=self._headers(), json=body
         )
@@ -148,7 +168,20 @@ class HindsightRestClient:
         return resp.json()
 
     async def recall(
-        self, *, bank_id, query, types=None, max_tokens=4096, tags=None, tags_match=None
+        self,
+        *,
+        bank_id,
+        query,
+        types=None,
+        max_tokens=4096,
+        tags=None,
+        tags_match=None,
+        tag_groups=None,
+        budget=None,
+        prefer_observations=None,
+        include=None,
+        query_timestamp=None,
+        min_scores=None,
     ):
         body: dict[str, Any] = {"query": query, "max_tokens": max_tokens}
         if types:
@@ -157,11 +190,63 @@ class HindsightRestClient:
             body["tags"] = list(tags)
         if tags_match is not None:
             body["tags_match"] = tags_match
+        if tag_groups is not None:
+            body["tag_groups"] = tag_groups
+        if budget is not None:
+            body["budget"] = budget
+        if prefer_observations is not None:
+            body["prefer_observations"] = bool(prefer_observations)
+        if include is not None:
+            body["include"] = include
+        if query_timestamp is not None:
+            body["query_timestamp"] = query_timestamp
+        if min_scores is not None:
+            body["min_scores"] = min_scores
         resp = await self._http.post(
             f"/v1/default/banks/{bank_id}/memories/recall", headers=self._headers(), json=body
         )
         resp.raise_for_status()
         return resp.json()
+
+    async def reflect(
+        self,
+        *,
+        bank_id,
+        query,
+        budget=None,
+        max_tokens=4096,
+        include=None,
+        response_schema=None,
+        tags=None,
+        tags_match=None,
+        tag_groups=None,
+        fact_types=None,
+        exclude_mental_models=None,
+        exclude_mental_model_ids=None,
+    ):
+        """POST ``/reflect`` — LLM-backed synthesis over the bank's memory."""
+        body: dict[str, Any] = {"query": query, "max_tokens": max_tokens}
+        if budget is not None:
+            body["budget"] = budget
+        if include is not None:
+            body["include"] = include
+        if response_schema is not None:
+            body["response_schema"] = response_schema
+        if tags:
+            body["tags"] = list(tags)
+        if tags_match is not None:
+            body["tags_match"] = tags_match
+        if tag_groups is not None:
+            body["tag_groups"] = tag_groups
+        if fact_types is not None:
+            body["fact_types"] = list(fact_types)
+        if exclude_mental_models is not None:
+            body["exclude_mental_models"] = bool(exclude_mental_models)
+        if exclude_mental_model_ids is not None:
+            body["exclude_mental_model_ids"] = list(exclude_mental_model_ids)
+        return await self.request_json(
+            "POST", f"/v1/default/banks/{bank_id}/reflect", json_body=body
+        )
 
     async def list_memories(self, *, bank_id, limit=50, offset=0, types=None, query=None):
         params: dict[str, Any] = {"limit": limit, "offset": offset}
@@ -190,6 +275,265 @@ class HindsightRestClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    # ── single-memory curation (PATCH /memories/{memory_id}) ────────────────
+
+    async def get_memory(self, *, bank_id, memory_id):
+        mem = quote(str(memory_id), safe="")
+        return await self.request_json("GET", f"/v1/default/banks/{bank_id}/memories/{mem}")
+
+    async def update_memory(
+        self,
+        *,
+        bank_id,
+        memory_id,
+        text=None,
+        context=None,
+        occurred_start=None,
+        occurred_end=None,
+        fact_type=None,
+        entities=None,
+        state=None,
+        reason=None,
+    ):
+        """PATCH one memory unit — edit its text/context/occurred-range/
+        fact_type/entities, or curate it via ``state`` (``"invalidated"`` to
+        soft-retire, ``"valid"`` to revert — reversible either way).
+
+        Every field is "omit to leave unchanged" per UpdateMemoryRequest, so
+        only explicitly-set (non-``None``) fields are sent."""
+        body: dict[str, Any] = {}
+        if text is not None:
+            body["text"] = text
+        if context is not None:
+            body["context"] = context
+        if occurred_start is not None:
+            body["occurred_start"] = occurred_start
+        if occurred_end is not None:
+            body["occurred_end"] = occurred_end
+        if fact_type is not None:
+            body["fact_type"] = fact_type
+        if entities is not None:
+            body["entities"] = list(entities)
+        if state is not None:
+            body["state"] = state
+        if reason is not None:
+            body["reason"] = reason
+        mem = quote(str(memory_id), safe="")
+        return await self.request_json(
+            "PATCH", f"/v1/default/banks/{bank_id}/memories/{mem}", json_body=body
+        )
+
+    async def memory_history(self, *, bank_id, memory_id):
+        mem = quote(str(memory_id), safe="")
+        return await self.request_json("GET", f"/v1/default/banks/{bank_id}/memories/{mem}/history")
+
+    # ── directives ────────────────────────────────────────────────────────
+
+    async def list_directives(
+        self, *, bank_id, tags=None, tags_match=None, active_only=None, limit=None, offset=None
+    ):
+        params: dict[str, Any] = {}
+        if tags:
+            params["tags"] = ",".join(tags)
+        if tags_match is not None:
+            params["tags_match"] = tags_match
+        if active_only is not None:
+            params["active_only"] = "true" if active_only else "false"
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        return await self.request_json(
+            "GET", f"/v1/default/banks/{bank_id}/directives", params=params or None
+        )
+
+    async def get_directive(self, *, bank_id, directive_id):
+        did = quote(str(directive_id), safe="")
+        return await self.request_json("GET", f"/v1/default/banks/{bank_id}/directives/{did}")
+
+    async def create_directive(
+        self, *, bank_id, name, content, priority=0, is_active=True, tags=None
+    ):
+        body = {
+            "name": name,
+            "content": content,
+            "priority": priority,
+            "is_active": is_active,
+            "tags": list(tags or []),
+        }
+        return await self.request_json(
+            "POST", f"/v1/default/banks/{bank_id}/directives", json_body=body
+        )
+
+    async def update_directive(
+        self,
+        *,
+        bank_id,
+        directive_id,
+        name=None,
+        content=None,
+        priority=None,
+        is_active=None,
+        tags=None,
+    ):
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if content is not None:
+            body["content"] = content
+        if priority is not None:
+            body["priority"] = priority
+        if is_active is not None:
+            body["is_active"] = is_active
+        if tags is not None:
+            body["tags"] = list(tags)
+        did = quote(str(directive_id), safe="")
+        return await self.request_json(
+            "PATCH", f"/v1/default/banks/{bank_id}/directives/{did}", json_body=body
+        )
+
+    async def delete_directive(self, *, bank_id, directive_id):
+        did = quote(str(directive_id), safe="")
+        return await self.request_json("DELETE", f"/v1/default/banks/{bank_id}/directives/{did}")
+
+    # ── mental models ─────────────────────────────────────────────────────
+
+    async def list_mental_models(
+        self, *, bank_id, tags=None, tags_match=None, detail=None, limit=None, offset=None
+    ):
+        params: dict[str, Any] = {}
+        if tags:
+            params["tags"] = ",".join(tags)
+        if tags_match is not None:
+            params["tags_match"] = tags_match
+        if detail is not None:
+            params["detail"] = detail
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        return await self.request_json(
+            "GET", f"/v1/default/banks/{bank_id}/mental-models", params=params or None
+        )
+
+    async def get_mental_model(self, *, bank_id, mental_model_id):
+        mid = quote(str(mental_model_id), safe="")
+        return await self.request_json("GET", f"/v1/default/banks/{bank_id}/mental-models/{mid}")
+
+    async def create_mental_model(
+        self, *, bank_id, name, source_query, id=None, tags=None, max_tokens=2048, trigger=None
+    ):
+        body: dict[str, Any] = {
+            "name": name,
+            "source_query": source_query,
+            "tags": list(tags or []),
+            "max_tokens": max_tokens,
+        }
+        if id is not None:
+            body["id"] = id
+        if trigger is not None:
+            body["trigger"] = trigger
+        return await self.request_json(
+            "POST", f"/v1/default/banks/{bank_id}/mental-models", json_body=body
+        )
+
+    async def update_mental_model(
+        self,
+        *,
+        bank_id,
+        mental_model_id,
+        name=None,
+        source_query=None,
+        max_tokens=None,
+        tags=None,
+        trigger=None,
+    ):
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if source_query is not None:
+            body["source_query"] = source_query
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if tags is not None:
+            body["tags"] = list(tags)
+        if trigger is not None:
+            body["trigger"] = trigger
+        mid = quote(str(mental_model_id), safe="")
+        return await self.request_json(
+            "PATCH", f"/v1/default/banks/{bank_id}/mental-models/{mid}", json_body=body
+        )
+
+    async def delete_mental_model(self, *, bank_id, mental_model_id):
+        mid = quote(str(mental_model_id), safe="")
+        return await self.request_json("DELETE", f"/v1/default/banks/{bank_id}/mental-models/{mid}")
+
+    async def refresh_mental_model(self, *, bank_id, mental_model_id):
+        mid = quote(str(mental_model_id), safe="")
+        return await self.request_json(
+            "POST", f"/v1/default/banks/{bank_id}/mental-models/{mid}/refresh"
+        )
+
+    # ── async operations ─────────────────────────────────────────────────
+
+    async def list_operations(
+        self, *, bank_id, status=None, type=None, limit=None, offset=None, exclude_parents=None
+    ):
+        params: dict[str, Any] = {}
+        if status is not None:
+            params["status"] = status
+        if type is not None:
+            params["type"] = type
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        if exclude_parents is not None:
+            params["exclude_parents"] = "true" if exclude_parents else "false"
+        return await self.request_json(
+            "GET", f"/v1/default/banks/{bank_id}/operations", params=params or None
+        )
+
+    async def get_operation(self, *, bank_id, operation_id, include_payload=None):
+        params = {"include_payload": "true"} if include_payload else None
+        oid = quote(str(operation_id), safe="")
+        return await self.request_json(
+            "GET", f"/v1/default/banks/{bank_id}/operations/{oid}", params=params
+        )
+
+    async def cancel_operation(self, *, bank_id, operation_id):
+        oid = quote(str(operation_id), safe="")
+        return await self.request_json("DELETE", f"/v1/default/banks/{bank_id}/operations/{oid}")
+
+    async def retry_operation(self, *, bank_id, operation_id):
+        oid = quote(str(operation_id), safe="")
+        return await self.request_json(
+            "POST", f"/v1/default/banks/{bank_id}/operations/{oid}/retry"
+        )
+
+    # ── tags / stats / consolidation ─────────────────────────────────────
+
+    async def list_tags(self, *, bank_id, q=None, source=None, limit=None, offset=None):
+        params: dict[str, Any] = {}
+        if q is not None:
+            params["q"] = q
+        if source is not None:
+            params["source"] = source
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        return await self.request_json(
+            "GET", f"/v1/default/banks/{bank_id}/tags", params=params or None
+        )
+
+    async def bank_stats(self, *, bank_id, refresh=None):
+        params = {"refresh": "true"} if refresh else None
+        return await self.request_json("GET", f"/v1/default/banks/{bank_id}/stats", params=params)
+
+    async def consolidate(self, *, bank_id):
+        return await self.request_json("POST", f"/v1/default/banks/{bank_id}/consolidate")
 
     async def request_json(
         self,

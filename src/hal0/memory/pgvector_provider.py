@@ -91,7 +91,18 @@ class PgVectorProvider(MemoryProvider):
         metadata=None,
         client_id=None,
         document_id=None,
+        entities=None,
+        observation_scopes=None,
+        strategy=None,
+        update_mode=None,
+        sync=False,
     ):
+        # This fallback has no document/entity/consolidation-strategy
+        # semantics — the new RetainRequest-shaped kwargs are accepted (so
+        # callers built against the full ABC don't need an engine check) and
+        # silently ignored, same posture as the existing document_id-as-id
+        # shortcut below.
+        del entities, observation_scopes, strategy, update_mode, sync
         # Emit a per-call warning (throttled to once per instance) so the
         # write-path is loud even when the construction-time warning was
         # swallowed by a log filter or the provider was built outside our
@@ -134,7 +145,13 @@ class PgVectorProvider(MemoryProvider):
         after=None,
         mode="vector",
         client_id=None,
+        tag_groups=None,
+        min_scores=None,
     ):
+        # No boolean tag-expression engine and no scored ranking here — this
+        # fallback is plain substring/tag matching, so both are accepted (ABC
+        # compliance) and ignored.
+        del tag_groups, min_scores
         allowed = self._allowed(dataset, client_id)
         tags = tags or []
         out = []

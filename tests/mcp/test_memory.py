@@ -36,6 +36,11 @@ class _FakeWrapper:
         metadata: dict[str, Any],
         client_id: str | None = None,
         document_id: str | None = None,
+        entities: list[dict[str, Any]] | None = None,
+        observation_scopes: Any = None,
+        strategy: str | None = None,
+        update_mode: str | None = None,
+        sync: bool = False,
     ) -> dict[str, Any]:
         self.add_calls.append(
             {
@@ -46,6 +51,11 @@ class _FakeWrapper:
                 "metadata": metadata,
                 "client_id": client_id,
                 "document_id": document_id,
+                "entities": entities,
+                "observation_scopes": observation_scopes,
+                "strategy": strategy,
+                "update_mode": update_mode,
+                "sync": sync,
             }
         )
         self._counter += 1

@@ -72,7 +72,10 @@ class FakeMemoryProvider(MemoryProvider):
         after=None,
         mode="vector",
         client_id=None,
+        tag_groups=None,
+        min_scores=None,
     ):
+        del tag_groups, min_scores  # accepted for ABC compliance; unused by this fake
         allowed = self._allowed(dataset, client_id)
         tags = tags or []
         out = []
