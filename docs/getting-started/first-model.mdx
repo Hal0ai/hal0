@@ -59,7 +59,7 @@ flow is **list → pull → assign**.
    slot):
 
    ```sh
-   hal0 model assign qwen3-4b --slot agent
+   hal0 slot edit agent --model qwen3-4b
    ```
 
    This writes `model.default` into the slot's configuration. `agent` is the
@@ -78,7 +78,7 @@ flow is **list → pull → assign**.
 
 </Steps>
 
-Other `hal0 model` commands: `register` (record an on-disk file in the
+Other `hal0 model` commands: `add` (record an on-disk file in the
 registry), `show` (inspect metadata), and `rm` (remove a registry row).
 
 <Aside type="tip" title="Gated or large models">
