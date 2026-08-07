@@ -4,6 +4,7 @@ Mounted under /api/profiles:
 
     GET    ""              — list all profiles
     POST   ""              — create a custom profile (201)
+    POST   "/generate"     — generate a draft profile from a model/HF repo (compute-only)
     POST   "/import"       — import a profile from a portable envelope
     GET    "/{name}"       — resolve a single profile
     POST   "/{name}/export"— export a profile to a portable envelope
@@ -25,18 +26,20 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Request, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from hal0.api._audit import record_action
 from hal0.config.schema import ProfileConfig
 from hal0.errors import BadRequest
 from hal0.profiles import ProfileCatalog, ProfilePatch, screen_profile_flags
+from hal0.profiles.generate import LlmCallContext, generate_draft_profile
 from hal0.profiles.portable import (
     export_envelope,
     import_profile,
     parse_envelope,
     verify_checksum,
 )
+from hal0.service_identity import service_auth_headers
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +92,39 @@ class ProfileBody(BaseModel):
                 "profile name must be kebab-case (a-z0-9_-), ≤32 chars, start with alphanumeric"
             )
         return v
+
+
+class ProfileGenerateBody(BaseModel):
+    """Body for POST /api/profiles/generate."""
+
+    model_id: str | None = Field(
+        default=None,
+        description="Registered model id to base the draft profile on.",
+    )
+    hf_repo: str | None = Field(
+        default=None,
+        description="HuggingFace repo id ('org/name' or full URL) to base the draft on.",
+    )
+    name: str | None = Field(
+        default=None,
+        description="Suggested profile name; sanitized to kebab-case (<=32 chars) if needed.",
+    )
+    use_llm: bool = Field(
+        default=False,
+        description=(
+            "Summarize the model card through the platform's utility LLM to fill the "
+            "intent headline. Degrades to heuristics (plus a warning) when the LLM is "
+            "unavailable — never fails the request."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> ProfileGenerateBody:
+        has_model = bool(self.model_id and self.model_id.strip())
+        has_repo = bool(self.hf_repo and self.hf_repo.strip())
+        if has_model == has_repo:
+            raise ValueError("exactly one of 'model_id' or 'hf_repo' is required")
+        return self
 
 
 class ProfileUpdateBody(BaseModel):
@@ -192,6 +228,67 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
             "backend": body.backend,
         }
     return profile.to_dict()
+
+
+@router.post("/generate")
+async def generate_profile_route(body: ProfileGenerateBody, request: Request) -> dict[str, Any]:
+    """Generate a draft profile from a registered model or a HuggingFace repo.
+
+    Body (exactly one of ``model_id`` / ``hf_repo`` — 422 otherwise)::
+
+        {"model_id": "qwen3-4b"}
+        {"hf_repo": "unsloth/Qwen3-8B-GGUF"}
+        {"hf_repo": "unsloth/Qwen3-8B-GGUF", "name": "my-qwen3", "use_llm": true}
+
+    Response::
+
+        {"profile": {...portable .hal0profile.json envelope...},
+         "warnings": ["..."], "sources": ["registry:...", "huggingface:...", "llm:hal0/utility"]}
+
+    Compute-only — never writes to the catalog. ``profile`` is the exact
+    envelope shape :func:`export_profile` produces, so it can be handed
+    straight to ``POST /api/profiles`` (after unwrapping ``.profile``) or
+    ``POST /api/profiles/import`` (as ``envelope``) unmodified.
+
+    ``use_llm: true`` asks the platform's ``hal0/utility`` slot to summarize
+    the model card into the profile's ``intent`` headline. Any failure (slot
+    unavailable, transport error, timeout, empty completion) degrades to the
+    heuristic intent with the reason recorded in ``warnings`` — it never
+    fails the request. Device/profile fit is derived for THIS host from the
+    cached ``hardware.json`` (never a live re-probe).
+
+    Raises:
+        422: neither or both of model_id/hf_repo were given.
+        404 model.not_found: model_id is not registered.
+        400 hf.bad_request: hf_repo is not a valid org/name coordinate.
+        404 hf.repo_not_found: HF repo does not exist.
+        502 hf.unreachable / hf.upstream_error: HuggingFace lookup failed.
+    """
+    llm_ctx: LlmCallContext | None = None
+    if body.use_llm:
+        base_url = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
+        # O17-style self-call auth: forward the caller's inbound bearer when
+        # present, else the box service identity at the least-privilege
+        # CLIENT tier — mirrors hal0.brain.chat._self_call_headers.
+        inbound = request.headers.get("Authorization", "") or ""
+        headers = (
+            {"Authorization": inbound} if inbound.strip() else service_auth_headers(prefer="client")
+        )
+        llm_ctx = LlmCallContext(base_url=base_url, headers=headers)
+
+    result = await generate_draft_profile(
+        model_id=body.model_id,
+        hf_repo=body.hf_repo,
+        name=body.name,
+        use_llm=body.use_llm,
+        llm=llm_ctx,
+        exported_at=datetime.now(UTC).isoformat(),
+    )
+    return {
+        "profile": result.profile,
+        "warnings": list(result.warnings),
+        "sources": list(result.sources),
+    }
 
 
 @router.post("/import")
