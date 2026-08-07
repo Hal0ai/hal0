@@ -2659,10 +2659,15 @@ else
             # (#1543's engine-side sibling). Hand the engine a real client-tier
             # key via the unit's EnvironmentFile whenever one exists;
             # `hal0 auth rotate` keeps the file fresh afterward.
+            # `|| true` on every grep: on an auth-off box these patterns match
+            # nothing and grep's exit 1 would abort the whole install under
+            # the script's set -e/pipefail (bit a live fresh-install test).
             hs_key=""
             if [[ -f /etc/hal0/api.env ]]; then
-                hs_key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1)"
-                [[ -z "${hs_key}" ]] && hs_key="$(grep -oP '(?<=^HAL0_ADMIN_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1)"
+                hs_key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1 || true)"
+                if [[ -z "${hs_key}" ]]; then
+                    hs_key="$(grep -oP '(?<=^HAL0_ADMIN_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1 || true)"
+                fi
             fi
             if [[ -n "${hs_key}" ]]; then
                 ( umask 027 && printf 'HINDSIGHT_API_LLM_API_KEY=%s\n' "${hs_key}" \
