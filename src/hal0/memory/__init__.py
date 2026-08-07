@@ -37,9 +37,66 @@ __all__ = [
     "MemoryRecord",
     "Mode",
     "PgVectorProvider",
+    "SelfHealingMemoryProvider",
     "_build_hindsight_client",
     "provider_from_config",
 ]
+
+
+class SelfHealingMemoryProvider:
+    """Delegating shell around a boot-degraded memory provider (#1613).
+
+    ``provider_from_config`` hands back the in-memory ``PgVectorProvider``
+    when the Hindsight daemon loses the boot race (a cold engine start —
+    embedded postgres init + model load — outlasts the 2s boot probe).
+    Every consumer captures the provider object at ``create_app`` time: the
+    REST routes read it off ``app.state``, but both MCP mounts and the
+    in-process dispatcher close over it. That made the fallback PERMANENT
+    until an operator restarted hal0-api — which is also the default end
+    state of a fresh install (#1543), because the installer starts both
+    units in the same pass.
+
+    ``create_app`` wraps a *degraded* boot result in this shell (a healthy
+    boot keeps today's exact object graph — no shell), and the lifespan
+    polls :meth:`try_heal` until the durable engine answers. The swap is a
+    single attribute rebind, so every captured reference — closures
+    included — recovers at once.
+    """
+
+    def __init__(self, provider: MemoryProvider, cfg: Any) -> None:
+        self._target = provider
+        self._cfg = cfg
+
+    @property
+    def target(self) -> Any:
+        """The current delegate (tests introspect which side is live)."""
+        return self._target
+
+    def try_heal(self) -> bool:
+        """One re-probe attempt; True once the durable engine is live.
+
+        Runs the same construction path as boot (probe included, so it is
+        bounded by ``HAL0_HINDSIGHT_PROBE_TIMEOUT_S``). Call off-loop —
+        the probe is synchronous I/O.
+        """
+        if not getattr(self._target, "degraded", False):
+            return True
+        try:
+            candidate = provider_from_config(self._cfg)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.debug("hal0.memory.reprobe_failed", error=str(exc))
+            return False
+        if getattr(candidate, "degraded", False):
+            return False
+        self._target = candidate
+        log.warning(
+            "hal0.memory.provider_healed",
+            detail="hindsight engine recovered — swapped out the degraded pgvector fallback",
+        )
+        return True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_target"), name)
 
 
 def _build_hindsight_client(cfg: Any) -> Any:

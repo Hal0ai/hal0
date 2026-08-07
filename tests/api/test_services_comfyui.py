@@ -25,46 +25,23 @@ def test_comfyui_repair_restarts_img_slot_unit(isolated_client, monkeypatch):
     import hal0.api.routes.installer as inst
 
     calls = []
-
-    def _fake_run(cmd, **kw):
-        calls.append(list(cmd))
-
-        class _R:
-            returncode = 0
-            stdout = ""
-
-        return _R()
-
-    monkeypatch.setattr(inst.subprocess, "run", _fake_run)
+    monkeypatch.setattr(inst, "_seam_restart", lambda unit: calls.append(unit))
     monkeypatch.setattr(inst.os, "geteuid", lambda: 0)
     monkeypatch.setattr(inst, "_unit_active", lambda u: False)
     monkeypatch.setattr(inst, "_container_active", lambda: True)
 
     r = isolated_client.post("/api/install/services/comfyui/repair")
     assert r.status_code == 200, r.text
-    assert calls, "repair made no subprocess calls"
-    # The background GPU sampler thread also routes through the module-level
-    # subprocess.run this test monkeypatches, so assert the restart is AMONG
-    # the calls rather than positionally first (position is race-dependent).
-    assert [inst._SYSTEMCTL, "restart", inst._COMFYUI_SLOT_UNIT] in calls
+    # comfyui maps to the seeded img slot unit, restarted through the seam
+    # (P3-perms: bare systemctl under User=hal0 dies on polkit).
+    assert calls == [inst._COMFYUI_SLOT_UNIT]
 
 
 def test_comfyui_repair_not_blocked_by_unknown_unit_check(isolated_client, monkeypatch):
     """Ensure comfyui repair returns 200, not 400 'unit not repairable'."""
     import hal0.api.routes.installer as inst
 
-    calls = []
-
-    def _fake_run(cmd, **kw):
-        calls.append(list(cmd))
-
-        class _R:
-            returncode = 0
-            stdout = ""
-
-        return _R()
-
-    monkeypatch.setattr(inst.subprocess, "run", _fake_run)
+    monkeypatch.setattr(inst, "_seam_restart", lambda unit: None)
     monkeypatch.setattr(inst.os, "geteuid", lambda: 0)
     monkeypatch.setattr(inst, "_unit_active", lambda u: False)
     monkeypatch.setattr(inst, "_container_active", lambda: True)

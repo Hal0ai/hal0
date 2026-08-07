@@ -1150,8 +1150,12 @@ cat > "${API_UNIT}" <<EOF
 [Unit]
 Description=hal0 API daemon
 Documentation=https://github.com/hal0ai/hal0
-After=network-online.target
-Wants=network-online.target
+# hindsight-api ordering (#1613): a cold engine start outlasts hal0-api's
+# boot probe, degrading memory to the pgvector fallback. After= narrows the
+# boot-time window (the runtime self-heal re-probe covers the rest); both
+# directives are no-ops on a box without the engine unit.
+After=network-online.target hindsight-api.service
+Wants=network-online.target hindsight-api.service
 
 [Service]
 Type=simple

@@ -556,13 +556,22 @@ _REPAIRABLE_UNITS = {
     "hal0-slot@img.service",
 }
 _COMFYUI_SLOT_UNIT = "hal0-slot@img.service"
-_SYSTEMCTL = "/usr/bin/systemctl"
 
 
-def _privileged_systemctl_argv(*args: str) -> list[str]:
-    # hal0-api runs as root, so systemctl is invoked directly. The former
-    # euid != 0 `sudo -n` fallback was part of the removed hardened-perms seam.
-    return [_SYSTEMCTL, *args]
+def _seam_restart(unit: str) -> subprocess.CompletedProcess[str]:
+    """Restart a unit through the hal0-systemctl seam.
+
+    hal0-api runs as ``User=hal0`` (P3-perms), so a bare ``systemctl restart``
+    dies on polkit's "Interactive authentication required" — which the
+    dashboard surfaces as a permission-denied toast on every repair/restart
+    button. :meth:`SystemCtlSeam.systemctl` routes hal0-managed units
+    (``hal0-slot@*``, ``hal0-agent@*``, and the companion map that covers
+    hindsight + openwebui) through the sudo wrapper, and still passes straight
+    through for root/dev/CI where the wrapper isn't needed.
+    """
+    from hal0.system.seam import SystemCtlSeam
+
+    return SystemCtlSeam().systemctl("systemctl", "restart", unit, timeout=60)
 
 
 def _unit_active(unit: str) -> bool:
@@ -652,11 +661,7 @@ async def service_repair(unit: str) -> dict[str, Any]:
     # Special case: public service id maps to the slot unit that owns :8188.
     if unit == "comfyui":
         try:
-            subprocess.run(
-                _privileged_systemctl_argv("restart", _COMFYUI_SLOT_UNIT),
-                check=True,
-                timeout=60,
-            )
+            await asyncio.to_thread(_seam_restart, _COMFYUI_SLOT_UNIT)
         except (OSError, subprocess.SubprocessError) as exc:
             raise PickDefaultError(
                 f"comfyui restart failed: {exc}", details={"unit": unit}
@@ -675,22 +680,20 @@ async def service_repair(unit: str) -> dict[str, Any]:
         # subprocess call holds the event loop, so neither the restart nor
         # the HTTP response can complete until a timeout kills one of them.
         # Mirror the updater's pattern instead (updater._try_restart_hal0_api):
-        # flush the response first, then fail-soft try-restart off-loop.
+        # flush the response first, then fail-soft restart off-loop via the
+        # seam's ``restart-self`` arm (queued with --no-block, #1540).
         # Callers should poll /api/health for recovery.
         async def _bounce_self() -> None:
             await asyncio.sleep(0.5)  # let the response flush
             with contextlib.suppress(OSError, subprocess.SubprocessError):
-                await asyncio.to_thread(
-                    subprocess.run,
-                    ["systemctl", "try-restart", unit],
-                    check=False,
-                    timeout=60,
-                )
+                from hal0.system.seam import SystemCtlSeam
+
+                await asyncio.to_thread(SystemCtlSeam().restart_self)
 
         asyncio.get_running_loop().create_task(_bounce_self())
         return {"unit": unit, "active": True, "deferred": True}
     try:
-        subprocess.run(["systemctl", "restart", unit], check=True, timeout=30)
+        await asyncio.to_thread(_seam_restart, unit)
     except (OSError, subprocess.SubprocessError) as exc:
         raise PickDefaultError(f"restart failed: {exc}", details={"unit": unit}) from exc
     return {"unit": unit, "active": _unit_active(unit)}

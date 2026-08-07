@@ -114,6 +114,26 @@ def test_bank_id_with_invalid_chars_400(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "memory.invalid_bank"
 
 
+def test_colon_namespaced_bank_id_forwards(client: TestClient, recorder: _Recorder) -> None:
+    """Foreign agents mint colon-namespaced banks (``claude::mint``,
+    ``global:hal0``) directly on the shared engine; the admin surface must
+    browse them instead of 400ing (the "stats unavailable" bug)."""
+    for bank in ("claude::mint", "global:hal0", "private:claude"):
+        recorder.respond(
+            "GET", f"/v1/default/banks/{bank}/stats", 200, {"bank_id": bank, "total_nodes": 1}
+        )
+        r = client.get(f"/api/memory/banks/{bank}/stats")
+        assert r.status_code == 200, (bank, r.json())
+        assert r.json()["bank_id"] == bank
+        assert recorder.requests[-1]["path"] == f"/v1/default/banks/{bank}/stats"
+
+
+def test_leading_colon_bank_id_still_400(client: TestClient) -> None:
+    r = client.get("/api/memory/banks/:sneaky/stats")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "memory.invalid_bank"
+
+
 # ── forwarding: reads ──────────────────────────────────────────────────────────
 
 

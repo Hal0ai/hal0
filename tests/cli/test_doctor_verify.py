@@ -86,6 +86,16 @@ def test_check_memory_states() -> None:
     assert ok.status == "pass" and "3 bank" in ok.detail
 
 
+def test_check_memory_enabled_but_degraded_is_not_a_pass() -> None:
+    """#1543: memory ENABLED with no engine client = the pgvector fallback
+    after a lost boot race — must not render as a green 'disabled' PASS."""
+    degraded = dv.check_memory({"enabled": True, "engine": None})
+    assert degraded.status == "warn"
+    assert "degraded" in degraded.detail
+    # deliberate disabled config stays an honest pass
+    assert dv.check_memory({"enabled": False, "engine": None}).status == "pass"
+
+
 def test_service_checks_up_and_down() -> None:
     services = {
         "services": [

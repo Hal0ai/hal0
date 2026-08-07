@@ -44,9 +44,13 @@ router = APIRouter()
 
 log = logging.getLogger(__name__)
 
-#: Bank ids come from namespace_to_bank() (``private__<agent>``) or operator
-#: input — kebab/snake alphanumerics only, no dots (blocks path tricks).
-_BANK_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
+#: Bank ids come from namespace_to_bank() (``private__<agent>``), operator
+#: input, or foreign agents writing to the shared engine directly — e.g. the
+#: hindsight plugin's ``dynamicBankId`` mints ``claude::<project>`` and other
+#: stacks use ``global:hal0`` / ``private:claude``. Colons are legal in a URL
+#: path segment and carry no traversal risk, so they are allowed (after the
+#: first char); dots stay blocked (path tricks).
+_BANK_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_:-]{0,127}$")
 
 #: Sub-resource ids (documents, operations, entities, …) — UUIDs and slugs;
 #: dots allowed but never as a whole traversal segment.

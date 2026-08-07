@@ -218,3 +218,73 @@ def test_boot_ladder_engages_against_a_real_closed_port(
 
     assert isinstance(provider, PgVectorProvider)
     assert provider.degraded is True
+
+
+# ── #1613: the boot-degraded fallback must self-heal, closures included ──────
+
+
+class _FakeDegraded:
+    degraded = True
+
+    def marker(self) -> str:
+        return "degraded"
+
+
+class _FakeHealthy:
+    degraded = False
+
+    def marker(self) -> str:
+        return "healthy"
+
+
+def test_self_heal_swaps_delegate_for_every_captured_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hal0.memory as mem
+
+    shell = mem.SelfHealingMemoryProvider(_FakeDegraded(), _cfg("hindsight"))
+
+    # A consumer closing over the provider at create_app time — the shape of
+    # both MCP mounts and the in-process dispatcher. Must heal WITHOUT rebind.
+    captured = (lambda p: lambda: p.marker())(shell)
+
+    # Engine still down: heal fails, delegate unchanged.
+    monkeypatch.setattr(mem, "provider_from_config", lambda cfg: _FakeDegraded())
+    assert shell.try_heal() is False
+    assert captured() == "degraded"
+
+    # Engine back: one probe swaps the delegate; the closure sees it too.
+    monkeypatch.setattr(mem, "provider_from_config", lambda cfg: _FakeHealthy())
+    assert shell.try_heal() is True
+    assert shell.degraded is False
+    assert captured() == "healthy"
+    assert isinstance(shell.target, _FakeHealthy)
+
+
+def test_self_heal_is_a_noop_once_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hal0.memory as mem
+
+    shell = mem.SelfHealingMemoryProvider(_FakeHealthy(), _cfg("hindsight"))
+
+    def _boom(cfg: object) -> None:
+        raise AssertionError("re-probe must not run for a healthy delegate")
+
+    monkeypatch.setattr(mem, "provider_from_config", _boom)
+    assert shell.try_heal() is True
+
+
+def test_boot_degraded_result_wraps_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real ladder against a closed port, then heal via a patched factory —
+    proves the shell composes with the actual provider_from_config output."""
+    import hal0.memory as mem
+
+    monkeypatch.setenv("HAL0_HINDSIGHT_URL", _closed_port_url())
+    provider = provider_from_config(_cfg("hindsight"))
+    assert provider.degraded is True
+
+    shell = mem.SelfHealingMemoryProvider(provider, _cfg("hindsight"))
+    assert shell.degraded is True  # delegation before heal
+
+    monkeypatch.setattr(mem, "provider_from_config", lambda cfg: _FakeHealthy())
+    assert shell.try_heal() is True
+    assert shell.degraded is False

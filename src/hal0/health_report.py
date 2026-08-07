@@ -157,6 +157,20 @@ def check_memory(memory: dict[str, Any] | None) -> Check:
     if memory is None:
         return Check("memory", "Hindsight / banks", _WARN, "memory admin unreachable")
     if not isinstance(memory, dict) or memory.get("engine") is None:
+        # engine=None covers two very different states (#1543/#1613): memory
+        # deliberately disabled (enabled=False → an honest PASS) vs. memory
+        # ENABLED but running on the degraded in-memory fallback because
+        # hindsight lost the boot race. The latter used to render as
+        # "✔ PASS  disabled (no memory engine)" while hindsight-api was
+        # active — the checkmark operators read as "done".
+        if isinstance(memory, dict) and memory.get("enabled"):
+            return Check(
+                "memory",
+                "Hindsight / banks",
+                _WARN,
+                "memory enabled but engine degraded (pgvector fallback) — "
+                "waits for the self-heal re-probe, or restart hal0-api",
+            )
         return Check("memory", "Hindsight / banks", _PASS, "disabled (no memory engine)")
     if not memory.get("reachable"):
         return Check("memory", "Hindsight / banks", _WARN, "engine enabled but :9177 unreachable")
