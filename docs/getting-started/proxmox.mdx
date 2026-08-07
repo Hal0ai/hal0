@@ -1,0 +1,243 @@
+---
+title: Install on Proxmox
+description: Run hal0 on Proxmox VE — the unprivileged one-liner for CPU-only, and the full GPU/NPU passthrough recipe for AMD Strix Halo LXCs.
+sidebar:
+  order: 13
+---
+
+import { Steps, Aside, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Proxmox VE is a common host for hal0, especially on AMD Strix Halo (Ryzen
+AI Max+) hardware where an LXC shares the host kernel and the iGPU + XDNA
+NPU pass through as ordinary device nodes — no VM, no vGPU shim, near-native
+throughput. This guide covers the unprivileged quick-start script for
+CPU-only trials, the full GPU/NPU passthrough recipe, and running hal0 in
+a Proxmox VM instead of a container.
+
+## 1. Prepare the PVE host
+
+Everything the accelerators need lives on the **host kernel**, because an
+LXC shares it. See [GPU drivers and memory](/docs/getting-started/drivers/#kernel-and-firmware)
+for the `amdgpu`/`amdxdna` kernel and firmware requirements, and
+[Size the GTT pool](/docs/getting-started/drivers/#size-the-gtt-pool) for
+the GRUB parameters that raise the amdgpu GTT window — both are set on the
+**Proxmox host**, not inside the container.
+
+If you only want a CPU-only trial, skip straight to the quick path below;
+GTT sizing and driver checks only matter once you attach a GPU.
+
+## 2. Quick path: unprivileged CT, no GPU
+
+The fastest way to get hal0 running on Proxmox is the bundled installer
+script, run **on the Proxmox host**:
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
+```
+
+It creates an **unprivileged Debian 13** LXC (default CTID from
+`pvesh get /cluster/nextid`, 4 cores, 8 GB RAM, 20 GB disk — all
+overridable via env vars) and runs the standard hal0 bootstrap inside it.
+This path intentionally has **no GPU passthrough** — it's the generic,
+hardware-agnostic homelab case, CPU-only inference. For Strix Halo
+iGPU/NPU passthrough, use the recipe in the next section instead.
+
+<Aside type="tip">
+Pass `--advanced` to open `whiptail` prompts for CTID, hostname, cores,
+RAM, disk, storage, and bridge instead of accepting the defaults.
+</Aside>
+
+## 3. GPU/NPU passthrough CT
+
+To get the iGPU and XDNA NPU into a container, create the LXC yourself and
+forward the accelerator device nodes from the host (PVE 8.2+ `devN`
+syntax). A minimal, generic starting point:
+
+```sh
+pct create <CTID> local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
+  --unprivileged 1 --cores 4 --memory 8192 --rootfs local-lvm:20
+```
+
+(the quick-path script in §2 automates exactly this step, plus the
+hal0 bootstrap, in one command). This GPU/NPU passthrough recipe
+assumes an **unprivileged** CT — the `devN` gid-mapping mechanism below
+is designed for the unprivileged uid/gid shift; the AppArmor purge note
+later in this section applies only when you're migrating an older
+**privileged** CT onto this path.
+
+Append this to `/etc/pve/lxc/<CTID>.conf` on the host:
+
+```ini
+# /etc/pve/lxc/<CTID>.conf
+dev0: /dev/dri/renderD128,gid=<render gid INSIDE this container>
+dev1: /dev/kfd                    # ROCm compute (optional)
+dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)
+```
+
+Then apply it:
+
+```sh
+pct stop <CTID> && pct start <CTID>
+```
+
+<Aside type="caution" title="gid means the CONTAINER's gid, not the host's">
+The `gid=` value must be the render group's id **inside the container**,
+not on the host — the two gid spaces can disagree. See
+[Render-group gids](/docs/getting-started/drivers/#render-group-gids) for
+how to read the correct value with `stat -c %g` and why `getent group
+render` can silently resolve to the wrong group.
+</Aside>
+
+hal0's own preflight checks for exactly this device layout inside an LXC
+and prints the same `dev0`/`dev1`/`dev2` remedy if the nodes or gid mapping
+are missing or wrong — after installing hal0 inside the CT (§4 below),
+`hal0 doctor` will confirm the devices are visible.
+
+### PVE keyring sysctls
+
+Podman inside an LXC can fail to start a container with `crun: create
+keyring '…': Disk quota exceeded`, even with `nesting=1,keyctl=1` already
+set — that's the kernel's session-keyring byte quota, not a missing
+feature flag. Raise it **on the Proxmox host**:
+
+```sh
+sysctl -w kernel.keys.maxbytes=1000000 kernel.keys.maxkeys=1000
+```
+
+then re-run `install.sh` inside the container. Persist the values in
+`/etc/sysctl.d/` if you don't want to repeat this after a host reboot.
+
+### AppArmor
+
+GPU/NPU passthrough needs an unconfined AppArmor profile
+(`lxc.apparmor.profile: unconfined` in the container's `.conf`) for the
+container runtime to launch slots inside the LXC. If you previously ran a
+**privileged** container for this, purge that config when moving to the
+unprivileged CT this section assumes — an unconfined profile on a
+privileged container is a wider trust boundary than you need.
+
+### Unprivileged podman network fix
+
+Unprivileged podman-in-LXC has a known bridge-netns teardown race. If slots
+fail to start with network errors, set hal0 to render every slot with host
+networking instead of a bridge netns:
+
+```toml
+# /etc/hal0/hal0.toml
+[slots]
+network_mode = "host"
+```
+
+hal0 still fences each slot's process bind to loopback under
+`network_mode = "host"`, so this does not expose slot ports to the LAN.
+
+### Surface true host memory pressure (optional)
+
+Inside an LXC, hal0 only sees its own cgroup memory share — but the GPU's
+GTT pool is drawn from the same physical DIMMs every other tenant and the
+host kernel use. Give hal0 a **read-only** Proxmox API token so the
+dashboard's unified-memory bar shows real host pressure instead of
+pretending only this container's bytes exist.
+
+Create a read-only token in the Proxmox UI (Datacenter → Permissions →
+API Tokens, with `PVEAuditor` on `/`), then configure it via the dashboard
+Settings → Proxmox card, or write `/etc/hal0/proxmox.json` directly:
+
+```json
+{
+  "proxmox": { "host": "192.0.2.10", "port": 8006, "verify_ssl": false, "service": "PVE" },
+  "auth": { "user": "hal0@pve", "token_name": "readonly", "token_value": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" }
+}
+```
+
+hal0 polls `GET /cluster/resources` (cached 30 s) and surfaces host RAM
+total/used plus every running tenant's allocation. Non-Proxmox installs
+leave the file absent and the feature stays silent.
+
+## 4. Install hal0 in the CT
+
+Open a shell in the container and run the standard bootstrap:
+
+```sh
+pct enter <CTID>
+curl -fsSL https://hal0.dev/install.sh | bash
+```
+
+No `sudo` needed here — `pct enter` drops you in as root inside the
+container, and minimal CT templates often don't even have `sudo`
+installed.
+
+See [Install hal0](/docs/getting-started/install/) for the full sequence,
+every environment variable, and what the 16-step installer does. On a
+GPU/NPU passthrough CT, the hardware probe should now see the iGPU and NPU
+through the forwarded device nodes.
+
+## 5. FastFlowLM NPU trio
+
+On an apt-based CT with the NPU device nodes present, the installer's NPU
+prerequisites step handles the **FastFlowLM (FLM)** userspace automatically:
+it best-effort installs `libxrt-npu2` from the container's own configured
+apt sources, then fetches the pinned, SHA-256-verified FastFlowLM `.deb`
+matching the CT's distro (Debian 13 or Ubuntu 24.04/25.10/26.04) directly
+from FastFlowLM's GitHub releases — no third-party apt/PPA source is added.
+A single `flm serve` process backs the **NPU trio** — one chat model plus
+optional embedding and speech-to-text "passengers" sharing the NPU.
+
+Confirm the NPU runtime is reachable from inside the container:
+
+```sh
+flm validate       # → "flm validate ok — NPU runtime reachable"
+hal0 doctor        # re-runs preflight; hardware probe records the NPU
+```
+
+The seeded `npu` slot serves a chat model on port `8088`. The trio's
+embedding and STT passengers are **opt-in** — enable them per slot (the
+`asr` / `embed` keys on the slot's `[npu]` table) once the chat slot is
+loaded. See [Voice (STT/TTS)](/docs/guides/voice-stt-tts/) and
+[Slots](/docs/concepts/slots/) for the trio routing details.
+
+<Aside type="note">
+If `flm validate` reports the NPU is unreachable, re-check that
+`/dev/accel/accel0` is visible **inside** the container (`ls -l
+/dev/accel/`) and that `amdxdna` is loaded on the **host** kernel. The
+`.deb` ships only userspace — it never loads the kernel driver.
+</Aside>
+
+## 6. Verify
+
+```sh
+hal0 status                       # system + slot status
+systemctl status hal0-api         # control plane
+journalctl -fu hal0-api           # live logs
+```
+
+The API and dashboard listen on `http://<container-ip>:8080`; OpenWebUI on
+`:3001`.
+
+## Proxmox VM
+
+hal0 also auto-detects and supports running inside a **Proxmox VM**
+(`proxmox-kvm`), CPU-only. iGPU passthrough to a VM is not documented for
+1.0 — use an LXC for GPU/NPU acceleration instead. The dashboard's Proxmox
+panel (host memory pressure) also stays off inside a VM, since it depends
+on the LXC-specific cgroup-vs-host memory split described above.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Load your first model"
+    href="/docs/getting-started/first-model/"
+    description="Pull a model from Hugging Face and assign it to a slot."
+  />
+  <LinkCard
+    title="Strix Halo tuning"
+    href="/docs/concepts/strix-halo/"
+    description="Unified memory, the GTT pool, and the GPU arbiter."
+  />
+  <LinkCard
+    title="Manage slots"
+    href="/docs/guides/manage-slots/"
+    description="Edit drawers, profiles, and the MTP control."
+  />
+</CardGrid>
