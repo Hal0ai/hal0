@@ -12,7 +12,7 @@ import { useSlots } from '@/api/hooks/useSlots'
 
 // Bundled card art. Imported (not referenced from /public) so Vite fingerprints
 // them and they survive any base-path mount.
-import hermesArt from './assets/hermes.png'
+import hermesArt from './assets/hermes.webp'
 import piArt from './assets/pi-amber.png'
 import qwenArt from './assets/qwen-logo.svg'
 import opencodeArt from './assets/opencode-logo.svg'
