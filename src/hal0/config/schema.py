@@ -2001,7 +2001,7 @@ class SlotsConfig(BaseModel):
             "interfaces so raw slot ports are reachable directly over the LAN "
             "(e.g. ``http://<host>.local:<port>``); this EXPOSES inference "
             "endpoints on your network, bypassing the API/reverse-proxy front "
-            "door. A specific interface IP (e.g. ``10.0.1.142``) binds just that "
+            "door. A specific interface IP (e.g. ``192.0.2.10``) binds just that "
             "address. Applies on the next slot (re)start. Host-networked slots "
             "(``network_mode=host``) ignore this — port publishing is a no-op there."
         ),

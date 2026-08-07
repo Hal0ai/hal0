@@ -165,7 +165,7 @@ interface DashLayout {
 
 ## 5. Investigation spikes (BACKEND team spawns; findings ESCALATE to user via orchestrator)
 Each spike: confirm a REAL source exists, propose the exact endpoint + effort, report to orchestrator. Do NOT ship fake data.
-1. **Power/thermal** — probe `/sys/class/hwmon` on CT105 (10.0.1.142): does amdgpu expose `power1_average`,
+1. **Power/thermal** — probe `/sys/class/hwmon` on the target host: does amdgpu expose `power1_average`,
    k10temp temps, fan rpm? Propose `GET /api/stats/power`.
 2. **Scheduler (lemond)** — the survey said "external," but a `Dispatcher` lives in `app.state`. Confirm whether it
    exposes in-flight/queued/dispatch-history. Propose `GET /api/scheduler/status` if real.
