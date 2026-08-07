@@ -116,10 +116,11 @@ doesn't check the name against any upstream's declared env var — type the
 exact name your upstream expects.
 
 <Aside type="caution">
-There is no built-in authentication on the hal0 API (ADR-0012) — it binds
-to the LAN. The credential file is LAN-writable; treat the host as you
-would any secret-bearing service and reverse-proxy it if it needs to be
-exposed.
+The hal0 API ships with optional key auth (`hal0 auth status` /
+`hal0 auth require`): with auth off it binds LAN-open and the credential
+file is LAN-writable. Enable auth on any shared network — the secrets
+surface requires the admin key once it is on — and reverse-proxy the host
+if it needs to be exposed beyond the LAN.
 </Aside>
 
 ## Picking up changes
