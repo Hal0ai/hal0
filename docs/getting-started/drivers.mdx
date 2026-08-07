@@ -80,33 +80,47 @@ silently leaves the container unable to open it.
 
 ## Size the GTT pool
 
-{/* GTT-VERIFY: numbers pending hardware verification, Task B9 */}
 On Strix Halo the GPU's usable memory is the amdgpu **GTT** pool, carved
 from system RAM (unified memory). A model can only allocate up to the
-GTT cap, not the full RAM pool — so if GTT is left at its small default,
-large models won't fit even on a 128 GB box.
+GTT cap, not the full RAM pool.
 
-hal0 *measures* the live GTT cap and sizes its model recommendations
-against it, but it does **not** configure GTT for you. Set it on the
-host kernel command line. On a 128 GB Strix Halo, the reference values
-from hal0's profile-tuning work are:
+On **kernel ≥ 6.14**, amdgpu grows the GTT/GART limit dynamically — hal0
+reads the *live* pool size from `mem_info_gtt_total` on every request
+rather than trusting a boot-time snapshot, precisely because that limit
+can move (see `src/hal0/api/routes/hardware.py`). You generally don't
+need to pin anything; hal0 measures whatever the kernel currently
+reports and sizes its model recommendations against it.
+
+Pinning GTT/TTM parameters on the kernel command line is an operator
+choice, not a requirement — it reserves a large fixed pool up front
+instead of letting the kernel size it dynamically, which is useful if
+you want a guaranteed floor regardless of what else the host is doing.
+Here's a worked example from a 128 GB Strix Halo host that pins one:
 
 ```sh
-# /etc/default/grub — append to GRUB_CMDLINE_LINUX_DEFAULT, then update-grub && reboot
-amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856
+# /etc/default/grub — GRUB_CMDLINE_LINUX_DEFAULT on a 128 GB Strix Halo host
+iommu=pt amd_iommu=on amd_pstate=active amdgpu.gttsize=118784 \
+amdgpu.cwsr_enable=1 ttm.pages_limit=30408704 ttm.page_pool_size=30408704 \
+amdttm.pages_limit=30408704 amdttm.page_pool_size=30408704
 ```
 
 | Parameter | Value | Meaning |
 |---|---|---|
-| `amdgpu.gttsize` | `126976` | GTT window in **MiB** (≈ 124 GiB) |
-| `ttm.pages_limit` | `32505856` | TTM page cap in **4 KiB pages** (≈ 124 GiB — keep it equal to `gttsize`) |
-| `amd_iommu=off` | — | Disables the IOMMU; measured worth ~5–12% on this workload |
+| `amdgpu.gttsize` | `118784` | GTT window in **MiB** (116 GiB) |
+| `ttm.pages_limit` / `ttm.page_pool_size` | `30408704` | TTM page cap in **4 KiB pages** (116 GiB — keep equal to `gttsize`) |
+| `amdttm.pages_limit` / `amdttm.page_pool_size` | `30408704` | Same cap, duplicated for the `amdttm` module name used on some kernels |
+| `iommu=pt amd_iommu=on` | — | IOMMU passthrough mode, left **on** here (this host does not disable the IOMMU) |
+| `amd_pstate=active` | — | Active P-state driver for CPU frequency scaling |
+| `amdgpu.cwsr_enable=1` | — | Compute wave save/restore, needed for compute-queue preemption |
 
-`126976` MiB leaves only ~4 GB for the host on a 128 GB machine — fine
-for a dedicated inference box, aggressive if the host runs other
-tenants. Scale both numbers down together (they must stay equal) to
-reserve more host RAM. After rebooting, `cat /proc/cmdline` should show
-the params.
+On this host the pinned values leave 116 GiB of a 128 GB machine as the
+GTT pool; the observed live pool
+(`/sys/class/drm/renderD*/device/mem_info_gtt_total`) matched the pinned
+`gttsize`/`pages_limit` exactly. Treat these as a starting point, not a
+universal constant — scale `gttsize` and the `pages_limit`/
+`page_pool_size` pairs down together (they must stay equal) to reserve
+more host RAM for other tenants. After rebooting, `cat /proc/cmdline`
+should show the params.
 
 ## NVIDIA
 
