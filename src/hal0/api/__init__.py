@@ -1621,9 +1621,7 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     ctx.memory_reprobe_task = None
     _mem_provider = getattr(app.state, "memory_provider", None)
     if hasattr(_mem_provider, "try_heal"):
-        _reprobe_interval = float(
-            os.environ.get("HAL0_MEMORY_REPROBE_INTERVAL_S", "30") or "30"
-        )
+        _reprobe_interval = float(os.environ.get("HAL0_MEMORY_REPROBE_INTERVAL_S", "30") or "30")
 
         async def _memory_reprobe_loop(provider: Any = _mem_provider) -> None:
             while True:

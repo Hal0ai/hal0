@@ -246,7 +246,7 @@ def test_self_heal_swaps_delegate_for_every_captured_reference(
 
     # A consumer closing over the provider at create_app time — the shape of
     # both MCP mounts and the in-process dispatcher. Must heal WITHOUT rebind.
-    captured = (lambda p: (lambda: p.marker()))(shell)
+    captured = (lambda p: lambda: p.marker())(shell)
 
     # Engine still down: heal fails, delegate unchanged.
     monkeypatch.setattr(mem, "provider_from_config", lambda cfg: _FakeDegraded())
