@@ -1,10 +1,13 @@
 # Changelog
 
 All notable changes to hal0 are recorded here. The format loosely
-follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
-the project adheres to semver pre-1.0 caveats: minor releases (v0.1 →
-v0.2) may carry breaking changes; patch releases inside a minor line
-(v0.2.0 → v0.2.1) won't.
+follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+From **v1.0.0** the project follows semver proper: breaking changes land
+only in a major release, minor releases add functionality compatibly, and
+patch releases fix bugs. Tags before v1.0.0 carried the pre-1.0 caveat —
+a minor bump (v0.1 → v0.2) could break, a patch bump (v0.2.0 → v0.2.1)
+could not.
 
 Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
@@ -20,6 +23,38 @@ applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
 ## [Unreleased]
+
+## [1.0.0] — 2026-08-07
+
+### Highlights
+
+- **The whole platform is agent-reachable.** The admin MCP catalog went from 92 to 160 tools — services, ComfyUI, updater/doctor/health, hardware and request telemetry, slots and models long-tail, bench, activity, approvals, runner images, NPU load/unload — plus the full 26-tool memory surface (was 5) at feature parity with Hindsight 0.8.4.
+- **Slots start when you say so.** New `autoload` setting: binding a model no longer implies boot start. New eviction `priority` (0-100) replaces the inert `lru = true` opt-in, so memory-pressure eviction actually works on a stock box.
+- **Voice is a device-keyed switch.** Moonshine is back as the CPU STT engine in its own toolbox image; `cpu` runs Moonshine, `npu` runs whisper-v3:turbo, GPU resolves to no STT engine instead of silently taking a llama chat profile.
+- **Image Gen and Slots panes got their lifecycle right** — state-typed engine indicators, a Stop that drives the GPU arbiter back to inference mode, dropdown-driven runner image/binary selection, and a `GET /api/slots` path that no longer multiplies `podman inspect` fan-out on wide boxes.
+- **Documentation moved into this repo.** `docs/` is the source of truth and publishes to hal0.dev through a mirror workflow, with a restored, v1.0-reconciled `getting-started/` section.
+
+### Breaking
+
+- The experimental standalone browser MCP server
+  (`hal0.mcp.browser_server`, port 9178, `HAL0_BROWSER_*` env) is
+  removed. It was never mounted or registered as a bundled server, and
+  its shipped unit pointed at a retired path. Browser tooling is the
+  agent's own concern — Hermes brings its own.
+
+- The `lru = true` eviction opt-in is retired. Memory-pressure and
+  pre-load eviction used to only ever touch a slot that explicitly set
+  `lru = true`; now every non-pinned resident slot is a candidate,
+  ordered by the new `priority` field. The key is still accepted in slot
+  TOML but ignored, with a one-time deprecation warning — remove it and
+  use `priority`/`pinned` instead. Practically: on a stock box that never
+  set `lru = true` on anything, pressure and pre-load eviction go from
+  inert (nothing was ever eligible) to ACTIVE the moment host memory gets
+  tight. Also note `idle_timeout_s = 0` never exempted a slot from
+  pressure or pre-load eviction — it only ever disabled that one slot's
+  idle-TTL path — and that distinction now matters more than it used to.
+  `pinned` (plus the built-in `agent`/`utility`/`npu` anchors) is the only
+  exemption from pressure and pre-load eviction.
 
 ### Added
 
@@ -53,37 +88,6 @@ applying. Add those subsections to a version's section to surface them; see
   Hermes config carries `Authorization` whenever the box requires
   auth). A 401 now fails doctor with the repair command instead of
   silently breaking every agent.
-
-### Fixed
-
-- Hermes bootstrap MCP wiring actually works now: the seed TOML never
-  declared the builtin `[mcp.servers.*]` blocks so the allow-list
-  silently skipped wiring both servers, and the post-wire live probe
-  double-appended `/mcp` and 404ed — together the provisioning-time
-  handshake had never succeeded. Bootstrap also injects
-  `HAL0_MCP_TOKEN` (0600) into the agent driver env and renders
-  `Authorization: Bearer` into the Hermes MCP client config whenever
-  the box has auth enabled, and refreshes it on `--repair` after a key
-  rotation.
-
-### Breaking
-
-- The experimental standalone browser MCP server
-  (`hal0.mcp.browser_server`, port 9178, `HAL0_BROWSER_*` env) is
-  removed. It was never mounted or registered as a bundled server, and
-  its shipped unit pointed at a retired path. Browser tooling is the
-  agent's own concern — Hermes brings its own.
-
-### Security
-
-- The `/mcp/memory` mount is now CLIENT-tier (was ADMIN): memory-only
-  agents no longer need the platform-admin key; the fail-closed
-  namespace ACL and the operator-approval gate on destructive tools
-  bound its blast radius. `/mcp/admin` and any future `/mcp/*` mount
-  remain ADMIN. Docs that still claimed "no built-in network auth"
-  (pre-KB-1) are corrected everywhere.
-
-### Added
 
 - Memory MCP surface brought to feature parity with the live Hindsight
   0.8.4 server: `memory_reflect` (LLM-backed synthesis over memory),
@@ -122,16 +126,12 @@ applying. Add those subsections to a version's section to surface them; see
   since `whisper.cpp` never shipped as a standalone CPU service. See
   [`docs/adr/0001-moonshine-cpu-stt-reinstatement.md`](docs/adr/0001-moonshine-cpu-stt-reinstatement.md).
 
-### Added
-
 - Image Gen pane: proper engine lifecycle controls and running indicators.
   The header pill is state-typed off the live engine (stopped / starting /
   running / generating·% / error) with matching colors, and a Stop button
   appears while the engine is up — it drives the GPU-arbiter switchover
   back to inference mode (restoring the LLM slots) and then unloads the img
   slot so the container actually goes down. Start/Restart/Logs unchanged.
-
-### Added
 
 - Slots: explicit `autoload` setting — a slot starts at boot only when
   `autoload = true` (slot drawer toggle). Binding a model no longer
@@ -142,23 +142,31 @@ applying. Add those subsections to a version's section to surface them; see
   (least-recently-used as the tie-break within a tier). `pinned` still
   exempts a slot entirely.
 
-### Breaking
+### Changed
 
-- The `lru = true` eviction opt-in is retired. Memory-pressure and
-  pre-load eviction used to only ever touch a slot that explicitly set
-  `lru = true`; now every non-pinned resident slot is a candidate,
-  ordered by the new `priority` field. The key is still accepted in slot
-  TOML but ignored, with a one-time deprecation warning — remove it and
-  use `priority`/`pinned` instead. Practically: on a stock box that never
-  set `lru = true` on anything, pressure and pre-load eviction go from
-  inert (nothing was ever eligible) to ACTIVE the moment host memory gets
-  tight. Also note `idle_timeout_s = 0` never exempted a slot from
-  pressure or pre-load eviction — it only ever disabled that one slot's
-  idle-TTL path — and that distinction now matters more than it used to.
-  `pinned` (plus the built-in `agent`/`utility`/`npu` anchors) is the only
-  exemption from pressure and pre-load eviction.
+- Slot drawer: the Profile field moved into the Model group, directly under
+  the model select (it rides the model choice). NPU slots keep a standalone
+  Profile group since the capability matrix replaces the Model group there.
+
+- Slot drawer: the Runner Image field is a dropdown of the runner-image
+  catalog (the same registry the Runtimes page shows) instead of a free-text
+  input; a "Custom image ref…" option keeps the debug/A-B/rollback escape
+  hatch. Picking an image repopulates the Runner Binary dropdown with the
+  binaries that image ships — dual-binary images (e.g. the shared
+  ROCm/Vulkan image) offer both, single-binary images hop the selection to
+  their sole binary.
 
 ### Fixed
+
+- Hermes bootstrap MCP wiring actually works now: the seed TOML never
+  declared the builtin `[mcp.servers.*]` blocks so the allow-list
+  silently skipped wiring both servers, and the post-wire live probe
+  double-appended `/mcp` and 404ed — together the provisioning-time
+  handshake had never succeeded. Bootstrap also injects
+  `HAL0_MCP_TOKEN` (0600) into the agent driver env and renders
+  `Authorization: Bearer` into the Hermes MCP client config whenever
+  the box has auth enabled, and refreshes it on `--repair` after a key
+  rotation.
 
 - ComfyUI img slot reliability: the provider now creates its bind-mount
   data dirs before spawn (a missing tree crash-looped the container with
@@ -189,19 +197,23 @@ applying. Add those subsections to a version's section to surface them; see
   fresh installs launch with `--chat-template-file` instead of the broken
   embedded template.
 
-### Changed
+### Known Issues
 
-- Slot drawer: the Profile field moved into the Model group, directly under
-  the model select (it rides the model choice). NPU slots keep a standalone
-  Profile group since the capability matrix replaces the Model group there.
+These carry forward from `1.0.0-rc.1` and all concern **upgrading from 0.9.8**,
+which is the path most existing boxes take into 1.0.
 
-- Slot drawer: the Runner Image field is a dropdown of the runner-image
-  catalog (the same registry the Runtimes page shows) instead of a free-text
-  input; a "Custom image ref…" option keeps the debug/A-B/rollback escape
-  hatch. Picking an image repopulates the Runner Binary dropdown with the
-  binaries that image ships — dual-binary images (e.g. the shared
-  ROCm/Vulkan image) offer both, single-binary images hop the selection to
-  their sole binary.
+- **The profile-catalog reset does not fire during the 0.9.8 → 1.0 update itself** (#1585, still open). The update's commit phase runs inside the *old* (0.9.8) daemon, which predates the reset — so an upgraded box keeps its `profiles.toml` and `meta.schema_version = 1` until the **next** update applied by v1.0 code. Nothing is lost (the reset is biased against deletion), but `hal0 update` on such a box reports "nothing to apply" without mentioning the outstanding reset.
+- **Updating *from* 0.9.8 ends with a spurious error from the old client.** The 0.9.8 CLI polls job status through the API it is restarting, treats the mid-restart connection refusal as fatal, and exits 1 after the update has in fact applied. The fix (#1540) ships in the v1.0 CLI, but the client driving a 0.9.8 → 1.0 update is by definition the old one. Verify the real outcome with `hal0 --version` and `curl /api/health`.
+- **First-boot installs can lose the dpkg lock race to `unattended-upgrades`** (#1584, still open) — the hermes-agent provisioning step degrades gracefully with a remediation line (`hal0 agent install hermes`) rather than failing the install.
+
+### Security
+
+- The `/mcp/memory` mount is now CLIENT-tier (was ADMIN): memory-only
+  agents no longer need the platform-admin key; the fail-closed
+  namespace ACL and the operator-approval gate on destructive tools
+  bound its blast radius. `/mcp/admin` and any future `/mcp/*` mount
+  remain ADMIN. Docs that still claimed "no built-in network auth"
+  (pre-KB-1) are corrected everywhere.
 
 ## [1.0.0-rc.1] — 2026-08-01 (R5 · the rework release)
 
