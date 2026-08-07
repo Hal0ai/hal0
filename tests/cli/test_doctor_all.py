@@ -297,6 +297,154 @@ def test_stt_weights_profile_absent_passes(monkeypatch: pytest.MonkeyPatch) -> N
     assert c.status == "pass"
 
 
+# ── check_mcp_mounts ────────────────────────────────────────────────────────
+
+
+def test_mcp_mounts_pass_when_both_answer_with_tools() -> None:
+    c = da.check_mcp_mounts(
+        {
+            "hal0-admin": {"ok": True, "tools": ["slot_list", "model_list"], "error": None},
+            "hal0-memory": {"ok": True, "tools": ["memory_add"], "error": None},
+        }
+    )
+    assert c.status == "pass" and c.key == "mcp_mounts"
+    assert "hal0-admin=2" in c.detail and "hal0-memory=1" in c.detail
+
+
+def test_mcp_mounts_401_names_the_repair_command() -> None:
+    c = da.check_mcp_mounts(
+        {
+            "hal0-admin": {"ok": False, "tools": [], "error": "HTTP Error 401: Unauthorized"},
+            "hal0-memory": {"ok": True, "tools": ["memory_add"], "error": None},
+        }
+    )
+    assert c.status == "fail"
+    assert "hal0-admin" in c.detail
+    assert "hal0 agent bootstrap hermes --repair" in c.detail
+
+
+def test_mcp_mounts_generic_transport_failure_surfaces_raw_error() -> None:
+    c = da.check_mcp_mounts(
+        {
+            "hal0-admin": {"ok": False, "tools": [], "error": "connection refused"},
+            "hal0-memory": {"ok": True, "tools": ["memory_add"], "error": None},
+        }
+    )
+    assert c.status == "fail"
+    assert "connection refused" in c.detail
+    # Non-auth failures don't get the repair-command red herring.
+    assert "--repair" not in c.detail
+
+
+def test_mcp_mounts_zero_tools_is_a_failure() -> None:
+    c = da.check_mcp_mounts(
+        {
+            "hal0-admin": {"ok": True, "tools": [], "error": None},
+            "hal0-memory": {"ok": True, "tools": ["memory_add"], "error": None},
+        }
+    )
+    assert c.status == "fail"
+    assert "zero tools" in c.detail
+
+
+def test_probe_builtin_mcp_mounts_hits_both_mount_roots() -> None:
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    def _fake_probe(url: str, **kw: object) -> dict[str, object]:
+        seen.append((url, kw))
+        return {"ok": True, "tools": ["t"], "error": None}
+
+    rows = da.probe_builtin_mcp_mounts(probe=_fake_probe)
+    assert set(rows) == {"hal0-admin", "hal0-memory"}
+    urls = {u for u, _ in seen}
+    assert urls == {"http://127.0.0.1:8080/mcp/admin", "http://127.0.0.1:8080/mcp/memory"}
+    memory_kw = next(kw for u, kw in seen if u.endswith("/mcp/memory"))
+    assert memory_kw["private"] is True
+
+
+# ── check_hermes_mcp_config_auth ────────────────────────────────────────────
+
+
+def test_hermes_mcp_auth_passes_when_not_provisioned(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    c = da.check_hermes_mcp_config_auth(
+        auth={"auth_required": True}, config_path=tmp_path / "config.yaml"
+    )
+    assert c.status == "pass"
+    assert "not provisioned" in c.detail
+
+
+def test_hermes_mcp_auth_passes_when_auth_not_required(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mcp_servers:\n  hal0-admin:\n    headers: {}\n")
+    c = da.check_hermes_mcp_config_auth(auth={"auth_required": False}, config_path=cfg)
+    assert c.status == "pass"
+    assert "not required" in c.detail
+
+
+def test_hermes_mcp_auth_fails_when_bearer_missing(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "mcp_servers:\n"
+        "  hal0-admin:\n"
+        "    headers:\n"
+        "      X-hal0-Agent: hermes\n"
+        "  hal0-memory:\n"
+        "    headers:\n"
+        "      X-hal0-Agent: hermes\n"
+    )
+    c = da.check_hermes_mcp_config_auth(auth={"auth_required": True}, config_path=cfg)
+    assert c.status == "fail"
+    assert "hal0-admin" in c.detail and "hal0-memory" in c.detail
+    assert "hal0 agent bootstrap hermes --repair" in c.detail
+
+
+def test_hermes_mcp_auth_passes_when_bearer_present(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "mcp_servers:\n"
+        "  hal0-admin:\n"
+        "    headers:\n"
+        "      Authorization: Bearer some-key\n"
+        "  hal0-memory:\n"
+        "    headers:\n"
+        "      Authorization: Bearer some-key\n"
+    )
+    c = da.check_hermes_mcp_config_auth(auth={"auth_required": True}, config_path=cfg)
+    assert c.status == "pass"
+
+
+def test_hermes_mcp_auth_partial_bearer_is_named(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Only hal0-memory drifted (e.g. added by hand after a stale repair) —
+    the missing-list must name exactly the offender, not both."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "mcp_servers:\n"
+        "  hal0-admin:\n"
+        "    headers:\n"
+        "      Authorization: Bearer some-key\n"
+        "  hal0-memory:\n"
+        "    headers:\n"
+        "      X-hal0-Agent: hermes\n"
+    )
+    c = da.check_hermes_mcp_config_auth(auth={"auth_required": True}, config_path=cfg)
+    assert c.status == "fail"
+    assert "hal0-memory" in c.detail
+    assert "hal0-admin" not in c.detail
+
+
+def test_hermes_mcp_auth_warns_on_unreadable_config(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mcp_servers: {}\n")
+
+    def _boom(_p):
+        raise OSError("permission denied")
+
+    c = da.check_hermes_mcp_config_auth(
+        auth={"auth_required": True}, config_path=cfg, read_text=_boom
+    )
+    assert c.status == "warn"
+
+
 # ── build_all_checks orchestration ────────────────────────────────────────────
 
 
@@ -339,11 +487,20 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
     # via the provider helper; neutralise it so this composition test asserts
     # the row list, not the host's staged-weights state.
     monkeypatch.setattr("hal0.providers.moonshine.check_moonshine_weights", lambda _p: None)
+    # MCP mount rows would otherwise dial the real loopback API / read the
+    # real host config.yaml — neutralise both so this composition test
+    # asserts the row list, not live network or host state.
+    monkeypatch.setattr(da, "probe_builtin_mcp_mounts", lambda probe=None: {})
+    monkeypatch.setattr(
+        da,
+        "check_hermes_mcp_config_auth",
+        lambda **_kw: Check("hermes_mcp_auth", "Hermes MCP config auth", "pass", "stubbed"),
+    )
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 8 extras.
-    assert keys[-8:] == [
+    # 7 verify rows + 10 extras.
+    assert keys[-10:] == [
         "auth",
         "models",
         "migrations",
@@ -352,6 +509,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "secret-modes",
         "stt-weights",
         "seams",
+        "mcp_mounts",
+        "hermes_mcp_auth",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
