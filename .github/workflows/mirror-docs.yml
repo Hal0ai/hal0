@@ -1,0 +1,83 @@
+# Mirror hal0/docs/<published sections> → Hal0ai/hal0-web:src/content/docs/docs/
+# whenever user docs change on main. hal0/docs/ is the source of truth;
+# the website copy is generated. Allowlist semantics: only the sections
+# listed below are ever written or deleted on the web side.
+#
+# Setup (one-time):
+#   1. Create a fine-grained PAT scoped to Hal0ai/hal0-web with
+#      `Contents: Read and write`.
+#   2. Add it to this repo's Actions secrets as `HALO_WEB_MIRROR_TOKEN`.
+#
+# What syncs:
+#   docs/<section>/**  →  hal0-web/src/content/docs/docs/<section>/
+#   for section in: getting-started concepts guides operate reference
+#   - .mdx/.md copied verbatim (Starlight component imports preserved).
+#   - A section missing in hal0 is skipped, never deleted on the web side.
+#   - Nothing else in hal0-web is touched (blog/, marketing, alpha-docs/).
+
+name: mirror-docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/getting-started/**"
+      - "docs/concepts/**"
+      - "docs/guides/**"
+      - "docs/operate/**"
+      - "docs/reference/**"
+      - ".github/workflows/mirror-docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: mirror-docs
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hal0 (source)
+        uses: actions/checkout@v4
+        with:
+          path: hal0
+
+      - name: Checkout Hal0ai/hal0-web (target)
+        uses: actions/checkout@v4
+        with:
+          repository: Hal0ai/hal0-web
+          token: ${{ secrets.HALO_WEB_MIRROR_TOKEN }}
+          path: hal0-web
+
+      - name: Sync published sections
+        run: |
+          for section in getting-started concepts guides operate reference; do
+            if [ -d "hal0/docs/${section}" ]; then
+              rsync -av --delete \
+                "hal0/docs/${section}/" \
+                "hal0-web/src/content/docs/docs/${section}/"
+            else
+              echo "Section ${section} absent in hal0/docs — skipped."
+            fi
+          done
+
+      - name: Commit + push
+        working-directory: hal0-web
+        run: |
+          git config user.name  "hal0-docs-mirror[bot]"
+          git config user.email "hal0-docs-mirror@users.noreply.github.com"
+
+          if [ -z "$(git status --porcelain src/content/docs/docs/)" ]; then
+            echo "No doc changes after sync. Nothing to push."
+            exit 0
+          fi
+
+          source_sha="${{ github.sha }}"
+          source_short="${source_sha:0:7}"
+          git add src/content/docs/docs/
+          git commit -m "docs: mirror from hal0@${source_short}
+
+          Auto-synced from Hal0ai/hal0 commit ${source_sha}.
+          See .github/workflows/mirror-docs.yml in hal0."
+
+          git push origin HEAD:master
