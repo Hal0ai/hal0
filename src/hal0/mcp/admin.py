@@ -61,7 +61,10 @@ Autonomous read::
     # Host-introspection probes (issue #237)
     gpu_target_version, npu_status, env_report, model_store_probe,
     # Memory reads — readOnly per their MCP annotations (moved out of
-    # autonomous-write in the §4.3 buildout; they never mutate state)
+    # autonomous-write in the §4.3 buildout; they never mutate state).
+    # memory_reflect/history/mental_model_{list,get}/directive_{list,get}/
+    # operation_{list,get}/tags_list/bank_stats are the Hindsight 0.8.4
+    # parity buildout's other 10 reads — see TOOL_DESCRIPTIONS.
     memory_search, memory_list, memory_recall
 
 Autonomous write::
@@ -72,7 +75,14 @@ Autonomous write::
     slot_load, slot_unload, slot_edit, slot_set_defaults,
     settings_reload,
     memory_add,
-    memory_delete (single id, default/own-namespace dataset only)
+    memory_delete (single id, default/own-namespace dataset only),
+    # Hindsight 0.8.4 parity buildout's other 9 writes — reversible,
+    # non-destructive (curate/mental-model/directive CRUD minus delete,
+    # operation cancel/retry, bank consolidate) — see TOOL_DESCRIPTIONS.
+    memory_curate, memory_mental_model_create, memory_mental_model_update,
+    memory_mental_model_refresh, memory_directive_create,
+    memory_directive_update, memory_operation_cancel, memory_operation_retry,
+    memory_bank_consolidate
 
 Gated (destructive — enqueued for owner approval)::
 
@@ -81,6 +91,7 @@ Gated (destructive — enqueued for owner approval)::
     slot_create, slot_delete, slot_restart, slot_rename,
     capability_set, config_write, provider_credential_write,
     memory_delete (bulk ids, OR a list/foreign-namespace dataset — #8),
+    memory_mental_model_delete, memory_directive_delete,
     # Profile CRUD (create/update/import/delete)
     profile_create, profile_update, profile_import, profile_delete,
     # Stack CRUD (create/update/apply/import/export/snapshot/delete)
@@ -94,11 +105,30 @@ Gated (destructive — enqueued for owner approval)::
     # Journald surfaces gated for security (MED-1)
     logs_tail, slot_logs
 
-The memory_* tools are delegates that forward into
-:mod:`hal0.mcp.memory` so we have a single tool surface per server
-(the admin server hosts every tool an agent might call; the memory
-server is a focused alternative mount that an agent can use when it
-only needs memory access).
+Platform-management expansion
+------------------------------
+
+The lists above are the original ADR-0004 §4 catalog; a later buildout
+widened coverage to every major management domain: services, ComfyUI,
+updater/doctor/health/features/metrics (reads only), hardware/telemetry,
+the slots/models/benchmarks long-tails, journal/activity, approvals
+(read-only), runner images, backends (incl. dynamic NPU slots), MCP
+self-management, and profile_generate. Rather than hand-duplicate ~65
+more tool names here (guaranteed to drift), see :data:`TOOL_DESCRIPTIONS`
+for the single source of truth, or grep this module for "Platform-
+management expansion" section markers in each table below.
+
+The memory_* tools (26 total — the original 5 plus the Hindsight 0.8.4
+parity buildout's reflect/curate/history, mental-model CRUD+refresh,
+directive CRUD, operation list/get/cancel/retry, and tags/bank-stats/
+bank-consolidate) are delegates that forward into :mod:`hal0.mcp.memory`
+so we have a single tool surface per server (the admin server hosts
+every tool an agent might call; the memory server is a focused
+alternative mount that an agent can use when it only needs memory
+access). Descriptions and ToolAnnotations for all 26 are owned by
+:mod:`hal0.mcp.memory` and imported verbatim (``_MEMORY_TOOL_ANNOTATIONS``)
+rather than hand-copied — only the read/write/gated classification and
+the agent-facing :data:`TOOL_DESCRIPTIONS` summaries live here.
 
 Deliberate exclusions
 ----------------------
@@ -145,6 +175,7 @@ import structlog
 
 from hal0.api._redact import redact_log_line as _redact_log_line
 from hal0.mcp.approval_queue import ApprovalQueue
+from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 from hal0.memory.namespace import is_known_namespace
 
@@ -186,6 +217,10 @@ _LIST_TOOL_WRAP_KEY: dict[str, str] = {
     "slot_list": "slots",
     "provider_list": "providers",
     "upstream_list": "upstreams",
+    # GET /api/runner-images/pulls/list -> list[dict] (all pull jobs).
+    "runner_image_pulls": "pulls",
+    # GET /api/backends -> list[dict] (one row per available backend).
+    "backend_list": "backends",
 }
 
 
@@ -326,6 +361,80 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "memory_search",
         "memory_list",
         "memory_recall",
+        # Memory — Hindsight 0.8.4 parity buildout (26-tool catalog). These
+        # 10 are read-only per hal0.mcp.memory's own ToolAnnotations
+        # (imported verbatim as _MEMORY_TOOL_ANNOTATIONS below).
+        "memory_reflect",
+        "memory_history",
+        "memory_mental_model_list",
+        "memory_mental_model_get",
+        "memory_directive_list",
+        "memory_directive_get",
+        "memory_operation_list",
+        "memory_operation_get",
+        "memory_tags_list",
+        "memory_bank_stats",
+        # Services
+        "service_list",
+        "service_health",
+        # ComfyUI
+        "comfyui_status",
+        "comfyui_workflows",
+        # Updater / doctor / health / features / metrics
+        "updater_state",
+        "updater_check",
+        "updater_channel_get",
+        "updater_slot_drift",
+        "updater_job_status",
+        "doctor_report",
+        "health_system",
+        "feature_list",
+        "metrics_snapshot",
+        # Hardware / telemetry
+        "hardware_snapshot",
+        "slot_stats",
+        "stats_overview",
+        "request_metrics",
+        "system_stats",
+        "power_stats",
+        "throughput_history",
+        "npu_occupancy",
+        "npu_swap_status",
+        "model_health_check",
+        # Slots long-tail
+        "slot_config",
+        "slot_voices",
+        "flm_model_list",
+        "slot_pull_status",
+        # Models long-tail. model_validate is a pure dry-run screen (never
+        # writes — confirmed against models.py:427's implementation).
+        "model_validate",
+        "hf_search",
+        "model_config_read",
+        # Benchmarks long-tail
+        "bench_roster",
+        "bench_plan",
+        "bench_cells",
+        "bench_history",
+        "bench_evals",
+        # Journal / activity
+        "journal_snapshot",
+        "activity_list",
+        "activity_export",
+        # Approvals — list only; approve/deny are excluded (operator-only).
+        "approval_list",
+        # Runner images / backends
+        "runner_image_list",
+        "runner_image_downloaded",
+        "runner_image_pulls",
+        "backend_list",
+        "backend_detail",
+        # MCP self-management
+        "mcp_server_list",
+        "mcp_client_list",
+        "mcp_catalog",
+        # Profiles — read-shaped POST (compute-only, like model_inspect).
+        "profile_generate",
     }
 )
 
@@ -370,6 +479,21 @@ AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
         # dataset gate. The dispatch helper applies that rule at call
         # time (see is_gated, #8).
         "memory_delete",
+        # Memory — Hindsight 0.8.4 parity buildout: mutating, reversible
+        # writes. memory_mental_model_delete/memory_directive_delete are
+        # destructive and live in GATED_TOOLS instead (below).
+        "memory_curate",
+        "memory_mental_model_create",
+        "memory_mental_model_update",
+        "memory_mental_model_refresh",
+        "memory_directive_create",
+        "memory_directive_update",
+        "memory_operation_cancel",
+        "memory_operation_retry",
+        "memory_bank_consolidate",
+        # Live hardware re-probe — reversible, scoped, persists to
+        # /etc/hal0/hardware.json (same blast radius as model_scan).
+        "hardware_reprobe",
     }
 )
 
@@ -432,6 +556,50 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "upstream_delete",
         # memory_delete with len(ids) > 1, or a list/foreign-namespace
         # dataset even for a single id, routes here at call time (#8).
+        # Memory — mental-model/directive deletion is destructive, same
+        # tier as memory_delete's bulk path. hal0.mcp.memory carried these
+        # in its own _LOCAL_GATED_TOOLS fallback (its module docstring
+        # #1302) pending this catalog picking up the classification —
+        # this is that follow-up; admin.is_gated is now the single owner.
+        "memory_mental_model_delete",
+        "memory_directive_delete",
+        # Services — start/stop/restart a systemd unit; destructive-adjacent.
+        "service_action",
+        # ComfyUI — mode flips, model downloads, render cancel, container
+        # restart, prompt submission. comfyui_logs joins logs_tail/slot_logs
+        # under the MED-1 journald-secret precedent (redacted the same way).
+        "comfyui_switchover",
+        "comfyui_pin",
+        "comfyui_models_fetch",
+        "comfyui_render_cancel",
+        "comfyui_restart",
+        "comfyui_workflow_launch",
+        "comfyui_logs",
+        # Container image pull for a slot — open-world network fetch, same
+        # gating tier as model_pull.
+        "slot_pull_image",
+        # Full [models] config-section overwrite.
+        "model_config_write",
+        # Enqueues a benchmark suite run (back-compat POST /run wrapper
+        # around bench_enqueue) — same tier as bench_enqueue.
+        "bench_run",
+        # Runner-image discovery pass — reaches GHCR.
+        "runner_image_sync",
+        # Dynamic NPU slot lifecycle — creates/loads or unloads+deletes a
+        # slot outright.
+        "npu_backend_load",
+        "npu_backend_unload",
+        # MCP self-management writes — install/uninstall/config-patch/action
+        # on OTHER MCP servers this box hosts.
+        "mcp_server_install",
+        "mcp_server_uninstall",
+        "mcp_server_config_write",
+        "mcp_server_action",
+        # Server audit-row tail — may echo prior tool-call args (including a
+        # provider_credential_write's raw value before any redaction pass
+        # exists for this surface). Gated pending its own MED-1-style
+        # redactor, mirroring logs_tail/slot_logs/comfyui_logs.
+        "mcp_server_logs",
     }
 )
 
@@ -560,6 +728,100 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "PATCH:/api/upstreams/{name}": ("upstream_update",),
     "DELETE:/api/upstreams/{name}": ("upstream_delete",),
     "POST:/api/upstreams/{name}/test": ("upstream_test",),
+    # ── Services (platform-management expansion) ───────────────────────────
+    "GET:/api/services": ("service_list",),
+    "GET:/api/services/health": ("service_health",),
+    "POST:/api/services/{service_id}/action": ("service_action",),
+    # ── ComfyUI ──────────────────────────────────────────────────────────────
+    "GET:/api/comfyui/status": ("comfyui_status",),
+    "GET:/api/comfyui/workflows": ("comfyui_workflows",),
+    "GET:/api/comfyui/logs": ("comfyui_logs",),
+    "POST:/api/comfyui/switchover": ("comfyui_switchover",),
+    "POST:/api/comfyui/pin": ("comfyui_pin",),
+    "POST:/api/comfyui/models/fetch": ("comfyui_models_fetch",),
+    "POST:/api/comfyui/render/cancel": ("comfyui_render_cancel",),
+    "POST:/api/comfyui/restart": ("comfyui_restart",),
+    "POST:/api/comfyui/workflows/{name}/launch": ("comfyui_workflow_launch",),
+    # comfyui_preview (GET /api/comfyui/preview) deliberately NOT aliased — it
+    # proxies raw image bytes (a PNG Response), not JSON; _call_rest assumes a
+    # JSON body and would hand the agent mangled/undecodable "text".
+    # ── Updater / doctor / health / features / metrics — READS ONLY. The
+    # apply/commit/rollback/prepare/restart-slots/channel-PUT routes stay
+    # unaliased (see EXCLUDED_TOOLS["updater_apply"]). ───────────────────────
+    "GET:/api/updates/state": ("updater_state",),
+    "GET:/api/updates/check": ("updater_check",),
+    "GET:/api/updates/channel": ("updater_channel_get",),
+    "GET:/api/updates/slot-drift": ("updater_slot_drift",),
+    "GET:/api/updates/status/{job_id}": ("updater_job_status",),
+    "GET:/api/doctor": ("doctor_report",),
+    "GET:/api/health/system": ("health_system",),
+    "GET:/api/features": ("feature_list",),
+    "GET:/api/metrics": ("metrics_snapshot",),
+    # ── Hardware / telemetry ───────────────────────────────────────────────
+    "GET:/api/hardware": ("hardware_snapshot",),
+    "POST:/api/hardware/probe": ("hardware_reprobe",),
+    "GET:/api/stats/slots": ("slot_stats",),
+    "GET:/api/stats": ("stats_overview",),
+    "GET:/api/stats/requests": ("request_metrics",),
+    "GET:/api/system-stats": ("system_stats",),
+    "GET:/api/stats/power": ("power_stats",),
+    "GET:/api/stats/throughput/history": ("throughput_history",),
+    "GET:/api/npu/occupancy": ("npu_occupancy",),
+    "GET:/api/npu/swap-status": ("npu_swap_status",),
+    "GET:/api/models/health": ("model_health_check",),
+    # ── Slots long-tail ──────────────────────────────────────────────────────
+    "GET:/api/slots/{name}/config": ("slot_config",),
+    "GET:/api/slots/{name}/voices": ("slot_voices",),
+    "GET:/api/slots/flm/models": ("flm_model_list",),
+    "POST:/api/slots/{name}/pull": ("slot_pull_image",),
+    "GET:/api/slots/{name}/pull/status": ("slot_pull_status",),
+    # ── Models long-tail ─────────────────────────────────────────────────────
+    "POST:/api/models/validate": ("model_validate",),
+    "GET:/api/hf/search": ("hf_search",),
+    "GET:/api/config/models": ("model_config_read",),
+    "PUT:/api/config/models": ("model_config_write",),
+    # profile_generate — compute-only POST (builds a draft profile + warnings
+    # from a model_id/hf_repo, persists nothing), classified AUTONOMOUS_READ
+    # like model_inspect's read-shaped-POST treatment.
+    "POST:/api/profiles/generate": ("profile_generate",),
+    # ── Benchmarks long-tail ─────────────────────────────────────────────────
+    "GET:/api/benchmarks/roster": ("bench_roster",),
+    "GET:/api/benchmarks/plan": ("bench_plan",),
+    "GET:/api/benchmarks/cells": ("bench_cells",),
+    "GET:/api/benchmarks/history": ("bench_history",),
+    "GET:/api/benchmarks/evals": ("bench_evals",),
+    "POST:/api/benchmarks/run": ("bench_run",),
+    # ── Journal / activity ───────────────────────────────────────────────────
+    "GET:/api/journal": ("journal_snapshot",),
+    "GET:/api/activity": ("activity_list",),
+    "GET:/api/activity/export": ("activity_export",),
+    # ── Approvals — READ ONLY. approve/deny stay operator-only, see
+    # EXCLUDED_TOOLS["approval_approve"/"approval_deny"]. ────────────────────
+    "GET:/api/agent/approvals": ("approval_list",),
+    # ── Runner images / backends / NPU dynamic slots ─────────────────────────
+    "GET:/api/runner-images": ("runner_image_list",),
+    "GET:/api/runner-images/downloaded": ("runner_image_downloaded",),
+    "GET:/api/runner-images/pulls/list": ("runner_image_pulls",),
+    "POST:/api/runner-images/sync": ("runner_image_sync",),
+    # runner_image_pull / pull/status / pull/cancel / detail (all keyed by
+    # {image_id:path}) deliberately NOT aliased — catalogue ids embed the
+    # GHCR repo path (e.g. "hal0ai/hal0-toolbox-cpu"), and _split_args
+    # rejects any path-arg value containing "/" (deliberate guard against
+    # path-segment splicing — see its docstring). Wiring these needs a
+    # slash-safe path-arg encoder; out of scope for this pass.
+    "GET:/api/backends": ("backend_list",),
+    "GET:/api/backends/{backend_id}": ("backend_detail",),
+    "POST:/api/backends/npu/load": ("npu_backend_load",),
+    "POST:/api/backends/npu/unload": ("npu_backend_unload",),
+    # ── MCP self-management (routes/mcp.py) ──────────────────────────────────
+    "GET:/api/mcp/servers": ("mcp_server_list",),
+    "GET:/api/mcp/clients": ("mcp_client_list",),
+    "GET:/api/mcp/catalog": ("mcp_catalog",),
+    "GET:/api/mcp/{server_id}/logs": ("mcp_server_logs",),
+    "POST:/api/mcp/install": ("mcp_server_install",),
+    "DELETE:/api/mcp/{server_id}": ("mcp_server_uninstall",),
+    "PATCH:/api/mcp/{server_id}/config": ("mcp_server_config_write",),
+    "POST:/api/mcp/{server_id}/{action}": ("mcp_server_action",),
 }
 
 
@@ -898,8 +1160,73 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 ),
             },
             "runtime": {"type": "string", "description": "Set 'container' when image is set"},
+            "autoload": {
+                "type": "boolean",
+                "description": "Boot-start this slot on hal0 startup (spec 2026-08-02).",
+            },
+            "priority": {
+                "type": "integer",
+                "description": (
+                    "Eviction priority 0-100 (higher = evicted later under memory "
+                    "pressure). Default 50."
+                ),
+            },
         },
         "required": ["name", "model"],
+    },
+    "slot_edit": {
+        "properties": {
+            "name": {"type": "string", "description": "Slot name to update (path arg)"},
+            "port": {"type": "integer", "description": "New port"},
+            "device": {"type": "string", "description": "e.g. 'gpu:0', 'cpu', 'npu'"},
+            "model": {
+                "type": "object",
+                "description": (
+                    "ModelConfig sub-table, e.g. {default: model_id, context_size: int}"
+                ),
+            },
+            "autoload": {
+                "type": "boolean",
+                "description": "Boot-start this slot on hal0 startup (spec 2026-08-02).",
+            },
+            "priority": {
+                "type": "integer",
+                "description": (
+                    "Eviction priority 0-100 (higher = evicted later under memory "
+                    "pressure). Default 50."
+                ),
+            },
+            "pinned": {
+                "type": "boolean",
+                "description": "Exempt this slot from automatic eviction entirely.",
+            },
+            "idle_timeout_s": {
+                "type": "integer",
+                "description": "Seconds idle before auto-unload (0 = never).",
+            },
+        },
+        "required": ["name"],
+    },
+    "slot_set_defaults": {
+        "properties": {
+            "name": {"type": "string", "description": "Slot name to update (path arg)"},
+            "default": {
+                "type": "string",
+                "description": "Default model id from the registry (ModelConfig.default)",
+            },
+            "context_size": {
+                "type": "integer",
+                "description": (
+                    "Hardware ceiling on the model's resolved context window "
+                    "(caps, never raises — ModelConfig.context_size)"
+                ),
+            },
+            "n_gpu_layers": {
+                "type": "integer",
+                "description": "GPU offload layer count, -1 = all (ModelConfig.n_gpu_layers)",
+            },
+        },
+        "required": ["name"],
     },
     "upstream_create": {
         "properties": {
@@ -974,6 +1301,141 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             },
         },
         "required": ["new_id"],
+    },
+    "service_action": {
+        "properties": {
+            "service_id": {"type": "string", "description": "Service id (path arg)"},
+            "action": {
+                "type": "string",
+                "description": (
+                    "start|stop|restart|enable|disable — must be in the service's "
+                    "allow-list (see service_list's per-row 'actions'). ComfyUI's "
+                    "'start' triggers the GPU-arbiter switchover, not a raw unit start."
+                ),
+            },
+        },
+        "required": ["action"],
+    },
+    "comfyui_switchover": {
+        "properties": {
+            "mode": {
+                "type": "string",
+                "description": "'generation' (hand iGPU to ComfyUI) or 'inference' (restore LLM slots)",
+            },
+            "force": {
+                "type": "boolean",
+                "description": "Switch to inference even with a busy ComfyUI queue",
+            },
+            "pin": {
+                "type": "boolean",
+                "description": "Pin generation mode so idle auto-restore-to-inference won't fire",
+            },
+        },
+        "required": ["mode"],
+    },
+    "comfyui_pin": {
+        "properties": {
+            "pinned": {
+                "type": "boolean",
+                "description": "true blocks idle auto-restore off generation mode",
+            },
+        },
+        "required": ["pinned"],
+    },
+    "comfyui_models_fetch": {
+        "properties": {
+            "auto": {
+                "type": "boolean",
+                "description": "Fetch the default variant for every ComfyUI capability (5 total)",
+            },
+            "selections": {
+                "type": "array",
+                "description": (
+                    "Explicit variants instead of 'auto': "
+                    "[{capability: 'txt2img', family: 'sdxl'}, ...]"
+                ),
+            },
+        },
+    },
+    "npu_backend_load": {
+        "properties": {
+            "model_id": {
+                "type": "string",
+                "description": "FLM model tag, e.g. 'lfm2:1.2b'. Idempotent per tag.",
+            },
+        },
+        "required": ["model_id"],
+    },
+    "npu_backend_unload": {
+        "properties": {
+            "slot_name": {
+                "type": "string",
+                "description": "Dynamic NPU slot name (must be 'npu-' prefixed)",
+            },
+        },
+        "required": ["slot_name"],
+    },
+    "mcp_server_install": {
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "Install spec/URL to resolve (oci://, npm:, uvx:, git+https://, or a manifest URL)",
+            },
+            "manifest": {
+                "type": "object",
+                "description": "Alternative to 'url': a pre-resolved manifest (round-tripped from mcp_resolve)",
+            },
+        },
+    },
+    "mcp_server_config_write": {
+        "properties": {
+            "server_id": {"type": "string", "description": "Installed server id (path arg)"},
+            "env": {
+                "type": "object",
+                "description": "FULL replacement env block (name -> value), not a delta",
+            },
+            "enabled": {"type": "boolean", "description": "Enable/disable without touching env"},
+        },
+    },
+    "mcp_server_action": {
+        "properties": {
+            "server_id": {"type": "string", "description": "Installed server id (path arg)"},
+            "action": {
+                "type": "string",
+                "description": (
+                    "start|stop|restart — currently always 501s (mcp.supervisor_unavailable); "
+                    "no process supervisor is wired yet."
+                ),
+            },
+        },
+    },
+    "bench_run": {
+        "properties": {
+            "suite": {
+                "type": "string",
+                "description": "Suite to enqueue (default 'roster'). Back-compat wrapper over bench_enqueue.",
+            },
+        },
+    },
+    "profile_generate": {
+        "properties": {
+            "model_id": {
+                "type": "string",
+                "description": "Registered model id to base the draft on (exactly one of this/hf_repo)",
+            },
+            "hf_repo": {
+                "type": "string",
+                "description": "HF repo 'org/name' or full URL to base the draft on",
+            },
+            "name": {
+                "type": "string",
+                "description": "Suggested profile name (sanitized to kebab-case, <=32 chars)",
+            },
+            "use_llm": {
+                "type": "boolean",
+                "description": "Summarize the model card via the utility LLM for the intent headline",
+            },
+        },
     },
 }
 
@@ -1201,6 +1663,8 @@ POLICY_NO_LOOSEN: frozenset[str] = frozenset(
         "stack_delete",
         "profile_delete",
         "memory_delete",  # keeps the bulk-delete arity gate intact
+        "memory_mental_model_delete",
+        "memory_directive_delete",
         "config_write",
         "provider_credential_write",
     }
@@ -1460,9 +1924,9 @@ async def _execute_tool(
     # themselves stay unredacted — REST consumers on the same host
     # already have credential access; the MCP transport is the spot
     # where a narrowly-scoped agent can otherwise siphon tokens out
-    # (security review MED-1). slot_logs proxies the same journald
-    # surface per-unit, so it gets the same treatment.
-    if tool in ("logs_tail", "slot_logs"):
+    # (security review MED-1). slot_logs / comfyui_logs proxy the same
+    # journald surface per-unit, so they get the same treatment.
+    if tool in ("logs_tail", "slot_logs", "comfyui_logs"):
         result = _redact_logs_payload(result)
     # Wrap bare-list REST responses (slot_list / provider_list) into a
     # top-level dict so the FastMCP result model validates. No-op for
@@ -1623,16 +2087,6 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "model_store_probe": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # Read-shaped memory tools — surface a memory query, no writes.
-    "memory_search": ToolAnnotations(
-        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
-    ),
-    "memory_list": ToolAnnotations(
-        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
-    ),
-    "memory_recall": ToolAnnotations(
-        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
-    ),
     # ── Autonomous write — mutating, reversible, idempotent writes. ────
     "model_swap": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
@@ -1739,9 +2193,6 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
     # Mutating, reversible, non-idempotent (each call has additional effect).
-    "memory_add": ToolAnnotations(
-        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
-    ),
     "slot_create": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
@@ -1799,10 +2250,229 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "profile_delete": ToolAnnotations(
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
-    "memory_delete": ToolAnnotations(
+    # ── Platform-management expansion — reads ──────────────────────────────
+    "service_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "service_health": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "comfyui_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "comfyui_workflows": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "updater_state": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Fetches the release manifest from the update channel — open-world.
+    "updater_check": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    "updater_channel_get": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "updater_slot_drift": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "updater_job_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "doctor_report": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "health_system": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "feature_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "metrics_snapshot": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "hardware_snapshot": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_stats": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "stats_overview": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "request_metrics": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "system_stats": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "power_stats": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "throughput_history": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "npu_occupancy": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "npu_swap_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_health_check": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_config": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_voices": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "flm_model_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_pull_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_validate": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Reaches the public HuggingFace Hub search API.
+    "hf_search": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    "model_config_read": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "bench_roster": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "bench_plan": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "bench_cells": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "bench_history": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "bench_evals": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "journal_snapshot": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "activity_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "activity_export": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "approval_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "runner_image_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "runner_image_downloaded": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "runner_image_pulls": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "backend_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "backend_detail": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "mcp_server_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "mcp_client_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "mcp_catalog": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Read-shaped POST — compute-only, never writes to the catalog. Reaches
+    # HuggingFace when given hf_repo (like model_inspect), so open-world.
+    "profile_generate": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    # ── Platform-management expansion — autonomous write ───────────────────
+    "hardware_reprobe": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # ── Platform-management expansion — gated ──────────────────────────────
+    "service_action": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # comfyui_logs is read-only in effect but server-gated (MED-1), same
+    # posture as logs_tail / slot_logs above.
+    "comfyui_logs": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "comfyui_switchover": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "comfyui_pin": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Triggers background HF-adjacent model-weight downloads.
+    "comfyui_models_fetch": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+    ),
+    "comfyui_render_cancel": ToolAnnotations(
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
+    "comfyui_restart": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "comfyui_workflow_launch": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    # Pulls a container image over the network — open-world like model_pull.
+    "slot_pull_image": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    "model_config_write": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "bench_run": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "runner_image_sync": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    "npu_backend_load": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "npu_backend_unload": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "mcp_server_install": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+    ),
+    "mcp_server_uninstall": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "mcp_server_config_write": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "mcp_server_action": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    # Read-only in effect but gated — audit rows may echo prior tool args.
+    "mcp_server_logs": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
 }
+
+# All 26 memory_* tools' hints are owned by hal0.mcp.memory (imported above as
+# _MEMORY_TOOL_ANNOTATIONS) and merged in verbatim here — a single source of
+# truth so the /mcp/admin and /mcp/memory mounts can never drift on
+# read-only/destructive/idempotent/open-world semantics for the same tool.
+_ANNOTATIONS.update(_MEMORY_TOOL_ANNOTATIONS)
 
 
 # ── Tool catalog descriptions ────────────────────────────────────────────────
@@ -1932,6 +2602,47 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "memory_delete": (
         "Delete one or more memory items (autonomous when len(ids)==1, gated otherwise)."
     ),
+    # ── Memory extended toolset (Hindsight 0.8.4 parity, §mcp-hal0-integration) ──
+    "memory_reflect": (
+        "LLM-backed synthesis over memory — ask a question, get a written answer "
+        "grounded in recalled facts (not a raw fact list). Single-bank."
+    ),
+    "memory_curate": (
+        "Edit a memory unit, or soft-invalidate/revert it via state ('invalidated'|"
+        "'valid' — reversible). The non-destructive correction path; id is the "
+        "per-fact id from a search/recall/list result, not memory_add's document_id."
+    ),
+    "memory_history": "Revision history for one memory unit (curation audit trail).",
+    "memory_mental_model_list": "List a bank's mental models (stored reflect responses).",
+    "memory_mental_model_get": "Get one mental model by id.",
+    "memory_mental_model_create": (
+        "Create a mental model — a standing question kept refreshed from memory. "
+        "Returns {mental_model_id, operation_id}; poll with memory_operation_get."
+    ),
+    "memory_mental_model_update": "Update a mental model's name/source_query/max_tokens/tags/trigger.",
+    "memory_mental_model_delete": "Delete a mental model (gated — destructive).",
+    "memory_mental_model_refresh": (
+        "Trigger a mental model refresh (async). Returns {operation_id}; poll with "
+        "memory_operation_get."
+    ),
+    "memory_directive_list": "List a bank's directives (standing instructions injected into prompts).",
+    "memory_directive_get": "Get one directive by id.",
+    "memory_directive_create": "Create a directive (standing instruction injected into prompts).",
+    "memory_directive_update": "Update a directive's name/content/priority/is_active/tags.",
+    "memory_directive_delete": "Delete a directive (gated — destructive).",
+    "memory_operation_list": "List async operations (retain, consolidation, refresh, ...).",
+    "memory_operation_get": (
+        "Get one async operation's status — the poll target for memory_add's "
+        "operation_id, memory_mental_model_refresh, and memory_bank_consolidate."
+    ),
+    "memory_operation_cancel": "Cancel a pending/processing operation (aborts in-flight work only).",
+    "memory_operation_retry": "Re-queue a failed operation.",
+    "memory_tags_list": "List tags in use in a bank, with usage counts.",
+    "memory_bank_stats": "Node/link/observation/operation counts for a bank (read-only).",
+    "memory_bank_consolidate": (
+        "Trigger the engine's world/experience -> observation consolidation pass "
+        "early. Returns {operation_id}; not destructive (source facts are kept)."
+    ),
     # ── Gated write ─────────────────────────────────────────────────────
     "model_pull": (
         "Download a model from HuggingFace into the operator's configured model store. "
@@ -1991,6 +2702,117 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "bench_queue_delete": "Drop a pending item from the benchmark queue (gated).",
     "logs_tail": "Tail journald for one systemd unit (gated).",
     "slot_logs": "Tail one slot's journal output (gated).",
+    # ── Platform-management expansion — reads ──────────────────────────────
+    "service_list": "List every companion service (ComfyUI/Hermes/Hindsight/OpenWebUI) with live probe status.",
+    "service_health": "Stable 3-service (comfyui/hermes/openwebui) health summary for the Overview card.",
+    "comfyui_status": "Aggregate ComfyUI engine status — container/systemd/HTTP reachability, queue, arbiter mode.",
+    "comfyui_workflows": "List launchable ComfyUI workflow templates (bind-mounted dirs).",
+    "updater_state": "Aggregate hal0 + FLM version/channel update state.",
+    "updater_check": "Fetch the release manifest and diff it against the running version.",
+    "updater_channel_get": "Get the configured update channel.",
+    "updater_slot_drift": "Report slots whose running argv has drifted from a fresh post-update render.",
+    "updater_job_status": "Poll an update/prepare/commit job's state. Args: job_id.",
+    "doctor_report": "Composed doctor verdict — health, URLs, system, memory, services, capabilities in one read.",
+    "health_system": "Deep health check — disk, slot manager, event bus, MCP mount.",
+    "feature_list": "Feature-flag map (comfyui_switchover, memory, memory_engine, npu, mcp_supervisor).",
+    "metrics_snapshot": "JSON metrics snapshot (slots/hardware/dispatcher).",
+    "hardware_snapshot": "Cached hardware.json probe, flattened for display.",
+    "slot_stats": "Per-slot runtime metrics aggregated across configured upstreams (fleet-wide).",
+    "stats_overview": "Request/throughput rollup over the request-metric table + bench baselines. "
+    "Query args: window, model_id, runner (all optional).",
+    "request_metrics": "Dispatcher-side request/latency rollup. Args: window_s (optional).",
+    "system_stats": "Latest fleet + per-slot metrics sample snapshot.",
+    "power_stats": "Lightweight hwmon power/thermal snapshot (GPU power/temp/clock, CPU temp).",
+    "throughput_history": "Bucketed token-throughput history. Args: buckets, window_s (both optional).",
+    "npu_occupancy": "AIE column-allocation + slot composition for the NPU pane.",
+    "npu_swap_status": "Whether the FLM trio chat model is mid-swap (from/to model).",
+    "model_health_check": "Per-slot checkpoint/health snapshot + 24h TTFT/decode-tps rollup.",
+    "slot_config": "Return a slot's TOML config as a dict. Args: name.",
+    "slot_voices": "List a TTS slot's available voices (proxies the slot's own voices endpoint).",
+    "flm_model_list": "Full FLM catalog for NPU model dropdowns (model, installed, capabilities, family).",
+    "slot_pull_status": "Poll a slot's container-image pull progress. Args: name.",
+    "model_validate": (
+        "Dry-run screen a candidate model write (create or edit) without persisting anything. "
+        "Same body shape as model_register/model_edit."
+    ),
+    "hf_search": "Free-text search the HuggingFace Hub model catalog. Args: q, type, limit (all optional).",
+    "model_config_read": "Get the current [models] config section (roots, auto-scan, extensions, pull_root, ...).",
+    "bench_roster": "Per-model benchmark roster board (zoom 1).",
+    "bench_plan": "Staleness / what-would-run report for the benchmark suite. Args: suite (optional).",
+    "bench_cells": "Filtered current-value benchmark cell matrix (zoom 2).",
+    "bench_history": "Time-series benchmark points for trend charts. Args: cell_key, model (both optional).",
+    "bench_evals": "Agentic-eval leaderboard.",
+    "journal_snapshot": "Recent journal entries (operator-facing event log). Args: since (optional cursor).",
+    "activity_list": "Recent audit/activity records. Args: since, category, action, severity, outcome, "
+    "actor, kind, search, limit (all optional).",
+    "activity_export": (
+        "Export activity records as a file download. Args: fmt ('json' recommended for MCP "
+        "consumption — 'csv' also supported but returns raw text), plus the same filters as "
+        "activity_list."
+    ),
+    "approval_list": "List pending agent-tool approvals awaiting operator review.",
+    "runner_image_list": "List every catalogued runner (container) image.",
+    "runner_image_downloaded": "List only the runner images actually present on this host.",
+    "runner_image_pulls": "List all runner-image pull jobs (active + persisted terminal).",
+    "backend_list": "List every available inference backend with live status.",
+    "backend_detail": "Get one backend's detail. Args: backend_id.",
+    "mcp_server_list": "List MCP servers hal0 hosts (bundled + user-installed) with tool/resource/prompt counts.",
+    "mcp_client_list": "List MCP clients seen in the recent audit window.",
+    "mcp_catalog": "The static installable-MCP-servers catalog.",
+    "profile_generate": (
+        "Generate a draft runtime profile from a registered model or a HuggingFace repo — "
+        "compute-only, persists nothing. Args: exactly one of model_id / hf_repo (required), "
+        "optional name, optional use_llm=true to summarize the model card via the platform "
+        "utility LLM (degrades to heuristics on failure). Returns {profile, warnings, sources} "
+        "— 'profile' is the exact envelope shape profile_export produces, so it can be handed "
+        "straight to profile_create (unwrap .profile) or profile_import (as 'envelope')."
+    ),
+    # ── Platform-management expansion — autonomous write ────────────────────
+    "hardware_reprobe": "Re-run the live hardware probe and persist the result to /etc/hal0/hardware.json.",
+    # ── Platform-management expansion — gated ───────────────────────────────
+    "service_action": (
+        "Run a lifecycle verb on a companion service's systemd unit (gated). "
+        "Args: service_id (path), action=start|stop|restart|enable|disable "
+        "(must be in that service's allow-list)."
+    ),
+    "comfyui_logs": "Tail the ComfyUI slot's journal output (gated; journald secret-redaction posture).",
+    "comfyui_switchover": (
+        "Flip the iGPU between LLM inference and ComfyUI generation via the GPU arbiter (gated). "
+        "Args: mode='generation'|'inference', optional force, pin."
+    ),
+    "comfyui_pin": "Toggle the arbiter's manual pin (blocks idle auto-restore off generation mode) (gated).",
+    "comfyui_models_fetch": (
+        "Trigger background ComfyUI model-weight downloads (gated). "
+        "Args: auto=true, OR selections=[{capability, family}, ...]."
+    ),
+    "comfyui_render_cancel": "Clear the ComfyUI queue and interrupt the current render (gated).",
+    "comfyui_restart": "Restart the slot-managed ComfyUI runtime (gated).",
+    "comfyui_workflow_launch": "Quick-launch a named ComfyUI workflow template (gated). Args: name (path).",
+    "slot_pull_image": "Start a background container-image pull for a slot (gated, idempotent). Args: name.",
+    "model_config_write": (
+        "Update the [models] config section — merges onto the current config, revalidates as a "
+        "whole, and persists the entire section (gated)."
+    ),
+    "bench_run": "Enqueue a benchmark suite run (back-compat wrapper over bench_enqueue) (gated). Args: suite.",
+    "runner_image_sync": "Run one runner-image discovery pass against GHCR (gated).",
+    "npu_backend_load": (
+        "Create + load a dynamic FLM/NPU slot for one model tag (gated, idempotent per tag). "
+        "Args: model_id."
+    ),
+    "npu_backend_unload": (
+        "Unload and delete a dynamically-created NPU slot (gated). Args: slot_name (must be "
+        "'npu-' prefixed)."
+    ),
+    "mcp_server_install": "Install a user MCP server from a URL/spec or a resolved manifest (gated).",
+    "mcp_server_uninstall": "Uninstall a user-installed MCP server (gated; bundled servers reject 409).",
+    "mcp_server_config_write": (
+        "Patch an installed MCP server's env/enabled fields (gated; bundled servers reject 409)."
+    ),
+    "mcp_server_action": (
+        "Start/stop/restart an installed MCP server (gated). Currently always 501s — no process "
+        "supervisor is wired yet."
+    ),
+    "mcp_server_logs": "Tail an MCP server's recent audit rows (gated — rows may echo prior tool-call args).",
 }
 
 
@@ -2015,9 +2837,13 @@ EXCLUDED_TOOLS: dict[str, str] = {
         "admin tool shape."
     ),
     "updater_apply": (
-        "Self-update/restart is a destructive host-level action; exposing it as "
-        "an MCP tool needs its own POLICY_NO_LOOSEN + operator-confirmation "
-        "design, deferred to a dedicated lane rather than hand-added here."
+        "Self-update/restart (apply/commit/rollback/prepare/restart-slots, plus the "
+        "channel PUT) is a destructive host-level action; exposing it as an MCP tool "
+        "needs its own POLICY_NO_LOOSEN + operator-confirmation design, deferred to a "
+        "dedicated lane rather than hand-added here. The READ half of the updater "
+        "surface (state/check/channel-GET/slot-drift/status) IS classified now — see "
+        "updater_state / updater_check / updater_channel_get / updater_slot_drift / "
+        "updater_job_status in TOOL_DESCRIPTIONS."
     ),
     "auth_rotate": (
         "Key rotation is a lockout-recovery / operator-console action — never "
@@ -2037,6 +2863,48 @@ EXCLUDED_TOOLS: dict[str, str] = {
         "Hermes/agent session administration (list/kill sessions) is an "
         "operator-console concern, not a tool an agent should hold over its "
         "own or sibling agents' sessions."
+    ),
+    # ── Policy-by-record (§4.3 buildout): these surfaces were unclassified
+    # by silence — recorded explicitly now so a future pass reads "excluded,
+    # leave it" instead of re-litigating each one.
+    "approval_approve": (
+        "Approving a gated tool call (POST /api/agent/approvals/{id}/approve) is the "
+        "owner-approval mechanism ITSELF — an agent approving its own or another "
+        "agent's queued call would defeat the gate. Operator-only, no loosen path."
+    ),
+    "approval_deny": (
+        "Denying a queued approval is the same operator-only surface as approve — "
+        "see approval_approve. approval_list (read) stays available so an agent can "
+        "report what's pending."
+    ),
+    "secrets_crud": (
+        "GET/POST/PUT/DELETE /api/secrets[/...] manage credential values. GET only "
+        "returns names/metadata (never values), but the whole surface is grouped "
+        "with the write half here — provider_credential_write is the one narrow, "
+        "already-gated write seam an agent gets onto secret-shaped config."
+    ),
+    "installer_wizard": (
+        "/api/install/* (state/probe/complete/curated-models/apply/apply-selections/"
+        "slots-model/services/services-repair) is the first-run wizard — a one-shot, "
+        "no-auth-by-convention bootstrap surface, not an ongoing agent-management tool."
+    ),
+    "proxmox_config": (
+        "/api/settings/proxmox[/test] reads/writes Proxmox host integration config, "
+        "including credential-adjacent fields, and probes a live external host — "
+        "operator-console territory, same tier as provider credentials."
+    ),
+    "auth_session": (
+        "/api/auth/login, /logout, /require, /status, /exposure — session minting and "
+        "the auth-required/exposure posture toggles. Never agent-callable; see "
+        "auth_rotate / auth_me above for the adjacent identity/rotation exclusions."
+    ),
+    "agent_lifecycle": (
+        "/api/agents/* (list/install/uninstall bundled agent products, persona-enums, "
+        "skills, per-agent activity) is bundled-agent product management — adjacent "
+        "to but distinct from agent_sessions above (which covers runtime session "
+        "admin). Kept excluded as one policy area rather than split by verb; the "
+        "hermes-specific sub-routers at the same prefix (personas/restart/memory-"
+        "stats/chat-proxy) are a sibling lane's surface, not aliased here either."
     ),
 }
 

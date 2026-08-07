@@ -142,15 +142,41 @@ class MemoryProvider(ABC):
         metadata: dict[str, Any] | None = None,
         client_id: str | None = None,
         document_id: str | None = None,
-    ) -> dict[str, str]:
+        entities: list[dict[str, Any]] | None = None,
+        observation_scopes: Any = None,
+        strategy: str | None = None,
+        update_mode: str | None = None,
+        sync: bool = False,
+    ) -> dict[str, Any]:
         """Add a memory item. Returns ``{id, timestamp}`` plus
-        ``operation_id`` when the engine processes asynchronously (poll
-        it via the engine-admin operations surface).
+        ``operation_id``/``operation_ids``/``items_count`` when the engine
+        reports them (poll async operations via the engine-admin operations
+        surface).
 
         ``document_id`` lets a caller pin the engine's grouping key —
         re-using one id across adds upserts the same logical document
         (conversation evolution). ``None`` → a fresh id per call.
-        Engines without document semantics ignore it."""
+        Engines without document semantics ignore it.
+
+        The rest mirror Hindsight's ``RetainRequest`` item shape (engines
+        without the concept ignore them):
+
+        ``entities``
+            Extra entities to combine with auto-extracted ones —
+            ``[{"text": ..., "type": ...}, ...]``.
+        ``observation_scopes``
+            How to scope observations during consolidation
+            (``"per_tag"|"combined"|"all_combinations"|"shared"`` or a list
+            of tag-lists).
+        ``strategy``
+            Named retain strategy overriding the bank default for this item.
+        ``update_mode``
+            ``"replace"`` (default) or ``"append"`` when ``document_id``
+            names an existing document.
+        ``sync``
+            ``True`` waits for extraction to complete before returning
+            (no ``operation_id``); ``False`` (default) ingests in the
+            background."""
 
     @abstractmethod
     async def search(
@@ -163,8 +189,14 @@ class MemoryProvider(ABC):
         after: str | None = None,
         mode: str = "vector",
         client_id: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        min_scores: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
-        """Vector + filter search. Returns a list of MemoryItem dicts."""
+        """Vector + filter search. Returns a list of MemoryItem dicts.
+
+        ``tag_groups``/``min_scores`` are optional engine-native recall
+        filters (boolean tag expressions / per-stage score floors); an
+        engine without them ignores both."""
 
     @abstractmethod
     async def list_items(
@@ -216,13 +248,21 @@ class MemoryProvider(ABC):
         dataset: str | list[str] = "shared",
         tags: list[str] | None = None,
         tags_match: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        budget: str = "mid",
+        prefer_observations: bool = False,
+        include: dict[str, Any] | None = None,
+        query_timestamp: str | None = None,
+        min_scores: dict[str, float] | None = None,
         client_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Token-budgeted recall. Default delegates to ``search`` so an
         engine without a richer recall surface still answers the route.
 
-        ``tags_match`` (``any``/``all``) is an engine-specific tag-filter hint;
-        the search-delegating default ignores it."""
+        ``tags_match``/``tag_groups``/``budget``/``prefer_observations``/
+        ``include``/``query_timestamp``/``min_scores`` are Hindsight-specific
+        knobs; the search-delegating default ignores every one of them —
+        a plain result list is still returned rather than erroring."""
         return await self.search(
             query=query,
             limit=max(1, max_tokens // 256),
@@ -232,12 +272,29 @@ class MemoryProvider(ABC):
         )
 
     async def reflect(
-        self, *, dataset: str = "shared", client_id: str | None = None
+        self,
+        query: str,
+        *,
+        dataset: str = "shared",
+        client_id: str | None = None,
+        budget: str = "low",
+        max_tokens: int = 4096,
+        fact_types: list[str] | None = None,
+        tags: list[str] | None = None,
+        tags_match: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        exclude_mental_models: bool = False,
+        exclude_mental_model_ids: list[str] | None = None,
+        include: dict[str, Any] | None = None,
+        response_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Trigger consolidation/reflection. No-op default."""
+        """Trigger LLM-backed reflection/synthesis over memory. No-op default
+        (``{"status": "unsupported"}``) for engines without the capability."""
         return {"status": "unsupported"}
 
-    async def consolidate(self, *, dataset: str = "shared") -> dict[str, Any]:
+    async def consolidate(
+        self, *, dataset: str = "shared", client_id: str | None = None
+    ) -> dict[str, Any]:
         """Trigger background consolidation. No-op default."""
         return {"status": "unsupported"}
 

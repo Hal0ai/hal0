@@ -31,7 +31,9 @@ Voice / Call-mode variables:
     AUDIO_TTS_VOICE=af_heart
 
 Exposure (#1515). OpenWebUI runs in its open-by-default posture — no login
-page, auth is upstream's job (ADR-0012) — and `hal0-openwebui.service`
+page; hal0's own optional key auth (KB-1) gates the hal0 API only and does
+not extend to this companion, so auth here is the perimeter's job — and
+`hal0-openwebui.service`
 publishes it on port 3001. Two knobs, both read from the environment here
 and both threaded through `installer/install.sh`, so the posture is
 reachable without editing code:

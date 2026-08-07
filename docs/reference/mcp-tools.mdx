@@ -9,8 +9,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 hal0 mounts two [FastMCP](https://github.com/jlowin/fastmcp) (Streamable-HTTP) servers
 on the main FastAPI app: `hal0-admin` at `/mcp/admin` and `hal0-memory` at
-`/mcp/memory`. A third, `hal0-browser`, exists in source but is not mounted anywhere —
-see [hal0-browser (not mounted)](#hal0-browser-not-mounted) below.
+`/mcp/memory`.
 
 ## `hal0-admin` (`/mcp/admin`)
 
@@ -170,19 +169,6 @@ it to `private:<client_id>`.
 `hal0-admin`'s `memory_*` tools and the standalone `/mcp/memory` mount share the exact
 same handlers — the admin server calls them in-process via a `memory_dispatcher`
 closure, with no HTTP hop.
-</Aside>
-
-## `hal0-browser` (not mounted)
-
-`hal0.mcp.browser_server` is a standalone FastMCP server with 8 fully-typed Playwright
-tools (`browser_navigate`, `browser_screenshot`, `browser_click`, `browser_type`,
-`browser_extract`, `browser_evaluate`, `browser_snapshot`, `browser_close_page`).
-
-<Aside type="caution">
-This module is explicitly experimental and **not wired in**: never imported by the MCP
-mount code, no systemd unit, not on any install path, and `playwright` isn't even a
-declared dependency. Do not document `hal0-browser` as a live tool surface. If you
-mention it, flag it as a prototype.
 </Aside>
 
 ## MCP server management REST API

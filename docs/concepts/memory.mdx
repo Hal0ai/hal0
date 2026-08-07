@@ -18,10 +18,41 @@ data on an existing box.
 
 The memory subsystem is an engine-neutral layer behind two surfaces: the
 `/api/memory/*` REST routes (which the dashboard's Memory view uses) and the
-`/mcp/memory` MCP server — five tools (`memory_add`, `memory_search`,
-`memory_list`, `memory_delete`, `memory_recall`) that agents and external
-tools use. Both speak to the same provider, so a fact written by an agent over
-MCP is the same fact the dashboard shows.
+`/mcp/memory` MCP server, which agents and external tools use. Both speak to
+the same provider, so a fact written by an agent over MCP is the same fact
+the dashboard shows.
+
+The MCP surface covers the full read/write/curate/synthesize lifecycle, not
+just add-and-search:
+
+- **Core**: `memory_add`, `memory_search`, `memory_list`, `memory_delete`,
+  `memory_recall` — the token-budgeted, observation-aware retrieval path
+  (preferred over `memory_search`), with native per-result relevance scores
+  and optional entity/chunk/source-fact enrichment.
+- **Reflect**: `memory_reflect` — ask a question and get an LLM-written
+  answer grounded in recalled facts, instead of a raw fact list.
+- **Curation**: `memory_curate` edits a fact or soft-invalidates/reverts it
+  (reversible) — the non-destructive "this is wrong" correction path, as
+  distinct from `memory_delete`. `memory_history` shows a fact's revision
+  trail.
+- **Mental models**: `memory_mental_model_list` / `_get` / `_create` /
+  `_update` / `_delete` / `_refresh` — standing questions ("what does the
+  user prefer for X") whose answer is kept refreshed from memory.
+- **Directives**: `memory_directive_list` / `_get` / `_create` / `_update` /
+  `_delete` — standing instructions injected into prompts.
+- **Async operations**: `memory_operation_list` / `_get` / `_cancel` /
+  `_retry` — retain is async by default, so these are the poll target for
+  `memory_add`'s `operation_id` and for mental-model refreshes.
+- **Bank introspection**: `memory_tags_list`, `memory_bank_stats`,
+  `memory_bank_consolidate` — read-only counts plus an early-trigger for
+  consolidation. No destructive bank operations (delete/clear a whole bank)
+  are exposed over MCP; those stay operator-only under `/api/memory/*`.
+
+Every write/destructive tool goes through the same namespace ACL and
+approval-gate pattern as `memory_add`/`memory_delete` — `memory_curate`'s
+`state` toggle is reversible so it stays autonomous, while
+`memory_mental_model_delete` and `memory_directive_delete` gate for operator
+approval the same way a bulk `memory_delete` does.
 
 ![Memory interface showing stored facts and recall](/screenshots/memory-view.png)
 *Memory view in the hal0 dashboard*

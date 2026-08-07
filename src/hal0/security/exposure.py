@@ -303,6 +303,15 @@ RULES: tuple[_Rule, ...] = (
     _Rule("activity", _prefix("/api/activity"), AuthClass.ADMIN, None),
     _Rule("journal", _prefix("/api/journal"), AuthClass.ADMIN, None),
     # ── mcp raw JSON-RPC mounts (admin + memory tool servers) ──────────
+    # The memory mount is CLIENT, not ADMIN: it is the surface agents use
+    # for their own long-term memory, its blast radius is bounded by the
+    # fail-closed namespace ACL (memory/namespace.py) plus the approval
+    # gate on destructive tools (mcp/memory.py), and no bank-scoped wipe
+    # is reachable through it. Requiring the admin key here forced every
+    # memory-only agent to carry full platform-admin credentials — the
+    # opposite of least privilege. The admin mount (and any future /mcp/*
+    # mount, via the prefix rule below) stays ADMIN.
+    _Rule("mcp memory tool-server mount", _prefix("/mcp/memory"), AuthClass.CLIENT, None),
     _Rule("mcp tool-server mounts", _prefix("/mcp"), AuthClass.ADMIN, None),
     # ── static SPA / assets / favicon / plugin-asset proxy ─────────────
     _Rule("static SPA shell", _outside_api_v1_mcp, AuthClass.OPEN, _GET),

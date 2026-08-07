@@ -47,8 +47,11 @@ live state.
 
 ## MCP surfaces
 
-- `hal0_admin` MCP — slots, models, capabilities, hardware probes.
-- `hal0_memory` MCP — Hindsight-backed durable memory; agents own
+- `hal0_admin` MCP — full platform management: slots, models, profiles
+  (incl. `profile_generate`), services, ComfyUI, updater reads, approvals
+  visibility, capabilities, hardware probes.
+- `hal0_memory` MCP — Hindsight-backed durable memory, plus advanced memory
+  tools incl. reflection, mental models, and directives; agents own
   `private:<agent_id>` namespaces; identity cards live in the
   `agents` dataset.
 

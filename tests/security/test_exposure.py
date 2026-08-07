@@ -240,6 +240,23 @@ def test_representative_client_routes_are_client() -> None:
         assert classify(method, path) is AuthClass.CLIENT, f"{method} {path} should be CLIENT"
 
 
+def test_mcp_mount_tiers() -> None:
+    """The MCP mount split is deliberate: memory is CLIENT, admin is ADMIN.
+
+    The memory mount's blast radius is bounded by the fail-closed namespace
+    ACL plus the destructive-tool approval gate, so memory-only agents must
+    not be forced to carry the platform-admin key. Any future /mcp/* mount
+    falls to ADMIN via the prefix rule until someone classifies it here.
+    """
+    for method in ("GET", "POST", "DELETE"):
+        assert classify(method, "/mcp/memory/mcp") is AuthClass.CLIENT
+        assert classify(method, "/mcp/admin/mcp") is AuthClass.ADMIN
+        assert classify(method, "/mcp/some-future-mount/mcp") is AuthClass.ADMIN
+    # Boundary safety: a mount merely *named* like memory must not inherit
+    # its CLIENT class.
+    assert classify("POST", "/mcp/memory2/mcp") is AuthClass.ADMIN
+
+
 def test_unclassified_new_route_denies_by_default() -> None:
     """A path nobody has classified must fall back to ADMIN (not OPEN/CLIENT)."""
     assert match_rule("GET", "/api/totally-new-router-nobody-classified-yet") is None

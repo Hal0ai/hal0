@@ -90,6 +90,71 @@ every new file it finds:
 hal0 model scan
 ```
 
+## Generate a draft profile from a model
+
+Picking a runtime [profile](/docs/concepts/capabilities-and-profiles) by hand
+means guessing which seed template fits a model's architecture and this
+host's hardware. `POST /api/profiles/generate` does that guessing for
+you — from a model already in the registry, or straight from a HuggingFace
+repo you haven't pulled yet — and hands back a draft to review, not
+something already written to the catalog.
+
+```sh
+# From a registered model
+curl -s -X POST http://localhost:8080/api/profiles/generate \
+  -H 'content-type: application/json' \
+  -d '{"model_id": "qwen3-4b-q4_k_m"}' | jq
+
+# From a HuggingFace repo you haven't pulled yet
+curl -s -X POST http://localhost:8080/api/profiles/generate \
+  -H 'content-type: application/json' \
+  -d '{"hf_repo": "unsloth/Qwen3-8B-GGUF", "name": "my-qwen3"}' | jq
+```
+
+Exactly one of `model_id` / `hf_repo` is required (`422` otherwise). The
+endpoint classifies the model's capability (chat, embed, rerank, stt, tts,
+or image), fits it to *this host's* cached hardware snapshot the same way
+slot creation's device auto-pick does, and clones the closest seed
+profile — including upgrading a chat model to the `moe` seed instead of the
+flat `chat` fallback when its architecture (or `mtp`/`a3b` tags) says MoE.
+A HuggingFace repo also picks up the recommended GGUF variant's quant and,
+when HF reports parsed GGUF metadata for the repo, its architecture and
+native context length.
+
+The response wraps a portable `.hal0profile.json` envelope (the same shape
+a profile export produces) plus `warnings` (anything it had to fall back
+on) and `sources` (where each fact came from):
+
+```json
+{
+  "profile": {
+    "kind": "hal0.profile",
+    "name": "qwen3-4b-q4_k_m",
+    "profile": {
+      "flags": "-fa on --jinja -b 2048 -ub 512",
+      "cloned_from": "chat",
+      "quant": "Q4_K_M",
+      "intent": "Qwen3 4B · qwen3 · 32K ctx · chat · gpu-rocm"
+    }
+  },
+  "warnings": [],
+  "sources": ["registry:qwen3-4b-q4_k_m"]
+}
+```
+
+<Aside type="note">
+This call is **compute-only** — nothing is written to the profile catalog.
+Take the inner `profile` object and hand it to `POST /api/profiles`
+(unwrap the envelope's own `.profile` body) or `POST /api/profiles/import`
+(pass the whole envelope as `envelope`) once you've reviewed it.
+</Aside>
+
+Pass `"use_llm": true` to have the platform's `hal0/utility` slot write the
+draft's headline (`intent`) from the model card instead of the heuristic
+one. If the utility slot isn't loaded, unreachable, or the call times out,
+the draft still comes back — with the heuristic headline in place and a
+warning explaining why the LLM pass was skipped, never a failed request.
+
 ## Change or inspect the model store
 
 ```sh

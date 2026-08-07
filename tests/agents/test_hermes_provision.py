@@ -1356,6 +1356,33 @@ def test_mcp_wire_phase_returns_ok_with_tools_when_servers_respond(
     assert out.details["warnings"] == []
 
 
+def test_mcp_wire_phase_probes_mount_root_not_double_mcp_suffixed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: entry["url"] from _default_mcp_servers() is the FULL
+    transport URL (".../mcp/admin/mcp" — correct as-is for config.yaml), but
+    probe_mcp_server's own contract wants the MOUNT ROOT and appends "/mcp"
+    itself. Passing the full URL through unstripped used to double-append
+    "/mcp" and 404 every probe unconditionally — this pins the fix so it
+    can't silently regress back to the double-suffixed URL."""
+    seen_urls: list[str] = []
+
+    def _fake_probe(url: str, **_kw: object) -> dict[str, object]:
+        seen_urls.append(url)
+        return {"ok": True, "tools": ["t1"], "error": None}
+
+    state = hp.BootstrapState()
+    io = hp.InstallIO(probe_mcp_server=_fake_probe)
+    monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
+    hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
+
+    assert seen_urls == [
+        "http://127.0.0.1:8080/mcp/admin",
+        "http://127.0.0.1:8080/mcp/memory",
+    ]
+    assert not any(u.endswith("/mcp/mcp") for u in seen_urls)
+
+
 def test_mcp_wire_phase_degrades_not_fails_on_unreachable_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1643,6 +1670,21 @@ def test_context_link_renders_all_three_files(
     # Templates reference Strix Halo signals — confirm at least one
     # variable substituted from snapshot.
     assert "RYZEN AI MAX" in soul or "gfx1151" in soul or "XDNA" in soul
+
+    # MCP-CLIENTS.md carries the real auth contract, not a stale "no auth"
+    # claim — the accuracy fix this template exists to guard.
+    assert (etc / "MCP-CLIENTS.md").exists()
+    mcp_clients = (etc / "MCP-CLIENTS.md").read_text()
+    assert "Authorization: Bearer" in mcp_clients
+    assert "HAL0_ADMIN_KEY" in mcp_clients
+    assert "no built-in" not in mcp_clients.lower()
+    assert "hal0 has no auth" not in mcp_clients.lower()
+
+    # AGENTS.md describes the full admin/memory tool surface generically
+    # rather than the old five-tool memory / status-only admin summary.
+    agents_md = (etc / "AGENTS.md").read_text()
+    assert "profile_generate" in agents_md
+    assert "reflection" in agents_md
 
 
 def test_context_link_idempotent_symlink(tmp_path: Path) -> None:

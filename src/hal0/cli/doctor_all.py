@@ -387,6 +387,158 @@ def check_ports(slots: Any) -> Check:
     return Check("ports", "Slot ports", _PASS, f"{len(bound)} bound: {', '.join(map(str, bound))}")
 
 
+def _default_mcp_probe_targets() -> tuple[tuple[str, str], ...]:
+    """(name, mount-root URL) pairs for hal0's two bundled MCP servers."""
+    return (
+        ("hal0-admin", "http://127.0.0.1:8080/mcp/admin"),
+        ("hal0-memory", "http://127.0.0.1:8080/mcp/memory"),
+    )
+
+
+def probe_builtin_mcp_mounts(
+    probe: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Run the real MCP ``initialize`` → ``tools/list`` handshake against
+    both bundled mounts, using the box service key the same way a
+    provisioned Hermes config.yaml does.
+
+    Reuses :func:`hal0.agents.hermes_provision._probe_mcp_server` — the same
+    initialize/notifications/tools-list sequence + bearer resolution a real
+    provision run already exercises — rather than re-implementing MCP
+    transport here. Late import keeps a bad import in the (much larger)
+    provisioning module from taking down `hal0 doctor`.
+    """
+    if probe is None:
+        from hal0.agents.hermes_provision import _probe_mcp_server as probe
+
+    return {
+        name: probe(url, agent_id="hal0-doctor", private=(name == "hal0-memory"))
+        for name, url in _default_mcp_probe_targets()
+    }
+
+
+def check_mcp_mounts(results: dict[str, dict[str, Any]] | None = None) -> Check:
+    """Live regression guard for the silent-401 class (§ MCP bearer wiring).
+
+    A provisioned box can look completely healthy — config.yaml has the
+    right shape, the daemon is up — and still have every hermes-issued MCP
+    call silently 401 (bearer never resolved at provision time, a key
+    rotated since, or the ADR-0013 allow-list quietly filtering the builtins
+    out). This is the row that actually dials both mounts and proves the
+    handshake completes under the box's CURRENT auth posture, instead of
+    trusting that a static config implies a working connection.
+
+    ``results`` is injectable (mirrors ``check_hal0_target``/``check_seams``)
+    so the classifier is testable without a live API. PASS requires BOTH
+    mounts to answer ``tools/list`` with a non-empty tool list; a 401/403 is
+    called out by name with the exact repair command, other transport
+    failures (connection refused, timeout, 5xx) get their raw error text.
+    """
+    rows = results if results is not None else probe_builtin_mcp_mounts()
+    failures: list[str] = []
+    for name, probe in rows.items():
+        if not probe.get("ok"):
+            err = str(probe.get("error") or "unreachable")
+            if any(marker in err for marker in ("401", "403", "Unauthorized", "Forbidden")):
+                failures.append(
+                    f"{name}: {err} — agent token missing/stale: "
+                    "run `hal0 agent bootstrap hermes --repair`"
+                )
+            else:
+                failures.append(f"{name}: {err}")
+        elif not probe.get("tools"):
+            failures.append(f"{name}: reachable but advertised zero tools")
+    if failures:
+        return Check("mcp_mounts", "MCP mounts (admin/memory)", _FAIL, "; ".join(failures))
+    tool_counts = ", ".join(f"{n}={len(p.get('tools') or [])}" for n, p in rows.items())
+    return Check(
+        "mcp_mounts",
+        "MCP mounts (admin/memory)",
+        _PASS,
+        f"both mounts completed initialize -> tools/list ({tool_counts})",
+    )
+
+
+def check_hermes_mcp_config_auth(
+    *,
+    auth: dict[str, Any] | None,
+    config_path: Path | None = None,
+    read_text: Callable[[Path], str] | None = None,
+) -> Check:
+    """Hermes' rendered ``config.yaml`` must carry ``Authorization`` on both
+    ``mcp_servers`` entries whenever the box requires auth.
+
+    Static counterpart to :func:`check_mcp_mounts`: that row proves the LIVE
+    handshake works right now (as the box's own service key, from wherever
+    `hal0 doctor` runs); this one proves the specific artifact
+    ``hal0 agent bootstrap hermes`` renders is what actually carries the
+    bearer forward into every Hermes-issued call — the drift class where
+    ``HAL0_ADMIN_KEY`` was set or rotated *after* the last provision/repair
+    pass, so the live config.yaml is stale even though the box's current key
+    would probe clean.
+
+    A missing ``config.yaml`` (hermes never provisioned) passes — nothing to
+    check yet. An auth-open box passes unconditionally — a tokenless
+    config.yaml is exactly the expected shape (see
+    ``test_overlay_omits_bearer_when_no_key_discoverable``).
+    """
+    from hal0.agents.hermes_provision import HERMES_HOME_DEFAULT
+
+    path = config_path if config_path is not None else (HERMES_HOME_DEFAULT / "config.yaml")
+    _read = read_text if read_text is not None else (lambda p: p.read_text(encoding="utf-8"))
+    if not path.exists():
+        return Check(
+            "hermes_mcp_auth",
+            "Hermes MCP config auth",
+            _PASS,
+            "hermes not provisioned — nothing to check",
+        )
+    if not bool((auth or {}).get("auth_required")):
+        return Check(
+            "hermes_mcp_auth",
+            "Hermes MCP config auth",
+            _PASS,
+            "auth not required — a tokenless config.yaml is expected",
+        )
+    try:
+        text = _read(path)
+    except OSError as exc:
+        return Check(
+            "hermes_mcp_auth", "Hermes MCP config auth", _WARN, f"could not read {path}: {exc}"
+        )
+
+    import yaml
+
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        return Check(
+            "hermes_mcp_auth", "Hermes MCP config auth", _WARN, f"could not parse {path}: {exc}"
+        )
+    servers = data.get("mcp_servers") if isinstance(data, dict) else None
+    servers = servers if isinstance(servers, dict) else {}
+    missing = [
+        name
+        for name in ("hal0-admin", "hal0-memory")
+        if isinstance(servers.get(name), dict)
+        and not ((servers[name].get("headers") or {}).get("Authorization"))
+    ]
+    if missing:
+        return Check(
+            "hermes_mcp_auth",
+            "Hermes MCP config auth",
+            _FAIL,
+            f"auth is required but {', '.join(missing)} carries no Authorization header in "
+            f"{path} — run `hal0 agent bootstrap hermes --repair`",
+        )
+    return Check(
+        "hermes_mcp_auth",
+        "Hermes MCP config auth",
+        _PASS,
+        "config.yaml carries Authorization for both bundled mounts",
+    )
+
+
 # ── orchestration ──────────────────────────────────────────────────────────────
 
 # GET /api/slots is the slowest read-only route hal0 serves: the aggregator
@@ -431,8 +583,9 @@ def build_all_checks(base: str | None = None) -> list[Check]:
 
     from hal0.cli.doctor_commands import pending_layout_migration
 
+    auth_payload = _get_any("/api/auth/status", base)
     extra_rows = [
-        check_auth_posture(_get_any("/api/auth/status", base)),
+        check_auth_posture(auth_payload),
         check_model_store(_get_any("/api/models", base)),
         check_migrations(pending_layout_migration()),
         check_ports(_get_any("/api/slots", base, timeout=SLOTS_PROBE_TIMEOUT_S)),
@@ -440,6 +593,8 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_secret_file_modes(),
         check_voice_stt_weights(),
         check_seams(),
+        check_mcp_mounts(),
+        check_hermes_mcp_config_auth(auth=auth_payload),
     ]
     return verify_rows + extra_rows
 
@@ -523,11 +678,14 @@ __all__ = [
     "build_all_checks",
     "check_auth_posture",
     "check_hal0_target",
+    "check_hermes_mcp_config_auth",
+    "check_mcp_mounts",
     "check_migrations",
     "check_model_store",
     "check_ports",
     "check_seams",
     "doctor_all_cmd",
     "overall_verdict",
+    "probe_builtin_mcp_mounts",
     "render_all",
 ]

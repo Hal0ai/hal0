@@ -262,6 +262,34 @@ _WRITE_HEALTH_TTL_S = 30.0
 _WRITE_OP_STATUSES = ("failed", "pending", "processing")
 
 
+class RecallResults(list):
+    """``recall()``'s return value: a ``list[dict]`` of MemoryItem-shaped
+    results, PLUS the response-level enrichment Hindsight's RecallResponse
+    carries alongside ``results`` that has no per-item home — entity mental
+    models, raw chunks, and observation source facts.
+
+    Every existing caller (``search()``, the MCP ``memory_recall`` handler,
+    every test in the suite) treats a recall as a plain list — iterating it,
+    slicing it, comparing it to ``[]`` — and none of that changes: this IS a
+    list, byte-for-byte, via ``list.__eq__``/``__iter__``/``__getitem__``.
+    Only a caller that explicitly reads ``.entities``/``.chunks``/
+    ``.source_facts`` sees the data recall() used to silently discard.
+    """
+
+    def __init__(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        entities: dict[str, Any] | None = None,
+        chunks: dict[str, Any] | None = None,
+        source_facts: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(items)
+        self.entities = entities
+        self.chunks = chunks
+        self.source_facts = source_facts
+
+
 class HindsightProvider(MemoryProvider):
     def __init__(
         self,
@@ -664,7 +692,12 @@ class HindsightProvider(MemoryProvider):
         metadata: dict[str, Any] | None = None,
         client_id: str | None = None,
         document_id: str | None = None,
-    ) -> dict[str, str]:
+        entities: list[dict[str, Any]] | None = None,
+        observation_scopes: Any = None,
+        strategy: str | None = None,
+        update_mode: str | None = None,
+        sync: bool = False,
+    ) -> dict[str, Any]:
         # ``private:<agent>`` / ``project:<id>`` still arrive from the front
         # door even in unified mode; capture that intent before the bank
         # collapses to shared, so it can survive as a tag.
@@ -718,6 +751,24 @@ class HindsightProvider(MemoryProvider):
         context = meta.pop("context", None) or meta.get("source") or f"{agent} conversation turn"
         timestamp = meta.pop("timestamp", None) or _now()
 
+        # Full RetainRequest item shape (entities/observation_scopes/strategy/
+        # update_mode) + the sync/async toggle — forwarded only when the
+        # caller actually set them, so a client fake built against the older
+        # narrow ``retain(bank_id, content, document_id, context, metadata,
+        # tags, timestamp)`` shape (every existing test double) keeps working
+        # unmodified; only a caller that opts into the new surface sees it.
+        extra: dict[str, Any] = {}
+        if entities is not None:
+            extra["entities"] = entities
+        if observation_scopes is not None:
+            extra["observation_scopes"] = observation_scopes
+        if strategy is not None:
+            extra["strategy"] = strategy
+        if update_mode is not None:
+            extra["update_mode"] = update_mode
+        if sync:
+            extra["sync"] = True
+
         try:
             resp = await self._call(
                 "retain",
@@ -728,6 +779,7 @@ class HindsightProvider(MemoryProvider):
                 metadata={k: str(v) for k, v in meta.items()},
                 tags=out_tags,
                 timestamp=timestamp,
+                **extra,
             )
         except Exception as exc:
             # #1420: a raised retain is write-path evidence, distinct from the
@@ -736,13 +788,23 @@ class HindsightProvider(MemoryProvider):
             self._mark_write_failure(str(exc), reason="retain_failed")
             raise
         document_id = resolved_id
-        out = {"id": document_id, "timestamp": _now()}
-        # retain is async on this engine — surface the operation id so
-        # callers (dashboard ingestion indicator, CLI) can poll instead of
-        # wondering why list doesn't show the item yet.
-        operation_id = (resp or {}).get("operation_id") if isinstance(resp, dict) else None
+        out: dict[str, Any] = {"id": document_id, "timestamp": _now()}
+        resp_dict = resp if isinstance(resp, dict) else {}
+        # retain is async by default on this engine — surface the operation
+        # id(s) so callers (dashboard ingestion indicator, CLI, memory_operation_*
+        # MCP tools) can poll instead of wondering why list doesn't show the
+        # item yet. ``items_count``/``operation_ids`` used to be dropped on the
+        # floor entirely — surface them whenever the engine reports them so a
+        # caller doing per-item accounting doesn't have to guess.
+        operation_id = resp_dict.get("operation_id")
         if operation_id:
             out["operation_id"] = str(operation_id)
+        operation_ids = resp_dict.get("operation_ids")
+        if isinstance(operation_ids, list) and operation_ids:
+            out["operation_ids"] = [str(i) for i in operation_ids]
+        items_count = resp_dict.get("items_count")
+        if isinstance(items_count, int):
+            out["items_count"] = items_count
         return out
 
     async def search(
@@ -755,6 +817,8 @@ class HindsightProvider(MemoryProvider):
         after: str | None = None,
         mode: str = "vector",
         client_id: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        min_scores: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
         """Search, honouring the time window the whole surface advertises (#1471).
 
@@ -772,6 +836,11 @@ class HindsightProvider(MemoryProvider):
         than the item count, then cut after filtering.
 
         ``mode`` is rejected rather than ignored — see :meth:`_reject_mode`.
+
+        ``tag_groups``/``min_scores`` are Hindsight-native recall filters
+        (boolean tag expressions / per-stage score floors) — passed straight
+        through to :meth:`recall` when set, so ``memory_search`` can be honest
+        about scope without every caller having to switch to ``memory_recall``.
         """
         self._reject_mode(mode)
         windowed = before is not None or after is not None
@@ -782,11 +851,13 @@ class HindsightProvider(MemoryProvider):
             max_tokens=max(256, limit * 256 * (4 if windowed else 1)),
             dataset=dataset,
             tags=tags,
+            tag_groups=tag_groups,
+            min_scores=min_scores,
             client_id=client_id,
         )
         if windowed:
             out = [item for item in out if _within_window(item, before=before, after=after)]
-        return out[:limit]
+        return list(out[:limit])
 
     @staticmethod
     def _reject_mode(mode: str | None) -> None:
@@ -1038,26 +1109,48 @@ class HindsightProvider(MemoryProvider):
         dataset: str | list[str] = _SHARED,
         tags: list[str] | None = None,
         tags_match: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        budget: str = "mid",
+        prefer_observations: bool = False,
+        include: dict[str, Any] | None = None,
+        query_timestamp: str | None = None,
+        min_scores: dict[str, float] | None = None,
         client_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> RecallResults:
         """Fan out per-bank recall to the caller's allowed banks, merge under
-        one token budget. Hindsight has no server-side cross-bank query and
-        returns no numeric score, so we re-rank the union via the :8086
-        reranker, with the §4b precedence ladder as the tiebreak.
+        one token budget.
+
+        Modern (0.8.x) Hindsight returns a native per-result ``scores.final``
+        — a combined reranker + recency/temporal ranking score — so that is
+        used for cross-bank merge ordering whenever at least one result in
+        the union carries one; the :8086 reranker only runs as a FALLBACK
+        when the engine gave us nothing to rank by (an older Hindsight, or a
+        response shape that omitted ``scores``). The §4b precedence ladder
+        is always the tiebreak.
 
         In unified-bank mode ``_allowed_namespaces`` collapses to a single
-        ``shared`` bank, so this is a one-bank recall (the rerank + budget still
-        apply). ``tags_match`` (``any``/``all``) is a passthrough to Hindsight's
-        tag filter — only forwarded when set.
+        ``shared`` bank, so this is a one-bank recall (the budget still
+        applies). ``tags_match``/``tag_groups``/``budget``/
+        ``prefer_observations``/``include``/``query_timestamp``/
+        ``min_scores`` are Hindsight-native recall knobs — each is only
+        forwarded to the engine when the caller actually set it, so a client
+        fake built against the older narrow signature stays compatible.
+
+        Returns a :class:`RecallResults` — a ``list[dict]`` (every existing
+        caller keeps iterating/indexing/comparing it exactly as before) that
+        additionally carries the response-level ``entities``/``chunks``/
+        ``source_facts`` Hindsight returns alongside ``results`` (merged
+        across the fanned-out banks) as ``.entities``/``.chunks``/
+        ``.source_facts`` attributes, instead of silently discarding them.
         """
         import asyncio
 
         banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
         if not banks:
-            return []
+            return RecallResults([])
         effective_types = list(types) if types else list(_DEFAULT_RECALL_TYPES)
 
-        async def _one(bank: str) -> list[dict[str, Any]]:
+        async def _one(bank: str) -> tuple[list[dict[str, Any]], dict, dict, dict]:
             kwargs: dict[str, Any] = {
                 "bank_id": bank,
                 "query": query,
@@ -1065,32 +1158,72 @@ class HindsightProvider(MemoryProvider):
                 "max_tokens": max_tokens,
                 "tags": tags,
             }
-            # Only forward tags_match when the caller set it, so clients/fakes
-            # that don't know the param stay compatible.
+            # Only forward the extended knobs when the caller set them, so
+            # clients/fakes that don't know the param stay compatible.
             if tags_match is not None:
                 kwargs["tags_match"] = tags_match
+            if tag_groups is not None:
+                kwargs["tag_groups"] = tag_groups
+            if budget is not None and budget != "mid":
+                kwargs["budget"] = budget
+            if prefer_observations:
+                kwargs["prefer_observations"] = True
+            if include is not None:
+                kwargs["include"] = include
+            if query_timestamp is not None:
+                kwargs["query_timestamp"] = query_timestamp
+            if min_scores is not None:
+                kwargs["min_scores"] = min_scores
             resp = await self._call("recall", **kwargs)
-            return [self._fact_to_item(f, bank) for f in resp.get("results", [])]
+            items = [self._fact_to_item(f, bank) for f in resp.get("results", [])]
+            return (
+                items,
+                resp.get("entities") or {},
+                resp.get("chunks") or {},
+                resp.get("source_facts") or {},
+            )
 
         per_bank = await asyncio.gather(*[_one(b) for b in banks])
-        union: list[dict[str, Any]] = [item for bank_items in per_bank for item in bank_items]
+        union: list[dict[str, Any]] = []
+        entities_merged: dict[str, Any] = {}
+        chunks_merged: dict[str, Any] = {}
+        source_facts_merged: dict[str, Any] = {}
+        for items, ents, chks, sfacts in per_bank:
+            union.extend(items)
+            entities_merged.update(ents)
+            chunks_merged.update(chks)
+            source_facts_merged.update(sfacts)
+
         # Enforce visibility:private + project scope BEFORE the rerank + token
         # budget so that docs the caller may not see never consume the caller's
         # budget (and never leak). No-op in pre-unified multi-bank mode. Done
         # pre-budget so the returned count reflects only visible docs.
         union = self._filter_visible(union, client_id, dataset)
         if not union:
-            return []
+            return RecallResults([])
 
-        union = await self._rerank_union(query, union)
+        # Native scores (Hindsight 0.8.x RecallScores.final) are the engine's
+        # own combined ranking signal, computed the same way per bank — trust
+        # them across the fan-out and skip the :8086 fallback entirely when
+        # present, rather than clobbering a real signal with a second opinion.
+        if not any(isinstance(item.get("score"), (int, float)) for item in union):
+            union = await self._rerank_union(query, union)
         union.sort(key=self._precedence_key)  # stable: precedence wins ties
-        return self._apply_token_budget(union, max_tokens)
+        budgeted = self._apply_token_budget(union, max_tokens)
+        return RecallResults(
+            budgeted,
+            entities=entities_merged or None,
+            chunks=chunks_merged or None,
+            source_facts=source_facts_merged or None,
+        )
 
     @staticmethod
     def _precedence_key(item: dict[str, Any]) -> tuple[int, float]:
         """§4b ladder: shared/curated observations rank above raw private
-        facts. Lower tuple sorts first. Second element is negative rerank
-        score so higher score sorts earlier within the same tier.
+        facts. Lower tuple sorts first. Second element is negative score
+        (native ``scores.final`` when the engine supplied one, else the
+        :8086 fallback reranker's score) so higher score sorts earlier
+        within the same tier.
         """
         is_observation = item.get("type") == "observation"
         is_shared = item.get("dataset") == _SHARED
@@ -1124,6 +1257,400 @@ class HindsightProvider(MemoryProvider):
             spent += cost
         return out
 
+    # ── reflect (LLM-backed synthesis) ───────────────────────────────────
+    #
+    # Reflect operates on exactly one bank — there is no server-side
+    # cross-bank reflect, and merging LLM narratives across banks the way
+    # recall merges facts would not make sense. ``dataset`` therefore
+    # resolves to a SINGLE namespace via ``_write_namespace`` (the same
+    # ACL-checked single-bank resolution ``add`` uses), not the read-side
+    # multi-bank ``_allowed_namespaces``.
+
+    async def reflect(
+        self,
+        query: str,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        budget: str = "low",
+        max_tokens: int = 4096,
+        fact_types: list[str] | None = None,
+        tags: list[str] | None = None,
+        tags_match: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        exclude_mental_models: bool = False,
+        exclude_mental_model_ids: list[str] | None = None,
+        include: dict[str, Any] | None = None,
+        response_schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "reflect",
+            bank_id=bank,
+            query=query,
+            budget=budget,
+            max_tokens=max_tokens,
+            fact_types=fact_types,
+            tags=tags,
+            tags_match=tags_match,
+            tag_groups=tag_groups,
+            exclude_mental_models=exclude_mental_models,
+            exclude_mental_model_ids=exclude_mental_model_ids,
+            include=include,
+            response_schema=response_schema,
+        )
+
+    # ── single-memory curation (non-destructive "this is wrong" path) ───
+
+    async def _ensure_memory_visible(
+        self, bank: str, memory_id: str, client_id: str | None, dataset: str | list[str] | None
+    ) -> None:
+        """Unified-bank guard: fetch the memory unit and check it against the
+        same ``visibility:private``/``project:<id>`` predicates every read
+        path enforces, so a caller cannot curate or inspect another agent's
+        private memory (or reach outside a project scope) just by guessing
+        its id. No-op in pre-unified multi-bank mode — bank isolation already
+        does the job there, matching :meth:`delete`'s ``_unified_bank`` gate.
+
+        Hindsight's single-memory GET response shape isn't in the published
+        OpenAPI schema (an empty ``{}`` response model) — this assumes it
+        carries ``tags`` the same way list/recall items do. A memory with no
+        (or unrecognised) ``tags`` field reads as unscoped/shared, the same
+        fail-open default an untagged doc gets everywhere else on this ACL.
+        """
+        if not self._unified_bank:
+            return
+        fact = await self._call("get_memory", bank_id=bank, memory_id=memory_id)
+        if not isinstance(fact, dict):
+            fact = {}
+        caller = self._caller_agent(client_id)
+        projects, wants_unscoped = self._requested_scope(dataset)
+        if not (
+            self._is_visible_to(fact, caller) and self._is_in_scope(fact, projects, wants_unscoped)
+        ):
+            raise PermissionError(f"memory {memory_id!r} is not visible to this caller")
+
+    async def curate(
+        self,
+        memory_id: str,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        text: str | None = None,
+        context: str | None = None,
+        occurred_start: str | None = None,
+        occurred_end: str | None = None,
+        fact_type: str | None = None,
+        entities: list[str] | None = None,
+        state: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit a memory unit, or soft-invalidate/revert it via ``state``
+        (``"invalidated"``/``"valid"`` — reversible either way, so this is
+        the non-destructive "this is wrong" correction path, distinct from
+        :meth:`delete`).
+
+        ``memory_id`` is the PER-FACT id (``RecallResult.id`` /
+        ``metadata.fact_id`` on a list/recall item) — NOT the ``document_id``
+        :meth:`add`/:meth:`delete` address. ``dataset`` names the single bank
+        the memory lives in (default ``shared``, ACL-checked the same way
+        ``add`` resolves its write namespace).
+        """
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        await self._ensure_memory_visible(bank, memory_id, client_id, dataset)
+        return await self._call(
+            "update_memory",
+            bank_id=bank,
+            memory_id=memory_id,
+            text=text,
+            context=context,
+            occurred_start=occurred_start,
+            occurred_end=occurred_end,
+            fact_type=fact_type,
+            entities=entities,
+            state=state,
+            reason=reason,
+        )
+
+    async def memory_history(
+        self, memory_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        """Revision history for one memory unit (curation audit trail)."""
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        await self._ensure_memory_visible(bank, memory_id, client_id, dataset)
+        return await self._call("memory_history", bank_id=bank, memory_id=memory_id)
+
+    # ── mental models ─────────────────────────────────────────────────────
+    #
+    # Bank-scoped configuration objects, not per-document facts — they carry
+    # no ``visibility:private``/``project:<id>`` tag of their own, so (as with
+    # ``reflect``) the only ACL enforcement is picking the right single bank.
+    # In unified mode every agent's mental models live in the one ``shared``
+    # bank and are mutually visible; this mirrors the existing REST admin
+    # surface (``memory_admin.py``), which applies no additional ACL here
+    # either.
+
+    async def list_mental_models(
+        self,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str | None = None,
+        detail: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "list_mental_models",
+            bank_id=bank,
+            tags=tags,
+            tags_match=tags_match,
+            detail=detail,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def get_mental_model(
+        self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call("get_mental_model", bank_id=bank, mental_model_id=mental_model_id)
+
+    async def create_mental_model(
+        self,
+        *,
+        name: str,
+        source_query: str,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        id: str | None = None,
+        tags: list[str] | None = None,
+        max_tokens: int = 2048,
+        trigger: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "create_mental_model",
+            bank_id=bank,
+            name=name,
+            source_query=source_query,
+            id=id,
+            tags=tags,
+            max_tokens=max_tokens,
+            trigger=trigger,
+        )
+
+    async def update_mental_model(
+        self,
+        mental_model_id: str,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        name: str | None = None,
+        source_query: str | None = None,
+        max_tokens: int | None = None,
+        tags: list[str] | None = None,
+        trigger: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "update_mental_model",
+            bank_id=bank,
+            mental_model_id=mental_model_id,
+            name=name,
+            source_query=source_query,
+            max_tokens=max_tokens,
+            tags=tags,
+            trigger=trigger,
+        )
+
+    async def delete_mental_model(
+        self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "delete_mental_model", bank_id=bank, mental_model_id=mental_model_id
+        )
+
+    async def refresh_mental_model(
+        self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "refresh_mental_model", bank_id=bank, mental_model_id=mental_model_id
+        )
+
+    # ── directives ───────────────────────────────────────────────────────
+    #
+    # Same bank-scoped-configuration posture as mental models (see above).
+
+    async def list_directives(
+        self,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str | None = None,
+        active_only: bool | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "list_directives",
+            bank_id=bank,
+            tags=tags,
+            tags_match=tags_match,
+            active_only=active_only,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def get_directive(
+        self, directive_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call("get_directive", bank_id=bank, directive_id=directive_id)
+
+    async def create_directive(
+        self,
+        *,
+        name: str,
+        content: str,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        priority: int = 0,
+        is_active: bool = True,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "create_directive",
+            bank_id=bank,
+            name=name,
+            content=content,
+            priority=priority,
+            is_active=is_active,
+            tags=tags,
+        )
+
+    async def update_directive(
+        self,
+        directive_id: str,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        name: str | None = None,
+        content: str | None = None,
+        priority: int | None = None,
+        is_active: bool | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "update_directive",
+            bank_id=bank,
+            directive_id=directive_id,
+            name=name,
+            content=content,
+            priority=priority,
+            is_active=is_active,
+            tags=tags,
+        )
+
+    async def delete_directive(
+        self, directive_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call("delete_directive", bank_id=bank, directive_id=directive_id)
+
+    # ── async operations (so retain/refresh/consolidate are pollable) ───
+
+    async def list_operations(
+        self,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        status: str | None = None,
+        type: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        exclude_parents: bool | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "list_operations",
+            bank_id=bank,
+            status=status,
+            type=type,
+            limit=limit,
+            offset=offset,
+            exclude_parents=exclude_parents,
+        )
+
+    async def get_operation(
+        self,
+        operation_id: str,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        include_payload: bool | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "get_operation",
+            bank_id=bank,
+            operation_id=operation_id,
+            include_payload=include_payload,
+        )
+
+    async def cancel_operation(
+        self, operation_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call("cancel_operation", bank_id=bank, operation_id=operation_id)
+
+    async def retry_operation(
+        self, operation_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call("retry_operation", bank_id=bank, operation_id=operation_id)
+
+    # ── tags / bank stats / consolidation ────────────────────────────────
+
+    async def list_tags(
+        self,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        q: str | None = None,
+        source: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "list_tags", bank_id=bank, q=q, source=source, limit=limit, offset=offset
+        )
+
+    async def bank_stats(
+        self,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        refresh: bool | None = None,
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call("bank_stats", bank_id=bank, refresh=refresh)
+
+    async def consolidate(  # type: ignore[override]  — real implementation, ABC default is a stub
+        self, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        return await self._call("consolidate", bank_id=bank)
+
     # ── Runtime toggles ────────────────────────────────────────────────
 
     def graph_status(self) -> dict[str, Any]:
@@ -1152,9 +1679,16 @@ class HindsightProvider(MemoryProvider):
     def _fact_to_item(fact: dict[str, Any], bank: str) -> dict[str, Any]:
         """Map a Hindsight RecallResult to the MemoryItem wire shape.
 
-        ``score`` is always None — Hindsight recall returns no numeric score;
-        ordering carries the relevance signal.
+        ``score`` carries the engine's native ``scores.final`` (RecallScores,
+        0.8.x+) when present — the comment this replaced ("Hindsight recall
+        returns no numeric score") is stale; ``recall()`` only falls back to
+        the :8086 reranker when the whole union comes back without one (an
+        older Hindsight). ``entities``/``source_fact_ids`` are the per-result
+        mention/provenance lists RecallResult already carries — additive keys,
+        harmless to every caller that only reads ``id``/``text``/``score``.
         """
+        scores = fact.get("scores") or {}
+        final_score = scores.get("final")
         return {
             "id": fact.get("document_id") or fact.get("id"),
             "text": fact.get("text", ""),
@@ -1163,6 +1697,8 @@ class HindsightProvider(MemoryProvider):
             "tags": list(fact.get("tags") or []),
             "source": (fact.get("metadata") or {}).get("source"),
             "metadata": dict(fact.get("metadata") or {}),
-            "score": None,
+            "score": float(final_score) if isinstance(final_score, (int, float)) else None,
             "type": fact.get("type"),
+            "entities": list(fact.get("entities") or []) or None,
+            "source_fact_ids": list(fact.get("source_fact_ids") or []) or None,
         }

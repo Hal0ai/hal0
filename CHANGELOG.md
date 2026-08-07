@@ -23,6 +23,92 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- Admin MCP catalog expanded from 92 to 160 tools — the full platform
+  management surface is now agent-reachable: services lifecycle
+  (`service_list`/`service_health` + gated `service_action`), ComfyUI
+  (status/workflows reads, gated switchover/pin/launch/cancel/restart),
+  updater/doctor/health/features reads (`updater_state`, `updater_check`,
+  `doctor_report`, `health_system`, …), hardware and request telemetry
+  (`slot_stats`, `request_metrics`, `npu_occupancy`, `power_stats`,
+  `throughput_history`, …), slots and models long-tail (`slot_config`,
+  `slot_voices`, `hf_search`, `model_validate`, `model_health_check`),
+  bench plan/results reads + gated `bench_run`, `journal_snapshot` and
+  activity reads, `approval_list` (the brain can now tell the operator
+  what's pending), runner images, NPU backend load/unload, and MCP
+  self-management. `slot_create`/`slot_edit` param hints now advertise
+  `autoload` and `priority`. The admin mount also delegates the full
+  26-tool memory surface (previously 5). Brain chat reaches every
+  non-excluded new tool through the shared dispatch core.
+- Profiles: `POST /api/profiles/generate` (admin MCP: `profile_generate`)
+  drafts a profile from a registered model or a HuggingFace repo —
+  capability classification, device fit for the local host, and seed
+  selection reuse the install-time heuristics, with an optional
+  `use_llm` pass that summarizes the model card through the local
+  utility slot and degrades to heuristics when inference is down. The
+  draft is a portable envelope ready for the existing create/import
+  flow; the catalog is never written.
+- `hal0 doctor all` gains two MCP preflights: `mcp_mounts` (live
+  `initialize` + `tools/list` against `/mcp/admin` and `/mcp/memory`
+  with the configured agent token) and `hermes_mcp_auth` (the rendered
+  Hermes config carries `Authorization` whenever the box requires
+  auth). A 401 now fails doctor with the repair command instead of
+  silently breaking every agent.
+
+### Fixed
+
+- Hermes bootstrap MCP wiring actually works now: the seed TOML never
+  declared the builtin `[mcp.servers.*]` blocks so the allow-list
+  silently skipped wiring both servers, and the post-wire live probe
+  double-appended `/mcp` and 404ed — together the provisioning-time
+  handshake had never succeeded. Bootstrap also injects
+  `HAL0_MCP_TOKEN` (0600) into the agent driver env and renders
+  `Authorization: Bearer` into the Hermes MCP client config whenever
+  the box has auth enabled, and refreshes it on `--repair` after a key
+  rotation.
+
+### Breaking
+
+- The experimental standalone browser MCP server
+  (`hal0.mcp.browser_server`, port 9178, `HAL0_BROWSER_*` env) is
+  removed. It was never mounted or registered as a bundled server, and
+  its shipped unit pointed at a retired path. Browser tooling is the
+  agent's own concern — Hermes brings its own.
+
+### Security
+
+- The `/mcp/memory` mount is now CLIENT-tier (was ADMIN): memory-only
+  agents no longer need the platform-admin key; the fail-closed
+  namespace ACL and the operator-approval gate on destructive tools
+  bound its blast radius. `/mcp/admin` and any future `/mcp/*` mount
+  remain ADMIN. Docs that still claimed "no built-in network auth"
+  (pre-KB-1) are corrected everywhere.
+
+### Added
+
+- Memory MCP surface brought to feature parity with the live Hindsight
+  0.8.4 server: `memory_reflect` (LLM-backed synthesis over memory),
+  `memory_curate`/`memory_history` (the non-destructive "this is wrong"
+  correction path — edit or reversibly invalidate a single fact), mental
+  model tools (`memory_mental_model_list`/`_get`/`_create`/`_update`/
+  `_delete`/`_refresh`), directive tools (`memory_directive_list`/`_get`/
+  `_create`/`_update`/`_delete`), async-operation tools
+  (`memory_operation_list`/`_get`/`_cancel`/`_retry` — retain is async by
+  default, so these are the poll target for `memory_add`'s `operation_id`),
+  and bank introspection (`memory_tags_list`, `memory_bank_stats`,
+  `memory_bank_consolidate`). `memory_add` gained `entities`/
+  `observation_scopes`/`strategy`/`update_mode`/`sync` (Hindsight's full
+  `RetainRequest` item shape) and now surfaces `operation_ids`/`items_count`
+  instead of dropping them. `memory_recall` gained `tag_groups`/`budget`/
+  `prefer_observations`/`include`/`query_timestamp`/`min_scores`, and its
+  results now carry the engine's native per-result relevance score plus
+  optional `entities`/`chunks`/`source_facts` response enrichment — a stale
+  comment claiming "Hindsight recall returns no numeric score" is fixed.
+  `memory_search` gained `tag_groups`/`min_scores`. Every new destructive
+  tool (`memory_mental_model_delete`, `memory_directive_delete`) goes
+  through the same operator-approval gate as a bulk `memory_delete`; no
+  destructive bank-level operation (delete/clear a whole bank) is exposed
+  over MCP.
+
 - Moonshine reinstated as hal0's CPU STT engine, packaged as its own
   toolbox image (`hal0-toolbox-moonshine:v1`). `voice.stt` is now a
   device-keyed engine switch exactly like `voice.tts`: `cpu` runs
