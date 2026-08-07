@@ -19,7 +19,7 @@ OpenAI-compatible `/v1/*` requests to the right slot, and serves the
 dashboard. There is no shared inference daemon to babysit.
 
 Each capability — `utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`,
-`agent`, and the NPU-conditional `stt-npu` / `embed-npu` slots — runs in its
+`agent`, and the NPU-conditional `flm-stt` / `flm-embed` slots — runs in its
 own dedicated podman container. `agent` is the capable default/fallback
 anchor and `utility` is the cheap helper used for background jobs like
 memory extraction.
