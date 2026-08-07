@@ -519,17 +519,59 @@ _ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
         "slot_status",
         "model_list",
         "hardware_probe",
-        # memory_* ride the profile's own namespace (private:hermes__hal0-brain)
-        # via Hindsight, not the agent memory engine's MCP dispatcher
-        # (memory_recall added to the admin catalog in §4.3 — same
-        # exclusion rationale applies)
+        # memory_* (all 26 — the legacy 5 plus the Hindsight 0.8.4 parity
+        # buildout's reflect/curate/history, mental-model CRUD+refresh,
+        # directive CRUD, operations, tags/bank-stats/consolidate) ride the
+        # profile's own namespace (private:hermes__hal0-brain) via Hindsight,
+        # not the agent memory engine's MCP dispatcher. Listed explicitly
+        # so this stays a plain frozenset — a static attribute other test
+        # modules read directly (e.g. tests/board/test_board_chat_admin_
+        # tools.py's ``catalog - bc._ADMIN_TOOL_EXCLUDES``) — while
+        # :func:`_is_admin_tool_excluded` below is the actual prefix-based
+        # check the exclusion logic runs, so a 27th memory_* tool is
+        # excluded automatically without this list needing a touch.
         "memory_add",
         "memory_search",
         "memory_list",
         "memory_delete",
         "memory_recall",
+        "memory_reflect",
+        "memory_curate",
+        "memory_history",
+        "memory_mental_model_list",
+        "memory_mental_model_get",
+        "memory_mental_model_create",
+        "memory_mental_model_update",
+        "memory_mental_model_delete",
+        "memory_mental_model_refresh",
+        "memory_directive_list",
+        "memory_directive_get",
+        "memory_directive_create",
+        "memory_directive_update",
+        "memory_directive_delete",
+        "memory_operation_list",
+        "memory_operation_get",
+        "memory_operation_cancel",
+        "memory_operation_retry",
+        "memory_tags_list",
+        "memory_bank_stats",
+        "memory_bank_consolidate",
     }
 )
+
+
+def _is_admin_tool_excluded(name: str) -> bool:
+    """True when ``name`` must not reach the brain-chat surfaced schema.
+
+    memory_* is excluded by PREFIX — the brain handles memory through the
+    hal0-brain persona's own namespace via Hindsight directly (see
+    ``_ADMIN_TOOL_EXCLUDES`` above), not the agent memory engine's MCP
+    dispatcher, and that rationale applies to every memory_* tool
+    uniformly regardless of how many hal0.mcp.memory ends up exposing.
+    The remaining exclusions are the literal name collisions / semantic
+    duplicates with the local board-chat platform verbs.
+    """
+    return name.startswith("memory_") or name in _ADMIN_TOOL_EXCLUDES
 
 
 def _admin_tool_names() -> frozenset[str]:
@@ -542,7 +584,11 @@ def _admin_tool_names() -> frozenset[str]:
         )
     except ImportError:
         return frozenset()
-    return (AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS) - _ADMIN_TOOL_EXCLUDES
+    return frozenset(
+        t
+        for t in (AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS)
+        if not _is_admin_tool_excluded(t)
+    )
 
 
 def _brain_tool_policy(request: Request) -> Any | None:
@@ -588,7 +634,7 @@ def _admin_tool_schemas(policy: Any | None = None) -> list[dict[str, Any]]:
         return []
     schemas: list[dict[str, Any]] = []
     for name, description in TOOL_DESCRIPTIONS.items():
-        if name in _ADMIN_TOOL_EXCLUDES:
+        if _is_admin_tool_excluded(name):
             continue
         if policy is not None and not policy.allows(name):
             continue
@@ -1737,6 +1783,7 @@ __all__ = [
     "_dispatch_tool",
     "_extract_tool_calls",
     "_frame_messages",
+    "_is_admin_tool_excluded",
     "_is_read_tool",
     "_parse_text_tool_calls",
     "_resolve_platform_tool",

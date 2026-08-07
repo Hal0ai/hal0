@@ -217,6 +217,10 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
         "mcp_server_uninstall",
         "comfyui_render_cancel",
         "npu_backend_unload",
+        # Hindsight 0.8.4 parity buildout: mental-model/directive deletion is
+        # destructive, same tier as memory_delete's bulk path.
+        "memory_mental_model_delete",
+        "memory_directive_delete",
     }
     destructive_per_annotation = {
         name for name, ann in admin._ANNOTATIONS.items() if ann.destructiveHint
@@ -877,6 +881,135 @@ async def test_memory_recall_dispatches_through_memory_dispatcher(queue: Approva
     dispatcher.assert_awaited_once_with(
         "memory_recall", {"query": "what did we decide about ports"}
     )
+
+
+# ── Hindsight 0.8.4 parity buildout: memory catalog sync (26 tools total) ───
+
+_MEMORY_EXTENDED_READ_TOOLS = (
+    "memory_reflect",
+    "memory_history",
+    "memory_mental_model_list",
+    "memory_mental_model_get",
+    "memory_directive_list",
+    "memory_directive_get",
+    "memory_operation_list",
+    "memory_operation_get",
+    "memory_tags_list",
+    "memory_bank_stats",
+)
+
+_MEMORY_EXTENDED_WRITE_TOOLS = (
+    "memory_curate",
+    "memory_mental_model_create",
+    "memory_mental_model_update",
+    "memory_mental_model_refresh",
+    "memory_directive_create",
+    "memory_directive_update",
+    "memory_operation_cancel",
+    "memory_operation_retry",
+    "memory_bank_consolidate",
+)
+
+_MEMORY_EXTENDED_GATED_TOOLS = (
+    "memory_mental_model_delete",
+    "memory_directive_delete",
+)
+
+
+def test_memory_extended_toolset_is_fully_classified() -> None:
+    """All 21 new hal0.mcp.memory tools (Hindsight 0.8.4 parity) land in
+    exactly one classification bucket, matching hal0.mcp.memory's own
+    read-only/destructive annotations."""
+    for t in _MEMORY_EXTENDED_READ_TOOLS:
+        assert t in admin.AUTONOMOUS_READ_TOOLS, f"{t} must be classified AUTONOMOUS_READ"
+        assert admin._ANNOTATIONS[t].readOnlyHint is True
+    for t in _MEMORY_EXTENDED_WRITE_TOOLS:
+        assert t in admin.AUTONOMOUS_WRITE_TOOLS, f"{t} must be classified AUTONOMOUS_WRITE"
+        assert admin._ANNOTATIONS[t].readOnlyHint is False
+        assert admin._ANNOTATIONS[t].destructiveHint is False
+    for t in _MEMORY_EXTENDED_GATED_TOOLS:
+        assert t in admin.GATED_TOOLS, f"{t} must be classified GATED"
+        assert admin._ANNOTATIONS[t].destructiveHint is True
+    catalog = admin.AUTONOMOUS_READ_TOOLS | admin.AUTONOMOUS_WRITE_TOOLS | admin.GATED_TOOLS
+    all_memory = {t for t in catalog if t.startswith("memory_")}
+    assert len(all_memory) == 26  # legacy 5 + the 21 above
+
+
+def test_memory_extended_annotations_match_the_memory_mount_verbatim() -> None:
+    """admin._ANNOTATIONS is not a hand-copied divergent table for the
+    memory catalog — it is hal0.mcp.memory's own _ANNOTATIONS merged in."""
+    from hal0.mcp import memory as memory_mod
+
+    for name, ann in memory_mod._ANNOTATIONS.items():
+        assert admin._ANNOTATIONS[name] is ann
+
+
+def test_memory_extended_gated_tools_are_static_not_arg_dependent() -> None:
+    """Unlike memory_delete, the two new gated memory tools gate on tool
+    name alone — no args-dependent carve-out."""
+    for t in _MEMORY_EXTENDED_GATED_TOOLS:
+        assert admin.is_gated(t, {}) is True
+        assert admin.is_gated(t, {"id": "mm-1"}) is True
+
+
+def test_memory_extended_gated_tools_are_on_the_no_loosen_floor() -> None:
+    """Destructive memory tools can't be auto-approved by a persona TOML,
+    same posture as memory_delete/model_delete/slot_delete/etc."""
+    for t in _MEMORY_EXTENDED_GATED_TOOLS:
+        assert t in admin.POLICY_NO_LOOSEN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("memory_reflect", {"query": "what do we know about ports"}),
+        ("memory_curate", {"id": "f-1", "state": "invalidated"}),
+        ("memory_mental_model_get", {"id": "mm-1"}),
+        ("memory_operation_cancel", {"id": "op-1"}),
+    ],
+)
+async def test_memory_extended_tools_dispatch_through_memory_dispatcher(
+    queue: ApprovalQueue, tool: str, args: dict[str, Any]
+) -> None:
+    """A representative read + write + gated-adjacent sample of the new
+    catalog bypasses REST entirely — same in-process path as the legacy 5."""
+    dispatcher = AsyncMock(return_value={"status": "ok"})
+    result = await admin.dispatch(
+        tool=tool,
+        args=args,
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+        memory_dispatcher=dispatcher,
+    )
+    assert result == {"status": "ok"}
+    dispatcher.assert_awaited_once_with(tool, args)
+
+
+@pytest.mark.asyncio
+async def test_memory_mental_model_delete_enqueues_and_forwards_on_approve(
+    queue: ApprovalQueue,
+) -> None:
+    """The new destructive memory tools gate through the SAME ApprovalQueue
+    -> executor path as every other gated tool, and still hit the in-process
+    memory_dispatcher (not REST) once approved."""
+    dispatcher = AsyncMock(return_value={"status": "ok", "deleted": True})
+    result = await admin.dispatch(
+        tool="memory_mental_model_delete",
+        args={"id": "mm-1"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+        memory_dispatcher=dispatcher,
+    )
+    assert result["status"] == "pending_approval"
+    dispatcher.assert_not_awaited()
+    approved = await queue.approve(result["approval_id"])
+    assert approved["result"] == {"status": "ok", "deleted": True}
+    dispatcher.assert_awaited_once_with("memory_mental_model_delete", {"id": "mm-1"})
 
 
 @pytest.mark.asyncio

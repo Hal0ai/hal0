@@ -62,6 +62,16 @@ def test_surfaced_tool_schemas_equals_local_plus_admin_minus_excludes() -> None:
     # is the assertion that actually catches a newly-introduced clash).
     assert local_names.isdisjoint(admin_catalog - bc._ADMIN_TOOL_EXCLUDES)
 
+    # The brain surfaces NONE of the 26 memory_* tools — it handles memory
+    # through the hal0-brain persona's own namespace via Hindsight, not the
+    # agent memory engine's MCP dispatcher. bc._is_admin_tool_excluded is a
+    # memory_-PREFIX check (not a 26-name literal list), so this also
+    # future-proofs a 27th hal0.mcp.memory tool with zero chat.py changes.
+    memory_tools = {t for t in admin_catalog if t.startswith("memory_")}
+    assert len(memory_tools) == 26
+    assert not any(bc._is_admin_tool_excluded(t) is False for t in memory_tools)
+    assert surfaced_names.isdisjoint(memory_tools)
+
     # The platform-management expansion actually reached the chat surface —
     # one representative tool per new domain.
     for new_tool in (

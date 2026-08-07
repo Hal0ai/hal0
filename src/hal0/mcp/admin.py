@@ -61,7 +61,10 @@ Autonomous read::
     # Host-introspection probes (issue #237)
     gpu_target_version, npu_status, env_report, model_store_probe,
     # Memory reads — readOnly per their MCP annotations (moved out of
-    # autonomous-write in the §4.3 buildout; they never mutate state)
+    # autonomous-write in the §4.3 buildout; they never mutate state).
+    # memory_reflect/history/mental_model_{list,get}/directive_{list,get}/
+    # operation_{list,get}/tags_list/bank_stats are the Hindsight 0.8.4
+    # parity buildout's other 10 reads — see TOOL_DESCRIPTIONS.
     memory_search, memory_list, memory_recall
 
 Autonomous write::
@@ -72,7 +75,14 @@ Autonomous write::
     slot_load, slot_unload, slot_edit, slot_set_defaults,
     settings_reload,
     memory_add,
-    memory_delete (single id, default/own-namespace dataset only)
+    memory_delete (single id, default/own-namespace dataset only),
+    # Hindsight 0.8.4 parity buildout's other 9 writes — reversible,
+    # non-destructive (curate/mental-model/directive CRUD minus delete,
+    # operation cancel/retry, bank consolidate) — see TOOL_DESCRIPTIONS.
+    memory_curate, memory_mental_model_create, memory_mental_model_update,
+    memory_mental_model_refresh, memory_directive_create,
+    memory_directive_update, memory_operation_cancel, memory_operation_retry,
+    memory_bank_consolidate
 
 Gated (destructive — enqueued for owner approval)::
 
@@ -81,6 +91,7 @@ Gated (destructive — enqueued for owner approval)::
     slot_create, slot_delete, slot_restart, slot_rename,
     capability_set, config_write, provider_credential_write,
     memory_delete (bulk ids, OR a list/foreign-namespace dataset — #8),
+    memory_mental_model_delete, memory_directive_delete,
     # Profile CRUD (create/update/import/delete)
     profile_create, profile_update, profile_import, profile_delete,
     # Stack CRUD (create/update/apply/import/export/snapshot/delete)
@@ -107,11 +118,17 @@ more tool names here (guaranteed to drift), see :data:`TOOL_DESCRIPTIONS`
 for the single source of truth, or grep this module for "Platform-
 management expansion" section markers in each table below.
 
-The memory_* tools are delegates that forward into
-:mod:`hal0.mcp.memory` so we have a single tool surface per server
-(the admin server hosts every tool an agent might call; the memory
-server is a focused alternative mount that an agent can use when it
-only needs memory access).
+The memory_* tools (26 total — the legacy 5 plus the Hindsight 0.8.4
+parity buildout's reflect/curate/history, mental-model CRUD+refresh,
+directive CRUD, operation list/get/cancel/retry, and tags/bank-stats/
+bank-consolidate) are delegates that forward into :mod:`hal0.mcp.memory`
+so we have a single tool surface per server (the admin server hosts
+every tool an agent might call; the memory server is a focused
+alternative mount that an agent can use when it only needs memory
+access). Descriptions and ToolAnnotations for all 26 are owned by
+:mod:`hal0.mcp.memory` and imported verbatim (``_MEMORY_TOOL_ANNOTATIONS``)
+rather than hand-copied — only the read/write/gated classification and
+the agent-facing :data:`TOOL_DESCRIPTIONS` summaries live here.
 
 Deliberate exclusions
 ----------------------
@@ -158,6 +175,7 @@ import structlog
 
 from hal0.api._redact import redact_log_line as _redact_log_line
 from hal0.mcp.approval_queue import ApprovalQueue
+from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 from hal0.memory.namespace import is_known_namespace
 
@@ -343,6 +361,19 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "memory_search",
         "memory_list",
         "memory_recall",
+        # Memory — Hindsight 0.8.4 parity buildout (26-tool catalog). These
+        # 10 are read-only per hal0.mcp.memory's own ToolAnnotations
+        # (imported verbatim as _MEMORY_TOOL_ANNOTATIONS below).
+        "memory_reflect",
+        "memory_history",
+        "memory_mental_model_list",
+        "memory_mental_model_get",
+        "memory_directive_list",
+        "memory_directive_get",
+        "memory_operation_list",
+        "memory_operation_get",
+        "memory_tags_list",
+        "memory_bank_stats",
         # Services
         "service_list",
         "service_health",
@@ -448,6 +479,18 @@ AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
         # dataset gate. The dispatch helper applies that rule at call
         # time (see is_gated, #8).
         "memory_delete",
+        # Memory — Hindsight 0.8.4 parity buildout: mutating, reversible
+        # writes. memory_mental_model_delete/memory_directive_delete are
+        # destructive and live in GATED_TOOLS instead (below).
+        "memory_curate",
+        "memory_mental_model_create",
+        "memory_mental_model_update",
+        "memory_mental_model_refresh",
+        "memory_directive_create",
+        "memory_directive_update",
+        "memory_operation_cancel",
+        "memory_operation_retry",
+        "memory_bank_consolidate",
         # Live hardware re-probe — reversible, scoped, persists to
         # /etc/hal0/hardware.json (same blast radius as model_scan).
         "hardware_reprobe",
@@ -513,6 +556,13 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "upstream_delete",
         # memory_delete with len(ids) > 1, or a list/foreign-namespace
         # dataset even for a single id, routes here at call time (#8).
+        # Memory — mental-model/directive deletion is destructive, same
+        # tier as memory_delete's bulk path. hal0.mcp.memory carried these
+        # in its own _LOCAL_GATED_TOOLS fallback (its module docstring
+        # #1302) pending this catalog picking up the classification —
+        # this is that follow-up; admin.is_gated is now the single owner.
+        "memory_mental_model_delete",
+        "memory_directive_delete",
         # Services — start/stop/restart a systemd unit; destructive-adjacent.
         "service_action",
         # ComfyUI — mode flips, model downloads, render cancel, container
@@ -1613,6 +1663,8 @@ POLICY_NO_LOOSEN: frozenset[str] = frozenset(
         "stack_delete",
         "profile_delete",
         "memory_delete",  # keeps the bulk-delete arity gate intact
+        "memory_mental_model_delete",
+        "memory_directive_delete",
         "config_write",
         "provider_credential_write",
     }
@@ -2035,16 +2087,6 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "model_store_probe": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # Read-shaped memory tools — surface a memory query, no writes.
-    "memory_search": ToolAnnotations(
-        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
-    ),
-    "memory_list": ToolAnnotations(
-        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
-    ),
-    "memory_recall": ToolAnnotations(
-        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
-    ),
     # ── Autonomous write — mutating, reversible, idempotent writes. ────
     "model_swap": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
@@ -2151,9 +2193,6 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
     # Mutating, reversible, non-idempotent (each call has additional effect).
-    "memory_add": ToolAnnotations(
-        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
-    ),
     "slot_create": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
@@ -2209,9 +2248,6 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
     "profile_delete": ToolAnnotations(
-        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
-    ),
-    "memory_delete": ToolAnnotations(
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
     # ── Platform-management expansion — reads ──────────────────────────────
@@ -2432,6 +2468,12 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     ),
 }
 
+# All 26 memory_* tools' hints are owned by hal0.mcp.memory (imported above as
+# _MEMORY_TOOL_ANNOTATIONS) and merged in verbatim here — a single source of
+# truth so the /mcp/admin and /mcp/memory mounts can never drift on
+# read-only/destructive/idempotent/open-world semantics for the same tool.
+_ANNOTATIONS.update(_MEMORY_TOOL_ANNOTATIONS)
+
 
 # ── Tool catalog descriptions ────────────────────────────────────────────────
 #
@@ -2559,6 +2601,47 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "memory_delete": (
         "Delete one or more memory items (autonomous when len(ids)==1, gated otherwise)."
+    ),
+    # ── Memory extended toolset (Hindsight 0.8.4 parity, §mcp-hal0-integration) ──
+    "memory_reflect": (
+        "LLM-backed synthesis over memory — ask a question, get a written answer "
+        "grounded in recalled facts (not a raw fact list). Single-bank."
+    ),
+    "memory_curate": (
+        "Edit a memory unit, or soft-invalidate/revert it via state ('invalidated'|"
+        "'valid' — reversible). The non-destructive correction path; id is the "
+        "per-fact id from a search/recall/list result, not memory_add's document_id."
+    ),
+    "memory_history": "Revision history for one memory unit (curation audit trail).",
+    "memory_mental_model_list": "List a bank's mental models (stored reflect responses).",
+    "memory_mental_model_get": "Get one mental model by id.",
+    "memory_mental_model_create": (
+        "Create a mental model — a standing question kept refreshed from memory. "
+        "Returns {mental_model_id, operation_id}; poll with memory_operation_get."
+    ),
+    "memory_mental_model_update": "Update a mental model's name/source_query/max_tokens/tags/trigger.",
+    "memory_mental_model_delete": "Delete a mental model (gated — destructive).",
+    "memory_mental_model_refresh": (
+        "Trigger a mental model refresh (async). Returns {operation_id}; poll with "
+        "memory_operation_get."
+    ),
+    "memory_directive_list": "List a bank's directives (standing instructions injected into prompts).",
+    "memory_directive_get": "Get one directive by id.",
+    "memory_directive_create": "Create a directive (standing instruction injected into prompts).",
+    "memory_directive_update": "Update a directive's name/content/priority/is_active/tags.",
+    "memory_directive_delete": "Delete a directive (gated — destructive).",
+    "memory_operation_list": "List async operations (retain, consolidation, refresh, ...).",
+    "memory_operation_get": (
+        "Get one async operation's status — the poll target for memory_add's "
+        "operation_id, memory_mental_model_refresh, and memory_bank_consolidate."
+    ),
+    "memory_operation_cancel": "Cancel a pending/processing operation (aborts in-flight work only).",
+    "memory_operation_retry": "Re-queue a failed operation.",
+    "memory_tags_list": "List tags in use in a bank, with usage counts.",
+    "memory_bank_stats": "Node/link/observation/operation counts for a bank (read-only).",
+    "memory_bank_consolidate": (
+        "Trigger the engine's world/experience -> observation consolidation pass "
+        "early. Returns {operation_id}; not destructive (source facts are kept)."
     ),
     # ── Gated write ─────────────────────────────────────────────────────
     "model_pull": (
