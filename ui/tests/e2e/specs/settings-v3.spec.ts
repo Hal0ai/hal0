@@ -1,34 +1,23 @@
 /**
- * settings-v3 — `#settings` route renders the grouped rail nav (SERVER /
- * MODELS / INFERENCE / ROUTING / OBSERVABILITY / DATA / DIAGNOSTICS /
- * INTEGRATIONS) and swaps the right pane on click.
+ * settings-v3 — `#settings` route renders the grouped rail nav (GENERAL /
+ * MODELS & INFERENCE / SYSTEM / INTEGRATIONS) and swaps the right pane on
+ * click.
  *
- * Auth section removed per ADR-0012 (PRs #254-#267). #544 pruned the
- * fully-mock OmniRouter/Agent-policy/Memory (Cognee) sections (those
- * surfaces live on MCP + agent views); surviving sections were renamed
- * for accuracy — Models→Storage, Appearance→General. #554 added Voice +
- * Image-gen sections. #687 Phase E removed the Runtime section (the old
- * runtime admin pane) — runtime status now lives on the sidebar rollup
- * + footer chip. #1163 reorganised settings: Memory section added,
- * Default slots→Slots, default landing is General.
- *
- * P3-ui split (settings.jsx → SettingsShell/ESM) regrouped the flat rail
- * into NAV_GROUPS and added visible sections: Security + Hardware Tuning
- * (both rendered `disabled` — gated on unbuilt backend lanes), plus
- * Library & Downloads, Health & Stats, and Doctor. Section list below is
- * sourced from `SettingsNav.jsx`'s NAV_GROUPS — the authoritative IA.
+ * settings-panel cleanup collapsed the old 8-group / 20-page tree:
+ * Overview (new default landing) absorbed Health & Stats + General;
+ * Loaded Models absorbed Library & Downloads; Hardware & Runtimes merged
+ * Backend & GPU + Runtimes; Updates absorbed About; the blocked Hardware
+ * Tuning stub was removed. Legacy #settings/<id> deep links resolve via
+ * SECTION_ALIASES. Section list below is sourced from `SettingsNav.jsx`'s
+ * NAV_GROUPS — the authoritative IA.
  */
 import { test, expect } from '../fixtures/apiMock'
 
 const SECTIONS = [
-  'General', 'Security',
-  'Loaded Models', 'Library & Downloads', 'Model Defaults',
-  'Backend & GPU', 'Hardware Tuning', 'NPU', 'Voice', 'Image-gen',
-  'Agents / Brain',
-  'Health & Stats',
-  'Storage', 'Memory',
-  'Doctor', 'Updates', 'Runtimes', 'Advanced', 'About',
-  'Secrets',
+  'Overview', 'Security', 'Doctor',
+  'Loaded Models', 'Model Defaults', 'Voice', 'Image Generation', 'NPU',
+  'Hardware & Runtimes', 'Storage', 'Memory', 'Updates', 'Advanced',
+  'Secrets', 'Agent Chat',
 ]
 
 test.describe('Settings v3 (/settings)', () => {
@@ -42,9 +31,22 @@ test.describe('Settings v3 (/settings)', () => {
     }
   })
 
-  test('default section is General', async ({ page }) => {
+  test('default section is Overview', async ({ page }) => {
     await page.goto('/#settings')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('General')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Overview')
+  })
+
+  // Legacy deep links from before the settings-panel cleanup must still land
+  // on the page that absorbed their content (SECTION_ALIASES).
+  test('legacy ids resolve via aliases', async ({ page }) => {
+    await page.goto('/#settings/health')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Overview')
+    await page.goto('/#settings/about')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Updates')
+    await page.goto('/#settings/runtimes')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Hardware & Runtimes')
+    await page.goto('/#settings/library')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Loaded Models')
   })
 
   test('clicking Updates swaps the section', async ({ page }) => {
@@ -69,29 +71,27 @@ test.describe('Settings v3 (/settings)', () => {
     await expect(page.locator('.settings-content h2').first()).toHaveText('Model Defaults')
   })
 
-  test('Backend & GPU section mounts', async ({ page }) => {
+  test('Hardware & Runtimes section mounts', async ({ page }) => {
     await page.goto('/#settings')
-    await page.locator('.settings-nav .nav-item', { hasText: 'Backend & GPU' }).click()
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Backend & GPU')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Hardware & Runtimes' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Hardware & Runtimes')
   })
 
-  // Phase-2 settings-seam lane (SWEEP §5): these two sections were bare
-  // "not yet wired — placeholder" stubs. Both now mount real, typed hooks
-  // (useModels/DownloadsPane for Library & Downloads; useHealthSystem/
-  // useStatsHardware/useStatsPower/useRequestsRollup/useServicesHealth for
-  // Health & Stats) — assert they mount without a runtime error AND that
-  // the placeholder string is actually gone (the fix this test guards).
-  test('Library & Downloads section mounts and drops the placeholder string', async ({ page }) => {
+  // The pages absorbed by the cleanup must surface their content on the new
+  // owners: library panels on Loaded Models, health panels on Overview.
+  test('Loaded Models carries the absorbed library panels', async ({ page }) => {
     await page.goto('/#settings')
-    await page.locator('.settings-nav .nav-item', { hasText: 'Library & Downloads' }).click()
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Library & Downloads')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Loaded Models' }).click()
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Loaded Models')
+    await expect(page.locator('.settings-content')).toContainText('Models known to the catalog')
     await expect(page.locator('.settings-content')).not.toContainText('not yet wired')
   })
 
-  test('Health & Stats section mounts and drops the placeholder string', async ({ page }) => {
+  test('Overview carries the absorbed health panels', async ({ page }) => {
     await page.goto('/#settings')
-    await page.locator('.settings-nav .nav-item', { hasText: 'Health & Stats' }).click()
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Health & Stats')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Overview')
+    await expect(page.locator('.settings-content')).toContainText('Health checks')
+    await expect(page.locator('.settings-content')).toContainText('Anonymous telemetry')
     await expect(page.locator('.settings-content')).not.toContainText('not yet wired')
   })
 
@@ -108,10 +108,10 @@ test.describe('Settings v3 (/settings)', () => {
     await expect(page).not.toHaveTitle(/v0\.5\.0-alpha\.1/)
   })
 
-  test('About section shows the same live version as the tab title', async ({ page }) => {
-    await page.goto('/#settings')
-    await page.locator('.settings-nav .nav-item', { hasText: 'About' }).click()
-    await expect(page.locator('.settings-content h2').first()).toHaveText('About')
-    await expect(page.locator('.s-panel')).toContainText('0.3.0-alpha.1')
+  test('Updates ▸ About panel shows the same live version as the tab title', async ({ page }) => {
+    await page.goto('/#settings/updates')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Updates')
+    await expect(page.locator('.settings-content')).toContainText('Apache-2.0')
+    await expect(page.locator('.settings-content')).toContainText('0.3.0-alpha.1')
   })
 })

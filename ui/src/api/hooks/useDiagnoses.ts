@@ -201,7 +201,7 @@ function synthesiseSystemInfo(hw: Record<string, unknown>, evidence: Evidence[])
       evidence,
       next_steps: [
         { kind: 'command', label: 'run: hal0 doctor', target: 'hal0 doctor' },
-        { kind: 'doc', label: 'Diagnostics reference', target: '#settings/about' },
+        { kind: 'doc', label: 'Diagnostics reference', target: '#settings/updates' },
       ],
       fixable: false,
     },

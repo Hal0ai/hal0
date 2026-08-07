@@ -1,11 +1,12 @@
-// DIAGNOSTICS ▸ Updates — signed self-update (matches spec (b)
-// DIAGNOSTICS▸Doctor/Bundle/Updates: updates = E(/api/updater/*)).
-// Extracted verbatim from settings.jsx UpdatesSection (P3-ui split phase 1).
-// The `id` stays "updates" (unchanged) so #settings/updates deep links keep
-// working.
+// SYSTEM ▸ Updates — signed self-update (updates = E(/api/updater/*)),
+// plus the About panel (version identity, license, links) absorbed from the
+// former DIAGNOSTICS ▸ About page (settings-panel cleanup). The `id` stays
+// "updates" (unchanged) so #settings/updates deep links keep working;
+// #settings/about aliases here.
 import { useState, useRef, useEffect } from 'react'
 import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel, useUpdateRollback } from '@/api/hooks/useUpdates'
 import { ConfirmDialog } from '../../../primitives.jsx'
+import { Icons } from '../../../chrome.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 
 export function UpdatesPage() {
@@ -214,6 +215,21 @@ export function UpdatesPage() {
             </select>
           }
         />
+      </div>
+
+      {/* ── About (absorbed from the former About page) ─────────────────── */}
+      <div className="s-panel" style={{marginTop: 12}}>
+        <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+          <div className="k"><span>About</span></div>
+        </div>
+        <SRow k="hal0" mono v={u.hal0?.current ? `${u.hal0.current} — container slots` : "—"} />
+        <SRow k="License" v="Apache-2.0" />
+        <SRow k="Repository" mono v="github.com/Hal0ai/hal0" actions={<a className="btn ghost sm" href="https://github.com/Hal0ai/hal0" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
+        <SRow k="Docs" v="hal0.dev/docs" actions={<a className="btn ghost sm" href="https://hal0.dev/docs/" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
+        <SRow k="Discord" v="discord.gg/hal0" actions={<a className="btn ghost sm" href="https://discord.gg/hal0" target="_blank" rel="noreferrer">{Icons.ext} Join</a>} />
+      </div>
+      <div style={{marginTop: 14, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)"}}>
+        Built on FLM (XDNA2), llama.cpp, whisper.cpp, sd.cpp, Kokoro, Cognee.
       </div>
       <ConfirmDialog
         open={rollbackConfirm}

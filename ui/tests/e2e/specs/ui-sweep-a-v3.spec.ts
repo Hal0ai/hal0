@@ -103,7 +103,7 @@ test.describe('GeneralSection — content', () => {
 test.describe('ImageGen section — deferred row hidden', () => {
   test('"deferred" row is not shown in Image-gen section', async ({ page }) => {
     await page.goto('/#settings')
-    await page.locator('.nav-item', { hasText: 'Image-gen' }).click()
+    await page.locator('.nav-item', { hasText: 'Image Generation' }).click()
     // Size/Steps/Workflow deferred row must be gone
     await expect(page.locator('body')).not.toContainText('deferred', { timeout: FIVE_S })
   })

@@ -1,22 +1,25 @@
-// OBSERVABILITY ▸ Health & Stats — WIRED (Phase-2 settings-seam lane).
+// GENERAL ▸ Overview — the default settings landing page.
 //
-// Was a bare "not yet wired — placeholder" stub (SWEEP §5). All the data
-// this page needs already has a typed, polling hook shipped elsewhere in
-// the dashboard (dashboard-redesign.jsx / services-card.jsx use the same
-// ones) — there was no missing backend surface, just no settings-page UI:
+// Consolidation of the former OBSERVABILITY ▸ Health & Stats page (all five
+// read-only polling panels) and SERVER ▸ General (version identity + the
+// telemetry opt-in). Status first: health, services, then live hardware /
+// power / requests, then the one writable panel (privacy) at the bottom.
+// Every polling hook is fail-soft (404/network error → pending, never
+// throws) — this page just renders what they report. Prometheus scrape +
+// per-slot metrics stay read-only reference links.
 //   - useHealthSystem()   → GET /api/health/system   (overall status + per-check map)
+//   - useServicesHealth() → GET /api/services/health (per-service up/down, fail-soft)
 //   - useStatsHardware()  → GET /api/stats/hardware  (live RAM/GPU/NPU/CPU counters)
 //   - useStatsPower()     → GET /api/stats/power     (GPU power/clock + CPU temp, fail-soft)
-//   - useRequestsRollup() → GET /api/stats/requests  (dispatcher /v1 rollup, just landed)
-//   - useServicesHealth() → GET /api/services/health (per-service up/down, fail-soft)
-// Every hook here is already fail-soft (404/network error → pending, never
-// throws) — this page just renders what they report. Prometheus scrape +
-// per-slot metrics are read-only reference links, not re-implemented here.
+//   - useRequestsRollup() → GET /api/stats/requests  (dispatcher /v1 rollup)
+import { useState, useEffect } from 'react'
 import { useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useStatsPower } from '@/api/hooks/useStatsPower'
 import { useRequestsRollup } from '@/api/hooks/useRequestsRollup'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
+import { useSettingsClient } from '../../data/settingsClient.js'
+import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 
 function _mb(mb) {
@@ -58,6 +61,35 @@ function HealthOverviewPanel() {
         sub={degraded ? failing.join(', ') || 'one or more checks failing' : 'all checks passing'}
         v={_statusChip(!degraded, degraded ? 'degraded' : 'ok')}
       />
+    </div>
+  )
+}
+
+function ServicesPanel() {
+  const { services, pending } = useServicesHealth()
+  // Degraded services float to the top so a problem is visible without
+  // scrolling the healthy rows.
+  const ordered = [...services].sort((a, b) => (a.up === b.up ? 0 : a.up ? 1 : -1))
+
+  return (
+    <div className="s-panel" style={{ marginTop: 12 }}>
+      <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
+        <div className="k"><span>Services</span><FieldInfoIcon description="/api/services/health · per-service up/down" /></div>
+      </div>
+      {pending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>source pending</div>}
+      {!pending && ordered.length === 0 && (
+        <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>No services reported.</div>
+      )}
+      {ordered.map(s => (
+        <SRow
+          key={s.id}
+          k={s.name}
+          sub={s.detail}
+          mono
+          v={s.stat ? <span style={{ color: 'var(--fg-3)' }}>{s.stat.label}: {s.stat.value}</span> : null}
+          actions={_statusChip(s.up, s.up ? 'up' : 'down')}
+        />
+      ))}
     </div>
   )
 }
@@ -136,47 +168,84 @@ function RequestsPanel() {
   )
 }
 
-function ServicesPanel() {
-  const { services, pending } = useServicesHealth()
+// Version identity + the telemetry opt-in — the whole former General page.
+function PrivacyVersionPanel() {
+  const { settings, update, registry } = useSettingsClient();
+  const liveTelemetry = settings.data?.telemetry;
+
+  const [telemetry, setTelemetry] = useState(false);
+  useEffect(() => {
+    if (settings.data) setTelemetry(settings.data.telemetry?.enabled === true);
+  }, [settings.data]);
+
+  const telemetryDirty = !!settings.data && telemetry !== (liveTelemetry?.enabled === true);
+
+  const onSaveTelemetry = async () => {
+    try {
+      await update.mutateAsync({ telemetry: { enabled: telemetry } });
+      window.__hal0Toast && window.__hal0Toast(`Telemetry ${telemetry ? "enabled" : "disabled"}`, "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const meta = settings.data?.meta || {};
+  const version = meta.hal0_version || "—";
+  const schemaVer = meta.schema_version != null ? String(meta.schema_version) : "—";
 
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>
       <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-        <div className="k"><span>Services</span><FieldInfoIcon description="/api/services/health · per-service up/down" /></div>
+        <div className="k"><span>Version &amp; privacy</span><FieldInfoIcon description="platform identity · telemetry opt-in" /></div>
       </div>
-      {pending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>source pending</div>}
-      {!pending && services.length === 0 && (
-        <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>No services reported.</div>
-      )}
-      {services.map(s => (
-        <SRow
-          key={s.id}
-          k={s.name}
-          sub={s.detail}
-          mono
-          v={s.stat ? <span style={{ color: 'var(--fg-3)' }}>{s.stat.label}: {s.stat.value}</span> : null}
-          actions={_statusChip(s.up, s.up ? 'up' : 'down')}
-        />
-      ))}
+      <SRow k="hal0 version" sub="Running API version" mono v={<span style={{color: "var(--fg-2)"}}>{version}</span>} />
+      <SRow k="Schema version" sub="hal0.toml schema version" mono v={<span style={{color: "var(--fg-3)"}}>{schemaVer}</span>} />
+      <SRow
+        k="Anonymous telemetry"
+        sub="Opt-in · off by default. Sends anonymized, aggregate usage counts to help prioritize work — no prompts, model I/O, or file paths leave the machine."
+        v={
+          <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
+            <input
+              type="checkbox"
+              checked={telemetry}
+              disabled={!settings.data}
+              onChange={e => setTelemetry(e.target.checked)}
+              style={{accentColor: "var(--accent)"}}
+            />
+            <span>{telemetry ? "enabled" : "disabled"}</span>
+          </label>
+        }
+        actions={
+          <div style={{display: "inline-flex", alignItems: "center", gap: 6}}>
+            <ApplyBadge settingsKey="telemetry.enabled" registry={registry} />
+            {telemetryDirty && (
+              <button className="btn ghost sm" disabled={update.isPending} onClick={onSaveTelemetry}>
+                {update.isPending ? "Saving…" : "Save"}
+              </button>
+            )}
+          </div>
+        }
+      />
     </div>
-  )
+  );
 }
 
-export function HealthStatsPage() {
+export function OverviewPage() {
   return (
     <div className="s-section">
-      <h2>Health &amp; Stats</h2>
+      <h2>Overview</h2>
       <p className="desc">
-        Live hardware / power / request / service health, read straight off the same polling hooks
-        the main dashboard uses. Raw scrape targets stay linkable below — per-slot detail lives on{' '}
-        <a href="#slots">Loaded Models</a>.
+        Live health, services, hardware, and request activity — read straight off the same polling
+        hooks the main dashboard uses — plus version identity and privacy. Per-slot detail lives on{' '}
+        <a href="#slots">Loaded Models</a>; deeper diagnostics on <a href="#settings/doctor">Doctor</a>.
       </p>
 
       <HealthOverviewPanel />
+      <ServicesPanel />
       <HardwarePanel />
       <PowerPanel />
       <RequestsPanel />
-      <ServicesPanel />
+      <PrivacyVersionPanel />
 
       <div className="mono" style={{ marginTop: 12, fontSize: 10.5, color: 'var(--fg-5)' }}>
         Raw endpoints: <span style={{ color: 'var(--fg-4)' }}>/api/health</span> ·{' '}

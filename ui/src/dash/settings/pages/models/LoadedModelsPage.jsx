@@ -1,11 +1,13 @@
-// MODELS ▸ Loaded Models — default slot assignment per modality + slot-pool
-// runtime limits. Extracted verbatim from settings.jsx SlotsSection (P3-ui
-// split phase 1), relabelled to match the target IA (spec (e) MVP: "Loaded
-// Models" — maps to MODELS▸Loaded, /api/slots/* per spec (b)). The `id`
-// stays "slots" (unchanged) so existing #settings/slots deep links keep
-// working; only the nav label + group changed.
+// MODELS & INFERENCE ▸ Loaded Models — default slot assignment per modality,
+// slot-pool runtime limits, and (settings-panel cleanup) the model-library
+// panels absorbed from the former Library & Downloads page: catalog size +
+// background pull status. The full search/pull experience stays on the main
+// Models view (dash/models.jsx) — not duplicated here. The `id` stays
+// "slots" (unchanged) so existing #settings/slots deep links keep working;
+// #settings/library aliases here.
 import { useState } from 'react'
 import { useSlots, useSlotEdit } from '@/api/hooks/useSlots'
+import { useModels } from '@/api/hooks/useModels'
 import { useSettingsClient } from '../../data/settingsClient.js'
 import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce } from '../../shared/SchemaRow.jsx'
 
@@ -23,6 +25,48 @@ const RUNTIME_DESC_OVERRIDE = {
     "0.0.0.0 exposes every slot's raw port directly on your LAN (e.g. http://<host>.local:<port>), bypassing the reverse-proxy front door — " +
     "only widen this on a trusted network. A specific interface IP binds just that address. Applies on the next slot restart.",
 };
+
+// Model library evidence (absorbed from the former Library & Downloads
+// page): catalog size + the shared background-downloads pane. Search and
+// starting a new pull stay on the main Models view.
+function LibraryPanels() {
+  const modelsQuery = useModels()
+  const models = modelsQuery.data || []
+  const installed = models.filter(m => m.installed).length
+
+  return (
+    <>
+      <div className="s-panel" style={{ marginTop: 12 }}>
+        <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
+          <div className="k"><span>Library</span><FieldInfoIcon description="/api/models · blessed + pulled models · search & pull live on the Models view" /></div>
+        </div>
+        {modelsQuery.isPending && (
+          <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>Loading catalog…</div>
+        )}
+        {modelsQuery.isError && (
+          <div className="err">{modelsQuery.error?.message || 'Failed to read /api/models'}</div>
+        )}
+        {!modelsQuery.isPending && !modelsQuery.isError && (
+          <div className="s-row">
+            <div className="k"><span>Models known to the catalog</span></div>
+            <div className="v mono">{installed} installed / {models.length} total</div>
+          </div>
+        )}
+      </div>
+
+      <div className="s-panel" style={{ marginTop: 12 }}>
+        <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
+          <div className="k"><span>Downloads</span><FieldInfoIcon description="/api/models/pulls · background pull jobs, live" /></div>
+        </div>
+        {window.DownloadsPane ? <window.DownloadsPane /> : (
+          <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>
+            Downloads panel unavailable — open <a href="#models">Models</a> to manage pulls.
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
 
 export function LoadedModelsPage() {
   // --- Slot defaults (moved from former DefaultSlotsSection) ---
@@ -85,7 +129,9 @@ export function LoadedModelsPage() {
     <div className="s-section">
       <h2>Loaded Models</h2>
       <p className="desc">
-        Default slot assignments per modality and runtime limits for the slot pool.
+        Default slot assignments per modality, runtime limits for the slot pool, and the model
+        library. HuggingFace search and starting a new pull live on the{' '}
+        <a href="#models">Models</a> view.
       </p>
 
       {/* --- Default slots --- */}
@@ -151,6 +197,9 @@ export function LoadedModelsPage() {
           </button>
         </div>
       </div>
+
+      {/* --- Model library (absorbed from Library & Downloads) --- */}
+      <LibraryPanels />
     </div>
   );
 }

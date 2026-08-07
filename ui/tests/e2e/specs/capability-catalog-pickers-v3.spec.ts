@@ -86,7 +86,7 @@ test.describe('Capability catalog pickers (#1454)', () => {
   test('Image-gen page: img Model picker renders as <select> populated from the bare-array catalog', async ({ page }) => {
     await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
     await page.goto('/#settings/imagegen')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Image-gen')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Image Generation')
 
     const modelRow = page.locator('.s-row').filter({ has: page.locator('.k span', { hasText: /^Model$/ }) })
     await expect(modelRow).toHaveCount(1)

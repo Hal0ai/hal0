@@ -38,8 +38,9 @@ test.describe('Settings — hash routing (#1438)', () => {
   })
 
   test('a hash change while already on /settings re-renders the section (no remount)', async ({ page }) => {
+    // legacy id — resolves to Overview via SECTION_ALIASES
     await page.goto('/#settings/general')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('General')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Overview')
 
     // Simulate what browser back/forward (or any other hash write) does:
     // change the hash directly, without going through SettingsNav's click.
@@ -50,12 +51,12 @@ test.describe('Settings — hash routing (#1438)', () => {
   })
 
   test('browser back navigates between two visited sections', async ({ page }) => {
-    await page.goto('/#settings/general')
+    await page.goto('/#settings/overview')
     await page.locator('.settings-nav .nav-item', { hasText: 'Memory' }).click()
     await expect(page.locator('.settings-content h2').first()).toHaveText('Memory')
 
     await page.goBack()
 
-    await expect(page.locator('.settings-content h2').first()).toHaveText('General')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Overview')
   })
 })
