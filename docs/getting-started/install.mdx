@@ -1,26 +1,36 @@
 ---
 title: Install hal0
-description: Install hal0 with one command — the bootstrap verifies the release with SHA-256 (and cosign, when available), installs podman, seeds default slot config, and starts the API.
+description: Install hal0 with one command — the bootstrap verifies the release with SHA-256 (and cosign, when available), then hands off to a 16-step, idempotent installer that seeds config and starts the API.
 sidebar:
   order: 10
 ---
 
-import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+import { Steps, Aside } from '@astrojs/starlight/components';
 
 hal0 installs from a single command. The bootstrap script is the trust
 boundary: it fetches the release manifest, verifies the tarball, unpacks
-it, and hands off to the real installer.
+it, and hands off to the real installer (`installer/install.sh`).
 
 ```sh
-curl -fsSL https://hal0.dev/install.sh | bash
+curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
 <Aside type="note">
 The installer needs root to write to `/etc`, `/usr/lib`, and the systemd
-unit directory. When piped through `bash` without `sudo`, it re-execs
-itself under `sudo` automatically. You can also run it explicitly:
-`curl -fsSL https://hal0.dev/install.sh | sudo bash`.
+unit directory. If you pipe through plain `bash` (no `sudo`), it re-execs
+itself under `sudo` automatically — as long as `sudo` is on `PATH`.
 </Aside>
+
+## Channels
+
+By default the bootstrap fetches the latest `stable` release manifest.
+Pick a different channel with `HAL0_CHANNEL`:
+
+```sh
+HAL0_CHANNEL=preview curl -fsSL https://hal0.dev/install.sh | sudo bash
+```
+
+Accepted values: `stable` (default), `preview`, `nightly`.
 
 ## Requirements
 
@@ -28,143 +38,127 @@ itself under `sudo` automatically. You can also run it explicitly:
   `.deb` and the toolbox container images). ARM and macOS/Windows are not
   supported.
 - **systemd** — `systemctl` must be on `PATH` (outside `--dev` mode).
-- **Python ≥ 3.12** — the package requires 3.12+; the installer is tested
-  on 3.11–3.14 and builds a dedicated virtualenv.
-- **A container runtime** — every inference slot runs in a container. The
-  installer auto-installs **podman** if no runtime is found.
-- **~20 GB free disk** under the data directory, plus free ports `8080`
-  (API) and `3001` (OpenWebUI).
+- **Python ≥ 3.12** — `pip install` of the release tree hard-requires
+  3.12+. If the default `python3` is older, the installer resolves or
+  auto-installs a 3.12 interpreter; otherwise it fails with a remediation
+  hint.
+- **A container runtime** — every inference slot runs in a container.
+  The installer prefers **podman** (auto-installed if neither podman nor
+  docker is found); **docker** is accepted if already present.
+- **Node.js** — only needed to build the dashboard UI from a source/git
+  checkout. Signed release tarballs ship a prebuilt `ui/dist` and skip
+  this requirement entirely; the installer auto-provisions Node when it's
+  needed and can't find a suitable version.
 
-Supported package managers for auto-installing prerequisites (podman, the
-Python venv stdlib): **apt** (Debian/Ubuntu), **dnf**/**yum** (Fedora),
-**pacman** (Arch), **zypper** (openSUSE), and **apk** (Alpine).
+## What the installer does
 
-<Aside type="caution" title="NVIDIA / CUDA">
-hal0 is tuned for the AMD Strix Halo iGPU + XDNA NPU; ROCm is AMD-only,
-so GPU acceleration on other hardware runs through the generic **Vulkan**
-profile (works on AMD/NVIDIA/Intel). An experimental `cuda` profile also
-ships (the upstream `llama.cpp:server-cuda` image, needs
-`nvidia-container-toolkit`/CDI on the host) — it isn't part of the
-one-line installer's automatic hardware seeding, so assign it to a slot
-manually from the dashboard after install.
-</Aside>
-
-## What the bootstrap does
+The bootstrap hands off to `installer/install.sh`, which runs 16 steps,
+in order:
 
 <Steps>
 
-1. **Fetch the release manifest** — by default the latest `stable.json`
-   from GitHub Releases. Override with `HAL0_RELEASES_URL` or pick a
-   channel with `HAL0_CHANNEL`.
-
-2. **Download and SHA-256-verify the tarball** against the digest in the
-   manifest. A mismatch aborts the install.
-
-3. **Cosign keyless verify, when available** — if `cosign` is on `PATH`,
-   the Fulcio-issued certificate and signature are checked against the
-   workflow OIDC identity declared in the manifest; a failed check aborts
-   the install. If `cosign` is **not** installed, the bootstrap proceeds
-   on the SHA-256 check alone with a loud warning — cosign is no longer a
-   hard requirement for the one-line install. Set
-   `HAL0_INSTALL_REQUIRE_COSIGN=1` to restore the old strict behavior
-   (fail instead of warn when cosign is missing).
-
-4. **Unpack and hand off** to `installer/install.sh`, which runs
-   pre-flight checks, installs podman + the Python venv, builds the
-   dashboard, writes config and systemd units, runs first-run setup
-   (`hal0 setup --auto --no-pull --no-extensions`) to seed a
-   hardware-recommended slot configuration, and starts the API.
+1. **Pre-flight checks** — architecture, systemd, Python, container
+   runtime, disk space, free ports.
+2. **System user** — creates the `hal0` service account.
+3. **Filesystem layout** — creates the FHS directory tree (or the `--dev`
+   tree under `$PWD/.hal0ai`).
+4. **Python environment** — builds the shared venv and `pip install`s
+   hal0 into it.
+5. **Node.js toolchain** — provisions Node only if this tree ships the
+   dashboard's npm project.
+6. **Dashboard UI** — builds `ui/dist` (or reuses a release's prebuilt
+   copy).
+7. **Configuration** — writes `/etc/hal0/hal0.toml`, `api.env`,
+   `upstreams.toml`, `openwebui.env` — never overwriting existing files.
+8. **Systemd units** — writes and enables `hal0-api.service` and
+   `hal0-openwebui.service` (unless `--no-start`).
+9. **Container slot seeds** — copies default slot TOMLs into
+   `/etc/hal0/slots/` (never overwriting operator edits).
+10. **Hardware probe** — detects CPU/RAM/GPU/NPU and writes
+    `/etc/hal0/hardware.json`.
+11. **Steward + agent models** — seeds a hardware-recommended slot and
+    profile.
+12. **NPU prerequisites** — installs the FastFlowLM runtime on
+    AMDXDNA/apt hosts (fail-soft elsewhere).
+13. **ComfyUI model share** — sets up the image-generation model path.
+14. **Bundle picker manifests** — writes the dashboard's first-run bundle
+    catalog.
+15. **Bundled agent skills** — installs the shipped agent skill set.
+16. **Service start** — starts `hal0-api` and `hal0-openwebui` (unless
+    `--no-start`).
 
 </Steps>
 
-## Environment variables and flags
+The installer is **idempotent** — safe to re-run after a partial failure,
+or just to pick up new configuration defaults. Existing config files are
+never clobbered.
 
-The installer reads several environment variables and accepts a few
-flags:
+## Flags and environment variables
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `HAL0_PREFIX` | `/usr/lib/hal0` | Installation root (FHS layout with a versioned dir + `current` symlink) |
-| `HAL0_PORT` | `8080` | API bind port |
-| `HAL0_MODELS_DIR` | `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`) | Where Hugging Face pulls land |
-| `HAL0_PYTHON` | `python3` | Python interpreter to build the venv from |
-| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip first-run automatic setup (hardware-recommended slot seed) |
-| `HAL0_INSTALL_REQUIRE_COSIGN` | _(unset)_ | Set to `1` to make the bootstrap refuse the install outright when `cosign` isn't present, instead of warning and proceeding on the SHA-256 check alone |
+```sh
+curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir=/mnt/ai-models
+```
 
 | Flag | Effect |
 |---|---|
 | `--dev` | Local-only editable install under `$PWD/.hal0ai` — no systemd, no host package changes |
 | `--no-start` | Set everything up but do not enable/start the units |
-| `--models-dir=PATH` | Absolute path where pulls land (same as `HAL0_MODELS_DIR`) |
+| `--models-dir=PATH` | Absolute path where Hugging Face pulls land (same as `HAL0_MODELS_DIR`) |
 
-<Aside type="tip">
-The model pull directory must be an **absolute** path. When not specified,
-the installer defaults to `/var/lib/hal0/models` non-interactively. You
-can change it later through `hal0 setup`.
-</Aside>
+| Variable | Default | Purpose |
+|---|---|---|
+| `HAL0_PREFIX` | `/usr/lib/hal0` | Installation root (versioned dir + `current` symlink) |
+| `HAL0_PORT` | `8080` | API bind port |
+| `HAL0_PYTHON` | `python3` | Python interpreter to build the venv from |
+| `HAL0_MODELS_DIR` | `/var/lib/hal0/models` | Where Hugging Face pulls land |
+| `HAL0_NONINTERACTIVE` | _(unset)_ | Set to `1` to force flag/env values everywhere instead of prompting on a terminal |
+| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe / first-run seeding |
+| `HAL0_SKIP_HINDSIGHT` | _(unset)_ | Set to `1` to skip installing the Hindsight memory service |
+| `HAL0_PY_AUTOINSTALL` | _(unset)_ | Set to `1` to let the installer auto-install a Python 3.12 interpreter when the default is too old |
+
+## Production filesystem layout
+
+```
+${HAL0_PREFIX}/hal0-<version>   # versioned code tree
+${HAL0_PREFIX}/current          # symlink hal0 update swaps atomically
+/etc/hal0                       # config: hal0.toml, slots/, profiles.toml
+/var/lib/hal0                   # state: models, registry, slots, openwebui, cache
+```
+
+Under `--dev`, all of the above lands under `$PWD/.hal0ai/` instead.
 
 ## Verify the install
 
-Once the installer finishes, check system and slot status:
-
 ```sh
 hal0 status
-```
-
-Re-run the full pre-flight set (architecture, systemd, Python, container
-runtime, disk, ports) any time:
-
-```sh
-hal0 doctor
-```
-
-Re-run hardware detection (CPU, RAM, GPU, NPU) on its own with:
-
-```sh
-hal0 probe
-```
-
-The API listens on `http://localhost:8080`. Service-level checks:
-
-```sh
-systemctl status hal0-api
-systemctl list-units 'hal0-slot@*'
+hal0 slot list
+curl http://localhost:8080/api/health
 journalctl -fu hal0-api
 ```
 
+`hal0 status` reports system + slot + memory health; `hal0 slot list`
+shows configured slots; the `/api/health` curl is a lightweight liveness
+probe (200 the moment the API is serving); `journalctl -fu hal0-api`
+tails the control-plane log if something looks wrong.
+
 ## Uninstall
 
-The CLI wraps `installer/uninstall.sh`:
-
 ```sh
-hal0 uninstall          # conservative: keep /etc/hal0 + models/registry
-hal0 uninstall --purge  # clean slate: also wipe config, data, user, images
+hal0 uninstall              # conservative: keep /etc/hal0 + models/registry
+hal0 uninstall --keep-data  # legacy alias for the same conservative default
+hal0 uninstall --purge      # clean slate: also wipe config, data, user, images
 ```
 
-The **conservative default** stops services and removes code, units,
-venvs, binaries, and every hal0 podman container, but keeps `/etc/hal0`
-(config) and the data directory (models, registry, OpenWebUI state) so a
-re-install reuses them. `--keep-data` is a legacy alias for this same
-default — it's kept for back-compat, not because the default changed.
-
-`--purge` (alias `--clean-slate`) additionally removes the config and
-data directories, the `hal0` system user and group, and all hal0/toolbox
-podman images. It prompts for a typed `DELETE` confirmation unless you pass
-`--force` (or set `HAL0_FORCE=1`).
-
-<Aside type="note">
-`--purge` deliberately leaves general-purpose host packages installed —
-podman itself, `libxrt-npu2`, ffmpeg, and boost — since other software
-may depend on them.
-</Aside>
+The conservative default stops services and removes code, units, venvs,
+binaries, and every hal0 podman container, but keeps `/etc/hal0` (config)
+and the data directory (models, registry, OpenWebUI state) so a re-install
+reuses them. `--purge` (alias `--clean-slate`) additionally removes the
+config and data directories, the `hal0` system user and group, and all
+hal0/toolbox podman images — it prompts for a typed `DELETE` confirmation
+unless you pass `--force` (or set `HAL0_FORCE=1`).
 
 ## Next steps
 
-First-run setup already seeded a hardware-recommended slot and profile
-during install. From here:
-
-- Run the interactive **`hal0 setup`** TUI to pick real models and
-  extensions — see [First-run setup](/docs/getting-started/setup/).
 - Pull a model and assign it to a slot — see
   [Load your first model](/docs/getting-started/first-model/).
 - Open the dashboard at `http://<host>:8080/` to manage slots, profiles,
