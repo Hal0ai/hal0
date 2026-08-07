@@ -247,6 +247,12 @@ async def rotate_key(body: RotateKeyRequest, request: Request) -> dict[str, obje
         # A client-key rotation never touches the operator's admin session.
         session_preserved = True
 
+    if status_only.get("hindsight_llm_env_refreshed"):
+        note += (
+            " The memory engine's LLM credential (/etc/hal0/hindsight-llm.env) was "
+            "refreshed too — restart hindsight-api to apply it."
+        )
+
     return {
         **status_only,
         "rotated_at": rotated_at,

@@ -2629,7 +2629,7 @@ else
             # /health poll below is the real gate on whether the engine came up.
             hs_installed=0
             if [[ "${hs_fallback}" -ne 1 ]]; then
-                if "${hs_pip}" install "hindsight-api==0.7.2" -q; then
+                if "${hs_pip}" install "hindsight-api==0.8.4" -q; then
                     hs_installed=1
                 else
                     hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
@@ -2639,7 +2639,7 @@ else
             if [[ "${hs_installed}" -ne 1 ]]; then
                 [[ "${hs_fallback}" -eq 1 ]] && \
                     info "installing hindsight-api with --ignore-requires-python (no Python 3.11-3.13 available; litellm's 3.14 gate is metadata-only)"
-                if "${hs_pip}" install --ignore-requires-python "hindsight-api==0.7.2" -q; then
+                if "${hs_pip}" install --ignore-requires-python "hindsight-api==0.8.4" -q; then
                     hs_installed=1
                 else
                     warn "hindsight-api install failed — memory engine will be unavailable"
@@ -2653,6 +2653,22 @@ else
         chown -R hal0:hal0 "${VAR_DIR}/memory" 2>/dev/null || true
         if [[ -x "${HS_DIR}/.venv/bin/hindsight-api" ]]; then
             install -m644 "${HINDSIGHT_UNIT_SRC}" /etc/systemd/system/hindsight-api.service
+            # The unit ships HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth — fine
+            # while the box has no keys, but once KB-1 auth is on, every
+            # extraction/reflect call to /v1 401s and retains fail silently
+            # (#1543's engine-side sibling). Hand the engine a real client-tier
+            # key via the unit's EnvironmentFile whenever one exists;
+            # `hal0 auth rotate` keeps the file fresh afterward.
+            hs_key=""
+            if [[ -f /etc/hal0/api.env ]]; then
+                hs_key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1)"
+                [[ -z "${hs_key}" ]] && hs_key="$(grep -oP '(?<=^HAL0_ADMIN_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1)"
+            fi
+            if [[ -n "${hs_key}" ]]; then
+                ( umask 027 && printf 'HINDSIGHT_API_LLM_API_KEY=%s\n' "${hs_key}" \
+                    > /etc/hal0/hindsight-llm.env )
+                chown root:hal0 /etc/hal0/hindsight-llm.env 2>/dev/null || true
+            fi
             systemctl daemon-reload
             systemctl enable --now hindsight-api
             # First boot: embedded pg0 init + local embed/rerank model load can

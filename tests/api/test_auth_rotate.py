@@ -247,3 +247,36 @@ def test_rotate_is_rate_limited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         resp = client.post("/api/auth/rotate", json={"tier": "admin"})
         assert resp.status_code == 429
         assert resp.json()["error"]["code"] == "auth.rate_limited"
+
+
+def test_rotate_refreshes_hindsight_llm_env_when_present(
+    rotate_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rotation must re-sync the memory engine's LLM credential file —
+    otherwise every retain/reflect 401s from the engine's next restart on."""
+    monkeypatch.setenv("HAL0_CLIENT_KEY", "old-client-key")
+    env_file = paths.etc() / "hindsight-llm.env"
+    env_file.write_text("HINDSIGHT_API_LLM_API_KEY=old-client-key\n")
+
+    resp = rotate_client.post("/api/auth/rotate", json={"tier": "client"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["hindsight_llm_env_refreshed"] is True
+    assert "restart hindsight-api" in body["note"]
+
+    new_key = keys_from_api_env().get("HAL0_CLIENT_KEY")
+    content = env_file.read_text()
+    assert new_key and f"HINDSIGHT_API_LLM_API_KEY={new_key}" in content
+    assert "old-client-key" not in content
+
+
+def test_rotate_skips_hindsight_llm_env_when_absent(
+    rotate_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_CLIENT_KEY", "old-client-key")
+    resp = rotate_client.post("/api/auth/rotate", json={"tier": "client"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["hindsight_llm_env_refreshed"] is False
+    assert "restart hindsight-api" not in body["note"]

@@ -539,6 +539,65 @@ def check_hermes_mcp_config_auth(
     )
 
 
+#: The placeholder credential the hindsight-api unit ships for the auth-off
+#: posture — see installer/systemd/hindsight-api.service.
+_HINDSIGHT_LLM_PLACEHOLDER = "hal0-local-noauth"
+
+
+def check_hindsight_llm_auth(
+    *,
+    auth: dict[str, Any] | None,
+    unit_path: Path | None = None,
+    env_path: Path | None = None,
+) -> Check:
+    """The memory engine's LLM credential must be a real key when auth is on.
+
+    hindsight-api calls back into hal0's ``/v1`` (CLIENT tier) for every
+    extraction and reflect. Its unit ships the ``hal0-local-noauth``
+    placeholder, overridden by ``/etc/hal0/hindsight-llm.env``. On an
+    auth-required box a missing/placeholder/stale key means every retain
+    fails extraction with a 401 — silently, because retain is async
+    (#1543's engine-side sibling).
+    """
+    unit = unit_path if unit_path is not None else Path("/etc/systemd/system/hindsight-api.service")
+    env_file = env_path if env_path is not None else Path("/etc/hal0/hindsight-llm.env")
+    name, title = "hindsight_llm_auth", "Memory engine LLM auth"
+    if not unit.exists():
+        return Check(name, title, _PASS, "memory engine not installed — nothing to check")
+    if not bool((auth or {}).get("auth_required")):
+        return Check(name, title, _PASS, "auth not required — placeholder credential is fine")
+
+    key = ""
+    try:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("HINDSIGHT_API_LLM_API_KEY="):
+                key = line.split("=", 1)[1].strip()
+    except OSError:
+        key = ""
+    if not key or key == _HINDSIGHT_LLM_PLACEHOLDER:
+        return Check(
+            name,
+            title,
+            _FAIL,
+            f"auth is required but {env_file} carries no real LLM key — every retain/reflect "
+            "401s against /v1. Write a client-tier key there (`hal0 auth rotate` refreshes it "
+            "automatically from now on) and restart hindsight-api",
+        )
+
+    from hal0.service_identity import keys_from_api_env
+
+    live = set(keys_from_api_env().values())
+    if live and key not in live:
+        return Check(
+            name,
+            title,
+            _FAIL,
+            f"{env_file} carries a key that matches neither current box key (stale after a "
+            "rotation?) — refresh it and restart hindsight-api",
+        )
+    return Check(name, title, _PASS, "memory engine carries a current client-tier LLM key")
+
+
 # ── orchestration ──────────────────────────────────────────────────────────────
 
 # GET /api/slots is the slowest read-only route hal0 serves: the aggregator
@@ -595,6 +654,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_seams(),
         check_mcp_mounts(),
         check_hermes_mcp_config_auth(auth=auth_payload),
+        check_hindsight_llm_auth(auth=auth_payload),
     ]
     return verify_rows + extra_rows
 
@@ -679,6 +739,7 @@ __all__ = [
     "check_auth_posture",
     "check_hal0_target",
     "check_hermes_mcp_config_auth",
+    "check_hindsight_llm_auth",
     "check_mcp_mounts",
     "check_migrations",
     "check_model_store",

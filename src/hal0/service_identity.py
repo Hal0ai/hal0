@@ -216,17 +216,91 @@ def rotate_api_env_key(tier: str) -> dict[str, object]:
     # key is honoured on the very next request without a restart.
     os.environ[env_name] = new_key
 
+    # Keep the memory engine's LLM credential in step: hindsight-api calls
+    # back into /v1 (CLIENT tier) for extraction/reflect, and its unit reads
+    # the key from hindsight-llm.env. A rotation that skipped this file would
+    # 401 every retain from the next hindsight restart onward (#1543's
+    # engine-side sibling). Best-effort — a box without the engine installed
+    # simply has no file to refresh.
+    hindsight_refreshed = False
+    with contextlib.suppress(OSError):
+        hindsight_refreshed = refresh_hindsight_llm_env()
+
     return {
         "tier": tier,
         "key_len": len(new_key),
         "fingerprint": key_fingerprint(new_key),
+        "hindsight_llm_env_refreshed": hindsight_refreshed,
     }
+
+
+#: The env file the hindsight-api unit reads (``EnvironmentFile=-``) for its
+#: extraction/reflect LLM credential. Written by install.sh at setup and by
+#: :func:`refresh_hindsight_llm_env` on rotation; 0640, same owner handling
+#: as api.env. The unit must be restarted to pick up a refresh (systemd reads
+#: EnvironmentFile at start) — surfaced in the rotate route's response note.
+_HINDSIGHT_LLM_ENV_NAME = "hindsight-llm.env"
+
+
+def refresh_hindsight_llm_env() -> bool:
+    """Sync ``/etc/hal0/hindsight-llm.env`` to the current box keys.
+
+    Writes ``HINDSIGHT_API_LLM_API_KEY=<client-or-admin key>`` using the same
+    atomic tmpfile + ``os.replace`` discipline as :func:`rotate_api_env_key`.
+    Returns True when the file was (re)written, False when the box has no
+    keys or the file does not exist yet and there is nothing to refresh —
+    creation on a keyless box is pointless (the placeholder default works
+    while auth is off) and creating it here would surprise operators who
+    never installed the memory engine.
+    """
+    from hal0.config import paths as cfg_paths
+
+    target = cfg_paths.etc() / _HINDSIGHT_LLM_ENV_NAME
+    key = service_key(prefer="client")
+    if not key:
+        return False
+    if not target.exists():
+        return False
+
+    content = f"HINDSIGHT_API_LLM_API_KEY={key}\n"
+
+    prev_uid = prev_gid = -1
+    with contextlib.suppress(OSError):
+        st = target.stat()
+        prev_uid, prev_gid = st.st_uid, st.st_gid
+
+    tmp_path: str | None = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{_HINDSIGHT_LLM_ENV_NAME}.", suffix=".tmp", dir=str(target.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        os.chmod(tmp_path, _API_ENV_MODE)
+        if prev_uid != -1:
+            with contextlib.suppress(OSError):
+                os.chown(tmp_path, prev_uid, prev_gid)
+        os.replace(tmp_path, str(target))
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+    return True
 
 
 __all__ = [
     "generate_service_key",
     "key_fingerprint",
     "keys_from_api_env",
+    "refresh_hindsight_llm_env",
     "rotate_api_env_key",
     "service_auth_headers",
     "service_key",
