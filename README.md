@@ -7,7 +7,7 @@
 
 ### Open-source home AI inference platform
 
-[hal0.dev](https://hal0.dev) · [Install](https://hal0.dev/docs/install/) · [Docs](https://hal0.dev/docs/) · [Roadmap](https://hal0.dev/#roadmap) · [Discord](https://discord.gg/7M4y6dcUyq)
+[hal0.dev](https://hal0.dev) · [Install](https://hal0.dev/docs/getting-started/install/) · [Docs](https://hal0.dev/docs/) · [Roadmap](https://hal0.dev/#roadmap) · [Discord](https://discord.gg/7M4y6dcUyq)
 
 </div>
 
@@ -34,7 +34,7 @@ shared inference daemon; no extra process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **Status:** **v0.9.4 — public beta.** Container-runtime era,
+> **Status:** **v1.0.0 — release candidate, cutting to stable.** Container-runtime era,
 > declarative config. Each slot (`agent`, `utility`, `embed`, `rerank`,
 > `stt`, `tts`, `img`, `vision`, NPU trio) runs as a dedicated podman
 > container (`hal0-slot@<name>.service`). Slot definitions live in
@@ -256,7 +256,7 @@ header bell + inbox modal in the dashboard, with CLI parity via
 
 The **hal0-brain steward** is a third, built-in persona wired to the
 dashboard's top-bar agent chat — no install step. It drives the platform
-through the full **74-tool `hal0-admin` catalog** (models, slots, stacks,
+through the full **160-tool `hal0-admin` catalog** (models, slots, stacks,
 profiles, settings, upstreams, benchmarks) under a **per-persona tool
 policy**: `tools_allowed` hides tools, `require_approval` tightens them,
 and a `POLICY_NO_LOOSEN` floor keeps destructive/secret-bearing tools
@@ -399,10 +399,10 @@ VM installs leave the panel off and the dashboard stays quiet.
 No dates — items are direction. The closer to the left, the closer to
 running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadmap).
 
-### Shipped (v0.9 / public beta)
+### Shipped (v1.0)
 
 - **hal0-brain steward** — the top-bar agent chat drives the whole
-  platform through the 74-tool `hal0-admin` catalog under a per-persona
+  platform through the 160-tool `hal0-admin` catalog under a per-persona
   tool policy, pausing turns on gated tools for inline approve/deny
 - **Upstream model controls** — manage external providers (OpenRouter,
   Anthropic, OpenAI, Google AI Studio, Ollama, custom) with reactive
