@@ -1,4 +1,4 @@
-// SERVER ▸ Security (D4, post-R3 surface rework).
+// GENERAL ▸ Security (D4, post-R3 surface rework).
 //
 // Admin/client key management, honestly bounded to what the backend actually
 // exposes today. The ONE auth surface is GET /api/auth/status (routes/auth.py):
@@ -8,14 +8,14 @@
 // real for BOTH tiers (POST /api/auth/rotate {tier: 'admin'|'client'}) and
 // returns status-only fields — after a rotate that row shows the returned
 // fingerprint + rotated-at (never the value); RotateKeyDialog is shared,
-// parameterised by tier (#1467 wired the client row to it — it used to be a
-// disabled "Set key…" button claiming no route existed). GET /api/auth/
-// exposure landed (Phase 1 wave 2), so the route-exposure table below is now
-// LIVE (ExposureTable.jsx / useAuthExposure), not a stub. What /api/auth/
-// status still can't back — client-key set/unset LIVE STATUS (the pip stays
-// "unknown", rotation is independent of reading status) and live
-// login-throttle counts — stays surfaced as disabled-with-reason; those are
-// genuinely still missing routes (API-lane requests below), not stale gates.
+// parameterised by tier. GET /api/auth/exposure landed (Phase 1 wave 2), so
+// the route-exposure table below is LIVE (ExposureTable.jsx /
+// useAuthExposure). What /api/auth/status still can't back — client-key
+// set/unset live status and login-throttle counters — is simply NOT rendered
+// (settings-panel cleanup dropped the permanent "unknown" pip and the
+// permanent "status unavailable" throttle panel; a row that can never change
+// state is noise, not evidence). Both return when their routes land
+// (client_key_configured on the status payload; GET /api/auth/throttle).
 // Assumed ADMIN-gated: a browser HMAC session is admin-equivalent (spec §22 /
 // KB-1).
 //
@@ -42,7 +42,8 @@ function StatusPip({ state }) {
   return <span className="chip mono" data-status="unknown" style={{ color: 'var(--fg-4)', borderColor: 'var(--line)', background: 'var(--bg-2)', fontSize: 10.5 }}>probe unavailable</span>
 }
 
-// One key row: label, what it gates, its status pip, and the trailing action.
+// One key row: label, what it gates, its status pip (omitted when the
+// backend can't report one — no fabricated "unknown"), and the action.
 function KeyRow({ testid, name, gates, state, action }) {
   return (
     <div
@@ -54,16 +55,11 @@ function KeyRow({ testid, name, gates, state, action }) {
         <div style={{ fontSize: 13, color: 'var(--fg)' }}>{name}</div>
         <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-5)', marginTop: 2 }}>{gates}</div>
       </div>
-      <span data-testid={`${testid}-status`} style={{ justifySelf: 'start' }}><StatusPip state={state} /></span>
+      <span data-testid={`${testid}-status`} style={{ justifySelf: 'start' }}>{state ? <StatusPip state={state} /> : null}</span>
       <span style={{ justifySelf: 'end' }}>{action}</span>
     </div>
   )
 }
-
-const CLIENT_KEY_REASON =
-  'Client-key set/unset is not reported by /api/auth/status — it returns admin posture only. (API-lane request: add client_key_configured to the status payload)'
-const THROTTLE_REASON =
-  'Live login-throttle counters are not exposed — the per-IP limiter runs server-side (routes/auth.py) but publishes no status. (API-lane request: GET /api/auth/throttle)'
 
 export function SecurityPage() {
   const auth = useAuthStatus()
@@ -102,7 +98,7 @@ export function SecurityPage() {
     <div className="s-section" data-testid="security-page">
       <h2>Security &amp; Access</h2>
       <p className="desc">
-        Authentication posture, API-key status, exposure policy, and login throttle. hal0&apos;s auth
+        Authentication posture, API-key status, and route exposure policy. hal0&apos;s auth
         surface (<span className="mono">GET /api/auth/status</span>) never returns a key value, and
         neither does this page. Assumes an admin session (a browser HMAC session is admin-equivalent).
       </p>
@@ -227,9 +223,8 @@ export function SecurityPage() {
           gates={
             lastRotated.client
               ? `fingerprint ${lastRotated.client.fingerprint} · rotated ${lastRotated.client.rotated_at}`
-              : 'gates CLIENT routes (/v1/*)'
+              : 'gates CLIENT routes (/v1/*) · live status not reported by the API'
           }
-          state="unknown"
           action={
             <button
               className="btn ghost sm"
@@ -240,29 +235,6 @@ export function SecurityPage() {
             </button>
           }
         />
-        <div
-          data-testid="security-client-reason"
-          className="mono"
-          style={{ fontSize: 10.5, color: 'var(--fg-5)', padding: '2px 14px 12px', lineHeight: 1.55 }}
-        >
-          ○ {CLIENT_KEY_REASON}
-        </div>
-      </div>
-
-      {/* ── login throttle (stub-with-reason) ───────────────────────── */}
-      <h3 style={{ margin: '0 0 6px', fontSize: 13 }}>Login throttle</h3>
-      <div className="s-panel" style={{ marginBottom: 16 }}>
-        <div className="s-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '13px 14px' }}>
-          <div>
-            <div style={{ fontSize: 13, color: 'var(--fg-3)' }}>Per-IP login rate limit</div>
-            <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-5)', marginTop: 2 }}>
-              active server-side · counters not published
-            </div>
-          </div>
-          <span className="chip mono" data-testid="security-throttle-status" style={{ fontSize: 10.5, color: 'var(--fg-4)', borderColor: 'var(--line)', background: 'var(--bg-2)' }} title={THROTTLE_REASON}>
-            status unavailable
-          </span>
-        </div>
       </div>
 
       {/* ── route exposure (static taxonomy + live per-route table) ─── */}

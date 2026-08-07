@@ -118,7 +118,7 @@ test.describe('Settings ▸ Updates — an unreadable update state is not a know
     const sel = page.locator('.s-panel select')
     await expect(sel).toHaveValue('nightly', { timeout: 15_000 })
     await expect(sel).toBeEnabled()
-    await expect(page.locator('.s-panel')).toContainText('current 9.9.9')
+    await expect(page.locator('.s-panel').first()).toContainText('current 9.9.9')
     await expect(page.getByTestId('updates-state-error')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Roll back' })).toBeEnabled()
   })

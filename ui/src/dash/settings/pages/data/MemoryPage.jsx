@@ -32,7 +32,8 @@ export function MemoryPage() {
 // (was part of settings.jsx-wide ADV_DESC_OVERRIDE table).
 const MEMORY_ENGINE_DESC_OVERRIDE =
   "Active memory engine, applied on the next hal0-api restart. hindsight is the durable default. " +
-  "pgvector is an in-memory, NON-DURABLE fallback — existing memories are not migrated and won't be visible while selected.";
+  "pgvector is an in-memory, NON-DURABLE fallback — existing memories are not migrated, won't be visible while selected, " +
+  "and the memory admin/graph tooling below is unavailable under it.";
 
 function MemoryEnginePanel({ registry }) {
   const { settings, update, schema: schemaQuery } = useSettingsClient({ schema: true });

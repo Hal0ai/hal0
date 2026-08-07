@@ -1,4 +1,4 @@
-// ROUTING ▸ Agents / Brain — the dashboard steward chat ([brain_chat]).
+// INTEGRATIONS ▸ Agent Chat — the dashboard steward chat ([brain_chat]).
 // Extracted verbatim from settings.jsx AgentsBrainSection (P3-ui split
 // phase 1). Filed under ROUTING (closest fit among the target IA groups —
 // this is the only existing agent-policy surface in settings.jsx; the
@@ -79,7 +79,7 @@ export function AgentsBrainPage() {
 
   return (
     <div className="s-section">
-      <h2>Agents / Brain</h2>
+      <h2>Agent Chat</h2>
       <p className="desc">
         The dashboard's agent-chat steward (<span className="mono">hal0-brain</span>): the
         slide-out chat that administers this instance via tools. These guardrails hold

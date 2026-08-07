@@ -5,7 +5,8 @@
  * Status-only key management. The page is driven by GET /api/auth/status
  * ({ auth_required, has_admin_key, tier }) and NEVER renders a key value —
  * this suite asserts that absence directly. Client-key status and login
- * throttle counts stay disabled-with-reason (genuinely no backend route yet);
+ * throttle counters have no backend route, so (settings-panel cleanup) the
+ * page renders neither rather than a permanent "unknown"/"unavailable";
  * the rotate flow's destructive confirm is gated on typing the phrase. The
  * route-exposure table (GET /api/auth/exposure) is now live — a separate
  * describe block below drives its loaded/empty/permission-denied states.
@@ -60,14 +61,14 @@ test.describe('Settings → Security', () => {
 
     await expect(page.getByTestId('security-key-admin-status')).toContainText(/set/i)
     await expect(page.getByTestId('security-tier')).toContainText('admin')
-    // Client-key LIVE STATUS still isn't reported by /api/auth/status → the
-    // status pip stays "unknown" with a reason. Rotation, unlike status, is a
-    // real route (POST /api/auth/rotate {tier:'client'}) — #1467 replaced the
-    // dead disabled "Set key…" button with a live "Rotate…" action.
-    await expect(page.getByTestId('security-client-reason')).toContainText(/API-lane/i)
+    // Client-key LIVE STATUS still isn't reported by /api/auth/status — the
+    // cleanup removed the permanent "unknown" pip and the permanent
+    // "status unavailable" throttle panel rather than fabricate state.
+    // Rotation, unlike status, is a real route (POST /api/auth/rotate
+    // {tier:'client'}), so the action stays.
+    await expect(page.getByTestId('security-key-client-status')).toBeEmpty()
     await expect(page.getByTestId('security-rotate-client')).toBeEnabled()
-    // Throttle counters are not published.
-    await expect(page.getByTestId('security-throttle-status')).toContainText(/unavailable/i)
+    await expect(page.getByTestId('security-throttle-status')).toHaveCount(0)
   })
 
   test('admin key posture derives from has_admin_key (unset)', async ({ page }) => {

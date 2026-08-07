@@ -1,4 +1,4 @@
-// INFERENCE ▸ Image-gen — img.img capability slot configuration.
+// MODELS & INFERENCE ▸ Image Generation — img.img capability slot configuration.
 // Extracted verbatim from settings.jsx ImageGenSection (P3-ui split phase 1).
 //
 // Image-gen exposes enable/engine(provider)/model picks for the img.img slot.
@@ -120,7 +120,7 @@ export function ImageGenPage() {
 
   return (
     <div className="s-section">
-      <h2>Image-gen</h2>
+      <h2>Image Generation</h2>
       <p className="desc">ComfyUI / stable-diffusion image generation slot configuration. Changes persist to the img.img capability slot.</p>
 
       {errored && (
@@ -165,7 +165,7 @@ export function ImageGenPage() {
               setImgProvider(imgSelection.provider || "");
             }}>Reset</button>
           )}
-          <button className="btn sm" disabled={!imgDirty || loading || errored || applyCapability.isPending} onClick={doSave}>Save Image-gen</button>
+          <button className="btn sm" disabled={!imgDirty || loading || errored || applyCapability.isPending} onClick={doSave}>Save image generation</button>
         </div>
       </div>
 
