@@ -18,15 +18,19 @@ by a `hal0-slot@<name>.service` systemd unit. A single control plane,
 OpenAI-compatible `/v1/*` requests to the right slot, and serves the
 dashboard. There is no shared inference daemon to babysit.
 
-<Aside type="note" title="Current release">
-This documentation tracks the **hal0 v0.9.x beta** line — the container-runtime
-era, where each slot (`utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`,
-and `agent` — plus the NPU-conditional slots `stt-npu` and `embed-npu` when
-FastFlowLM is installed) runs in a dedicated podman container. `agent` is the
-capable default/fallback anchor and `utility` is the cheap helper used for
-background jobs like memory extraction; the older `chat`/`primary` slot names
-are retired. See the [changelog](/changelog) for the exact current version.
-</Aside>
+Each capability — `utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`,
+`agent`, and the NPU-conditional `stt-npu` / `embed-npu` slots — runs in its
+own dedicated podman container. `agent` is the capable default/fallback
+anchor and `utility` is the cheap helper used for background jobs like
+memory extraction.
+
+## Hardware support
+
+hal0 is first-class on AMD Strix Halo — the Ryzen AI Max+ 395 (128 GB) and
+the 385 / 390 (64 GB) — with AMD RX 7000-series GPUs also supported. NVIDIA
+RTX 30/40/50 (via CDI + the NVIDIA Container Toolkit) is experimental, and
+CPU-only x86_64 hosts work as a fallback. There is no minimum-spec gate —
+backend selection degrades to CPU rather than refusing to run.
 
 ## What you get
 
@@ -44,9 +48,9 @@ are retired. See the [changelog](/changelog) for the exact current version.
 - **Stacks** — named, exportable bundles of slot + profile + model
   assignments (built-in `saber`, `forge`, and `pi`) that you can load,
   clone, and re-apply as a single declarative unit.
-- **First-run terminal setup** — the `hal0 setup` TUI picks a
-  hardware-anchored tier and provisions a coherent set of slots, models,
-  and extensions.
+- **Hardware-anchored install** — `install.sh` probes your hardware and
+  provisions a coherent set of slots, models, and extensions in one pass —
+  no separate setup wizard to run afterward.
 - **Prewired chat UI** — OpenWebUI on port `3001`, zero config.
 - **Signed self-update** — cosign-verified tarballs with one-flag
   rollback.
@@ -61,11 +65,6 @@ are retired. See the [changelog](/changelog) for the exact current version.
     title="Install hal0"
     href="/docs/getting-started/install/"
     description="One-line install: fetch, verify, unpack, and bring up the API."
-  />
-  <LinkCard
-    title="First-run setup"
-    href="/docs/getting-started/setup/"
-    description="Run the hal0 setup TUI to provision your first slots, models, and extensions."
   />
   <LinkCard
     title="Load your first model"
