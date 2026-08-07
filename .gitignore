@@ -91,6 +91,7 @@ auth.json
 # Operator-only docs (live notes referencing internal lab hosts; kept
 # out of public history so they don't have to be sanitised every edit).
 docs/handoff-*.md
+/.handoff-*.md
 tests/release-gate-report.json
 
 # Internal lab docs (topology, ADRs, codebase audits, brain-redesign notes) —
@@ -102,6 +103,9 @@ Thumbs.db
 .claude/worktrees/
 .claude/design-import/
 .claude/wip.json
+.claude/.wip.lock
+# per-branch team worktree state (graphify caches etc.) — machine-local
+.claude/team-wt/
 
 # knowledge graph — curated artifacts ARE committed (GRAPH_REPORT.md, wiki/, manifest.json);
 # raw graph.json + caches/backups stay local-only (regenerate with `graphify update .`;
@@ -115,6 +119,7 @@ graphify-out/*
 # pi agent artefacts — session-scoped, never committed
 .pi/
 .pi-subagents/
+.pi-tasks/
 
 # never track node_modules anywhere (incl. symlinks)
 node_modules
