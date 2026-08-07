@@ -2,7 +2,7 @@
 title: Quick start — WSL2 (experimental)
 description: Running hal0 under WSL2 on Windows — what works, what doesn't, enabling systemd, and the accelerator limits (no ROCm, no NPU) you should expect.
 sidebar:
-  order: 13
+  order: 14
 ---
 
 import { Steps, Aside, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
@@ -62,13 +62,13 @@ systemctl is-system-running   # "running" or "degraded" is fine; a hard error is
 sudo apt-get update && sudo apt-get install -y python3-venv python3-pip
 ```
 
-hal0 needs Python 3.11–3.14 (Ubuntu 24.04 under WSL ships 3.12), the venv
+hal0 needs Python ≥ 3.12 (Ubuntu 24.04 under WSL ships 3.12), the venv
 module, and a container runtime (the installer auto-installs podman).
 
 ## 3. Install hal0
 
 ```sh
-curl -fsSL https://hal0.dev/install.sh | bash
+curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
 The bootstrap and installer run exactly as on bare metal — verify the
