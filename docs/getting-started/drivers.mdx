@@ -1,0 +1,120 @@
+---
+title: GPU drivers and memory
+description: Kernel driver requirements, device-node layout, render-group gid semantics, GTT pool sizing, and experimental NVIDIA support for hal0's AMD Strix Halo iGPU and XDNA NPU.
+sidebar:
+  order: 11
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0's inference containers need the host kernel to already expose the
+GPU (and, on Strix Halo, the NPU) as device nodes. hal0 ships the
+*userspace* runtime — ROCm, XRT, the FastFlowLM binary — inside its
+container images, but it cannot load a kernel driver from inside a
+container. This page covers what the host needs before you install, and
+how container/LXC device passthrough must be wired so hal0 can see it.
+
+## Kernel and firmware
+
+The iGPU uses the in-tree `amdgpu` driver. On AMD Strix Halo (Ryzen AI
+Max+ 395/385/390), get onto a **kernel ≥ 6.14** with current
+`linux-firmware` — earlier kernels are missing GTT and NPU fixes that
+Strix Halo depends on. If you also want the XDNA NPU, the kernel needs
+the `amdxdna` module available (`modprobe amdxdna`) and NPU firmware
+current enough to match it.
+
+hal0 does not install or manage this layer — it is host-side operator
+setup done before hal0's installer runs.
+
+## Verify amdgpu
+
+Confirm the kernel actually bound `amdgpu` to the GPU before you
+install:
+
+```sh
+lspci -nnk | grep -A3 VGA
+```
+
+Look for `Kernel driver in use: amdgpu` in the output. If it instead
+shows `amdgpu` under "Kernel modules" but not "Kernel driver in use", the
+module is available but not bound — check `dmesg` for why the driver
+probe failed (firmware mismatch is the usual cause).
+
+## Device nodes
+
+Once `amdgpu` (and, for NPU hosts, `amdxdna`) is bound, the kernel
+exposes the accelerators as device nodes:
+
+| Node | Role |
+|---|---|
+| `/dev/dri/renderD*` | Render node — Vulkan / ROCm render access |
+| `/dev/kfd` | ROCm compute queues |
+| `/dev/accel/accel0` | XDNA NPU (FastFlowLM) |
+
+hal0's hardware probe reads these directly; if a node is missing, the
+corresponding capability drops out of the probe rather than failing the
+install.
+
+<Aside type="note" title="Host ROCm is not required">
+The host only needs `amdgpu` bound and the nodes above present — it does
+**not** need a host ROCm install. Every hal0 slot container carries its
+own ROCm userspace.
+</Aside>
+
+## Render-group gids
+
+Containers (podman slots, or an LXC passing devices through to an inner
+container runtime) need group access to these nodes, and the group id
+that matters is the **device node's owner gid**, not whatever name it
+resolves to on the host. Check it directly:
+
+```sh
+stat -c %g /dev/dri/renderD128
+```
+
+Use that numeric gid with `--group-add` (or the container runtime's
+equivalent) when granting the container access. Don't rely on
+`getent group render` — on a given host that name can resolve to a
+different gid than the one that actually owns the render node, which
+silently leaves the container unable to open it.
+
+## Size the GTT pool
+
+{/* GTT-VERIFY: numbers pending hardware verification, Task B9 */}
+On Strix Halo the GPU's usable memory is the amdgpu **GTT** pool, carved
+from system RAM (unified memory). A model can only allocate up to the
+GTT cap, not the full RAM pool — so if GTT is left at its small default,
+large models won't fit even on a 128 GB box.
+
+hal0 *measures* the live GTT cap and sizes its model recommendations
+against it, but it does **not** configure GTT for you. Set it on the
+host kernel command line. On a 128 GB Strix Halo, the reference values
+from hal0's profile-tuning work are:
+
+```sh
+# /etc/default/grub — append to GRUB_CMDLINE_LINUX_DEFAULT, then update-grub && reboot
+amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856
+```
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `amdgpu.gttsize` | `126976` | GTT window in **MiB** (≈ 124 GiB) |
+| `ttm.pages_limit` | `32505856` | TTM page cap in **4 KiB pages** (≈ 124 GiB — keep it equal to `gttsize`) |
+| `amd_iommu=off` | — | Disables the IOMMU; measured worth ~5–12% on this workload |
+
+`126976` MiB leaves only ~4 GB for the host on a 128 GB machine — fine
+for a dedicated inference box, aggressive if the host runs other
+tenants. Scale both numbers down together (they must stay equal) to
+reserve more host RAM. After rebooting, `cat /proc/cmdline` should show
+the params.
+
+## NVIDIA
+
+NVIDIA support is **experimental**. hal0 targets AMD Strix Halo first,
+and RTX 30/40/50-series GPUs are supported through
+[CDI](https://github.com/cncf-tags/container-device-interface) and the
+NVIDIA Container Toolkit rather than through the AMD device-node path
+above. Install the NVIDIA Container Toolkit and generate a CDI spec on
+the host so podman/docker can request the GPU by CDI device name; hal0's
+hardware probe picks it up from there. Expect rougher edges than the
+AMD path — this tier gets less field validation.
