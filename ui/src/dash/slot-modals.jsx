@@ -1176,9 +1176,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							<>
 								{/* Device has no control here on purpose: it rides the model
 								    at creation (see the create modal's device-redirect note);
-								    running the model differently on this slot is the per-slot
-								    Profile select above. The drawer still READS slot.device
-								    for the fit filters below. */}
+								    the per-slot Profile select above picks this slot's
+								    runtime (runner family + image), not its flag tune. The
+								    drawer still READS slot.device for the fit filters below. */}
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Runner Image</span>

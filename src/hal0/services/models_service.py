@@ -1432,5 +1432,7 @@ def screen_model_write(
 
 # (The duplicate-model service — ``POST /api/models/{id}/duplicate`` — was
 # removed 2026-08: duplicate registry rows for "same weights, different
-# settings" confused which row was the original. Slots that need divergent
-# tunes on one model use per-slot profiles (``SlotConfig.profile``) instead.)
+# settings" confused which row was the original. Per-slot runtime divergence
+# is ``SlotConfig.profile`` (runner family + image); a per-slot *flag* tune
+# has no path today — the model's ``defaults`` is the whole tune and is
+# shared by every slot bound to it (spec-flags-ownership §2).)

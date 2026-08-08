@@ -232,7 +232,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
           ) : (
             <> Pick a model — its stamped tune sets the device.</>
           )}
-          {" "}To run this model differently on another slot, assign a custom <b style={{ color: "var(--fg)" }}>profile</b> in that slot&apos;s edit drawer after create.
+          {" "}Each slot can pick its own runtime <b style={{ color: "var(--fg)" }}>profile</b> (runner + image) in its edit drawer after create; the model&apos;s launch-flag tune is shared by every slot bound to it.
         </div>
       </div>
 
