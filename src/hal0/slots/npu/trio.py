@@ -55,6 +55,50 @@ def _log_renamed(old: str, canon: str) -> None:
     log.info("slot.trio_shadow_renamed", extra={"from": old, "to": canon})
 
 
+def _slot_table(raw: dict[str, Any]) -> dict[str, Any]:
+    """The table a slot's SCALAR fields actually live in.
+
+    Two on-disk shapes are supported: flat (scalars at the root, what the
+    runtime writes) and nested (scalars under ``[slot]``, the haloai shape the
+    id-keying migration preserves verbatim). ``_flatten_slot_toml`` treats
+    ``[slot]`` as authoritative and drops root scalars into ``extra`` when it
+    exists, so a writer that normalizes at the root of a nested file produces a
+    change the runtime never sees — and, worse, one that looks converged on the
+    next pass. Every field write here goes through this accessor instead.
+    """
+    table = raw.get("slot")
+    return table if isinstance(table, dict) else raw
+
+
+async def _relabel_shadow_in_place(mgr: NpuTrioHost, path: Path, old: str, canon: str) -> None:
+    """Relabel an id-keyed shadow: TOML body + identity row, no file moves.
+
+    Deliberately NOT :meth:`SlotManager.rename`. That guard rejects any slot
+    which is not OFFLINE, because a name-keyed slot's systemd unit still
+    carries its name — but a trio shadow is never independently loadable
+    (``load`` short-circuits it straight to READY, so a live box persists
+    exactly the state the guard rejects) and the reconcile would then fail on
+    every boot, which is the bug this lane is fixing.
+
+    An id-keyed slot's TOML, state record and unit are all addressed by the
+    stable id, so relabelling moves no file and touches no unit: the label
+    lives in the TOML body and the identity row, and this moves both. The
+    persisted state record's ``name`` is left alone — ``status`` reports the
+    name it was ASKED for, so that copy is a cosmetic echo.
+    """
+    import tomllib
+
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    _slot_table(raw)["name"] = canon
+    write_slot_toml(path, raw)
+    identity = getattr(mgr, "_identity", None)
+    if identity is not None and is_id_stem(path.stem):
+        with contextlib.suppress(Exception):
+            identity.rename(int(path.stem), canon)
+    mgr._invalidate_cfg_cache(old)
+    mgr._invalidate_cfg_cache(canon)
+
+
 def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
     """True if *cfg* is an NPU FLM trio **shadow** (stt/embed), not the anchor.
 
@@ -90,7 +134,6 @@ class NpuTrioHost(Protocol):
 
     async def iter_configs(self) -> list[dict[str, Any]]: ...
     async def create(self, slot_name: str, slot_cfg: dict[str, Any]) -> Any: ...
-    async def rename(self, slot_name: str, new_name: str) -> Any: ...
     def _invalidate_cfg_cache(self, slot_name: str) -> None: ...
 
 
@@ -180,19 +223,16 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
                         },
                     )
                 elif is_id_stem(prior_path.stem):
-                    # Id-keyed: a rename is a RELABEL of a stable id, and the
-                    # identity row carries that label. A bare file move would
-                    # strand the row under the old name and leave the shadow
-                    # unresolvable by its new one, so delegate to the canonical
-                    # :meth:`SlotManager.rename` — it rewrites the embedded
-                    # ``name`` in place, moves the identity row + state record,
-                    # and invalidates the caches as one unit.
+                    # Id-keyed: a rename is a RELABEL of a stable id, so the
+                    # stem stays put and the identity row moves with the label.
+                    # A bare file move would strand the row under the old name
+                    # and leave the shadow unresolvable by its new one.
                     canon_path = prior_path
-                    await mgr.rename(prior, canon)
+                    await _relabel_shadow_in_place(mgr, prior_path, prior, canon)
                     _log_renamed(prior, canon)
                 else:
                     raw_before = tomllib.loads(prior_path.read_text(encoding="utf-8"))
-                    raw_before["name"] = canon
+                    _slot_table(raw_before)["name"] = canon
                     canon_path = slots_dir / f"{canon}.toml"
                     write_slot_toml(canon_path, raw_before)
                     with contextlib.suppress(FileNotFoundError):
@@ -205,6 +245,11 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
             #    canon_path now exists, so the same iteration normalizes it.
             if canon_path is not None:
                 raw = tomllib.loads(canon_path.read_text(encoding="utf-8"))
+                # Compare AND write in whichever table the file's scalars live
+                # in: normalizing at the root of a ``[slot]``-nested file is
+                # invisible to the loader, and the duplicated root values then
+                # make the next pass look converged and suppress the repair.
+                table = _slot_table(raw)
                 desired = {
                     "device": "npu",
                     "profile": "flm",
@@ -212,9 +257,9 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
                     "port": int(anchor_port),
                     "type": slot_type,
                 }
-                if any(raw.get(k) != v for k, v in desired.items()):
-                    raw.update(desired)
-                    raw.setdefault("name", canon)
+                if any(table.get(k) != v for k, v in desired.items()):
+                    table.update(desired)
+                    table.setdefault("name", canon)
                     write_slot_toml(canon_path, raw)
                     mgr._invalidate_cfg_cache(canon)
                     changed += 1

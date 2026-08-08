@@ -33,12 +33,14 @@ import pytest
 
 from hal0.capabilities.config import CapabilitySelection
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
+from hal0.config.loader import load_slot_config
 from hal0.ports.authority import PortAuthority
 from hal0.slot_config import SlotConfigStore, SlotSelection
 from hal0.slots.identity import SlotIdentityStore
 from hal0.slots.manager import SlotManager
 from hal0.slots.migrate_id_keying import RecordingSlotArtifactOps, migrate_slot_id_keying
 from hal0.slots.routing import loaded_slot_from_config
+from hal0.slots.state import SlotState
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -269,6 +271,27 @@ async def test_ensure_slot_exists_still_creates_a_genuinely_missing_slot(
 # ── (c) trio reconciler: normalize the id-keyed shadow (#1664) ───────────────
 
 
+def _anchor_toml(home: str | Path) -> Path:
+    """A name-keyed FLM container anchor written straight to disk."""
+    return _write(
+        _slots_dir(home) / "flm.toml",
+        [
+            'name = "flm"',
+            'type = "llm"',
+            'device = "npu"',
+            'runtime = "container"',
+            'profile = "flm"',
+            "port = 8088",
+            "[model]",
+            'default = "qwen3:4b"',
+            "[npu]",
+            "chat = true",
+            "asr = true",
+            "embed = true",
+        ],
+    )
+
+
 async def _npu_box(home: Path, *, shadow: str | None) -> tuple[SlotManager, dict[str, int]]:
     """A migrated, id-keyed box: FLM container anchor + (optionally) one shadow.
 
@@ -356,3 +379,62 @@ async def test_trio_reconcile_renames_id_keyed_legacy_shadow_in_place(tmp_hal0_h
     row = sm._identity.get_by_name("flm-stt")
     assert row is not None and row.id == ids["stt-npu"]
     assert await sm.status("flm-stt") is not None
+
+
+@pytest.mark.usefixtures("container_stub")
+async def test_trio_reconcile_relabels_a_non_offline_id_keyed_shadow(tmp_hal0_home: str) -> None:
+    """A shadow is short-circuited to READY on load, so it is never OFFLINE.
+
+    Routing the relabel through ``SlotManager.rename`` would hit that method's
+    "must be offline to rename" guard (which exists for the name-keyed systemd
+    unit, and does not apply to a never-spawned, id-keyed shadow) and fail into
+    the per-shadow ``except`` on every single boot.
+    """
+    home = Path(tmp_hal0_home)
+    sm, ids = await _npu_box(home, shadow="stt-npu")
+    await sm.load("stt-npu")
+    assert sm.state("stt-npu") is not SlotState.OFFLINE
+
+    await sm.reconcile_npu_trio_slots()
+
+    assert _read(_slots_dir(home) / f"{ids['stt-npu']}.toml")["name"] == "flm-stt"
+    assert sm._identity.get_by_name("flm-stt") is not None
+
+
+@pytest.mark.usefixtures("container_stub")
+async def test_trio_reconcile_normalizes_inside_the_nested_slot_table(tmp_hal0_home: str) -> None:
+    """A ``[slot]``-nested shadow must be repaired IN its authoritative table.
+
+    ``_flatten_slot_toml`` treats ``[slot]`` as authoritative and drops root
+    scalars into ``extra``, so normalizing at the root of a nested file is
+    invisible to the runtime — and the duplicated root values then make the
+    next pass look converged and suppress the repair forever.
+    """
+    home = Path(tmp_hal0_home)
+    _anchor_toml(home)
+    shadow = _write(
+        _slots_dir(home) / "flm-stt.toml",
+        [
+            "[slot]",
+            'name = "flm-stt"',
+            'device = "npu"',
+            'type = "transcription"',
+            "port = 9999",  # drifted off the anchor's port
+            "[model]",
+            'default = "whisper-v3:turbo"',
+        ],
+    )
+
+    changed = await SlotManager().reconcile_npu_trio_slots()
+
+    assert changed == 2  # the drifted stt shadow repaired + the embed one seeded
+    raw = _read(shadow)
+    assert raw["slot"]["port"] == 8088
+    assert raw["slot"]["served_by"] == "flm"
+    assert raw["slot"]["profile"] == "flm"
+    # No shadow root scalars — the loader would drop those into ``extra``.
+    assert not [k for k, v in raw.items() if k != "slot" and not isinstance(v, dict)]
+    # And the repaired file must load through the real loader as normalized —
+    # the assertion that actually catches a root-scalar write on a nested file.
+    cfg = load_slot_config("flm-stt", path=shadow)
+    assert (cfg.served_by, cfg.port, cfg.profile) == ("flm", 8088, "flm")
