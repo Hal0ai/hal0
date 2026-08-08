@@ -888,6 +888,12 @@ async def list_all(
         for fm in flm_served_models():
             if not fm.get("installed"):
                 continue
+            # A registry row already covers this installed model under FLM's
+            # native colon tag (the FLM pull flow registers ``gemma4-it:e4b``
+            # with backends=["npu"]) — emitting the probe row too listed every
+            # pulled FLM model twice, once undeletable (#duplicate-FLM-rows).
+            if fm["tag"] in seen:
+                continue
             mid = fm["tag"].replace(":", "-") + "-FLM"
             if mid in seen:
                 continue
