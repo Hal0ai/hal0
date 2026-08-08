@@ -15,6 +15,48 @@ export const MODEL_SORT_FIELDS = [
 ];
 
 /**
+ * True when a model carries an explicit MTP opt-in (`defaults.mtp === true`)
+ * or the legacy registry `mtp` tag. Mirrors
+ * `hal0.model_meta.model_is_mtp_eligible`'s tag fallback — see
+ * `lib/normalizeApiModel.isMtpEligibleModel` for the full tri-state version
+ * (this simplified OR is what the Models-page MTP filter chip has always
+ * used; keep the two in sync).
+ *
+ * @param {any} m
+ * @returns {boolean}
+ */
+export function isMtpModel(m) {
+  return m?.defaults?.mtp === true || (m?.tags || []).some((t) => String(t).toLowerCase() === "mtp");
+}
+
+//: Architecture ids the backend already knows are MoE — mirrors
+//: `hal0.hardware.recommend._MOE_ARCHITECTURES`. Keep in sync.
+const MOE_ARCHITECTURES = new Set(["qwen3next", "mixtral", "deepseek-moe"]);
+
+/**
+ * True when a model is MoE, per the SAME precedence the backend uses
+ * (`hal0.hardware.recommend._resolve_primary_ctx` /
+ * `hal0.profiles.generate._looks_moe`): a backfilled `Model.architecture`
+ * wins when present; otherwise fall back to the `moe`/`a3b`/`mtp` tag-or-id
+ * heuristic every row relies on today.
+ *
+ * `Model.architecture` is not persisted on any registry row yet (#1649) —
+ * no writer sets it — so in practice this always takes the fallback path.
+ * It's still checked first so a future architecture backfill picks it up
+ * for free, same as the backend.
+ *
+ * @param {any} m
+ * @returns {boolean}
+ */
+export function isMoeModel(m) {
+  const arch = String(m?.architecture || "").trim().toLowerCase();
+  if (arch) return MOE_ARCHITECTURES.has(arch);
+  const tags = (m?.tags || []).map((t) => String(t).trim().toLowerCase());
+  if (tags.includes("moe") || tags.includes("a3b") || tags.includes("mtp")) return true;
+  return /a3b/i.test(String(m?.id || ""));
+}
+
+/**
  * Parse a human param-count ("27B", "350M", "1.5B", "74K") — or a raw
  * number — into a comparable count. Returns null when unparseable.
  *
