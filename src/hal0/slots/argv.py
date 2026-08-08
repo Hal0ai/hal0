@@ -130,9 +130,16 @@ SLOT_HARDWARE_FLAGS: frozenset[str] = frozenset(
 #     row's free-form launcher flags; NOT the schema-computed ``-ngl`` from
 #     ``defaults.n_gpu_layers``, which rides the trusted ``model_defaults``
 #     segment — see ``container._llama_argv_segments``).
+#   * ``slot_profile``     — a DIVERGENT slot profile's flag text (#1636):
+#     emitted only when ``slot.profile`` differs from the model's stamped
+#     provenance (``defaults.profile``). Profile saves already screen these
+#     flags, but the profile file is operator-editable on disk, so the launch
+#     merge re-screens them like any other free-form source.
 # A future request-level ``llamacpp_args`` segment (§7.1a 5-tier precedence
 # rewrite) adds its own label here so it rides the same guard.
-UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset({"extra_args", "model_extra_args"})
+UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset(
+    {"extra_args", "model_extra_args", "slot_profile"}
+)
 
 
 @dataclass(frozen=True)

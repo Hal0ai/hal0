@@ -834,6 +834,7 @@ def _llama_argv_segments(
     slot_threads: int | None = None,
     slot_parallel: int | None = None,
     extra_args: str | None = None,
+    slot_profile_flags: str = "",
 ) -> list[tuple[str, list[str]]]:
     """Build the ordered, labelled llama-server argv segments (SINGLE SOURCE).
 
@@ -848,19 +849,29 @@ def _llama_argv_segments(
     fields, emitted in a TRUSTED ``slot_hardware`` segment. The MODEL still owns
     the logical, device-agnostic tune — free-form ``defaults.extra_args``
     (``model_extra_args`` segment, still screened against the §21.7 managed-arg
-    denylist by :func:`~hal0.slots.argv.resolve_argv`). The ``profile`` segment
-    stays removed — a profile is a copy-on-stamp template, read at stamp time,
-    never at launch.
+    denylist by :func:`~hal0.slots.argv.resolve_argv`). The old ``profile``
+    segment stays removed — a profile is a copy-on-stamp template, read at
+    stamp time, not at launch, whenever the slot's profile matches the model's
+    stamped provenance (``defaults.profile``).
+
+    Divergence overlay (#1636): when the slot's profile DIFFERS from the
+    model's provenance, ``slot_profile_flags`` carries that profile's resolved
+    flag text and is emitted as an UNTRUSTED ``slot_profile`` segment layered
+    over the model tune — the per-slot flag-divergence path that replaced the
+    retired duplicate-for-device model flow (PR #1635). The caller
+    (:func:`_resolve_llama_scalars`) computes it divergence-gated; aligned and
+    provenance-less slots pass ``""`` and launch byte-identical to the stamped
+    tune.
 
     Precedence (lowest → highest; ``resolve_argv``/``normalize_argv`` keeps the
     LAST occurrence of each canonical flag)::
 
-        base < model_extra_args < slot_hardware < chat_template < mmproj
+        base < model_extra_args < slot_profile < slot_hardware < chat_template < mmproj
 
-    The slot hardware segment sits AFTER ``model_extra_args`` so the slot's
-    typed ``-ngl``/``--threads`` win over any collision a model tune smuggled in
-    (defense in depth — the model/profile flag save also hard-rejects
-    hardware flags, spec §5).
+    The slot hardware segment sits AFTER ``model_extra_args`` and
+    ``slot_profile`` so the slot's typed ``-ngl``/``--threads`` win over any
+    collision a model tune or divergent profile smuggled in (defense in depth
+    — the model/profile flag save also hard-rejects hardware flags, spec §5).
 
     ``profile_flags`` / ``slot_parallel`` / ``extra_args`` are accepted-and-
     ignored (kept for call-site compat until the sunset ratchet drops the
@@ -913,13 +924,24 @@ def _llama_argv_segments(
     chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
     mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
 
-    return [
+    # Divergent slot-profile overlay (#1636): free-form/operator-editable, so it
+    # rides an UNTRUSTED label (managed-arg screen in resolve_argv). Sits above
+    # the model tune (the divergence wins collisions) but below slot_hardware
+    # (typed slot fields stay authoritative). The segment appears ONLY when a
+    # divergence produced flags — the aligned case keeps the exact golden #5
+    # segment shape (tests/golden_paths/test_gp05_stamped_launch_layering.py).
+    segments: list[tuple[str, list[str]]] = [
         ("base", base),
         ("model_extra_args", md_extra_tokens),
+    ]
+    if slot_profile_flags.strip():
+        segments.append(("slot_profile", shlex.split(slot_profile_flags)))
+    segments += [
         ("slot_hardware", slot_hw_tokens),
         ("chat_template", chat_tokens),
         ("mmproj", mmproj_tokens),
     ]
+    return segments
 
 
 def _llama_launch_plan(
@@ -940,6 +962,7 @@ def _llama_launch_plan(
     slot_threads: int | None = None,
     slot_parallel: int | None = None,
     env: dict[str, str] | None = None,
+    slot_profile_flags: str = "",
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -964,6 +987,7 @@ def _llama_launch_plan(
         slot_threads=slot_threads,
         slot_parallel=slot_parallel,
         extra_args=extra_args,
+        slot_profile_flags=slot_profile_flags,
     )
     # resolve_argv over the labelled segments is argv-equivalent to
     # normalize_argv over the flat concatenation (pinned by tests/slots/
@@ -1315,6 +1339,44 @@ def _resolve_llama_scalars(
     # no longer enter the argv chain (see _llama_argv_segments).
     flags_str = ""
 
+    # Divergent slot-profile overlay (#1636): a slot whose ``profile`` differs
+    # from the model's stamped provenance (``defaults.profile``) launches with
+    # that profile's flags layered over the model tune (the ``slot_profile``
+    # segment) — the per-slot flag-divergence path replacing the retired
+    # duplicate-for-device model flow. Gated three ways so the common case
+    # stays byte-identical to golden #5:
+    #   * the slot names a profile AND the model records a provenance — a
+    #     provenance-less (hand-authored) tune has made no profile choice, so
+    #     there is nothing to diverge from;
+    #   * the names differ;
+    #   * the resolved profile IS the slot's named one — a missing-profile
+    #     fallback to the backend base (``_resolve_profile_or_base``) must not
+    #     inject flags the operator never picked.
+    # No MTP expansion here (``resolve_profile_flags`` with no override): the
+    # ``--spec-draft-*`` bundle stays model-driven (see _effective_mtp).
+    slot_profile_flags = ""
+    _cfg_profile = str(slot_cfg.get("profile") or "")
+    _mi_defaults = model_info.get("defaults")
+    _provenance = _mi_defaults.get("profile") if isinstance(_mi_defaults, Mapping) else None
+    _resolved_name = getattr(profile, "name", None)
+    if (
+        _cfg_profile
+        and isinstance(_provenance, str)
+        and _provenance
+        and _cfg_profile != _provenance
+        and (_resolved_name is None or _resolved_name == _cfg_profile)
+    ):
+        slot_profile_flags = str(resolve_profile_flags(profile) or "").strip()
+        if slot_profile_flags and for_launch:
+            log.info(
+                "slot.profile_divergence_applied",
+                extra={
+                    "slot": str(slot_cfg.get("name") or ""),
+                    "profile": _cfg_profile,
+                    "model_profile": _provenance,
+                },
+            )
+
     if for_launch:
         workers = slot_cfg.get("workers")
         if workers is not None and int(workers or 1) != 1:
@@ -1458,6 +1520,7 @@ def _resolve_llama_scalars(
     return {
         "image": str(image),
         "flags_str": str(flags_str),
+        "slot_profile_flags": str(slot_profile_flags),
         "context_size": context_size,
         "extra_args": extra_args,
         "server_env": server_env,
@@ -1606,6 +1669,7 @@ class ContainerProvider(Provider):
             slot_threads=scalars["slot_threads"],
             slot_parallel=scalars["slot_parallel"],
             env=merged_env or None,
+            slot_profile_flags=scalars["slot_profile_flags"],
         )
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
@@ -2240,6 +2304,7 @@ def _resolve_slot_argv(
         slot_threads=scalars["slot_threads"],
         slot_parallel=scalars["slot_parallel"],
         extra_args=scalars["extra_args"],
+        slot_profile_flags=scalars["slot_profile_flags"],
     )
     return str(scalars["image"]), resolve_argv(segments)
 

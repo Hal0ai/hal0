@@ -280,3 +280,86 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     await expect(modelSel.locator('option[value="qwen-plain"]')).toHaveCount(1)
   })
 })
+
+// ─── #1636 — per-slot divergence: flag overlay + cross-device transition ────
+//
+// Option (a): a slot profile that DIFFERS from the model's stamped provenance
+// (defaults.profile) overlays its flags on the model tune at launch — the
+// drawer surfaces that divergence. Option (b): the picker offers profiles
+// declaring ANOTHER backend; selecting one flips the slot's device on save
+// (server-side _reconcile_device_profile).
+test.describe('slot profile divergence (#1636)', () => {
+  const CHAT = MOCK_DATA.slots.find(s => s.name === 'chat')!  // gpu-rocm · rocm-mtp
+
+  async function seedSlotsAndModels(page: Page, slots: any[], models: any[]) {
+    await page.addInitScript(({ slots, models }: { slots: any[]; models: any[] }) => {
+      let real: any
+      Object.defineProperty(window, 'HAL0_DATA', {
+        configurable: true, get() { return real },
+        set(v) { real = v; if (v && typeof v === 'object') { v.slots = slots; v.models = models } },
+      })
+    }, { slots, models })
+  }
+
+  const CHAT_MODEL = (profile: string) => [{
+    id: 'qwen3.6-35b-a3b', name: 'qwen3.6-35b-a3b', capabilities: ['chat'],
+    defaults: { profile, extra_args: '-b 2048' },
+  }]
+
+  test('divergent slot profile surfaces the flag-overlay hint', async ({ page }) => {
+    // Model provenance says "rocm"; the slot pins "rocm-mtp" → divergence.
+    await seedSlotsAndModels(page, [CHAT], CHAT_MODEL('rocm'))
+    await page.goto('/#slots/chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+    await expect(page.getByTestId('slot-profile-diverges')).toBeVisible()
+  })
+
+  test('aligned slot profile shows no divergence hint', async ({ page }) => {
+    await seedSlotsAndModels(page, [CHAT], CHAT_MODEL('rocm-mtp'))
+    await page.goto('/#slots/chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+    await expect(page.getByTestId('slot-profile-diverges')).toHaveCount(0)
+  })
+
+  test('cross-backend profile is offered and saving it PUTs the profile', async ({ page }) => {
+    const configPuts: any[] = []
+    await page.route('**/api/slots/chat/config', async (route) => {
+      if (route.request().method() === 'PUT') {
+        configPuts.push(JSON.parse(route.request().postData() || '{}'))
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/chat/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    await page.route('**/api/slots/chat/restart', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+
+    await seedSlotsAndModels(page, [CHAT], CHAT_MODEL('rocm-mtp'))
+    await page.goto('/#slots/chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    // The gpu-rocm slot is offered the vulkan-backend profile (was filtered
+    // out pre-#1636) under the "Other backend" group…
+    const sel = page.getByTestId('slot-profile')
+    await expect(sel.locator('optgroup option[value="vulkan"]')).toHaveCount(1)
+    await sel.selectOption('vulkan')
+
+    // …and selecting it announces the device switch.
+    await expect(page.getByTestId('slot-profile-device-switch')).toBeVisible()
+    await expect(page.getByTestId('slot-profile-device-switch')).toContainText('gpu-vulkan')
+
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => configPuts.length).toBeGreaterThan(0)
+    expect(configPuts[0].profile).toBe('vulkan')
+  })
+
+  test('same-backend profiles carry no device-switch hint', async ({ page }) => {
+    await seedSlotsAndModels(page, [CHAT], CHAT_MODEL('rocm-mtp'))
+    await page.goto('/#slots/chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+    await page.getByTestId('slot-profile').selectOption('rocm')
+    await expect(page.getByTestId('slot-profile-device-switch')).toHaveCount(0)
+  })
+})

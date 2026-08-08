@@ -262,10 +262,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// hatch the field originally existed for.
 	const [pinCustom, setPinCustom] = useStateSM(false);
 	// Runtime profile (SlotConfig.profile) — picks the runtime family,
-	// device-class gating and MTP draft backend. NOT a flags source at launch:
-	// profile flags are copy-on-stamp into model.defaults.extra_args (model
-	// drawer). Rides Save (PUT /config {profile}), restart-required; the
-	// backend's _reconcile_device_profile keeps device/profile coherent.
+	// device-class gating and MTP draft backend. Flags: copy-on-stamp into
+	// model.defaults.extra_args (model drawer) when aligned with the model's
+	// provenance; a DIVERGENT slot profile overlays its flags on the model
+	// tune at launch (#1636). Rides Save (PUT /config {profile}),
+	// restart-required; the backend's _reconcile_device_profile keeps
+	// device/profile coherent (a cross-backend profile flips the device).
 	const [profileSel, setProfileSel] = useStateSM(slot?.profile || "");
 	// Eviction priority (spec 2026-08-02) — instant-apply on blur/Enter, NOT
 	// part of the Save batch (see the pinned-toggle-shaped handler below).
@@ -843,44 +845,96 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	};
 
 	// Runtime profile row — the slot's SlotConfig.profile. Controls the runtime
-	// family, device-class gating and MTP draft backend; profile FLAGS are
-	// copy-on-stamp into the model tune (model drawer), never read at launch.
+	// family, device-class gating and MTP draft backend. Flags: aligned with
+	// the model's stamped provenance (defaults.profile) they are copy-on-stamp
+	// only (model drawer); a DIVERGENT slot profile overlays its flags on the
+	// model tune at launch (#1636, the slot_profile argv segment). A profile
+	// declaring another backend switches the slot's device on save (the
+	// backend's _reconcile_device_profile rederives it).
 	// Rendered inside the Model group right under the model select (it rides
 	// the model choice), or under its own group on an NPU slot where the Model
 	// group is replaced by the NPU capability matrix.
 	const profileRow = (() => {
 		const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
 		const devBackend = deviceBackend(device);
-		// Mirror backend profile_fits_slot: slot type supported +
+		const modelProfile = curModelRow?.defaults?.profile || "";
+		// Mirror backend profile_fits_slot: slot type supported first, then
 		// device_class match + backend match (when both declared).
-		const fit = all.filter(
+		const typeFit = all.filter(
 			(p) =>
-				(!Array.isArray(p.supported_slot_types) ||
-					p.supported_slot_types.includes(slot.type)) &&
+				!Array.isArray(p.supported_slot_types) ||
+				p.supported_slot_types.includes(slot.type),
+		);
+		const fit = typeFit.filter(
+			(p) =>
 				(!p.device_class || p.device_class === deviceClass) &&
 				(!p.backend || !devBackend || p.backend === devBackend),
 		);
+		// Cross-device candidates (#1636): a profile declaring ANOTHER llama
+		// backend is selectable — on save the backend's
+		// _reconcile_device_profile flips the slot's device to match (profile
+		// changed alone → device rederived). Only gpu/cpu-class slots
+		// transition (npu/img route to different runtime families —
+		// hard-blocked in model_fit), and only a backend-declaring profile can
+		// drive the flip; a bare device_class hint cannot.
+		const BACKEND_DEVICE = {
+			rocm: "gpu-rocm",
+			vulkan: "gpu-vulkan",
+			cuda: "gpu-cuda",
+			cpu: "cpu",
+		};
+		const crossFit = ["gpu", "cpu"].includes(deviceClass)
+			? typeFit.filter(
+					(p) =>
+						!fit.includes(p) &&
+						p.backend &&
+						BACKEND_DEVICE[p.backend] &&
+						!["npu", "img"].includes(p.device_class || ""),
+				)
+			: [];
 		const fitNames = fit.map((p) => p.name);
-		const adoptedFromModel =
-			!!profileSel && profileSel === (curModelRow?.defaults?.profile || "");
-		// The options are filtered against the slot's device, which is no
-		// longer editable here — a profile persisted on disk can still be
-		// out-of-vocab for it. Saving a
-		// profile+device pair with conflicting backends is a hard
-		// SlotConfigError (_reconcile_device_profile), so warn instead of
-		// silently PUTting the conflict.
+		const listedNames = [...fitNames, ...crossFit.map((p) => p.name)];
+		const adoptedFromModel = !!profileSel && profileSel === modelProfile;
+		// Divergence overlay (#1636): a slot profile that differs from the
+		// model's stamped provenance layers its flags over the model tune at
+		// launch (the slot_profile argv segment).
+		const diverges =
+			!!profileSel && !!modelProfile && profileSel !== modelProfile;
+		const selCross = crossFit.find((p) => p.name === profileSel) || null;
+		const targetDevice = selCross ? BACKEND_DEVICE[selCross.backend] : null;
+		// Cross-device cautions: an explicit BINARY or a pinned image may not
+		// serve the target backend — warn before Save, never block (§4).
+		const crossCautions = [];
+		if (selCross) {
+			const backendsCat = systemInfoQuery.data?.backends ?? {};
+			const selRunner = binary ? backendsCat[binary] : null;
+			const sup = selRunner ? runnerBackends(selRunner) : [];
+			if (binary && sup.length > 0 && !sup.includes(selCross.backend))
+				crossCautions.push(
+					`Runner binary "${binary}" does not list backend "${selCross.backend}" — clear it or pick a matching binary.`,
+				);
+			if ((imagePin || "").trim())
+				crossCautions.push(
+					"The pinned runner image may not serve the new backend — check or clear the pin.",
+				);
+		}
+		// A persisted profile that is neither same-device nor a viable
+		// transition target (bare device_class hint, npu/img class, unknown):
+		// stays selectable, but the device cannot follow it — warn.
 		const profileFitWarn =
-			profileSel && all.length > 0 && !fitNames.includes(profileSel)
-				? `Profile "${profileSel}" does not fit device "${device}" — saving both together is rejected. Pick a listed profile or revert the device.`
+			profileSel && all.length > 0 && !listedNames.includes(profileSel)
+				? `Profile "${profileSel}" does not fit device "${device}" and declares no backend the device could follow — the slot may misbehave at launch. Pick a listed profile.`
 				: null;
 		return (
 			<div className="form-row">
 				<div className="form-lbl">
 					<span>Profile</span>
-					<FieldInfoIcon description="⟳ Runtime profile — picks the runtime family, device-class
-						gating and the MTP draft backend. Flags are NOT read from here
-						at launch; they are stamped into the model's launch flags on
-						the model drawer." />
+					<FieldInfoIcon description="⟳ Runtime profile — picks the runtime family and the MTP
+						draft backend. Matching the model's profile: flags come solely
+						from the model's stamped tune. Diverging from it: this
+						profile's flags overlay the model tune for this slot at
+						launch. A profile declaring another backend also switches the
+						slot's device on save." />
 				</div>
 				<div className="form-ctl">
 					<select
@@ -891,7 +945,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					>
 						{/* keep a none/out-of-vocab persisted profile selectable */}
 						{!slot.profile && <option value="">— none —</option>}
-						{profileSel && !fitNames.includes(profileSel) && (
+						{profileSel && !listedNames.includes(profileSel) && (
 							<option value={profileSel}>{profileSel}</option>
 						)}
 						{fit.map((p) => (
@@ -900,11 +954,48 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								{p.intent ? ` · ${p.intent}` : ""}
 							</option>
 						))}
+						{crossFit.length > 0 && (
+							<optgroup label="Other backend — switches slot device">
+								{crossFit.map((p) => (
+									<option key={p.name} value={p.name} title={p.intent}>
+										{p.name} · → {BACKEND_DEVICE[p.backend]}
+										{p.intent ? ` · ${p.intent}` : ""}
+									</option>
+								))}
+							</optgroup>
+						)}
 					</select>
 					{adoptedFromModel && (
 						<div className="hint">
 							Adopted from the bound model's preference — swapping the model
 							may change it.
+						</div>
+					)}
+					{diverges && (
+						<div className="hint" data-testid="slot-profile-diverges">
+							Diverges from the model's profile ("{modelProfile}") — this
+							profile's flags overlay the model tune for this slot at
+							launch.
+						</div>
+					)}
+					{selCross && (
+						<div
+							className="hint"
+							data-testid="slot-profile-device-switch"
+							style={{
+								marginTop: 6,
+								padding: "6px 10px",
+								borderRadius: "var(--rad-sm)",
+								border: "1px solid var(--line)",
+							}}
+						>
+							Saving switches this slot's device to "{targetDevice}"
+							(profile backend "{selCross.backend}") and restarts it.
+							{crossCautions.map((c) => (
+								<div key={c} style={{ marginTop: 4, color: "var(--warn)" }}>
+									⚠ {c}
+								</div>
+							))}
 						</div>
 					)}
 					{profileFitWarn && (
