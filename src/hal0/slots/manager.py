@@ -2396,10 +2396,28 @@ class SlotManager:
         # Deleting a static seed leaves a tombstone so the boot-time seeding
         # pass honours the deletion (it would otherwise re-copy the seed TOML
         # on the next start — the old "undeletable seeded slot" behaviour).
-        if slot_name in self.seeded_slots():
-            from hal0.install.static_seeds import add_seed_tombstone
+        # STATIC seeds only: the NPU trio (flm-stt/flm-embed) is reconciled
+        # from the anchor by reconcile_trio_slots, which does not consult
+        # tombstones — a trio deletion is ephemeral by contract.
+        from hal0.install.static_seeds import STATIC_SEED_SLOTS, add_seed_tombstone
 
+        if slot_name in STATIC_SEED_SLOTS:
             add_seed_tombstone(slot_name)
+
+        # Reconcile capability intent: a deleted capability slot must not
+        # leave its capabilities.toml selection enabled — the orchestrator
+        # would treat the file as converged and never recreate the slot,
+        # while the dashboard shows the capability "on" with nothing behind
+        # it. Best-effort; re-enabling in settings recreates the slot.
+        try:
+            from hal0.capabilities.orchestrator import disable_selections_for_slot
+
+            disable_selections_for_slot(slot_name)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning(
+                "slot.capability_selection_release_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
 
     async def update_config(
         self,

@@ -50,19 +50,40 @@ def test_capabilities_toml_drops_stray_vision_selection(tmp_path) -> None:
     assert "img" in cfg.selections
 
 
-def test_vision_scaffold_slot_migration(tmp_path) -> None:
-    from hal0.config.migrations.vision_slot_retirement import migrate_vision_slot
+def test_vision_scaffold_retirement_goes_through_the_manager() -> None:
+    """The scaffold retires via SlotManager.delete (identity/port/state go
+    with the TOML); a model-bound vision slot is operator-owned and kept."""
+    import asyncio
 
-    # Untouched scaffold (no model bound) → removed.
-    (tmp_path / "vision.toml").write_text('name = "vision"\nport = 8093\n[model]\ndefault = ""\n')
-    assert migrate_vision_slot(tmp_path) is True
-    assert not (tmp_path / "vision.toml").exists()
-    # Idempotent.
-    assert migrate_vision_slot(tmp_path) is False
-    # Operator-owned (model bound) → kept.
-    (tmp_path / "vision.toml").write_text('name = "vision"\nport = 8093\n[model]\ndefault = "mm"\n')
-    assert migrate_vision_slot(tmp_path) is False
-    assert (tmp_path / "vision.toml").exists()
+    from hal0.config.migrations.vision_slot_retirement import retire_vision_scaffold
+    from hal0.slots.state import SlotNotFound
+
+    class _FakeManager:
+        def __init__(self, cfg):
+            self._cfg = cfg
+            self.deleted: list[tuple[str, bool]] = []
+
+        async def get_config(self, name):
+            if self._cfg is None:
+                raise SlotNotFound(name)
+            return self._cfg
+
+        async def delete(self, name, *, force=False):
+            self.deleted.append((name, force))
+
+    # Untouched scaffold → deleted with force (pin-proof).
+    mgr = _FakeManager({"name": "vision", "model": {"default": ""}})
+    assert asyncio.run(retire_vision_scaffold(mgr)) is True
+    assert mgr.deleted == [("vision", True)]
+
+    # Model bound → operator-owned, kept.
+    mgr = _FakeManager({"name": "vision", "model": {"default": "mm"}})
+    assert asyncio.run(retire_vision_scaffold(mgr)) is False
+    assert mgr.deleted == []
+
+    # No slot at all → idempotent no-op.
+    mgr = _FakeManager(None)
+    assert asyncio.run(retire_vision_scaffold(mgr)) is False
 
 
 # ── Model-side vision surfacing stays intact ────────────────────────────────

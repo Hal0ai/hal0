@@ -143,15 +143,18 @@ def test_scaffolding_first_destroys_the_curated_config(hal0_home: Path, slot_nam
 def test_scaffold_still_creates_slots_that_have_no_static_seed(hal0_home: Path) -> None:
     """Seeding first must not disable the scaffold pass.
 
-    ``vision`` has no file in ``installer/etc-hal0/slots/``, so the scaffold is
-    the only thing that can create it. If the ordering fix accidentally short-
-    circuited the whole pass, this is what would silently go missing.
+    ``vision`` used to be the unconditional seed-less scaffold this test
+    pinned; its lane is retired (vision is a model property served by any
+    llm slot) and the one other seed-less capability, ``stt``, is hardware-
+    gated. So the pin inverts: the scaffold pass must complete WITHOUT
+    creating the retired lane, while the curated seeds all still land.
     """
     _copy_curated_seeds(hal0_home)
     _run_scaffold_pass(hal0_home)
-    assert not (_SEEDS_DIR / "vision.toml").exists(), (
-        "vision now has a static seed — pick a different scaffold-only slot here"
+    # The retired vision lane must NOT come back through setup.
+    assert not (hal0_home / "etc" / "hal0" / "slots" / "vision.toml").exists(), (
+        "setup recreated the retired vision scaffold slot"
     )
-    assert (hal0_home / "etc" / "hal0" / "slots" / "vision.toml").exists(), (
-        "the scaffold pass no longer creates seed-less capability slots"
-    )
+    # And the pass as a whole still ran — every curated seed is present.
+    for name in _CURATED_EXPECTATIONS:
+        assert (hal0_home / "etc" / "hal0" / "slots" / f"{name}.toml").exists()

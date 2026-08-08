@@ -8,12 +8,17 @@ drove behaviour into their typed homes and strips all six:
 
 * ``mtp`` → ``defaults.mtp = True`` (absent-only — an explicit operator
   False stays False; ``model_is_mtp_eligible`` prefers the typed field).
-* ``vision`` → ensure ``"vision"`` is in the ``capabilities`` list (the
-  fact-derived surface model pickers and ``LoadedSlot.modalities`` read).
-* ``moe``/``tool-calling``/``reasoning``/``coder`` → dropped; their typed
-  owners (``Model.architecture``, ``capability_flags.tool_calling``,
-  ``defaults.enable_thinking``, the capabilities list) are populated by
-  detection/curation, not by tags.
+* ``vision`` → folded into the ``capabilities`` list ONLY when the row
+  carries an mmproj sidecar — a vision capability with no projector is a
+  lie the modality derivation would immediately contradict; a projector-
+  less ``vision`` tag is dropped (the tag never made the model multimodal).
+* ``moe`` → stripped only when ``Model.architecture`` is set (the typed
+  MoE signal); with no architecture the tag is the row's only MoE marker,
+  so it stays until a scan/detect fills the typed field.
+* ``coder`` → KEPT — the bench roster selector matches it as a descriptive
+  label (tags are inert for routing either way).
+* ``tool-calling``/``reasoning`` → dropped; ``capability_flags.
+  tool_calling`` and ``defaults.enable_thinking`` own those behaviours.
 
 Curated CATALOGUE entries (registry/curated.py) keep their descriptive tags —
 this sweep touches only registry rows. Idempotent and best-effort: a store
@@ -28,10 +33,13 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-#: The retired behaviour tags, lowercase.
-RETIRED_TYPE_TAGS: frozenset[str] = frozenset(
-    {"mtp", "moe", "tool-calling", "reasoning", "coder", "vision"}
-)
+#: Tags stripped unconditionally once folded, lowercase. ``moe`` and
+#: ``vision`` strip conditionally (see module docstring); ``coder`` is kept
+#: as a descriptive label the bench roster selector matches.
+RETIRED_TYPE_TAGS: frozenset[str] = frozenset({"mtp", "tool-calling", "reasoning"})
+
+#: Conditionally-stripped tags — see the per-tag rules in the sweep body.
+CONDITIONAL_TYPE_TAGS: frozenset[str] = frozenset({"moe", "vision"})
 
 
 def retire_model_type_tags(registry: Any) -> list[str]:
@@ -48,12 +56,22 @@ def retire_model_type_tags(registry: Any) -> list[str]:
         try:
             tags = list(getattr(row, "tags", None) or [])
             lowered = {str(t).lower() for t in tags}
-            hit = lowered & RETIRED_TYPE_TAGS
+            hit = lowered & (RETIRED_TYPE_TAGS | CONDITIONAL_TYPE_TAGS)
             if not hit:
                 continue
-            updates: dict[str, Any] = {
-                "tags": [t for t in tags if str(t).lower() not in RETIRED_TYPE_TAGS]
-            }
+            strip = set(RETIRED_TYPE_TAGS)
+            # ``moe`` strips only when the typed MoE signal exists.
+            if "moe" in hit and str(getattr(row, "architecture", "") or "").strip():
+                strip.add("moe")
+            # ``vision`` folds into capabilities only alongside an mmproj
+            # sidecar; either way the tag itself strips (it drove nothing).
+            has_mmproj = bool(str(getattr(row, "mmproj", "") or "").strip())
+            if "vision" in hit:
+                strip.add("vision")
+            new_tags = [t for t in tags if str(t).lower() not in strip]
+            if new_tags == tags and not (hit & strip):
+                continue  # nothing strippable this pass (e.g. lone un-typed moe)
+            updates: dict[str, Any] = {"tags": new_tags}
             defaults = getattr(row, "defaults", None)
             if "mtp" in hit and (defaults is None or defaults.mtp is None):
                 updates["defaults"] = (
@@ -61,13 +79,13 @@ def retire_model_type_tags(registry: Any) -> list[str]:
                     if defaults is not None
                     else ModelDefaults(mtp=True)
                 )
-            if "vision" in hit:
+            if "vision" in hit and has_mmproj:
                 caps = list(getattr(row, "capabilities", None) or [])
                 if "vision" not in {str(c).lower() for c in caps}:
                     updates["capabilities"] = [*caps, "vision"]
             registry.update(row.id, updates)
             changed.append(row.id)
-            log.info("registry.type_tags_retired", model=row.id, folded=sorted(hit))
+            log.info("registry.type_tags_retired", model=row.id, folded=sorted(hit & strip))
         except Exception as exc:  # pragma: no cover — best-effort per row
             log.warning(
                 "registry.tag_retirement_row_failed",
@@ -77,4 +95,4 @@ def retire_model_type_tags(registry: Any) -> list[str]:
     return changed
 
 
-__all__ = ["RETIRED_TYPE_TAGS", "retire_model_type_tags"]
+__all__ = ["CONDITIONAL_TYPE_TAGS", "RETIRED_TYPE_TAGS", "retire_model_type_tags"]

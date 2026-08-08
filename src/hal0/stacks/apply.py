@@ -100,6 +100,10 @@ _CHILD_TO_GROUP: dict[str, str] = {
     "tts": "voice",
     "img": "img",
 }
+#: Capability children retired from the slot-lane surface entirely — rows in
+#: saved stacks that predate the retirement are skipped, not errored.
+_RETIRED_CHILDREN: frozenset[str] = frozenset({"vision"})
+
 _CHILD_TO_SLOT_NAME: dict[str, str] = {
     "embed": "embed",
     "rerank": "embed-rerank",
@@ -477,6 +481,12 @@ class StackApplyEngine:
                 group = _CHILD_TO_GROUP.get(row.child)
                 slot_name = _CHILD_TO_SLOT_NAME.get(row.child)
                 if group is None or slot_name is None:
+                    if row.child in _RETIRED_CHILDREN:
+                        # A stack saved before the lane was retired — skip
+                        # quietly rather than failing the whole convergence
+                        # (vision is a model property now, not a slot lane).
+                        log.info("stack.retired_capability_child_skipped child=%s", row.child)
+                        continue
                     report.errors.append((f"capability:{row.child}", "unknown capability child"))
                     continue
                 touched.add(slot_name)

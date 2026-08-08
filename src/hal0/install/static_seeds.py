@@ -133,33 +133,44 @@ def read_seed_tombstones(*, slots_dir: Path | None = None) -> frozenset[str]:
 
 
 def add_seed_tombstone(name: str, *, slots_dir: Path | None = None) -> None:
-    """Record that seed ``name`` was deliberately deleted (idempotent)."""
-    current = set(read_seed_tombstones(slots_dir=slots_dir))
-    if name in current:
-        return
-    current.add(name)
-    path = _tombstone_path(slots_dir)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("".join(f"{n}\n" for n in sorted(current)))
-    except OSError as exc:  # read-only config dir — deletion still proceeds
-        log.warning("install.seed_tombstone_write_failed", slot=name, error=str(exc))
+    """Record that seed ``name`` was deliberately deleted (idempotent).
+
+    Read-modify-write under the cross-process slot-TOML lock: two concurrent
+    deletes (CLI + API) each rewriting the whole file would otherwise lose one
+    entry and the lost deletion resurrects on the next seeding pass.
+    """
+    from hal0.slot_config import slot_write_lock
+
+    with slot_write_lock():
+        current = set(read_seed_tombstones(slots_dir=slots_dir))
+        if name in current:
+            return
+        current.add(name)
+        path = _tombstone_path(slots_dir)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("".join(f"{n}\n" for n in sorted(current)))
+        except OSError as exc:  # read-only config dir — deletion still proceeds
+            log.warning("install.seed_tombstone_write_failed", slot=name, error=str(exc))
 
 
 def clear_seed_tombstone(name: str, *, slots_dir: Path | None = None) -> None:
     """Forget a deletion — the slot exists again under this name (idempotent)."""
-    current = set(read_seed_tombstones(slots_dir=slots_dir))
-    if name not in current:
-        return
-    current.discard(name)
-    path = _tombstone_path(slots_dir)
-    try:
-        if current:
-            path.write_text("".join(f"{n}\n" for n in sorted(current)))
-        else:
-            path.unlink(missing_ok=True)
-    except OSError as exc:  # pragma: no cover — defensive
-        log.warning("install.seed_tombstone_clear_failed", slot=name, error=str(exc))
+    from hal0.slot_config import slot_write_lock
+
+    with slot_write_lock():
+        current = set(read_seed_tombstones(slots_dir=slots_dir))
+        if name not in current:
+            return
+        current.discard(name)
+        path = _tombstone_path(slots_dir)
+        try:
+            if current:
+                path.write_text("".join(f"{n}\n" for n in sorted(current)))
+            else:
+                path.unlink(missing_ok=True)
+        except OSError as exc:  # pragma: no cover — defensive
+            log.warning("install.seed_tombstone_clear_failed", slot=name, error=str(exc))
 
 
 __all__ = [

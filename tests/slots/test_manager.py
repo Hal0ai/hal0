@@ -269,6 +269,54 @@ async def test_seeded_slot_deletable_without_force(
     assert not (slots_dir / "tts.toml").exists()
 
 
+async def test_npu_trio_delete_writes_no_tombstone(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The trio shadow slots are reconciled from the FLM anchor every boot and
+    # reconcile_trio_slots does not consult tombstones — writing one would be
+    # a dead promise. Deleting a trio slot is ephemeral by contract.
+    monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: "/usr/bin/flm")
+    sm = SlotManager()
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "flm-stt.toml").write_text(
+        'name = "flm-stt"\nport = 8088\nprovider = "llama-server"\n[model]\ndefault = "x"\n'
+    )
+    await sm.delete("flm-stt")
+
+    from hal0.install.static_seeds import read_seed_tombstones
+
+    assert "flm-stt" not in read_seed_tombstones()
+
+
+async def test_deleting_a_capability_slot_disables_its_selection(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # capabilities.toml must not keep claiming an enabled capability whose
+    # slot is gone — the converged-file fast path would never recreate it.
+    monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: None)
+    sm = SlotManager()
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "img.toml").write_text(
+        'name = "img"\nport = 8188\nprovider = "llama-server"\n[model]\ndefault = "sdxl"\n'
+    )
+    from hal0.capabilities.config import capabilities_toml_path
+
+    capabilities_toml_path().parent.mkdir(parents=True, exist_ok=True)
+    capabilities_toml_path().write_text(
+        "schema_version = 2\n"
+        "[selections.img.img]\n"
+        'model = "sdxl"\ndevice = "gpu-rocm"\nenabled = true\n'
+    )
+    await sm.delete("img")
+
+    from hal0.capabilities.config import load_capabilities_config
+
+    cfg = load_capabilities_config()
+    assert cfg.selections["img"]["img"].enabled is False
+
+
 async def test_default_pinned_anchor_still_refuses_without_force(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

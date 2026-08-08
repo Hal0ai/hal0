@@ -106,6 +106,41 @@ def legal_children(slot: str) -> list[str]:
     return [child for (s, child) in _CHILD_TO_SLOT if s == slot]
 
 
+def disable_selections_for_slot(slot_name: str) -> list[tuple[str, str]]:
+    """Mark every capabilities.toml selection served by ``slot_name`` disabled.
+
+    Called from ``SlotManager.delete`` (lazily, to keep the import edge thin):
+    deleting a capability slot without releasing its selection leaves the file
+    claiming an enabled capability with nothing behind it, and the converged-
+    file fast path never recreates the slot. Returns the (group, child) pairs
+    it disabled; empty when the slot serves no capability child or the file
+    doesn't exist.
+    """
+    from hal0.capabilities.config import (
+        capabilities_toml_path,
+        load_capabilities_config,
+        save_capabilities_config,
+    )
+
+    key = _SLOT_TO_CHILD.get(slot_name)
+    if key is None or not capabilities_toml_path().exists():
+        return []
+    group, child = key
+    cfg = load_capabilities_config()
+    selection = (cfg.selections.get(group) or {}).get(child)
+    if selection is None or not selection.enabled:
+        return []
+    selection.enabled = False
+    save_capabilities_config(cfg)
+    log.info(
+        "capability.selection_disabled_on_slot_delete slot=%s group=%s child=%s",
+        slot_name,
+        group,
+        child,
+    )
+    return [(group, child)]
+
+
 def child_to_slot(slot: str, child: str) -> str:
     """Resolve a (slot, child) tuple to its underlying slot name.
 
