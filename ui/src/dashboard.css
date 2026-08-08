@@ -2908,6 +2908,7 @@ select.npu-sel {
   right: 56px;
   display: flex;
   align-items: center;
+  gap: 18px; /* room between the Auto-Load and Pinned header toggles */
 }
 .drawer-enable { gap: 8px; }
 .drawer-enable-label {

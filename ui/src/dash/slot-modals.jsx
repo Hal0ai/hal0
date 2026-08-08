@@ -927,26 +927,50 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				title={`Edit ${slot.name}`}
 				width={SLOT_DRAWER_WIDTH}
 				headRight={
-					<label
-						className="slot-enable-toggle drawer-enable"
-						title={
-							pinned
-								? "Unpin slot — idle/pressure eviction applies again (order set by Eviction priority)"
-								: "Pin slot — once loaded it stays resident: exempt from idle/pressure eviction, and unload/delete require ?force=true. Pinning never starts a slot — boot start is the Auto-load toggle."
-						}
-					>
-						<span className="drawer-enable-label mono">
-							{pinned ? "Pinned" : "Unpinned"}
-						</span>
-						<input
-							type="checkbox"
-							checked={pinned}
-							disabled={enableBusy}
-							onChange={() => onTogglePinned(!pinned)}
-							aria-label={pinned ? "Unpin slot" : "Pin slot"}
-						/>
-						<span className="slot-enable-track" aria-hidden="true" />
-					</label>
+					<>
+						{/* Lifecycle pair (spec 2026-08-02 consolidation): Auto-Load =
+						    boot start only, Pin = residency only. Side by side so they
+						    read as one story instead of competing features. */}
+						<label
+							className="slot-enable-toggle drawer-enable"
+							data-testid="slot-autoload-toggle"
+							title="Auto-Load — start this slot automatically at boot. Only controls startup; eviction protection is the Pin toggle."
+						>
+							<span className="drawer-enable-label mono">Auto-Load</span>
+							<input
+								type="checkbox"
+								checked={autoload}
+								onChange={() => onToggleAutoload(!autoload)}
+								aria-label={
+									autoload
+										? "Disable auto-load on start"
+										: "Enable auto-load on start"
+								}
+							/>
+							<span className="slot-enable-track" aria-hidden="true" />
+						</label>
+						<label
+							className="slot-enable-toggle drawer-enable"
+							data-testid="slot-pin-toggle"
+							title={
+								pinned
+									? "Unpin slot — idle/pressure eviction applies again (order set by Eviction priority under Advanced)"
+									: "Pin slot — once loaded it stays resident: exempt from idle/pressure eviction, and unload/delete require ?force=true. Pinning never starts a slot — boot start is the Auto-Load toggle."
+							}
+						>
+							<span className="drawer-enable-label mono">
+								{pinned ? "Pinned" : "Unpinned"}
+							</span>
+							<input
+								type="checkbox"
+								checked={pinned}
+								disabled={enableBusy}
+								onChange={() => onTogglePinned(!pinned)}
+								aria-label={pinned ? "Unpin slot" : "Pin slot"}
+							/>
+							<span className="slot-enable-track" aria-hidden="true" />
+						</label>
+					</>
 				}
 				foot={
 					<>
@@ -1514,55 +1538,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 						<div className="form-row">
 							<div className="form-lbl">
-								<span>Auto-load on start</span>
-								<FieldInfoIcon description="Start this slot automatically at boot. Off: the slot
-									only loads when you load or swap it — binding a model no
-									longer implies boot start. Auto-load only controls startup;
-									it does not protect a running slot from eviction — that is
-									the Pin toggle in the drawer header." />
-							</div>
-							<div className="form-ctl">
-								<label className="slot-enable-toggle">
-									<input
-										type="checkbox"
-										data-testid="slot-autoload-toggle"
-										checked={autoload}
-										onChange={() => onToggleAutoload(!autoload)}
-										aria-label={autoload ? "Disable auto-load on start" : "Enable auto-load on start"}
-									/>
-									<span className="slot-enable-track" aria-hidden="true" />
-								</label>
-							</div>
-						</div>
-						<div className="form-row">
-							<div className="form-lbl">
-								<span>Eviction priority</span>
-								<FieldInfoIcon description="0-100 — lower unloads first when memory is needed.
-									Ties go to the least recently used. Pin the slot to exempt
-									it entirely." />
-							</div>
-							<div className="form-ctl">
-								<input
-									className="input mono"
-									data-testid="slot-priority-input"
-									type="number"
-									min={0}
-									max={100}
-									step={1}
-									value={prio}
-									onChange={(e) => setPrio(e.target.value)}
-									onBlur={commitPriority}
-									onKeyDown={(e) => {
-										if (e.key === "Enter") e.currentTarget.blur();
-									}}
-									style={{ width: 90 }}
-								/>
-								<div className="hint">lower unloads first</div>
-							</div>
-						</div>
-
-						<div className="form-row">
-							<div className="form-lbl">
 								<span>Context (ceiling)</span>
 								<FieldInfoIcon description="⟳ ctx_size — a hardware CEILING in tokens, not an
 									override: the bound model's own default context_size (set on the
@@ -1787,6 +1762,36 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					>
 						Advanced
 					</summary>
+
+					{/* Eviction priority (spec 2026-08-02) lives under Advanced: its
+					    lifecycle siblings (Auto-Load / Pin) are header toggles, and it
+					    only matters for unpinned slots under memory pressure. */}
+					<div className="form-row">
+						<div className="form-lbl">
+							<span>Eviction priority</span>
+							<FieldInfoIcon description="0-100 — lower unloads first when memory is needed.
+								Ties go to the least recently used. Pin the slot to exempt
+								it entirely." />
+						</div>
+						<div className="form-ctl">
+							<input
+								className="input mono"
+								data-testid="slot-priority-input"
+								type="number"
+								min={0}
+								max={100}
+								step={1}
+								value={prio}
+								onChange={(e) => setPrio(e.target.value)}
+								onBlur={commitPriority}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") e.currentTarget.blur();
+								}}
+								style={{ width: 90 }}
+							/>
+							<div className="hint">lower unloads first</div>
+						</div>
+					</div>
 
 					{/* Flags preview — backend-provided resolved_command (real podman argv),
           computed SERVER-SIDE (profile + MTP + image resolution). #1379 removed
