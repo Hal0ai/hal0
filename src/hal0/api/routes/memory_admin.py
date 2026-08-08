@@ -281,7 +281,10 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
 
 #: #1024 dry-run preview: bank-stats keys carrying stored-item counts. Best
 #: effort — Hindsight versions differ, so absent keys are simply omitted.
-_PREVIEW_COUNT_KEYS = ("memory_count", "document_count", "entity_count")
+#: These are the real hindsight-api 0.8.4 ``/v1/default/banks/{bank}/stats``
+#: keys (verified live) — NOT the ``memory_count``/``document_count``/
+#: ``entity_count`` keys that endpoint has never returned (#1653).
+_PREVIEW_COUNT_KEYS = ("total_nodes", "total_documents", "total_observations")
 
 
 async def _delete_preview(client: Any, bank_id: str) -> dict[str, Any]:
@@ -303,7 +306,7 @@ async def _delete_preview(client: Any, bank_id: str) -> dict[str, Any]:
     counts = {k: stats[k] for k in _PREVIEW_COUNT_KEYS if isinstance(stats.get(k), int)}
     preview["stats_available"] = True
     preview["counts"] = counts
-    preview["item_count"] = counts.get("memory_count")
+    preview["item_count"] = counts.get("total_nodes")
     return preview
 
 
