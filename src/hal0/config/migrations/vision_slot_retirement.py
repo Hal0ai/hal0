@@ -1,4 +1,4 @@
-"""One-shot boot sweep: retire the legacy ``vision`` scaffold slot.
+"""One-shot boot sweep: retire the pre-1.0 ``vision`` scaffold slot.
 
 The dedicated ``vision`` slot lane is gone — vision is a MODEL property
 (mmproj sidecar, the registry's ``capabilities`` list and ``defaults.vision``
