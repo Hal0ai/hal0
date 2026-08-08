@@ -58,6 +58,13 @@ dependencies = [
   "Jinja2>=3.1",
   "PyYAML>=6.0",
   "psutil>=5.9",
+  # hal0.updater._is_newer / hal0.updater._enforce_upgrade_floor need PEP 440
+  # version + specifier comparison (rc/beta ordering, upgrade_from floors).
+  # This was previously only a transitive dep of the `dev` extra (pytest), so
+  # a production install (pip install hal0ai, no extras) never got it and
+  # silently fell back to the broken naive tuple compare — a box on
+  # 1.0.0rc1 was never offered 1.0.0/1.0.1 GA. Declare it directly.
+  "packaging>=24",
 ]
 
 [project.optional-dependencies]

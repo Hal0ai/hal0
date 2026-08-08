@@ -574,6 +574,53 @@ def _version_tuple(v: str) -> tuple[int, ...]:
     return tuple(parts) or (0,)
 
 
+# Best-effort prerelease recognizer used ONLY by the packaging-less fallback
+# below. ``packaging`` is now a hard runtime dependency (pyproject.toml), so
+# this path should only ever fire on a venv that predates that fix — the old
+# updater code downloads and runs the *new* tarball's installer, but the
+# version *comparison* that decides whether to offer an update at all runs in
+# the OLD, already-installed code. A box stuck on this fallback needs one
+# manual/self-update to get off it permanently.
+_PRERELEASE_LABEL_RE = re.compile(
+    r"^(?P<release>\d+(?:\.\d+)*)[-._]?(?P<label>a|alpha|b|beta|c|rc|pre|preview)[-._]?(?P<num>\d*)$",
+    re.IGNORECASE,
+)
+_PRERELEASE_RANK = {
+    "a": 0,
+    "alpha": 0,
+    "b": 1,
+    "beta": 1,
+    "c": 2,
+    "rc": 2,
+    "pre": 2,
+    "preview": 2,
+}
+
+
+def _naive_version_key(v: str) -> tuple[Any, int, int]:
+    """packaging-less sort key: (release_tuple_or_digit_tuple, pre_rank, pre_num).
+
+    Recognises ``<release><a|alpha|b|beta|c|rc|pre|preview><N>`` (both the
+    pip-normalised form, e.g. ``1.0.0rc1``, and the tag-derived form, e.g.
+    ``1.0.0-rc.1``) so a prerelease sorts BEFORE its own final release —
+    without this, ``_version_tuple("1.0.0rc1")`` reads the ``rc1`` suffix as
+    an extra ``.1`` patch component and a box on ``1.0.0rc1`` never sees
+    ``1.0.0`` (or even ``1.0.1``) GA as "newer". Final releases get the
+    sentinel rank 99 so they sort above every prerelease of the same release
+    tuple. Anything that doesn't match (nightly timestamp tags, malformed
+    strings) keeps the original digit-tuple behavior via ``_version_tuple``,
+    tagged as a "final" so it still compares correctly against a prerelease
+    of the same release number.
+    """
+    match = _PRERELEASE_LABEL_RE.match((v or "").strip())
+    if match:
+        release = tuple(int(p) for p in match.group("release").split("."))
+        rank = _PRERELEASE_RANK[match.group("label").lower()]
+        num = int(match.group("num") or 0)
+        return (release, rank, num)
+    return (_version_tuple(v), 99, 0)
+
+
 def _is_newer(candidate: str, current: str) -> bool:
     """Return True if PEP 440 version ``candidate`` is strictly newer than ``current``.
 
@@ -582,16 +629,18 @@ def _is_newer(candidate: str, current: str) -> bool:
     ``_version_tuple`` digit-parser conflated the beta number with the patch
     component (``0.8.0b3`` → ``(0, 8, 3)``), so every box on a ``0.8.0bN`` beta saw
     ``0.8.1-beta.1`` as "not newer" and ``hal0 update`` reported nothing to apply.
-    Falls back to the tuple compare only when a string is not valid PEP 440.
+    Falls back to ``_naive_version_key`` only when a string is not valid PEP 440
+    or when ``packaging`` itself is unavailable (see its docstring for why that
+    fallback needs its own prerelease handling, not just a raw tuple compare).
     """
     try:
         from packaging.version import InvalidVersion, Version
-    except Exception:  # packaging absent — keep the best-effort tuple compare
-        return _version_tuple(candidate) > _version_tuple(current)
+    except Exception:  # packaging absent — keep the best-effort key compare
+        return _naive_version_key(candidate) > _naive_version_key(current)
     try:
         return Version(candidate) > Version(current)
     except InvalidVersion:
-        return _version_tuple(candidate) > _version_tuple(current)
+        return _naive_version_key(candidate) > _naive_version_key(current)
 
 
 def _enforce_upgrade_floor(
