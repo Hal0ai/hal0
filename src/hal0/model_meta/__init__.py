@@ -291,7 +291,7 @@ CURATED_MODEL_TAGS: tuple[str, ...] = (
     # DESCRIPTIVE ONLY — the curated "type" chips are retired from the model
     # editors and NOTHING routes on these tags. Behaviour is owned by typed
     # fields: ``defaults.mtp`` (model_is_mtp_eligible prefers it; the tag is
-    # the legacy fallback a boot migration folds forward), Model.architecture
+    # the pre-1.0 source a boot migration folds forward), Model.architecture
     # (moe — the "moe" tag was removed in §7.1d), ``capability_flags.
     # tool_calling`` (the §7.3 master gate), ``defaults.enable_thinking``
     # (reasoning), the capabilities list + mmproj sidecar (vision, surfaced
