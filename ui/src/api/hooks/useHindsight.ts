@@ -59,17 +59,23 @@ export interface BankTimeseries {
 }
 
 export interface BankOperation {
-  operation_id: string
-  operation_type: string
+  id: string
+  task_type: string
   status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | string
   created_at: string
   error_message: string | null
   retry_count: number
 }
 
+// Real hindsight-api 0.8.4 envelope — verified live against
+// GET /v1/default/banks/{bank}/operations. NOT the `{items, total}` shape
+// every other Hindsight list endpoint uses (#1645).
 export interface BankOperations {
-  items: BankOperation[]
+  bank_id?: string
   total: number
+  limit?: number
+  offset?: number
+  operations: BankOperation[]
 }
 
 // ── engine card ──────────────────────────────────────────────────────────────
@@ -176,7 +182,7 @@ export interface BankActivity {
   cancelled: number
   /** pending + processing — "work in flight" drives the spinner/pulse. */
   inFlight: number
-  /** operation_type of each failed op, for the failed-ops affordance. */
+  /** task_type of each failed op, for the failed-ops affordance. */
   failedTypes: string[]
   total: number
 }
@@ -185,10 +191,10 @@ export interface BankActivity {
 export function summarizeBankOperations(ops?: BankOperations | null): BankActivity {
   const counts = { pending: 0, processing: 0, completed: 0, failed: 0, cancelled: 0 }
   const failedTypes: string[] = []
-  const items = ops?.items ?? []
+  const items = ops?.operations ?? []
   for (const op of items) {
     if (op.status in counts) counts[op.status as keyof typeof counts] += 1
-    if (op.status === 'failed') failedTypes.push(op.operation_type)
+    if (op.status === 'failed') failedTypes.push(op.task_type)
   }
   return {
     ...counts,
@@ -214,7 +220,7 @@ export function useBankOperations(
     enabled: !!bank && opts?.enabled !== false,
     staleTime: 3_000,
     refetchInterval: (query) => {
-      const items = query.state.data?.items ?? []
+      const items = query.state.data?.operations ?? []
       const inFlight = items.some((o) => IN_FLIGHT_STATUSES.has(o.status))
       return inFlight ? 3_000 : 20_000
     },

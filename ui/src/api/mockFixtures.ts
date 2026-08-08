@@ -1084,23 +1084,26 @@ function buildDirectives() {
   return { items, total: items.length }
 }
 
+// Real hindsight-api 0.8.4 envelope: {bank_id, total, limit, offset,
+// operations: [{id, task_type, status, ...}]} — NOT {items, operation_id,
+// operation_type} (#1645).
 function buildBankOperations(_url: string, match: RegExpMatchArray) {
   const bank = bankFrom(match)
   if (bank === 'ingest') {
-    const items = [
-      { operation_id: 'op-ing-9012', operation_type: 'document_ingest', status: 'processing', created_at: '2026-06-12T22:14:00.000Z', error_message: null, retry_count: 0 },
-      { operation_id: 'op-ing-9011', operation_type: 'document_ingest', status: 'pending', created_at: '2026-06-12T22:13:30.000Z', error_message: null, retry_count: 0 },
-      { operation_id: 'op-ing-8990', operation_type: 'consolidation', status: 'failed', created_at: '2026-06-12T19:02:00.000Z', error_message: 'embedding backend timed out after 30s', retry_count: 2 },
-      { operation_id: 'op-ing-8975', operation_type: 'document_ingest', status: 'completed', created_at: '2026-06-12T18:40:00.000Z', error_message: null, retry_count: 0 },
+    const operations = [
+      { id: 'op-ing-9012', task_type: 'document_ingest', status: 'processing', created_at: '2026-06-12T22:14:00.000Z', error_message: null, retry_count: 0 },
+      { id: 'op-ing-9011', task_type: 'document_ingest', status: 'pending', created_at: '2026-06-12T22:13:30.000Z', error_message: null, retry_count: 0 },
+      { id: 'op-ing-8990', task_type: 'consolidation', status: 'failed', created_at: '2026-06-12T19:02:00.000Z', error_message: 'embedding backend timed out after 30s', retry_count: 2 },
+      { id: 'op-ing-8975', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-12T18:40:00.000Z', error_message: null, retry_count: 0 },
     ]
-    return { items, total: items.length }
+    return { bank_id: bank, total: operations.length, limit: 50, offset: 0, operations }
   }
-  const items = [
-    { operation_id: 'op-7741', operation_type: 'consolidation', status: 'completed', created_at: '2026-06-12T04:30:00.000Z', error_message: null, retry_count: 0 },
-    { operation_id: 'op-7742', operation_type: 'observation_extract', status: 'pending', created_at: '2026-06-12T22:06:00.000Z', error_message: null, retry_count: 0 },
-    { operation_id: 'op-7710', operation_type: 'document_ingest', status: 'completed', created_at: '2026-06-05T11:21:00.000Z', error_message: null, retry_count: 0 },
+  const operations = [
+    { id: 'op-7741', task_type: 'consolidation', status: 'completed', created_at: '2026-06-12T04:30:00.000Z', error_message: null, retry_count: 0 },
+    { id: 'op-7742', task_type: 'observation_extract', status: 'pending', created_at: '2026-06-12T22:06:00.000Z', error_message: null, retry_count: 0 },
+    { id: 'op-7710', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-05T11:21:00.000Z', error_message: null, retry_count: 0 },
   ]
-  return { items, total: items.length }
+  return { bank_id: bank, total: operations.length, limit: 50, offset: 0, operations }
 }
 
 // Route wrappers: the allowlist passes the query-stripped path as the first

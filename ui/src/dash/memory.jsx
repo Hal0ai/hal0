@@ -458,7 +458,7 @@ function MemOperations({ bank }) {
   const query = useBankOperations ? useBankOperations(bank) : { data: null };
   const retry = useOperationRetry ? useOperationRetry() : null;
   const cancel = useOperationCancel ? useOperationCancel() : null;
-  const items = query.data?.items || [];
+  const items = query.data?.operations || [];
 
   async function doRetry(id) {
     try {
@@ -488,21 +488,21 @@ function MemOperations({ bank }) {
   return (
     <div className="mem-ops">
       {items.map(op => (
-        <div className="mem-op-row" key={op.operation_id} data-testid={`mem-op-${op.operation_id}`}>
+        <div className="mem-op-row" key={op.id} data-testid={`mem-op-${op.id}`}>
           <span className={'chip ' + (op.status === 'failed' ? 'err' : op.status === 'completed' ? 'ok' : 'warn')}>
             {op.status}
           </span>
-          <span className="mono mem-op-type">{op.operation_type}</span>
+          <span className="mono mem-op-type">{op.task_type}</span>
           <span className="mono mem-op-when">{fmtWhen(op.created_at)}</span>
           {op.error_message && <span className="mem-op-err mono" title={op.error_message}>{op.error_message}</span>}
           <span className="mem-op-actions">
             {op.status === 'failed' && (
-              <button className="btn ghost xs" data-testid="mem-op-retry" onClick={() => doRetry(op.operation_id)}>
+              <button className="btn ghost xs" data-testid="mem-op-retry" onClick={() => doRetry(op.id)}>
                 Retry
               </button>
             )}
             {op.status === 'pending' && (
-              <button className="btn ghost xs danger" data-testid="mem-op-cancel" onClick={() => doCancel(op.operation_id)}>
+              <button className="btn ghost xs danger" data-testid="mem-op-cancel" onClick={() => doCancel(op.id)}>
                 Cancel
               </button>
             )}
