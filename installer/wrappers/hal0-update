@@ -78,6 +78,61 @@ validate_dir_name() {
   [[ "${d}" =~ ^hal0-[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] || die "bad release directory name: ${d}"
 }
 
+# ── operator releases-URL override (#1690) ──────────────────────────────────
+#
+# hal0-api (unprivileged) resolves its manifest URL via
+# hal0.updater.updater.releases_url(), which honours HAL0_RELEASES_URL from
+# its systemd EnvironmentFile= (/etc/hal0/api.env) — the documented interim
+# mechanism while releases.hal0.dev does not exist (see
+# scripts/release-prototype/RELEASE_PIPELINE_NOTES.md). `sudo` resets the
+# environment for this grant (no env_keep in packaging/sudoers/hal0-update),
+# so root never inherited that value: `stage` silently re-resolved the
+# production default instead, so a custom-URL box passed
+# /api/updates/check and then always failed stage against a host
+# (releases.hal0.dev) that does not exist yet.
+#
+# Root does NOT accept the URL via sudo argv or the caller's environment —
+# both are an injection surface into a root process. Instead it reads the
+# SAME root-owned trusted config the daemon reads, itself, as root. No
+# `source`/`eval` of the file (it also carries provider tokens and
+# HAL0_ADMIN_KEY/HAL0_CLIENT_KEY): exactly the ``HAL0_RELEASES_URL=`` line is
+# grep+cut out, and it must look like an http(s)/file URL before it is
+# exported into the Python re-entry's environment. A present-but-malformed
+# value dies loudly here rather than silently falling back to the default —
+# that silent fallback is the exact bug being fixed.
+resolve_releases_url() {
+  local etc_root="/etc/hal0"
+  # HAL0_HOME sandboxes the whole config root for dev installs + integration
+  # tests (src/hal0/config/paths.py: etc()/api_env()) — mirrored here so a
+  # sandboxed run resolves the exact api.env the Python side resolves,
+  # never a real box's /etc/hal0/api.env.
+  if [[ -n "${HAL0_HOME:-}" ]]; then
+    etc_root="${HAL0_HOME}/etc/hal0"
+  fi
+  local env_file="${etc_root}/api.env"
+  [[ -r "${env_file}" ]] || return 0
+
+  local raw
+  # `|| true`: grep exits 1 on no match (the common case — most boxes never
+  # set this override), and with `pipefail` that would otherwise trip
+  # `set -e` and kill the whole seam with an opaque rc=1 before `stage` ever
+  # runs. No match is not an error here, just "no override configured".
+  raw="$(grep -E '^HAL0_RELEASES_URL=' -- "${env_file}" 2>/dev/null | tail -n1 | cut -d'=' -f2-)" || true
+  raw="${raw%$'\r'}"
+  # api.env is a plain KEY=VALUE file; strip one layer of matching quotes if
+  # the operator added them (systemd's EnvironmentFile= parser does the same).
+  case "${raw}" in
+    \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+    \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+  esac
+
+  [[ -n "${raw}" ]] || return 0
+  case "${raw}" in
+    https://*|file://*) export HAL0_RELEASES_URL="${raw}" ;;
+    *) die "bad HAL0_RELEASES_URL in ${env_file} (must be https:// or file://): ${raw}" ;;
+  esac
+}
+
 cmd="${1:-help}"; shift || true
 
 case "${cmd}" in
@@ -88,6 +143,7 @@ case "${cmd}" in
   stage)                      # stage <channel> [version]
     channel="${1:-}"; validate_channel "${channel}"
     version="${2:-}"
+    resolve_releases_url      # #1690 — same-origin HAL0_RELEASES_URL as the daemon
     if [[ -n "${version}" ]]; then
       validate_version "${version}"
       exec "${PY}" -I -m hal0.updater.privileged stage "${channel}" "${version}"

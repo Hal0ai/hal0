@@ -23,6 +23,11 @@ WRAPPER = Path(__file__).resolve().parents[2] / "installer" / "wrappers" / "hal0
 _STUB_PY = """#!/bin/bash
 # Records argv so the test can assert exactly what the wrapper forwarded.
 printf '%s\\n' "$@" > "${HAL0_TEST_ARGV_SINK}"
+# Records the resolved HAL0_RELEASES_URL (if any) so #1690 tests can assert
+# on it without needing a real network fetch.
+if [[ -n "${HAL0_TEST_ENV_SINK:-}" ]]; then
+  printf '%s' "${HAL0_RELEASES_URL:-}" > "${HAL0_TEST_ENV_SINK}"
+fi
 """
 
 
@@ -40,17 +45,41 @@ def installed(tmp_path: Path) -> Path:
     return lib
 
 
-def _run(installed: Path, *args: str) -> tuple[int, list[str], str]:
+def _run(
+    installed: Path, *args: str, env: dict[str, str] | None = None
+) -> tuple[int, list[str], str]:
     sink = installed / "argv.txt"
+    env_sink = installed / "env.txt"
+    base_env = {
+        "PATH": "/usr/bin:/bin",
+        "HAL0_TEST_ARGV_SINK": str(sink),
+        "HAL0_TEST_ENV_SINK": str(env_sink),
+    }
+    if env:
+        base_env.update(env)
     proc = subprocess.run(
         [str(installed / "bin" / "hal0-update"), *args],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", "HAL0_TEST_ARGV_SINK": str(sink)},
+        env=base_env,
         check=False,
     )
     forwarded = sink.read_text().splitlines() if sink.exists() else []
     return proc.returncode, forwarded, proc.stderr
+
+
+def _released_url(installed: Path) -> str | None:
+    """The HAL0_RELEASES_URL the stub interpreter observed, or None if unset."""
+    env_sink = installed / "env.txt"
+    return env_sink.read_text() if env_sink.exists() and env_sink.stat().st_size else None
+
+
+def _write_api_env(hal0_home: Path, body: str) -> None:
+    """Lay out $HAL0_HOME/etc/hal0/api.env exactly where paths.py's api_env() and
+    this wrapper's resolve_releases_url() both look for it."""
+    etc = hal0_home / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "api.env").write_text(body)
 
 
 # ── accepted verbs ─────────────────────────────────────────────────────────────
@@ -103,6 +132,160 @@ def test_help_lists_exactly_the_granted_verbs(installed: Path) -> None:
     assert proc.returncode == 0
     for verb in ("check", "stage", "activate", "discard"):
         assert verb in proc.stdout
+
+
+# ── operator releases-URL override (#1690) ──────────────────────────────────
+
+
+def test_stage_reads_releases_url_from_hal0_home_api_env(
+    installed: Path, tmp_path: Path
+) -> None:
+    """The documented interim mechanism (custom HAL0_RELEASES_URL while
+    releases.hal0.dev does not exist) must reach root, or every custom-URL box
+    passes /api/updates/check and then always fails stage (#1690)."""
+    hal0_home = tmp_path / "sandbox"
+    _write_api_env(hal0_home, "HAL0_RELEASES_URL=https://mirror.example/preview.json\n")
+
+    rc, argv, _ = _run(installed, "stage", "preview", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert argv == ["-I", "-m", "hal0.updater.privileged", "stage", "preview"]
+    assert _released_url(installed) == "https://mirror.example/preview.json"
+
+
+def test_stage_accepts_a_file_url(installed: Path, tmp_path: Path) -> None:
+    hal0_home = tmp_path / "sandbox"
+    _write_api_env(hal0_home, "HAL0_RELEASES_URL=file:///srv/hal0-releases/stable.json\n")
+
+    rc, _, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert _released_url(installed) == "file:///srv/hal0-releases/stable.json"
+
+
+def test_stage_strips_matching_quotes_around_releases_url(
+    installed: Path, tmp_path: Path
+) -> None:
+    hal0_home = tmp_path / "sandbox"
+    _write_api_env(hal0_home, 'HAL0_RELEASES_URL="https://mirror.example/stable.json"\n')
+
+    rc, _, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert _released_url(installed) == "https://mirror.example/stable.json"
+
+
+def test_stage_uses_the_last_releases_url_line_when_duplicated(
+    installed: Path, tmp_path: Path
+) -> None:
+    hal0_home = tmp_path / "sandbox"
+    _write_api_env(
+        hal0_home,
+        "HAL0_RELEASES_URL=https://stale.example/stable.json\n"
+        "HAL0_RELEASES_URL=https://current.example/stable.json\n",
+    )
+
+    rc, _, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert _released_url(installed) == "https://current.example/stable.json"
+
+
+def test_stage_ignores_a_missing_api_env(installed: Path, tmp_path: Path) -> None:
+    """No override configured -> unset, falls through to the production default
+    (releases.hal0.dev) exactly like before this fix."""
+    hal0_home = tmp_path / "sandbox"  # created, but no etc/hal0/api.env inside it
+    hal0_home.mkdir()
+
+    rc, argv, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert argv == ["-I", "-m", "hal0.updater.privileged", "stage", "stable"]
+    assert _released_url(installed) is None
+
+
+def test_stage_ignores_an_api_env_with_no_releases_url_line(
+    installed: Path, tmp_path: Path
+) -> None:
+    hal0_home = tmp_path / "sandbox"
+    _write_api_env(hal0_home, "HF_TOKEN=super-secret\nHAL0_PORT=8000\n")
+
+    rc, _, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert _released_url(installed) is None
+
+
+def test_stage_never_forwards_unrelated_api_env_secrets(
+    installed: Path, tmp_path: Path
+) -> None:
+    """Only HAL0_RELEASES_URL is parsed out — never a `source`/`eval` of the
+    whole file, which also carries provider tokens and HAL0_ADMIN_KEY /
+    HAL0_CLIENT_KEY."""
+    hal0_home = tmp_path / "sandbox"
+    _write_api_env(
+        hal0_home,
+        "HF_TOKEN=super-secret\n"
+        "HAL0_ADMIN_KEY=do-not-leak\n"
+        "HAL0_RELEASES_URL=https://mirror.example/stable.json\n",
+    )
+
+    proc = subprocess.run(
+        [str(installed / "bin" / "hal0-update"), "stage", "stable"],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HAL0_TEST_ARGV_SINK": str(installed / "argv.txt"),
+            "HAL0_TEST_ENV_SINK": str(installed / "env.txt"),
+            "HAL0_HOME": str(hal0_home),
+        },
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert "super-secret" not in proc.stdout
+    assert "super-secret" not in proc.stderr
+    assert "do-not-leak" not in proc.stdout
+    assert "do-not-leak" not in proc.stderr
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "javascript:alert(1)",
+        "ftp://mirror.example/stable.json",
+        "not-a-url",
+        "http://mirror.example/stable.json",  # https:// or file:// only, per #1690
+    ],
+)
+def test_stage_refuses_a_releases_url_with_a_disallowed_scheme(
+    installed: Path, tmp_path: Path, bad_url: str
+) -> None:
+    hal0_home = tmp_path / "sandbox"
+    _write_api_env(hal0_home, f"HAL0_RELEASES_URL={bad_url}\n")
+
+    rc, argv, stderr = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 64
+    assert argv == [], "malformed operator URL must never reach the interpreter"
+    assert "hal0-update:" in stderr
+
+
+def test_check_activate_discard_do_not_resolve_releases_url(
+    installed: Path, tmp_path: Path
+) -> None:
+    """Only `stage` fetches a manifest; keep the blast radius of #1690 narrow."""
+    hal0_home = tmp_path / "sandbox"
+    _write_api_env(hal0_home, "HAL0_RELEASES_URL=https://mirror.example/stable.json\n")
+
+    rc, _, _ = _run(installed, "check", env={"HAL0_HOME": str(hal0_home)})
+    assert rc == 0
+    assert _released_url(installed) is None
+
+    rc, _, _ = _run(installed, "activate", "hal0-1.0.0", env={"HAL0_HOME": str(hal0_home)})
+    assert rc == 0
+    assert _released_url(installed) is None
 
 
 # ── rejected input (never reaches the interpreter) ─────────────────────────────
