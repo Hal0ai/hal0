@@ -47,16 +47,16 @@
 #
 # Port 8089: 8088 belongs to the flm seed.
 #
-# If you point this slot at a small (~1B) model, note the tool-calling
-# caveat: on the FPX brain runtime a 1B can't emit tool calls the native
-# parser accepts (it leaks/500s). There is no per-turn reroute for this —
-# the steward's own model handles tool calls internally on whatever
-# `[brain_chat] model` resolves to. If that matters on your box, point the
-# whole steward chat at a tool-capable model instead, e.g.
-# `[brain_chat] model = "hal0/agent"` (the always-on anchor every fallback
-# chain ends in, ADR-0023). The chadrock family are confirmed clean native
-# tool-callers on this runtime: `hal0/code` (27B coder, lighter) and
-# `hal0/agent` (35B anchor).
+# Tool calling: as of runner ade07ba (DEFAULT_ROCMFPX_IMAGE) the brain
+# models are NATIVE tool-callers — llama.cpp's MiniCPM5 specialized parser
+# preserves the vocab's tool-syntax control tokens and grammar-locks the
+# call shape, so the steward executes its own calls on this slot (verified
+# live on both the SFT quants and the MiniCPM5 base). The `[brain_chat]
+# tool_model` reroute (default `hal0/agent`, ADR-0023) remains as the
+# FALLBACK: it catches artefact rounds and covers older runner images or
+# off-dialect models, and the tool-capable model still owns a chain's
+# continuation rounds. Point `[brain_chat] model` elsewhere only if you
+# deliberately want a bigger steward voice.
 name = "brain"
 type = "llm"
 device = "gpu-vulkan"
