@@ -1707,12 +1707,31 @@ slot_name_exists() {
     return 1
 }
 
+# slot_seed_tombstoned — mirrors hal0.install.static_seeds.read_seed_tombstones:
+# `hal0 slot delete <name>` on a STATIC_SEED_SLOTS member writes its name into
+# ${ETC_DIR}/slots/.seed-tombstones (one name per line, SlotManager.delete →
+# add_seed_tombstone). #1631's contract is that this file records a
+# deliberate operator DELETION and seeding must honour it instead of
+# resurrecting the slot. Only the Python boot-time closer
+# (hal0.install.static_seeds.seed_static_slots) checked it — this bash loop
+# gated on slot_name_exists alone, so `sudo bash install.sh` (the documented
+# repair/upgrade-in-place path, updater.py / privileged.py) silently undid a
+# deliberate deletion on every re-run. #1650.
+slot_seed_tombstoned() {
+    local want="$1" f="${ETC_DIR}/slots/.seed-tombstones"
+    [[ -f "${f}" ]] || return 1
+    grep -qxF "${want}" "${f}"
+}
+
 SEEDED_NEW_SLOTS=()
 SEEDED_EXISTING_SLOTS=0
 for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
-    if slot_name_exists "${seed_slot}"; then
+    if slot_seed_tombstoned "${seed_slot}"; then
+        info "${seed_slot} slot: deliberately deleted (tombstoned) — left alone"
+        SEEDED_EXISTING_SLOTS=$((SEEDED_EXISTING_SLOTS + 1))
+    elif slot_name_exists "${seed_slot}"; then
         info "${seed_slot} slot: already present — left alone"
         SEEDED_EXISTING_SLOTS=$((SEEDED_EXISTING_SLOTS + 1))
     else
