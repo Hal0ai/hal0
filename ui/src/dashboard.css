@@ -3151,6 +3151,11 @@ select.npu-sel {
   top: -4px;
   z-index: 60;
   display: none;
+  /* Shrink-to-fit for an absolutely-positioned box resolves against the
+     containing block — the ~19px icon wrapper — which collapsed the popup
+     to one word per line. max-content sizes it to the text instead, with
+     max-width as the wrap point. */
+  width: max-content;
   max-width: 280px;
   padding: 6px 10px;
   color: var(--fg-2);

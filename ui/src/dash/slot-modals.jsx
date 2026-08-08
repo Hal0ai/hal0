@@ -931,8 +931,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						className="slot-enable-toggle drawer-enable"
 						title={
 							pinned
-								? "Unpin slot"
-								: "Pin slot — exempt from idle/pressure eviction; unload/delete require ?force=true"
+								? "Unpin slot — idle/pressure eviction applies again (order set by Eviction priority)"
+								: "Pin slot — once loaded it stays resident: exempt from idle/pressure eviction, and unload/delete require ?force=true. Pinning never starts a slot — boot start is the Auto-load toggle."
 						}
 					>
 						<span className="drawer-enable-label mono">
@@ -1517,7 +1517,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								<span>Auto-load on start</span>
 								<FieldInfoIcon description="Start this slot automatically at boot. Off: the slot
 									only loads when you load or swap it — binding a model no
-									longer implies boot start." />
+									longer implies boot start. Auto-load only controls startup;
+									it does not protect a running slot from eviction — that is
+									the Pin toggle in the drawer header." />
 							</div>
 							<div className="form-ctl">
 								<label className="slot-enable-toggle">
