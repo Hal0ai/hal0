@@ -60,9 +60,7 @@ def test_divergent_profile_produces_flags():
 
 
 def test_aligned_profile_produces_no_flags():
-    scalars = _resolve_llama_scalars(
-        _slot("chat"), _model("chat"), _profile("chat", "--temp 0.7")
-    )
+    scalars = _resolve_llama_scalars(_slot("chat"), _model("chat"), _profile("chat", "--temp 0.7"))
     assert scalars["slot_profile_flags"] == ""
 
 
