@@ -1,0 +1,35 @@
+// Pins the FLM [npu] modality defaults to the backend contract
+// (config/schema.py NpuConfig + providers/flm.py build_env): chat defaults ON
+// when the key is absent; asr/embed default OFF unless explicitly true.
+//
+// Regression: the NPU occupancy card rendered its STT/Embed pills with
+// `npu.asr !== false` (absent ⇒ On) while the edit drawer seeded its toggles
+// with `npu.asr === true` (absent ⇒ Off) — the two surfaces showed opposite
+// states for the same slot. Both now read through npuModalityOn.
+
+import { describe, expect, it } from 'vitest'
+
+import { npuModalityOn } from '../npu-modality.js'
+
+describe('npuModalityOn', () => {
+  it('defaults chat ON, asr/embed OFF when the [npu] table is absent', () => {
+    for (const npu of [undefined, null, {}]) {
+      expect(npuModalityOn(npu, 'chat')).toBe(true)
+      expect(npuModalityOn(npu, 'asr')).toBe(false)
+      expect(npuModalityOn(npu, 'embed')).toBe(false)
+    }
+  })
+
+  it('honours explicit values', () => {
+    const npu = { chat: false, asr: true, embed: true }
+    expect(npuModalityOn(npu, 'chat')).toBe(false)
+    expect(npuModalityOn(npu, 'asr')).toBe(true)
+    expect(npuModalityOn(npu, 'embed')).toBe(true)
+  })
+
+  it('treats a bare [npu] section with partial keys per-key', () => {
+    expect(npuModalityOn({ asr: true }, 'asr')).toBe(true)
+    expect(npuModalityOn({ asr: true }, 'embed')).toBe(false)
+    expect(npuModalityOn({ asr: true }, 'chat')).toBe(true)
+  })
+})
