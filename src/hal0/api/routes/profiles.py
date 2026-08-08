@@ -309,8 +309,7 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
     so the integrity stamp was decorative on the one path that writes — a
     hand-edited or transport-corrupted envelope created a profile with a 200 and
     no warning. A profile is a launch-flag template that gets stamped into a
-    slot's argv (and, via ``POST /api/models/{id}/duplicate?profile=…``, into a
-    model's ``defaults.extra_args``), so importing one unverified is the wrong
+    slot's argv, so importing one unverified is the wrong
     default. ``force: true`` is the escape hatch for a deliberately hand-edited
     envelope — it waives the checksum ONLY; the §5/§21.7 flag screen still
     applies (``ProfileCatalog.create``), so an envelope can never back-door a

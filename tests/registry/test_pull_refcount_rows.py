@@ -7,8 +7,7 @@ mmproj-pair branch — the one Add-by-HF-coords and
 ``POST /api/models/{id}/pull`` with ``hf_repo``+``hf_filename`` actually take
 — went straight to ``_register_pulled`` and wrote neither. On a box whose
 models all came through that path ``store_blob`` and ``model_file`` were
-empty, so refcounting, hardlink dedup, ``duplicate_model``'s documented
-refcount bump, and the store GC were all inert.
+empty, so refcounting, hardlink dedup, and the store GC were all inert.
 """
 
 from __future__ import annotations
@@ -165,20 +164,3 @@ async def test_repull_same_bytes_does_not_inflate_refcount(tmp_hal0_home: str) -
         assert len(repository.list_model_files(conn, "repull")) == 1
 
 
-@pytest.mark.asyncio
-async def test_duplicate_of_a_pulled_model_refcounts_its_files(tmp_hal0_home: str) -> None:
-    """End-to-end shape from the issue: pull → duplicate must actually bump
-    the shared blob's refcount instead of silently reporting zero files."""
-    from hal0.services.models_service import duplicate_model
-
-    body = _payload(4096)
-    digest = hashlib.sha256(body).hexdigest()
-    registry = _registry()
-
-    await _pull("dup-src", "dup-src.gguf", {"dup-src.gguf": body}, registry=registry)
-    out = duplicate_model(registry, source_id="dup-src", new_id="dup-copy")
-
-    assert out["files_refcounted"] == 1
-    with connect() as conn:
-        assert repository.get_blob(conn, digest)["refcount"] == 2
-        assert [f["rel"] for f in repository.list_model_files(conn, "dup-copy")] == ["dup-src.gguf"]

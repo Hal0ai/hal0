@@ -25,7 +25,6 @@ AttributeError). Both now fail fast with a clean 400 instead.
 
 from __future__ import annotations
 
-import json as _json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -443,62 +442,6 @@ def test_set_default_invalid_json_returns_400(models_client: TestClient) -> None
     )
     assert r.status_code == 400, r.text
     assert "error" in r.json()
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# models.py — POST /{model_id}/duplicate
-# ══════════════════════════════════════════════════════════════════════════
-
-
-def test_duplicate_valid_body_works(models_client: TestClient, tmp_hal0_home: str) -> None:
-    _register_model(models_client, tmp_hal0_home, "dup-src")
-    r = models_client.post("/api/models/dup-src/duplicate", json={"new_id": "dup-copy"})
-    assert r.status_code == 201, r.text
-    assert r.json()["id"] == "dup-copy"
-
-
-def test_duplicate_missing_new_id_returns_400_not_422(
-    models_client: TestClient, tmp_hal0_home: str
-) -> None:
-    _register_model(models_client, tmp_hal0_home, "dup-src2")
-    r = models_client.post("/api/models/dup-src2/duplicate", json={})
-    assert r.status_code == 400, r.text
-    body = r.json()
-    assert "error" in body, f"expected hal0 envelope not FastAPI 422 shape: {body}"
-    assert body["error"]["code"] == "validation.invalid"
-
-
-def test_duplicate_wrong_type_new_id_returns_400_not_422(
-    models_client: TestClient, tmp_hal0_home: str
-) -> None:
-    _register_model(models_client, tmp_hal0_home, "dup-src3")
-    r = models_client.post("/api/models/dup-src3/duplicate", json={"new_id": 123})
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "validation.invalid"
-
-
-def test_duplicate_wrong_type_profile_returns_400(
-    models_client: TestClient, tmp_hal0_home: str
-) -> None:
-    _register_model(models_client, tmp_hal0_home, "dup-src4")
-    r = models_client.post(
-        "/api/models/dup-src4/duplicate", json={"new_id": "dup-copy4", "profile": 123}
-    )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "validation.invalid"
-
-
-def test_duplicate_both_new_id_and_profile_wrong_reports_new_id_first(
-    models_client: TestClient, tmp_hal0_home: str
-) -> None:
-    """Pin the old sequential-if check order: new_id was validated before
-    profile, so a body with both wrong reports the new_id error."""
-    _register_model(models_client, tmp_hal0_home, "dup-src5")
-    r = models_client.post("/api/models/dup-src5/duplicate", json={"new_id": 1, "profile": 2})
-    assert r.status_code == 400, r.text
-    body = r.json()
-    assert body["error"]["code"] == "validation.invalid"
-    assert "new_id" in _json.dumps(body["error"].get("details", {}))
 
 
 # ══════════════════════════════════════════════════════════════════════════

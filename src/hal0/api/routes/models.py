@@ -149,13 +149,6 @@ class _SetModelDefaultBody(BaseModel):
     default: Any = None
 
 
-class _DuplicateModelBody(BaseModel):
-    """``POST /{model_id}/duplicate`` body."""
-
-    new_id: str
-    profile: str | None = None
-
-
 def _validation_error_details(exc: ValidationError) -> dict[str, str]:
     """Render a pydantic ValidationError into ``{field_path: message}``.
 
@@ -736,82 +729,6 @@ async def set_model_default(model_id: str, request: Request) -> dict[str, Any]:
                 f"{mid}: updated (default)",
                 data={"id": mid, "changed_fields": ["default"]},
             )
-    return result
-
-
-@router.post("/{model_id}/duplicate", status_code=201)
-async def duplicate_model(model_id: str, request: Request) -> dict[str, Any]:
-    """Duplicate a registry row so two rows reference the SAME weights.
-
-    Body::
-
-        {
-          "new_id":  "qwen3-4b-cpu",    # required — the new registry id
-          "profile": "cpu-tune"          # optional — stamp this profile's flags
-        }                                #            into the new row's defaults
-
-    The new row copies the source's metadata/defaults/capabilities/backends and
-    shares its ``path`` — NO byte copy. When the source is a pulled model with
-    ``model_file`` rows, those are replicated under the new id and each shared
-    blob's refcount is bumped, so a later delete of either row never orphans
-    bytes the other still uses (see
-    :func:`hal0.services.models_service.duplicate_model`). Optionally stamps a
-    profile's flags into the new row's ``defaults.extra_args`` (copy-not-layer;
-    the profile is never mutated — spec-flags-ownership §3).
-
-    Errors:
-      * ``404 model.not_found`` — ``model_id`` (source) not registered.
-      * ``404 profiles.not_found`` — ``profile`` given but unknown.
-      * ``409 model.already_exists`` — ``new_id`` already taken.
-      * ``400 validation.invalid`` — ``new_id`` missing / equal to the source.
-    """
-    registry = request.app.state.model_registry
-    try:
-        body = await request.json()
-    except Exception as exc:
-        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
-    if not isinstance(body, dict):
-        raise BadRequest("body must be a JSON object")
-
-    try:
-        parsed_body = _DuplicateModelBody.model_validate(body)
-    except ValidationError as exc:
-        errors = exc.errors()
-        # Preserve the exact per-field message the old isinstance checks
-        # raised, AND their check order — new_id was validated first, so a
-        # body with both fields wrong reported the new_id message before
-        # ever reaching the profile check.
-        if any(err.get("loc") == ("new_id",) for err in errors):
-            raise BadRequest(
-                "'new_id' must be a string",
-                code="validation.invalid",
-                details=_validation_error_details(exc),
-            ) from exc
-        raise BadRequest(
-            "'profile' must be a string when set",
-            code="validation.invalid",
-            details=_validation_error_details(exc),
-        ) from exc
-    new_id = parsed_body.new_id
-    profile = parsed_body.profile
-
-    result = _svc.duplicate_model(registry, source_id=model_id, new_id=new_id, profile=profile)
-
-    event_bus = getattr(request.app.state, "events", None)
-    if event_bus is not None:
-        await event_bus.emit(
-            "model.registered",
-            "info",
-            f"model:{result['id']}",
-            f"{result['id']}: registered (duplicate of {model_id})",
-            data={
-                "id": result["id"],
-                "backends": list(result.get("backends") or []),
-                "capabilities": list(result.get("capabilities") or []),
-                "source": "duplicate",
-                "duplicated_from": model_id,
-            },
-        )
     return result
 
 

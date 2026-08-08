@@ -71,7 +71,7 @@ Autonomous write::
 
     model_swap, model_assign, model_edit, model_scan,
     model_pull_cancel, model_pull_delete,
-    model_set_default, model_duplicate,
+    model_set_default,
     slot_load, slot_unload, slot_edit, slot_set_defaults,
     settings_reload,
     memory_add,
@@ -459,10 +459,8 @@ AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
         # like model_pull_cancel above, not gated like model_delete.
         "model_pull_delete",
         # Promotion is atomic + idempotent (single-holder invariant,
-        # re-promoting a no-op); duplicate shares weights via refcount, no
-        # byte copy — both reversible via model_edit/model_delete.
+        # re-promoting a no-op) — reversible via model_edit.
         "model_set_default",
-        "model_duplicate",
         # Slot lifecycle
         "slot_load",
         "slot_unload",
@@ -673,7 +671,6 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "GET:/api/settings/models/store": ("model_store",),
     "DELETE:/api/models/pulls/{model_id}": ("model_pull_delete",),
     "POST:/api/models/{model_id}/default": ("model_set_default",),
-    "POST:/api/models/{model_id}/duplicate": ("model_duplicate",),
     "GET:/api/profiles": ("profile_list",),
     "GET:/api/profiles/{name}": ("profile_status",),
     "POST:/api/profiles/{name}/export": ("profile_export",),
@@ -1290,17 +1287,6 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "description": "true=promote (demotes current holder), false=clear; default true",
             },
         },
-    },
-    "model_duplicate": {
-        "properties": {
-            "model_id": {"type": "string", "description": "SOURCE model id to duplicate"},
-            "new_id": {"type": "string", "description": "New registry id — must be unused"},
-            "profile": {
-                "type": "string",
-                "description": "Optional profile name to stamp into the new row's defaults",
-            },
-        },
-        "required": ["new_id"],
     },
     "service_action": {
         "properties": {
@@ -2115,11 +2101,6 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "model_set_default": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # Each call mints a NEW registry row (new_id) — re-duplicating the
-    # same new_id 409s rather than converging, so non-idempotent.
-    "model_duplicate": ToolAnnotations(
-        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
-    ),
     "slot_load": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -2574,10 +2555,6 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "model_set_default": (
         "Promote or clear a model's per-type default marker. "
         "Args: model_id, optional default=true|false (default true — bare call promotes)."
-    ),
-    "model_duplicate": (
-        "Duplicate a registry row to share the SAME weights under a new id (no byte copy). "
-        "Args: model_id=source, new_id=required new registry id, optional profile to stamp."
     ),
     "slot_load": (
         "Load a slot (optionally assign a model first). "

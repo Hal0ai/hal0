@@ -240,14 +240,3 @@ def test_create_slot_promote_failure_does_not_break_create(
     assert promo and promo["promoted"] is False
     # Slot really exists.
     assert client.get("/api/slots/slot3").status_code == 200
-
-
-def test_duplicate_does_not_clone_default_flag(client: TestClient, tmp_hal0_home: str) -> None:
-    _register(client, tmp_hal0_home, "dup-src", ["chat"])
-    client.post("/api/models/dup-src/default")
-    r = client.post("/api/models/dup-src/duplicate", json={"new_id": "dup-copy"})
-    assert r.status_code == 201, r.text
-    assert r.json().get("default") is False
-    assert client.get("/api/models/dup-copy").json()["default"] is False
-    # The source keeps its default — single holder still holds.
-    assert client.get("/api/models/dup-src").json()["default"] is True

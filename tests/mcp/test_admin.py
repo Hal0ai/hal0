@@ -842,7 +842,7 @@ async def test_dispatch_policy_bulk_memory_delete_stays_gated(queue: ApprovalQue
 
 
 # ── §4.3 tier-a buildout: rename/by-id/by-name/resolved/state/defaults, ─────
-# model default+duplicate, pulls delete, system-info, bench queue delete,
+# model default, pulls delete, system-info, bench queue delete,
 # memory_recall, and the memory_search/memory_list read reclassification.
 
 
@@ -1110,7 +1110,7 @@ async def test_slot_rename_is_gated(queue: ApprovalQueue, mock_transport: dict[s
 
 
 @pytest.mark.asyncio
-async def test_model_set_default_and_duplicate_are_autonomous_write(
+async def test_model_set_default_is_autonomous_write(
     queue: ApprovalQueue, mock_transport: dict[str, Any]
 ) -> None:
     result = await admin.dispatch(
@@ -1126,20 +1126,6 @@ async def test_model_set_default_and_duplicate_are_autonomous_write(
     method, url, payload, _ = mock_transport["calls"][-1]
     assert (method, url) == ("POST", "http://t/api/models/qwen3-4b/default")
     assert payload == {}
-
-    result = await admin.dispatch(
-        tool="model_duplicate",
-        args={"model_id": "qwen3-4b", "new_id": "qwen3-4b-cpu"},
-        client_id="pi",
-        bearer="t",
-        base_url="http://t",
-        approval_queue=queue,
-    )
-    assert result == {"ok": "post"}
-    assert queue.list_pending() == []
-    method, url, payload, _ = mock_transport["calls"][-1]
-    assert (method, url) == ("POST", "http://t/api/models/qwen3-4b/duplicate")
-    assert payload == {"new_id": "qwen3-4b-cpu"}
 
 
 @pytest.mark.asyncio
