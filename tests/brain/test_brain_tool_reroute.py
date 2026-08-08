@@ -356,6 +356,67 @@ def test_replayed_tool_history_does_not_pin_a_turn_to_the_tool_model() -> None:
     assert _tokens(events) == "Nothing else pending."
 
 
+# ── native `tools` never ride a brain round (the peg-format 500) ────────────
+#
+# Third measured failure shape (lxc105, image c077206, bundled
+# hal0-brain-sft.jinja via --chat-template-file): EVERY tools-attached
+# completion against the brain slot — even "just say hello" — fails with
+#
+#   HTTP 500 {"error":{"message":"The model produced output that does not
+#   match the expected peg-native format","type":"server_error"}}
+#
+# llama.cpp builds a tool-format parser from the chat template and hard-fails
+# the whole request when the model's output doesn't match it. The 1B cannot
+# match it by design (that is why the reroute exists), so attaching native
+# `tools` to a brain round buys nothing and now costs the entire turn.
+
+
+def test_brain_rounds_do_not_carry_native_tools() -> None:
+    """With the reroute armed, the brain round goes out WITHOUT `tools`.
+
+    The tool-capable rounds keep them — the 35B parses native calls fine.
+    """
+    stub = _StubLLM(
+        [
+            _leaked("", reasoning=STATED_INTENT),  # round 0, brain (tools-less)
+            _tool_call("list_slots", {}, "c1"),  # round 0 re-run, tool model
+            _final("Three slots."),  # round 1, tool model
+        ]
+    )
+    request = _fake_request(stub, model="hal0/brain", tool_model="hal0/agent")
+
+    _run(_collect(request))
+
+    assert stub.models == ["hal0/brain", "hal0/agent", "hal0/agent"]
+    assert "tools" not in stub.calls[0], "native tools rode the brain round"
+    assert stub.calls[1].get("tools"), "the tool-model re-run lost the tools"
+    assert stub.calls[2].get("tools"), "the continuation round lost the tools"
+
+
+def test_tools_are_restored_when_the_brain_round_answers_plain() -> None:
+    """Stripping is per-round, not destructive: the engine-owned body gets its
+    `tools` back after the brain answers, so a later turn or reroute path
+    always finds them in place."""
+    stub = _StubLLM([_final("Hey — what can I help with?")])
+    request = _fake_request(stub, model="hal0/brain", tool_model="hal0/agent")
+
+    _run(_collect(request, {"messages": [{"role": "user", "content": "hi"}]}))
+
+    assert "tools" not in stub.calls[0]
+
+
+def test_no_reroute_keeps_tools_on_the_chat_model() -> None:
+    """With the reroute off (tool_model == chat model) the operator has said
+    their chat model handles tools natively — the pass-through must not strip
+    them."""
+    stub = _StubLLM([_tool_call("list_slots", {}, "c1"), _final("done")])
+    request = _fake_request(stub, model="hal0/agent", tool_model="hal0/agent")
+
+    _run(_collect(request))
+
+    assert stub.calls[0].get("tools"), "pass-through path must keep native tools"
+
+
 # ── the tool_model vocabulary (Stream A's contract) ─────────────────────────
 
 
