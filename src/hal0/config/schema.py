@@ -27,7 +27,14 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_serializer,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from hal0.config import paths
 from hal0.model_meta import (
@@ -2909,6 +2916,26 @@ class BrainChatConfig(BaseModel):
         if text.lower() in BRAIN_TOOL_MODEL_DISABLED:
             return ""
         return text
+
+    @field_serializer("tool_model")
+    def _serialize_tool_model(self, value: str) -> str:
+        """Persist "disabled" as a word, not the empty string (#1644).
+
+        In-memory/runtime, "no tool routing" is represented as ``""`` — every
+        consumer (:func:`hal0.brain.chat._tool_routing_llm` et al.) treats a
+        falsy ``tool_model`` as "don't reroute". But :meth:`_normalise_tool_model`
+        treats an on-disk ``tool_model = ""`` as "nobody set this" and coerces
+        it back to :data:`BRAIN_TOOL_MODEL_DEFAULT`. Dumping ``""`` straight to
+        ``hal0.toml`` for the disabled state collided with that rule: save
+        wrote ``""``, the next load saw an "unset" empty string and silently
+        re-enabled routing.
+
+        Route around the collision by giving the disabled state a word on
+        disk. ``"off"`` round-trips cleanly back through
+        ``_normalise_tool_model`` to ``""`` on the next load, same as any
+        other spelling in :data:`BRAIN_TOOL_MODEL_DISABLED`.
+        """
+        return "off" if value == "" else value
 
 
 class SecurityConfig(BaseModel):
