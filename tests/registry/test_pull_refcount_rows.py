@@ -162,5 +162,3 @@ async def test_repull_same_bytes_does_not_inflate_refcount(tmp_hal0_home: str) -
         assert blob is not None
         assert blob["refcount"] == 1
         assert len(repository.list_model_files(conn, "repull")) == 1
-
-
