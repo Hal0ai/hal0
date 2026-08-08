@@ -586,6 +586,86 @@ async def test_list_items_last_page_has_no_cursor():
     assert page["next_cursor"] is None
 
 
+# ── #1667: list_items cursor math must not skip ACL-withheld rows ───────────
+#
+# ``consumed = bank_offset - max(0, len(items) - limit)`` corrects the raw
+# offset by the number of *visible* items that overflowed the page. That only
+# equals the number of raw rows to roll back when the ACL filter dropped
+# nothing from the tail of the fetched chunk. In unified-bank mode the shared
+# bank interleaves other agents' private docs, so a real page filters
+# unevenly and the correction under-rewinds — the next cursor starts past raw
+# rows that still held unreturned visible items, and those items become
+# permanently unreachable through pagination.
+
+
+async def _seed_acl_mixed_bank(fake: "FakeHindsightClient", total: int, client_id: str) -> int:
+    """Retain ``total`` shared-bank docs; every raw index with ``i % 5 in (0, 1)``
+    belongs to another agent under ``visibility:private`` (invisible to
+    ``client_id``); the rest are ordinary visible shared docs. Returns the
+    number of visible docs seeded."""
+    visible = 0
+    for i in range(total):
+        if i % 5 in (0, 1):
+            await fake.retain(
+                bank_id="shared",
+                content=f"f{i}",
+                document_id=f"d{i}",
+                tags=["visibility:private", "agent:someone-else"],
+            )
+        else:
+            await fake.retain(bank_id="shared", content=f"f{i}", document_id=f"d{i}", tags=[])
+            visible += 1
+    return visible
+
+
+@pytest.mark.asyncio
+async def test_list_items_cursor_survives_acl_filtering_mid_page():
+    """Every visible item must be reachable across pages — none silently
+    dropped by a mis-rewound cursor — when the ACL filter thins a page
+    unevenly (#1667)."""
+    fake = FakeHindsightClient()
+    visible_total = await _seed_acl_mixed_bank(fake, total=100, client_id="hermes")
+    assert visible_total == 60  # sanity: matches the issue's repro shape
+
+    p = HindsightProvider(client=fake, client_id="hermes", unified_bank=True)
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(20):  # generous bound; the walk must terminate well inside it
+        page = await p.list_items(dataset="shared", limit=50, cursor=cursor, client_id="hermes")
+        seen.extend(item["text"] for item in page["items"])
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+
+    assert cursor is None, "the walk must terminate"
+    assert len(seen) == len(set(seen)), "no item returned twice"
+    expected = {f"f{i}" for i in range(100) if i % 5 in (2, 3, 4)}
+    assert set(seen) == expected, "every ACL-visible item must be reachable via pagination"
+
+
+@pytest.mark.asyncio
+async def test_list_items_negative_control_still_withholds_foreign_private_docs():
+    """The ACL itself must keep failing closed while the cursor math is
+    fixed — a foreign agent's private doc must never surface, on any page,
+    to a caller who cannot see it."""
+    fake = FakeHindsightClient()
+    await _seed_acl_mixed_bank(fake, total=20, client_id="hermes")
+    p = HindsightProvider(client=fake, client_id="hermes", unified_bank=True)
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(20):
+        page = await p.list_items(dataset="shared", limit=5, cursor=cursor, client_id="hermes")
+        seen.extend(item["text"] for item in page["items"])
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+
+    withheld = {f"f{i}" for i in range(20) if i % 5 in (0, 1)}
+    assert not (withheld & set(seen)), "another agent's private docs must never be returned"
+
+
 # ── recall modernization: native scores, entities/chunks/source_facts ───────
 
 
