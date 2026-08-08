@@ -94,26 +94,32 @@ const TIMESERIES = {
   ],
 }
 
+// Real hindsight-api 0.8.4 envelope: {bank_id, total, limit, offset,
+// operations: [{id, task_type, ...}]} — NOT {items, operation_id,
+// operation_type} (#1645).
 const OPERATIONS = {
-  items: [
+  bank_id: 'shared',
+  total: 2,
+  limit: 50,
+  offset: 0,
+  operations: [
     {
-      operation_id: 'op-fail-1',
-      operation_type: 'consolidation',
+      id: 'op-fail-1',
+      task_type: 'consolidation',
       status: 'failed',
       created_at: '2026-06-07T09:00:00Z',
       error_message: 'LLM timeout',
       retry_count: 3,
     },
     {
-      operation_id: 'op-pend-1',
-      operation_type: 'retain',
+      id: 'op-pend-1',
+      task_type: 'retain',
       status: 'pending',
       created_at: '2026-06-07T09:10:00Z',
       error_message: null,
       retry_count: 0,
     },
   ],
-  total: 2,
 }
 
 async function installMemoryMocks(page: any) {
