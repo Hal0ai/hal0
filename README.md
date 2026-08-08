@@ -34,7 +34,7 @@ shared inference daemon; no extra process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **Status:** **v1.0.0 — release candidate, cutting to stable.** Container-runtime era,
+> **Status:** **release candidate — v1.0.0 stable is the target of the current cut.** Container-runtime era,
 > declarative config. Each slot (`agent`, `utility`, `embed`, `rerank`,
 > `stt`, `tts`, `img`, `vision`, NPU trio) runs as a dedicated podman
 > container (`hal0-slot@<name>.service`). Slot definitions live in
@@ -256,7 +256,7 @@ header bell + inbox modal in the dashboard, with CLI parity via
 
 The **hal0-brain steward** is a third, built-in persona wired to the
 dashboard's top-bar agent chat — no install step. It drives the platform
-through the full **160-tool `hal0-admin` catalog** (models, slots, stacks,
+through the full **181-tool `hal0-admin` catalog** (models, slots, stacks,
 profiles, settings, upstreams, benchmarks) under a **per-persona tool
 policy**: `tools_allowed` hides tools, `require_approval` tightens them,
 and a `POLICY_NO_LOOSEN` floor keeps destructive/secret-bearing tools
@@ -402,7 +402,7 @@ running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadm
 ### Shipped (v1.0)
 
 - **hal0-brain steward** — the top-bar agent chat drives the whole
-  platform through the 160-tool `hal0-admin` catalog under a per-persona
+  platform through the 181-tool `hal0-admin` catalog under a per-persona
   tool policy, pausing turns on gated tools for inline approve/deny
 - **Upstream model controls** — manage external providers (OpenRouter,
   Anthropic, OpenAI, Google AI Studio, Ollama, custom) with reactive
