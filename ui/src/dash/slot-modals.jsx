@@ -360,7 +360,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			.catch(() => {});
 	}, []);
 	React.useEffect(() => {
-		if (device !== "npu") return;
+		// Anchor only — the trio shadows render no model pickers (their [npu]
+		// section is a pointer at the anchor), so skip the catalogue fetch.
+		if (device !== "npu" || slot?.type !== "llm") return;
 		refreshFlmModels();
 	}, [slot?.name, device]);
 
@@ -1596,8 +1598,45 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						</div>
 					</FieldGroup>
 				)}
-				{/* NPU capability matrix — replaces Model+Template for NPU slots */}
+				{/* NPU trio SHADOW (flm-stt / flm-embed): its own [npu] table is
+				    inert — the anchor's FLM process owns all three modalities, so
+				    editing toggles here wrote config the launcher never reads and
+				    nothing outside the drawer reflected it. Point at the anchor
+				    instead of rendering write-only controls. */}
+				{device === "npu" && slot && slot.type !== "llm" && (
+					<div className="form-row">
+						<div className="form-lbl">
+							<span>NPU modalities</span>
+						</div>
+						<div className="form-ctl">
+							<div className="hint">
+								{(() => {
+									const anchor = slot.name.replace(/-(stt|embed)$/, "") || "flm";
+									return (
+										<>
+											This capability is served by the anchor FLM slot — STT and
+											Embed are toggled there.{" "}
+											<a
+												href={"#slots/" + anchor}
+												onClick={(e) => {
+													e.preventDefault();
+													window.location.hash = "#slots/" + anchor;
+												}}
+											>
+												Open {anchor}
+											</a>
+										</>
+									);
+								})()}
+							</div>
+						</div>
+					</div>
+				)}
+				{/* NPU capability matrix — replaces Model+Template for NPU slots.
+				    Anchor only (type=llm): the trio shadows have no config of
+				    their own (see the block above). */}
 				{device === "npu" &&
+					slot?.type === "llm" &&
 					(() => {
 						// Full catalogue per lane (installed + downloadable) — NOT filtered by
 						// `installed`, so any tag can be picked and pulled on demand. Lane

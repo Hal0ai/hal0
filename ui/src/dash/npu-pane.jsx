@@ -328,6 +328,9 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
       </div>
       <div className="cslot-foot">
         <span className="grow" />
+        {/* The pills APPLY the modality directly (PUT [npu] on the anchor +
+            cold restart, same contract as the drawer's applyNpu) — they used
+            to merely open the edit drawer, which read as a broken toggle. */}
         {(slot.name === 'flm-stt' || slot.name === 'flm-embed') ? (
           <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
             <span style={{color: 'var(--fg-2)'}}>
@@ -336,8 +339,8 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
             <PillToggle
               on={npuModalityOn(mainFlmNpu, slot.name === 'flm-stt' ? 'asr' : 'embed')}
               label={slot.name === 'flm-stt' ? 'STT' : 'Embed'}
-              className="npu-card-toggle"
-              onToggle={() => handlers.onEdit(slot)}
+              disabled={handlers.modalityBusy}
+              onToggle={(next) => handlers.onModality(slot.name === 'flm-stt' ? 'asr' : 'embed', next)}
             />
           </span>
         ) : (
@@ -346,8 +349,8 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
             <PillToggle
               on={npuModalityOn(mainFlmNpu, 'chat')}
               label="Chat"
-              className="npu-card-toggle"
-              onToggle={() => handlers.onEdit(slot)}
+              disabled={handlers.modalityBusy}
+              onToggle={(next) => handlers.onModality('chat', next)}
             />
           </span>
         )}
@@ -448,6 +451,32 @@ export function NpuOccupancyCard({ slots }) {
     })
     toast(okMsg, 'info')
   }
+  // Direct modality apply — writes the ANCHOR's [npu] table (the single FLM
+  // process owns all three capabilities; the shadow slots have no config of
+  // their own) and cold-restarts it, mirroring the drawer's applyNpu.
+  const applyModality = (role, next) => {
+    if (!flmSlot || editMut.isPending || restartMut.isPending) return
+    const npu = {
+      chat: npuModalityOn(mainFlmNpu, 'chat'),
+      asr: npuModalityOn(mainFlmNpu, 'asr'),
+      embed: npuModalityOn(mainFlmNpu, 'embed'),
+      [role]: next,
+    }
+    editMut.mutate(
+      { name: flmSlot.name, body: { npu } },
+      {
+        onSuccess: () => {
+          toast(`${flmSlot.name} NPU ${role} ${next ? 'on' : 'off'} — restarting`, 'info')
+          restartMut.mutate(flmSlot.name, {
+            onError: (err) =>
+              toast(`NPU restart failed — ${err?.message || 'see logs'}`, 'warn'),
+          })
+        },
+        onError: (err) => toast(err?.message || `NPU ${role} toggle failed`, 'warn'),
+      }
+    )
+  }
+
   const handlers = {
     onStart: (s) => run(s.name, loadMut, s.name, `Starting ${s.name}…`),
     onStop: (s) => run(s.name, unloadMut, s.name, `Stopping ${s.name}…`),
@@ -458,10 +487,8 @@ export function NpuOccupancyCard({ slots }) {
     onLogs: (s) => {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
     },
-    onToggleShadow: (s) => {
-      // Open the FLM edit drawer — capability toggles are configured there
-      window.location.hash = '#slots/flm'
-    },
+    onModality: applyModality,
+    modalityBusy: editMut.isPending || restartMut.isPending,
   }
 
   const dutySub = colsAvailable
