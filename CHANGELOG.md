@@ -28,24 +28,63 @@ applying. Add those subsections to a version's section to surface them; see
 
 Second — and intended final — release candidate on the road to 1.0.0. This
 tag is the preview-channel snapshot of everything documented in the
-[1.0.0](#100--2026-08-07) section below; a box on `1.0.0-rc.1` picks up all
-of it via `hal0 update`.
+[1.0.0 section of the changelog](https://github.com/Hal0ai/hal0/blob/v1.0.0-rc.2/CHANGELOG.md#100--2026-08-07);
+a box on `1.0.0-rc.1` picks up all of it via `hal0 update`.
 
 ### Highlights
 
-- **Preview snapshot of the full 1.0.0 content:** 180-tool admin MCP catalog, memory MCP parity with Hindsight 0.8.4, Moonshine CPU STT reinstated, slot `autoload` + eviction `priority`, on-demand capability slots, per-slot profiles, and the hardened OpenWebUI/secrets posture. Full detail in the [1.0.0](#100--2026-08-07) section.
+- **Preview snapshot of the full 1.0.0 content:** 180-tool admin MCP catalog, memory MCP parity with Hindsight 0.8.4, Moonshine CPU STT reinstated, slot `autoload` + eviction `priority`, on-demand capability slots, per-slot profiles, and the hardened OpenWebUI/secrets posture. Full detail in the [1.0.0 changelog section](https://github.com/Hal0ai/hal0/blob/v1.0.0-rc.2/CHANGELOG.md#100--2026-08-07).
 
 ### Breaking
 
 New since `1.0.0-rc.1` (a box upgrading from 0.9.8 also gets the R5 set —
-see the [1.0.0](#100--2026-08-07) section):
+see the [1.0.0 changelog section](https://github.com/Hal0ai/hal0/blob/v1.0.0-rc.2/CHANGELOG.md#100--2026-08-07)):
 
-- **The experimental standalone browser MCP server is removed.** (`hal0.mcp.browser_server`, port 9178, `HAL0_BROWSER_*` env; detail under [1.0.0].)
-- **The `lru = true` eviction opt-in is retired — every non-pinned resident slot is now an eviction candidate, ordered by the new `priority` field.** On a box that never set `lru = true`, pressure and pre-load eviction go from inert to active; `pinned` is the only exemption. (Detail under [1.0.0].)
+- **The experimental standalone browser MCP server is removed.** (`hal0.mcp.browser_server`, port 9178, `HAL0_BROWSER_*` env; detail in the 1.0.0 changelog section linked above.)
+- **The `lru = true` eviction opt-in is retired — every non-pinned resident slot is now an eviction candidate, ordered by the new `priority` field.** On a box that never set `lru = true`, pressure and pre-load eviction go from inert to active; `pinned` is the only exemption. (Detail in the 1.0.0 changelog section linked above.)
 
 ### Migrations
 
-- **Nothing new for a box already on `1.0.0-rc.1`** — slots with a bound model migrate to `autoload = true` automatically, so boot behaviour is unchanged until toggled. Boxes coming from 0.9.8 follow the [1.0.0](#100--2026-08-07) migration set (one-shot `enabled` sweep at first boot; operator-run slot-flag fold and id-keying migrators).
+- **Nothing new for a box already on `1.0.0-rc.1`** — slots with a bound model migrate to `autoload = true` automatically, so boot behaviour is unchanged until toggled. Boxes coming from 0.9.8 follow the [1.0.0 migration set](https://github.com/Hal0ai/hal0/blob/v1.0.0-rc.2/CHANGELOG.md#100--2026-08-07) (one-shot `enabled` sweep at first boot; operator-run slot-flag fold and id-keying migrators).
+
+### Audience
+
+Preview-channel operators validating the 1.0 line ahead of GA, and fresh
+installs that want the current build. Boxes that track the stable channel
+are not offered this tag.
+
+### Supported upgrades
+
+- `1.0.0-rc.1` → `1.0.0-rc.2` via `hal0 update` (preview channel).
+- `0.9.8` → `1.0.0-rc.2` in place — re-run the installer or `hal0 update`
+  after switching to the preview channel; the R5 migration set applies
+  (see Migrations above).
+- Older than 0.9.8: step through 0.9.8 first.
+
+### Known issues
+
+The three known issues carry forward from `1.0.0-rc.1` unchanged: the
+profile-catalog reset defers to the next v1.0-applied update when coming
+from 0.9.8 (#1585); the 0.9.8 CLI reports a spurious error at the end of
+a successful 0.9.8 → 1.0 update (verify with `hal0 --version` and
+`curl http://127.0.0.1:8080/api/health`); and first-boot installs can
+lose the dpkg lock race to `unattended-upgrades` (#1584, degrades with a
+remediation line). Detail in the 1.0.0 changelog section linked above.
+
+### Operator migrations
+
+None for a box already on `1.0.0-rc.1`. Coming from 0.9.8, the one-shot
+`enabled` sweep runs automatically at first boot; the slot-flag fold and
+slot id-keying migrators remain operator-run and unchanged from rc.1
+(dry-run by default — back up `hal0.db` and the slot dirs first).
+
+### Rollback
+
+Release tarballs are immutable and cosign-signed; roll back by
+re-installing the previous tag (`v1.0.0-rc.1`) from its GitHub release.
+Note the `enabled`-sweep caveat from the R5 set: pre-R5 code reads a
+missing `enabled` as true, so a rollback past R5 needs the config backup
+taken before upgrading.
 
 ## [1.0.0] — 2026-08-07
 
@@ -82,7 +121,8 @@ see the [1.0.0](#100--2026-08-07) section):
 
 The R5 breaking changes below shipped in `1.0.0-rc.1` and apply equally to a
 box coming straight from 0.9.8 — the expected upgrade path into 1.0. Full
-rationale and code-path detail under [1.0.0-rc.1](#100-rc1--2026-08-01-r5--the-rework-release).
+rationale and code-path detail in the
+[1.0.0-rc.1 changelog section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100-rc1--2026-08-01-r5--the-rework-release).
 
 - **Launch flags, device, and chat-template moved off slots onto models.**
   A slot is just `(id, name, model, port, state)`; `model.defaults` carries
@@ -114,7 +154,8 @@ rationale and code-path detail under [1.0.0-rc.1](#100-rc1--2026-08-01-r5--the-r
 ### Migrations
 
 These carry forward from `1.0.0-rc.1` for every box upgrading from 0.9.8;
-full detail under [1.0.0-rc.1](#100-rc1--2026-08-01-r5--the-rework-release).
+full detail in the
+[1.0.0-rc.1 changelog section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100-rc1--2026-08-01-r5--the-rework-release).
 
 - **Upgrade in place — re-run the installer (or `hal0 update`); idempotent, non-destructive, never clobbers existing config. No reinstall.**
 - **Slot-flag fold (operator-run): the fold migrator moves slot tunes into model defaults — dry-run by default; back up `hal0.db` + slot dirs before applying.**

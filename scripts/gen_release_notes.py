@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -98,7 +99,9 @@ def main() -> int:
         markdown = _git_changelog(args.tag, nightly=(args.channel == "nightly"))
         source = "git-log"
 
-    # Preview notes: add required headings when absent.
+    # Preview notes: add required headings when absent. A changelog section
+    # can only carry them as ### subsections (a ## heading would terminate
+    # extract_changelog_section), so accept either level, case-insensitively.
     if args.channel == "preview":
         required_headings = [
             "Audience",
@@ -108,7 +111,11 @@ def main() -> int:
             "Rollback",
         ]
         for heading in required_headings:
-            if f"## {heading}" not in markdown:
+            pattern = re.compile(
+                rf"^#{{2,3}} {re.escape(heading)}\s*$",
+                re.IGNORECASE | re.MULTILINE,
+            )
+            if not pattern.search(markdown):
                 markdown += f"\n## {heading}\n\nTBD\n"
 
     (out / "RELEASE_NOTES.md").write_text(markdown, encoding="utf-8")
