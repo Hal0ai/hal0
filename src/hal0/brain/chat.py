@@ -1229,12 +1229,14 @@ def _unrouteable_model_error(tried_model: str) -> str:
 # use of `run_tool_loop` is therefore untouched by construction.
 
 #: The remnant llama.cpp's jinja tool parser leaves in `content` when it eats a
-#: `<function name="X">` opener it then fails to parse: `name="X"`.
-_ARTEFACT_NAME_RE = re.compile(r"""name\s*=\s*["']?\s*([A-Za-z0-9_.\-]+)""")
+#: `<function name="X">` opener it then fails to parse: `name="X"`. `/` is in
+#: the name class because the brain reaches for slash-qualified names too —
+#: measured live: ` name="hal0/slot_list">` (virtual-model spelling).
+_ARTEFACT_NAME_RE = re.compile(r"""name\s*=\s*["']?\s*([A-Za-z0-9_./\-]+)""")
 
 #: An unterminated `<function=X` opener — the terminated form is already handled
 #: by the shared text-call fallback (`parse_text_tool_calls`).
-_ARTEFACT_FN_RE = re.compile(r"<\s*function\s*=\s*([A-Za-z0-9_.\-]+)", re.IGNORECASE)
+_ARTEFACT_FN_RE = re.compile(r"<\s*function\s*=\s*([A-Za-z0-9_./\-]+)", re.IGNORECASE)
 
 #: Call-tag syntax of any shape. Reaching this module at all means neither
 #: extractor could make a call out of it, so a surviving `<function` /

@@ -599,6 +599,11 @@ def test_tool_intent_artefact_signals() -> None:
     # catch, so it does not.
     assert art(_leaked(JINJA_LEAK), known) == "slot_list"
     assert art(_leaked('<function name="get_board">'), known) == "get_board"
+    # Slash-qualified names — measured live on lxc105 after the tools-less
+    # round landed: the brain reached for `hal0/slot_list` and the remnant
+    # ` name="hal0/slot_list">` sailed past a `/`-less name char class.
+    assert art(_leaked(' name="hal0/slot_list">'), known) == "hal0/slot_list"
+    assert art(_leaked('<function name="hal0/list_slots">'), known) == "hal0/list_slots"
     # An unterminated `<function=NAME` opener (the terminated form is already
     # handled by the shared text-call fallback).
     assert art(_leaked("<function=list_slots"), known) == "list_slots"
