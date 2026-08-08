@@ -615,6 +615,48 @@ def test_list_models_surfaces_installed_flm_models(
     assert "qwen3-0.6b-FLM" not in rows
 
 
+def test_list_models_dedups_flm_probe_against_registry_rows(
+    inspect_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installed FLM tag that already has a registry row (the FLM pull
+    flow registers the native colon tag, e.g. ``gemma4-it:e4b``) must not
+    ALSO surface as a probe-sourced ``<tag>-FLM`` row — that listed every
+    pulled FLM model twice, and the duplicate could not be deleted because
+    it exists in no registry."""
+    fpath = Path(tmp_hal0_home) / "gemma4-e4b.gguf"
+    fpath.write_bytes(b"\x00" * 8)
+    inspect_client.post(
+        "/api/models",
+        json={"id": "gemma4-it:e4b", "path": str(fpath)},
+    )
+    fake = [
+        {
+            "tag": "gemma4-it:e4b",
+            "capabilities": ["chat", "stt"],
+            "installed": True,
+            "size_bytes": 1,
+            "footprint_gb": 0.0,
+            "family": "gemma4",
+        },
+        {
+            "tag": "llama3.2:1b",  # no registry row — probe row must remain
+            "capabilities": ["chat"],
+            "installed": True,
+            "size_bytes": 1,
+            "footprint_gb": 0.0,
+            "family": "llama3.2",
+        },
+    ]
+    monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: fake)
+
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    assert "gemma4-it:e4b" in rows
+    assert "gemma4-it-e4b-FLM" not in rows
+    assert rows["llama3.2-1b-FLM"]["backend"] == "flm"
+
+
 # ── upstream provenance in /api/models ─────────────────────────────────────
 
 
