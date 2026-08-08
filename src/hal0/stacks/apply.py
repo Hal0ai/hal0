@@ -7,7 +7,7 @@ spanning every touched file, then commit it through the verified
 backs the dashboard's dry-run diff preview.
 
 Out of scope here (PR-2b): slot lifecycle convergence (load/swap/unload) and
-capability-child (embed/stt/tts/rerank/vision) routing through the
+capability-child (embed/stt/tts/rerank) routing through the
 CapabilityOrchestrator.
 """
 
@@ -99,7 +99,6 @@ _CHILD_TO_GROUP: dict[str, str] = {
     "stt": "voice",
     "tts": "voice",
     "img": "img",
-    "vision": "vision",
 }
 _CHILD_TO_SLOT_NAME: dict[str, str] = {
     "embed": "embed",
@@ -107,7 +106,6 @@ _CHILD_TO_SLOT_NAME: dict[str, str] = {
     "stt": "stt",
     "tts": "tts",
     "img": "img",
-    "vision": "vision",
 }
 
 
