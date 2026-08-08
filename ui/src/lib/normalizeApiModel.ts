@@ -106,14 +106,15 @@ export function formatSize(b: number): string {
 // installed host-side, so the `installed` check keeps them local.
 /** True when a model ships MTP speculative-decoding heads, per the SAME rule
  * the server uses (`model_meta.model_is_mtp_eligible`): an explicit
- * `defaults.mtp === true` opt-in wins, else fall back to the registry `mtp`
- * tag. The old filename/GGUF-name `MTP` marker sniff (`_MTP_NAME_RE`) was
- * REMOVED server-side — an uncurated local pull with no tag and no explicit
- * `defaults.mtp` is simply not eligible. Mirrors `isMtpModel` in
- * `dash/models.jsx`; keep the two in sync. */
+ * `defaults.mtp` — EITHER direction, true or false — wins over the registry
+ * `mtp` tag; only an unset/null `defaults.mtp` falls back to the tag. The
+ * old filename/GGUF-name `MTP` marker sniff (`_MTP_NAME_RE`) was REMOVED
+ * server-side — an uncurated local pull with no tag and no explicit
+ * `defaults.mtp` is simply not eligible. */
 export function isMtpEligibleModel(m: ApiModelRaw | null | undefined): boolean {
   if (!m) return false
-  if (m.defaults?.mtp === true) return true
+  const explicit = m.defaults?.mtp
+  if (explicit != null) return Boolean(explicit)
   return Array.isArray(m.tags) && m.tags.some(t => String(t).trim().toLowerCase() === 'mtp')
 }
 

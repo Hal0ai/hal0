@@ -16,6 +16,14 @@ describe('isMtpEligibleModel', () => {
     expect(isMtpEligibleModel({ id: 'some-model', tags: ['chat', 'mtp'] })).toBe(true)
   })
 
+  it('honors an explicit defaults.mtp=false over the legacy mtp tag (either direction wins)', () => {
+    // A row can carry BOTH an explicit opt-out and a stale/un-retired tag
+    // (older backend, or before a tag-retirement sweep ran). The backend's
+    // model_is_mtp_eligible treats explicit=false as authoritative — it
+    // does NOT fall back to the tag in that case.
+    expect(isMtpEligibleModel({ id: 'some-model', tags: ['chat', 'mtp'], defaults: { mtp: false } })).toBe(false)
+  })
+
   it('is NOT eligible for a name-only "mtp" marker with no tag and no defaults.mtp (removed sniff)', () => {
     // The old MTP_NAME_RE fallback used to false-positive on this; the
     // backend's sniff was removed, so the UI must not diverge.
