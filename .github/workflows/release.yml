@@ -1124,3 +1124,18 @@ jobs:
             echo "**No external channel pointer was mutated.** This job performed read-only authorization only."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "authorized=true" >> "$GITHUB_OUTPUT"
+
+  # ── 10. Re-arm the GA→mirror handoff ────────────────────────────────────
+  # `gh release create` in the release job above runs under the default
+  # GITHUB_TOKEN, and GitHub suppresses workflow-triggering events created by
+  # the default token (anti-recursion) — so mirror-bootstrap.yml's own
+  # `release: published` trigger never fires for a release this workflow just
+  # cut. Call it directly instead, the same way nightly.yml invokes this
+  # workflow via workflow_call. Gated on authorize-pointer (not just release)
+  # so the mirror only fires once the cut release has been independently
+  # re-verified from the remote, not merely reported as published.
+  trigger-mirror-bootstrap:
+    name: Re-arm mirror-bootstrap
+    needs: [release, authorize-pointer]
+    uses: ./.github/workflows/mirror-bootstrap.yml
+    secrets: inherit
