@@ -275,3 +275,68 @@ async def test_create_allows_first_npu_llm_in_clean_home(tmp_hal0_home: str) -> 
         },
     )
     assert snap is not None
+
+
+# ── Id-keyed boxes (#1569): stems are numeric ids, names live in the body ──
+
+
+def test_id_keyed_own_file_is_not_a_peer(tmp_hal0_home: str) -> None:
+    """A slot must not conflict with its OWN file stored under an id stem.
+
+    On an id-keyed box ``flm``'s config lives at ``8.toml`` (stem = numeric
+    id, display name in the body). The peer walk excluded only ``flm.toml``,
+    so the slot's own file counted as an offender and EVERY config write on
+    the anchor 409'd against itself ("slot 'flm' would conflict with '8'").
+    """
+    from hal0.slots.config_write import check_npu_exclusivity
+
+    cfg = {
+        "name": "flm",
+        "device": "npu",
+        "type": "llm",
+        "model": {"default": "gemma4-it:e4b"},
+    }
+    path = _write_slot_toml(
+        tmp_hal0_home,
+        "8",
+        [
+            'name = "flm"',
+            "port = 8088",
+            'device = "npu"',
+            'type = "llm"',
+            "id = 8",
+            "[model]",
+            'default = "gemma4-it:e4b"',
+        ],
+    )
+    # Must not raise: 8.toml IS slot "flm".
+    check_npu_exclusivity("flm", cfg, slots_dir=path.parent)
+
+
+def test_id_keyed_real_peer_still_conflicts_and_is_named(tmp_hal0_home: str) -> None:
+    """A genuine second anchor under an id stem still 409s, reported by name."""
+    from hal0.slots.config_write import check_npu_exclusivity
+
+    path = _write_slot_toml(
+        tmp_hal0_home,
+        "9",
+        [
+            'name = "npu-b"',
+            "port = 8089",
+            'device = "npu"',
+            'type = "llm"',
+            "id = 9",
+            "[model]",
+            'default = "qwen3-1b"',
+        ],
+    )
+    cfg = {
+        "name": "flm",
+        "device": "npu",
+        "type": "llm",
+        "model": {"default": "gemma4-it:e4b"},
+    }
+    with pytest.raises(NpuExclusivityViolation) as exc:
+        check_npu_exclusivity("flm", cfg, slots_dir=path.parent)
+    # The offender is reported by its display name, not its opaque id stem.
+    assert exc.value.details["conflicting_slots"] == ["npu-b"]

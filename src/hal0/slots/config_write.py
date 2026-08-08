@@ -182,7 +182,15 @@ def _read_slot_toml_dict(path: Path) -> dict[str, Any] | None:
 def _iter_peer_configs(
     slot_name: str, slots_dir: Path | None = None
 ) -> list[tuple[str, dict[str, Any]]]:
-    """(name, cfg) for every readable configured slot other than ``slot_name``."""
+    """(name, cfg) for every readable configured slot other than ``slot_name``.
+
+    ``slot_name`` is the DISPLAY name. On an id-keyed box (#1569) the file
+    stem is the slot's numeric id and the display name lives in the body, so
+    exclusion must also match the embedded name — keyed on stems alone, the
+    slot's own file (``flm`` stored as ``8.toml``) counted as a peer and the
+    cross-slot guards vetoed every write against the slot itself. Peers are
+    likewise reported by their embedded display name when one exists.
+    """
     base = Path(slots_dir) if slots_dir is not None else paths.slots_config_dir()
     if not base.is_dir():
         return []
@@ -191,8 +199,13 @@ def _iter_peer_configs(
         if path.stem == slot_name:
             continue
         peer = _read_slot_toml_dict(path)
-        if peer is not None:
-            peers.append((path.stem, peer))
+        if peer is None:
+            continue
+        display = peer.get("name")
+        if display == slot_name:
+            continue
+        label = display if isinstance(display, str) and display and not display.isdigit() else path.stem
+        peers.append((label, peer))
     return peers
 
 
