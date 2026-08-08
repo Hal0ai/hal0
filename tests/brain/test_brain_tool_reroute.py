@@ -48,6 +48,7 @@ from hal0.api.routes import board_chat as bc
 from hal0.config.schema import (
     BRAIN_TOOL_MODEL_DEFAULT,
     BRAIN_TOOL_MODEL_DISABLED,
+    DEFAULT_ROCMFPX_IMAGE,
     BrainChatConfig,
     Hal0Config,
 )
@@ -619,3 +620,123 @@ def test_unavailable_message_is_actionable() -> None:
     assert "dispatch.no_route" in msg
     # A non-virtual target degrades without mangling the name.
     assert "some-model" in bc._tool_reroute_unavailable_message("some-model", "x")
+
+
+# ── #1655: the chat-model round checks its resolved slot's runner first ─────
+#
+# ade07ba is the GA default, but `_chat_stream` permits overrides (a custom
+# `model`, or a rollback via `image_pin`) and `retag_stale_slot_images` only
+# fixes a stale pin on `hal0 update run` — not on every chat call. A brain
+# round whose resolved slot is STILL on an older image (e.g. c077206) 500s on
+# a `tools`-attached completion exactly like #1626 measured. These tests pin
+# that the preflight in `_resolved_slot_native_tools` catches it and
+# `_tool_routing_llm` strips `tools` off just the CHAT-model round.
+
+_STALE_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:c077206"
+
+
+class _FakeSlotManager:
+    """Mirrors the parts of ``SlotManager`` chat.py's preflight reads."""
+
+    def __init__(self, configs: list[dict[str, Any]]) -> None:
+        self._configs = configs
+
+    async def iter_configs(self) -> list[dict[str, Any]]:
+        return list(self._configs)
+
+
+def _brain_slot_cfg(*, image_pin: str, device: str = "gpu-rocm") -> dict[str, Any]:
+    return {
+        "name": "brain",
+        "type": "llm",
+        "device": device,
+        "profile": "rocmfpx-rocm",
+        "image_pin": image_pin,
+        "model": {"default": "hal0-brain-sft-fpx8"},
+    }
+
+
+def _fake_request_with_slot(stub: _StubLLM, slot_cfg: dict[str, Any], **brain_chat: Any) -> Any:
+    request = _fake_request(stub, **brain_chat)
+    request.app.state.slot_manager = _FakeSlotManager([slot_cfg])
+    return request
+
+
+def test_resolved_slot_native_tools_true_with_no_slot_manager() -> None:
+    """Best-effort default: no slot_manager on app.state -> assume supported.
+
+    Every OTHER test in this file hits exactly this path — proof the new
+    preflight is a pure addition, not a behaviour change, when the check
+    can't be reasoned about (matches _resolved_context_length's contract).
+    """
+    request = _fake_request(_StubLLM([]), model="hal0/brain", tool_model="hal0/agent")
+    assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is True
+
+
+def test_resolved_slot_native_tools_true_on_the_default_image() -> None:
+    """A slot pinned to the current DEFAULT_ROCMFPX_IMAGE (ade07ba) -> True."""
+    request = _fake_request_with_slot(
+        _StubLLM([]), _brain_slot_cfg(image_pin=DEFAULT_ROCMFPX_IMAGE), model="hal0/brain"
+    )
+    assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is True
+
+
+def test_resolved_slot_native_tools_false_on_a_stale_pin() -> None:
+    """A slot pinned to c077206 (pre-ade07ba) -> False: it 500s on `tools`."""
+    request = _fake_request_with_slot(
+        _StubLLM([]), _brain_slot_cfg(image_pin=_STALE_IMAGE), model="hal0/brain"
+    )
+    assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is False
+
+
+def test_resolved_slot_native_tools_true_for_npu_backed_slots() -> None:
+    """FLM/NPU-backed slots never route through the ROCmFPX runner this check
+    exists for — an image_pin field there (if present at all) is noise."""
+    request = _fake_request_with_slot(
+        _StubLLM([]),
+        _brain_slot_cfg(image_pin=_STALE_IMAGE, device="npu"),
+        model="hal0/brain",
+    )
+    assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is True
+
+
+def test_stale_pin_strips_tools_from_the_chat_round_only() -> None:
+    """The end-to-end contract: chat round goes out WITHOUT tools when the
+    resolved slot 500s on them; the tool-model round still carries them, and
+    the reroute still fires — detection reads the reply text, not the
+    request, so a stale pin degrades to the fallback instead of a 500."""
+    stub = _StubLLM(
+        [
+            _leaked(JINJA_LEAK),  # round 0, brain: garbage (as if tools-less)
+            _tool_call("list_slots", {}, "c1"),  # round 0 re-run, tool model
+            _final("You have three slots loaded."),  # round 1, tool model
+        ]
+    )
+    request = _fake_request_with_slot(
+        stub, _brain_slot_cfg(image_pin=_STALE_IMAGE), model="hal0/brain", tool_model="hal0/agent"
+    )
+
+    events = _run(_collect(request))
+
+    assert stub.models == ["hal0/brain", "hal0/agent", "hal0/agent"]
+    assert not stub.calls[0].get("tools"), "stale-pinned chat round must NOT carry tools"
+    assert stub.calls[1].get("tools"), "tool-model round must still carry tools"
+    assert stub.calls[2].get("tools"), "tool-model continuation must still carry tools"
+    assert _tokens(events) == "You have three slots loaded."
+
+
+def test_default_image_pin_keeps_tools_on_the_chat_round() -> None:
+    """Regression guard: a slot explicitly pinned to today's default image
+    keeps the native fast path — this preflight must not be a blanket strip."""
+    stub = _StubLLM([_tool_call("list_slots", {}, "c1"), _final("done")])
+    request = _fake_request_with_slot(
+        stub,
+        _brain_slot_cfg(image_pin=DEFAULT_ROCMFPX_IMAGE),
+        model="hal0/brain",
+        tool_model="hal0/agent",
+    )
+
+    _run(_collect(request))
+
+    assert stub.models == ["hal0/brain", "hal0/agent"]
+    assert stub.calls[0].get("tools"), "chat round on the default image lost native tools"
