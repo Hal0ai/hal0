@@ -183,20 +183,10 @@ RULES: tuple[_Rule, ...] = (
     _Rule("v1 inference/writer", _prefix("/v1"), AuthClass.CLIENT, None),
     # ── CLIENT: explicit read-only introspection GETs ──────────────────
     _Rule("models list/introspection (GET)", _prefix("/api/models"), AuthClass.CLIENT, _GET),
-    # Duplicate a registry row (UI-API-1 item 3) — a write that mints a new
-    # model. Explicitly ADMIN; the generic "models mutations" rule below would
-    # already catch it, but pinning it by name documents the intent and gives
-    # the exposure test a stable target.
-    _Rule(
-        "model duplicate (POST)",
-        _prefix("/api/models"),
-        AuthClass.ADMIN,
-        _POST,
-    ),
     # Set/clear a model's per-type default marker (POST /api/models/{id}/default)
     # — a registry mutation. Explicitly ADMIN, matching every other model
     # mutation; the generic "models mutations" rule below would already catch it,
-    # but pinning it by name documents the intent (same pattern as duplicate).
+    # but pinning it by name documents the intent.
     _Rule(
         "model set-default (POST)",
         _prefix("/api/models"),
