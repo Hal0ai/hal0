@@ -288,9 +288,15 @@ MODEL_BACKENDS: tuple[str, ...] = (
 #: tests/model_meta/test_curated_model_tags.py pins this against the curated
 #: catalogue so a new seed tag can't silently drift out of the enums payload.
 CURATED_MODEL_TAGS: tuple[str, ...] = (
-    # behaviour-driving type tags (routing / slot-feature gates)
-    # "moe" removed (§7.1d) — it was declared but never read anywhere;
-    # Model.architecture (hardware/recommend.is_moe) is the replacement.
+    # DESCRIPTIVE ONLY — the curated "type" chips are retired from the model
+    # editors and NOTHING routes on these tags. Behaviour is owned by typed
+    # fields: ``defaults.mtp`` (model_is_mtp_eligible prefers it; the tag is
+    # the legacy fallback a boot migration folds forward), Model.architecture
+    # (moe — the "moe" tag was removed in §7.1d), ``capability_flags.
+    # tool_calling`` (the §7.3 master gate), ``defaults.enable_thinking``
+    # (reasoning), the capabilities list + mmproj sidecar (vision, surfaced
+    # via LoadedSlot.modalities). They remain in this tuple only because the
+    # curated catalogue still stamps them as display tags.
     "mtp",
     "tool-calling",
     "reasoning",

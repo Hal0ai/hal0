@@ -17,7 +17,6 @@ import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { canonicalCapabilities, modelDeviceClasses, profileDeviceClass } from '@/lib/deviceMeta'
-import { MODEL_TYPE_TAGS, splitModelTags, mergeModelTags } from '@/dash/model-types.js'
 
 const { useState: useStateMM, useEffect: useEffectMM, useMemo: useMemoMM } = React;
 
@@ -339,12 +338,10 @@ function RecipeEditorModal({ open, onClose, model }) {
   const [chatTemplate, setChatTemplate] = useStateMM("auto");
   // Preferred runtime profile that loads with this model (ModelDefaults.profile).
   const [profile, setProfile] = useStateMM("");
-  // Identity + types. `name` is the editable display name; `types` is the
-  // selected subset of MODEL_TYPE_TAGS; `otherTags` snapshots the model's
-  // non-curated tags so we can re-emit them verbatim on save (never clobber).
+  // Identity. `name` is the editable display name. Tags are no longer edited
+  // here — the behaviour-driving "type" chips are retired; typed fields
+  // (defaults.mtp / enable_thinking / capability_flags) own behaviour.
   const [name, setName] = useStateMM("");
-  const [types, setTypes] = useStateMM([]);
-  const [otherTags, setOtherTags] = useStateMM([]);
   // Routing-critical top-level fields (registry/model.py): capabilities gate
   // dispatch/omni eligibility, backends gate slot-compat filtering, mmproj is
   // the vision projector sidecar path, and hf_repo/hf_filename are the re-pull
@@ -363,9 +360,6 @@ function RecipeEditorModal({ open, onClose, model }) {
       setChatTemplate(init.chat_template ?? "auto");
       setProfile(init.profile || "");
       setName(model.name || "");
-      const split = splitModelTags(model.tags);
-      setTypes(split.selected);
-      setOtherTags(split.other);
       // Normalize legacy capability spellings (embeddings/reranking/…)
       // through meta.capability_aliases so the toggles light up correctly.
       setCaps(canonicalCapabilities(model.capabilities, enums));
@@ -377,8 +371,6 @@ function RecipeEditorModal({ open, onClose, model }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, model?.id]);
 
-  const toggleType = (tag) =>
-    setTypes(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
   const toggleCap = (cap) =>
     setCaps(prev => prev.includes(cap) ? prev.filter(c => c !== cap) : [...prev, cap]);
   const toggleBackend = (b) =>
@@ -409,15 +401,6 @@ function RecipeEditorModal({ open, onClose, model }) {
     // Display name: only persist a real, changed value — never blank it out.
     const trimmedName = name.trim();
     if (trimmedName && trimmedName !== (model.name || "")) body.name = trimmedName;
-    // Tags: union of preserved (non-curated) tags + selected types. Only
-    // emit when the set actually changed (order-insensitive) so a
-    // defaults-only save doesn't spuriously report a tag edit.
-    const nextTags = mergeModelTags(otherTags, types);
-    const prevTags = Array.isArray(model.tags) ? model.tags : [];
-    const sameTags =
-      nextTags.length === prevTags.length &&
-      [...nextTags].sort().join(" ") === [...prevTags].sort().join(" ");
-    if (!sameTags) body.tags = nextTags;
     // Capabilities + backends: routing-critical top-level sets. Emit only when
     // the set actually changed (order-insensitive, compared through the
     // canonical alias map so a legacy "embeddings" row isn't spuriously dirty).
@@ -448,7 +431,7 @@ function RecipeEditorModal({ open, onClose, model }) {
     <Modal
       open={open}
       onClose={onClose}
-      eyebrow="Edit model · name, types & defaults"
+      eyebrow="Edit model · name & defaults"
       title={`Edit options · ${model.longName || model.name || model.id}`}
       width={560}
       foot={
@@ -476,30 +459,6 @@ function RecipeEditorModal({ open, onClose, model }) {
             value={name}
             onChange={e => setName(e.target.value)}
           />
-        </div>
-      </div>
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>types</span>
-          <span className="sub">capability tags · drive routing &amp; slot features (e.g. mtp shows the slot MTP toggle)</span>
-        </div>
-        <div className="form-ctl" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {MODEL_TYPE_TAGS.map(tag => {
-            const on = types.includes(tag);
-            return (
-              <button
-                key={tag}
-                type="button"
-                role="switch"
-                aria-checked={on}
-                data-testid={`type-toggle-${tag}`}
-                className={"mdl-chip" + (on ? " on" : "")}
-                onClick={() => toggleType(tag)}
-              >
-                {tag}
-              </button>
-            );
-          })}
         </div>
       </div>
       <div className="form-row">

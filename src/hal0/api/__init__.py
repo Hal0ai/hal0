@@ -1164,6 +1164,18 @@ async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("slot.enabled_removal_failed", error=str(exc))
 
+    # One-shot: fold retired behaviour tags (mtp/vision → typed fields) and
+    # strip the curated "type" chips' tags from registry rows — nothing
+    # routes on Model.tags any more (see hal0.registry.tag_retirement).
+    try:
+        from hal0.registry.tag_retirement import retire_model_type_tags
+
+        retired = retire_model_type_tags(ctx.model_registry)
+        if retired:
+            log.info("registry.type_tags_retired_sweep", models=retired)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("registry.type_tags_retirement_failed", error=str(exc))
+
     # One-shot reconciliation: clear pre-fix stuck ERROR on slots whose
     # only problem was an empty model.default. After fix(slots): empty
     # default is OFFLINE+CTA, not ERROR; this pass migrates existing

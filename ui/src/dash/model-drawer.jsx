@@ -36,11 +36,6 @@ import {
 	profileDeviceClass,
 } from "@/lib/deviceMeta";
 import {
-	MODEL_TYPE_TAGS,
-	splitModelTags,
-	mergeModelTags,
-} from "@/dash/model-types.js";
-import {
 	findManagedFlags,
 	findSlotHardwareFlags,
 	MANAGED_FLAG_SOURCE,
@@ -512,13 +507,9 @@ function DuplicateModelDialog({ open, onClose, model, profiles }) {
 function modelBaseline(model, enums) {
 	if (!model) return null;
 	const init = model.defaults || {};
-	const split = splitModelTags(model.tags);
 	return {
 		id: model.id,
 		name: model.name || "",
-		types: split.selected,
-		otherTags: split.other,
-		tags: Array.isArray(model.tags) ? model.tags : [],
 		caps: canonicalCapabilities(model.capabilities, enums),
 		backends: Array.isArray(model.backends) ? model.backends : [],
 		mmproj: model.mmproj || "",
@@ -547,15 +538,12 @@ function modelBaseline(model, enums) {
 function deriveModelChanges(baseline, form) {
 	if (!baseline) return null;
 	const trimmedName = form.name.trim();
-	const nextTags = mergeModelTags(baseline.otherTags, form.types);
 	const c = {
 		// Diff on the value alone (#1381): a truthiness guard here once collapsed
 		// "unchanged" and "deliberately emptied" into the same skip branch, so the
 		// name could never be cleared.
 		name: trimmedName !== baseline.name,
 		trimmedName,
-		nextTags,
-		tags: !sameSet(nextTags, baseline.tags),
 		caps: !sameSet(form.caps, baseline.caps),
 		backends: !sameSet(form.backends, baseline.backends),
 		mmproj: form.mmproj.trim() !== baseline.mmproj,
@@ -602,7 +590,6 @@ function ModelDrawer({ open, onClose, model }) {
 
 	// Identity + typed fields (preserve the full RecipeEditor save surface).
 	const [name, setName] = useStateMD("");
-	const [types, setTypes] = useStateMD([]);
 	// (Non-curated tags are not editable here; they live on the frozen baseline
 	// as `otherTags` and are re-merged into the write by deriveModelChanges. A
 	// second mutable copy in component state would be exactly the drift this
@@ -655,7 +642,6 @@ function ModelDrawer({ open, onClose, model }) {
 		const b = modelBaseline(model, enums);
 		setBaseline(b);
 		setName(b.name);
-		setTypes(b.types);
 		setCaps(b.caps);
 		setBackends(b.backends);
 		setMmproj(b.mmproj);
@@ -673,8 +659,6 @@ function ModelDrawer({ open, onClose, model }) {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, model?.id]);
 
-	const toggleType = (t) =>
-		setTypes((p) => (p.includes(t) ? p.filter((x) => x !== t) : [...p, t]));
 	const toggleCap = (c) =>
 		setCaps((p) => (p.includes(c) ? p.filter((x) => x !== c) : [...p, c]));
 	const toggleBackend = (b) =>
@@ -854,7 +838,6 @@ function ModelDrawer({ open, onClose, model }) {
 	// predicate and nothing touches the live `model` prop.
 	const changes = deriveModelChanges(baseline, {
 		name,
-		types,
 		caps,
 		backends,
 		mmproj,
@@ -909,7 +892,6 @@ function ModelDrawer({ open, onClose, model }) {
 		// the one derived comparison above (`changes`) — the same values the
 		// dirty aggregate and the Save gate read.
 		if (changes.name) body.name = changes.trimmedName;
-		if (changes.tags) body.tags = changes.nextTags;
 		if (changes.caps) body.capabilities = caps;
 		if (changes.backends) body.backends = backends;
 		if (changes.mmproj) body.mmproj = changes.trimmedMmproj || null;
@@ -990,34 +972,6 @@ function ModelDrawer({ open, onClose, model }) {
 						/>
 					</div>
 				</div>
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>Types</span>
-						<FieldInfoIcon description="capability tags · drive routing &amp; slot features" />
-					</div>
-					<div
-						className="form-ctl"
-						style={{ display: "flex", flexWrap: "wrap", gap: 6 }}
-					>
-						{MODEL_TYPE_TAGS.map((tag) => {
-							const on = types.includes(tag);
-							return (
-								<button
-									key={tag}
-									type="button"
-									role="switch"
-									aria-checked={on}
-									data-testid={`type-toggle-${tag}`}
-									className={"mdl-chip" + (on ? " on" : "")}
-									onClick={() => toggleType(tag)}
-								>
-									{tag}
-								</button>
-							);
-						})}
-					</div>
-				</div>
-
 				{/* ── Per-type default marker (Set / Remove) ── */}
 				<div className="form-row">
 					<div className="form-lbl">

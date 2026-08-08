@@ -21,10 +21,18 @@ const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 // ── Simplified filter chips ────────────────────────────────────────────
 // Each chip is a multi-select toggle with OR semantics (empty = show all).
 // "DENSE" means neither MTP nor MOE; checked by absence of those tags.
+// mtp/moe read typed facts first (defaults.mtp, architecture) and fall back
+// to legacy tags for rows an older release stamped — the curated type-tag
+// editor is retired and the boot migration strips behaviour tags.
+const isMtpModel = m =>
+  m?.defaults?.mtp === true || (m.tags || []).some(t => String(t).toLowerCase() === "mtp");
+const isMoeModel = m =>
+  String(m.architecture || "").toLowerCase().includes("moe") ||
+  (m.tags || []).some(t => String(t).toLowerCase() === "moe");
 const FILTER_CHIPS = [
-  { id: "mtp",    label: "MTP",   check: m => (m.tags || []).some(t => String(t).toLowerCase() === "mtp") },
-  { id: "moe",    label: "MOE",   check: m => (m.tags || []).some(t => String(t).toLowerCase() === "moe") },
-  { id: "dense",  label: "DENSE", check: m => !(m.tags || []).some(t => String(t).toLowerCase() === "mtp" || String(t).toLowerCase() === "moe") },
+  { id: "mtp",    label: "MTP",   check: isMtpModel },
+  { id: "moe",    label: "MOE",   check: isMoeModel },
+  { id: "dense",  label: "DENSE", check: m => !isMtpModel(m) && !isMoeModel(m) },
   { id: "embed",  label: "Embed",  check: m => m.type === "embedding" },
   { id: "rerank", label: "Rerank", check: m => m.type === "reranking" },
   { id: "voice",  label: "Voice",  check: m => m.type === "tts" || m.type === "transcription" },
