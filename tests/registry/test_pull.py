@@ -215,6 +215,140 @@ async def test_run_pull_uncurated_model_gets_no_template_default(
     assert registry.get("some-random-gguf").defaults is None
 
 
+# ── context-length + capability stamping at pull time ────────────────────────
+#
+# The fresh-install path registers pulled models HERE — nothing else runs
+# detection on them. Without a context_length the 1.0 launch resolver falls to
+# the 8192 safe fallback, which is fatal for the brain steward (its system
+# prompt alone is ~7.3k tokens): the measured live shape was every second turn
+# 400ing with exceed_context. Same story for capability_flags.tool_calling:
+# null derives False, so the omni-router ships a natively tool-capable brain
+# model no tools at all.
+
+
+def _gguf_payload(context_length: int = 131072) -> bytes:
+    """A minimal REAL GGUF header (llama arch + context_length), as a pull body."""
+    import struct
+
+    def enc_str(s: str) -> bytes:
+        raw = s.encode("utf-8")
+        return struct.pack("<Q", len(raw)) + raw
+
+    kvs = [
+        ("general.architecture", 8, enc_str("llama")),  # 8 = GGUF string type
+        ("llama.context_length", 4, struct.pack("<I", context_length)),  # 4 = uint32
+    ]
+    out = bytearray(b"GGUF")
+    out += struct.pack("<I", 3)  # version
+    out += struct.pack("<Q", 0)  # tensor_count
+    out += struct.pack("<Q", len(kvs))
+    for key, vtype, vbytes in kvs:
+        out += enc_str(key) + struct.pack("<I", vtype) + vbytes
+    return bytes(out)
+
+
+@pytest.mark.asyncio
+async def test_run_pull_stamps_gguf_context_length(tmp_hal0_home: str) -> None:
+    """The pulled artifact's own GGUF window lands in metadata.context_length."""
+    body = _gguf_payload(context_length=131072)
+    job = make_job("some-random-gguf")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job, hf_repo="org/random-GGUF", hf_file="random.gguf", registry=registry, client=client
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert registry.get("some-random-gguf").metadata.get("context_length") == 131072
+
+
+@pytest.mark.asyncio
+async def test_run_pull_curated_context_length_backfills_unreadable_gguf(
+    tmp_hal0_home: str,
+) -> None:
+    """When the header can't be read, the curated catalogue window is stamped.
+
+    The FPX brain artifacts carry custom tensor types; if a future layout ever
+    defeats the header parser, the curated context_length (the same value the
+    wizard card shows) must still reach the registry row — 8192-fallback on
+    the steward's slot is the failure this exists to prevent.
+    """
+    body = _payload(4096)  # not a GGUF — detection yields nothing
+    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert registry.get("hal0-brain-sft-q8-rocmfpx").metadata.get("context_length") == 131072
+
+
+@pytest.mark.asyncio
+async def test_run_pull_stamps_curated_tool_calling(tmp_hal0_home: str) -> None:
+    """A curated native tool-caller lands with capability_flags.tool_calling=True."""
+    body = _payload(4096)
+    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert registry.get("hal0-brain-sft-q8-rocmfpx").capability_flags.tool_calling is True
+
+
+@pytest.mark.asyncio
+async def test_run_pull_keeps_operator_tool_calling(tmp_hal0_home: str) -> None:
+    """An operator's explicit tool_calling=False survives a re-pull."""
+    from hal0.registry.model import Model, ModelCapabilities
+
+    registry = ModelRegistry()
+    registry.add(
+        Model(
+            id="hal0-brain-sft-q8-rocmfpx",
+            name="hal0-brain-sft-q8-rocmfpx",
+            path="/nonexistent/pre-pull.gguf",
+            capability_flags=ModelCapabilities(tool_calling=False),
+        )
+    )
+    body = _payload(4096)
+    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert registry.get("hal0-brain-sft-q8-rocmfpx").capability_flags.tool_calling is False
+
+
 # ── MR-1: run_pull persists a durable snapshot for ALL callers ────────────────
 
 

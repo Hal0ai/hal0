@@ -40,7 +40,7 @@ from hal0.db import repository
 from hal0.db.connection import connect, tx
 from hal0.errors import Hal0Error
 from hal0.registry.fileset import FileSetEntry, FileSetPlan
-from hal0.registry.model import Model, ModelDefaults
+from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
 from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
 
 log = logging.getLogger(__name__)
@@ -1208,6 +1208,25 @@ def _register_pulled(
 
     curated = get_curated(model_id)
     curated_template = curated.chat_template if curated is not None else ""
+    curated_tool_calling = curated.tool_calling if curated is not None else None
+    # Context window — the pull path is the ONLY registration these bytes get
+    # on a fresh install (nothing re-runs detection on them), and a row with
+    # no window sends the 1.0 launch resolver to the 8192 safe fallback. For
+    # the brain slot that is fatal: the steward's system prompt alone is
+    # ~7.3k tokens, so the second turn 400s with exceed_context. The
+    # artifact's own GGUF header is authoritative; the curated catalogue
+    # window backfills an unreadable header.
+    from hal0.registry.detect import detect
+
+    ctx_len: int | None = None
+    try:
+        ctx_len = detect(Path(path)).context_length
+    except Exception:  # header parse must never fail a completed pull
+        ctx_len = None
+    if not ctx_len and curated is not None and curated.context_length:
+        ctx_len = int(curated.context_length)
+    if ctx_len:
+        fresh_meta["context_length"] = int(ctx_len)
     updates: dict[str, Any] = {
         "path": path,
         "size_bytes": size_bytes,
@@ -1239,6 +1258,9 @@ def _register_pulled(
                 defaults=ModelDefaults(chat_template=curated_template)
                 if curated_template
                 else None,
+                capability_flags=ModelCapabilities(tool_calling=curated_tool_calling)
+                if curated_tool_calling is not None
+                else ModelCapabilities(),
             )
         )
         return
@@ -1247,6 +1269,11 @@ def _register_pulled(
     # before kicking off the pull).
     merged_meta = dict(existing.metadata)
     merged_meta.update(fresh_meta)
+    # An operator/scan-provided window outranks this pull's read: only fill
+    # the key when the existing row has none (same absent-only contract as
+    # chat_template below).
+    if existing.metadata.get("context_length") and "context_length" in fresh_meta:
+        merged_meta["context_length"] = existing.metadata["context_length"]
     updates["metadata"] = merged_meta
     if curated_template and not (existing.defaults is not None and existing.defaults.chat_template):
         merged_defaults = (
@@ -1255,6 +1282,10 @@ def _register_pulled(
             else ModelDefaults(chat_template=curated_template)
         )
         updates["defaults"] = merged_defaults
+    if curated_tool_calling is not None and (
+        existing.capability_flags is None or existing.capability_flags.tool_calling is None
+    ):
+        updates["capability_flags"] = ModelCapabilities(tool_calling=curated_tool_calling)
     registry.update(model_id, updates)
 
 

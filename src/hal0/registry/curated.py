@@ -132,6 +132,18 @@ class CuratedModel(BaseModel):
             "lacks). Empty = use the embedded template ('auto')."
         ),
     )
+    tool_calling: bool | None = Field(
+        default=None,
+        description=(
+            "Curated ``capability_flags.tool_calling`` stamp. True marks a "
+            "catalogue model as a NATIVE tool-caller on the shipped runner "
+            "(verified, not aspirational — the omni-router's master gate and "
+            "the dashboard's capability pill both read the derived flag). "
+            "Stamped at pull like ``chat_template``: absent-only, never over "
+            "an operator's own setting. None = no curated opinion (derives "
+            "False downstream)."
+        ),
+    )
     recommended_slot: str = Field(
         default="chat",
         description="Default slot to assign the model to. 'chat' for chat, 'img' for image-gen.",
@@ -348,9 +360,16 @@ CURATED_MODELS: list[CuratedModel] = [
     # ``hal0.install.brain_model`` picks between them from hardware.json;
     # don't hardcode a variant in a slot seed.
     #
-    # Tool calling is `hal0-function-xml`, and a 1B leaks on native tool-call
-    # parsing on this runtime — the steward routes TOOL turns to a capable
-    # model via ``[brain_chat] tool_model`` (default ``hal0/agent``). See
+    # Tool calling is the attribute-XML dialect (`<function name="..">
+    # <param name="..">..</param></function>`). As of runner ade07ba
+    # (DEFAULT_ROCMFPX_IMAGE) that dialect parses NATIVELY: llama.cpp's
+    # MiniCPM5 specialized parser preserves the vocab's tool-syntax control
+    # tokens and grammar-locks the call shape, so the ROCmFPX variants are
+    # verified native tool-callers (tool_calling=True below). The steward's
+    # ``[brain_chat] tool_model`` reroute (default ``hal0/agent``) remains as
+    # the fallback for older runners / artefact rounds. The F16 variant runs
+    # on stock llama.cpp images whose parser vintage we don't pin, so it
+    # carries no curated tool_calling opinion. See
     # installer/etc-hal0/slots/brain.toml.
     CuratedModel(
         id="hal0-brain-sft-q8-rocmfpx",
@@ -365,6 +384,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
         context_length=131072,
         chat_template="hal0-brain-sft",
+        tool_calling=True,
         recommended_slot="chat",
         tags=["chat", "brain", "steward", "tool-use", "tiny", "rocmfpx"],
         notes=(
@@ -388,6 +408,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="hal0-brain-sft-Q4_0_ROCMFP4_COHERENT.gguf",
         context_length=131072,
         chat_template="hal0-brain-sft",
+        tool_calling=True,
         recommended_slot="chat",
         tags=["chat", "brain", "steward", "tool-use", "tiny", "rocmfp4"],
         notes=(
