@@ -137,3 +137,103 @@ test.describe('NPU occupancy card', () => {
     await expect(card.locator('.gauge .sub')).toContainText('column probe unavailable')
   })
 })
+
+// ─── #1661: STT/Embed pills must reflect npu_modality_active, not the raw
+// [npu] table, on a model-less anchor ──────────────────────────────────────
+//
+// #1637 guarded the CHAT pill's write against a model-less anchor but left
+// the STT/Embed pills reading `npu.asr`/`npu.embed` off the raw config —
+// which happily renders ON right after a write lands (or on any pre-seeded
+// TOML), even though `hal0.slots.activation.npu_modality_active` — the one
+// gate the backend actually dispatches on — is False whenever the anchor
+// has no `[model].default`. The trio shadows carry the server-resolved
+// answer as `npu_modality_active`; this suite pins the card to read that,
+// not the raw table, and confirms a click on a model-less anchor never PUTs.
+async function seedTrio(page: any, slots: any[]) {
+  await page.addInitScript((slots: any[]) => {
+    let real: any
+    Object.defineProperty(window, 'HAL0_DATA', {
+      configurable: true,
+      get() {
+        return real
+      },
+      set(v) {
+        real = v
+        if (v && typeof v === 'object') v.slots = slots
+      },
+    })
+  }, slots)
+}
+
+const MODELLESS_ANCHOR = {
+  name: 'flm',
+  type: 'llm',
+  device: 'npu',
+  device_class: 'npu',
+  group: 'chat',
+  state: 'offline',
+  port: 8098,
+  // No model bound anywhere — the fresh-install, out-of-the-box state.
+  model: null,
+  model_id: null,
+  modelDefault: null,
+  // The write already landed on disk (or is still in flight) — this is
+  // exactly the stale-looking-ON config the raw-table read used to trust.
+  npu: { chat: true, asr: true, embed: false },
+  metrics: {},
+}
+
+const STT_SHADOW = {
+  name: 'flm-stt',
+  type: 'transcription',
+  device: 'npu',
+  device_class: 'npu',
+  group: 'chat',
+  state: 'offline',
+  port: 8098,
+  model: 'flm-stt-placeholder',
+  model_id: 'flm-stt-placeholder',
+  // Server-resolved: the anchor has no model, so nothing routes — even
+  // though the anchor's raw npu.asr above reads true.
+  npu_modality_active: false,
+  metrics: {},
+}
+
+const EMBED_SHADOW = {
+  ...STT_SHADOW,
+  name: 'flm-embed',
+  type: 'embedding',
+  npu_modality_active: false,
+}
+
+test.describe('NPU pills on a model-less anchor (#1661)', () => {
+  test('STT/Embed pills render OFF even though the raw [npu] table says on', async ({ page }) => {
+    await seedTrio(page, [MODELLESS_ANCHOR, STT_SHADOW, EMBED_SHADOW])
+    await page.goto('/#slots')
+
+    const card = page.locator('.npu-card')
+    await expect(card).toBeVisible()
+
+    const sttSwitch = card.locator('.cslot', { hasText: 'flm-stt' }).getByRole('switch', { name: 'STT' })
+    const embedSwitch = card.locator('.cslot', { hasText: 'flm-embed' }).getByRole('switch', { name: 'Embed' })
+    await expect(sttSwitch).toHaveAttribute('aria-checked', 'false')
+    await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
+  })
+
+  test('clicking the STT pill on a model-less anchor never PUTs — it routes to the drawer instead', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/flm/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(route.request().postDataJSON())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await seedTrio(page, [MODELLESS_ANCHOR, STT_SHADOW, EMBED_SHADOW])
+    await page.goto('/#slots')
+
+    const card = page.locator('.npu-card')
+    await card.locator('.cslot', { hasText: 'flm-stt' }).getByRole('switch', { name: 'STT' }).click()
+
+    // No write ever fires — the guard redirects to the drawer to pick a model.
+    await expect(page).toHaveURL(/#slots\/flm$/)
+    expect(puts.length).toBe(0)
+  })
+})
