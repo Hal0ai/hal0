@@ -36,7 +36,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 
 > **Status:** **release candidate — v1.0.0 stable is the target of the current cut.** Container-runtime era,
 > declarative config. Each slot (`agent`, `utility`, `embed`, `rerank`,
-> `stt`, `tts`, `img`, `vision`, NPU trio) runs as a dedicated podman
+> `stt`, `tts`, `img`, NPU trio) runs as a dedicated podman
 > container (`hal0-slot@<name>.service`). Slot definitions live in
 > `/etc/hal0/slots/<name>.toml`; backend profiles in
 > `/etc/hal0/profiles.toml`; the model catalog is `registry.toml` — the
@@ -152,7 +152,7 @@ be evicted out from under a streaming request.
   `/etc/hal0/slots/<name>.toml` during install (each gates on its own
   runtime validation at load time — the `flm` NPU slot simply stays
   grey without FastFlowLM hardware); the installer scaffolds the
-  additional capability slots (chat/`agent`, coder, embed, stt, vision)
+  additional capability slots (chat/`agent`, coder, embed, stt)
   with empty model picks for the operator to fill.
   User-added slots via `hal0 slot create NAME --type TYPE --model MODEL`.
   Slots refer to a **profile** in `/etc/hal0/profiles.toml` that pins
@@ -256,7 +256,7 @@ header bell + inbox modal in the dashboard, with CLI parity via
 
 The **hal0-brain steward** is a third, built-in persona wired to the
 dashboard's top-bar agent chat — no install step. It drives the platform
-through the full **181-tool `hal0-admin` catalog** (models, slots, stacks,
+through the full **180-tool `hal0-admin` catalog** (models, slots, stacks,
 profiles, settings, upstreams, benchmarks) under a **per-persona tool
 policy**: `tools_allowed` hides tools, `require_approval` tightens them,
 and a `POLICY_NO_LOOSEN` floor keeps destructive/secret-bearing tools
@@ -402,7 +402,7 @@ running on your box. Full version at [hal0.dev/#roadmap](https://hal0.dev/#roadm
 ### Shipped (v1.0)
 
 - **hal0-brain steward** — the top-bar agent chat drives the whole
-  platform through the 181-tool `hal0-admin` catalog under a per-persona
+  platform through the 180-tool `hal0-admin` catalog under a per-persona
   tool policy, pausing turns on gated tools for inline approve/deny
 - **Upstream model controls** — manage external providers (OpenRouter,
   Anthropic, OpenAI, Google AI Studio, Ollama, custom) with reactive

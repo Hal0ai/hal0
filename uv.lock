@@ -334,7 +334,7 @@ wheels = [
 
 [[package]]
 name = "hal0ai"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
