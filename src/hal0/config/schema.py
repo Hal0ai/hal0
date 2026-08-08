@@ -989,7 +989,7 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: (debug builds, A/B tests, etc.).  See #__hal0_image_control__ for the
 #: phasing: 0.9.5 wires slot.image + DEFAULT_ROCMFPX_IMAGE; 0.9.6 will
 #: drop ``image`` from SEED_PROFILES entirely.
-DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:c077206"
+DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
 
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
 #: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
@@ -998,13 +998,28 @@ DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:c077206"
 #: default (:func:`hal0.updater.updater.retag_stale_slot_images`). A pin to
 #: any ref NOT in this set is treated as intentional and never touched.
 #:
+#: ade07ba lineage (2026-08-08, alias ``b10297-hal0.1``): llama.cpp upstream
+#: b10297 via ciru/main's FPX-preserving sync (native MiniCPM5 tool-call
+#: parser with preserved control tokens + lazy grammar, vulkan submission
+#: batching fix, gfx1151 fixes, MTP-layer alloc fix, spec-decode /metrics)
+#: + two hal0 patches: multi-token preserved-marker control tokens
+#: (server-schema) and the restored vulkan ROCmFPX dmmv registrations the
+#: sync dropped. Source: Hal0ai/Hal0_ROCmFPX branch hal0/build-20260808.
+#: This runner is what makes the brain model's attribute-XML tool dialect
+#: parse NATIVELY — brain rounds carry OpenAI ``tools`` again from this
+#: release (see hal0.brain.chat).
+#:
 #: c077206 lineage (2026-07-10): charlie ROCmFPX main @5b39566 (FP6 CPU
 #: decode fix, MTP partial-draft-state fix, vecdotq pack window) + the
 #: minicpm5 pre-tokenizer vocab mapping (ac0137d) + TurboQuant turbo3/turbo4
 #: KV-cache types; image assembly drops the base toolbox's stale
 #: /usr/local llama.cpp (the old mixed install ABI-segfaulted llama-bench).
+#: Superseded by ade07ba — every tools-attached completion against a
+#: MiniCPM5-vocab model on c077206 500s with "peg-native format" (the
+#: control-token pieces are stripped before the parser sees them).
 STALE_ROCMFPX_IMAGE_REFS = frozenset(
     {
+        "ghcr.io/hal0ai/hal0-rocmfpx:c077206",
         "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5",
         "localhost/hal0-rocmfpx:vulkan-minicpm5",
         "ghcr.io/hal0ai/hal0-rocmfpx:server",
