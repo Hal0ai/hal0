@@ -34,6 +34,10 @@ export interface ApiModelRaw {
   quant?: string | null
   /** Freeform registry tags ("mtp", "coder", "user-added", …). */
   tags?: string[]
+  /** Per-model launch-default overrides (`ModelDefaults` on the backend).
+   * `defaults.mtp === true` is an explicit opt-in that wins over the legacy
+   * `mtp` tag — see `isMtpEligibleModel`. */
+  defaults?: { mtp?: boolean | null; [k: string]: unknown } | null
   /** Unix seconds the row was registered / first seen. */
   created?: number
   /** True when the last HF update check (GET /api/models/updates/check)
@@ -100,20 +104,17 @@ export function formatSize(b: number): string {
 // present. Fallback (older backends / legacy fixtures): infer from
 // installed+upstream. FLM/NPU rows also carry `upstream` ("npu") but are
 // installed host-side, so the `installed` check keeps them local.
-/** Delimited "MTP" marker in a model id / filename — mirrors the backend's
- * `model_meta._MTP_NAME_RE` so the UI's eligibility gate never disagrees with
- * the server's `_effective_mtp` auto decision. */
-const MTP_NAME_RE = /(?:^|[-_. ])mtp(?:[-_. ]|$)/i
-
 /** True when a model ships MTP speculative-decoding heads, per the SAME rule
- * the server uses (`model_meta.model_is_mtp_eligible`): the registry `mtp`
- * tag, or — for uncurated local pulls that carry no tags — a delimited MTP
- * marker in the id/path. Keep in sync with the backend; a divergence here
- * hides the MTP control exactly when the override matters. */
+ * the server uses (`model_meta.model_is_mtp_eligible`): an explicit
+ * `defaults.mtp === true` opt-in wins, else fall back to the registry `mtp`
+ * tag. The old filename/GGUF-name `MTP` marker sniff (`_MTP_NAME_RE`) was
+ * REMOVED server-side — an uncurated local pull with no tag and no explicit
+ * `defaults.mtp` is simply not eligible. Mirrors `isMtpModel` in
+ * `dash/models.jsx`; keep the two in sync. */
 export function isMtpEligibleModel(m: ApiModelRaw | null | undefined): boolean {
   if (!m) return false
-  if (Array.isArray(m.tags) && m.tags.some(t => String(t).trim().toLowerCase() === 'mtp')) return true
-  return MTP_NAME_RE.test(String(m.id || '')) || MTP_NAME_RE.test(String(m.path || ''))
+  if (m.defaults?.mtp === true) return true
+  return Array.isArray(m.tags) && m.tags.some(t => String(t).trim().toLowerCase() === 'mtp')
 }
 
 export function isUpstreamModel(m: ApiModelRaw): boolean {
