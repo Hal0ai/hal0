@@ -273,14 +273,18 @@ def test_unconfirmed_bank_delete_returns_stats_preview(
         "GET",
         "/v1/default/banks/scratch/stats",
         200,
-        {"memory_count": 42, "document_count": 7, "entity_count": 3, "unrelated": "x"},
+        {"total_nodes": 42, "total_documents": 7, "total_observations": 3, "unrelated": "x"},
     )
     r = client.delete("/api/memory/banks/scratch")
     assert r.status_code == 400
     preview = r.json()["error"]["details"]["preview"]
     assert preview["stats_available"] is True
     assert preview["item_count"] == 42
-    assert preview["counts"] == {"memory_count": 42, "document_count": 7, "entity_count": 3}
+    assert preview["counts"] == {
+        "total_nodes": 42,
+        "total_documents": 7,
+        "total_observations": 3,
+    }
     # The rejection still forwarded no DELETE upstream.
     assert not any(rq["method"] == "DELETE" for rq in recorder.requests)
 

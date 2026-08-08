@@ -86,12 +86,12 @@ def test_bank_memories_wipe_rejection_carries_the_blast_radius_preview(
         "GET",
         "/v1/default/banks/scratch/stats",
         200,
-        {"memory_count": 1629, "document_count": 315, "entity_count": 12},
+        {"total_nodes": 1629, "total_documents": 315, "total_observations": 12},
     )
     preview = client.delete(WIPE).json()["error"]["details"]["preview"]
     assert preview["stats_available"] is True
     assert preview["item_count"] == 1629
-    assert preview["counts"]["document_count"] == 315
+    assert preview["counts"]["total_documents"] == 315
 
 
 def test_bank_memories_wipe_preview_failsoft_still_rejects(
