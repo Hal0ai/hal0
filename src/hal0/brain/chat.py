@@ -1165,6 +1165,14 @@ def _unrouteable_model_error(tried_model: str) -> str:
 #     prompt: `content` came back EMPTY with `reasoning_content` ending
 #     "I'll call the slot_list() function to retrieve the information." — it
 #     stated intent and stopped. That is signal (b) below.
+#   * WITH `--jinja` + `--chat-template-file hal0-brain-sft.jinja` (the bundled
+#     template, post-#1434) + native `tools`: HTTP 500 "The model produced
+#     output that does not match the expected peg-native format" on EVERY
+#     tools-attached completion, tool-related prompt or not. llama.cpp builds
+#     a tool-format parser from the template and rejects the whole request
+#     when the output doesn't match. This is why `_routed` strips `tools`
+#     from the brain round below — no response ever arrives to run signal
+#     detection on otherwise.
 #
 # So the 1B genuinely cannot drive tools on this runtime. `[brain_chat]
 # tool_model` (default "hal0/agent") is the documented mitigation, and this is
@@ -1221,12 +1229,14 @@ def _unrouteable_model_error(tried_model: str) -> str:
 # use of `run_tool_loop` is therefore untouched by construction.
 
 #: The remnant llama.cpp's jinja tool parser leaves in `content` when it eats a
-#: `<function name="X">` opener it then fails to parse: `name="X"`.
-_ARTEFACT_NAME_RE = re.compile(r"""name\s*=\s*["']?\s*([A-Za-z0-9_.\-]+)""")
+#: `<function name="X">` opener it then fails to parse: `name="X"`. `/` is in
+#: the name class because the brain reaches for slash-qualified names too —
+#: measured live: ` name="hal0/slot_list">` (virtual-model spelling).
+_ARTEFACT_NAME_RE = re.compile(r"""name\s*=\s*["']?\s*([A-Za-z0-9_./\-]+)""")
 
 #: An unterminated `<function=X` opener — the terminated form is already handled
 #: by the shared text-call fallback (`parse_text_tool_calls`).
-_ARTEFACT_FN_RE = re.compile(r"<\s*function\s*=\s*([A-Za-z0-9_.\-]+)", re.IGNORECASE)
+_ARTEFACT_FN_RE = re.compile(r"<\s*function\s*=\s*([A-Za-z0-9_./\-]+)", re.IGNORECASE)
 
 #: Call-tag syntax of any shape. Reaching this module at all means neither
 #: extractor could make a call out of it, so a surviving `<function` /
@@ -1402,7 +1412,25 @@ def _tool_routing_llm(
             return await _degrade(await llm(body))
 
         body["model"] = chat_model
-        response = await llm(body)
+        # The brain round goes out WITHOUT native `tools`. The runtime builds
+        # a tool-format parser from the chat template and hard-fails the WHOLE
+        # completion when the model's output doesn't match it — measured on
+        # lxc105 (image c077206, bundled hal0-brain-sft.jinja): every
+        # tools-attached request, even "just say hello", returns HTTP 500
+        # "The model produced output that does not match the expected
+        # peg-native format". The 1B cannot match that format by design (the
+        # reason this reroute exists), so attaching `tools` buys nothing and
+        # costs the entire turn. Detection is unaffected: the text fallback
+        # and _tool_intent_artefact read the reply, not the request, and the
+        # steward knows its tool surface from the system prompt. Popped per
+        # round and restored — the engine owns `body` and the tool-model
+        # rounds need the schemas back.
+        native_tools = body.pop("tools", None)
+        try:
+            response = await llm(body)
+        finally:
+            if native_tools is not None:
+                body["tools"] = native_tools
         if not isinstance(response, dict) or response.get("error"):
             # A BRAIN-side failure keeps its documented contract exactly — the
             # loop core turns it into the error+done frames tests already pin.
