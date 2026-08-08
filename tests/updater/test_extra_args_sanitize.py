@@ -3,8 +3,9 @@
 ``defaults.extra_args`` rides the untrusted ``model_extra_args`` argv segment,
 so a row carrying a §21.7 managed flag (``-c``/``--port``/…) hard-fails every
 launch with ``slot.managed_arg_denied``. Such rows were minted by the
-pre-screen ``POST /api/models/{id}/duplicate`` profile stamp back when 8 seed
-profiles carried ``-c <N>``. The migration's contract under test:
+pre-screen profile stamp of the since-removed
+``POST /api/models/{id}/duplicate`` back when 8 seed profiles carried
+``-c <N>``. The migration's contract under test:
 
   - managed flags (+ values) are stripped, either spelling, and persisted,
   - clean rows / rows without defaults are untouched,

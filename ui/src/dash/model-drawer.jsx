@@ -25,7 +25,6 @@
 import {
 	useModelUpdate,
 	useModelSetDefault,
-	useModelDuplicate,
 } from "@/api/hooks/useModels";
 import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useProfiles } from "@/api/hooks/useProfiles";
@@ -329,154 +328,6 @@ function DivergenceDiff({ diff, profileName, onReset }) {
 	);
 }
 
-// ─── DuplicateModelDialog — duplicate for a second device (1dup) ─────────────
-// Wired to the real POST /api/models/{id}/duplicate route (UI-API-1,
-// models.py:674 `duplicate_model`): weights are refcounted (no re-download,
-// no byte copy) and the new row copies the source's metadata/defaults/
-// capabilities/backends. Picking a device template stamps that profile's
-// flags into the new row's defaults server-side (copy-not-layer — the
-// profile itself is never mutated).
-function DuplicateModelDialog({ open, onClose, model, profiles }) {
-	const duplicate = useModelDuplicate();
-	const [pick, setPick] = useStateMD("");
-	const [newId, setNewId] = useStateMD("");
-	// Tracks whether the operator has hand-edited the id field so the
-	// suggested-id effect below stops clobbering their typing once they start
-	// (same "don't stomp user input" convention as the flags-stamp confirm).
-	const [idTouched, setIdTouched] = useStateMD(false);
-	const [err, setErr] = useStateMD(null);
-	// Device-flavoured templates the operator can stamp the duplicate with.
-	const devProfiles = useMemoMD(() => {
-		const all = Array.isArray(profiles) ? profiles : [];
-		// one representative profile per device class, excluding the model's current.
-		const seen = new Set();
-		const out = [];
-		for (const p of all) {
-			const cls = profileDeviceClass(p) || "";
-			if (!cls || seen.has(cls)) continue;
-			seen.add(cls);
-			out.push(p);
-		}
-		return out;
-	}, [profiles]);
-	useEffectMD(() => {
-		if (open) {
-			setPick(devProfiles[0]?.name || "");
-			setIdTouched(false);
-			setErr(null);
-		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [open, model?.id, devProfiles]);
-
-	// Suggested new_id: `<source id>-<device class or profile name>`, re-derived
-	// as the template pick changes unless the operator has typed their own.
-	const suggestedId = useMemoMD(() => {
-		if (!model) return "";
-		const prof = (profiles || []).find((p) => p.name === pick);
-		const suffix = prof ? profileDeviceClass(prof) || prof.name : "copy";
-		return `${model.id}-${suffix}`;
-	}, [model, profiles, pick]);
-	useEffectMD(() => {
-		if (open && !idTouched) setNewId(suggestedId);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [open, suggestedId, idTouched]);
-
-	if (!open || !model) return null;
-
-	const trimmedId = newId.trim();
-	const idInvalid = !trimmedId || trimmedId === model.id;
-
-	const onConfirm = async () => {
-		if (duplicate.isPending) return; // guard against double-submit
-		if (idInvalid) {
-			setErr("pick a new model id, different from the source");
-			return;
-		}
-		setErr(null);
-		try {
-			const result = await duplicate.mutateAsync({
-				id: model.id,
-				new_id: trimmedId,
-				profile: pick || undefined,
-			});
-			window.__hal0Toast &&
-				window.__hal0Toast(`Duplicated → ${result?.id || trimmedId}`, "ok");
-			onClose();
-		} catch (e) {
-			// Server 409s on a taken id, 404s on an unknown profile/source — surface
-			// the envelope message inline (RenameSlotDialog's pattern) AND toast.
-			const msg = e?.message || "duplicate failed — see logs";
-			setErr(msg);
-			window.__hal0Toast &&
-				window.__hal0Toast(`Duplicate failed — ${msg}`, "err");
-		}
-	};
-	return (
-		<ConfirmDialog
-			open={open}
-			onCancel={onClose}
-			onConfirm={onConfirm}
-			title={`Duplicate ${model.longName || model.name || model.id}?`}
-			confirmLabel={duplicate.isPending ? "Duplicating…" : "Duplicate"}
-			footerNote="The duplicate can be deleted at any time; weights are shared."
-			message={
-				<span>
-					A new model row shares the same weights (refcounted — no re-download)
-					and can be stamped with a device template. You can tune its flags
-					independently.
-					<br />
-					<br />
-					<span className="mono" style={{ fontSize: 11, color: "var(--fg-3)" }}>
-						device template
-					</span>
-					<select
-						className="input mono"
-						data-testid="model-duplicate-device"
-						value={pick}
-						onChange={(e) => setPick(e.target.value)}
-						style={{ width: "100%", marginTop: 6 }}
-					>
-						<option value="">— no template —</option>
-						{devProfiles.map((p) => (
-							<option key={p.name} value={p.name}>
-								{p.name}
-								{p.intent ? ` · ${p.intent}` : ""}
-							</option>
-						))}
-					</select>
-					<div style={{ marginTop: 10 }}>
-						<span
-							className="mono"
-							style={{ fontSize: 11, color: "var(--fg-3)" }}
-						>
-							new model id
-						</span>
-						<input
-							className="input mono"
-							data-testid="model-duplicate-id"
-							value={newId}
-							onChange={(e) => {
-								setNewId(e.target.value);
-								setIdTouched(true);
-							}}
-							style={{ width: "100%", marginTop: 6 }}
-						/>
-					</div>
-					{err && (
-						<div
-							className="err"
-							data-testid="model-duplicate-error"
-							style={{ marginTop: 8 }}
-						>
-							{err}
-						</div>
-					)}
-				</span>
-			}
-		/>
-	);
-}
-
 // ─── Drawer dirty-tracking seam (#1398) ──────────────────────────────────────
 //
 // Same seam the slot drawer got in #1447, for the same reason. This drawer
@@ -614,7 +465,6 @@ function ModelDrawer({ open, onClose, model }) {
 	// carries one; Off force-suppresses it even when present.
 	const [vision, setVision] = useStateMD("auto");
 	// Local UI state.
-	const [dupOpen, setDupOpen] = useStateMD(false);
 	const [confirm, setConfirm] = useStateMD(null); // {title,message,confirmLabel,onConfirm}
 	// Per-type default: the `model` prop is live-polled (see the seam note
 	// above), but the models-query invalidation this POST fires can land after
@@ -926,13 +776,6 @@ function ModelDrawer({ open, onClose, model }) {
 							⟳ changes require the slot to restart
 						</span>
 						<span style={{ display: "inline-flex", gap: 8 }}>
-							<button
-								className="btn ghost sm"
-								data-testid="model-duplicate-open"
-								onClick={() => setDupOpen(true)}
-							>
-								⋯ Duplicate for device
-							</button>
 							<button className="btn ghost sm" onClick={onClose}>
 								Cancel
 							</button>
@@ -1471,13 +1314,6 @@ function ModelDrawer({ open, onClose, model }) {
 				)}
 			</Drawer>
 
-			<DuplicateModelDialog
-				open={dupOpen}
-				onClose={() => setDupOpen(false)}
-				model={model}
-				profiles={profilesQuery.data}
-			/>
-
 			{confirm && (
 				<ConfirmDialog
 					open={!!confirm}
@@ -1526,5 +1362,4 @@ Object.assign(window, {
 	ModelDrawer,
 	FlagsEditor,
 	DivergenceDiff,
-	DuplicateModelDialog,
 });

@@ -2,10 +2,10 @@
 //
 // A slot is now a PURE INSTANCE: (slot_id, name, model, port, state). Creating
 // one is "pick a model (it already carries tune/device/runner), name it, done."
-// The old profile / image / device fields are gone — device rides the model, so
-// reaching for a device here redirects to the model's duplicate-for-device flow
-// (teaching the mental model instead of dead-ending). Port is assigned by
-// PortAuthority on create and shown read-only.
+// The old profile / image / device fields are gone — device rides the model;
+// per-slot divergence (device/runtime tune) is a custom profile assigned in
+// the slot's edit drawer after create. Port is assigned by PortAuthority on
+// create and shown read-only.
 //
 // Backend: POST /api/slots requires only `name`; model/device are optional flat-
 // body fields the normalizer folds into the nested TOML. We derive `device` from
@@ -232,7 +232,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
           ) : (
             <> Pick a model — its stamped tune sets the device.</>
           )}
-          {" "}To run on another device, <a href="#models" onClick={onClose} data-testid="create-slot-duplicate-link">duplicate the model for that device</a>.
+          {" "}Each slot can pick its own runtime <b style={{ color: "var(--fg)" }}>profile</b> (runner + image) in its edit drawer after create; the model&apos;s launch-flag tune is shared by every slot bound to it.
         </div>
       </div>
 

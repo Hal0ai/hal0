@@ -2151,8 +2151,9 @@ def sanitize_model_extra_args(*, job_id: str | None = None, registry: Any = None
     ``defaults.extra_args`` rides the untrusted ``model_extra_args`` argv
     segment, which hard-rejects the §21.7 managed flags at every launch
     (``slot.managed_arg_denied``). Rows stamped before the screens existed —
-    notably via the unscreened ``POST /api/models/{id}/duplicate`` profile
-    stamp, back when 8 seed profiles carried ``-c <N>`` — are therefore
+    notably via the unscreened profile stamp of the since-removed
+    ``POST /api/models/{id}/duplicate``, back when 8 seed profiles carried
+    ``-c <N>`` — are therefore
     bricked: they can never load until the flag is hand-removed. Strip exactly
     the denylisted tokens (+ values) from every model's ``extra_args`` and log
     loudly per row. Matching is token-exact via the argv alias table, so

@@ -225,39 +225,6 @@ export function useModelSetDefault() {
   })
 }
 
-// ─── Duplicate (UI-API-1, models.py:674 `duplicate_model`) ───────────────
-
-export interface ModelDuplicateRequest {
-  /** Source model id — the row whose weights/metadata get copied. */
-  id: string
-  /** New registry id. Required; must differ from `id`. */
-  new_id: string
-  /** Optional profile whose flags get stamped into the new row's defaults. */
-  profile?: string
-}
-
-export interface ModelDuplicateResponse extends Model {
-  duplicated_from: string
-  files_refcounted: number
-}
-
-export function useModelDuplicate() {
-  // POST /api/models/{id}/duplicate — refcounted weight-sharing duplicate
-  // (no byte copy); optionally stamps a profile's flags into the new row.
-  // endpoints.ts has no `modelDuplicate` const yet (flagged for the
-  // CONTRACTS lane) — built inline off the existing `model(id)` helper,
-  // same route family as useModelDelete/useModelUpdate above.
-  const qc = useQueryClient()
-  return useMutation<ModelDuplicateResponse, Hal0Error, ModelDuplicateRequest>({
-    mutationFn: ({ id, new_id, profile }) =>
-      apiPost<ModelDuplicateResponse>(
-        `${ENDPOINTS.model(id)}/duplicate`,
-        profile ? { new_id, profile } : { new_id },
-      ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
-  })
-}
-
 // ─── HF update check + in-place update ────────────────────────────────
 
 export interface ModelUpdateVerdict {

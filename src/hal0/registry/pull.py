@@ -1094,7 +1094,7 @@ async def run_pull(
         # Blob/file accounting — the SAME bookkeeping the fileset branch does
         # (#1412). Without it `store_blob`/`model_file` stay empty on every box
         # that pulls through HF coords, which silently disables refcounting,
-        # hardlink dedup, duplicate_model's refcount bump, and the store GC.
+        # hardlink dedup, and the store GC.
         installed_rows = [InstalledFile(hf_file, final, size_bytes, digest, "model")]
         if mmproj_final is not None:
             mm_rec = job.files[1]
@@ -1318,8 +1318,8 @@ def _register_installed_files(
     (:func:`_register_blob_after_install` per file, then the ``model_file``
     rows in :func:`_register_pulled_fileset`). The single-file branch did
     neither, so on any box whose models all arrived via HF coords both tables
-    were empty and every consumer of them — refcount GC, hardlink dedup,
-    ``duplicate_model``'s refcount bump — was a silent no-op.
+    were empty and every consumer of them — refcount GC, hardlink dedup — was
+    a silent no-op.
 
     The invariant this maintains is *refcount == number of ``model_file`` rows
     referencing the blob*. That makes the write idempotent: re-pulling the same
