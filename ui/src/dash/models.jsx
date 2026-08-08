@@ -14,7 +14,7 @@ import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded } from '@/dash/model-sort.js'
-import { RunnerImagesView } from '@/dash/runner-images.jsx'
+import { RunnerImagesView, RunnerImagesSyncButton } from '@/dash/runner-images.jsx'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
@@ -238,32 +238,41 @@ function ModelsView() {
     <div className="view">
       <div className="vh">
         <span className="vh-eye mono">Catalog</span>
-        <h1>Models</h1>
+        {/* One heading for the whole catalog — the active tab names it. The
+            Runner Images tab swaps the title and header actions in place
+            rather than stacking a second vh below the tab bar. */}
+        <h1>{tab === "runner-images" ? "Runner Images" : "Models"}</h1>
         <span className="vh-spacer" />
-        {updatable.length > 0 ? (
-          <button
-            className="btn"
-            data-testid="mdl-update-all"
-            disabled={updateAll.isPending}
-            title="Re-pull every installed model whose HuggingFace file has changed"
-            onClick={onUpdateAll}
-          >{Icons.download} {updateAll.isPending ? "Starting…" : `Update all (${updatable.length})`}</button>
+        {tab === "runner-images" ? (
+          <RunnerImagesSyncButton />
         ) : (
-          /* Everything current → the update surface would otherwise be
-             invisible. Keep an explicit check affordance so the feature is
-             discoverable and the TTL cache can be bypassed on demand. */
-          <button
-            className="btn ghost"
-            data-testid="mdl-check-updates"
-            disabled={forceCheck.isPending}
-            title="Compare every installed model against its HuggingFace repo now"
-            onClick={onCheckUpdates}
-          >{Icons.download} {forceCheck.isPending ? "Checking…" : "Check updates"}</button>
+          <>
+            {updatable.length > 0 ? (
+              <button
+                className="btn"
+                data-testid="mdl-update-all"
+                disabled={updateAll.isPending}
+                title="Re-pull every installed model whose HuggingFace file has changed"
+                onClick={onUpdateAll}
+              >{Icons.download} {updateAll.isPending ? "Starting…" : `Update all (${updatable.length})`}</button>
+            ) : (
+              /* Everything current → the update surface would otherwise be
+                 invisible. Keep an explicit check affordance so the feature is
+                 discoverable and the TTL cache can be bypassed on demand. */
+              <button
+                className="btn ghost"
+                data-testid="mdl-check-updates"
+                disabled={forceCheck.isPending}
+                title="Compare every installed model against its HuggingFace repo now"
+                onClick={onCheckUpdates}
+              >{Icons.download} {forceCheck.isPending ? "Checking…" : "Check updates"}</button>
+            )}
+            <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
+            <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
+            <button className="btn ghost" onClick={() => setAddByPathOpen(true)}>{Icons.plus} Add by path</button>
+            <button className="btn" onClick={() => setAddOpen(true)}>{Icons.plus} Add by HF coords</button>
+          </>
         )}
-        <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
-        <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
-        <button className="btn ghost" onClick={() => setAddByPathOpen(true)}>{Icons.plus} Add by path</button>
-        <button className="btn" onClick={() => setAddOpen(true)}>{Icons.plus} Add by HF coords</button>
       </div>
 
       {/* ── Tab bar (matches slot-tabs pattern) ── */}

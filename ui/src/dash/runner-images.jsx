@@ -23,6 +23,31 @@ function fmtBytesRI(b) {
   return `${(b / 1024 ** 3).toFixed(2)} GB`;
 }
 
+// ── RunnerImagesSyncButton ──────────────────────────────────────────────
+// Rendered by models.jsx inside the Models page header (vh) when the
+// Runner Images tab is active — the view below carries no header of its
+// own, so the page keeps a single "Catalog / Runner Images" heading.
+export function RunnerImagesSyncButton() {
+  const sync = useRunnerImageSync();
+
+  const onSync = async () => {
+    try {
+      const res = await sync.mutateAsync();
+      const n = res.images?.length ?? 0;
+      const warn = res.images_json_ok === false ? " (images.json unreachable — GHCR data only)" : "";
+      window.__hal0Toast && window.__hal0Toast(`Runner image sync complete — ${n} image${n === 1 ? "" : "s"}${warn}`, res.images_json_ok === false ? "warn" : "info");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Sync failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  return (
+    <button className="btn" data-testid="ri-sync" disabled={sync.isPending} onClick={onSync}>
+      {Icons.restart} {sync.isPending ? "Syncing…" : "Sync now"}
+    </button>
+  );
+}
+
 // ── RunnerImagesView ────────────────────────────────────────────────────
 export function RunnerImagesView() {
   const [selId, setSelId] = useStateRI(null);
@@ -30,7 +55,6 @@ export function RunnerImagesView() {
 
   const imagesQuery = useRunnerImages();
   const images = imagesQuery.data ?? [];
-  const sync = useRunnerImageSync();
 
   useEffectRI(() => {
     if (!selId && images.length) setSelId(images[0].id);
@@ -45,29 +69,8 @@ export function RunnerImagesView() {
 
   const selected = images.find(i => i.id === selId) || images[0];
 
-  const onSync = async () => {
-    try {
-      const res = await sync.mutateAsync();
-      const n = res.images?.length ?? 0;
-      const warn = res.images_json_ok === false ? " (images.json unreachable — GHCR data only)" : "";
-      window.__hal0Toast && window.__hal0Toast(`Runner image sync complete — ${n} image${n === 1 ? "" : "s"}${warn}`, res.images_json_ok === false ? "warn" : "info");
-    } catch (e) {
-      window.__hal0Toast && window.__hal0Toast(`Sync failed — ${e?.message || "see logs"}`, "err");
-    }
-  };
-
   return (
-    <div className="view">
-      <div className="vh">
-        <span className="vh-eye mono">Catalog</span>
-        <h1>Runner Images</h1>
-        <span className="vh-spacer" />
-        <button className="btn" data-testid="ri-sync" disabled={sync.isPending} onClick={onSync}>
-          {Icons.restart} {sync.isPending ? "Syncing…" : "Sync now"}
-        </button>
-      </div>
-
-      <div className="models-layout" style={{marginTop: 18}}>
+    <div className="models-layout" style={{marginTop: 18}}>
         <div className="mdl-list">
           <div className="mdl-toolbar">
             <input
@@ -108,7 +111,6 @@ export function RunnerImagesView() {
           <RunnerCard image={selected} />
           <RunnerDownloadsPane />
         </div>
-      </div>
     </div>
   );
 }
@@ -259,7 +261,8 @@ function RunnerDownloadRow({ job }) {
 
 function RunnerDownloadsPane() {
   const pullsList = useRunnerImagePullsList();
-  const jobs = pullsList.data ?? [];
+  // An error envelope (or proxy 5xx body) must not crash the whole tab.
+  const jobs = Array.isArray(pullsList.data) ? pullsList.data : [];
   const active = jobs.filter(j => j.state === "queued" || j.state === "running");
   if (active.length === 0) return null;
   return (

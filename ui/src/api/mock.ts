@@ -98,6 +98,11 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   { re: /^\/api\/profiles$/, key: 'profiles', networkFirst: true },
   { re: /^\/api\/stacks$/, key: 'stacks', networkFirst: true },
   { re: /^\/api\/chat-templates$/, key: 'chatTemplates', networkFirst: true },
+  // ── Runner Images (Models → Runner Images tab) — ORDER MATTERS: the
+  // more-specific sub-paths sit before the bare collection route.
+  { re: /^\/api\/runner-images\/pulls\/list$/, key: 'runnerImagesPulls' },
+  { re: /^\/api\/runner-images\/downloaded$/, key: 'runnerImagesDownloaded' },
+  { re: /^\/api\/runner-images$/, key: 'runnerImages' },
   // ── Memory (Hindsight) — engine + bank-scoped surface ────────────
   // Forced-mock + 404-fallback story for the Memory graph overhaul. The
   // bank id is captured as group 1. ORDER MATTERS: the more-specific
