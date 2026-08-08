@@ -468,8 +468,26 @@ class SlotConfigStore:
         return self._capabilities_path or capabilities_toml_path()
 
     def _slot_path(self, slot_name: str) -> Path:
+        """The on-disk config path for a slot addressed by DISPLAY name (#1643).
+
+        A capability selection — like a stack entry (#1510) — addresses its
+        slot by the portable display name, but the stem is this box's storage
+        detail: after ``hal0 slot migrate-id-keying`` the same slot lives at
+        ``<id>.toml`` with the name in the body. Resolving through the ONE
+        bilingual seam (:func:`hal0.slots.layout.resolve_slot_stem`) is what
+        makes a capability **disable** actually clear ``[model].default``
+        instead of reading ``None`` for a slot that is plainly on disk (and
+        leaving it bound and routable).
+
+        Falls back to the name itself when nothing resolves — a name-keyed box
+        never reads a TOML here (the stem-first ``exists()`` wins), and a slot
+        that genuinely does not exist yet keeps the name-keyed path the
+        creation lane expects.
+        """
+        from hal0.slots.layout import resolve_slot_stem
+
         base = self._slots_dir or paths.slots_config_dir()
-        return base / f"{slot_name}.toml"
+        return base / f"{resolve_slot_stem(base, slot_name) or slot_name}.toml"
 
     # ── apply (compute-only) ─────────────────────────────────────────────────
 

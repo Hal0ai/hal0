@@ -28,11 +28,26 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from hal0.slot_config import write_slot_toml
 from hal0.slots._cfg_helpers import _cfg_to_dict
+from hal0.slots.layout import is_id_stem, resolve_slot_stem
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from hal0.config.schema import SlotConfig
 
 log = logging.getLogger(__name__)
+
+
+def _shadow_path(slots_dir: Path, name: str) -> Path | None:
+    """The on-disk TOML for a shadow addressed by display name, or ``None``.
+
+    Bilingual (#1664): a name-keyed box resolves ``<name>.toml`` with a single
+    ``exists()``; an id-keyed one falls back to the display-name index and
+    resolves ``<id>.toml``. ``None`` means "this shadow does not exist" — which
+    is the only signal that should reach the create branch.
+    """
+    stem = resolve_slot_stem(slots_dir, name)
+    return None if stem is None else slots_dir / f"{stem}.toml"
 
 
 def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
@@ -70,6 +85,7 @@ class NpuTrioHost(Protocol):
 
     async def iter_configs(self) -> list[dict[str, Any]]: ...
     async def create(self, slot_name: str, slot_cfg: dict[str, Any]) -> Any: ...
+    async def rename(self, slot_name: str, new_name: str) -> Any: ...
     def _invalidate_cfg_cache(self, slot_name: str) -> None: ...
 
 
@@ -137,12 +153,19 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
     for suffix, slot_type, default_model in _TRIO_SHADOW_SPEC:
         canon = f"{anchor_name}-{suffix}"
         legacy = f"{suffix}-npu"  # stt-npu / embed-npu
-        canon_path = slots_dir / f"{canon}.toml"
-        legacy_path = slots_dir / f"{legacy}.toml"
+        # Shadows are addressed by DISPLAY name, but the on-disk stem is this
+        # box's storage detail: after ``hal0 slot migrate-id-keying`` the same
+        # shadow lives at ``<id>.toml`` with the name in the body. Probing the
+        # literal ``<name>.toml`` (#1664) missed it on every boot, so step 2
+        # (structural normalization — the point of this routine) was skipped
+        # and step 3 re-attempted a create that ``SlotManager``'s bilingual
+        # clobber guard rejected. Resolve through the ONE layout seam instead.
+        canon_path = _shadow_path(slots_dir, canon)
+        legacy_path = _shadow_path(slots_dir, legacy)
         try:
             # 1. Legacy rename — only when the canon target is free.
-            if legacy_path.exists():
-                if canon_path.exists():
+            if legacy_path is not None:
+                if canon_path is not None:
                     log.warning(
                         "slot.trio_shadow_rename_skipped",
                         extra={
@@ -151,9 +174,21 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
                             "reason": "canon target already exists",
                         },
                     )
+                elif is_id_stem(legacy_path.stem):
+                    # Id-keyed: a rename is a RELABEL of a stable id, and the
+                    # identity row carries that label. A bare file move would
+                    # strand the row under the legacy name and leave the shadow
+                    # unresolvable by its new one, so delegate to the canonical
+                    # :meth:`SlotManager.rename` — it rewrites the embedded
+                    # ``name`` in place, moves the identity row + state record,
+                    # and invalidates the caches as one unit.
+                    await mgr.rename(legacy, canon)
+                    canon_path = legacy_path
+                    log.info("slot.trio_shadow_renamed", extra={"from": legacy, "to": canon})
                 else:
                     legacy_raw = tomllib.loads(legacy_path.read_text(encoding="utf-8"))
                     legacy_raw["name"] = canon
+                    canon_path = slots_dir / f"{canon}.toml"
                     write_slot_toml(canon_path, legacy_raw)
                     with contextlib.suppress(FileNotFoundError):
                         legacy_path.unlink()
@@ -166,7 +201,7 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
 
             # 2. Ensure + normalize the canon shadow record. After a rename
             #    canon_path now exists, so the same iteration normalizes it.
-            if canon_path.exists():
+            if canon_path is not None:
                 raw = tomllib.loads(canon_path.read_text(encoding="utf-8"))
                 desired = {
                     "device": "npu",
