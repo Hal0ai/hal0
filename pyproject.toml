@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 # that resolves this project by distribution name must use "hal0ai".
 [project]
 name = "hal0ai"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 description = "Open-source home AI inference platform"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -18,7 +18,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "hal0 contributors" }]
 keywords = ["ai", "llm", "inference", "openai-compatible", "homeai"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: End Users/Desktop",
   "Intended Audience :: System Administrators",
   "Operating System :: POSIX :: Linux",

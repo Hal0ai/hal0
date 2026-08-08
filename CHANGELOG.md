@@ -24,11 +24,34 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.0.0-rc.2] — 2026-08-08
+
+Second — and intended final — release candidate on the road to 1.0.0. This
+tag is the preview-channel snapshot of everything documented in the
+[1.0.0](#100--2026-08-07) section below; a box on `1.0.0-rc.1` picks up all
+of it via `hal0 update`.
+
+### Highlights
+
+- **Preview snapshot of the full 1.0.0 content:** 180-tool admin MCP catalog, memory MCP parity with Hindsight 0.8.4, Moonshine CPU STT reinstated, slot `autoload` + eviction `priority`, on-demand capability slots, per-slot profiles, and the hardened OpenWebUI/secrets posture. Full detail in the [1.0.0](#100--2026-08-07) section.
+
+### Breaking
+
+New since `1.0.0-rc.1` (a box upgrading from 0.9.8 also gets the R5 set —
+see the [1.0.0](#100--2026-08-07) section):
+
+- **The experimental standalone browser MCP server is removed.** (`hal0.mcp.browser_server`, port 9178, `HAL0_BROWSER_*` env; detail under [1.0.0].)
+- **The `lru = true` eviction opt-in is retired — every non-pinned resident slot is now an eviction candidate, ordered by the new `priority` field.** On a box that never set `lru = true`, pressure and pre-load eviction go from inert to active; `pinned` is the only exemption. (Detail under [1.0.0].)
+
+### Migrations
+
+- **Nothing new for a box already on `1.0.0-rc.1`** — slots with a bound model migrate to `autoload = true` automatically, so boot behaviour is unchanged until toggled. Boxes coming from 0.9.8 follow the [1.0.0](#100--2026-08-07) migration set (one-shot `enabled` sweep at first boot; operator-run slot-flag fold and id-keying migrators).
+
 ## [1.0.0] — 2026-08-07
 
 ### Highlights
 
-- **The whole platform is agent-reachable.** The admin MCP catalog went from 92 to 181 tools — services, ComfyUI, updater/doctor/health, hardware and request telemetry, slots and models long-tail, bench, activity, approvals, runner images, NPU load/unload — plus the full 26-tool memory surface (was 5) at feature parity with Hindsight 0.8.4.
+- **The whole platform is agent-reachable.** The admin MCP catalog went from 92 to 180 tools — services, ComfyUI, updater/doctor/health, hardware and request telemetry, slots and models long-tail, bench, activity, approvals, runner images, NPU load/unload — plus the full 26-tool memory surface (was 5) at feature parity with Hindsight 0.8.4.
 - **Slots start when you say so.** New `autoload` setting: binding a model no longer implies boot start. New eviction `priority` (0-100) replaces the inert `lru = true` opt-in, so memory-pressure eviction actually works on a stock box.
 - **Voice is a device-keyed switch.** Moonshine is back as the CPU STT engine in its own toolbox image; `cpu` runs Moonshine, `npu` runs whisper-v3:turbo, GPU resolves to no STT engine instead of silently taking a llama chat profile.
 - **Image Gen and Slots panes got their lifecycle right** — state-typed engine indicators, a Stop that drives the GPU arbiter back to inference mode, dropdown-driven runner image/binary selection, and a `GET /api/slots` path that no longer multiplies `podman inspect` fan-out on wide boxes.
@@ -114,7 +137,7 @@ full detail under [1.0.0-rc.1](#100-rc1--2026-08-01-r5--the-rework-release).
 
 ### Added
 
-- Admin MCP catalog expanded from 92 to 181 tools — the full platform
+- Admin MCP catalog expanded from 92 to 180 tools — the full platform
   management surface is now agent-reachable: services lifecycle
   (`service_list`/`service_health` + gated `service_action`), ComfyUI
   (status/workflows reads, gated switchover/pin/launch/cancel/restart),
