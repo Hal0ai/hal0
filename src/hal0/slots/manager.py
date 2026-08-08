@@ -2321,36 +2321,38 @@ class SlotManager:
                 },
                 force=True,
             )
+        # The name exists again — a deleted-seed tombstone (if any) is now
+        # stale; forget it so future seeding decisions see current intent.
+        from hal0.install.static_seeds import clear_seed_tombstone
+
+        clear_seed_tombstone(slot_name)
         return await self.status(slot_name)
 
     async def delete(self, slot_name: str, *, force: bool = False) -> None:
-        """Delete a slot. Seeded + pinned slots are protected unless ``force=True``.
+        """Delete a slot. Only a pinned slot is protected (without ``force``).
 
-        A seeded slot (``primary`` / ``embed`` / … + the NPU trio) is normally
-        undeletable — disable it via ``capabilities.toml`` instead. ``force``
-        overrides that guard so an operator can remove a seeded slot outright;
-        note an install/update reconcile may re-seed it later, and the name stays
-        reserved (``create`` still rejects it) until then.
+        Seeded slots are deletable like any other: capability slots are
+        recreated on demand when their capability is re-enabled in settings
+        (the orchestrator's ``_ensure_slot_exists``), and deleting a static
+        seed writes a tombstone (:mod:`hal0.install.static_seeds`) so the
+        boot-time seeding pass honours the deletion instead of resurrecting
+        the slot. Recreating the name clears the tombstone.
 
         §21.10 operator-pin hardening: a pinned slot (default-pinned anchor
-        or ``SlotConfig.pinned = true``) is likewise refused without
-        ``force=True`` — HTTP 409 ``slot.pinned`` — so an accidental delete
-        can't take down an always-warm anchor.
+        or ``SlotConfig.pinned = true``) is refused without ``force=True`` —
+        HTTP 409 ``slot.pinned`` — so an accidental delete can't take down
+        an always-warm anchor.
         """
         slot_name = self._resolve_alias(slot_name)
-        if not force:
-            if slot_name in self.seeded_slots():
-                raise SlotConfigError(
-                    f"cannot delete seeded slot {slot_name!r} — disable it via "
-                    "capabilities.toml, or pass force to delete it anyway",
-                    details={"slot": slot_name, "seeded": True},
-                )
-            if await self.is_pinned(slot_name):
-                raise SlotPinned(
-                    f"slot {slot_name!r} is pinned — pass force=true to delete it anyway",
-                    details={"slot": slot_name, "pinned": True},
-                )
+        # Existence first: deleting an unknown slot is a 404, not a pinned
+        # 409 (the default-pinned anchor names would otherwise 409 even when
+        # no such slot exists on disk).
         self._ensure_known(slot_name)
+        if not force and await self.is_pinned(slot_name):
+            raise SlotPinned(
+                f"slot {slot_name!r} is pinned — pass force=true to delete it anyway",
+                details={"slot": slot_name, "pinned": True},
+            )
         # Make sure it's stopped first.
         current = self._current_state(slot_name)
         if current != SlotState.OFFLINE:
@@ -2390,6 +2392,14 @@ class SlotManager:
             self._last_used.pop(key, None)
             self._cfg_cache.pop(key, None)
         self._forget_key(slot_name)
+
+        # Deleting a static seed leaves a tombstone so the boot-time seeding
+        # pass honours the deletion (it would otherwise re-copy the seed TOML
+        # on the next start — the old "undeletable seeded slot" behaviour).
+        if slot_name in self.seeded_slots():
+            from hal0.install.static_seeds import add_seed_tombstone
+
+            add_seed_tombstone(slot_name)
 
     async def update_config(
         self,

@@ -1176,6 +1176,18 @@ async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("registry.type_tags_retirement_failed", error=str(exc))
 
+    # Retire the pre-1.0 ``vision`` scaffold slot (untouched scaffolds only —
+    # vision is a model property now, served by any llm slot; see
+    # hal0.config.migrations.vision_slot_retirement).
+    try:
+        from hal0.config import paths as _vision_paths
+        from hal0.config.migrations.vision_slot_retirement import migrate_vision_slot
+
+        if migrate_vision_slot(_vision_paths.slots_config_dir()):
+            log.info("slot.vision_scaffold_retired")
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("slot.vision_retirement_failed", error=str(exc))
+
     # One-shot reconciliation: clear pre-fix stuck ERROR on slots whose
     # only problem was an empty model.default. After fix(slots): empty
     # default is OFFLINE+CTA, not ERROR; this pass migrates existing

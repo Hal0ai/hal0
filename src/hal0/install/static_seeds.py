@@ -83,12 +83,16 @@ def seed_static_slots(
     src_dir = installer_root / "installer" / "etc-hal0" / "slots"
     known = set(existing_names)
 
+    tombstoned = read_seed_tombstones(slots_dir=dest_dir)
     seeded: list[str] = []
     for name in STATIC_SEED_SLOTS:
         dest = dest_dir / f"{name}.toml"
         # "Already known" = the identity store tracks it (id-keyed, no
         # <name>.toml) OR a name-keyed file still exists (pre-migration box).
-        if name in known or dest.exists():
+        # A tombstoned name is an operator DELETION — honour it instead of
+        # resurrecting the slot on every boot (the pre-tombstone behaviour
+        # that made seeded slots effectively undeletable).
+        if name in known or name in tombstoned or dest.exists():
             continue
         src = src_dir / f"{name}.toml"
         if not src.is_file():
@@ -102,4 +106,66 @@ def seed_static_slots(
     return seeded
 
 
-__all__ = ["STATIC_SEED_SLOTS", "seed_static_slots"]
+# ── Seed tombstones — "the operator deleted this seed on purpose" ────────────
+#
+# Deleting a slot removes its TOML and identity row, which made a static seed
+# indistinguishable from "new seed this release" on the next boot — the seeding
+# pass re-created it, so a seeded slot could never actually be removed (the
+# delete guard papered over that with a hard refusal). A tombstone records the
+# deletion; creating a slot under the name again (operator create, or the
+# capability orchestrator materialising it on re-enable) clears it.
+
+_TOMBSTONE_FILE = ".seed-tombstones"
+
+
+def _tombstone_path(slots_dir: Path | None = None) -> Path:
+    base = slots_dir if slots_dir is not None else paths.slots_config_dir()
+    return base / _TOMBSTONE_FILE
+
+
+def read_seed_tombstones(*, slots_dir: Path | None = None) -> frozenset[str]:
+    """Names the operator deleted and that seeding must not resurrect."""
+    try:
+        raw = _tombstone_path(slots_dir).read_text()
+    except OSError:
+        return frozenset()
+    return frozenset(line.strip() for line in raw.splitlines() if line.strip())
+
+
+def add_seed_tombstone(name: str, *, slots_dir: Path | None = None) -> None:
+    """Record that seed ``name`` was deliberately deleted (idempotent)."""
+    current = set(read_seed_tombstones(slots_dir=slots_dir))
+    if name in current:
+        return
+    current.add(name)
+    path = _tombstone_path(slots_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"{n}\n" for n in sorted(current)))
+    except OSError as exc:  # read-only config dir — deletion still proceeds
+        log.warning("install.seed_tombstone_write_failed", slot=name, error=str(exc))
+
+
+def clear_seed_tombstone(name: str, *, slots_dir: Path | None = None) -> None:
+    """Forget a deletion — the slot exists again under this name (idempotent)."""
+    current = set(read_seed_tombstones(slots_dir=slots_dir))
+    if name not in current:
+        return
+    current.discard(name)
+    path = _tombstone_path(slots_dir)
+    try:
+        if current:
+            path.write_text("".join(f"{n}\n" for n in sorted(current)))
+        else:
+            path.unlink(missing_ok=True)
+    except OSError as exc:  # pragma: no cover — defensive
+        log.warning("install.seed_tombstone_clear_failed", slot=name, error=str(exc))
+
+
+__all__ = [
+    "STATIC_SEED_SLOTS",
+    "add_seed_tombstone",
+    "clear_seed_tombstone",
+    "read_seed_tombstones",
+    "seed_static_slots",
+]

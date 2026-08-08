@@ -338,6 +338,14 @@ def load_capabilities_config(path: Path | None = None) -> CapabilityConfig:
         return CapabilityConfig()
     with open(target, "rb") as f:
         raw = tomllib.load(f)
+    # Retired capability lanes are dropped on read (tolerant load — the next
+    # write converges the file). ``vision`` stopped being a slot-backed
+    # capability: vision is a MODEL property (mmproj presence, the registry's
+    # ``capabilities``/``defaults.vision``) served by any llm slot, so a
+    # stray ``[selections.vision]`` table from an older install is inert.
+    sels = raw.get("selections")
+    if isinstance(sels, dict):
+        sels.pop("vision", None)
     return CapabilityConfig.model_validate(raw)
 
 

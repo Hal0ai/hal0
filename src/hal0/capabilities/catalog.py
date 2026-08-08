@@ -1018,9 +1018,6 @@ def catalogs_by_slot(
         "img": {
             "img": models_for_capability("image", registry=registry),
         },
-        "vision": {
-            "vision": models_for_capability("vision", registry=registry),
-        },
         "chat": {
             "chat": models_for_capability("chat", registry=registry),
         },

@@ -35,25 +35,25 @@ log = logging.getLogger(__name__)
 
 # ── Seeded slot catalogue (PR-10, plan §4.2 + §10.2) ────────────────────────
 
-#: Slots that exist on every hal0 install regardless of hardware. The
-#: dashboard creates these as empty cards at first run; the bundle
-#: picker (Phase 5) populates their ``model.default`` fields. ``agent``
-#: is the GPU MoE chat-role sibling of ``chat`` (moved here from the NPU
-#: set in #679 — it is a GPU slot, not the NPU FLM anchor).
+#: Slots with a static install seed — SINGLE-SOURCED from
+#: :data:`hal0.install.static_seeds.STATIC_SEED_SLOTS` (which itself mirrors
+#: install.sh's seed loop). This list previously hand-duplicated the seed set
+#: and drifted badly: it still carried the retired ``stt``/``vision`` scaffold
+#: names (protected-but-never-seeded — the un-deletable ghost-slot bug) while
+#: missing ``brain``/``coder``/``flm``/``qwen3tts`` (seeded-but-unprotected).
+#:
+#: Membership no longer implies delete-protection or name reservation:
+#: capability slots are created ON DEMAND when their capability is enabled in
+#: settings (:meth:`hal0.capabilities.orchestrator.CapabilityOrchestrator.
+#: _ensure_slot_exists`), any slot is deletable (``pinned`` is the protection
+#: lever, §21.10), and a deleted seed leaves a tombstone so boot-time seeding
+#: doesn't resurrect it (:mod:`hal0.install.static_seeds`). The list now only
+#: feeds identity metadata (``is_seed``) and the seeding pass itself.
 # ADR-0023: `utility` (cheap helper) + `agent` (capable/default anchor) are the two
 # canonical llm seeds. `chat` is retired as a slot/role name (the `chat` *capability*
 # is unaffected; any llm slot serves it). `utility` is seeded so the memory
 # extraction target is always present on a fresh box.
-SEEDED_SLOTS: tuple[str, ...] = (
-    "utility",
-    "embed",
-    "rerank",
-    "stt",
-    "tts",
-    "img",
-    "vision",
-    "agent",
-)
+from hal0.install.static_seeds import STATIC_SEED_SLOTS as SEEDED_SLOTS  # noqa: E402
 
 #: NPU FLM shadow slots seeded only when the FastFlowLM ``.deb`` is
 #: installed (``shutil.which('flm')`` truthy): the ASR + embed tags that
@@ -432,13 +432,16 @@ async def add_slot(
             f"start with alphanumeric; max 32 chars",
             details={"slot": name},
         )
-    # Reject collisions with ALL seeded slots (include the NPU trio
-    # regardless of FLM presence — the names are reserved).
-    reserved = set(SEEDED_SLOTS) | set(NPU_SEEDED_SLOTS)
-    if name in reserved:
+    # Only the NPU trio names stay reserved: the occupancy pane SYNTHESISES
+    # ``flm-stt``/``flm-embed`` virtual sub-cards from the anchor slot, so a
+    # real slot under either name would collide with the synthesis. Seed
+    # names are NOT reserved any more — a deleted seed is recreatable (the
+    # collision-with-an-existing-slot case is host.create's own check), and
+    # recreation clears its seed tombstone in SlotManager.create.
+    if name in NPU_SEEDED_SLOTS:
         raise SlotConfigError(
-            f"slot {name!r} collides with a seeded slot; pick a different name",
-            details={"slot": name, "reserved": sorted(reserved)},
+            f"slot {name!r} collides with a synthesised NPU sub-card name; pick a different name",
+            details={"slot": name, "reserved": sorted(NPU_SEEDED_SLOTS)},
         )
     if type not in _VALID_SLOT_TYPES:
         raise SlotConfigError(
@@ -476,18 +479,13 @@ async def add_slot(
 async def remove_slot(host: RoutingHost, name: str) -> None:
     """Programmatic ``hal0 slot remove`` (plan §4.3).
 
-    Rejects seeded-slot names (use :meth:`SlotManager.unload` or
-    ``capabilities.toml`` to disable a seeded slot, not delete it).
-    No side effect on the underlying model files — they stay in
-    the registry.
+    Any slot is removable — capability slots are recreated on demand when
+    their capability is re-enabled in settings, and a removed static seed
+    leaves a tombstone so boot-time seeding honours the deletion. A pinned
+    slot still refuses without force (SlotManager.delete, §21.10). No side
+    effect on the underlying model files — they stay in the registry.
     """
     name = host._resolve_alias(name)
-    reserved = set(SEEDED_SLOTS) | set(NPU_SEEDED_SLOTS)
-    if name in reserved:
-        raise SlotConfigError(
-            f"slot {name!r} is seeded; cannot remove (disable it via capabilities.toml)",
-            details={"slot": name, "reserved": sorted(reserved)},
-        )
     await host.delete(name)
 
 
