@@ -22,6 +22,7 @@ import pytest
 from hal0.registry.pull import (
     _CHUNK_BYTES,
     _pull_root,
+    _register_flm_pulled,
     _sanitise_id,
     _tmp_dir,
     hf_download_url,
@@ -1524,3 +1525,65 @@ async def test_run_pull_expected_hash_captured_from_redirect_hop(
     assert job.state == "failed"
     assert job.error_code == "pull.checksum_mismatch"
     assert job.files[0].expected_sha256 == wrong
+
+
+# ── _register_flm_pulled: capability classification (#1647) ──────────────────
+
+
+def test_register_flm_pulled_uses_probe_capabilities_not_hardcoded_chat(
+    tmp_hal0_home: str,
+) -> None:
+    """A fresh FLM registration must record the caller-supplied (probe-
+    classified) capabilities — an embed/STT tag must not be mistyped as
+    chat-only just because the registry row is new."""
+    registry = ModelRegistry()
+    _register_flm_pulled(
+        registry,
+        tag="embed-gemma:300m",
+        path="/models/embed-gemma",
+        size_bytes=123,
+        capabilities=["embed"],
+    )
+    model = registry.get("embed-gemma:300m")
+    assert model.capabilities == ["embed"]
+    assert model.metadata.get("runtime") == "flm"
+
+
+def test_register_flm_pulled_falls_back_to_chat_when_probe_has_no_classification(
+    tmp_hal0_home: str,
+) -> None:
+    """When the probe couldn't classify the tag (transiently empty right
+    after a pull), keep the old chat-default rather than writing an empty
+    capabilities list."""
+    registry = ModelRegistry()
+    _register_flm_pulled(
+        registry,
+        tag="mystery:tag",
+        path="/models/mystery",
+        size_bytes=123,
+        capabilities=None,
+    )
+    assert registry.get("mystery:tag").capabilities == ["chat"]
+
+
+def test_register_flm_pulled_re_pull_corrects_stale_capabilities(
+    tmp_hal0_home: str,
+) -> None:
+    """A re-pull (e.g. after upgrading the FLM toolbox) must self-heal a row
+    that was mistyped by a prior buggy pull, not just leave it alone."""
+    registry = ModelRegistry()
+    _register_flm_pulled(
+        registry,
+        tag="embed-gemma:300m",
+        path="/models/embed-gemma",
+        size_bytes=100,
+        capabilities=["chat"],  # simulates the pre-#1647 hardcoded write
+    )
+    _register_flm_pulled(
+        registry,
+        tag="embed-gemma:300m",
+        path="/models/embed-gemma",
+        size_bytes=200,
+        capabilities=["embed"],
+    )
+    assert registry.get("embed-gemma:300m").capabilities == ["embed"]

@@ -1831,6 +1831,17 @@ async def run_flm_pull(
             job.bytes_downloaded = size_bytes
         job.path = str(final_path)
 
+        # Read the freshly-reset probe's classification for this tag so the
+        # registry row records the model's real modality (embed/stt/chat)
+        # instead of assuming chat (#1647).
+        pulled_capabilities: list[str] | None = None
+        for entry in flm_served_models():
+            if entry["tag"] == tag:
+                caps = entry.get("capabilities")
+                if caps:
+                    pulled_capabilities = list(caps)
+                break
+
         # Register an FLM tag so the registry surfaces it for downstream
         # consumers (catalog, slot model resolution). hf_repo/filename
         # stay empty — FLM tags route through the toolbox, not HF directly.
@@ -1839,6 +1850,7 @@ async def run_flm_pull(
             tag=tag,
             path=str(final_path),
             size_bytes=size_bytes,
+            capabilities=pulled_capabilities,
         )
 
         job.state = "completed"
@@ -1930,6 +1942,7 @@ def _register_flm_pulled(
     tag: str,
     path: str,
     size_bytes: int,
+    capabilities: list[str] | None = None,
 ) -> None:
     """Upsert a registry entry for an FLM-pulled model.
 
@@ -1938,10 +1951,20 @@ def _register_flm_pulled(
     ``hf_filename`` stay empty. ``metadata.runtime = "flm"`` flags the
     entry so other code (slot pick, model resolution) can route it to
     the FLM provider without re-deriving from the id.
+
+    ``capabilities`` should come from the live ``flm_served_models()``
+    classification (embed/stt/chat) rather than being assumed — a hardcoded
+    ``["chat"]`` here mistyped every embed/STT tag pulled through FLM as
+    chat-only, and ``models_service.list_all()``'s dedupe skip had no way to
+    recover the real value afterward (#1647). Falls back to ``["chat"]``
+    only when the caller couldn't resolve a classification (e.g. the probe
+    was transiently empty right after the pull).
     """
+    caps = list(capabilities) if capabilities else ["chat"]
     updates: dict[str, Any] = {
         "path": path,
         "size_bytes": size_bytes,
+        "capabilities": caps,
         "metadata": {"runtime": "flm"},
     }
     try:
@@ -1953,7 +1976,7 @@ def _register_flm_pulled(
                 name=tag,
                 path=path,
                 size_bytes=size_bytes,
-                capabilities=["chat"],
+                capabilities=caps,
                 backends=["npu"],
                 metadata={"runtime": "flm"},
             )
