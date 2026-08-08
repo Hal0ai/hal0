@@ -521,6 +521,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		if (Number.isInteger(slot?.priority)) setPrio(slot.priority);
 	}, [slot?.priority]);
 
+	// Screen-reader descriptions for the header toggles — the hover `title`
+	// alone is unreachable for keyboard/touch/SR users (Codex review, #1638).
+	// Hooks: must sit ABOVE the `!slot` early return (positional counting).
+	const autoloadDescId = React.useId();
+	const pinDescId = React.useId();
+
 	if (!slot) return null;
 
 	async function onSaveClick() {
@@ -706,6 +712,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Same contract as the pinned toggle above: fire the PUT, toast, let the
 	// slots poll re-render from server truth. Excluded from the Save batch —
 	// see the `dirty` comment below.
+	// NPU trio shadows (flm-stt / flm-embed) never run as their own process,
+	// so the process-lifecycle controls (Auto-Load, Eviction priority) are
+	// hidden for them — the anchor slot owns the FLM process.
+	const isNpuShadow = device === "npu" && slot.type !== "llm";
 	const autoload = slot.autoload === true;
 	const onToggleAutoload = async (next) => {
 		try {
@@ -927,26 +937,67 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				title={`Edit ${slot.name}`}
 				width={SLOT_DRAWER_WIDTH}
 				headRight={
-					<label
-						className="slot-enable-toggle drawer-enable"
-						title={
-							pinned
-								? "Unpin slot"
-								: "Pin slot — exempt from idle/pressure eviction; unload/delete require ?force=true"
-						}
-					>
-						<span className="drawer-enable-label mono">
-							{pinned ? "Pinned" : "Unpinned"}
-						</span>
-						<input
-							type="checkbox"
-							checked={pinned}
-							disabled={enableBusy}
-							onChange={() => onTogglePinned(!pinned)}
-							aria-label={pinned ? "Unpin slot" : "Pin slot"}
-						/>
-						<span className="slot-enable-track" aria-hidden="true" />
-					</label>
+					<>
+						{/* Lifecycle pair (spec 2026-08-02 consolidation): Auto-Load =
+						    boot start only, Pin = residency only. Side by side so they
+						    read as one story instead of competing features. NPU trio
+						    shadows (flm-stt / flm-embed) have no unit or container of
+						    their own — the anchor's FLM process serves them — so
+						    Auto-Load is hidden there: writing { autoload } to a shadow
+						    TOML configures a boot start that can never happen. */}
+						{!isNpuShadow && (
+							<label
+								className="slot-enable-toggle drawer-enable"
+								data-testid="slot-autoload-toggle"
+								title="Auto-Load — start this slot automatically at boot. Only controls startup; eviction protection is the Pin toggle."
+							>
+								<span className="drawer-enable-label mono">Auto-Load</span>
+								<input
+									type="checkbox"
+									checked={autoload}
+									onChange={() => onToggleAutoload(!autoload)}
+									aria-label={
+										autoload
+											? "Disable auto-load on start"
+											: "Enable auto-load on start"
+									}
+									aria-describedby={autoloadDescId}
+								/>
+								<span className="slot-enable-track" aria-hidden="true" />
+								<span id={autoloadDescId} className="sr-only">
+									Start this slot automatically at boot. Only controls
+									startup; eviction protection is the Pin toggle.
+								</span>
+							</label>
+						)}
+						<label
+							className="slot-enable-toggle drawer-enable"
+							data-testid="slot-pin-toggle"
+							title={
+								pinned
+									? "Unpin slot — idle/pressure eviction applies again (order set by Eviction priority under Advanced)"
+									: "Pin slot — once loaded it stays resident: exempt from idle/pressure eviction, and unload/delete require ?force=true. Pinning never starts a slot — boot start is the Auto-Load toggle."
+							}
+						>
+							<span className="drawer-enable-label mono">
+								{pinned ? "Pinned" : "Unpinned"}
+							</span>
+							<input
+								type="checkbox"
+								checked={pinned}
+								disabled={enableBusy}
+								onChange={() => onTogglePinned(!pinned)}
+								aria-label={pinned ? "Unpin slot" : "Pin slot"}
+								aria-describedby={pinDescId}
+							/>
+							<span className="slot-enable-track" aria-hidden="true" />
+							<span id={pinDescId} className="sr-only">
+								A pinned slot stays resident once loaded: exempt from idle
+								and pressure eviction, and unload or delete require force.
+								Pinning never starts a slot — boot start is Auto-Load.
+							</span>
+						</label>
+					</>
 				}
 				foot={
 					<>
@@ -1514,53 +1565,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 						<div className="form-row">
 							<div className="form-lbl">
-								<span>Auto-load on start</span>
-								<FieldInfoIcon description="Start this slot automatically at boot. Off: the slot
-									only loads when you load or swap it — binding a model no
-									longer implies boot start." />
-							</div>
-							<div className="form-ctl">
-								<label className="slot-enable-toggle">
-									<input
-										type="checkbox"
-										data-testid="slot-autoload-toggle"
-										checked={autoload}
-										onChange={() => onToggleAutoload(!autoload)}
-										aria-label={autoload ? "Disable auto-load on start" : "Enable auto-load on start"}
-									/>
-									<span className="slot-enable-track" aria-hidden="true" />
-								</label>
-							</div>
-						</div>
-						<div className="form-row">
-							<div className="form-lbl">
-								<span>Eviction priority</span>
-								<FieldInfoIcon description="0-100 — lower unloads first when memory is needed.
-									Ties go to the least recently used. Pin the slot to exempt
-									it entirely." />
-							</div>
-							<div className="form-ctl">
-								<input
-									className="input mono"
-									data-testid="slot-priority-input"
-									type="number"
-									min={0}
-									max={100}
-									step={1}
-									value={prio}
-									onChange={(e) => setPrio(e.target.value)}
-									onBlur={commitPriority}
-									onKeyDown={(e) => {
-										if (e.key === "Enter") e.currentTarget.blur();
-									}}
-									style={{ width: 90 }}
-								/>
-								<div className="hint">lower unloads first</div>
-							</div>
-						</div>
-
-						<div className="form-row">
-							<div className="form-lbl">
 								<span>Context (ceiling)</span>
 								<FieldInfoIcon description="⟳ ctx_size — a hardware CEILING in tokens, not an
 									override: the bound model's own default context_size (set on the
@@ -1785,6 +1789,39 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					>
 						Advanced
 					</summary>
+
+					{/* Eviction priority (spec 2026-08-02) lives under Advanced: its
+					    lifecycle siblings (Auto-Load / Pin) are header toggles, and it
+					    only matters for unpinned slots under memory pressure. Hidden
+					    for NPU trio shadows — no process of their own to evict. */}
+					{!isNpuShadow && (
+					<div className="form-row">
+						<div className="form-lbl">
+							<span>Eviction priority</span>
+							<FieldInfoIcon description="0-100 — lower unloads first when memory is needed.
+								Ties go to the least recently used. Pin the slot to exempt
+								it entirely." />
+						</div>
+						<div className="form-ctl">
+							<input
+								className="input mono"
+								data-testid="slot-priority-input"
+								type="number"
+								min={0}
+								max={100}
+								step={1}
+								value={prio}
+								onChange={(e) => setPrio(e.target.value)}
+								onBlur={commitPriority}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") e.currentTarget.blur();
+								}}
+								style={{ width: 90 }}
+							/>
+							<div className="hint">lower unloads first</div>
+						</div>
+					</div>
+					)}
 
 					{/* Flags preview — backend-provided resolved_command (real podman argv),
           computed SERVER-SIDE (profile + MTP + image resolution). #1379 removed

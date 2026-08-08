@@ -2908,6 +2908,18 @@ select.npu-sel {
   right: 56px;
   display: flex;
   align-items: center;
+  gap: 18px; /* room between the Auto-Load and Pinned header toggles */
+}
+/* headRight is absolutely positioned, so the header reserves no space for it —
+   a long title (e.g. "Edit <slot-name>") or the eyebrow would run underneath.
+   Reserve the width of the widest headRight (the slot drawer's two lifecycle
+   toggles, ~215px, plus their 56px close-button offset) and ellipsize. */
+.drawer-h:has(.drawer-h-right) h2,
+.drawer-h:has(.drawer-h-right) .modal-h-eye {
+  margin-right: 270px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .drawer-enable { gap: 8px; }
 .drawer-enable-label {
@@ -3151,6 +3163,11 @@ select.npu-sel {
   top: -4px;
   z-index: 60;
   display: none;
+  /* Shrink-to-fit for an absolutely-positioned box resolves against the
+     containing block — the ~19px icon wrapper — which collapsed the popup
+     to one word per line. max-content sizes it to the text instead, with
+     max-width as the wrap point. */
+  width: max-content;
   max-width: 280px;
   padding: 6px 10px;
   color: var(--fg-2);
@@ -3165,6 +3182,29 @@ select.npu-sel {
 .field-info-wrap:hover .field-info-pop,
 .field-info-wrap:focus-within .field-info-pop {
   display: block;
+}
+/* On narrow screens the to-the-right placement runs the (now content-width)
+   popup past the right edge of overflow-clipped panels (.s-panel). Drop it
+   below the icon, centred, with a viewport-derived cap instead. */
+@media (max-width: 720px) {
+  .field-info-pop {
+    left: 50%;
+    top: 20px;
+    transform: translateX(-50%);
+    max-width: min(260px, calc(100vw - 48px));
+  }
+}
+/* Visually hidden but exposed to assistive tech (toggle descriptions etc.). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 .form-row .form-lbl .warn { font-size: 10px; color: var(--warn); font-family: var(--jbm); }
 .form-row .form-ctl { font-family: var(--jbm); }

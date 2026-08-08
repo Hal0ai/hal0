@@ -24,6 +24,21 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- Field-info popups (the `(i)` descriptions in the slot/model drawers and
+  settings pages) no longer collapse to one word per line — the popup was
+  shrink-to-fit against its tiny icon wrapper; it now sizes to its text up
+  to the 280px wrap width. The slot drawer's Auto-load and Pin descriptions
+  now also spell out the difference: Auto-load only controls boot start,
+  Pin only controls residency (eviction exemption + guarded unload/delete).
+- Slot drawer lifecycle controls consolidated: Auto-Load moved from the Model
+  section up into the drawer header next to the Pinned toggle (same
+  instant-apply style — the pair now reads as one story: Auto-Load = when it
+  starts, Pin = whether it may be stopped), and Eviction priority moved into
+  the Advanced disclosure. Two fewer always-visible rows in the drawer body,
+  and NPU slots — which have no Model section — gain the Auto-Load toggle.
+
 ## [1.0.0-rc.2] — 2026-08-08
 
 Second — and intended final — release candidate on the road to 1.0.0. This
