@@ -14,6 +14,11 @@
 #   - .mdx/.md copied verbatim (Starlight component imports preserved).
 #   - A section missing in hal0 is skipped, never deleted on the web side.
 #   - Nothing else in hal0-web is touched (blog/, marketing, alpha-docs/).
+#
+# workflow_dispatch has no branch input, so a manual run is pinned to `main`
+# below (the "Checkout hal0 (source)" step) rather than defaulting to
+# whatever ref it was invoked from — a manual test run off a feature branch
+# must never mirror unmerged docs to the live site.
 
 name: mirror-docs
 
@@ -40,6 +45,7 @@ jobs:
       - name: Checkout hal0 (source)
         uses: actions/checkout@v4
         with:
+          ref: main
           path: hal0
 
       - name: Checkout Hal0ai/hal0-web (target)
@@ -72,7 +78,10 @@ jobs:
             exit 0
           fi
 
-          source_sha="${{ github.sha }}"
+          # Read the actual synced commit off the pinned hal0 checkout rather
+          # than github.sha, which under workflow_dispatch reflects whatever
+          # ref triggered the run, not the main commit that was mirrored.
+          source_sha="$(git -C ../hal0 rev-parse HEAD)"
           source_short="${source_sha:0:7}"
           git add src/content/docs/docs/
           git commit -m "docs: mirror from hal0@${source_short}
