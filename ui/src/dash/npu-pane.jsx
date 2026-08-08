@@ -27,7 +27,7 @@ import { slotIndicatorFromPhase } from './slot-status.js'
 // the shared helper folds them through backend_to_device → npu).
 import { devKind } from '@/lib/deviceMeta'
 import { PillToggle } from './primitives.jsx'
-import { npuModalityOn } from './npu-modality.js'
+import { npuModalityOn, npuRoleForSlot, isNpuShadowSlot } from './npu-modality.js'
 
 // ─── icons (16×16, hal0 thin-line family — ported from the design) ─────────
 const NI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -272,7 +272,7 @@ export function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
 }
 
 // ═══ per-slot card (right rail) ════════════════════════════════════════
-function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
+function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu }) {
   const ind = slotIndicatorFromPhase(slot)
   // Signal from BOTH the slot's own phase and the NPU occupancy's synthesised
   // state. The slot phase is authoritative for the anchor (esp. actively
@@ -330,30 +330,24 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
         <span className="grow" />
         {/* The pills APPLY the modality directly (PUT [npu] on the anchor +
             cold restart, same contract as the drawer's applyNpu) — they used
-            to merely open the edit drawer, which read as a broken toggle. */}
-        {(slot.name === 'flm-stt' || slot.name === 'flm-embed') ? (
-          <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
-            <span style={{color: 'var(--fg-2)'}}>
-              {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
+            to merely open the edit drawer, which read as a broken toggle.
+            Role comes from the slot TYPE (npuRoleForSlot), not the display
+            name — a non-canonically-named shadow must not flip chat. */}
+        {(() => {
+          const role = npuRoleForSlot(slot)
+          const roleLabel = role === 'asr' ? 'STT' : role === 'embed' ? 'Embed' : 'Chat'
+          return (
+            <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
+              <span style={{color: 'var(--fg-2)'}}>{roleLabel}</span>
+              <PillToggle
+                on={npuModalityOn(anchorNpu, role)}
+                label={roleLabel}
+                disabled={handlers.modalityBusy}
+                onToggle={(next) => handlers.onModality(role, next)}
+              />
             </span>
-            <PillToggle
-              on={npuModalityOn(mainFlmNpu, slot.name === 'flm-stt' ? 'asr' : 'embed')}
-              label={slot.name === 'flm-stt' ? 'STT' : 'Embed'}
-              disabled={handlers.modalityBusy}
-              onToggle={(next) => handlers.onModality(slot.name === 'flm-stt' ? 'asr' : 'embed', next)}
-            />
-          </span>
-        ) : (
-          <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
-            <span style={{color: 'var(--fg-2)'}}>Chat</span>
-            <PillToggle
-              on={npuModalityOn(mainFlmNpu, 'chat')}
-              label="Chat"
-              disabled={handlers.modalityBusy}
-              onToggle={(next) => handlers.onModality('chat', next)}
-            />
-          </span>
-        )}
+          )
+        })()}
       </div>
     </div>
   )
@@ -367,16 +361,22 @@ export function NpuOccupancyCard({ slots }) {
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
   const editMut = useSlotEdit()
-  // Full npu dict (chat/asr/embed) via react-query so the drawer's edit
-  // (which invalidates ['slot-config','flm']) refreshes the card toggles in
-  // lockstep — the old one-shot fetch went stale after every drawer change.
-  const flmCfgQuery = useSlotConfig('flm')
 
+  // The ANCHOR is resolved structurally — the non-shadow NPU LLM slot — not
+  // by the canonical 'flm' display name. A renamed or legacy anchor ('npu')
+  // must still own the pills, the config query and the header controls;
+  // keyed on the name, every pill click silently no-op'd on such boxes.
   const npuSlots = (slots || []).filter(isNpuSlot)
+  const anchorSlot =
+    npuSlots.find((s) => !isNpuShadowSlot(s) && s.type === 'llm') ||
+    npuSlots.find((s) => !isNpuShadowSlot(s))
+  // Full npu dict (chat/asr/embed) via react-query so the drawer's edit
+  // (which invalidates ['slot-config',anchor]) refreshes the card toggles in
+  // lockstep — the old one-shot fetch went stale after every drawer change.
+  const anchorCfgQuery = useSlotConfig(anchorSlot?.name)
   if (npuSlots.length === 0) return null
 
-  const flmSlot = npuSlots.find(s => s.name === 'flm')
-  const mainFlmNpu = flmCfgQuery.data?.npu || flmSlot?.npu || {}
+  const anchorNpu = anchorCfgQuery.data?.npu || anchorSlot?.npu || {}
 
   const occ = occQuery.data || {}
   const occSlots = occ.slots || []
@@ -408,10 +408,9 @@ export function NpuOccupancyCard({ slots }) {
   // overwrite the anchor's colour (grid turns green + labels "flm-stt"). Only
   // non-shadow slots own grid columns, so the grid always reads as the primary
   // FLM slot. Shadow cards keep their own accent via ComboSlot's `hue` prop.
-  const isNpuShadow = (s) => s.type === 'transcription' || s.type === 'embedding'
   const owners = Array(NPU_COLS).fill(null)
   npuSlots.forEach((s, idx) => {
-    if (isNpuShadow(s)) return
+    if (isNpuShadowSlot(s)) return
     const o = occByName[s.name]
     const cols = o?.cols || []
     const ind = slotIndicatorFromPhase(s)
@@ -455,19 +454,24 @@ export function NpuOccupancyCard({ slots }) {
   // process owns all three capabilities; the shadow slots have no config of
   // their own) and cold-restarts it, mirroring the drawer's applyNpu.
   const applyModality = (role, next) => {
-    if (!flmSlot || editMut.isPending || restartMut.isPending) return
-    const npu = {
-      chat: npuModalityOn(mainFlmNpu, 'chat'),
-      asr: npuModalityOn(mainFlmNpu, 'asr'),
-      embed: npuModalityOn(mainFlmNpu, 'embed'),
-      [role]: next,
+    if (!anchorSlot || editMut.isPending || restartMut.isPending) return
+    // Enabling chat needs a bound model — model presence IS the activation
+    // signal, so a bare chat=true write would show the pill on while the
+    // slot stays unroutable. The model picker lives in the drawer.
+    if (role === 'chat' && next && !(anchorSlot.modelDefault || anchorSlot.model_id || anchorSlot.model)) {
+      toast('Pick a chat model first — opening the slot editor', 'info')
+      window.location.hash = '#slots/' + anchorSlot.name
+      return
     }
+    // Partial write on purpose: the backend one-level-deep-merges [npu]
+    // (merge_slot_config), so sending only the flipped key can never clobber
+    // sibling modalities off a stale or still-loading client snapshot.
     editMut.mutate(
-      { name: flmSlot.name, body: { npu } },
+      { name: anchorSlot.name, body: { npu: { [role]: next } } },
       {
         onSuccess: () => {
-          toast(`${flmSlot.name} NPU ${role} ${next ? 'on' : 'off'} — restarting`, 'info')
-          restartMut.mutate(flmSlot.name, {
+          toast(`${anchorSlot.name} NPU ${role} ${next ? 'on' : 'off'} — restarting`, 'info')
+          restartMut.mutate(anchorSlot.name, {
             onError: (err) =>
               toast(`NPU restart failed — ${err?.message || 'see logs'}`, 'warn'),
           })
@@ -513,22 +517,22 @@ export function NpuOccupancyCard({ slots }) {
           </span>
           <span className="grow" />
           <button className="btn ghost sm ctl-start" title="Start"
-            onClick={() => handlers.onStart(flmSlot)} disabled={!flmSlot}>
+            onClick={() => handlers.onStart(anchorSlot)} disabled={!anchorSlot}>
             ▶
           </button>
           <button className="btn ghost sm ctl-stop" title="Stop"
-            onClick={() => handlers.onStop(flmSlot)} disabled={!flmSlot}>
+            onClick={() => handlers.onStop(anchorSlot)} disabled={!anchorSlot}>
             ■
           </button>
           <button className="btn ghost sm ctl-restart" title="Restart"
-            onClick={() => handlers.onRestart(flmSlot)} disabled={!flmSlot}>
+            onClick={() => handlers.onRestart(anchorSlot)} disabled={!anchorSlot}>
             ↻
           </button>
           <button className="btn ghost sm ctl-logs" title="Logs"
-            onClick={() => handlers.onLogs(flmSlot)} disabled={!flmSlot}>
+            onClick={() => handlers.onLogs(anchorSlot)} disabled={!anchorSlot}>
             📋
           </button>
-          <button className="btn ghost sm" title="Configure FLM slot" onClick={() => window.location.hash = '#slots/flm'} style={{fontSize: 13}}>✎ Configure</button>
+          <button className="btn ghost sm" title="Configure FLM slot" onClick={() => anchorSlot && (window.location.hash = '#slots/' + anchorSlot.name)} disabled={!anchorSlot} style={{fontSize: 13}}>✎ Configure</button>
         </div>
         <div className="wcard-b">
           <div className="combo">
@@ -565,7 +569,7 @@ export function NpuOccupancyCard({ slots }) {
                   hue={HUES[idx % HUES.length]}
                   handlers={handlers}
                   act={act}
-                  mainFlmNpu={mainFlmNpu}
+                  anchorNpu={anchorNpu}
                 />
               ))}
             </div>
