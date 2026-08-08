@@ -12,9 +12,11 @@ The fix keeps "no tool routing" reachable, but only if you say so out loud.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 
+from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import (
     BRAIN_TOOL_MODEL_DEFAULT,
     BRAIN_TOOL_MODEL_DISABLED,
@@ -84,6 +86,26 @@ def test_the_normalised_value_round_trips_through_a_dump() -> None:
     cfg = BrainChatConfig(tool_model="")
     assert cfg.model_dump()["tool_model"] == BRAIN_TOOL_MODEL_DEFAULT
     assert BrainChatConfig(**cfg.model_dump()).tool_model == BRAIN_TOOL_MODEL_DEFAULT
+
+
+@pytest.mark.parametrize("word", sorted(BRAIN_TOOL_MODEL_DISABLED))
+def test_an_explicit_off_survives_a_save_load_round_trip(word: str, tmp_path: Path) -> None:
+    """#1644: the save→load composition, not just each rule in isolation.
+
+    ``save_hal0_config`` used to dump the in-memory disabled value ("") to
+    disk verbatim; ``load_hal0_config`` then re-ran ``_normalise_tool_model``
+    on that on-disk "" and coerced it straight back to the default, because
+    an on-disk empty string is defined to mean "never set". An operator who
+    deliberately disabled tool routing got it silently re-enabled on the
+    next `hal0-api` restart.
+    """
+    toml_path = tmp_path / "hal0.toml"
+    save_hal0_config(Hal0Config(brain_chat={"tool_model": word}), toml_path)
+    reloaded = load_hal0_config(toml_path)
+    assert reloaded.brain_chat.tool_model == "", (
+        f"tool_model={word!r} did not survive a save/load round trip: "
+        f"got {reloaded.brain_chat.tool_model!r}"
+    )
 
 
 def test_tool_model_is_a_known_settings_key() -> None:
