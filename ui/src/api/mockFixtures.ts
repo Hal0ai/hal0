@@ -1197,6 +1197,43 @@ function buildMemoryGraphStatus() {
   }
 }
 
+// ─── Runner Images (Models → Runner Images tab) ───────────────────────────
+// Shape mirrors /api/runner-images (registry rows synced from
+// hal0-runner-images images.json + GHCR). One row is enough for the
+// catalog list + card to render; the pulls list must be an ARRAY — the
+// downloads pane calls `.filter` on it directly.
+function buildRunnerImages() {
+  return {
+    images: [
+      {
+        id: 'rocmfpx',
+        image: 'ghcr.io/hal0ai/hal0-rocmfpx',
+        tag: 'ade07ba',
+        digest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+        size_bytes: 7_340_032_000,
+        manifest_key: null,
+        ownership: 'referenced',
+        publish: 'manual',
+        notes: 'ROCmFPX runner — HIP+Vulkan single build (mock fixture).',
+        build: null,
+        local_path: null,
+        downloaded_at: null,
+        discovered_at: '2026-08-08T00:00:00Z',
+        updated_at: '2026-08-08T00:00:00Z',
+        extra: {},
+      },
+    ],
+  }
+}
+
+function buildRunnerImagesDownloaded() {
+  return { images: [] }
+}
+
+function buildRunnerImagesPulls() {
+  return []
+}
+
 // ─── Builder lookup — keyed by the AllowRow.key in `./mock.ts`'s
 // `MOCK_ALLOWLIST`. The route table there only carries `{re, key,
 // networkFirst}` (no function refs), so it stays cheap to construct eagerly;
@@ -1221,6 +1258,9 @@ export const MOCK_BUILDERS: Record<string, Builder> = {
   stacks: buildStacksList,
   chatTemplates: buildChatTemplates,
   memoryGraphStatus: buildMemoryGraphStatus,
+  runnerImages: buildRunnerImages,
+  runnerImagesDownloaded: buildRunnerImagesDownloaded,
+  runnerImagesPulls: buildRunnerImagesPulls,
   memoryEngine: buildMemoryEngine,
   memoryBanks: buildMemoryBanks,
   bankTimeseries: buildBankTimeseries,

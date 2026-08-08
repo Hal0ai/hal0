@@ -39,6 +39,21 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.view .vh button:has-text("Search HF")')).toBeVisible()
   })
 
+  test('Runner Images tab swaps the page heading in place — no second vh', async ({ page }) => {
+    await page.goto('/#models')
+    await page.locator('.slot-tab:has-text("Runner Images")').click()
+    // The single catalog heading renames; the view must not stack a second one.
+    await expect(page.locator('.view .vh h1')).toHaveCount(1)
+    await expect(page.locator('.view .vh h1')).toHaveText('Runner Images')
+    // Header actions swap to the sync CTA; the Models CTAs leave.
+    await expect(page.getByTestId('ri-sync')).toBeVisible()
+    await expect(page.locator('.view .vh button:has-text("Add by HF coords")')).toHaveCount(0)
+    // Switching back restores the Models heading + CTAs.
+    await page.locator('.slot-tab:has-text("Inference Models")').click()
+    await expect(page.locator('.view .vh h1')).toHaveText('Models')
+    await expect(page.locator('.view .vh button:has-text("Add by HF coords")')).toBeVisible()
+  })
+
   test('simplified filter chips toggle OR semantics', async ({ page }) => {
     await page.goto('/#models')
     // All 7 filter chips render
