@@ -21,6 +21,7 @@ import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
 import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
+import { npuModalityOn } from "./npu-modality.js";
 import { slotModelRow } from "./slots/slot-shared.js";
 
 // The slot edit drawer's own width, and therefore the offset the stacked model
@@ -316,9 +317,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
 	// device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
 	// revert-on-error.
-	const [npuAsr, setNpuAsr] = useStateSM(slot?.npu?.asr === true);
-	const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
-	const [npuChat, setNpuChat] = useStateSM(slot?.npu?.chat !== false);
+	const [npuAsr, setNpuAsr] = useStateSM(npuModalityOn(slot?.npu, "asr"));
+	const [npuEmbed, setNpuEmbed] = useStateSM(npuModalityOn(slot?.npu, "embed"));
+	const [npuChat, setNpuChat] = useStateSM(npuModalityOn(slot?.npu, "chat"));
 	// #1388: seed from the CONFIGURED tag ([model].default, lifted by
 	// config_enrichment and normalised to `modelDefault`), not the live
 	// `model_id`. useSlots documents model_id as stale for exactly this slot
@@ -478,12 +479,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setPendingSwap(null);
 		setModelEditOpen(false);
 		setFieldErrs({});
-		setNpuAsr(slot.npu?.asr === true);
-		setNpuEmbed(slot.npu?.embed === true);
+		setNpuAsr(npuModalityOn(slot.npu, "asr"));
+		setNpuEmbed(npuModalityOn(slot.npu, "embed"));
 		// Re-seed the chat pill + all three model selects too, so a save +
 		// refetch keeps the drawer in sync with server truth instead of
 		// drifting until the drawer is remounted.
-		setNpuChat(slot.npu?.chat !== false);
+		setNpuChat(npuModalityOn(slot.npu, "chat"));
 		setNpuChatModel(
 			slot.modelDefault || slot.model_id || slot.model || "qwen3:4b",
 		);

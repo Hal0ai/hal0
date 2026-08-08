@@ -27,6 +27,7 @@ import { slotIndicatorFromPhase } from './slot-status.js'
 // the shared helper folds them through backend_to_device → npu).
 import { devKind } from '@/lib/deviceMeta'
 import { PillToggle } from './primitives.jsx'
+import { npuModalityOn } from './npu-modality.js'
 
 // ─── icons (16×16, hal0 thin-line family — ported from the design) ─────────
 const NI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -298,7 +299,12 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
   const tps = typeof m.toks === 'number' && m.toks > 0 ? Math.round(m.toks) : null
   const ttft = typeof m.ttft === 'number' && m.ttft > 0 ? Math.round(m.ttft) : null
   const gb = occ && typeof occ.gb === 'number' ? round1(occ.gb) : typeof m.mem === 'number' ? round1(m.mem) : null
-  const model = String(slot.model_id || slot.model || occ?.model || '').replace(/-FLM$/, '')
+  // #1388 ordering, same as the drawer's chat-model seed: the CONFIGURED
+  // [model].default first, live id as fallback. model_id is documented stale
+  // for this slot class (trio slots never load as their own process; the
+  // anchor's id lags while stopped), so leading with it made this card
+  // disagree with the edit drawer about which model the slot runs.
+  const model = String(slot.modelDefault || slot.model_id || slot.model || occ?.model || '').replace(/-FLM$/, '')
   return (
     <div className={'cslot' + (running ? ' running' : ' dim')} style={{ '--slot-hue': hue.hue, '--slot-fg': hue.fg }}>
       <div className="cslot-top">
@@ -328,7 +334,7 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
               {slot.name === 'flm-stt' ? 'STT' : 'Embed'}
             </span>
             <PillToggle
-              on={slot.name === 'flm-stt' ? mainFlmNpu.asr !== false : mainFlmNpu.embed !== false}
+              on={npuModalityOn(mainFlmNpu, slot.name === 'flm-stt' ? 'asr' : 'embed')}
               label={slot.name === 'flm-stt' ? 'STT' : 'Embed'}
               className="npu-card-toggle"
               onToggle={() => handlers.onEdit(slot)}
@@ -338,7 +344,7 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, mainFlmNpu }) {
           <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
             <span style={{color: 'var(--fg-2)'}}>Chat</span>
             <PillToggle
-              on={mainFlmNpu?.chat !== false}
+              on={npuModalityOn(mainFlmNpu, 'chat')}
               label="Chat"
               className="npu-card-toggle"
               onToggle={() => handlers.onEdit(slot)}
