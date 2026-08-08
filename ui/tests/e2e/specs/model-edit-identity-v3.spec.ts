@@ -1,23 +1,20 @@
 /**
- * model-edit-identity-v3 — display name + curated type toggles in the
- * model "Edit options" pane (RecipeEditorModal).
+ * model-edit-identity-v3 — display name editing in the model "Edit options"
+ * pane (RecipeEditorModal).
  *
- * The editor gains:
- *   1. A display-name text input, prefilled from the model's `name`
- *      (placeholder = model id), written to PUT /api/models/{id} as `name`
- *      only when changed.
- *   2. A curated row of type toggles (mtp, moe, tool-calling, reasoning,
- *      coder, vision) prefilled from the model's `tags`, written back as a
- *      `tags` union that preserves non-curated provenance tags. The union
- *      logic itself is pinned by ../../src/dash/__tests__/model-types.test.mjs;
- *      here we assert the UI wiring + the PUT contract end-to-end.
+ * The curated "type" toggle row (mtp/moe/tool-calling/reasoning/coder/vision)
+ * is RETIRED: behaviour is owned by typed fields (defaults.mtp,
+ * defaults.enable_thinking, capability_flags.tool_calling, mmproj-derived
+ * vision) and tags are freeform labels the editor no longer touches. These
+ * tests pin the retirement (no toggles rendered, PUT never carries `tags`)
+ * alongside the surviving display-name contract.
  *
  * The recipe editor auto-targets the first installed model exposed by the
  * dashboard mock — `qwen3.6-27b-mtp` — mirroring model-recipe-template-v3.
  */
 import { test, expect } from '../fixtures/apiMock'
 
-const CURATED = ['mtp', 'moe', 'tool-calling', 'reasoning', 'coder', 'vision']
+const RETIRED = ['mtp', 'moe', 'tool-calling', 'reasoning', 'coder', 'vision']
 
 function mockChatTemplates(page: import('@playwright/test').Page) {
   return page.route('**/api/chat-templates', (route) =>
@@ -29,8 +26,8 @@ function mockChatTemplates(page: import('@playwright/test').Page) {
   )
 }
 
-test.describe('Model edit — display name + type toggles', () => {
-  test('name input and all curated type toggles render', async ({ page }) => {
+test.describe('Model edit — display name, type toggles retired', () => {
+  test('name input renders; no curated type toggles', async ({ page }) => {
     await mockChatTemplates(page)
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').click()
@@ -41,23 +38,12 @@ test.describe('Model edit — display name + type toggles', () => {
     // even when no display name is set.
     await expect(nameInput).toHaveAttribute('placeholder', 'qwen3.6-27b-mtp')
 
-    for (const tag of CURATED) {
-      await expect(page.getByTestId(`type-toggle-${tag}`)).toBeVisible()
+    for (const tag of RETIRED) {
+      await expect(page.getByTestId(`type-toggle-${tag}`)).toHaveCount(0)
     }
   })
 
-  test('toggling a type flips its aria-checked state', async ({ page }) => {
-    await mockChatTemplates(page)
-    await page.goto('/#models')
-    await page.locator('button:has-text("Edit options")').click()
-
-    const mtp = page.getByTestId('type-toggle-mtp')
-    await expect(mtp).toHaveAttribute('aria-checked', 'false')
-    await mtp.click()
-    await expect(mtp).toHaveAttribute('aria-checked', 'true')
-  })
-
-  test('editing the name and toggling a type writes name + tags on Save', async ({ page }) => {
+  test('editing the name writes name — and never tags — on Save', async ({ page }) => {
     let putBody: any = null
     await page.route('**/api/models/qwen3.6-27b-mtp', async (route) => {
       if (route.request().method() === 'PUT') {
@@ -68,7 +54,6 @@ test.describe('Model edit — display name + type toggles', () => {
           body: JSON.stringify({
             id: 'qwen3.6-27b-mtp',
             name: putBody.name,
-            tags: putBody.tags,
           }),
         })
       }
@@ -80,10 +65,9 @@ test.describe('Model edit — display name + type toggles', () => {
     await page.locator('button:has-text("Edit options")').click()
 
     await page.getByTestId('model-name-input').fill('My Renamed Qwen')
-    await page.getByTestId('type-toggle-mtp').click()
     await page.getByTestId('model-save').click()
 
     await expect.poll(() => putBody?.name).toBe('My Renamed Qwen')
-    await expect.poll(() => putBody?.tags).toContain('mtp')
+    expect(putBody).not.toHaveProperty('tags')
   })
 })

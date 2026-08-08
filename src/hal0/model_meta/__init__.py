@@ -281,16 +281,22 @@ MODEL_BACKENDS: tuple[str, ...] = (
 #: Curated ``model.tags`` vocabulary served on /api/meta/enums (WS-13) so the
 #: dashboard's tag chips stop hardcoding their own copies. Ordering is
 #: presentation order: the behaviour-driving type tags first (mirrors the UI
-#: edit pane's toggles — ui/src/dash/model-types.js MODEL_TYPE_TAGS), then
+#: edit pane's retired type toggles — chips removed, tags inert), then
 #: provenance, then the descriptive tags the curated catalogue seeds
 #: (registry/curated.py). Tags remain freeform on ``Model.tags`` — this tuple
 #: is the *curated* superset, not a validation whitelist.
 #: tests/model_meta/test_curated_model_tags.py pins this against the curated
 #: catalogue so a new seed tag can't silently drift out of the enums payload.
 CURATED_MODEL_TAGS: tuple[str, ...] = (
-    # behaviour-driving type tags (routing / slot-feature gates)
-    # "moe" removed (§7.1d) — it was declared but never read anywhere;
-    # Model.architecture (hardware/recommend.is_moe) is the replacement.
+    # DESCRIPTIVE ONLY — the curated "type" chips are retired from the model
+    # editors and NOTHING routes on these tags. Behaviour is owned by typed
+    # fields: ``defaults.mtp`` (model_is_mtp_eligible prefers it; the tag is
+    # the pre-1.0 source a boot migration folds forward), Model.architecture
+    # (moe — the "moe" tag was removed in §7.1d), ``capability_flags.
+    # tool_calling`` (the §7.3 master gate), ``defaults.enable_thinking``
+    # (reasoning), the capabilities list + mmproj sidecar (vision, surfaced
+    # via LoadedSlot.modalities). They remain in this tuple only because the
+    # curated catalogue still stamps them as display tags.
     "mtp",
     "tool-calling",
     "reasoning",

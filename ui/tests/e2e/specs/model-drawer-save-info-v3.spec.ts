@@ -95,7 +95,6 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await openDrawer(page)
 
     await page.getByTestId('model-name-input').fill('Saved model name')
-    await page.getByTestId('type-toggle-coder').click()
     await page.getByTestId('cap-toggle-vision').click()
     await page.getByTestId('backend-toggle-vulkan').click()
     await page.getByTestId('model-mmproj-input').fill('/models/mmproj-saved.gguf')
@@ -113,7 +112,8 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     await expect.poll(() => putBody).not.toBeNull()
     expect(putBody.name).toBe('Saved model name')
-    expect(putBody.tags).toEqual(['curated', 'coder'])
+    // Type-tag chips are retired — saves never touch tags.
+    expect(putBody).not.toHaveProperty('tags')
     expect(putBody.capabilities).toEqual(['chat', 'vision'])
     expect(putBody.backends).toEqual(['rocm', 'vulkan'])
     expect(putBody.mmproj).toBe('/models/mmproj-saved.gguf')
@@ -148,11 +148,12 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     const drawer = page.locator('.drawer.open')
     const labels = drawer.locator('.form-lbl')
-    // +1 vs the pre-existing 14: the new "Vision" tri-state row
-    // (spec-hw-slot-ownership §1 — vision moved off the per-slot toggle).
-    await expect(labels).toHaveCount(15)
+    // 14 rows: the Vision tri-state row (+1, spec-hw-slot-ownership §1) and
+    // the retired Types chip row (−1 — type tags are inert, typed fields own
+    // behaviour) net out against the pre-existing 14.
+    await expect(labels).toHaveCount(14)
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
-    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(15)
+    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(14)
 
     const displayNameLabel = labels.filter({ hasText: 'Display name' })
     const info = displayNameLabel.getByRole('button', { name: 'Info' })
