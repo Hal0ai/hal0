@@ -1156,7 +1156,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "type": "string",
                 "description": (
                     "Container image override — FPX/FP4 quants need "
-                    "ghcr.io/hal0ai/hal0-rocmfpx:c077206 with runtime='container'"
+                    "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba with runtime='container'"
                 ),
             },
             "runtime": {"type": "string", "description": "Set 'container' when image is set"},

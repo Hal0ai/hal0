@@ -201,8 +201,8 @@ COMMON_RUN_FLAGS=(
 # device flags at all, so the container is handed neither /dev/kfd nor a
 # /dev/dri node and there is physically no backend device to select.
 declare -A BACKENDS=(
-  [rocm]="ghcr.io/hal0ai/hal0-rocmfpx:c077206|/opt/rocmfpx/bin/llama-bench|2048|GGML_HIP_ENABLE_UNIFIED_MEMORY=1|-ngl 99 -dev ROCm0"
-  [vulkan_radv]="ghcr.io/hal0ai/hal0-rocmfpx:c077206|/opt/rocmfpx/bin/llama-bench|512||-ngl 99 -dev Vulkan0"
+  [rocm]="ghcr.io/hal0ai/hal0-rocmfpx:ade07ba|/opt/rocmfpx/bin/llama-bench|2048|GGML_HIP_ENABLE_UNIFIED_MEMORY=1|-ngl 99 -dev ROCm0"
+  [vulkan_radv]="ghcr.io/hal0ai/hal0-rocmfpx:ade07ba|/opt/rocmfpx/bin/llama-bench|512||-ngl 99 -dev Vulkan0"
   [cpu]="ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server|/usr/local/bin/llama-bench|512||-ngl 0"
 )
 

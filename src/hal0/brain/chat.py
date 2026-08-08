@@ -1170,11 +1170,18 @@ def _unrouteable_model_error(tried_model: str) -> str:
 #     output that does not match the expected peg-native format" on EVERY
 #     tools-attached completion, tool-related prompt or not. llama.cpp builds
 #     a tool-format parser from the template and rejects the whole request
-#     when the output doesn't match. This is why `_routed` strips `tools`
-#     from the brain round below — no response ever arrives to run signal
-#     detection on otherwise.
+#     when the output doesn't match. #1626 briefly stripped `tools` from the
+#     brain round because of this.
 #
-# So the 1B genuinely cannot drive tools on this runtime. `[brain_chat]
+# ROOT CAUSE, RESOLVED BY RUNNER ade07ba (DEFAULT_ROCMFPX_IMAGE): all three
+# shapes were ONE bug — the MiniCPM5-family vocab carries the tool syntax as
+# CONTROL tokens (`<function`=18, `</function>`=19, `<param`=20,
+# `</param>`=21) and llama-server strips control pieces at decode, so the
+# parser never saw the openers the model actually emitted. The ade07ba
+# runner's MiniCPM5 specialized parser preserves those tokens and
+# grammar-locks the call shape, so the 1B DOES drive native tool calls now;
+# brain rounds carry `tools` again and everything below is the FALLBACK for
+# older runners and off-dialect models. `[brain_chat]
 # tool_model` (default "hal0/agent") is the documented mitigation, and this is
 # its implementation.
 #
@@ -1412,25 +1419,16 @@ def _tool_routing_llm(
             return await _degrade(await llm(body))
 
         body["model"] = chat_model
-        # The brain round goes out WITHOUT native `tools`. The runtime builds
-        # a tool-format parser from the chat template and hard-fails the WHOLE
-        # completion when the model's output doesn't match it — measured on
-        # lxc105 (image c077206, bundled hal0-brain-sft.jinja): every
-        # tools-attached request, even "just say hello", returns HTTP 500
-        # "The model produced output that does not match the expected
-        # peg-native format". The 1B cannot match that format by design (the
-        # reason this reroute exists), so attaching `tools` buys nothing and
-        # costs the entire turn. Detection is unaffected: the text fallback
-        # and _tool_intent_artefact read the reply, not the request, and the
-        # steward knows its tool surface from the system prompt. Popped per
-        # round and restored — the engine owns `body` and the tool-model
-        # rounds need the schemas back.
-        native_tools = body.pop("tools", None)
-        try:
-            response = await llm(body)
-        finally:
-            if native_tools is not None:
-                body["tools"] = native_tools
+        # Brain rounds carry native `tools` again as of runner ade07ba
+        # (DEFAULT_ROCMFPX_IMAGE): llama.cpp's MiniCPM5 specialized parser
+        # preserves the vocab's tool-syntax control tokens and grammar-locks
+        # the call shape, so the 1B's attribute-XML dialect parses into real
+        # `tool_calls` — measured live (clean JSON args, no peg-format 500).
+        # On the PRIOR runner (c077206) a tools-attached request against the
+        # brain slot always 500'd, which is why #1626 briefly stripped tools
+        # from this round; the reroute below is now the fallback it was
+        # designed to be, not the only path.
+        response = await llm(body)
         if not isinstance(response, dict) or response.get("error"):
             # A BRAIN-side failure keeps its documented contract exactly — the
             # loop core turns it into the error+done frames tests already pin.
