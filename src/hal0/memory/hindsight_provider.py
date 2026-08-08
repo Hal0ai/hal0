@@ -635,6 +635,25 @@ class HindsightProvider(MemoryProvider):
         return projects, len(projects) < len([r for r in reqs if r])
 
     @staticmethod
+    def _wants_private_only(requested: str | list[str] | None) -> bool:
+        """True when every requested namespace is ``private:<id>`` (#1654).
+
+        ``_is_visible_to`` only enforces OWNERSHIP of private docs — a
+        non-private doc always passes it, unconditionally, regardless of
+        what was requested. So a read for ``private:<agent>`` alone (no
+        ``shared``) currently returns identically to a ``shared`` read: the
+        caller's own private docs AND every ordinary public doc in the bank.
+        Callers that explicitly ask for the private namespace ONLY (e.g. the
+        per-agent memory-stats chip) want private docs alone; this is the
+        signal :meth:`list_items` uses to apply that extra filter. A mixed
+        request (``["shared", "private:x"]``) is NOT private-only — it wants
+        the ordinary union — so this returns ``False`` unless every entry is
+        a private namespace.
+        """
+        reqs = HindsightProvider._requested_list(requested)
+        return bool(reqs) and all(isinstance(ds, str) and ds.startswith(_PRIVATE) for ds in reqs)
+
+    @staticmethod
     def _is_in_scope(item: dict[str, Any], projects: set[str], wants_unscoped: bool) -> bool:
         """Read-side enforcement of the ``project:<id>`` tag (#1300).
 
@@ -911,6 +930,14 @@ class HindsightProvider(MemoryProvider):
         if start_bank is None:
             return {"items": [], "next_cursor": None}
 
+        # #1654: in unified mode, ``_filter_visible`` only enforces private
+        # OWNERSHIP — a non-private doc passes it unconditionally regardless
+        # of what was requested, so a ``private:<agent>``-only request would
+        # otherwise return identically to a ``shared`` request (own private
+        # docs AND every public doc). A caller that asked for the private
+        # namespace(s) alone gets exactly that: private docs only.
+        private_only = self._unified_bank and self._wants_private_only(dataset)
+
         items: list[dict[str, Any]] = []
         next_cursor: str | None = None
         # Walk banks from the cursor's bank onward, carrying its offset into
@@ -938,6 +965,8 @@ class HindsightProvider(MemoryProvider):
                 page = self._filter_visible(
                     [self._list_fact_to_item(fact, bank) for fact in raw], client_id, dataset
                 )
+                if private_only:
+                    page = [it for it in page if _VISIBILITY_PRIVATE in (it.get("tags") or [])]
                 items.extend(page)
                 total = resp.get("total")
                 exhausted = len(raw) < fetch if not isinstance(total, int) else bank_offset >= total
