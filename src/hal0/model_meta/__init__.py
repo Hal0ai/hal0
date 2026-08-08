@@ -281,7 +281,7 @@ MODEL_BACKENDS: tuple[str, ...] = (
 #: Curated ``model.tags`` vocabulary served on /api/meta/enums (WS-13) so the
 #: dashboard's tag chips stop hardcoding their own copies. Ordering is
 #: presentation order: the behaviour-driving type tags first (mirrors the UI
-#: edit pane's toggles — ui/src/dash/model-types.js MODEL_TYPE_TAGS), then
+#: edit pane's retired type toggles — chips removed, tags inert), then
 #: provenance, then the descriptive tags the curated catalogue seeds
 #: (registry/curated.py). Tags remain freeform on ``Model.tags`` — this tuple
 #: is the *curated* superset, not a validation whitelist.

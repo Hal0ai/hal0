@@ -95,7 +95,6 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await openDrawer(page)
 
     await page.getByTestId('model-name-input').fill('Saved model name')
-    await page.getByTestId('type-toggle-coder').click()
     await page.getByTestId('cap-toggle-vision').click()
     await page.getByTestId('backend-toggle-vulkan').click()
     await page.getByTestId('model-mmproj-input').fill('/models/mmproj-saved.gguf')
@@ -113,7 +112,8 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     await expect.poll(() => putBody).not.toBeNull()
     expect(putBody.name).toBe('Saved model name')
-    expect(putBody.tags).toEqual(['curated', 'coder'])
+    // Type-tag chips are retired — saves never touch tags.
+    expect(putBody).not.toHaveProperty('tags')
     expect(putBody.capabilities).toEqual(['chat', 'vision'])
     expect(putBody.backends).toEqual(['rocm', 'vulkan'])
     expect(putBody.mmproj).toBe('/models/mmproj-saved.gguf')

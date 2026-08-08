@@ -1,6 +1,6 @@
 // Pure sort / tag-filter helpers for the Models catalog toolbar (WS-13).
 //
-// Kept dependency-free (mirrors model-types.js) so they run under plain
+// Kept dependency-free so it runs under plain
 // `node ui/src/dash/__tests__/model-sort.test.mjs` — no bundler, no React.
 //
 // Sorting is applied WITHIN each catalog section (installed / blessed /
