@@ -204,7 +204,9 @@ def _iter_peer_configs(
         display = peer.get("name")
         if display == slot_name:
             continue
-        label = display if isinstance(display, str) and display and not display.isdigit() else path.stem
+        label = (
+            display if isinstance(display, str) and display and not display.isdigit() else path.stem
+        )
         peers.append((label, peer))
     return peers
 
