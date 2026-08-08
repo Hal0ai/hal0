@@ -41,7 +41,7 @@ from hal0.registry.model_store import describe_store_state
 
 #: capability → (slot_name, port) for the slots first-run provisions. Mirrors
 #: installer.py:_SLOT_META for the shared capabilities (chat/coder/embed/stt/
-#: tts) and adds rerank/vision on free ports in the 8081-8099 pool. ``img`` is
+#: tts) and adds rerank on a free port in the 8081-8099 pool. ``img`` is
 #: handled via the ComfyUI ``comfyui_defaults`` sidecar, not this table.
 #: The chat capability's slot is NAMED ``agent`` per ADR-0023: `agent` is the
 #: default LLM anchor every ``hal0/<slot>`` fallback chain ends in, so first
@@ -53,7 +53,6 @@ _SETUP_SLOTS = {
     "stt": ("stt", 8084),
     "tts": ("tts", 8085),
     "rerank": ("rerank", 8086),
-    "vision": ("vision", 8087),
 }
 
 #: The dashboard steward's dedicated slot, scaffolded (empty, chat-capability
@@ -68,7 +67,7 @@ _BRAIN_SLOT = ("brain", 8089)
 #: separately, gated on an agent extension. ``apply_setup`` derives each slot's
 #: device and skips any that don't apply to the hardware (e.g. NPU-only ``stt``
 #: without ``npu_opt_in``).
-_SCAFFOLD_CAPS = ("chat", "embed", "rerank", "stt", "tts", "vision")
+_SCAFFOLD_CAPS = ("chat", "embed", "rerank", "stt", "tts")
 
 
 def _api_reachable(timeout: float = 0.5) -> bool:

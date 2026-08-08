@@ -46,7 +46,10 @@ def test_auto_selections_scaffolds_capability_slots_empty():
     # model is chosen — pick-free: slots yes, models no. The chat capability's
     # slot is NAMED `agent` (ADR-0023 LLM anchor) and the steward's `brain`
     # scaffold rides along.
-    assert {"agent", "brain", "embed", "rerank", "stt", "tts", "vision"} <= names
+    # vision is retired — a model property served by any llm slot, no
+    # dedicated scaffold.
+    assert {"agent", "brain", "embed", "rerank", "stt", "tts"} <= names
+    assert "vision" not in names
     assert all(s.model_id is None for s in sel.slots)  # every slot empty
     assert sel.extensions["openwebui"] is True
     assert sel.extensions["hermes"] is True

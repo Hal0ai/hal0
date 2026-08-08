@@ -101,3 +101,14 @@ def test_child_maps_mirror_orchestrator_source_of_truth() -> None:
     expected_slot = {child: slot for (group, child), slot in _CHILD_TO_SLOT.items()}
     assert expected_group == _CHILD_TO_GROUP
     assert expected_slot == _CHILD_TO_SLOT_NAME
+
+
+def test_retired_vision_child_is_skipped_not_errored() -> None:
+    """A stack saved before the vision-lane retirement carries a
+    StackCapabilityRow(child="vision"); applying it must skip the row
+    quietly instead of failing convergence."""
+    from hal0.stacks.apply import _CHILD_TO_GROUP, _CHILD_TO_SLOT_NAME, _RETIRED_CHILDREN
+
+    assert "vision" in _RETIRED_CHILDREN
+    assert "vision" not in _CHILD_TO_GROUP
+    assert "vision" not in _CHILD_TO_SLOT_NAME

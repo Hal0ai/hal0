@@ -53,11 +53,17 @@ def _no_spawn_context_refresh(monkeypatch):
 # ── SEEDED_SLOTS + NPU_SEEDED_SLOTS (PR-10 §10.2) ───────────────────────────
 
 
-def test_seeded_slots_matches_plan_section_10_2() -> None:
-    # ``vision`` added in #515 (first-class vision capability, reusing the
-    # curated multimodal MoE primaries + their mmproj sidecar).
-    # ADR-0023: ``chat`` retired as a seed; ``utility`` (cheap helper) added.
-    assert SEEDED_SLOTS == ("utility", "embed", "rerank", "stt", "tts", "img", "vision", "agent")
+def test_seeded_slots_is_single_sourced_from_static_seeds() -> None:
+    # SEEDED_SLOTS previously hand-duplicated the install seed set and drifted
+    # (it carried the retired ``stt``/``vision`` scaffolds while missing
+    # ``brain``/``coder``/``flm``/``qwen3tts``). It is now a re-export of
+    # STATIC_SEED_SLOTS — one source of truth, no drift possible.
+    from hal0.install.static_seeds import STATIC_SEED_SLOTS
+
+    assert SEEDED_SLOTS is STATIC_SEED_SLOTS
+    assert "vision" not in SEEDED_SLOTS
+    assert "stt" not in SEEDED_SLOTS
+    assert "brain" in SEEDED_SLOTS
 
 
 def test_npu_seeded_slots_matches_plan_section_10_2() -> None:
@@ -220,37 +226,102 @@ async def test_add_slot_writes_toml(
     assert 'default = "whisper-base"' in text
 
 
-async def test_add_slot_rejects_seeded_collision(tmp_hal0_home: str) -> None:
+async def test_add_slot_allows_recreating_a_seed_name(tmp_hal0_home: str) -> None:
+    # Seed names are no longer reserved — a deleted seed must be recreatable
+    # (capability slots materialise on demand when re-enabled in settings).
     sm = SlotManager()
-    with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.add_slot("utility", type="llm", model="x", port=8090)
+    slot = await sm.add_slot("utility", type="llm", model="x", port=8090)
+    assert slot.name == "utility"
 
 
 async def test_add_slot_rejects_npu_seeded_collision(tmp_hal0_home: str) -> None:
-    # Reserved even when FLM isn't installed.
+    # The NPU trio names stay reserved even when FLM isn't installed — the
+    # occupancy pane synthesises flm-stt/flm-embed virtual sub-cards, so a
+    # real slot under either name would collide with the synthesis.
     sm = SlotManager()
-    with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.add_slot("agent", type="llm", model="x", port=8090)
+    with pytest.raises(SlotConfigError, match="NPU"):
+        await sm.add_slot("flm-stt", type="transcription", model="x", port=8090)
 
 
-async def test_agent_slot_non_deletable_without_flm(
+async def test_seeded_slot_deletable_without_force(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # #679: agent is a GPU seed slot, so it is non-deletable regardless of FLM.
-    # Regression guard — while agent was NPU-seeded, delete protection vanished
-    # on non-FLM boxes (seeded_slots() excludes the NPU trio without flm).
+    # Seeded slots are deletable like any other (pinned is the protection
+    # lever) — and the deletion writes a tombstone so the boot-time seeding
+    # pass doesn't resurrect the slot. ``tts`` is a seed but not a
+    # default-pinned anchor.
     monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: None)
     sm = SlotManager()
-    with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.delete("agent")
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "tts.toml").write_text(
+        'name = "tts"\nport = 8084\nprovider = "llama-server"\n[model]\ndefault = "x"\n'
+    )
+    await sm.delete("tts")
+    assert not (slots_dir / "tts.toml").exists()
+
+    from hal0.install.static_seeds import read_seed_tombstones, seed_static_slots
+
+    assert "tts" in read_seed_tombstones()
+    # The seeding pass honours the tombstone instead of re-copying the seed.
+    seeded = seed_static_slots()
+    assert "tts" not in seeded
+    assert not (slots_dir / "tts.toml").exists()
 
 
-async def test_seeded_slot_deletable_with_force(
+async def test_npu_trio_delete_writes_no_tombstone(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # force=True overrides the seeded-slot guard so an operator can remove one
-    # outright. Seed the config on disk, confirm the guard still refuses without
-    # force, then force-delete it.
+    # The trio shadow slots are reconciled from the FLM anchor every boot and
+    # reconcile_trio_slots does not consult tombstones — writing one would be
+    # a dead promise. Deleting a trio slot is ephemeral by contract.
+    monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: "/usr/bin/flm")
+    sm = SlotManager()
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "flm-stt.toml").write_text(
+        'name = "flm-stt"\nport = 8088\nprovider = "llama-server"\n[model]\ndefault = "x"\n'
+    )
+    await sm.delete("flm-stt")
+
+    from hal0.install.static_seeds import read_seed_tombstones
+
+    assert "flm-stt" not in read_seed_tombstones()
+
+
+async def test_deleting_a_capability_slot_disables_its_selection(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # capabilities.toml must not keep claiming an enabled capability whose
+    # slot is gone — the converged-file fast path would never recreate it.
+    monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: None)
+    sm = SlotManager()
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "img.toml").write_text(
+        'name = "img"\nport = 8188\nprovider = "llama-server"\n[model]\ndefault = "sdxl"\n'
+    )
+    from hal0.capabilities.config import capabilities_toml_path
+
+    capabilities_toml_path().parent.mkdir(parents=True, exist_ok=True)
+    capabilities_toml_path().write_text(
+        "schema_version = 2\n"
+        "[selections.img.img]\n"
+        'model = "sdxl"\ndevice = "gpu-rocm"\nenabled = true\n'
+    )
+    await sm.delete("img")
+
+    from hal0.capabilities.config import load_capabilities_config
+
+    cfg = load_capabilities_config()
+    assert cfg.selections["img"]["img"].enabled is False
+
+
+async def test_default_pinned_anchor_still_refuses_without_force(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The anchor protection moved wholly onto the pinned lever (§21.10):
+    # agent is default-pinned, so a bare delete 409s and force succeeds.
     monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: None)
     sm = SlotManager()
     slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
@@ -258,10 +329,31 @@ async def test_seeded_slot_deletable_with_force(
     (slots_dir / "agent.toml").write_text(
         'name = "agent"\nport = 8081\nprovider = "llama-server"\n[model]\ndefault = "x"\n'
     )
-    with pytest.raises(SlotConfigError, match="seeded"):
+    from hal0.slots.manager import SlotPinned
+
+    with pytest.raises(SlotPinned):
         await sm.delete("agent")
     await sm.delete("agent", force=True)
     assert not (slots_dir / "agent.toml").exists()
+
+
+async def test_recreating_a_deleted_seed_clears_its_tombstone(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.slots.routing.shutil.which", lambda name: None)
+    sm = SlotManager()
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "rerank.toml").write_text(
+        'name = "rerank"\nport = 8083\nprovider = "llama-server"\n[model]\ndefault = "x"\n'
+    )
+    await sm.delete("rerank")
+
+    from hal0.install.static_seeds import read_seed_tombstones
+
+    assert "rerank" in read_seed_tombstones()
+    await sm.add_slot("rerank", type="reranking", model="x", port=8090)
+    assert "rerank" not in read_seed_tombstones()
 
 
 async def test_add_slot_rejects_invalid_type(tmp_hal0_home: str) -> None:
@@ -278,14 +370,17 @@ async def test_add_slot_rejects_invalid_name(tmp_hal0_home: str) -> None:
         await sm.add_slot("-leading-hyphen", type="llm", model="x", port=8090)
 
 
-async def test_remove_slot_refuses_seeded(tmp_hal0_home: str) -> None:
+async def test_remove_slot_deletes_seeded(tmp_hal0_home: str) -> None:
+    # remove_slot no longer refuses seed names — deletion works and resolves
+    # back-compat aliases first (agent-hermes → agent).
     sm = SlotManager()
-    with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.remove_slot("utility")  # canonical name
-    with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.remove_slot("agent-hermes")  # back-compat alias → agent (still seeded)
-    with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.remove_slot("agent")
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "img.toml").write_text(
+        'name = "img"\nport = 8188\nprovider = "llama-server"\n[model]\ndefault = "x"\n'
+    )
+    await sm.remove_slot("img")
+    assert not (slots_dir / "img.toml").exists()
 
 
 async def test_remove_slot_deletes_user_slot(
@@ -720,7 +815,9 @@ async def test_delete_removes_files_and_protects_seeded(
     await sm.create("extra", cfg)
     await sm.delete("extra")
     assert not (Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "extra.toml").exists()
-    with pytest.raises(SlotConfigError):
+    # Seed names are no longer delete-protected; an unknown slot (no TOML on
+    # disk) surfaces as not-found rather than "seeded".
+    with pytest.raises(SlotNotFound):
         await sm.delete("utility")
 
 

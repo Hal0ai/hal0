@@ -114,6 +114,11 @@ def _model_caps(m: dict[str, Any]) -> set[str]:
         caps.update(m.get(field_name) or [])
     if m.get("type"):
         caps.add(m["type"])
+    # The type-tag retirement folds the pre-1.0 "mtp" tag into the typed
+    # defaults.mtp field — surface it back into the match set so rosters
+    # keyed on "mtp" keep selecting migrated rows.
+    if (m.get("defaults") or {}).get("mtp") is True:
+        caps.add("mtp")
     return caps
 
 

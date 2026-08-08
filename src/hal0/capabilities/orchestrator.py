@@ -25,7 +25,7 @@ serving chat coresident with embed/asr — by writing the anchor's
 (``v1._is_npu_trio_request``). The modality slot is never
 load/swap/unloaded; the anchor is never eagerly restarted — the change
 returns ``pending_reload`` and the operator applies it via the dashboard
-NPU section's reload affordance. Non-trio children (rerank/tts/img/vision)
+NPU section's reload affordance. Non-trio children (rerank/tts/img)
 and non-NPU devices keep spawning their own slot via the regular
 ``load()`` path.
 """
@@ -71,7 +71,6 @@ _CHILD_TO_SLOT: dict[tuple[str, str], str] = {
     ("voice", "stt"): "stt",
     ("voice", "tts"): "tts",
     ("img", "img"): "img",
-    ("vision", "vision"): "vision",
 }
 
 # Inverse for status surfacing ("which child is this slot serving").
@@ -82,7 +81,7 @@ _SLOT_TO_CHILD: dict[str, tuple[str, str]] = {
 # ── Trio dispatch discriminator: capability child → slot ``type`` ─────────────
 # The FLM trio (one ``flm serve`` process serving chat + embed + asr) is gated
 # in v1._is_npu_trio_request on the slot record's ``type`` field. Only the two
-# trio modalities carry a type; rerank/tts/img/vision are NOT trio members and
+# trio modalities carry a type; rerank/tts/img are NOT trio members and
 # get no ``type`` key (their auto-created slots are plain llama-server/dedicated
 # providers). Mirrors providers/flm._classify_flm_model emitting "embed"/"stt".
 _CHILD_TO_SLOT_TYPE: dict[str, str] = {
@@ -91,7 +90,7 @@ _CHILD_TO_SLOT_TYPE: dict[str, str] = {
 }
 
 # The legal capability/child surface — used by HTTP validation.
-LEGAL_SLOTS: tuple[str, ...] = ("embed", "voice", "img", "vision")
+LEGAL_SLOTS: tuple[str, ...] = ("embed", "voice", "img")
 
 
 # child → the ``[npu]`` TOML boolean field that controls it on container slots.
@@ -105,6 +104,41 @@ _CHILD_TO_NPU_FIELD: dict[str, str] = {
 def legal_children(slot: str) -> list[str]:
     """Return the child names valid for ``slot``."""
     return [child for (s, child) in _CHILD_TO_SLOT if s == slot]
+
+
+def disable_selections_for_slot(slot_name: str) -> list[tuple[str, str]]:
+    """Mark every capabilities.toml selection served by ``slot_name`` disabled.
+
+    Called from ``SlotManager.delete`` (lazily, to keep the import edge thin):
+    deleting a capability slot without releasing its selection leaves the file
+    claiming an enabled capability with nothing behind it, and the converged-
+    file fast path never recreates the slot. Returns the (group, child) pairs
+    it disabled; empty when the slot serves no capability child or the file
+    doesn't exist.
+    """
+    from hal0.capabilities.config import (
+        capabilities_toml_path,
+        load_capabilities_config,
+        save_capabilities_config,
+    )
+
+    key = _SLOT_TO_CHILD.get(slot_name)
+    if key is None or not capabilities_toml_path().exists():
+        return []
+    group, child = key
+    cfg = load_capabilities_config()
+    selection = (cfg.selections.get(group) or {}).get(child)
+    if selection is None or not selection.enabled:
+        return []
+    selection.enabled = False
+    save_capabilities_config(cfg)
+    log.info(
+        "capability.selection_disabled_on_slot_delete slot=%s group=%s child=%s",
+        slot_name,
+        group,
+        child,
+    )
+    return [(group, child)]
 
 
 def child_to_slot(slot: str, child: str) -> str:
@@ -130,7 +164,6 @@ _CHILD_TO_CAPABILITY: dict[tuple[str, str], str] = {
     ("voice", "stt"): "stt",
     ("voice", "tts"): "tts",
     ("img", "img"): "image",
-    ("vision", "vision"): "vision",
 }
 
 _CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
@@ -140,7 +173,6 @@ _CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
     "stt": "transcription",
     "tts": "tts",
     "image": "image",
-    "vision": "llm",
 }
 
 
@@ -701,7 +733,7 @@ class CapabilityOrchestrator:
         }
         # Stamp the trio dispatch discriminator for embed/stt children so
         # v1._is_npu_trio_request can gate on it. Non-trio children
-        # (rerank/tts/img/vision) get no ``type`` key.
+        # (rerank/tts/img) get no ``type`` key.
         _, child = _SLOT_TO_CHILD.get(slot_name, (None, None))
         slot_type = _CHILD_TO_SLOT_TYPE.get(child) if child else None
         if slot_type:
