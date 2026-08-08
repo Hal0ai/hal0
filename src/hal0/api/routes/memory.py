@@ -18,6 +18,7 @@ veneer that:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -476,8 +477,14 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     if slot_changed or timeout_changed:
         from hal0.memory.extraction_env import apply_extraction_slot
 
-        propagation = apply_extraction_slot(
-            new_cfg.extraction_slot, timeout_s=new_cfg.llm_timeout_s
+        # Thread hop (#1641): the propagation shells out to the privileged seam
+        # and then waits on a hindsight-api restart — a ~60s-bounded blocking
+        # call that would otherwise stall the whole event loop for the engine's
+        # cold start.
+        propagation = await asyncio.to_thread(
+            apply_extraction_slot,
+            new_cfg.extraction_slot,
+            timeout_s=new_cfg.llm_timeout_s,
         )
 
     cfg.memory.graph = new_cfg

@@ -51,6 +51,15 @@ QUADLET_DIR="/etc/containers/systemd"
 GATEWAY_DROPIN_DIR="/etc/systemd/system/hermes-gateway.service.d"
 GATEWAY_DROPIN_FILE="${GATEWAY_DROPIN_DIR}/10-hal0-secrets.conf"
 
+# Fixed, literal drop-in path for the hindsight-api extraction override (#1641 /
+# ADR-0023): HINDSIGHT_API_LLM_MODEL + HINDSIGHT_API_LLM_TIMEOUT, repointed by
+# `hal0 memory graph enable --slot <name>` and the Memory dashboard. Same posture
+# and same reason as the gateway drop-in above: hal0-api runs as the
+# unprivileged hal0 user and cannot write /etc/systemd/system itself. LITERAL —
+# the caller supplies only the body on stdin, never the path.
+HINDSIGHT_DROPIN_DIR="/etc/systemd/system/hindsight-api.service.d"
+HINDSIGHT_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/extraction-model.conf"
+
 die() { echo "hal0-systemctl: $1" >&2; exit 64; }
 
 validate_slot_id() {   # arg: slot id (the "<id>" in hal0-slot@<id>.service)
@@ -109,6 +118,21 @@ case "$cmd" in
     chown root:root "$tmp"
     chmod 0644 "$tmp"
     mv -f "$tmp" "$GATEWAY_DROPIN_FILE"
+    trap - EXIT
+    ;;
+
+  write-hindsight-dropin)     # write the hindsight-api extraction drop-in (body on stdin)
+    # Literal fixed path — the caller never supplies it, so this verb can only
+    # ever reach that one file. 0644 root:root so systemd can read the fragment.
+    # Atomic (tmp + mv), same shape as write-gateway-dropin.
+    install -d -m 0755 -o root -g root "$HINDSIGHT_DROPIN_DIR"
+    umask 022
+    tmp="$(mktemp "${HINDSIGHT_DROPIN_FILE}.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    cat > "$tmp"
+    chown root:root "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$HINDSIGHT_DROPIN_FILE"
     trap - EXIT
     ;;
 
@@ -185,6 +209,7 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   write-quadlet <slot-id>          write ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container (body on stdin)
   remove-quadlet <slot-id>         rm -f ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container
   write-gateway-dropin             write ${GATEWAY_DROPIN_FILE} (body on stdin)
+  write-hindsight-dropin           write ${HINDSIGHT_DROPIN_FILE} (body on stdin)
   daemon-reload                    systemctl daemon-reload
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
   enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service

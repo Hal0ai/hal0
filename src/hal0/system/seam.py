@@ -92,6 +92,14 @@ COMPANION_SERVICE_UNITS: dict[str, str] = {
     "hindsight-api.service": "hindsight",
 }
 
+#: Fixed, literal drop-in the memory extraction slot / LLM timeout ride on
+#: (#1641, ADR-0023). Root-owned like every other ``/etc/systemd/system``
+#: fragment, so an unprivileged hal0-api writes it through the wrapper's
+#: ``write-hindsight-dropin`` verb (body on stdin, path is a root-side literal)
+#: — exactly the ``write-gateway-dropin`` shape.
+HINDSIGHT_DROPIN_DIR = Path("/etc/systemd/system/hindsight-api.service.d")
+HINDSIGHT_DROPIN_PATH = HINDSIGHT_DROPIN_DIR / "extraction-model.conf"
+
 
 class Hal0SeamMissing(RuntimeError):
     """Raised when the hal0-systemctl seam is required but not installed.
@@ -307,6 +315,34 @@ class SystemCtlSeam:
             raise ValueError(f"not a hal0-slot@ quadlet file: {quadlet_path.name!r}")
         self._run(self._seam_argv("remove-quadlet", token), check=False)
 
+    def write_hindsight_dropin(self, body: str, *, path: Path = HINDSIGHT_DROPIN_PATH) -> None:
+        """Write the hindsight-api extraction drop-in (#1641).
+
+        Unlike :meth:`write_unit` / :meth:`write_quadlet` there is no id to
+        validate: the target is a single fixed file, so the seam verb takes only
+        the body on stdin and the root side owns the path outright (the
+        ``write-gateway-dropin`` posture). ``path`` is therefore used **only** on
+        the direct (root / dev / CI) branch — it exists so tests and callers that
+        redirect the drop-in to a tmp tree keep working; the seam branch can only
+        ever reach :data:`HINDSIGHT_DROPIN_PATH`.
+
+        The direct write is atomic (temp + rename) so a crash mid-write can never
+        leave a half-written override that would wedge hindsight-api.
+        """
+        if not self._is_hal0_user():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".conf.tmp")
+            tmp.write_text(body, encoding="utf-8")
+            tmp.replace(path)
+            return
+        self._run(
+            self._seam_argv("write-hindsight-dropin"),
+            input=body,
+            text=True,
+            check=True,
+            capture_output=True,
+        )
+
     def systemctl(
         self,
         *args: str,
@@ -398,6 +434,8 @@ __all__ = [
     "AGENT_UNIT_PREFIX",
     "AGENT_UNIT_VERBS",
     "COMPANION_SERVICE_UNITS",
+    "HINDSIGHT_DROPIN_DIR",
+    "HINDSIGHT_DROPIN_PATH",
     "SEAM_BIN",
     "Hal0SeamMissing",
     "SystemCtlSeam",
