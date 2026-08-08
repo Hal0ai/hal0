@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { npuModalityOn } from '../npu-modality.js'
+import { npuModalityOn, npuRoleForSlot } from '../npu-modality.js'
 
 describe('npuModalityOn', () => {
   it('defaults chat ON, asr/embed OFF when the [npu] table is absent', () => {
@@ -31,5 +31,23 @@ describe('npuModalityOn', () => {
     expect(npuModalityOn({ asr: true }, 'asr')).toBe(true)
     expect(npuModalityOn({ asr: true }, 'embed')).toBe(false)
     expect(npuModalityOn({ asr: true }, 'chat')).toBe(true)
+  })
+})
+
+describe('npuRoleForSlot', () => {
+  it('derives the role from the slot TYPE, never the display name', () => {
+    // Shadow semantics everywhere else key off type — a shadow with a
+    // non-canonical name (legacy `stt-npu`, operator rename) must not fall
+    // into the chat branch and flip the anchor's chat modality.
+    expect(npuRoleForSlot({ name: 'weird-name', type: 'transcription' })).toBe('asr')
+    expect(npuRoleForSlot({ name: 'weird-name', type: 'embedding' })).toBe('embed')
+    expect(npuRoleForSlot({ name: 'flm-stt', type: 'transcription' })).toBe('asr')
+    expect(npuRoleForSlot({ name: 'flm-embed', type: 'embedding' })).toBe('embed')
+  })
+
+  it('treats the anchor (type=llm) and unknowns as chat', () => {
+    expect(npuRoleForSlot({ name: 'flm', type: 'llm' })).toBe('chat')
+    expect(npuRoleForSlot({ name: 'npu', type: 'llm' })).toBe('chat')
+    expect(npuRoleForSlot(undefined)).toBe('chat')
   })
 })

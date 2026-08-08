@@ -296,6 +296,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// replacing the raw window.confirm. Every dismiss path (Cancel, ✕, Esc,
 	// backdrop) funnels through requestClose below.
 	const [discardOpen, setDiscardOpen] = useStateSM(false);
+	// In-drawer navigation target (anchor link on trio shadows) held while the
+	// discard dialog confirms — hash assignment must not bypass the dirty
+	// guard, or the re-seed effect silently drops pending Save-batched edits.
+	const [pendingNav, setPendingNav] = useStateSM(null);
 	// UI-5 (state-driven): swapping the model on a LIVE container slot
 	// cold-restarts it — stash the picked {id, label} here and confirm through
 	// ConfirmDialog before firing the swap. null = no confirm pending.
@@ -478,6 +482,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setProfileSel(slot.profile || "");
 		setSubmitErr(null);
 		setDiscardOpen(false);
+		setPendingNav(null);
 		setPendingSwap(null);
 		setModelEditOpen(false);
 		setFieldErrs({});
@@ -1620,7 +1625,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												href={"#slots/" + anchor}
 												onClick={(e) => {
 													e.preventDefault();
-													window.location.hash = "#slots/" + anchor;
+													const target = "#slots/" + anchor;
+													// Route through the dirty guard — a direct hash
+													// assignment would re-seed the drawer for the anchor
+													// and silently drop pending Save-batched edits.
+													if (dirty) {
+														setPendingNav(target);
+														setDiscardOpen(true);
+													} else {
+														window.location.hash = target;
+													}
 												}}
 											>
 												Open {anchor}
@@ -2003,9 +2017,20 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			</DrawerDock>
 			<ConfirmDialog
 				open={discardOpen}
-				onCancel={() => setDiscardOpen(false)}
+				onCancel={() => {
+					setDiscardOpen(false);
+					setPendingNav(null);
+				}}
 				onConfirm={() => {
 					setDiscardOpen(false);
+					if (pendingNav) {
+						// Discard confirmed for an in-drawer navigation (shadow ->
+						// anchor): switch slots instead of closing.
+						const target = pendingNav;
+						setPendingNav(null);
+						window.location.hash = target;
+						return;
+					}
 					onClose();
 				}}
 				title="Discard unsaved changes?"
