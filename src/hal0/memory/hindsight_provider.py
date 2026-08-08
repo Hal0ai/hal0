@@ -629,10 +629,18 @@ class HindsightProvider(MemoryProvider):
         An empty request scopes to nothing at all, so neither is True
         (#1451: ``[]`` used to read back as ``[shared]`` here too, which is
         what let the unified-mode delete gate wave shared docs through).
+
+        Both sides of the comparison must be deduplicated (#1668): a caller
+        repeating the same project entry (e.g. a client-side retry building
+        ``["project:apollo", "project:apollo"]``) must not make ``projects``
+        (a set) look smaller than the raw request count and flip
+        ``wants_unscoped`` True — that silently admitted unscoped shared docs
+        into a call that only ever named one project.
         """
         reqs = HindsightProvider._requested_list(requested)
         projects = {ds for ds in reqs if isinstance(ds, str) and ds.startswith(_PROJECT)}
-        return projects, len(projects) < len([r for r in reqs if r])
+        non_empty = {r for r in reqs if r}
+        return projects, len(projects) < len(non_empty)
 
     @staticmethod
     def _is_in_scope(item: dict[str, Any], projects: set[str], wants_unscoped: bool) -> bool:

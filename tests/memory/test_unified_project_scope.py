@@ -130,6 +130,71 @@ async def test_multi_project_read_unions_the_requested_scopes() -> None:
     assert _texts(out) == {"apollo secret", "zeus secret"}
 
 
+# ── #1668: a duplicate project entry must not widen the scope ────────────────
+#
+# ``_requested_scope`` computed ``wants_unscoped`` by comparing the size of a
+# *set* of project namespaces against the size of the *list* of non-empty
+# requests. A repeated project entry shrinks the set relative to the list even
+# though every entry named the same project, flipping ``wants_unscoped`` True
+# and admitting unscoped shared docs into a call that only ever asked for one
+# project.
+
+
+@pytest.mark.asyncio
+async def test_duplicate_project_entry_does_not_widen_recall_to_unscoped() -> None:
+    p = _unified()
+    await p.add("apollo secret", dataset="project:apollo", client_id="hermes")
+    await p.add("everyone knows", dataset="shared", client_id="hermes")
+
+    out = await p.recall(
+        "x", dataset=["project:apollo", "project:apollo"], client_id="hermes"
+    )
+    assert _texts(out) == {"apollo secret"}, "duplicate entry must not leak unscoped shared docs"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_project_entry_does_not_widen_list_to_unscoped() -> None:
+    p = _unified()
+    await p.add("apollo secret", dataset="project:apollo", client_id="hermes")
+    await p.add("everyone knows", dataset="shared", client_id="hermes")
+
+    page = await p.list_items(dataset=["project:apollo", "project:apollo"], client_id="hermes")
+    assert _texts(page["items"]) == {"apollo secret"}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_project_entry_does_not_widen_delete_to_unscoped() -> None:
+    """Negative control: a delete scoped (with a duplicate) to one project
+    must not be able to reach an unscoped shared doc (fail-closed, #1451
+    lineage) — mirrors test_delete_scoped_to_a_project_cannot_reach_another."""
+    p = _unified()
+    await p.add("apollo secret", dataset="project:apollo", client_id="hermes")
+    await p.add("everyone knows", dataset="shared", client_id="hermes")
+    shared_id = p._client.retained[1]["document_id"]
+
+    res = await p.delete(
+        [shared_id], client_id="hermes", dataset=["project:apollo", "project:apollo"]
+    )
+    assert res["deleted"] == 0
+
+    remaining = await p.recall("knows", dataset="shared", client_id="hermes")
+    assert _texts(remaining) == {"everyone knows"}
+
+
+@pytest.mark.asyncio
+async def test_distinct_multi_project_entries_do_not_widen_to_unscoped() -> None:
+    """A caller who legitimately named several distinct projects (no
+    duplicates, no non-project entry) must still see ONLY those projects —
+    covers the case the naive set-size fix could get backwards."""
+    p = _unified()
+    await p.add("apollo secret", dataset="project:apollo", client_id="hermes")
+    await p.add("zeus secret", dataset="project:zeus", client_id="hermes")
+    await p.add("everyone knows", dataset="shared", client_id="hermes")
+
+    out = await p.recall("x", dataset=["project:apollo", "project:zeus"], client_id="hermes")
+    assert _texts(out) == {"apollo secret", "zeus secret"}
+
+
 # ── Read path: list ──────────────────────────────────────────────────────────
 
 
