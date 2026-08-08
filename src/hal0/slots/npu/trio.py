@@ -50,6 +50,11 @@ def _shadow_path(slots_dir: Path, name: str) -> Path | None:
     return None if stem is None else slots_dir / f"{stem}.toml"
 
 
+def _log_renamed(old: str, canon: str) -> None:
+    """One rename receipt, shared by the id-keyed and name-keyed branches."""
+    log.info("slot.trio_shadow_renamed", extra={"from": old, "to": canon})
+
+
 def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
     """True if *cfg* is an NPU FLM trio **shadow** (stt/embed), not the anchor.
 
@@ -152,7 +157,7 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
     slots_dir = paths.slots_config_dir()
     for suffix, slot_type, default_model in _TRIO_SHADOW_SPEC:
         canon = f"{anchor_name}-{suffix}"
-        legacy = f"{suffix}-npu"  # stt-npu / embed-npu
+        prior = f"{suffix}-npu"  # the pre-canon shadow name: stt-npu / embed-npu
         # Shadows are addressed by DISPLAY name, but the on-disk stem is this
         # box's storage detail: after ``hal0 slot migrate-id-keying`` the same
         # shadow lives at ``<id>.toml`` with the name in the body. Probing the
@@ -161,43 +166,40 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
         # and step 3 re-attempted a create that ``SlotManager``'s bilingual
         # clobber guard rejected. Resolve through the ONE layout seam instead.
         canon_path = _shadow_path(slots_dir, canon)
-        legacy_path = _shadow_path(slots_dir, legacy)
+        prior_path = _shadow_path(slots_dir, prior)
         try:
             # 1. Legacy rename — only when the canon target is free.
-            if legacy_path is not None:
+            if prior_path is not None:
                 if canon_path is not None:
                     log.warning(
                         "slot.trio_shadow_rename_skipped",
                         extra={
-                            "legacy": legacy,
+                            "legacy": prior,
                             "canon": canon,
                             "reason": "canon target already exists",
                         },
                     )
-                elif is_id_stem(legacy_path.stem):
+                elif is_id_stem(prior_path.stem):
                     # Id-keyed: a rename is a RELABEL of a stable id, and the
                     # identity row carries that label. A bare file move would
-                    # strand the row under the legacy name and leave the shadow
+                    # strand the row under the old name and leave the shadow
                     # unresolvable by its new one, so delegate to the canonical
                     # :meth:`SlotManager.rename` — it rewrites the embedded
                     # ``name`` in place, moves the identity row + state record,
                     # and invalidates the caches as one unit.
-                    await mgr.rename(legacy, canon)
-                    canon_path = legacy_path
-                    log.info("slot.trio_shadow_renamed", extra={"from": legacy, "to": canon})
+                    canon_path = prior_path
+                    await mgr.rename(prior, canon)
+                    _log_renamed(prior, canon)
                 else:
-                    legacy_raw = tomllib.loads(legacy_path.read_text(encoding="utf-8"))
-                    legacy_raw["name"] = canon
+                    raw_before = tomllib.loads(prior_path.read_text(encoding="utf-8"))
+                    raw_before["name"] = canon
                     canon_path = slots_dir / f"{canon}.toml"
-                    write_slot_toml(canon_path, legacy_raw)
+                    write_slot_toml(canon_path, raw_before)
                     with contextlib.suppress(FileNotFoundError):
-                        legacy_path.unlink()
-                    mgr._invalidate_cfg_cache(legacy)
+                        prior_path.unlink()
+                    mgr._invalidate_cfg_cache(prior)
                     mgr._invalidate_cfg_cache(canon)
-                    log.info(
-                        "slot.trio_shadow_renamed",
-                        extra={"from": legacy, "to": canon},
-                    )
+                    _log_renamed(prior, canon)
 
             # 2. Ensure + normalize the canon shadow record. After a rename
             #    canon_path now exists, so the same iteration normalizes it.
