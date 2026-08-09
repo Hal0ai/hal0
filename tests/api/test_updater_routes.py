@@ -84,6 +84,70 @@ def test_check_returns_well_formed_envelope_with_update_available(
     assert isinstance(body["manifest"], dict)
 
 
+def test_check_includes_profile_reset_snapshot(isolated_client: TestClient) -> None:
+    """#1585: /check carries a read-only profile_reset status so the up-to-date
+    CLI path can converge an outstanding v1.0 reset without an update."""
+    r = isolated_client.get("/api/updates/check")
+    assert r.status_code == 200, r.text
+    pr = r.json()["profile_reset"]
+    assert isinstance(pr, dict)
+    assert "due" in pr and "needs_consent" in pr
+
+
+def _seed_pre_v1(hal0_home: str, *, custom: str | None = None) -> None:
+    """Write a pre-v1.0 hal0.toml (schema_version 1) and an optional custom profile."""
+    from hal0.config.paths import hal0_toml, profiles_toml
+
+    ht = hal0_toml()
+    ht.parent.mkdir(parents=True, exist_ok=True)
+    ht.write_text(
+        "[meta]\nschema_version = 1\n\n[slots]\nport_range_start = 8081\n", encoding="utf-8"
+    )
+    if custom is not None:
+        pt = profiles_toml()
+        pt.parent.mkdir(parents=True, exist_ok=True)
+        pt.write_text(f"[profile.{custom}]\ndescription = 'mine'\n", encoding="utf-8")
+
+
+def test_converge_profiles_resets_a_pre_v1_box_with_consent(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """#1585: a standalone converge deletes the pre-v1 catalog, stamps the gate,
+    and is idempotent — no update, no staging."""
+    from hal0.config.paths import profiles_toml
+
+    _seed_pre_v1(tmp_hal0_home, custom="mine")
+    assert profiles_toml().exists()
+
+    r = isolated_client.post("/api/updates/converge-profiles", json={"reset_profiles": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["performed"] is True
+    assert body["outcome"] == "reset"
+    assert body["backup"]
+    assert not profiles_toml().exists()
+
+    # Idempotent: a second call is a no-op on the now-stamped box.
+    r2 = isolated_client.post("/api/updates/converge-profiles", json={"reset_profiles": True})
+    assert r2.json()["outcome"] == "already_reset"
+    assert r2.json()["performed"] is False
+
+
+def test_converge_profiles_without_consent_leaves_custom_profiles(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """No consent + operator-authored profiles → declined, nothing deleted."""
+    from hal0.config.paths import profiles_toml
+
+    _seed_pre_v1(tmp_hal0_home, custom="mine")
+    r = isolated_client.post("/api/updates/converge-profiles", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["performed"] is False
+    assert body["outcome"] == "declined"
+    assert profiles_toml().exists()
+
+
 def test_state_returns_shape_expected_by_dashboard(
     isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
