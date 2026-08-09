@@ -85,6 +85,63 @@ def test_migrations_pending_warns() -> None:
     assert "5 link" in c.detail
 
 
+# ── check_ui_dist ──────────────────────────────────────────────────────────────
+
+
+def test_ui_dist_no_api_env_passes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    c = da.check_ui_dist(
+        api_env_path=tmp_path / "missing.env", current_ui_dist=tmp_path / "current/ui/dist"
+    )
+    assert c.status == "pass" and c.key == "ui-dist"
+    assert "no HAL0_UI_DIST override" in c.detail
+
+
+def test_ui_dist_no_override_line_passes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    env = tmp_path / "api.env"
+    env.write_text("HAL0_PORT=8080\nHAL0_LOG_LEVEL=info\n")
+    c = da.check_ui_dist(api_env_path=env, current_ui_dist=tmp_path / "current/ui/dist")
+    assert c.status == "pass"
+
+
+def test_ui_dist_matches_current_passes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    current = tmp_path / "current" / "ui" / "dist"
+    current.mkdir(parents=True)
+    env = tmp_path / "api.env"
+    env.write_text(f"HAL0_UI_DIST={current}\n")
+    c = da.check_ui_dist(api_env_path=env, current_ui_dist=current)
+    assert c.status == "pass"
+    assert "matches the current release bundle" in c.detail
+
+
+def test_ui_dist_stale_override_warns(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    stale = tmp_path / "old-layout" / "ui" / "dist"
+    stale.mkdir(parents=True)
+    current = tmp_path / "current" / "ui" / "dist"
+    current.mkdir(parents=True)
+    env = tmp_path / "api.env"
+    env.write_text(f"HAL0_UI_DIST={stale}\n")
+    c = da.check_ui_dist(api_env_path=env, current_ui_dist=current)
+    assert c.status == "warn"
+    assert str(stale) in c.detail
+    assert "restart hal0-api" in c.detail
+
+
+def test_ui_dist_commented_out_line_does_not_count(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    env = tmp_path / "api.env"
+    env.write_text('# HAL0_UI_DIST="/old/ui/dist"\n')
+    c = da.check_ui_dist(api_env_path=env, current_ui_dist=tmp_path / "current/ui/dist")
+    assert c.status == "pass"
+
+
+def test_ui_dist_quoted_value_is_unquoted(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    current = tmp_path / "current" / "ui" / "dist"
+    current.mkdir(parents=True)
+    env = tmp_path / "api.env"
+    env.write_text(f'HAL0_UI_DIST="{current}"\n')
+    c = da.check_ui_dist(api_env_path=env, current_ui_dist=current)
+    assert c.status == "pass"
+
+
 # ── check_ports ───────────────────────────────────────────────────────────────
 
 
@@ -473,6 +530,11 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(da, "_get_any", _fake_get)
     monkeypatch.setattr("hal0.cli.doctor_commands.pending_layout_migration", lambda: (0, 0))
+    # ui-dist (#1589) reads real api.env otherwise; neutralise it so this
+    # composition test asserts the row list, not the host's api.env content.
+    monkeypatch.setattr(
+        da, "check_ui_dist", lambda: Check("ui-dist", "Dashboard bundle", "pass", "stubbed")
+    )
     # model file existence + hal0.target unit file: pretend present so
     # neither spuriously fails.
     monkeypatch.setattr(da.Path, "exists", lambda self: True)
@@ -504,11 +566,12 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 11 extras.
-    assert keys[-11:] == [
+    # 7 verify rows + 12 extras.
+    assert keys[-12:] == [
         "auth",
         "models",
         "migrations",
+        "ui-dist",
         "ports",
         "hal0_target",
         "secret-modes",
