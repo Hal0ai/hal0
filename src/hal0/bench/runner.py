@@ -83,16 +83,24 @@ SERVER_AB = "/usr/lib/hal0/bench/server_ab.py"
 LEGACY_MODEL_ROOT = "/mnt/ai-models"
 
 
-def _model_root() -> str:
-    """The LIVE model-store root (``hal0.config.paths.model_store_root``) —
-    the same resolver ``hal0-benchctl``'s ``exec`` verb uses independently to
-    compute its own ``$MODEL_ROOT``. The composed ``--volume=``/``-m`` argv
-    must use THIS root, not whichever historic root a registry path happened to
-    be stripped against (see ``_rel_gguf``): the shim re-resolves the root
-    itself and will reject an argv built against a different one (#1516)."""
+def _containing_root(gguf: str) -> tuple[str, str]:
+    """(root, rel) for a registry gguf path: the allowed root the path
+    actually sits under (longest-prefix match over ``_model_roots``) plus the
+    path relative to it. The composed ``--volume=``/``-m`` argv must use the
+    CONTAINING root, never a rebuilt "resolved-root + stripped-rel" — on a
+    box whose store was relocated (CT105, 2026-08), pre-relocation models
+    still live under the historic ``/mnt/ai-models``, and rebuilding their
+    paths against the new store root pointed every Tier-A cell at a file
+    that does not exist (found on the first deploy validation, 2026-08-09).
+    The shim accepts either root, so no path escapes validation. A relative
+    path falls back to the live resolved root."""
+    for root in _model_roots():
+        prefix = root + "/"
+        if gguf.startswith(prefix):
+            return root, gguf[len(prefix) :]
     from hal0.config.paths import model_store_root
 
-    return model_store_root().rstrip("/")
+    return model_store_root().rstrip("/"), gguf.lstrip("/")
 
 
 def _model_roots() -> list[str]:
@@ -262,18 +270,6 @@ def _gpu_slot_serving(api: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _rel_gguf(gguf: str) -> str:
-    """The model path the seam expects: relative to the model-store root,
-    ending .gguf (hal0-benchctl validate_model). Absolute registry paths are
-    stripped against the RESOLVED store root(s), not a hardcoded literal
-    (#1516)."""
-    for root in _model_roots():
-        prefix = root + "/"
-        if gguf.startswith(prefix):
-            return gguf[len(prefix) :]
-    return gguf.lstrip("/")
-
-
 def _run_subprocess(cmd: list[str], timeout_s: float, log_path: Path) -> tuple[int, str]:
     """Run one engine subprocess under the watchdog, teeing output to ``log_path``.
     Returns (returncode, tail). A timeout returns rc=-9 → ``hang``.
@@ -385,8 +381,8 @@ def _tier_a_cmd(cell, pp_prompt: int, tg_gen: int, devices: BenchDeviceSpec) -> 
     plan-bypassing entry point) can still land here, so the KeyError is a
     deliberate, documented failure mode rather than a silent default."""
     spec = harness.lane_specs()[cell.lane]
-    model_root = _model_root()
-    model_path = f"{model_root}/{_rel_gguf(cell.identity.model.gguf)}"
+    model_root, model_rel = _containing_root(cell.identity.model.gguf)
+    model_path = f"{model_root}/{model_rel}"
     flags = _tier_a_flags(cell, pp_prompt, tg_gen)
     podman_argv = harness.compose_podman_argv(spec, devices, model_path, model_root, flags)
     per_attempt = _tier_a_per_attempt_s(cell)
@@ -696,8 +692,7 @@ def _tier_a_record(
         tail = ""
     else:
         pp, tg = sizes.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
-        model_root = _model_root()
-        model_rel = _rel_gguf(cell.identity.model.gguf)
+        model_root, model_rel = _containing_root(cell.identity.model.gguf)
         flags = _tier_a_flags(cell, pp, tg)
         log = artifacts / "sweep-benchctl.log"
         run_kwargs = {

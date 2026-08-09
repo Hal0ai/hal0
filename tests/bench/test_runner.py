@@ -328,20 +328,32 @@ class TestLlamaBenchyDispatch:
 
 
 class TestPaths:
-    def test_rel_gguf_strips_resolved_store_root(self, monkeypatch):
+    def test_containing_root_for_a_store_path(self, monkeypatch):
         from hal0.config import paths as hal0_paths
 
         monkeypatch.setattr(hal0_paths, "model_store_root", lambda: "/var/lib/hal0/models")
-        assert runner._rel_gguf("/var/lib/hal0/models/d/M.gguf") == "d/M.gguf"
+        assert runner._containing_root("/var/lib/hal0/models/d/M.gguf") == (
+            "/var/lib/hal0/models",
+            "d/M.gguf",
+        )
 
-    def test_rel_gguf_still_strips_the_legacy_root(self):
-        assert runner._rel_gguf("/mnt/ai-models/d/M.gguf") == "d/M.gguf"
+    def test_containing_root_keeps_a_legacy_rooted_model_under_its_own_root(self, monkeypatch):
+        """A relocated store must not rebuild a pre-relocation model's path
+        against the new root — the file lives under /mnt/ai-models and only
+        exists there (CT105 deploy validation, 2026-08-09)."""
+        from hal0.config import paths as hal0_paths
 
-    def test_model_root_is_the_live_resolved_store(self, monkeypatch):
+        monkeypatch.setattr(hal0_paths, "model_store_root", lambda: "/var/lib/hal0/models")
+        assert runner._containing_root("/mnt/ai-models/d/M.gguf") == (
+            "/mnt/ai-models",
+            "d/M.gguf",
+        )
+
+    def test_containing_root_relative_path_falls_back_to_the_live_store(self, monkeypatch):
         from hal0.config import paths as hal0_paths
 
         monkeypatch.setattr(hal0_paths, "model_store_root", lambda: "/var/lib/hal0/models/")
-        assert runner._model_root() == "/var/lib/hal0/models"
+        assert runner._containing_root("d/M.gguf") == ("/var/lib/hal0/models", "d/M.gguf")
 
 
 # --------------------------------------------------------------------------- #

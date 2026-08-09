@@ -504,3 +504,52 @@ class TestTelemetrySampler:
 def test_the_shim_is_syntactically_valid() -> None:
     proc = subprocess.run(["bash", "-n", str(BENCHCTL)], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
+
+
+class TestLegacyRootMount:
+    """A relocated store leaves pre-relocation models under the historic
+    /mnt/ai-models; both self-mounts are legitimate (closed two-root set)."""
+
+    def test_legacy_root_mount_and_model_accepted(self, tmp_path) -> None:
+        model_root = _model_root(tmp_path)
+        legacy_root = tmp_path / "legacy-models"
+        legacy_model = legacy_root / "tiny/tiny.gguf"
+        legacy_model.parent.mkdir(parents=True)
+        legacy_model.write_bytes(b"GGUF")
+        argv_log = tmp_path / "podman-argv.log"
+        bindir = _stub_bin(tmp_path, model_root, argv_log=argv_log)
+        env = _env(tmp_path, bindir, model_root)
+        env["HAL0_BENCHCTL_LEGACY_ROOT_TEST"] = "1"  # doc marker only
+
+        argv = _cpu_argv(legacy_root, legacy_model)
+
+        # rewrite the shim's LEGACY_MODEL_ROOT for the test via a patched copy
+        patched = tmp_path / "benchctl-patched"
+        patched.write_text(
+            BENCHCTL.read_text().replace(
+                'LEGACY_MODEL_ROOT="/mnt/ai-models"',
+                f'LEGACY_MODEL_ROOT="{legacy_root}"',
+            )
+        )
+        proc = subprocess.run(
+            ["bash", str(patched), "exec", "--", *argv],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_model_outside_the_mounted_root_is_rejected(self, tmp_path) -> None:
+        model_root = _model_root(tmp_path)
+        model_abs = _write_model(model_root)
+        bindir = _stub_bin(tmp_path, model_root)
+        env = _env(tmp_path, bindir, model_root)
+        argv = _cpu_argv(model_root, model_abs)
+        # mount the resolved root but point -m at a legacy-root path
+        argv[argv.index("-m") + 1] = "/mnt/ai-models/tiny/tiny.gguf"
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+        assert "not under the mounted root" in proc.stderr

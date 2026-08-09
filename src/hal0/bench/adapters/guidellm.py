@@ -195,11 +195,19 @@ def _default_runner(argv: list[str], timeout_s: float | None) -> tuple[int, str,
     head = resolve_tool(argv[0])
     if head is not None:
         argv = [head, *argv[1:]]
+    # guidellm's settings layer probes ./.env in the CWD at startup; run
+    # from a neutral readable directory so a service CWD the hal0 user
+    # cannot read (found on-box 2026-08-09: PermissionError on '.env')
+    # never crashes the tool before it starts.
+    import tempfile
+
+    run_cwd = tempfile.gettempdir()
     proc = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        cwd=run_cwd,
         start_new_session=True,
     )
     try:

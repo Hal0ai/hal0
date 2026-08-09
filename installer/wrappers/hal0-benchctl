@@ -61,6 +61,11 @@ _resolve_model_root() {
   printf '%s' /mnt/ai-models
 }
 MODEL_ROOT="$(_resolve_model_root)"
+# The historic store root. A relocated box (store moved to /var/lib/hal0/
+# models) still carries pre-relocation models under this path, and the
+# registry points at wherever a model actually lives — so BOTH roots are
+# legitimate mount/-m prefixes. Closed two-element set, not caller-shaped.
+LEGACY_MODEL_ROOT="/mnt/ai-models"
 
 die() { echo "hal0-benchctl: $1" >&2; exit 2; }
 
@@ -102,12 +107,12 @@ validate_device_flag() {
   [[ -c "$node" ]]
 }
 
-validate_model() {   # arg: path relative to MODEL_ROOT
-  local rel="$1"
+validate_model() {   # args: allowed root, path relative to it
+  local root="$1" rel="$2"
   [[ -n "$rel" ]]                              || die "missing model path"
   [[ "$rel" != *..* ]]                         || die "path traversal in model path"
   [[ "$rel" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*\.gguf$ ]] || die "bad model path: $rel"
-  [[ -f "$MODEL_ROOT/$rel" ]]                  || die "model not found under $MODEL_ROOT: $rel"
+  [[ -f "$root/$rel" ]]                        || die "model not found under $root: $rel"
 }
 
 # Hardware tier vocabulary — the shell mirror of hal0.bench.devices' TIER_*.
@@ -158,6 +163,7 @@ case "$cmd" in
 
     seen_rm=0
     volume_ok=0
+    mounted_root=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --rm) seen_rm=1; shift ;;
@@ -171,9 +177,15 @@ case "$cmd" in
           esac
           shift 2 ;;
         --volume=*)
-          # Exactly the read-only model-store self-mount, nothing else.
-          [[ "$1" == "--volume=${MODEL_ROOT}:${MODEL_ROOT}:ro,z" ]] \
-            || die "volume not allowed: $1"
+          # Exactly a read-only model-store self-mount (resolved or historic
+          # root), nothing else.
+          if [[ "$1" == "--volume=${MODEL_ROOT}:${MODEL_ROOT}:ro,z" ]]; then
+            mounted_root="$MODEL_ROOT"
+          elif [[ "$1" == "--volume=${LEGACY_MODEL_ROOT}:${LEGACY_MODEL_ROOT}:ro,z" ]]; then
+            mounted_root="$LEGACY_MODEL_ROOT"
+          else
+            die "volume not allowed: $1"
+          fi
           volume_ok=1; shift ;;
         -e)
           # EXACT-value allowlist, never a pattern. A pattern wide enough for
@@ -201,8 +213,12 @@ case "$cmd" in
     shift
     [[ "${1:-}" == "-m" ]] || die "expected -m <model> after the image"
     model_abs="${2:-}"
-    [[ "$model_abs" == "$MODEL_ROOT"/* ]] || die "model not under $MODEL_ROOT: $model_abs"
-    validate_model "${model_abs#"$MODEL_ROOT"/}"
+    # -m must sit under the SAME root that was mounted — a model outside the
+    # container's volume would be unreachable anyway, and mixing roots is a
+    # composition bug worth failing loudly on.
+    [[ "$model_abs" == "$mounted_root"/* ]] \
+      || die "model not under the mounted root $mounted_root: $model_abs"
+    validate_model "$mounted_root" "${model_abs#"$mounted_root"/}"
     shift 2
 
     # Only whitelisted llama-bench tuning flags + safe values. -o must be json
