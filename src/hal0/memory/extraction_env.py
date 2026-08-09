@@ -14,10 +14,27 @@ engine picks up the new target. The slot is addressed as the ``hal0/<slot>`` vir
 (resolved by the dispatcher to that slot's model — ADR-0023 §2), so the value tracks
 the slot, never a hardcoded model id.
 
-Privileged operation: writing under ``/etc/systemd/system`` + restarting a unit needs
-root. When hal0-api runs unprivileged the write/restart will fail; this module is
-best-effort and returns a status dict describing what happened rather than raising, so
-the API can surface a partial result instead of 500ing.
+Privileged operation, routed through the seam (#1641): both the drop-in write and
+the restart are genuinely-root, and hal0-api runs as the unprivileged ``hal0``
+service user (``User=hal0``). The original implementation wrote
+``/etc/systemd/system`` directly and shelled out to a bare ``systemctl``, so on
+every standard install the write died with ``EPERM`` (the ``.d`` dir is
+``root:root``) and the restart, had it been reached, would have hit polkit's
+"Interactive authentication required" — while ``hal0.toml`` recorded the new slot
+regardless, so the dashboard reported an override that was never applied. Every
+step now goes through :class:`hal0.system.SystemCtlSeam`:
+
+* the drop-in write -> ``hal0-systemctl write-hindsight-dropin`` (body on stdin,
+  the path is a root-side literal — the ``write-gateway-dropin`` posture);
+* ``daemon-reload`` -> the seam's own verb;
+* the restart -> ``svc-restart hindsight`` (the wrapper's closed companion-unit
+  map), which is why the unit is spelled ``hindsight-api.service`` here.
+
+Off the ``hal0`` service account (root, a dev shell, CI, the unit tests) the seam
+is a passthrough and everything runs directly, exactly as before.
+
+Still best-effort: this returns a status dict describing what happened rather than
+raising, so the API can surface a partial result instead of 500ing.
 """
 
 from __future__ import annotations
@@ -28,12 +45,20 @@ from typing import Any
 
 import structlog
 
+from hal0.system.seam import SystemCtlSeam
+
 log = structlog.get_logger(__name__)
 
 #: systemd drop-in directory + file for the hindsight-api extraction model override.
 DROP_IN_DIR = Path("/etc/systemd/system/hindsight-api.service.d")
 DROP_IN_PATH = DROP_IN_DIR / "extraction-model.conf"
-SERVICE = "hindsight-api"
+#: Full unit name — ``COMPANION_SERVICE_UNITS`` keys on it to reach the wrapper's
+#: ``svc-restart hindsight`` arm. A bare ``hindsight-api`` would miss that map and
+#: fall through to an unprivileged (polkit-blocked) systemctl.
+SERVICE = "hindsight-api.service"
+
+#: Bound on each seam call so a wedged unit can never pin an event-loop thread.
+_SYSTEMCTL_TIMEOUT_S = 60.0
 
 #: Default daemon LLM timeout (seconds) — mirrors MemoryGraphConfig.llm_timeout_s.
 DEFAULT_LLM_TIMEOUT_S = 300
@@ -50,6 +75,44 @@ _DROP_IN_TEMPLATE = (
 )
 
 
+def _detail(exc: BaseException) -> str:
+    """``str(exc)`` plus the child's stderr when there is one.
+
+    A seam failure's *cause* almost always lives in stderr — ``sudo: a password
+    is required`` (no grant), ``hal0-systemctl: bad cmd`` (stale wrapper) — while
+    ``str(exc)`` is just the exit code. Both go to the operator.
+    """
+    stderr = getattr(exc, "stderr", "") or ""
+    if isinstance(stderr, bytes):  # TimeoutExpired can carry raw bytes
+        stderr = stderr.decode("utf-8", "replace")
+    stderr = stderr.strip()
+    return f"{exc}{(' — ' + stderr) if stderr else ''}"
+
+
+#: The wrapper's own ``die()`` exit code (installer/wrappers/hal0-systemctl).
+_SEAM_USAGE_RC = 64
+
+_STALE_WRAPPER_HINT = (
+    " — the installed /usr/lib/hal0/bin/hal0-systemctl predates this verb; "
+    "re-run the installer (`sudo bash install.sh`) to refresh the seam wrapper"
+)
+
+
+def _stale_wrapper_hint(exc: BaseException) -> str:
+    """Remediation text when the seam rejected the verb outright.
+
+    ``hal0 update`` swaps the release tree and re-pips the venv but does not
+    reinstall ``${LIB_DIR}/bin/*`` — only ``install.sh`` does. So new Python can
+    meet an old wrapper, which answers a verb it doesn't know with
+    ``hal0-systemctl: bad cmd: ...`` and exit 64. That is a fixable operator
+    condition, not a bug report, so say how to fix it.
+    """
+    rc = getattr(exc, "returncode", None)
+    if rc == _SEAM_USAGE_RC or "bad cmd" in _detail(exc):
+        return _STALE_WRAPPER_HINT
+    return ""
+
+
 def render_drop_in(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> str:
     """Return the drop-in contents pinning extraction to ``hal0/<slot>`` + timeout."""
     return _DROP_IN_TEMPLATE.format(slot=slot, timeout_s=int(timeout_s))
@@ -60,6 +123,7 @@ def apply_extraction_slot(
     *,
     timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
     restart: bool = True,
+    seam: SystemCtlSeam | None = None,
 ) -> dict[str, Any]:
     """Write the drop-in for ``slot`` and (best-effort) restart hindsight-api.
 
@@ -70,7 +134,13 @@ def apply_extraction_slot(
 
     ``error`` is ``None`` on full success. The write is atomic (temp + rename) so a
     crash mid-write never leaves a half-written override that would wedge the unit.
+
+    ``seam`` is an injection point (default-constructed = production behaviour), so
+    the privileged routing is unit-testable without sudo, a real ``hal0`` user, or
+    a writable ``/etc``. Blocking: callers on the event loop must hop a thread
+    (``asyncio.to_thread``) — the restart waits on a hindsight-api cold start.
     """
+    seam = seam if seam is not None else SystemCtlSeam()
     model = f"hal0/{slot}"
     result: dict[str, Any] = {
         "slot": slot,
@@ -84,13 +154,16 @@ def apply_extraction_slot(
     }
 
     try:
-        DROP_IN_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = DROP_IN_PATH.with_suffix(".conf.tmp")
-        tmp.write_text(render_drop_in(slot, timeout_s), encoding="utf-8")
-        tmp.replace(DROP_IN_PATH)
+        seam.write_hindsight_dropin(
+            render_drop_in(slot, timeout_s),
+            path=DROP_IN_PATH,
+            timeout=_SYSTEMCTL_TIMEOUT_S,
+        )
         result["written"] = True
-    except OSError as exc:
-        result["error"] = f"could not write {DROP_IN_PATH}: {exc}"
+    except (OSError, subprocess.SubprocessError) as exc:
+        result["error"] = (
+            f"could not write {DROP_IN_PATH}: {_detail(exc)}{_stale_wrapper_hint(exc)}"
+        )
         log.warning("hal0.memory.extraction_dropin_write_failed", slot=slot, error=str(exc))
         return result
 
@@ -98,17 +171,14 @@ def apply_extraction_slot(
         return result
 
     for step, args in (
-        ("daemon_reloaded", ["systemctl", "daemon-reload"]),
-        ("restarted", ["systemctl", "restart", SERVICE]),
+        ("daemon_reloaded", ("systemctl", "daemon-reload")),
+        ("restarted", ("systemctl", "restart", SERVICE)),
     ):
         try:
-            subprocess.run(args, check=True, capture_output=True, text=True, timeout=60)
+            seam.systemctl(*args, check=True, timeout=_SYSTEMCTL_TIMEOUT_S)
             result[step] = True
         except (OSError, subprocess.SubprocessError) as exc:
-            stderr = getattr(exc, "stderr", "") or ""
-            result["error"] = (
-                f"{' '.join(args)} failed: {exc}{(' — ' + stderr.strip()) if stderr else ''}"
-            )
+            result["error"] = f"{' '.join(args)} failed: {_detail(exc)}"
             log.warning(
                 "hal0.memory.extraction_restart_failed",
                 slot=slot,

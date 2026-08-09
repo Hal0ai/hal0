@@ -9,6 +9,7 @@ best-effort (returns a status dict rather than raising) so an unprivileged hal0
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from hal0.memory.extraction_env import (
@@ -16,6 +17,25 @@ from hal0.memory.extraction_env import (
     apply_extraction_slot,
     render_drop_in,
 )
+from hal0.system.seam import SEAM_BIN, SystemCtlSeam
+
+
+def _seam_recorder(rc: int = 0, stderr: str = ""):
+    """Record ``(argv, stdin-body)`` for every seam invocation."""
+    calls: list[tuple[list[str], str | None]] = []
+
+    def _run(argv, **kwargs):
+        calls.append((list(argv), kwargs.get("input")))
+        done = subprocess.CompletedProcess(list(argv), rc, "", stderr)
+        if rc and kwargs.get("check", False):
+            raise subprocess.CalledProcessError(rc, list(argv), "", stderr)
+        return done
+
+    return calls, _run
+
+
+def _forbidden(*_a, **_k):  # pragma: no cover — a call here is the bug
+    raise AssertionError("privileged work must route through the seam, not bare subprocess")
 
 
 def test_render_drop_in_pins_hal0_virtual():
@@ -37,7 +57,7 @@ def test_drop_in_path_is_a_systemd_override():
 
 
 def test_apply_writes_drop_in_and_reports_status(monkeypatch, tmp_path: Path):
-    # Redirect the drop-in to a tmp dir + stub systemctl so the test never
+    # Redirect the drop-in to a tmp dir + inject a fake runner so the test never
     # touches /etc or the real service.
     import hal0.memory.extraction_env as ee
 
@@ -45,19 +65,11 @@ def test_apply_writes_drop_in_and_reports_status(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(ee, "DROP_IN_DIR", drop_in.parent)
     monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
 
-    ran: list[list[str]] = []
+    calls, run = _seam_recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
 
-    def fake_run(args, **_kw):
-        ran.append(list(args))
-
-        class _Done:
-            returncode = 0
-
-        return _Done()
-
-    monkeypatch.setattr(ee.subprocess, "run", fake_run)
-
-    result = apply_extraction_slot("utility")
+    result = apply_extraction_slot("utility", seam=seam)
+    ran = [c[0] for c in calls]
 
     assert result["error"] is None
     assert result["written"] is True
@@ -65,9 +77,10 @@ def test_apply_writes_drop_in_and_reports_status(monkeypatch, tmp_path: Path):
     assert result["restarted"] is True
     assert result["model"] == "hal0/utility"
     assert drop_in.read_text().count("HINDSIGHT_API_LLM_MODEL=hal0/utility") == 1
-    # daemon-reload then restart, in order.
+    # daemon-reload then restart, in order. Off the hal0 service account the
+    # seam is a passthrough, so these are the bare argv.
     assert ran[0][:2] == ["systemctl", "daemon-reload"]
-    assert ran[1] == ["systemctl", "restart", "hindsight-api"]
+    assert ran[1] == ["systemctl", "restart", "hindsight-api.service"]
 
 
 def test_apply_no_restart_skips_systemctl(monkeypatch, tmp_path: Path):
@@ -77,12 +90,9 @@ def test_apply_no_restart_skips_systemctl(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(ee, "DROP_IN_DIR", drop_in.parent)
     monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
 
-    def boom(*_a, **_k):  # pragma: no cover — must not be called
-        raise AssertionError("systemctl should not run when restart=False")
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
 
-    monkeypatch.setattr(ee.subprocess, "run", boom)
-
-    result = apply_extraction_slot("agent", restart=False)
+    result = apply_extraction_slot("agent", restart=False, seam=seam)
     assert result["written"] is True
     assert result["restarted"] is False
     assert result["error"] is None
@@ -108,3 +118,128 @@ def test_apply_threads_timeout_into_drop_in_and_status(monkeypatch, tmp_path: Pa
     text = drop_in.read_text()
     assert "HINDSIGHT_API_LLM_MODEL=hal0/agent" in text
     assert "HINDSIGHT_API_LLM_TIMEOUT=900" in text
+
+
+# ── #1641: the unprivileged hal0-api path ────────────────────────────────────
+#
+# hal0-api runs as the unprivileged ``hal0`` service user (User=hal0), and
+# /etc/systemd/system/hindsight-api.service.d is root:root. Writing the drop-in
+# directly is EPERM and a bare ``systemctl restart`` escalates through polkit
+# ("Interactive authentication required"), so on every standard install the
+# propagation silently no-opped while hal0.toml recorded the new slot. Every
+# privileged step must route through the hal0-systemctl seam instead.
+
+
+def test_apply_routes_every_step_through_the_seam_as_the_hal0_user(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_DIR", drop_in.parent)
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+    monkeypatch.setattr(ee.subprocess, "run", _forbidden)
+
+    calls, run = _seam_recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_extraction_slot("utility", timeout_s=420, seam=seam)
+
+    assert result["error"] is None
+    assert result["written"] is True
+    assert result["daemon_reloaded"] is True
+    assert result["restarted"] is True
+    # Never written directly — the root side owns the literal path.
+    assert not drop_in.exists()
+    assert [c[0] for c in calls] == [
+        ["sudo", "-n", SEAM_BIN, "write-hindsight-dropin"],
+        ["sudo", "-n", SEAM_BIN, "daemon-reload"],
+        ["sudo", "-n", SEAM_BIN, "svc-restart", "hindsight"],
+    ]
+    body = calls[0][1]
+    assert "HINDSIGHT_API_LLM_MODEL=hal0/utility" in body
+    assert "HINDSIGHT_API_LLM_TIMEOUT=420" in body
+
+
+def test_apply_surfaces_a_seam_write_failure(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_DIR", drop_in.parent)
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+    monkeypatch.setattr(ee.subprocess, "run", _forbidden)
+
+    _calls, run = _seam_recorder(rc=1, stderr="sudo: a password is required")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_extraction_slot("utility", seam=seam)
+
+    assert result["written"] is False
+    assert result["restarted"] is False
+    assert result["error"] and "sudo" in result["error"]
+
+
+def test_apply_bounds_the_privileged_write(monkeypatch, tmp_path: Path):
+    """A stalled sudo must not park an API worker thread forever."""
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+
+    seen: list[object] = []
+
+    def _run(argv, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    seam = SystemCtlSeam(run=_run, is_hal0_user=lambda: True)
+    apply_extraction_slot("utility", seam=seam)
+
+    # write, daemon-reload, restart — every one bounded.
+    assert seen == [ee._SYSTEMCTL_TIMEOUT_S] * 3
+
+
+def test_apply_names_the_stale_wrapper_as_the_cause(monkeypatch, tmp_path: Path):
+    """`hal0 update` never refreshes ${LIB_DIR}/bin, so new Python can meet an
+    old wrapper. Exit 64 / `bad cmd` is a fixable operator condition — say so."""
+    import hal0.memory.extraction_env as ee
+
+    monkeypatch.setattr(ee, "DROP_IN_PATH", tmp_path / "extraction-model.conf")
+
+    _calls, run = _seam_recorder(rc=64, stderr="hal0-systemctl: bad cmd: write-hindsight-dropin")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_extraction_slot("utility", seam=seam)
+
+    assert result["written"] is False
+    assert "install.sh" in result["error"]
+
+
+def test_apply_does_not_blame_the_wrapper_for_other_failures(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+
+    monkeypatch.setattr(ee, "DROP_IN_PATH", tmp_path / "extraction-model.conf")
+
+    _calls, run = _seam_recorder(rc=1, stderr="sudo: a password is required")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    assert "install.sh" not in (apply_extraction_slot("utility", seam=seam)["error"] or "")
+
+
+def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Path):
+    """Root / dev / CI keeps the pre-seam behaviour: a direct atomic write."""
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_DIR", drop_in.parent)
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+
+    calls, run = _seam_recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
+
+    result = apply_extraction_slot("agent", seam=seam)
+
+    assert result["error"] is None
+    assert drop_in.read_text().count("HINDSIGHT_API_LLM_MODEL=hal0/agent") == 1
+    assert [c[0] for c in calls] == [
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "restart", "hindsight-api.service"],
+    ]

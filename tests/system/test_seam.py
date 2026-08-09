@@ -100,6 +100,62 @@ def test_write_quadlet_routes_through_seam_when_hal0_user(tmp_path: Path) -> Non
     assert calls == [["sudo", "-n", SEAM_BIN, "write-quadlet", "chat"]]
 
 
+# ── write_hindsight_dropin (#1641) ─────────────────────────────────────────
+
+
+def test_write_hindsight_dropin_direct_when_not_hal0_user(tmp_path: Path) -> None:
+    calls, run = _recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
+    dropin = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+
+    seam.write_hindsight_dropin("[Service]\n", path=dropin)
+
+    assert dropin.read_text() == "[Service]\n"  # parent dir auto-created
+    assert calls == []
+    # Atomic write: the temp file is renamed, never left behind.
+    assert sorted(p.name for p in dropin.parent.iterdir()) == ["extraction-model.conf"]
+
+
+def test_write_hindsight_dropin_routes_through_seam_when_hal0_user(tmp_path: Path) -> None:
+    calls, run = _recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+    dropin = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+
+    seam.write_hindsight_dropin("[Service]\n", path=dropin)
+
+    assert not dropin.exists()  # never written directly — root owns the path
+    assert calls == [["sudo", "-n", SEAM_BIN, "write-hindsight-dropin"]]
+
+
+def test_write_hindsight_dropin_pipes_the_body_on_stdin() -> None:
+    """No id to validate: the body is the ENTIRE payload, so it must ride
+    stdin rather than argv (the write-gateway-dropin contract)."""
+    seen: dict[str, object] = {}
+
+    def _run(argv: object, **kwargs: object) -> MagicMock:
+        seen["argv"] = list(argv)  # type: ignore[arg-type]
+        seen.update(kwargs)
+        return _completed()
+
+    SystemCtlSeam(run=_run, is_hal0_user=lambda: True).write_hindsight_dropin("BODY")
+
+    assert seen["input"] == "BODY"
+    assert seen["check"] is True
+    # No path token anywhere in argv — the root side owns the literal.
+    assert not any("/" in a for a in seen["argv"][3:])  # type: ignore[index]
+
+
+def test_hindsight_dropin_verb_exists_in_the_wrapper() -> None:
+    """The sudoers grant is pinned to the BINARY, so the wrapper's case
+    statement is the allow-list. A Python-side verb the wrapper doesn't have
+    fails at runtime with `bad cmd` — pin the two spellings together."""
+    wrapper = Path(__file__).resolve().parents[2] / "installer" / "wrappers" / "hal0-systemctl"
+    text = wrapper.read_text()
+    assert "write-hindsight-dropin)" in text
+    assert str(seam_mod.HINDSIGHT_DROPIN_PATH.parent) in text
+    assert seam_mod.HINDSIGHT_DROPIN_PATH.name in text
+
+
 def test_write_quadlet_rejects_non_slot_name(tmp_path: Path) -> None:
     _, run = _recorder()
     seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)

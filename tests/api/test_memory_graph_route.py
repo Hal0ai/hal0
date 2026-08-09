@@ -148,6 +148,27 @@ def test_put_enable_with_valid_slot(
     assert body["propagation"]["slot"] == "agent"
 
 
+def test_put_persists_hal0_toml_before_propagating(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """#1641 review: the propagation awaits a ~60s restart, and cancelling that
+    await (client disconnect) does NOT stop the worker thread. If the save ran
+    afterwards, the daemon could end up on the new slot while hal0.toml still
+    held the old one. Persist first — the propagation is the best-effort half."""
+    from hal0.config import paths as config_paths
+
+    def _record(*_a: object, **_k: object) -> dict[str, object]:
+        # Called from the thread hop: hal0.toml must ALREADY name the new slot.
+        assert 'extraction_slot = "agent"' in config_paths.hal0_toml().read_text()
+        return {"slot": "agent", "written": True, "error": None}
+
+    with patch("hal0.memory.extraction_env.apply_extraction_slot", side_effect=_record):
+        r = client.put("/api/memory/graph", json={"enabled": True, "extraction_slot": "agent"})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["propagation"]["written"] is True
+
+
 def test_put_enable_with_unknown_slot_rejected(
     client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
