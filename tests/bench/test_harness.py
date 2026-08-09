@@ -14,6 +14,20 @@ the retired ``tests/bench/test_harness_matrix.py`` (``TestBackendMatrix``,
 ``TestCpuCellEndToEnd``), translated from shell-sourcing + subprocess
 assertions into direct unit tests against the new pure functions.
 
+It also absorbs ``tests/bench/test_harness_impl.py`` (final-review finding 9,
+2026-08): the two files grew independently over the same module and had
+~35 overlapping behaviours (lane_specs identity/images, dedupe_flags
+later-wins, compose shape + caller-overrides-``-ngl``, benchctl_exec_argv
+with/without/zero timeout, the retry ladder, rc-0-empty-stdout
+normalisation, the legacy meta key set, ExclusiveSlots stop/restart). Exact
+duplicates were dropped and the stronger assertion kept where two tests
+covered the same behaviour differently (see
+``test_meta_carries_the_legacy_provenance_keys``); ``test_harness_impl.py``'s
+tests with no equivalent here (the 137-vs-135 timeout/crash split, the
+attempt-log write, malformed-JSON tolerance, and three ExclusiveSlots
+failure-path tests) were ported in verbatim, tagged "Ported from
+test_harness_impl.py" at each site.
+
 A few of ``run_cell``'s and ``ExclusiveSlots``' exact call shapes are
 underspecified in the interface contract (see the task brief) — where this
 file has to guess, the guess is called out in a comment next to the
@@ -27,6 +41,7 @@ import json
 
 import pytest
 
+from hal0.bench import harness as _harness_mod
 from hal0.bench.devices import (
     TIER_AMD,
     TIER_CPU,
@@ -119,19 +134,20 @@ class TestLaneSpecs:
         assert spec.bench_bin == ROCMFPX_BENCH_BIN
         assert spec.dev_args == (("-ngl", "99"), ("-dev", dev))
 
-    def test_rocm_lane_ubatch_and_env(self) -> None:
+    def test_rocm_lane_env(self) -> None:
         spec = lane_specs()["rocm"]
 
-        assert spec.ubatch == 2048
         assert spec.env == ("GGML_HIP_ENABLE_UNIFIED_MEMORY=1",)
 
-    def test_vulkan_lane_ubatch_and_no_env(self) -> None:
-        """``vulkan_radv`` shares the rocm image but is a distinct lane: half
-        the ubatch, no HIP unified-memory env (that flag is ROCm-specific)."""
+    def test_vulkan_lane_has_no_env(self) -> None:
+        """``vulkan_radv`` shares the rocm image but is a distinct lane: no
+        HIP unified-memory env (that flag is ROCm-specific). Neither lane
+        carries a ``ubatch`` field (finding 6): the harness never emits
+        ``-ub``, so both lanes run at llama-bench's own internal default."""
         spec = lane_specs()["vulkan_radv"]
 
-        assert spec.ubatch == 512
         assert spec.env == ()
+        assert not hasattr(spec, "ubatch")
 
     def test_lane_field_matches_the_dict_key(self) -> None:
         specs = lane_specs()
@@ -321,6 +337,16 @@ class TestComposePodmanArgv:
         assert argv.count("-ngl") == 1
         assert argv[argv.index("-ngl") + 1] == "0"
 
+    def test_ub_placeholder_never_appears(self) -> None:
+        """Regression guard ported from ``test_harness_impl.py`` (finding 9):
+        the v1 shell harness composed ``-ub %UB%`` and substituted it later —
+        the Python composer must never leak that sentinel into the argv even
+        when a caller passes its own ``-ub`` tuning flag."""
+        spec = lane_specs()["rocm"]
+        argv = compose_podman_argv(spec, _amd_devices(), "/x/m.gguf", "/x", flags=[("-ub", "2048")])
+
+        assert "%UB%" not in argv
+
     def test_full_cpu_argv_shape(self) -> None:
         """A precise end-to-end shape check for the simplest lane (no
         devices, no env) — the property tests above cover the GPU lane and
@@ -486,6 +512,55 @@ class TestRunCell:
         assert result.rc == 124
         assert len(runner.calls) == 1
 
+    def test_137_past_the_cap_is_a_timeout_not_a_crash_retry(self, tmp_path, monkeypatch) -> None:
+        """Ported from ``test_harness_impl.py`` (finding 9): rc 137 delivered
+        AFTER the per-attempt wall-clock cap has elapsed is the shim's own
+        ``--kill-after=30`` escalation from TERM to KILL, not a plain
+        rocmfpx crash — it must never crash-retry."""
+        times = iter([0.0, 100.0])
+        monkeypatch.setattr(_harness_mod.time, "monotonic", lambda: next(times))
+        runner = _ScriptedRunner([(137, "", "killed")])
+
+        result = run_cell(**self._kwargs(tmp_path, runner, timeout_s=60))
+
+        assert result.rc == 137
+        assert len(runner.calls) == 1
+
+    def test_137_within_the_cap_is_a_crash_retry(self, tmp_path, monkeypatch) -> None:
+        """Ported from ``test_harness_impl.py`` (finding 9): rc 137 delivered
+        WELL inside the per-attempt cap reads as the same crash class as 139
+        (a fast SIGKILL, not the shim's escalation) and DOES retry."""
+        times = iter([0.0, 1.0] * MAX_ATTEMPTS)
+        monkeypatch.setattr(_harness_mod.time, "monotonic", lambda: next(times))
+        monkeypatch.setattr(_harness_mod.time, "sleep", lambda *_: None)
+        runner = _ScriptedRunner([(137, "", "killed fast")] * MAX_ATTEMPTS)
+
+        result = run_cell(**self._kwargs(tmp_path, runner, timeout_s=60))
+
+        assert result.rc == 137
+        assert len(runner.calls) == MAX_ATTEMPTS
+
+    def test_writes_the_attempt_log(self, tmp_path) -> None:
+        """Ported from ``test_harness_impl.py`` (finding 9)."""
+        log_path = tmp_path / "sub" / "log.txt"
+        runner = _ScriptedRunner([(0, _FAKE_BENCH_JSON, "")])
+
+        run_cell(**self._kwargs(tmp_path, runner, log_path=log_path))
+
+        assert log_path.exists()
+        assert "exit=0" in log_path.read_text()
+
+    def test_malformed_json_yields_empty_rows_not_a_crash(self, tmp_path) -> None:
+        """Ported from ``test_harness_impl.py`` (finding 9): a successful
+        (rc=0) attempt whose stdout is NOT valid JSON must degrade to empty
+        rows, not raise ``json.JSONDecodeError`` out of ``run_cell``."""
+        runner = _ScriptedRunner([(0, "not json", "")])
+
+        result = run_cell(**self._kwargs(tmp_path, runner))
+
+        assert result.rc == 0
+        assert result.rows == []
+
     def test_meta_carries_the_legacy_provenance_keys(self, tmp_path) -> None:
         """``meta`` feeds ``artifacts/meta.json``, which ``parsers.py`` reads
         by these exact key names — see the task brief's global constraints.
@@ -517,10 +592,15 @@ class TestRunCell:
             "gpu",
             "timestamp",
         }
-        assert legacy_keys <= set(result.meta)
+        # Exact key set, not just a subset (finding 9 — strengthened from the
+        # `<=` this test and test_harness_impl.py's now-merged
+        # test_meta_provenance_keys_match_legacy_exactly both asserted).
+        assert set(result.meta) == legacy_keys
         assert result.meta["backend"] == "cpu"
         assert result.meta["image"] == FALLBACK_VULKAN_IMAGE
-        assert result.meta["ubatch"] == 512
+        # finding 6: the harness never emits -ub — the key stays for legacy
+        # readers, but its value is always None for a v2-composed cell.
+        assert result.meta["ubatch"] is None
         assert result.meta["model_rel"] == "tiny/tiny.gguf"
         assert result.meta["model_path"] == f"{tmp_path}/tiny/tiny.gguf"
 
@@ -647,6 +727,59 @@ class TestExclusiveSlots:
         assert privileged
         for call in privileged:
             assert SYSTEMCTL_SEAM in call
+
+    def test_failed_stop_raises_and_restores_what_was_already_stopped(self) -> None:
+        """Ported from ``test_harness_impl.py`` (finding 9): if the second of
+        two active slots fails to stop, the FIRST (already-stopped) slot must
+        still be restarted before the RuntimeError propagates."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                return 0, "\n".join(["hal0-slot@a.service", "hal0-slot@b.service"]), ""
+            if argv[-2:] == ["stop", "a"]:
+                return 0, "", ""
+            if argv[-2:] == ["stop", "b"]:
+                return 1, "", "permission denied"
+            return 0, "", ""
+
+        with pytest.raises(RuntimeError), ExclusiveSlots(runner=runner):
+            pass
+
+        starts = [c[-1] for c in calls if len(c) > 3 and c[-2] == "start"]
+        assert starts == ["a"]  # only the slot that WAS stopped gets restored
+
+    def test_failed_restart_warns_but_does_not_raise(self, capsys) -> None:
+        """Ported from ``test_harness_impl.py`` (finding 9): a failed restart
+        must never crash a benchmark session that already completed."""
+
+        def runner(argv):
+            if argv[0] == "systemctl":
+                return 0, "hal0-slot@agent.service", ""
+            if argv[-2:] == ["stop", "agent"]:
+                return 0, "", ""
+            if argv[-2:] == ["start", "agent"]:
+                return 1, "", "unit not found"
+            return 0, "", ""
+
+        with ExclusiveSlots(runner=runner):
+            pass  # must not raise
+
+        assert "WARN" in capsys.readouterr().err
+
+    def test_list_units_failure_treated_as_nothing_active(self) -> None:
+        """Ported from ``test_harness_impl.py`` (finding 9): an unprivileged
+        ``systemctl list-units`` failure degrades to "nothing active" rather
+        than raising — a benchmark session must still be able to start."""
+
+        def runner(argv):
+            if argv[0] == "systemctl":
+                return 1, "", "no systemd"
+            return 0, "", ""
+
+        with ExclusiveSlots(runner=runner):
+            pass  # must not raise
 
 
 def test_module_exposes_the_privileged_seam_paths() -> None:
