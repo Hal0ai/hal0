@@ -67,7 +67,7 @@ export function RestartApiPanel() {
     <div className="s-panel">
       <SRow
         k="hal0-api service"
-        sub="Control plane · dashboard, slot manager, /v1 proxy. Restart to apply settings marked ⟳ restart hal0-api or ⚠ manual restart."
+        sub="Control plane · dashboard, slot manager, /v1 proxy. Restart to apply settings marked with the amber ⟳ badge or ⚠ manual restart."
         v={waiting
           ? <span className="mono" style={{color: "var(--warn)", fontSize: 11}}>restarting — waiting for /api/health…</span>
           : <span className="mono" style={{color: "var(--fg-3)", fontSize: 11}}>running</span>}
