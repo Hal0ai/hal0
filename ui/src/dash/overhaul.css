@@ -7,7 +7,7 @@
 /* has a single source of truth. --warming-glow is a glow rgba, kept local.      */
 :root {
   --warming: var(--warn);
-  --warming-glow: rgba(242, 121, 43, 0.35);
+  --warming-glow: rgba(232, 185, 78, 0.35);
   --ok-glow:  rgba(111, 207, 151, 0.35);
 }
 
@@ -100,7 +100,7 @@
 
 .sdot.warming {
   background: var(--warming);
-  box-shadow: 0 0 8px var(--warming-glow, rgba(242, 121, 43, 0.35));
+  box-shadow: 0 0 8px var(--warming-glow, rgba(232, 185, 78, 0.35));
   animation: pulse 1.4s ease-in-out infinite;
 }
 
