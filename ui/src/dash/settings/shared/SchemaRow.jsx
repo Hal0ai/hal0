@@ -88,6 +88,9 @@ export const _advInputStyle = {
 // `options` lets a page override enum choices per-key (e.g. memory.engine's
 // validator also accepts "cognee"/"mem0", which the factory silently maps to
 // hindsight — offering them would lie, so the page passes its own allowlist).
+// Entries are plain strings, or `{value, label}` objects when the display
+// text should differ from the persisted value (e.g. the memory reranker's
+// model picker annotating catalog rows with their gpu/npu backends).
 // `descriptions` lets a page override a stale/missing schema description.
 // The description goes to SRow whole — the info popup wraps and caps its own
 // width, so truncating here only ever dropped the tail of a deliberate
@@ -111,7 +114,11 @@ export function AdvRow({ dotKey, field, live, buf, onChange, registry, label: la
   } else if (options) {
     control = (
       <select value={current} onChange={e => onChange(dotKey, e.target.value)} style={_advInputStyle}>
-        {options.map(o => <option key={o} value={o}>{o}</option>)}
+        {options.map(o => {
+          const v = typeof o === "object" && o != null ? o.value : o;
+          const l = typeof o === "object" && o != null ? o.label : o;
+          return <option key={v} value={v}>{l}</option>;
+        })}
       </select>
     );
   } else if (isNum) {
