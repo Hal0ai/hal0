@@ -79,6 +79,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE
 
@@ -253,8 +254,8 @@ class CellResult:
     never a partial/guessed value), the provenance sidecar, the FINAL attempt's
     exit code, and its last 4000 chars of log for a failed record's ``note``."""
 
-    rows: list[dict]
-    meta: dict
+    rows: list[dict[str, Any]]
+    meta: dict[str, Any]
     rc: int
     tail: str
 
@@ -276,7 +277,7 @@ def _build_meta(
     model_rel: str,
     model_path: str,
     flags: list[tuple[str, str]],
-) -> dict:
+) -> dict[str, Any]:
     """The ``.meta.json`` provenance dict, exact legacy keys (see module
     docstring for which are always-empty v1 concepts with no v2 equivalent)."""
     reps: int | None = None
@@ -368,7 +369,7 @@ def run_cell(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(f"exit={rc}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n")
 
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     if rc == 0 and stdout.strip():
         with contextlib.suppress(json.JSONDecodeError):
             parsed = json.loads(stdout)
