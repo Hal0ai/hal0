@@ -21,9 +21,7 @@ export const NAV_GROUPS = [
     items: [
       { id: "slots", label: "Loaded Models" },
       { id: "modeldefaults", label: "Model Defaults" },
-      { id: "voice", label: "Voice" },
-      { id: "imagegen", label: "Image Generation" },
-      { id: "npu", label: "NPU" },
+      { id: "capabilities", label: "AI Capabilities" },
     ],
   },
   {
@@ -56,6 +54,10 @@ export const SECTION_ALIASES = {
   runtimes: "hardware",
   hwtuning: "hardware",
   about: "updates",
+  // Unified AI Capabilities page (2026-08) absorbed three pages:
+  voice: "capabilities",
+  imagegen: "capabilities",
+  npu: "capabilities",
 };
 
 // Flat id → item lookup + the ordered id list, derived once from NAV_GROUPS
