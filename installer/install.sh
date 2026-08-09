@@ -1961,7 +1961,14 @@ else
         "${VENV_DIR}/bin/python" -m hal0.install.agent_model --plan 2>/dev/null || true)"
     _agent_plan="${_agent_plan%%$'\n'*}"
     if [[ -z "${_agent_plan}" || "${_agent_plan}" != *$'\t'* ]]; then
-        info "No agent model fits this box (a ROCm/Vulkan device and ~15 GB of pool are the floor) — not offering one."
+        # Floor comes from the curated ladder itself (`--floor` reads the
+        # smallest rung's vram_gb_min — catalogue only, no hardware probe), so
+        # this notice can't drift from `_smallest_rung_gb()` the way a bash
+        # literal would. `|| true` + regex guard: a broken venv still prints
+        # a sane fallback instead of aborting under `set -euo pipefail`.
+        _agent_floor="$("${VENV_DIR}/bin/python" -m hal0.install.agent_model --floor 2>/dev/null || true)"
+        [[ "${_agent_floor}" =~ ^[0-9]+$ ]] || _agent_floor=15
+        info "No agent model fits this box (a ROCm/Vulkan device and ~${_agent_floor} GB of pool are the floor) — not offering one."
     else
         _agent_id="${_agent_plan%%$'\t'*}"
         _agent_desc="${_agent_plan#*$'\t'}"
@@ -2075,13 +2082,13 @@ if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "          install manually if exercising NPU paths: see installer/README.md"
 elif ! command -v apt-get >/dev/null 2>&1; then
     # Non-Debian host (Fedora, Arch/CachyOS, openSUSE…). FastFlowLM upstream
-    # ships only an Ubuntu .deb + a Windows .msi — there is no dnf/pacman/
+    # ships Debian/Ubuntu .debs + a Windows .msi — there is no dnf/pacman/
     # zypper artefact and the libxrt-npu2 runtime is Debian-packaged too — so
     # the NPU prereqs genuinely can't be auto-installed here. This is an
     # upstream packaging limit, not a hal0 one: GPU (Vulkan/ROCm) and CPU
     # paths are fully supported on this distro; only the NPU/FLM trio waits
     # on a manual FastFlowLM install. Surface it honestly and keep going.
-    warn "$(distro_pretty): skipping NPU prereqs — FastFlowLM ships an Ubuntu .deb only (upstream)"
+    warn "$(distro_pretty): skipping NPU prereqs — FastFlowLM ships Debian/Ubuntu .debs only (no dnf/pacman/zypper artefact upstream)"
     warn "  GPU (Vulkan/ROCm) + CPU paths work normally; NPU/FLM slots stay disabled until you install"
     warn "  FastFlowLM ${FLM_DEB_VERSION} manually (see installer/README.md). 'flm validate' gates the NPU trio."
 else

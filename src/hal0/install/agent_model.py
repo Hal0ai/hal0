@@ -237,12 +237,15 @@ def _load_hardware() -> HardwareInfo:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python -m hal0.install.agent_model [--plan]`` — install.sh entry point.
+    """``python -m hal0.install.agent_model [--plan|--floor]`` — install.sh entry point.
 
     ``--plan`` is the *offer* half: it prints one ``id\\tsentence`` line (or
     nothing) and exits 0 without touching the network. install.sh turns that
-    into the consent prompt. No arguments is the *pull* half, run only after
-    the operator said yes.
+    into the consent prompt. ``--floor`` prints the smallest curated rung's
+    ``vram_gb_min`` as a bare integer (no hardware probe — catalogue only), so
+    the "no agent model fits this box" notice can quote the real floor instead
+    of a bash-side literal that drifts from the ladder. No arguments is the
+    *pull* half, run only after the operator said yes.
 
     NEVER raises: install.sh runs under ``set -euo pipefail`` and a traceback
     escaping here would abort a whole install over an optional model.
@@ -251,6 +254,10 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="  %(message)s")
     override = (os.environ.get("HAL0_AGENT_MODEL") or "").strip() or None
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+
+    if "--floor" in argv:
+        print(f"{_smallest_rung_gb():.0f}")
+        return 0
 
     if "--plan" in argv:
         try:
