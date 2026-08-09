@@ -407,7 +407,7 @@ export function SlotScard({
   // gets the amber .acc emphasis.
   const tpsLive = typeof s.metrics?.toks === 'number' && s.metrics.toks > 0 ? s.metrics.toks : null
   const ttftLive = typeof s.metrics?.ttft === 'number' && s.metrics.ttft > 0 ? s.metrics.ttft : null
-  const metricKey = s.name + ' ' + (s.model || '')
+  const metricKey = s.name + '::' + (s.model || '')
   if (tpsLive != null || ttftLive != null) {
     const prev = lastServingMetrics.get(metricKey) || {}
     lastServingMetrics.set(metricKey, {
