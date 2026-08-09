@@ -17,6 +17,13 @@
 #   sibling bundle. The gate opens by itself the moment a signed stable release
 #   (v1.0.0) is published, and `release: published` re-runs it at that instant.
 #   Override with the `force` input only if you know the gate is stale.
+#
+# `release: published` never actually fires for a release hal0 cuts itself:
+# release.yml creates the release via `gh release create` running under the
+# default GITHUB_TOKEN, and GitHub suppresses workflow-triggering events
+# created by that token (anti-recursion). So release.yml calls this workflow
+# directly via `workflow_call` right after its release is verified — the same
+# pattern nightly.yml uses to invoke release.yml.
 
 name: mirror-bootstrap
 
@@ -29,6 +36,12 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Publish even if the stable manifest has no sibling Sigstore bundle"
+        type: boolean
+        default: false
+  workflow_call:
     inputs:
       force:
         description: "Publish even if the stable manifest has no sibling Sigstore bundle"

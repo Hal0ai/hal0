@@ -134,6 +134,11 @@ jobs:
       id-token: write
       packages: read
     uses: ./.github/workflows/release.yml
+    # secrets: inherit — required for release.yml's own trigger-mirror-bootstrap
+    # job to reach HALO_WEB_MIRROR_TOKEN. Nested workflow_call hops don't pass
+    # secrets by default; without this, a nightly-triggered release would call
+    # mirror-bootstrap.yml with an empty mirror token instead of skipping it.
+    secrets: inherit
     with:
       tag: ${{ needs.tag.outputs.tag }}
       channel: nightly
