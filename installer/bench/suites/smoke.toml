@@ -1,21 +1,19 @@
-# suites/smoke.toml — fires on model-pull. Gives a freshly pulled model a
-# number (and an OOM/breakage signal) within minutes, automatically,
-# instead of waiting for the weekly roster window. See the bench design handoff §4
-# ("smoke") and §6 ("Model pulled/registered" trigger row).
+# suites/smoke.toml — a cheap first-light check for a freshly pulled/
+# registered model: one pp+tg pair at one depth, a number (and an OOM/
+# breakage signal) in minutes instead of waiting for the weekly roster
+# window. On-demand only — there is no model-pull trigger: no pull-completion
+# hook and no `--trigger` CLI argument exist in this codebase. Run manually
+# after a pull (`hal0 bench run --suite smoke`); the staleness rule below
+# means it only measures models with no record yet, so a manual run is cheap.
 
 [suite]
 id          = "smoke"
 description = "First-light check for a freshly pulled/registered model"
-schedule    = "trigger:model-pull"   # fired by the pull-completion hook, not the weekly timer
 budget_min  = 3                      # ~3 min: one pp+tg pair at one depth, nothing more
 exclusive   = false                  # allowed to run even while GPU slots are busy...
 priority    = 90                     # ...but jumps the queue when it does get a window
 
 [selector]
-# NOTE: the model-pull trigger hook is NOT wired yet — there is no
-# `--trigger` CLI argument. Until it lands, run this suite manually after a
-# pull (`hal0 bench run --suite smoke`); the staleness rule below means it
-# only measures models with no record yet, so a manual run is cheap.
 caps_any  = ["chat", "coder"]
 installed = true
 
@@ -29,9 +27,9 @@ reps     = 1              # smoke != roster: one sample is enough to catch OOM/h
 kinds = ["pp", "tg"]
 
 [staleness]
-# Smoke doesn't re-run on an age timer — the model-pull event is its only
-# trigger. max_age_days is set effectively-infinite so the planner never
-# re-queues a smoke cell on its own.
+# Smoke doesn't re-run on an age timer — it is run manually, on demand.
+# max_age_days is set effectively-infinite so the planner never re-queues a
+# smoke cell on its own once it has one ok record.
 max_age_days = 36500
 
 # NOTE — contended runs (the bench design handoff §4): because exclusive=false, a smoke

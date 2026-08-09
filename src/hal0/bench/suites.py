@@ -7,11 +7,21 @@ agent contract and must parse with zero deps on the box (tomllib is stdlib on
 3.11+, which is exactly why this package pins ``requires-python >=3.11`` and does
 NOT depend on tomli — DESIGN task note).
 
-The five tables mirror DESIGN §4 one-to-one: ``[suite]`` (identity + schedule +
-budget), ``[selector]`` (which models, resolved against the registry at plan
-time — the planner does the resolving, not this loader), ``[matrix]`` (the
-axes), ``[cells]`` (measurement kinds), ``[staleness]`` (max age). Unknown keys
-are ignored, not fatal, so a newer suite file stays loadable by an older lab.
+The five tables mirror DESIGN §4 one-to-one: ``[suite]`` (identity + budget),
+``[selector]`` (which models, resolved against the registry at plan time — the
+planner does the resolving, not this loader), ``[matrix]`` (the axes),
+``[cells]`` (measurement kinds), ``[staleness]`` (max age). Unknown keys are
+ignored, not fatal, so a newer suite file stays loadable by an older lab.
+
+A suite's ``[suite].schedule`` key never existed as a real hook: it was parsed
+into a ``Suite.schedule`` field nothing ever read — no systemd timer or worker
+consulted it. It has been removed outright (Phase 4), not merely ignored. The
+actual cadence: ``installer/systemd/hal0-bench.timer`` fires weekly and always
+runs the "roster" suite (``hal0 bench run --suite roster --scheduled``, gated
+by ``run --scheduled``'s own politeness window — ``window.toml``,
+:func:`window_file`); every other suite (``lane-matrix``, ``smoke``, ad-hoc
+ones) is on-demand only, and the model-pull trigger ``smoke.toml`` used to
+advertise has no wired hook at all (see that file).
 """
 
 from __future__ import annotations
@@ -112,7 +122,6 @@ class Suite:
 
     id: str
     description: str = ""
-    schedule: str = "on-demand"  # weekly | monthly | on-demand | model-pull
     budget_min: int = 240
     exclusive: bool = True
     priority: int = 50
@@ -138,7 +147,6 @@ def suite_from_dict(data: dict, source_path: str = "") -> Suite:
     return Suite(
         id=suite_tbl["id"],
         description=suite_tbl.get("description", ""),
-        schedule=suite_tbl.get("schedule", "on-demand"),
         budget_min=int(suite_tbl.get("budget_min", 240)),
         exclusive=bool(suite_tbl.get("exclusive", True)),
         priority=int(suite_tbl.get("priority", 50)),
