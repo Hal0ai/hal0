@@ -48,7 +48,7 @@ global flag is controlled per-command via environment variables instead — see
 | `hal0 probe` | **Deprecated**, hidden. Alias for `hal0 config hardware --refresh`. | — |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`, env `HAL0_BIND_HOST`), `--port` (default `8080`, env `HAL0_PORT`), `--reload` |
 | `hal0 uninstall` | Uninstall hal0. Conservative by default. | `--purge` (alias `--clean-slate`), `--keep-data`, `--force`/`-f` (honors `HAL0_FORCE=1`), `--dev` (tears down a dev install at `$PWD/.hal0ai`) |
-| `hal0 bench ...` | Benchmark pipeline. Raw argparse passthrough (`allow_extra_args`), see [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). | verbs: `plan, run, worker, status, results, history, reindex, devices, publish, eval, bundle` (+ maintainer-only `upload`) |
+| `hal0 bench ...` | Benchmark pipeline. Raw argparse passthrough (`allow_extra_args`), see [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). | verbs: `plan, run, worker, status, results, history, reindex, devices, publish, eval, bundle` |
 | `hal0 chat` | Interactive chat REPL. | `--model` (default `"agent"`), `--base-url` (default `http://127.0.0.1:8080/v1`, env `HAL0_CHAT_BASE_URL`), `--no-stream`, `--brain` (talk to the hal0-brain steward instead) |
 | `hal0 system-info` | Host system info. | `--json` |
 | `hal0 ports` | Port allocation view. | `--json` |

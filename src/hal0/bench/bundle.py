@@ -2,10 +2,12 @@
 
 A bundle is a SELECTION + PACKAGING layer over the store: no new measurement,
 no mutation. Only ``ok`` records are eligible (Outcome contract, schema.py) —
-the public board must never carry a contended or failed number. The manifest
+a shared bundle must never carry a contended or failed number. The manifest
 carries a sha256 for every member file and a ``bundle_id`` derived from those
-hashes, so the server can verify integrity and dedupe re-uploads without
-trusting the client.
+hashes, so any consumer (a reader on the forums, or a future opt-in ingest
+system) can verify integrity and dedupe re-shares without trusting the
+producer. Bundles land on local disk only; there is no upload path in the
+public release (operator decision 2026-08-09) — sharing one is a manual act.
 """
 
 from __future__ import annotations
@@ -28,8 +30,9 @@ from .store import Store
 @dataclass
 class BundleSpec:
     """What goes into a bundle. All selectors AND together; an empty spec
-    selects every ok record (explicit upload is still a separate verb, so an
-    over-wide bundle is inspectable before it goes anywhere)."""
+    selects every ok record (a bundle only ever lands on local disk — sharing
+    it anywhere, e.g. the forums, is a manual act — so an over-wide bundle is
+    inspectable before it goes anywhere)."""
 
     run_ids: list[str] | None = None
     suite: str | None = None

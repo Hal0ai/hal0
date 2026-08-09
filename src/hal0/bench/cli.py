@@ -616,23 +616,6 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_upload(args: argparse.Namespace) -> int:
-    from . import upload as _upload
-
-    path = Path(args.bundle)
-    if not path.is_file():
-        print(f"upload: {path} not found", file=sys.stderr)
-        return 1
-    try:
-        resp = _upload.upload_bundle(path, api=args.upload_api, token=args.token)
-    except _upload.UploadError as exc:
-        print(f"upload: {exc}", file=sys.stderr)
-        return 1
-    url = resp.get("url") or resp.get("bundle_id") or "ok"
-    print(f"uploaded: {url}")
-    return 0
-
-
 def cmd_eval(args: argparse.Namespace) -> int:
     """Agentic task eval (the quality tier): drive each model as a real Hermes
     agent through verifiable-value tasks and score correctness + speed.
@@ -845,19 +828,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", action="append", help="profile/suite TOML to include; repeatable")
     p.add_argument("-o", "--out", default="bench-bundle.hal0bench.tar.gz", help="output path")
     p.set_defaults(func=cmd_bundle)
-
-    p = sub.add_parser(
-        "upload", help="maintainer: publish a bundle to the hal0.dev roster (requires token)"
-    )
-    p.add_argument("bundle", help="path to a .hal0bench.tar.gz built by `hal0 bench bundle`")
-    p.add_argument(
-        "--api",
-        dest="upload_api",
-        default=None,
-        help="bench API base (default $HAL0_BENCH_API_BASE or https://api.hal0.dev)",
-    )
-    p.add_argument("--token", default=None, help="bearer token (default $HAL0_BENCH_TOKEN)")
-    p.set_defaults(func=cmd_upload)
 
     p = sub.add_parser(
         "eval", help="agentic task eval (quality tier): score a model as a real agent"
