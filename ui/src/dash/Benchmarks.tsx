@@ -54,7 +54,14 @@ interface CellRow {
   lane: string; depth: number; kind: string;
   cell_key?: string; trigger?: string; config?: string; run_id?: string;
   decode_ts_med?: number | null;
-  record?: { summary?: { decode_ts_med?: number | null; prefill_ts_med?: number | null }; config?: string };
+  record?: {
+    summary?: {
+      decode_ts_med?: number | null; prefill_ts_med?: number | null;
+      accept_med?: number | null; ttft_ms_p50?: number | null; decode_ts_stddev?: number | null;
+    };
+    config?: string;
+    reps?: unknown[];
+  };
 }
 
 interface HistoryPoint {
@@ -70,7 +77,7 @@ interface RegressionFlag {
 interface RunSummary {
   run_id: string; suite: string; trigger: string; model: string | null;
   lane: string; kind: string; depth: number | null; outcome: string;
-  decode_ts_med: number | null; reps: number; config: string;
+  decode_ts_med: number | null; prefill_ts_med?: number | null; reps: number; config: string;
 }
 
 interface QueueState {
@@ -241,6 +248,63 @@ function Num({ v, unit }: { v: number | null | undefined; unit?: string }) {
   );
 }
 
+/* ── decode-speed bucket: 3-bar meter + number, never colour alone ──
+ * fast >=60 t/s, mid >=25 t/s, slow <25 t/s — wording/thresholds match the
+ * hal0.dev roster idiom (design handoff bench-app.jsx BucketLegend/Decode). */
+type Bucket = 'fast' | 'mid' | 'slow';
+const BUCKET_COLOR: Record<Bucket, string> = { fast: 'var(--ok)', mid: 'var(--accent)', slow: 'var(--err)' };
+const bucketOf = (v: number): Bucket => (v >= 60 ? 'fast' : v >= 25 ? 'mid' : 'slow');
+
+function DecodeMeter({ v, sd }: { v: number | null | undefined; sd?: number | null }) {
+  if (v == null) return <Dash />;
+  const b = bucketOf(v);
+  const color = BUCKET_COLOR[b];
+  const fill = { fast: 3, mid: 2, slow: 1 }[b];
+  return (
+    <span title={`${b} · ${fmt(v)} t/s`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <span aria-hidden="true" style={{ display: 'inline-flex', gap: 1.5 }}>
+        {[0, 1, 2].map(i => (
+          <i key={i} style={{ display: 'inline-block', width: 3, height: 11, borderRadius: 1, background: i < fill ? color : 'var(--fg-5)' }} />
+        ))}
+      </span>
+      <span style={{ fontFamily: mono, fontSize: 13, fontVariantNumeric: 'tabular-nums' as any, color: b === 'fast' ? color : b === 'slow' ? color : 'var(--fg)', fontWeight: b === 'fast' ? 600 : 400 }}>
+        {fmt(v)}
+      </span>
+      <span style={{ fontSize: 9, color: 'var(--fg-4)' }}>t/s</span>
+      {sd != null && <span style={{ fontSize: 9, color: 'var(--fg-4)' }}>±{fmt(sd)}</span>}
+    </span>
+  );
+}
+
+function BucketLegend() {
+  return (
+    <div style={{
+      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '5px 16px',
+      padding: '6px 2px 12px', fontFamily: mono, fontSize: 10.5, color: 'var(--fg-3)',
+    }}>
+      <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, marginRight: 5, verticalAlign: 'middle', background: BUCKET_COLOR.fast }} />&ge;60 t/s</span>
+      <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, marginRight: 5, verticalAlign: 'middle', background: BUCKET_COLOR.mid }} />25&ndash;60</span>
+      <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, marginRight: 5, verticalAlign: 'middle', background: BUCKET_COLOR.slow }} />&lt;25</span>
+      <span style={{ color: 'var(--fg-5)' }}>&middot;</span>
+      <span><CapIconLegendEntry k="mtp" /></span>
+      <span><CapIconLegendEntry k="tools" /></span>
+      <span><CapIconLegendEntry k="coding" /></span>
+      <span><CapIconLegendEntry k="vision" /></span>
+      <span><CapIconLegendEntry k="chat" /></span>
+    </div>
+  );
+}
+
+const CAP_LABEL: Record<string, string> = { mtp: 'MTP speculative', vision: 'Vision', tools: 'Tool-calling', coding: 'Coding', chat: 'Chat' };
+function CapIconLegendEntry({ k }: { k: string }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <span style={{ display: 'inline-flex', width: '0.9rem', height: '0.9rem', color: CAP_COLOR[k] || 'var(--fg-3)' }}>{CAP_SVG[k]}</span>
+      {CAP_LABEL[k]}
+    </span>
+  );
+}
+
 const CAP_ALIAS: Record<string, string> = { mtp: 'mtp', vision: 'vision', tools: 'tools', 'tool-calling': 'tools', agent: 'tools', coder: 'coding', coding: 'coding', chat: 'chat' };
 const CAP_COLOR: Record<string, string> = { mtp: 'var(--accent)', vision: 'var(--info)', tools: 'var(--ok)', coding: 'var(--ok)', chat: 'var(--fg-2)' };
 const CAP_SVG: Record<string, React.ReactNode> = {
@@ -272,47 +336,84 @@ function CapIcons({ caps }: { caps: string[] }) {
 
 /* ── sparkline ── */
 
-function Sparkline({ points }: { points: HistoryPoint[] }) {
+// Single-lane sparkline: decode (solid) + prefill (dashed), both in the
+// lane's colour with the lane's marker shape — colour is a lane signal
+// everywhere now, not a generic "accent decode" convention. `lane` is
+// optional only for the one truly-unscoped fallback (a model with no lane
+// data at all, rendering the pooled /history?model= series) — falls back to
+// the old accent/circle look there.
+function Sparkline({ points, lane }: { points: HistoryPoint[]; lane?: string }) {
   const W = 260, H = 54, pad = 6;
-  const pts = points.map((p, i) => ({ i, v: p.decode_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
-  if (pts.length < 2) {
+  const color = lane ? laneColor(lane) : 'var(--accent)';
+  const shape = lane ? laneMarkerFor(lane) : ('circle' as const);
+  const decodePts = points.map((p, i) => ({ i, v: p.decode_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
+  const prefillPts = points.map((p, i) => ({ i, v: p.prefill_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
+
+  if (decodePts.length === 0 && prefillPts.length === 0) {
     return (
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
-        <text x={W / 2} y={H / 2 + 3} textAnchor="middle" fill="var(--fg-4)" fontSize={9}>
-          {pts.length === 1 ? '1 data point' : 'no series yet'}
-        </text>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-sparkline">
+        <text x={W / 2} y={H / 2 + 3} textAnchor="middle" fill="var(--fg-4)" fontSize={9}>no series yet</text>
       </svg>
     );
   }
-  const ys = pts.map(p => p.v);
-  const min = Math.min(...ys), max = Math.max(...ys), span = max - min || 1;
-  const N = points.length;
-  const x = (i: number) => pad + (N === 1 ? (W - 2 * pad) / 2 : (i * (W - 2 * pad)) / (N - 1));
-  const y = (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad);
-  const path = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
-
-  // Prefill is a separate signal on its own scale — a lighter, thinner path
-  // just to show the trend shape alongside decode, not a directly comparable magnitude.
-  const pfPts = points.map((p, i) => ({ i, v: p.prefill_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
-  let pfPath = '';
-  if (pfPts.length >= 2) {
-    const pfYs = pfPts.map(p => p.v);
-    const pfMin = Math.min(...pfYs), pfMax = Math.max(...pfYs), pfSpan = pfMax - pfMin || 1;
-    const pfY = (v: number) => H - pad - ((v - pfMin) / pfSpan) * (H - 2 * pad);
-    pfPath = pfPts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${pfY(p.v).toFixed(1)}`).join(' ');
+  if (points.length === 1) {
+    // A single sweep still gets PLOTTED (centered marker + value), not a
+    // placeholder sentence — the next sweep extends it into a line. Decode
+    // is filled; prefill (if this sweep has it) is a hollow ring at the same
+    // spot — a dashed LINE has no point analogue, so fill state carries the
+    // metric signal here.
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-sparkline">
+        {prefillPts.length === 1 && (
+          <Marker lane={lane} metric="prefill" shape={shape} cx={W / 2} cy={H / 2} r={4} fill="none" stroke={color} title={`prefill ${fmt(prefillPts[0].v)} t/s`} />
+        )}
+        {decodePts.length === 1 && (
+          <>
+            <Marker lane={lane} metric="decode" shape={shape} cx={W / 2} cy={H / 2} r={2.5} fill={color} title={`decode ${fmt(decodePts[0].v)} t/s`} />
+            <text x={W / 2} y={H / 2 - 9} textAnchor="middle" fill="var(--fg-3)" fontSize={9} fontFamily="var(--mono)">
+              {decodePts[0].v.toFixed(1)}
+            </text>
+          </>
+        )}
+      </svg>
+    );
   }
 
+  const N = points.length;
+  const x = (i: number) => pad + (i * (W - 2 * pad)) / (N - 1);
+  const decodeScale = metricScale(decodePts.map(p => p.v), H, pad);
+  const prefillScale = metricScale(prefillPts.map(p => p.v), H, pad);
+
+  // Regression-dip highlighting (decode only): a >10% drop against the prior
+  // point turns the line + that point's marker to the warn colour.
+  const dipIdx = decodePts.findIndex((p, k) => k > 0 && p.v < decodePts[k - 1].v * 0.9);
+
+  const decodePath = decodeScale ? decodePts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${decodeScale.y(p.v).toFixed(1)}`).join(' ') : '';
+  const prefillPath = prefillScale && prefillPts.length >= 2
+    ? prefillPts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${prefillScale.y(p.v).toFixed(1)}`).join(' ')
+    : '';
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
-      {pfPath && <path d={pfPath} fill="none" stroke="var(--fg-4)" strokeWidth={1} opacity={0.6} />}
-      <path d={path} fill="none" stroke="var(--accent)" strokeWidth={1.5} />
-      {pts.map(p => (
-        <circle key={p.i} cx={x(p.i).toFixed(1)} cy={y(p.v).toFixed(1)} r={1.7} fill="var(--accent)">
-          <title>{fmt(p.v)} t/s</title>
-        </circle>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-sparkline">
+      {prefillPath && (
+        <path data-lane={lane} data-metric="prefill" d={prefillPath} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="4 3" opacity={0.75} />
+      )}
+      {prefillScale && prefillPts.length === 1 && (
+        <Marker lane={lane} metric="prefill" shape={shape} cx={x(prefillPts[0].i)} cy={prefillScale.y(prefillPts[0].v)} r={2.4} fill="none" stroke={color} title={`prefill ${fmt(prefillPts[0].v)} t/s`} />
+      )}
+      {decodePath && (
+        <path data-lane={lane} data-metric="decode" d={decodePath} fill="none" stroke={dipIdx > -1 ? 'var(--warn)' : color} strokeWidth={1.5} />
+      )}
+      {decodeScale && decodePts.map((p, k) => (
+        <Marker
+          key={p.i} lane={lane} metric="decode" shape={shape}
+          cx={x(p.i)} cy={decodeScale.y(p.v)} r={k === dipIdx ? 2.4 : 1.7}
+          fill={k === dipIdx ? 'var(--warn)' : color}
+          title={`${fmt(p.v)} t/s${k === dipIdx ? ' — regression dip' : ''}`}
+        />
       ))}
-      <text x={pad} y={10} fill="var(--fg-4)" fontSize={8}>{fmt(max)}</text>
-      <text x={pad} y={H - 1} fill="var(--fg-4)" fontSize={8}>{fmt(min)}</text>
+      {decodeScale && <text x={pad} y={10} fill="var(--fg-4)" fontSize={8}>{fmt(decodeScale.max)}</text>}
+      {decodeScale && <text x={pad} y={H - 1} fill="var(--fg-4)" fontSize={8}>{fmt(decodeScale.min)}</text>}
     </svg>
   );
 }
@@ -362,7 +463,7 @@ const Benchmarks: React.FC = () => {
   const workerState = queue?.control?.state || 'stopped';
 
   return (
-    <div className="view">
+    <div className="view" data-testid="benchmarks-view">
       <div className="vh">
         <span className="vh-eye mono">Performance</span>
         <h1>Benchmarks</h1>
@@ -425,6 +526,17 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detailCache, setDetailCache] = useState<Record<string, { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] }>>({});
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+
+  const onSortClick = useCallback((key: string) => {
+    if (sortKey === key) {
+      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  }, [sortKey]);
 
   const toggleExpand = useCallback(async (id: string) => {
     if (expanded === id) { setExpanded(null); return; }
@@ -434,7 +546,11 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
     const [cellsR, histR, runsR] = await Promise.all([
       apiGet<{ cells: CellRow[] }>(`/api/benchmarks/cells?model=${q}`).catch(() => ({ cells: [] })),
       apiGet<{ points: HistoryPoint[] }>(`/api/benchmarks/history?model=${q}`).catch(() => ({ points: [] })),
-      apiGet<{ runs: RunSummary[] }>(`/api/benchmarks/runs?model=${q}&limit=24`).catch(() => ({ runs: [] })),
+      // Fetch the model's FULL run history: the trend sparkline needs every
+      // sweep (a limit-5 fetch fed it ~2.5 sweeps — each sweep is a pp row
+      // AND a tg row — which silently truncated the graph). The displayed
+      // run list caps itself to the latest 5 sweeps client-side.
+      apiGet<{ runs: RunSummary[] }>(`/api/benchmarks/runs?model=${q}&limit=200`).catch(() => ({ runs: [] })),
     ]);
     setDetailCache(prev => ({
       ...prev,
@@ -451,7 +567,41 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
     regByModel.get(f.model_id)!.push(f);
   }
 
+  // Sortable roster columns — "Click any header to sort" (bucket legend
+  // wording). Null/undefined values always sort to the bottom regardless of
+  // direction so an empty column doesn't dominate either end.
+  const ROSTER_COLUMNS: { key: string; label: string; align: 'left' | 'right'; get: (m: RosterModel) => string | number | null }[] = [
+    { key: 'model', label: 'model', align: 'left', get: m => (m.name || cleanName(m.id)).toLowerCase() },
+    { key: 'decode', label: 'decode', align: 'right', get: m => m.decode_ts },
+    { key: 'prefill', label: 'prefill', align: 'right', get: m => m.prefill_ts },
+    { key: 'acc', label: 'acc', align: 'right', get: m => m.accept },
+    { key: 'caps', label: 'caps', align: 'left', get: m => (m.caps || []).length },
+    { key: 'spec_kv', label: 'spec / kv', align: 'left', get: m => [m.spec, m.kv].filter(Boolean).join(' / ') || null },
+    { key: 'size', label: 'size', align: 'right', get: m => m.size_gb },
+    { key: 'last_run', label: 'last run', align: 'right', get: m => m.last_run || null },
+    { key: 'runs', label: 'runs', align: 'right', get: m => m.runs ?? 0 },
+  ];
+
+  const sortedRoster = (() => {
+    if (!sortKey) return roster;
+    const col = ROSTER_COLUMNS.find(c => c.key === sortKey);
+    if (!col) return roster;
+    const dirMul = sortDir === 'asc' ? 1 : -1;
+    return [...roster].sort((a, b) => {
+      const av = col.get(a), bv = col.get(b);
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1; // nulls last, always
+      if (bv == null) return -1;
+      if (typeof av === 'string' || typeof bv === 'string') {
+        return dirMul * String(av).localeCompare(String(bv));
+      }
+      return dirMul * (av < bv ? -1 : av > bv ? 1 : 0);
+    });
+  })();
+
   return (
+    <>
+    <BucketLegend />
     <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
       <colgroup>
         <col />
@@ -467,13 +617,28 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
       </colgroup>
       <thead>
         <tr>
-          {(['model', 'decode', 'prefill', 'acc', 'caps', 'spec / kv', 'size', 'last run', 'runs', ''] as const).map((h, i) => (
-            <th key={i} style={thStyle(h === 'model' || h === 'caps' || h === 'spec / kv' ? 'left' : 'right')}>{h}</th>
-          ))}
+          {ROSTER_COLUMNS.map(col => {
+            const active = sortKey === col.key;
+            return (
+              <th
+                key={col.key}
+                style={{ ...thStyle(col.align), cursor: 'pointer', userSelect: 'none', color: active ? 'var(--fg-2)' : thStyle(col.align).color }}
+                onClick={() => onSortClick(col.key)}
+                title={`sort by ${col.label}`}
+                aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+              >
+                {col.label}
+                <span style={{ display: 'inline-block', width: '0.9em', marginLeft: 3, color: active ? 'var(--accent)' : 'var(--fg-5)' }}>
+                  {active ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                </span>
+              </th>
+            );
+          })}
+          <th style={thStyle('right')} />
         </tr>
       </thead>
       <tbody>
-        {roster.map(m => (
+        {sortedRoster.map(m => (
           <ModelRow
             key={m.id}
             model={m}
@@ -486,6 +651,7 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
         ))}
       </tbody>
     </table>
+    </>
   );
 }
 
@@ -505,6 +671,7 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail, flags }: {
     <>
       <tr
         onClick={onToggle}
+        data-testid={`bench-model-row-${m.id}`}
         style={{ cursor: 'pointer', background: expanded ? 'var(--bg-2)' : undefined, opacity: m.measured === false ? 0.55 : 1 }}
       >
         <td style={cellTd}>
@@ -536,7 +703,7 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail, flags }: {
             </span>
           )}
         </td>
-        <td style={numTd}><Num v={m.decode_ts} unit=" t/s" /></td>
+        <td style={numTd}><DecodeMeter v={m.decode_ts} /></td>
         <td style={numTd}><Num v={m.prefill_ts} unit=" t/s" /></td>
         <td style={numTd}>
           {m.accept != null
@@ -567,30 +734,226 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail, flags }: {
   );
 }
 
+// Known lanes, canonical display order; anything else present sorts after,
+// alphabetically, so an unexpected lane still shows up rather than vanishing.
+const KNOWN_LANE_ORDER = ['rocm', 'vulkan_radv'];
+
+// Lane identity is colour EVERYWHERE (laneColor()) plus, so colour is never
+// the only signal, a fixed marker shape per lane on every data point —
+// including lone points. Metric identity (decode vs prefill) is line dash,
+// handled per-call by Sparkline/CompareSparkline, not here.
+const LANE_MARKER: Record<string, 'circle' | 'square' | 'triangle'> = {
+  rocm: 'circle',
+  vulkan_radv: 'square',
+};
+const laneMarkerFor = (lane: string): 'circle' | 'square' | 'triangle' => LANE_MARKER[lane] || 'triangle';
+
+function Marker({ shape, cx, cy, r, fill, stroke, title, lane, metric }: {
+  shape: 'circle' | 'square' | 'triangle'; cx: number; cy: number; r: number;
+  fill: string; stroke?: string; title?: string; lane?: string; metric?: 'decode' | 'prefill';
+}) {
+  const common = { 'data-lane': lane, 'data-metric': metric } as Record<string, string | undefined>;
+  if (shape === 'square') {
+    return <rect {...common} x={cx - r} y={cy - r} width={r * 2} height={r * 2} fill={fill} stroke={stroke} strokeWidth={stroke ? 1.2 : undefined}>{title && <title>{title}</title>}</rect>;
+  }
+  if (shape === 'triangle') {
+    const pts = `${cx},${cy - r * 1.3} ${cx - r * 1.15},${cy + r} ${cx + r * 1.15},${cy + r}`;
+    return <polygon {...common} points={pts} fill={fill} stroke={stroke} strokeWidth={stroke ? 1.2 : undefined}>{title && <title>{title}</title>}</polygon>;
+  }
+  return <circle {...common} cx={cx} cy={cy} r={r} fill={fill} stroke={stroke} strokeWidth={stroke ? 1.2 : undefined}>{title && <title>{title}</title>}</circle>;
+}
+
+// One (x, y) mapper + scale for one metric across ALL lanes combined — every
+// lane's line for that metric is directly comparable on the same axis, but
+// decode and prefill NEVER share a scale (prefill runs 10-100x decode's
+// magnitude; sparklines are shape-readers, the numbers live in the cards).
+function metricScale(allVals: number[], H: number, pad: number) {
+  if (!allVals.length) return null;
+  const min = Math.min(...allVals), max = Math.max(...allVals), span = max - min || 1;
+  return { min, max, y: (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad) };
+}
+
+// Compare-mode sparkline: decode (solid) + prefill (dashed) per lane, both in
+// that lane's colour, each series keeping its own x-scale (its own point
+// count — series are never pooled into one array).
+function CompareSparkline({ series }: { series: { lane: string; points: HistoryPoint[] }[] }) {
+  const W = 260, H = 54, pad = 6;
+  const prepared = series.map(s => ({
+    lane: s.lane,
+    n: s.points.length,
+    decode: s.points.map((p, i) => ({ i, v: p.decode_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[],
+    prefill: s.points.map((p, i) => ({ i, v: p.prefill_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[],
+  }));
+  const decodeScale = metricScale(prepared.flatMap(s => s.decode.map(p => p.v)), H, pad);
+  const prefillScale = metricScale(prepared.flatMap(s => s.prefill.map(p => p.v)), H, pad);
+  if (!decodeScale && !prefillScale) {
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-compare-sparkline">
+        <text x={W / 2} y={H / 2 + 3} textAnchor="middle" fill="var(--fg-4)" fontSize={9}>no series yet</text>
+      </svg>
+    );
+  }
+
+  function renderMetric(
+    lane: string, pts: { i: number; v: number }[], n: number, scale: NonNullable<ReturnType<typeof metricScale>>,
+    metric: 'decode' | 'prefill',
+  ) {
+    if (!pts.length) return null;
+    const x = (i: number) => pad + (n === 1 ? (W - 2 * pad) / 2 : (i * (W - 2 * pad)) / (n - 1));
+    const shape = laneMarkerFor(lane);
+    const color = laneColor(lane);
+    const dashed = metric === 'prefill';
+    if (pts.length === 1) {
+      // One sweep: plot its marker on the shared-per-metric y-scale. Decode
+      // is filled, prefill is hollow (a dashed LINE has no point analogue,
+      // so the fill state carries the metric signal for a lone point).
+      return (
+        <Marker
+          key={metric} lane={lane} metric={metric} shape={shape}
+          cx={x(pts[0].i)} cy={scale.y(pts[0].v)} r={2.4}
+          fill={dashed ? 'none' : color} stroke={dashed ? color : undefined}
+          title={`${laneLabel(lane)} ${metric} ${fmt(pts[0].v)} t/s`}
+        />
+      );
+    }
+    const dipIdx = metric === 'decode' ? pts.findIndex((p, k) => k > 0 && p.v < pts[k - 1].v * 0.9) : -1;
+    const path = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${scale.y(p.v).toFixed(1)}`).join(' ');
+    const baseColor = dipIdx > -1 ? 'var(--warn)' : color;
+    return (
+      <g data-lane={lane} data-metric={metric}>
+        <path data-lane={lane} data-metric={metric} d={path} fill="none" stroke={baseColor} strokeWidth={1.5} strokeDasharray={dashed ? '4 3' : undefined} opacity={dashed ? 0.75 : 1} />
+        {metric === 'decode' && pts.map((p, k) => (
+          <Marker
+            key={k} lane={lane} metric={metric} shape={shape}
+            cx={x(p.i)} cy={scale.y(p.v)} r={k === dipIdx ? 2.6 : 1.7}
+            fill={k === dipIdx ? 'var(--warn)' : color}
+            title={`${laneLabel(lane)} ${fmt(p.v)} t/s${k === dipIdx ? ' — regression dip' : ''}`}
+          />
+        ))}
+      </g>
+    );
+  }
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-compare-sparkline">
+      {prepared.map(s => (
+        <g key={s.lane}>
+          {prefillScale && renderMetric(s.lane, s.prefill, s.n, prefillScale, 'prefill')}
+          {decodeScale && renderMetric(s.lane, s.decode, s.n, decodeScale, 'decode')}
+        </g>
+      ))}
+      {decodeScale && <text x={pad} y={10} fill="var(--fg-4)" fontSize={8}>{fmt(decodeScale.max)}</text>}
+      {decodeScale && <text x={pad} y={H - 1} fill="var(--fg-4)" fontSize={8}>{fmt(decodeScale.min)}</text>}
+    </svg>
+  );
+}
+
+// The one cell that represents "this lane's current number": config==='default',
+// highest depth if more than one is measured. Everything lane-scoped (stat
+// cards, per-lane history fetch) is derived from this single cell so a
+// variant sweep never leaks into the headline figures.
+function pickDefaultCell(lane: string, cells: CellRow[]): CellRow | undefined {
+  const candidates = cells.filter(c => c.lane === lane && (c.record?.config || c.config || 'default') === 'default');
+  if (!candidates.length) return undefined;
+  return [...candidates].sort((a, b) => (b.depth || 0) - (a.depth || 0))[0];
+}
+
+function laneSummary(lane: string, cells: CellRow[]) {
+  const c = pickDefaultCell(lane, cells);
+  const sum = c?.record?.summary || {};
+  return {
+    cellKey: c?.cell_key,
+    depth: c?.depth ?? null,
+    decode: c?.decode_ts_med ?? sum.decode_ts_med ?? null,
+    prefill: sum.prefill_ts_med ?? null,
+    accept: sum.accept_med != null ? Math.round(sum.accept_med * 100) : null,
+    ttftP50: sum.ttft_ms_p50 ?? null,
+    stddev: sum.decode_ts_stddev ?? null,
+    reps: c?.record?.reps?.length ?? null,
+  };
+}
+
+function LaneDot({ lane }: { lane: string }) {
+  return <span aria-hidden="true" style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: laneColor(lane) }} />;
+}
+
+// A single legend entry: a solid or dashed line swatch in the lane's colour,
+// labelled with the lane (dashed = prefill; solid = decode). One swatch per
+// visible series — never colour alone (the dash pattern is the metric signal).
+function MetricLegendSwatch({ lane, dashed, title }: { lane: string; dashed: boolean; title?: string }) {
+  return (
+    <span title={title} data-lane={lane} data-metric={dashed ? 'prefill' : 'decode'} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <svg width={16} height={8} aria-hidden="true">
+        <line x1={0} y1={4} x2={16} y2={4} stroke={laneColor(lane)} strokeWidth={1.5} strokeDasharray={dashed ? '4 3' : undefined} />
+      </svg>
+      {laneLabel(lane)}{dashed ? ' pf' : ''}
+    </span>
+  );
+}
+
+// The roster tab's one failure signal: the lane's current number is stale
+// because its most recent attempt didn't succeed.
+function LastAttemptBadge({ run }: { run: RunSummary }) {
+  return (
+    <span
+      title={`${run.outcome} · ${run.run_id}`}
+      style={{
+        fontSize: 9, padding: '0.05rem 0.4rem', borderRadius: '0.3rem',
+        border: '1px solid var(--err)', color: 'var(--err)', whiteSpace: 'nowrap',
+      }}
+    >
+      last attempt failed {runDate(run.run_id)}
+    </span>
+  );
+}
+
+type RunGroup = { lane: string; depth: number | null; config: string; t: number; runs: RunSummary[] };
+
+// The accordion's trend, built from the model-scoped RUNS list (never
+// /history?cell_key=): a cell_key is a content-addressed identity, so a
+// provenance bump (engine build/image) between two sweeps forks the key and
+// each sweep becomes its own one-point "history" — that's the bug this
+// fixes. A sweep (one group in `allGroups`, already clustered within 2
+// minutes by lane|depth|config) contributes one point when it has an ok tg
+// run at the accordion's active depth/config; `total` counts every sweep for
+// the lane regardless of dims/outcome, so the caption can say exactly how
+// many were dropped and stay honest about it.
+function sweepSeries(lane: string, targetDepth: number | null, allGroups: RunGroup[]) {
+  const laneGroups = allGroups.filter(g => g.lane === lane);
+  const total = laneGroups.length;
+  const dimsMatched = laneGroups.filter(g => g.config === 'default' && (targetDepth == null || g.depth === targetDepth));
+  const ascending = [...dimsMatched].sort((a, b) => a.t - b.t);
+  const points: HistoryPoint[] = [];
+  for (const g of ascending) {
+    const okRun = g.runs.find(r => r.kind === 'tg' && r.outcome === 'ok' && r.decode_ts_med != null);
+    if (okRun) points.push({ ts: okRun.run_id, decode_ts_med: okRun.decode_ts_med, prefill_ts_med: okRun.prefill_ts_med });
+  }
+  return { points, total, plotted: points.length, excluded: total - points.length };
+}
+
 function ModelDetail({ model: m, detail }: {
   model: RosterModel;
   detail: { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] };
 }) {
-  const d = m.detail || {};
   const { cells, points, runs } = detail;
 
-  // The winning record — the one that fed the headline decode/prefill tiles —
-  // so lane/depth/config can be shown next to the number instead of leaving it
-  // ambiguous which variant it came from.
-  const winningCell = d.run_id ? cells.find(c => c.run_id === d.run_id) : undefined;
-  const winningConfig = winningCell?.config || winningCell?.record?.config || 'default';
-  const winningLane = winningCell?.lane ?? d.lane;
-  const winningDepth = winningCell?.depth ?? d.depth;
+  // Lanes with actual data for this model — segments with zero runs are
+  // never shown (no empty segments in the control).
+  const lanesPresentSet = new Set<string>();
+  for (const c of cells) if (c.lane) lanesPresentSet.add(c.lane);
+  for (const r of runs) if (r.lane) lanesPresentSet.add(r.lane);
+  const lanesPresent = [
+    ...KNOWN_LANE_ORDER.filter(l => lanesPresentSet.has(l)),
+    ...[...lanesPresentSet].filter(l => !KNOWN_LANE_ORDER.includes(l)).sort(),
+  ];
 
-  // Sparkline history mixes configs into one meaningless line unless filtered
-  // down to a single variant — 'default' when present, else whatever the only
-  // config in the series is.
-  const sparkConfigs = [...new Set(points.map(p => p.config || 'default'))];
-  const sparkConfig = sparkConfigs.includes('default') ? 'default' : sparkConfigs[0];
-  const sparkPoints = points.filter(p => (p.config || 'default') === sparkConfig);
+  // Default: Compare when both lanes have runs, else the single lane that
+  // does. No lane data at all (unmeasured model) => no control, no scoping.
+  const [mode, setMode] = useState<string>(() => (lanesPresent.length >= 2 ? 'compare' : (lanesPresent[0] || '')));
 
-  // matrix: one card per (lane, depth, config)
-  const matrix = (() => {
+  // matrix: one card per (lane, depth, config), scoped to the active lane
+  // outside Compare mode.
+  const matrixAll = (() => {
     const groups = new Map<string, { lane: string; depth: number; config: string; decode: number | null; prefill: number | null }>();
     for (const c of cells) {
       const cfg = c.record?.config || 'default';
@@ -604,11 +967,20 @@ function ModelDetail({ model: m, detail }: {
     return [...groups.values()].filter(g => g.decode != null || g.prefill != null)
       .sort((a, b) => String(a.lane).localeCompare(String(b.lane)) || (a.depth - b.depth));
   })();
+  const matrix = mode === 'compare' || !mode ? matrixAll : matrixAll.filter(g => g.lane === mode);
 
-  // group runs by (lane, depth, config), clustered within 2 minutes
-  const runGroups = (() => {
+  // group OK runs by (lane, depth, config), clustered within 2 minutes.
+  // Failed runs live on the Runs tab only — the roster accordion (run list,
+  // sweep counts, trend series) is ok-only: a sweep that never succeeded
+  // isn't a data point to plot or a row to show here, it's a failure to
+  // look up in the failure log.
+  const runGroupsAll = (() => {
+    // Group over the FULL history: the trend sparkline consumes these
+    // groups, and capping here silently truncated the graph. The rendered
+    // run list applies its own latest-5 cap below.
     const byLD = new Map<string, RunSummary[]>();
     for (const r of runs) {
+      if (r.outcome !== 'ok') continue;
       const k = `${r.lane}|${r.depth}|${r.config || 'default'}`;
       if (!byLD.has(k)) byLD.set(k, []);
       byLD.get(k)!.push(r);
@@ -626,108 +998,228 @@ function ModelDetail({ model: m, detail }: {
     groups.sort((a, b) => b.t - a.t);
     return groups;
   })();
+  // Interleaved chronological order is kept in Compare; a single-lane
+  // segment filters down to that lane. Only the DISPLAYED list caps at the
+  // latest 5 sweeps — the sparklines above read the uncapped groups.
+  const runGroups = (mode === 'compare' || !mode ? runGroupsAll : runGroupsAll.filter(g => g.lane === mode)).slice(0, 5);
 
-  const tiles: [string, number | null | undefined, string][] = [
-    ['decode', m.decode_ts, 't/s'],
-    ['prefill', m.prefill_ts, 't/s'],
-    ['accept', m.accept != null ? Math.round(m.accept * 100) : null, '%'],
-    ['ttft p50', d.ttft_ms_p50, 'ms'],
-    ['stddev', d.stddev, ''],
-    ['size', m.size_gb, 'GB'],
-    ['reps', d.reps, ''],
-  ];
+  const laneStats = Object.fromEntries(lanesPresent.map(lane => [lane, laneSummary(lane, cells)]));
+
+  // The one failure signal the roster carries: if a lane's MOST RECENT
+  // attempt (looking at the raw, unfiltered runs — not the ok-only groups
+  // above) didn't succeed, the lane's current numbers are stale-because-
+  // broken. Hiding that would misrepresent health, so it gets a small badge
+  // on the lane's headline card — the only place "failed" appears on the
+  // roster tab.
+  const lastAttemptFailed: Record<string, RunSummary | null> = (() => {
+    const newestByLane: Record<string, RunSummary> = {};
+    for (const r of runs) {
+      if (!r.lane) continue;
+      const prev = newestByLane[r.lane];
+      if (!prev || String(r.run_id) > String(prev.run_id)) newestByLane[r.lane] = r;
+    }
+    const out: Record<string, RunSummary | null> = {};
+    for (const lane of lanesPresent) {
+      const newest = newestByLane[lane];
+      out[lane] = newest && newest.outcome !== 'ok' ? newest : null;
+    }
+    return out;
+  })();
 
   return (
-    <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: '1.1fr 1fr' }}>
-      <div>
-        <h4 style={h4Style}>current summary</h4>
-        {(winningLane || winningDepth != null) && (
-          <div style={{ display: 'flex', gap: '0.3rem', marginBottom: '0.4rem' }}>
-            {winningLane && (
-              <span style={{ ...chipStyle, fontSize: 9, padding: '0.08rem 0.4rem', color: laneColor(winningLane), background: 'transparent' }}>
-                {laneLabel(winningLane)}
-              </span>
-            )}
-            {winningDepth != null && <span style={{ ...chipStyle, fontSize: 9 }}>d{winningDepth}</span>}
-            {winningConfig !== 'default' && <span style={{ ...chipStyle, fontSize: 9, color: 'var(--accent)' }}>{winningConfig}</span>}
-          </div>
-        )}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-          {tiles.map(([label, val, unit], i) => (
-            <div key={label} style={{
-              border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.4rem 0.6rem',
-              background: 'var(--bg-2)', minWidth: 92,
-            }}>
-              <div style={{
-                fontFamily: mono, fontSize: 15, color: i === 0 ? 'var(--accent)' : 'var(--fg)',
-                fontVariantNumeric: 'tabular-nums' as any,
-              }}>
-                {val != null ? fmt(val) + (unit ? ` ${unit}` : '') : '—'}
-              </div>
-              <div style={{ fontFamily: mono, fontSize: 8.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-4)', marginTop: 2 }}>
-                {label}
-              </div>
-            </div>
+    <div>
+      {lanesPresent.length >= 2 && (
+        <div className="mtp-seg" style={{ marginBottom: '0.8rem' }} title="scope this panel to one lane, or compare both">
+          {lanesPresent.map(lane => (
+            <button key={lane} className={'mtp-seg-btn' + (mode === lane ? ' on' : '')} onClick={() => setMode(lane)}>
+              {laneLabel(lane)}
+            </button>
           ))}
+          <button className={'mtp-seg-btn' + (mode === 'compare' ? ' on' : '')} onClick={() => setMode('compare')}>
+            Compare
+          </button>
         </div>
+      )}
 
-        <h4 style={{ ...h4Style, margin: '1rem 0 0.5rem' }}>lane &times; depth &times; config</h4>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-          {matrix.length ? matrix.map((g, i) => (
-            <div key={i} style={{ border: '1px solid var(--line)', borderRadius: '0.35rem', padding: '0.35rem 0.5rem', background: 'var(--bg-2)', minWidth: 96 }}>
-              <div style={{ fontFamily: mono, fontSize: 8.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--fg-4)', marginBottom: 2 }}>
-                <span style={{ ...chipStyle, fontSize: 9, padding: '0.08rem 0.4rem', color: laneColor(g.lane), background: 'transparent' }}>
-                  {laneLabel(g.lane)}
-                </span>
-                {' '}d{g.depth}
-                {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{` · ${g.config}`}</span>}
-              </div>
-              <div style={{ fontFamily: mono, fontSize: 13, color: 'var(--fg-2)' }}>
-                {g.decode != null ? `${fmt(g.decode)} t/s` : <Dash />}
-              </div>
-              {g.prefill != null && (
-                <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--fg-4)' }}>{fmt(g.prefill)} t/s pf</div>
+      <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: '1.1fr 1fr' }}>
+        <div>
+          <h4 style={h4Style}>current summary</h4>
+
+          {mode === 'compare' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+              {([
+                ['decode', 'decode', 't/s'],
+                ['prefill', 'prefill', 't/s'],
+                ['accept', 'accept', '%'],
+                ['ttft p50', 'ttftP50', 'ms'],
+              ] as [string, keyof ReturnType<typeof laneSummary>, string][]).map(([label, key]) => {
+                const baseLane = lanesPresent[0];
+                const baseVal = laneStats[baseLane]?.[key] as number | null;
+                return (
+                  <div key={label} style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.4rem 0.6rem', background: 'var(--bg-2)' }}>
+                    <div style={{ fontFamily: mono, fontSize: 8.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-4)', marginBottom: 4 }}>{label}</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem' }}>
+                      {lanesPresent.map((lane, i) => {
+                        const val = laneStats[lane]?.[key] as number | null;
+                        const delta = i > 0 && baseVal != null && val != null && baseVal !== 0 ? ((val - baseVal) / baseVal) * 100 : null;
+                        const failedRun = label === 'decode' ? lastAttemptFailed[lane] : null;
+                        return (
+                          <div key={lane} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: mono, fontSize: 12 }}>
+                            <LaneDot lane={lane} />
+                            <span style={{ color: 'var(--fg-4)', fontSize: 9 }}>{laneLabel(lane)}</span>
+                            <span style={{ fontVariantNumeric: 'tabular-nums' as any }}>{val != null ? `${fmt(val)}${unit(label)}` : '—'}</span>
+                            {delta != null && (
+                              <span style={{ fontSize: 9.5, color: delta < 0 ? 'var(--err)' : delta > 0 ? 'var(--ok)' : 'var(--fg-4)' }}>
+                                {delta >= 0 ? '+' : ''}{delta.toFixed(1)}%
+                              </span>
+                            )}
+                            {failedRun && <LastAttemptBadge run={failedRun} />}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+              {m.size_gb != null && (
+                <div style={{ fontFamily: mono, fontSize: 10.5, color: 'var(--fg-4)' }}>size {fmt(m.size_gb)} GB</div>
               )}
             </div>
-          )) : <div style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no measured cells for this model.</div>}
-        </div>
-      </div>
+          ) : (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+              {([
+                ['decode', laneStats[mode]?.decode, 't/s'],
+                ['prefill', laneStats[mode]?.prefill, 't/s'],
+                ['accept', laneStats[mode]?.accept, '%'],
+                ['ttft p50', laneStats[mode]?.ttftP50, 'ms'],
+                ['stddev', laneStats[mode]?.stddev, ''],
+                ['size', m.size_gb, 'GB'],
+                ['reps', laneStats[mode]?.reps, ''],
+              ] as [string, number | null | undefined, string][]).map(([label, val, u], i) => (
+                <div key={label} style={{
+                  border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.4rem 0.6rem',
+                  background: 'var(--bg-2)', minWidth: 92,
+                }}>
+                  <div style={{
+                    fontFamily: mono, fontSize: 15, color: i === 0 && mode ? laneColor(mode) : 'var(--fg)',
+                    fontVariantNumeric: 'tabular-nums' as any,
+                  }}>
+                    {val != null ? fmt(val) + (u ? ` ${u}` : '') : '—'}
+                  </div>
+                  <div style={{ fontFamily: mono, fontSize: 8.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-4)', marginTop: 2 }}>
+                    {label}
+                  </div>
+                  {i === 0 && lastAttemptFailed[mode] && (
+                    <div style={{ marginTop: 4 }}><LastAttemptBadge run={lastAttemptFailed[mode]!} /></div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
 
-      <div>
-        <h4 style={h4Style}>throughput history</h4>
-        <div style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.5rem 0.6rem', background: 'var(--bg-2)' }}>
-          <Sparkline points={sparkPoints} />
-          <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
-            <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode <span style={{ color: 'var(--fg-4)' }}>{'■'}</span> prefill
-            &middot; {sparkConfig} &middot; {sparkPoints.length} pt{sparkPoints.length === 1 ? '' : 's'}
-            {d.image && <span> &middot; {d.image.split('/').pop()}</span>}
+          <h4 style={{ ...h4Style, margin: '1rem 0 0.5rem' }}>lane &times; depth &times; config</h4>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+            {matrix.length ? matrix.map((g, i) => (
+              <div key={i} style={{ border: '1px solid var(--line)', borderRadius: '0.35rem', padding: '0.35rem 0.5rem', background: 'var(--bg-2)', minWidth: 96 }}>
+                <div style={{ fontFamily: mono, fontSize: 8.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--fg-4)', marginBottom: 2 }}>
+                  <span style={{ ...chipStyle, fontSize: 9, padding: '0.08rem 0.4rem', color: laneColor(g.lane), background: 'transparent' }}>
+                    {laneLabel(g.lane)}
+                  </span>
+                  {' '}d{g.depth}
+                  {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{` · ${g.config}`}</span>}
+                </div>
+                <div style={{ fontFamily: mono, fontSize: 13, color: 'var(--fg-2)' }}>
+                  <DecodeMeter v={g.decode} />
+                </div>
+                {g.prefill != null && (
+                  <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--fg-4)' }}>{fmt(g.prefill)} t/s pf</div>
+                )}
+              </div>
+            )) : <div style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no measured cells for this model.</div>}
           </div>
         </div>
 
-        <h4 style={{ ...h4Style, margin: '1rem 0 0.5rem' }}>runs — {runGroups.length} sweep{runGroups.length === 1 ? '' : 's'}</h4>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
-          {runGroups.length ? runGroups.map((g, i) => {
-            const kinds = [...new Set(g.runs.map(r => r.kind))].join('+');
-            const reps = Math.max(0, ...g.runs.map(r => r.reps || 0));
-            const outcomes = g.runs.map(r => r.outcome);
-            const worst = outcomes.every(o => o === 'ok') ? 'ok'
-              : outcomes.some(o => o !== 'ok' && o !== 'skipped-contended') ? 'failed' : 'skipped-contended';
-            return (
-              <span key={i} style={chipStyle}>
-                {runDate(g.runs[0].run_id)} {runTime(g.runs[0].run_id)}
-                <span style={{ ...chipStyle, fontSize: 9, padding: '0.05rem 0.35rem', color: laneColor(g.lane), background: 'transparent' }}>
-                  {laneLabel(g.lane)}
+        <div>
+          <h4 style={h4Style}>{mode === 'compare' ? 'decode history · compare' : 'throughput history'}</h4>
+          <div style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.5rem 0.6rem', background: 'var(--bg-2)' }}>
+            {mode === 'compare' ? (
+              <>
+                <CompareSparkline series={lanesPresent.map(lane => ({ lane, points: sweepSeries(lane, laneStats[lane]?.depth ?? null, runGroupsAll).points }))} />
+                {/* Simple legend only — one swatch per visible series (solid
+                    decode / dashed prefill, per lane). The honest sweep
+                    counts (why fewer points than the run list below implies)
+                    live in the title tooltip, one hover away, not inline. */}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.7rem', fontSize: 10, color: 'var(--fg-4)', marginTop: '0.3rem' }}>
+                  {lanesPresent.map(lane => {
+                    const s = sweepSeries(lane, laneStats[lane]?.depth ?? null, runGroupsAll);
+                    const hasPrefill = s.points.some(p => typeof p.prefill_ts_med === 'number');
+                    const tip = `${laneLabel(lane)}: ${s.total} sweep${s.total === 1 ? '' : 's'} · ${s.plotted} plotted`
+                      + (s.excluded > 0 ? ` (${s.excluded} other-config)` : '');
+                    return (
+                      <React.Fragment key={lane}>
+                        <MetricLegendSwatch lane={lane} dashed={false} title={tip} />
+                        {hasPrefill && <MetricLegendSwatch lane={lane} dashed={true} title={tip} />}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              </>
+            ) : mode ? (
+              <>
+                {(() => {
+                  const s = sweepSeries(mode, laneStats[mode]?.depth ?? null, runGroupsAll);
+                  const hasPrefill = s.points.some(p => typeof p.prefill_ts_med === 'number');
+                  const tip = `${laneLabel(mode)}: ${s.total} sweep${s.total === 1 ? '' : 's'} · ${s.plotted} plotted`
+                    + (s.excluded > 0 ? ` (${s.excluded} other-config)` : '');
+                  return (
+                    <>
+                      <Sparkline points={s.points} lane={mode} />
+                      {/* Simple legend only — see the Compare branch's comment above. */}
+                      <div title={tip} style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
+                        <MetricLegendSwatch lane={mode} dashed={false} />
+                        {hasPrefill && <MetricLegendSwatch lane={mode} dashed={true} />}
+                      </div>
+                    </>
+                  );
+                })()}
+              </>
+            ) : (
+              <>
+                <Sparkline points={points} />
+                <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>no lane data yet &middot; {points.length} pt{points.length === 1 ? '' : 's'} pooled</div>
+              </>
+            )}
+          </div>
+
+          <h4 style={{ ...h4Style, margin: '1rem 0 0.5rem' }}>runs — {runGroups.length} sweep{runGroups.length === 1 ? '' : 's'}</h4>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
+            {runGroups.length ? runGroups.map((g, i) => {
+              const kinds = [...new Set(g.runs.map(r => r.kind))].join('+');
+              const reps = Math.max(0, ...g.runs.map(r => r.reps || 0));
+              const outcomes = g.runs.map(r => r.outcome);
+              const worst = outcomes.every(o => o === 'ok') ? 'ok'
+                : outcomes.some(o => o !== 'ok' && o !== 'skipped-contended') ? 'failed' : 'skipped-contended';
+              return (
+                <span key={i} style={chipStyle}>
+                  {runDate(g.runs[0].run_id)} {runTime(g.runs[0].run_id)}
+                  <span style={{ ...chipStyle, fontSize: 9, padding: '0.05rem 0.35rem', color: laneColor(g.lane), background: 'transparent' }}>
+                    {laneLabel(g.lane)}
+                  </span>
+                  d{g.depth} {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{g.config}</span>}
+                  {kinds} &middot; {reps > 0 ? `${reps} rep${reps === 1 ? '' : 's'}` : `${g.runs.length} rec`}
+                  <span title={`outcome: ${[...new Set(outcomes)].join(', ')}`} style={{ color: outcomeColor(worst) }}>{'●'}</span>
                 </span>
-                d{g.depth} {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{g.config}</span>}
-                {kinds} &middot; {reps > 0 ? `${reps} rep${reps === 1 ? '' : 's'}` : `${g.runs.length} rec`}
-                <span style={{ color: outcomeColor(worst) }}>{'●'}</span>
-              </span>
-            );
-          }) : <span style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no runs recorded.</span>}
+              );
+            }) : <span style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no runs recorded{mode && mode !== 'compare' ? ` on ${laneLabel(mode)}` : ''}.</span>}
+          </div>
         </div>
       </div>
     </div>
   );
+}
+
+function unit(label: string): string {
+  return label === 'accept' ? '%' : label === 'ttft p50' ? ' ms' : ' t/s';
 }
 
 /* ── Runs tab ── */
@@ -736,7 +1228,10 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('');
-  const [outcomeFilter, setOutcomeFilter] = useState<string | null>(null);
+  // Default to ok — this is the failure log, but a wall of failures on open
+  // is noise; the chips (still counted over every outcome) reveal
+  // failed/oom/etc on click. "all" resets to null.
+  const [outcomeFilter, setOutcomeFilter] = useState<string | null>('ok');
   const [expanded, setExpanded] = useState<string | null>(null);
   const [recordCache, setRecordCache] = useState<Record<string, any>>({});
 
@@ -796,23 +1291,26 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
             background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 'var(--rad, 6px)', color: 'var(--fg)',
           }}
         />
-        <span style={{ fontFamily: mono, fontSize: 10, color: 'var(--fg-4)' }}>
+        <div className="mtp-seg" title="filter by outcome">
+          <button
+            key="all"
+            className={'mtp-seg-btn' + (outcomeFilter === null ? ' on' : '')}
+            onClick={() => setOutcomeFilter(null)}
+          >
+            all {filtered.length}
+          </button>
           {Object.entries(tally).map(([o, n]) => (
             <button
               key={o}
+              className={'mtp-seg-btn' + (outcomeFilter === o ? ' on' : '')}
               onClick={() => setOutcomeFilter(cur => cur === o ? null : o)}
-              title={`toggle filter: ${o}`}
-              style={{
-                marginRight: 10, background: 'transparent', border: 'none', cursor: 'pointer',
-                fontFamily: mono, fontSize: 10, padding: 0,
-                color: outcomeFilter === o ? 'var(--fg)' : 'var(--fg-4)',
-                textDecoration: outcomeFilter === o ? 'underline' : 'none',
-              }}
+              title={`filter: outcome = ${o}`}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
             >
-              <span style={{ color: outcomeColor(o) }}>{'●'}</span> {o} {n}
+              <span style={{ color: outcomeFilter === o ? 'inherit' : outcomeColor(o) }}>{'●'}</span> {o} {n}
             </button>
           ))}
-        </span>
+        </div>
       </div>
       <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
         <thead>
@@ -825,7 +1323,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
         <tbody>
           {shown.map(r => (
             <React.Fragment key={r.run_id}>
-              <tr onClick={() => toggle(r.run_id)} style={{ cursor: 'pointer', background: expanded === r.run_id ? 'var(--bg-2)' : undefined }}>
+              <tr onClick={() => toggle(r.run_id)} data-testid={`bench-run-row-${r.run_id}`} style={{ cursor: 'pointer', background: expanded === r.run_id ? 'var(--bg-2)' : undefined }}>
                 <td style={{ ...cellTd, whiteSpace: 'nowrap', color: 'var(--fg-3)' }}>
                   <span style={{
                     display: 'inline-block', width: '0.7rem',
@@ -846,7 +1344,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
                 <td style={{ ...cellTd, fontSize: 11, color: r.config !== 'default' ? 'var(--accent)' : 'var(--fg-4)' }}>{r.config}</td>
                 <td style={cellTd}><TriggerChip t={r.trigger} /></td>
                 <td style={numTd}>{r.reps}</td>
-                <td style={numTd}><Num v={r.decode_ts_med} unit=" t/s" /></td>
+                <td style={numTd}><DecodeMeter v={r.decode_ts_med} /></td>
                 <td style={{ ...cellTd, textAlign: 'right' }}>
                   <span title={r.outcome} style={{ color: outcomeColor(r.outcome) }}>{'●'}</span>
                 </td>
@@ -856,7 +1354,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
                   <td colSpan={11} style={{ padding: 0, borderBottom: '1px solid var(--line)', background: 'var(--bg-1)' }}>
                     <div style={{ padding: '0.9rem 1.1rem 1.1rem' }}>
                       {recordCache[r.run_id]
-                        ? <RunDetail rec={recordCache[r.run_id]} />
+                        ? <RunDetail rec={recordCache[r.run_id]} regressions={regressions} />
                         : <div style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>loading&hellip;</div>}
                     </div>
                   </td>
@@ -871,7 +1369,52 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
   );
 }
 
-function RunDetail({ rec }: { rec: any }) {
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="btn ghost sm"
+      style={{ fontSize: 10, padding: '2px 8px' }}
+      onClick={() => {
+        navigator.clipboard?.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1400);
+      }}
+    >
+      {copied ? 'copied' : 'copy'}
+    </button>
+  );
+}
+
+function RunHistory({ cellKey, regressed, lane }: { cellKey: string; regressed: boolean; lane?: string }) {
+  const [points, setPoints] = useState<HistoryPoint[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    apiGet<{ points: HistoryPoint[] }>(`/api/benchmarks/history?cell_key=${encodeURIComponent(cellKey)}`)
+      .then(d => { if (live) setPoints(d.points || []); })
+      .catch(() => { if (live) setPoints([]); });
+    return () => { live = false; };
+  }, [cellKey]);
+
+  if (points == null) return <div style={{ color: 'var(--fg-4)', fontStyle: 'italic', fontFamily: mono, fontSize: 10.5 }}>loading history&hellip;</div>;
+  if (points.length < 2) return null; // no series for this cell — omit rather than render an empty chart
+
+  return (
+    <section>
+      <h4 style={h4Style}>history &middot; decode t/s &middot; {points.length} pts for this cell</h4>
+      <div style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.5rem 0.6rem', background: 'var(--bg-2)' }}>
+        <Sparkline points={points} lane={lane} />
+        {regressed && (
+          <div style={{ marginTop: 6, fontFamily: mono, fontSize: 10.5, color: 'var(--warn)' }}>
+            {'▼'} regression flagged for this cell — see the dip above.
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function RunDetail({ rec, regressions }: { rec: any; regressions?: RegressionFlag[] }) {
   const id = rec.identity || {};
   const model = id.model || {};
   const engine = id.engine || {};
@@ -957,11 +1500,22 @@ function RunDetail({ rec }: { rec: any }) {
           ))}
         </div>
         {Array.isArray(config.argv) && config.argv.length > 0 && (
-          <pre style={{
-            fontFamily: mono, fontSize: 10.5, color: 'var(--fg-3)', background: 'var(--bg-2)',
-            border: '1px solid var(--line)', borderRadius: '0.35rem', padding: '0.45rem 0.6rem',
-            margin: '0.5rem 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all', userSelect: 'all',
-          }}>{config.argv.join(' ')}</pre>
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.6rem' }}>
+              <h4 style={{ ...h4Style, margin: 0 }}>resolved flags</h4>
+              <CopyButton text={config.argv.join(' ')} />
+            </div>
+            <pre style={{
+              fontFamily: mono, fontSize: 10.5, color: 'var(--fg-3)', background: 'var(--bg-2)',
+              border: '1px solid var(--line)', borderRadius: '0.35rem', padding: '0.45rem 0.6rem',
+              margin: '0.4rem 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all', userSelect: 'all',
+            }}>{config.argv.join(' ')}</pre>
+          </>
+        )}
+        {cellKey && (
+          <div style={{ marginTop: '0.8rem' }}>
+            <RunHistory cellKey={cellKey} regressed={!!regressions?.some(f => f.cell_key === cellKey)} lane={id.lane} />
+          </div>
         )}
       </div>
 
