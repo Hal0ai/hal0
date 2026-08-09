@@ -2783,7 +2783,45 @@ class ActivityConfig(BaseModel):
     enabled: bool = True
     retention_days: int = Field(default=30, ge=1)
     # None disables the row cap (retention_days still applies).
+    #
+    # PERSISTENCE (#1665): ``save_hal0_config``/``_maybe_run_config_migrations``
+    # both dump with ``exclude_none=True`` — None has no TOML representation
+    # and ``tomli_w`` raises TypeError on it. Dumping None for "unlimited"
+    # therefore drops the key outright, and the next load restores this
+    # 50_000 default: the documented unlimited mode was unreachable through
+    # any persisted config. ``0`` is already unreachable as a genuine row cap
+    # (below the ``ge=100`` floor), so it is reserved as the on-disk spelling
+    # of "unlimited" — see ``_normalise_max_rows`` (load) and
+    # ``_serialize_max_rows`` (save) below. Same fix shape as
+    # ``BrainChatConfig.tool_model`` / ``BRAIN_TOOL_MODEL_DISABLED`` (#1644):
+    # give the unrepresentable sentinel a real word/value on disk instead of
+    # relying on ``exclude_none`` to round-trip it.
     max_rows: int | None = Field(default=50_000, ge=100)
+
+    @field_validator("max_rows", mode="before")
+    @classmethod
+    def _normalise_max_rows(cls, v: Any) -> Any:
+        """``0`` on disk (or via the API) means "unlimited" — see above."""
+        if v == 0:
+            return None
+        return v
+
+    @model_serializer(mode="wrap")
+    def _serialize_max_rows(self, handler: Any) -> dict[str, Any]:
+        """Persist ``None`` ("unlimited") as ``0``, not absent (#1665).
+
+        ``exclude_none=True`` drops a None-valued field before any
+        field-level serializer would run, so the disabled-cap intent is
+        lost silently on write. A wrapping model serializer runs after
+        ``handler`` has already applied that exclusion, so it can add the
+        sentinel back in only when the key was actually dropped — an
+        ``exclude_none=False`` dump (e.g. the API echo) already has
+        ``max_rows: None`` in ``data`` and is left untouched.
+        """
+        data = handler(self)
+        if self.max_rows is None and "max_rows" not in data:
+            data["max_rows"] = 0
+        return data
 
 
 #: Where the steward sends TOOL turns when nothing else says otherwise. ADR-0023's
