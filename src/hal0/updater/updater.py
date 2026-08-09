@@ -1018,6 +1018,15 @@ _STAGING_SENTINEL = ".hal0-staging"
 _QUARANTINE_KEEP = 3
 _QUARANTINE_MAX_AGE_S = 30 * 86400
 
+#: Orphaned ``.stage-<version>-XXXXXX`` staging dirs (see
+#: :func:`_root_only_staging_dir`) are removed in a ``finally``, which does not
+#: run on SIGKILL / OOM / power-cut. A killed stage therefore leaks a fresh
+#: ``mkdtemp`` dir holding a full release tarball under the root filesystem,
+#: forever. Reap any older than this. The floor is comfortably above the
+#: privileged stage timeout (``_STAGE_TIMEOUT`` = 1800s) so a live concurrent
+#: stage's own dir — always freshly created — can never be swept.
+_STAGING_MAX_AGE_S = 3600
+
 
 def _looks_like_hal0_install(path: Path) -> bool:
     """Heuristic: does ``path`` look like a prior hal0 tarball extraction?
@@ -1117,6 +1126,43 @@ def _reap_stale_quarantines(
         log.info("updater.quarantine_reaped", job_id=job_id, path=str(entry), stamp=stamp)
 
 
+def _reap_stale_staging_dirs(
+    *,
+    max_age_s: int = _STAGING_MAX_AGE_S,
+    job_id: str | None = None,
+) -> None:
+    """Delete orphaned ``.stage-<version>-XXXXXX`` dirs under the install root.
+
+    :func:`_root_only_staging_dir` tears its dir down in a ``finally``, so a
+    stage killed by SIGKILL / OOM / power-cut leaks the whole ``mkdtemp`` tree —
+    a full release tarball — under ``/usr/lib/hal0`` with nothing to sweep it.
+    The ``.stale-`` quarantine reaper doesn't match this prefix, so it grew
+    unbounded, one dir per killed stage. Reap any ``.stage-`` dir older than
+    ``max_age_s`` by mtime; the floor sits above ``_STAGE_TIMEOUT`` so a live
+    concurrent stage's freshly-created dir is always spared. Best-effort and
+    logged: failing to tidy is never a reason to fail an update.
+    """
+    root = _usr_lib_root()
+    cutoff = time.time() - max_age_s
+    for entry in _iterdir_safe(root):
+        if not entry.name.startswith(".stage-") or not entry.is_dir():
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > cutoff:
+            continue
+        try:
+            shutil.rmtree(entry)
+        except OSError as exc:
+            log.warning(
+                "updater.staging_reap_failed", job_id=job_id, path=str(entry), error=str(exc)
+            )
+            continue
+        log.info("updater.staging_reaped", job_id=job_id, path=str(entry))
+
+
 @contextlib.contextmanager
 def _root_only_staging_dir(version: str, *, job_id: str | None = None) -> Iterator[Path]:
     """Yield a fresh 0700 staging dir under the **root-owned** install root.
@@ -1171,17 +1217,19 @@ def _extract_tarball(
     ``expected_digest`` (#1738) is the authenticated ``manifest.digest_sha256``.
     When given, the file is opened **once** and that single file object is used
     for both the digest and the extraction — the bytes that are hashed are, by
-    construction, the bytes that are unpacked. Any substitution after
-    ``cosign verify-blob`` returned (a rename, a replace, or an in-place
-    rewrite of the same inode) fails the check and aborts the stage before a
-    single member is written. The caller additionally stages inside a
-    root-only directory (:func:`_root_only_staging_dir`) so no unprivileged
-    principal can reach the artifact in the first place; this check is the
-    inner, non-negotiable guarantee, not a substitute for that isolation.
+    construction, the bytes that are unpacked. Any substitution between
+    ``cosign verify-blob`` returning and this hash pass (a rename, a replace,
+    or an in-place rewrite of the artifact) fails the check and aborts the
+    stage before a single member is written. A rewrite of the pinned inode
+    *after* the hash pass is not re-checked — the fd pins the inode, not its
+    bytes — so the guarantee against that is the root-only staging isolation
+    (:func:`_root_only_staging_dir`), which keeps any unprivileged principal
+    from reaching the artifact in the first place. This digest check is the
+    inner, non-negotiable half; the isolation is the load-bearing one.
 
     If ``dest`` already exists and looks like a prior hal0 extraction
     (see :func:`_looks_like_hal0_install`), it is renamed aside
-    to ``dest.with_suffix(.stale-<unix-ts>)`` so a retry after a half-
+    to ``dest.with_name(<name>.stale-<unix-ts>)`` so a retry after a half-
     failed apply isn't permanently wedged. Unrelated non-empty dirs are
     still refused — we will not silently destroy whatever the operator
     parked there.
@@ -1357,6 +1405,9 @@ def _extract_tarball(
     # Tidy older quarantines now that a good tree exists at `dest` — the
     # recovery material for *this* failure is kept, ancient copies are not.
     _reap_stale_quarantines(dest, job_id=job_id)
+    # Sweep any staging dirs orphaned by a SIGKILLed stage (the current one is
+    # still live and too fresh to match the age floor).
+    _reap_stale_staging_dirs(job_id=job_id)
 
     log.info("updater.extract_ok", job_id=job_id, dest=str(dest))
 
@@ -1370,9 +1421,14 @@ def _open_digest_verified(tarball: Path, expected_digest: str | None) -> BinaryI
 
     This is the #1738 fix's inner guarantee: hashing and extracting share a
     single file object, so nothing that happens to the *path* between
-    ``cosign verify-blob`` and ``tarfile.open`` can change what gets
-    unpacked, and an in-place rewrite of the same inode is caught by the
-    digest itself.
+    ``cosign verify-blob`` and ``tarfile.open`` — a rename or an
+    ``os.replace`` of a different inode — can change what gets unpacked.
+    Holding the fd pins the *inode*, not its bytes: a rewrite of the pinned
+    inode after this hash pass would not be re-checked, so the load-bearing
+    guarantee against that is the root-only staging isolation
+    (:func:`_root_only_staging_dir`), which keeps any other principal from
+    reaching the artifact at all. This check is the non-negotiable inner half,
+    not a standalone one.
     """
     try:
         # SIM115 off: returning the *still-open* handle is the entire point —
@@ -3422,7 +3478,8 @@ class Updater:
 
           1. Fetch + schema-validate the release manifest.
           2. Confirm the target version (caller-pinned or manifest.version).
-          3. Download tarball + signature to ``/var/lib/hal0/cache/<version>/``.
+          3. Download tarball + signature into a root-only staging dir under
+             the install root (#1738 — never the hal0-writable cache).
           4. SHA-256 verify against the manifest digest.
           5. Cosign verify-blob against the GH Actions OIDC identity.
           6. Extract to ``/usr/lib/hal0-<version>/`` (refuse non-empty).
