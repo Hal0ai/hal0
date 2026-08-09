@@ -92,45 +92,87 @@ validate_dir_name() {
 # (releases.hal0.dev) that does not exist yet.
 #
 # Root does NOT accept the URL via sudo argv or the caller's environment —
-# both are an injection surface into a root process. Instead it reads the
-# SAME root-owned trusted config the daemon reads, itself, as root. No
-# `source`/`eval` of the file (it also carries provider tokens and
-# HAL0_ADMIN_KEY/HAL0_CLIENT_KEY): exactly the ``HAL0_RELEASES_URL=`` line is
-# grep+cut out, and it must look like an http(s)/file URL before it is
-# exported into the Python re-entry's environment. A present-but-malformed
-# value dies loudly here rather than silently falling back to the default —
-# that silent fallback is the exact bug being fixed.
+# both are an injection surface into a root process. It reads the config
+# itself, as root, with no `source`/`eval` of the file (these files also carry
+# provider tokens and HAL0_ADMIN_KEY/HAL0_CLIENT_KEY): exactly the
+# ``HAL0_RELEASES_URL=`` line is grep+cut out, and it must look like an
+# accepted URL before it is exported into the Python re-entry's environment.
+# A present-but-malformed value dies loudly here rather than silently falling
+# back to the default — that silent fallback is the exact bug #1690 fixed.
+#
+# #1750 — the two config files are NOT equally trusted, and an earlier version
+# of this comment wrongly called api.env a root-owned trusted config that root
+# and the daemon both read. It is not: src/hal0/install/perms.py builds the
+# /etc/hal0 rows with ``etc_owner = service_user if flipped else "root"`` and
+# ``service_user="hal0"`` is the DEFAULT (the hardened flip), so on a shipped
+# box /etc/hal0/api.env is hal0:hal0 0600 — writable by the very unprivileged
+# account this sudo grant exists to contain. Hence two sources, two trust
+# levels:
+#
+#   /etc/hal0/update.conf  root:root 0644 (its own perms.py PermRow, optional)
+#       Genuinely root-owned, so it may name any accepted scheme including
+#       file://. Checked first and authoritative — a value here cannot be
+#       overridden from the service-owned file.
+#   /etc/hal0/api.env      service-owned under the flip
+#       Still honoured, because #1690's interim mechanism lives there and
+#       operators rely on it while releases.hal0.dev does not exist — but
+#       https:// ONLY. A file:// from here would let a process compromised as
+#       hal0 point ROOT's manifest fetch at an arbitrary local path
+#       (Path(...).read_bytes()/shutil.copyfile on the Python side), so it is
+#       refused with a pointer at update.conf.
+#
+# Cosign identity+issuer pinning still backstops whatever URL wins; it is not
+# asked to be the only thing standing between the service account and root.
 resolve_releases_url() {
   local etc_root="/etc/hal0"
   # HAL0_HOME sandboxes the whole config root for dev installs + integration
   # tests (src/hal0/config/paths.py: etc()/api_env()) — mirrored here so a
-  # sandboxed run resolves the exact api.env the Python side resolves,
-  # never a real box's /etc/hal0/api.env.
+  # sandboxed run resolves the exact files the Python side resolves,
+  # never a real box's /etc/hal0.
   if [[ -n "${HAL0_HOME:-}" ]]; then
     etc_root="${HAL0_HOME}/etc/hal0"
   fi
-  local env_file="${etc_root}/api.env"
-  [[ -r "${env_file}" ]] || return 0
 
   local raw
+  # Root-owned file first: it may name file:// as well as https://.
+  raw="$(read_releases_url "${etc_root}/update.conf")"
+  if [[ -n "${raw}" ]]; then
+    case "${raw}" in
+      https://*|file://*) export HAL0_RELEASES_URL="${raw}"; return 0 ;;
+      *) die "bad HAL0_RELEASES_URL in ${etc_root}/update.conf (must be https:// or file://): ${raw}" ;;
+    esac
+  fi
+
+  # Service-owned fallback: https:// only.
+  raw="$(read_releases_url "${etc_root}/api.env")"
+  [[ -n "${raw}" ]] || return 0
+  case "${raw}" in
+    https://*) export HAL0_RELEASES_URL="${raw}" ;;
+    file://*)
+      die "refusing a file:// HAL0_RELEASES_URL from ${etc_root}/api.env (service-owned; put it in ${etc_root}/update.conf, root:root 0644): ${raw}"
+      ;;
+    *) die "bad HAL0_RELEASES_URL in ${etc_root}/api.env (must be https://): ${raw}" ;;
+  esac
+}
+
+# Echo the last ``HAL0_RELEASES_URL=`` value in a KEY=VALUE file, or nothing.
+read_releases_url() {
+  local file="$1" raw
+  [[ -r "${file}" ]] || return 0
+
   # `|| true`: grep exits 1 on no match (the common case — most boxes never
   # set this override), and with `pipefail` that would otherwise trip
   # `set -e` and kill the whole seam with an opaque rc=1 before `stage` ever
   # runs. No match is not an error here, just "no override configured".
-  raw="$(grep -E '^HAL0_RELEASES_URL=' -- "${env_file}" 2>/dev/null | tail -n1 | cut -d'=' -f2-)" || true
+  raw="$(grep -E '^HAL0_RELEASES_URL=' -- "${file}" 2>/dev/null | tail -n1 | cut -d'=' -f2-)" || true
   raw="${raw%$'\r'}"
-  # api.env is a plain KEY=VALUE file; strip one layer of matching quotes if
-  # the operator added them (systemd's EnvironmentFile= parser does the same).
+  # Both files are plain KEY=VALUE; strip one layer of matching quotes if the
+  # operator added them (systemd's EnvironmentFile= parser does the same).
   case "${raw}" in
     \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
     \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
   esac
-
-  [[ -n "${raw}" ]] || return 0
-  case "${raw}" in
-    https://*|file://*) export HAL0_RELEASES_URL="${raw}" ;;
-    *) die "bad HAL0_RELEASES_URL in ${env_file} (must be https:// or file://): ${raw}" ;;
-  esac
+  printf '%s' "${raw}"
 }
 
 cmd="${1:-help}"; shift || true
