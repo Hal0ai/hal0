@@ -5,6 +5,7 @@
 // #settings/memory deep links keep working.
 import { useState, useEffect } from 'react'
 import { useSettingsClient } from '../../data/settingsClient.js'
+import { useCapabilities } from '@/api/hooks/useCapabilities'
 import { useMemoryGraphStatus, useRetryFailedExtractions, useUpdateMemoryGraph } from '@/api/hooks/useMemory'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
@@ -94,14 +95,38 @@ function MemoryRerankerPanel({ registry }) {
   const schema = schemaQuery.data || null;
   const live = settings.data || null;
 
+  const RERANK_MODEL_KEY = "memory.embedding.rerank_model";
   const RERANK_KEYS = [
     "memory.embedding.rerank_gateway_url",
-    "memory.embedding.rerank_model",
+    RERANK_MODEL_KEY,
     "memory.embedding.rerank_connect_timeout_s",
     "memory.embedding.rerank_read_timeout_s",
   ];
   const fields = {};
   for (const k of RERANK_KEYS) fields[k] = _schemaField(schema, k);
+
+  // rerank_model picker: the builtin (schema default, served without a rerank
+  // slot) plus every capability-tagged rerank model from the embed.rerank
+  // catalog, annotated with its gpu/npu backends. A saved id outside both
+  // stays pickable as "(saved)" so the operator can see and move off it.
+  // Free text is not offered — an id the gateway can't resolve just makes
+  // Hal0Reranker fail-soft to fused vector ordering on every recall.
+  const capsQuery = useCapabilities();
+  const rerankCatalog = capsQuery.data?.catalogs?.embed?.rerank || [];
+  const builtinModel = fields[RERANK_MODEL_KEY]?.default || "builtin.jina-reranker-v1-tiny-en-q8";
+  const savedModel = _getIn(live, RERANK_MODEL_KEY);
+  const modelOptions = [
+    { value: builtinModel, label: `${builtinModel} · builtin (default)` },
+    ...rerankCatalog
+      .filter(m => m.id && m.id !== builtinModel)
+      .map(m => {
+        const backends = [...new Set((m.backends || []).map(b => String(b.id || "")).filter(Boolean))];
+        return { value: m.id, label: backends.length ? `${m.id} · ${backends.join(" / ")}` : m.id };
+      }),
+  ];
+  if (savedModel && !modelOptions.some(o => o.value === savedModel)) {
+    modelOptions.unshift({ value: savedModel, label: `${savedModel} (saved)` });
+  }
 
   const [buf, setBuf] = useState({});
   const onChange = (dotKey, value) => setBuf(b => ({ ...b, [dotKey]: value }));
@@ -147,6 +172,7 @@ function MemoryRerankerPanel({ registry }) {
           buf={buf[k]}
           onChange={onChange}
           registry={registry}
+          options={k === RERANK_MODEL_KEY ? modelOptions : undefined}
         />
       ))}
       <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
