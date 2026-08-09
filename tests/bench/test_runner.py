@@ -25,12 +25,22 @@ from pathlib import Path
 
 import pytest
 
-from hal0.bench import harness, runner
+from hal0.bench import harness, planner, runner
 from hal0.bench.devices import BenchDeviceSpec
 from hal0.bench.planner import plan
 from hal0.bench.schema import Host, Outcome
 from hal0.bench.store import Store
 from hal0.bench.suites import suite_from_dict
+
+
+@pytest.fixture(autouse=True)
+def _adapter_tools_present(monkeypatch):
+    """Bench Phase 3 gates a suite's ``chat``/``http_pp``/``http_tg`` kinds at
+    plan time on the adapter binary being on PATH (planner._ADAPTER_TOOL_FOR_
+    KIND). CI has neither guidellm nor llama-benchy installed, so every test
+    in this module that plans one of those kinds needs the gate satisfied —
+    autouse so individual tests don't have to remember it."""
+    monkeypatch.setattr(planner.shutil, "which", lambda _name: "/usr/bin/true")
 
 
 @pytest.fixture
@@ -149,25 +159,6 @@ class TestTierACmd:
 
 
 class TestTierBCCmd:
-    def test_chat_cell_passes_its_config_variant(self, tmp_path):
-        cells = _cells(
-            ["chat"],
-            Store(tmp_path),
-            configs=[{"label": "fa-off", "flags": {"-fa": 0}}],
-        )
-        cmd = runner._tier_bc_cmd(cells[0], slot="s1", api="http://x", out="/o.json")
-
-        assert cmd[cmd.index("--mode") + 1] == "ab"
-        # The single --variant carries label + flags so the server actually
-        # runs what the record is labelled with (a variant-less --mode ab is
-        # rejected by server_ab and failed every chat cell).
-        assert cmd[cmd.index("--variant") + 1] == "fa-off:-fa 0"
-
-    def test_default_chat_cell_passes_a_baseline_variant(self, tmp_path):
-        cells = _cells(["chat"], Store(tmp_path))
-        cmd = runner._tier_bc_cmd(cells[0], slot="s1", api="http://x")
-        assert cmd[cmd.index("--variant") + 1] == "default:"
-
     def test_embed_has_no_variant(self, tmp_path):
         cells = _cells(["embed"], Store(tmp_path))
         cmd = runner._tier_bc_cmd(cells[0], slot="s1", api="http://x")
@@ -177,6 +168,14 @@ class TestTierBCCmd:
     def test_unknown_kind_is_rejected_at_plan_time(self, tmp_path):
         with pytest.raises(ValueError, match="unknown cell kind"):
             plan(_suite(["batch"]), _registry(), Store(tmp_path))
+
+    def test_missing_adapter_tool_is_rejected_at_plan_time(self, tmp_path, monkeypatch):
+        """Bench Phase 3 design decision 5: a kind whose adapter binary is
+        missing fails at PLAN time, naming the pin — never a mid-session
+        per-cell failure loop."""
+        monkeypatch.setattr(planner.shutil, "which", lambda _name: None)
+        with pytest.raises(ValueError, match=r"guidellm==0\.7\.3"):
+            plan(_suite(["chat"]), _registry(), Store(tmp_path))
 
     def test_unknown_lane_is_rejected_at_plan_time(self, tmp_path):
         """Finding 5: a suite spelling the registry's own backend hint
@@ -207,6 +206,120 @@ class TestTierBCCmd:
         already-known lane) must plan without raising."""
         cells = _cells(["pp"], Store(tmp_path))
         assert cells and cells[0].lane in ("rocm", "vulkan_radv", "cpu")
+
+
+# --------------------------------------------------------------------------- #
+# Bench Phase 3 — GuideLLM (chat) / llama-benchy (http_pp/http_tg) dispatch
+# --------------------------------------------------------------------------- #
+
+
+class TestGuideLLMDispatch:
+    def test_profile_is_synchronous_at_concurrency_one(self, tmp_path):
+        cells = _cells(["chat"], Store(tmp_path))
+        assert cells[0].identity.workload.concurrency == 1
+        kind, opts = runner._guidellm_profile(cells[0])
+        assert kind == "synchronous"
+        assert opts == {}
+
+    def test_profile_is_concurrent_with_streams_above_one(self, tmp_path):
+        cells = _cells(["chat"], Store(tmp_path))
+        cells[0].identity.workload.concurrency = 4
+        kind, opts = runner._guidellm_profile(cells[0])
+        assert kind == "concurrent"
+        assert opts == {"streams": 4}
+
+    def test_describe_worklist_composes_guidellm_argv(self, tmp_path):
+        cells = _cells(["chat"], Store(tmp_path))
+        lines = runner.describe_worklist(cells, exclusive=True, api="http://x")
+        assert "guidellm run" in lines[0]
+        assert "kind=synchronous" in lines[0]
+        assert "kind=openai_http" in lines[0]
+
+    def test_plan_sets_guidellm_engine_kind(self, tmp_path):
+        cells = _cells(["chat"], Store(tmp_path))
+        assert cells[0].identity.engine.kind == "guidellm"
+
+    def test_no_live_slot_records_failed_not_a_crash(self, sandbox, monkeypatch, tmp_path):
+        monkeypatch.setattr(runner, "_traffic_in_flight", lambda *a, **k: False)
+        monkeypatch.setattr(runner, "_get_slot", lambda api, mid: None)
+
+        store = Store(tmp_path / "state")
+        cells = _cells(["chat"], store)
+        result = runner.run_session(
+            cells, store, Host(hal0_version="1.0.0", exclusive=True), suite_id="t", api="http://x"
+        )
+
+        assert result.cells_failed == 1
+        [rec] = list(store.iter_records())
+        assert rec["outcome"] == Outcome.FAILED.value
+        assert "no live slot" in rec["note"]
+
+    def test_guidellm_run_appends_a_failed_record_not_a_crash(self, sandbox, monkeypatch, tmp_path):
+        """A guidellm run that fails yields outcome=failed and the session
+        continues — chat cells drive GuideLLM now, not server_ab (Phase 3
+        design decision 1)."""
+        from hal0.bench.adapters.guidellm import GuidellmResult
+
+        monkeypatch.setattr(runner, "_traffic_in_flight", lambda *a, **k: False)
+        monkeypatch.setattr(runner, "_get_slot", lambda api, mid: {"name": "slot1", "port": 9999})
+        monkeypatch.setattr(
+            runner.guidellm,
+            "run_guidellm",
+            lambda request, runner=None, *, timeout_s=None: GuidellmResult(
+                outcome=Outcome.FAILED, doc=None, rc=2, tail="boom", argv=[]
+            ),
+        )
+
+        store = Store(tmp_path / "state")
+        cells = _cells(["chat"], store)
+        result = runner.run_session(
+            cells, store, Host(hal0_version="1.0.0", exclusive=True), suite_id="t", api="http://x"
+        )
+
+        assert result.cells_failed == 1
+        [rec] = list(store.iter_records())
+        assert rec["outcome"] == Outcome.FAILED.value
+        assert "boom" in rec["note"]
+
+
+class TestLlamaBenchyDispatch:
+    def test_plan_accepts_http_pp_http_tg_and_sets_engine_kind(self, tmp_path):
+        cells = _cells(["http_pp", "http_tg"], Store(tmp_path))
+        assert {c.kind for c in cells} == {"http_pp", "http_tg"}
+        assert all(c.identity.engine.kind == "llama-benchy" for c in cells)
+
+    def test_describe_worklist_composes_llama_benchy_argv(self, tmp_path):
+        cells = _cells(["http_pp"], Store(tmp_path))
+        lines = runner.describe_worklist(cells, exclusive=True, api="http://x")
+        assert "llama-benchy" in lines[0]
+        assert "--base-url" in lines[0]
+        assert "/v1" in lines[0]
+
+    def test_llama_benchy_run_appends_a_failed_record_not_a_crash(
+        self, sandbox, monkeypatch, tmp_path
+    ):
+        from hal0.bench.adapters.llama_benchy import BenchyRunResult
+
+        monkeypatch.setattr(runner, "_traffic_in_flight", lambda *a, **k: False)
+        monkeypatch.setattr(runner, "_get_slot", lambda api, mid: {"name": "slot1", "port": 9999})
+        monkeypatch.setattr(
+            runner.llama_benchy,
+            "run_llama_benchy",
+            lambda request, runner=None: BenchyRunResult(
+                doc=None, rc=2, tail="boom", outcome=Outcome.FAILED
+            ),
+        )
+
+        store = Store(tmp_path / "state")
+        cells = _cells(["http_tg"], store)
+        result = runner.run_session(
+            cells, store, Host(hal0_version="1.0.0", exclusive=True), suite_id="t", api="http://x"
+        )
+
+        assert result.cells_failed == 1
+        [rec] = list(store.iter_records())
+        assert rec["outcome"] == Outcome.FAILED.value
+        assert "boom" in rec["note"]
 
 
 # --------------------------------------------------------------------------- #
@@ -389,7 +502,7 @@ class TestSessionIntegration:
         monkeypatch.setattr(runner, "_slot_for_model", lambda api, mid: "slot1")
 
         store = Store(tmp_path / "state")
-        cells = _cells(["chat"], store)
+        cells = _cells(["embed"], store)
         result = runner.run_session(
             cells, store, Host(hal0_version="1.0.0", exclusive=True), suite_id="t", api="http://x"
         )

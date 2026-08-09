@@ -25,6 +25,7 @@ exactly the cells it changed, no re-bench checklist.
 from __future__ import annotations
 
 import shlex
+import shutil
 import sys
 import urllib.request
 from dataclasses import dataclass, field
@@ -32,6 +33,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import harness
+from .adapters import GUIDELLM_PIN, LLAMA_BENCHY_PIN
+from .adapters.guidellm import GUIDELLM_BIN
+from .adapters.llama_benchy import LLAMA_BENCHY_BIN
 from .schema import Config, Engine, Identity, Model, Workload, cell_key
 from .store import Store
 from .suites import Suite
@@ -62,16 +66,49 @@ _TUNE_FLAGS = frozenset({"-b", "-ub", "-ngl", "-fa", "-ctk", "-ctv", "-t", "-mmp
 # measures decoding n_gen tokens at that same fill.
 _PP_PROMPT = 512
 
-# The measurement kinds the runner can execute (Tier A + server_ab modes).
-# plan() rejects a suite kind outside this set loudly — the old behavior
-# silently fell back to server_ab `--mode ab`, which mislabeled the record.
-KNOWN_KINDS = frozenset({"pp", "tg", "chat", "reuse", "embed", "rerank"})
+# The measurement kinds the runner can execute: Tier A (llama-bench via the
+# seam), the GuideLLM/llama-benchy OSS adapters (bench Phase 3), and the
+# remaining server_ab modes. plan() rejects a suite kind outside this set
+# loudly — the old behavior silently fell back to server_ab `--mode ab`,
+# which mislabeled the record.
+#
+# "chat" drives GuideLLM (adapters/guidellm.py), not server_ab, as of Phase 3
+# (docs/superpowers/plans/2026-08-09-bench-phase3-oss-adapters.md design
+# decision 1). "http_pp"/"http_tg" are NEW Phase-3 kinds: llama-bench
+# vocabulary (pp/tg x depth) driven over a live slot's HTTP endpoint via
+# llama-benchy (adapters/llama_benchy.py) — no suite ships them yet, but the
+# planner must accept them so a suite can opt in later (design decision 3).
+KNOWN_KINDS = frozenset({"pp", "tg", "chat", "reuse", "embed", "rerank", "http_pp", "http_tg"})
 
 # Tier-A kinds — the only ones that ever reach harness.lane_specs()[cell.lane]
 # (runner._tier_a_cmd / _tier_a_record). A Tier-B/C cell's lane is display-only
-# (server_ab never looks it up), so only a Tier-A cell's resolved lane is
-# validated against the harness's known lanes (finding 5).
+# (server_ab/adapters never look it up), so only a Tier-A cell's resolved lane
+# is validated against the harness's known lanes (finding 5). "http_pp"/
+# "http_tg" measure a live HTTP slot like chat/reuse/embed/rerank do — they
+# are Tier-B-like (unprivileged, no exclusive seam), not Tier A.
 _TIER_A_KINDS = frozenset({"pp", "tg"})
+
+# kind -> (console-script binary, pin string) for the two Phase-3 OSS
+# adapters. plan() rejects a suite whose cells need a tool that isn't
+# installed — loudly, at plan time, naming the pin — rather than letting the
+# runner discover the gap per-cell mid-session (design decision 5). embed/
+# rerank/reuse (still server_ab) and pp/tg (the seam) need no external tool
+# on the unprivileged runner's PATH, so they are not in this map.
+_ADAPTER_TOOL_FOR_KIND: dict[str, tuple[str, str]] = {
+    "chat": (GUIDELLM_BIN, GUIDELLM_PIN),
+    "http_pp": (LLAMA_BENCHY_BIN, LLAMA_BENCHY_PIN),
+    "http_tg": (LLAMA_BENCHY_BIN, LLAMA_BENCHY_PIN),
+}
+
+# cell kind -> the schema.Engine.kind an adapter-measured cell reports. Tier-A
+# (pp/tg) and the remaining server_ab kinds keep their pre-Phase-3 values.
+_ENGINE_KIND_FOR_KIND: dict[str, str] = {
+    "pp": "llama-bench",
+    "tg": "llama-bench",
+    "chat": "guidellm",
+    "http_pp": "llama-benchy",
+    "http_tg": "llama-benchy",
+}
 
 
 @dataclass
@@ -313,6 +350,7 @@ def _build_identity(
     engine block for DISPLAY only (roster chips, run drawer). See the results
     appendix in docs/archive/handoffs/box-bringup-prompt-2026-07-05.md.
     """
+    is_pp_shaped = kind in ("pp", "http_pp")
     return Identity(
         model=Model(
             id=model["id"],
@@ -322,14 +360,14 @@ def _build_identity(
             size_bytes=int(model.get("size_bytes", 0) or 0),
             caps=sorted(_model_caps(model)),
         ),
-        engine=Engine(kind="llama-bench" if kind in ("pp", "tg") else "llama-server"),
+        engine=Engine(kind=_ENGINE_KIND_FOR_KIND.get(kind, "llama-server")),
         lane=lane,
         config=_apply_flags(_resolve_profile(model, depth), flags or {}),
         workload=Workload(
             kind=kind,
             depth=depth,
-            n_prompt=_PP_PROMPT if kind == "pp" else 0,
-            n_gen=0 if kind == "pp" else int(model.get("n_gen", 256) or 256),
+            n_prompt=_PP_PROMPT if is_pp_shaped else 0,
+            n_gen=0 if is_pp_shaped else int(model.get("n_gen", 256) or 256),
             sampler=_sampler_block(sampler),
             concurrency=1,
         ),
@@ -384,6 +422,20 @@ def plan(
         raise ValueError(
             f"suite {suite.id!r}: unknown cell kind(s) {unknown} (known: {sorted(KNOWN_KINDS)})"
         )
+    # Tool availability is a plan-time policy (design decision 5): a kind
+    # whose adapter binary is missing is rejected here, loudly, naming the
+    # pin — never discovered mid-session as a per-cell failure loop.
+    missing_tools = sorted(
+        k
+        for k in suite.cells.kinds
+        if k in _ADAPTER_TOOL_FOR_KIND and shutil.which(_ADAPTER_TOOL_FOR_KIND[k][0]) is None
+    )
+    if missing_tools:
+        detail = "; ".join(
+            f"{k!r} needs {_ADAPTER_TOOL_FOR_KIND[k][0]!r} (pin: {_ADAPTER_TOOL_FOR_KIND[k][1]})"
+            for k in missing_tools
+        )
+        raise ValueError(f"suite {suite.id!r}: required tool(s) not on PATH — {detail}")
     current = store.newest_ok_by_cell()  # cell_key -> newest ok record
     max_age = timedelta(days=suite.staleness.max_age_days)
     known_lanes = set(harness.lane_specs())
@@ -446,7 +498,17 @@ def plan(
     # model (pp before tg, shallow before deep) so a budget-truncated session
     # still publishes something coherent. Stable sort on model_id groups a
     # model's cells together.
-    kind_cost = {"pp": 0, "tg": 1, "chat": 2, "reuse": 2, "embed": 1, "rerank": 1, "batch": 3}
+    kind_cost = {
+        "pp": 0,
+        "tg": 1,
+        "chat": 2,
+        "reuse": 2,
+        "embed": 1,
+        "rerank": 1,
+        "batch": 3,
+        "http_pp": 0,
+        "http_tg": 1,
+    }
     stale.sort(
         key=lambda c: (
             -c.priority,
