@@ -355,6 +355,29 @@ async def test_txn_body_timeout_is_not_relabelled_as_lock_contention(
     assert "propagation timed out" in str(caught.value)
 
 
+async def test_nested_txn_in_one_task_does_not_deadlock(tmp_hal0_home: str) -> None:
+    """A txn opened inside a txn by the same task must not hang.
+
+    ``HAL0_TOML_LOCK`` is reached before the file lock's owner check, so
+    without task tracking at the transaction level the inner acquire waits on
+    a lock its own caller holds — forever (#1721 review).
+    """
+    target = _toml_path(tmp_hal0_home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    save_hal0_config(Hal0Config(), target)
+
+    async def _nested() -> str:
+        async with hal0_config_txn(path=target, timeout=5) as outer:
+            outer.config.telemetry.enabled = True
+            outer.save()
+            async with hal0_config_txn(path=target, timeout=5) as inner:
+                # The inner txn sees the outer's committed write.
+                assert inner.config.telemetry.enabled is True
+                return "ok"
+
+    assert await asyncio.wait_for(_nested(), timeout=10) == "ok"
+
+
 async def test_txn_is_reentrant_within_one_task(tmp_hal0_home: str) -> None:
     """A nested txn in the same task passes through instead of self-deadlocking.
 
@@ -409,3 +432,98 @@ def test_no_hal0_toml_writer_hand_rolls_its_own_read_modify_write() -> None:
         "these modules write hal0.toml without the serialized RMW path "
         f"(hal0_config_txn / hal0_config_file_lock): {offenders}"
     )
+
+
+def test_raw_hal0_toml_writers_are_covered_too() -> None:
+    """The ratchet must catch RAW writers, not just ``save_hal0_config`` ones.
+
+    #1721 review: the updater's stamp pass and ``hal0 config migrate`` go
+    straight to ``write_toml_atomic`` against ``paths.hal0_toml()``, so scanning
+    for the typed writer alone let two cooperating processes escape the
+    advisory-lock contract entirely.
+    """
+    src = Path(__file__).resolve().parents[2] / "src" / "hal0"
+    offenders: list[str] = []
+    for py in src.rglob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        if "write_toml_atomic(" not in text:
+            continue  # a mention in prose is not a writer
+        if "hal0_toml()" not in text and "_hal0_toml_path()" not in text:
+            continue  # writes some other TOML (slots, profiles, registry)
+        rel = py.relative_to(src).as_posix()
+        if rel == "config/loader.py":
+            continue
+        if "hal0_config_txn" in text or "hal0_config_file_lock" in text:
+            continue
+        offenders.append(rel)
+
+    assert not offenders, (
+        f"these modules write hal0.toml raw, outside the advisory lock: {offenders}"
+    )
+
+
+def test_installer_shell_writer_takes_the_advisory_lock() -> None:
+    """``install.sh`` patches [models].store while hal0-api may still be live.
+
+    It restarts the service only further down the script, so this write races a
+    settings PUT on a real upgrade. It cannot import hal0 (the venv may not
+    exist yet), so it takes the same lock file with plain fcntl.
+    """
+    install_sh = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
+    text = install_sh.read_text(encoding="utf-8")
+    start = text.index('HAL0_TOML="${ETC_DIR}/hal0.toml"')
+    block = text[start : start + 3000]
+    assert "hal0.toml" in block
+    assert ".lock" in block and "flock" in block, (
+        "install.sh's [models].store patch must hold hal0.toml.lock"
+    )
+    assert "O_NOFOLLOW" in block, "the root-run lock open must refuse symlinks"
+
+
+def test_lock_file_open_refuses_a_symlink(tmp_path: Path) -> None:
+    """A symlinked lock file must be refused, not followed.
+
+    ``/etc/hal0`` is service-writable under the ownership flip while
+    ``install.sh`` / ``hal0 update`` take this lock as root, so following a
+    symlink would let the service account aim the next root-run upgrade at any
+    root-writable file (#1721 review).
+    """
+    target = tmp_path / "hal0.toml"
+    target.write_text("", encoding="utf-8")
+    victim = tmp_path / "victim"
+    victim.write_text("precious", encoding="utf-8")
+    (tmp_path / "hal0.toml.lock").symlink_to(victim)
+
+    with pytest.raises(OSError), file_lock(target):
+        pass  # pragma: no cover — the open must fail first
+    assert victim.read_text(encoding="utf-8") == "precious"
+
+
+async def test_async_lock_does_not_fake_reentrancy_for_a_sibling_task(
+    tmp_hal0_home: str,
+) -> None:
+    """A sibling task's blocking ``file_lock`` must not sail through.
+
+    The sync lock's re-entrancy is thread-local, and every task shares the loop
+    thread — so marking the thread as "already holding" while an async writer
+    runs would let an unrelated task write with no lock at all (#1721 review).
+    """
+    target = _toml_path(tmp_hal0_home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    save_hal0_config(Hal0Config(), target)
+
+    from hal0.config.locking import async_file_lock
+
+    sibling_got_lock = threading.Event()
+
+    async with async_file_lock(target, timeout=5):
+        # Same loop thread, different task → must contend, not pass through.
+        worker = threading.Thread(
+            target=lambda: (file_lock(target).__enter__(), sibling_got_lock.set()),
+            daemon=True,
+        )
+        worker.start()
+        assert not sibling_got_lock.wait(timeout=0.3), (
+            "a second acquirer took the lock while the async holder had it"
+        )
+    assert sibling_got_lock.wait(timeout=5)

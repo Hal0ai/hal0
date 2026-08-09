@@ -687,42 +687,56 @@ fi
 HAL0_TOML="${ETC_DIR}/hal0.toml"
 if [[ "${MODELS_DIR}" != "/var/lib/hal0/models" ]]; then
     if ! grep -qE "^\\s*store\\s*=\\s*\"${MODELS_DIR//\//\\/}\"" "${HAL0_TOML}" 2>/dev/null; then
-        if [[ -f "${HAL0_TOML}" ]] && grep -q "^\\[models\\]" "${HAL0_TOML}"; then
-            # [models] table exists — patch store + pull_root in place (or
-            # append under the existing table). Cheap regex pass; no toml
-            # parser so we accept the limitation that nested tables under
-            # [models.xxx] aren't supported (the schema has none).
-            python3 - "${HAL0_TOML}" "${MODELS_DIR}" <<'PYEOF'
-import sys, re, pathlib
+        # ONE locked read-modify-write for every case (existing [models] table,
+        # table-less file, no file at all). This step runs BEFORE hal0-api is
+        # restarted below, i.e. against a possibly-live daemon that may be
+        # serving a settings PUT, so it takes the same `hal0.toml.lock` advisory
+        # lock every in-process writer holds (hal0.config.locking / #1721) —
+        # otherwise the installer and the API can erase each other's section.
+        # Plain fcntl on purpose: this is system python3, which cannot import
+        # hal0 (the venv does not exist yet at this point).
+        mkdir -p "${ETC_DIR}"
+        python3 - "${HAL0_TOML}" "${MODELS_DIR}" <<'PYEOF'
+import fcntl, os, pathlib, re, stat, sys
 path = pathlib.Path(sys.argv[1])
 new_root = sys.argv[2]
-text = path.read_text(encoding="utf-8")
-# Replace existing store/pull_root inside [models], else append before the
-# next [section]. The section body is "every following line that does not
-# START with '['" — NOT `[^\[]*`, which the old patcher used and which
-# stopped at the first '[' of a list value like roots = ["/x"], splicing
-# the table in half and corrupting the TOML.
-m = re.search(r"^\[models\][ \t]*\n(?:(?!\[).*\n?)*", text, flags=re.MULTILINE)
-if m:
-    block = m.group(0)
-    for key in ("store", "pull_root"):
-        if re.search(rf"^\s*{key}\s*=", block, flags=re.MULTILINE):
-            block = re.sub(rf"^\s*{key}\s*=.*$",
-                           f'{key} = "{new_root}"',
-                           block, count=1, flags=re.MULTILINE)
-        else:
-            block = block.rstrip() + f'\n{key} = "{new_root}"\n'
-    if not block.endswith("\n"):
-        block += "\n"
-    text = text[:m.start()] + block + text[m.end():]
-else:
-    text = text.rstrip() + f'\n\n[models]\nstore = "{new_root}"\npull_root = "{new_root}"\n'
-path.write_text(text, encoding="utf-8")
+
+# Same lock file, same O_NOFOLLOW discipline as hal0.config.locking.file_lock:
+# /etc/hal0 is service-writable under the ownership flip while this script runs
+# as root, so following a symlink here would be a privilege hole.
+lock_path = pathlib.Path(f"{path}.lock")
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o664)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise SystemExit(f"lock path is not a regular file: {lock_path}")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    # Replace existing store/pull_root inside [models], else append before the
+    # next [section]. The section body is "every following line that does not
+    # START with '['" — NOT `[^\[]*`, which the old patcher used and which
+    # stopped at the first '[' of a list value like roots = ["/x"], splicing
+    # the table in half and corrupting the TOML.
+    m = re.search(r"^\[models\][ \t]*\n(?:(?!\[).*\n?)*", text, flags=re.MULTILINE)
+    if m:
+        block = m.group(0)
+        for key in ("store", "pull_root"):
+            if re.search(rf"^\s*{key}\s*=", block, flags=re.MULTILINE):
+                block = re.sub(rf"^\s*{key}\s*=.*$",
+                               f'{key} = "{new_root}"',
+                               block, count=1, flags=re.MULTILINE)
+            else:
+                block = block.rstrip() + f'\n{key} = "{new_root}"\n'
+        if not block.endswith("\n"):
+            block += "\n"
+        text = text[:m.start()] + block + text[m.end():]
+    else:
+        text = text.rstrip() + f'\n\n[models]\nstore = "{new_root}"\npull_root = "{new_root}"\n'
+        text = text.lstrip("\n")
+    path.write_text(text, encoding="utf-8")
+finally:
+    os.close(fd)
 PYEOF
-        else
-            mkdir -p "${ETC_DIR}"
-            printf '\n[models]\nstore = "%s"\npull_root = "%s"\n' "${MODELS_DIR}" "${MODELS_DIR}" >> "${HAL0_TOML}"
-        fi
         info "wrote [models].store (+pull_root) → ${HAL0_TOML}"
     fi
 fi

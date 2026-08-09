@@ -1892,19 +1892,27 @@ def _stamp_profile_catalog_version(*, job_id: str | None = None) -> bool:
     # Same cross-process lock as every other hal0.toml read-modify-write
     # (#1721) — the raw round-trip below is exactly the read → modify → write
     # shape that loses a concurrent API writer's section.
-    with hal0_config_file_lock():
-        raw = _raw_hal0_toml()
-        if raw is None:
-            log.warning(
-                "updater.profile_reset_stamp_skipped", job_id=job_id, reason="hal0.toml absent"
-            )
-            return False
-        try:
+    #
+    # The lock ACQUIRE is inside the failure handler on purpose (#1721 review):
+    # this runs after ``reset_profile_catalog`` has already backed up and
+    # deleted profiles.toml, so an un-contained OSError here (an unwritable
+    # lock file left by an earlier root-run install, say) would escape as a
+    # generic reset error and leave the catalog deleted with no stamp and no
+    # honest report. A lock we cannot take is reported exactly like a write we
+    # cannot make: unstamped, logged, False.
+    try:
+        with hal0_config_file_lock():
+            raw = _raw_hal0_toml()
+            if raw is None:
+                log.warning(
+                    "updater.profile_reset_stamp_skipped", job_id=job_id, reason="hal0.toml absent"
+                )
+                return False
             new_raw, version = run_migrations(raw, target_version=PROFILE_CATALOG_SCHEMA_VERSION)
             write_toml_atomic(paths.hal0_toml(), new_raw)
-        except Exception as exc:
-            log.warning("updater.profile_reset_stamp_failed", job_id=job_id, error=str(exc))
-            return False
+    except Exception as exc:
+        log.warning("updater.profile_reset_stamp_failed", job_id=job_id, error=str(exc))
+        return False
     log.info("updater.profile_reset_stamped", job_id=job_id, schema_version=version)
     return True
 

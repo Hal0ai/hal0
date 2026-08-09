@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import stat
 import threading
 import time
 import weakref
@@ -61,6 +62,30 @@ def _depths() -> dict[str, int]:
         depths = {}
         _reentry.depths = depths
     return depths
+
+
+def _open_lock_file(lock_path: Path):  # type: ignore[no-untyped-def]
+    """Open ``lock_path`` for locking, refusing symlinks and non-regular files.
+
+    These locks straddle a privilege boundary: ``/etc/hal0`` is writable by the
+    ``hal0`` service account under the ownership flip, while ``install.sh`` and
+    ``hal0 update`` acquire the same lock as **root**. A plain
+    ``open(path, "w")`` there follows a symlink and truncates whatever it points
+    at, so a compromised service account could aim ``hal0.toml.lock`` at any
+    root-writable file and have the next upgrade clobber it. ``O_NOFOLLOW``
+    plus an ``S_ISREG`` check on the descriptor (not the path — no TOCTOU
+    window) closes that. No ``O_TRUNC``: the lock file's contents are never
+    read or written, only its inode is locked.
+    """
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o664)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"lock path is not a regular file: {lock_path}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, "r+b")
 
 
 def lock_path_for(target: Path | str) -> Path:
@@ -101,7 +126,7 @@ def file_lock(target: Path | str) -> Iterator[None]:
             depths.pop(key, None)
         return
 
-    with open(lock_path, "w") as fh:
+    with _open_lock_file(lock_path) as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         depths[key] = 1
         try:
@@ -120,14 +145,19 @@ def file_lock(target: Path | str) -> Iterator[None]:
 # variant therefore polls ``LOCK_EX | LOCK_NB`` and awaits between attempts, so
 # only the waiting coroutine is parked.
 #
-# Re-entrancy needs a second guard here that the sync path does not: the
-# thread-local depth map is shared by every task on the loop thread, so a
-# second TASK arriving while the first holds the lock would read depth > 0 and
-# sail straight through with no lock at all. Coroutines are therefore
-# serialized first by a per-loop, per-path ``asyncio.Lock`` — held for the same
-# span as the OS lock — and only then does the depth map get set (which keeps a
-# nested SYNC ``file_lock`` on the same target inside the body a no-op instead
-# of a self-deadlock).
+# Re-entrancy is tracked by TASK, not by thread. The sync path's thread-local
+# depth map is deliberately NOT touched here: every task on the loop shares one
+# thread, so marking depth > 0 while an async holder runs would make a sibling
+# task's sync ``file_lock`` believe it already held the lock and write with no
+# lock at all — a silent lost update, worse than the contention it avoids.
+# Coroutines serialize on a per-loop, per-path ``asyncio.Lock`` and the holding
+# task is recorded so its own nested acquire passes through instead of hanging
+# on the non-recursive lock.
+#
+# Corollary: never call the blocking :func:`file_lock` from the event-loop
+# thread for a target an async writer also locks — it would block the loop, and
+# if a txn on that same loop holds it, forever. Off-loop writers must run in a
+# worker thread (``asyncio.to_thread``) or use this async variant.
 
 _async_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
     weakref.WeakKeyDictionary()
@@ -250,22 +280,17 @@ async def async_file_lock(
         return
 
     async with _async_lock_for(key):
-        depths = _depths()
         lock_path.parent.mkdir(parents=True, exist_ok=True)
 
         if fcntl is None:  # pragma: no cover - non-POSIX platforms
-            depths[key] = depths.get(key, 0) + 1
             owners[key] = current
             try:
                 yield
             finally:
                 owners.pop(key, None)
-                depths[key] -= 1
-                if depths[key] <= 0:
-                    depths.pop(key, None)
             return
 
-        with open(lock_path, "w") as fh:
+        with _open_lock_file(lock_path) as fh:
             deadline = None if timeout is None else time.monotonic() + timeout
             while True:
                 try:
@@ -277,15 +302,11 @@ async def async_file_lock(
                             f"timed out after {timeout}s waiting for advisory lock {lock_path}"
                         ) from None
                     await asyncio.sleep(poll_interval)
-            depths[key] = depths.get(key, 0) + 1
             owners[key] = current
             try:
                 yield
             finally:
                 owners.pop(key, None)
-                depths[key] -= 1
-                if depths[key] <= 0:
-                    depths.pop(key, None)
                 with contextlib.suppress(OSError):
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 

@@ -7,6 +7,7 @@ post-install. Deps are injected so there is no hidden ``app.state`` coupling.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -519,7 +520,12 @@ async def apply_setup(
     # Honour the operator's chosen store BEFORE planning pulls: the pull engine
     # reads ``[models].store`` lazily at pull time, so persisting it here is
     # what threads ``storage_dir`` all the way to the pull destination (#1095).
-    _persist_store_dir(selections.storage_dir)
+    # Off-loop (#1721 review): ``apply_setup`` is awaited by
+    # ``POST /api/installer/apply*`` on the API event loop, and
+    # ``_persist_store_dir`` takes the BLOCKING hal0.toml advisory lock. Run on
+    # the loop it would freeze the whole daemon while any peer holds that lock
+    # (and deadlock outright behind a txn on the same loop).
+    await asyncio.to_thread(_persist_store_dir, selections.storage_dir)
 
     for s in selections.slots:
         rec = SlotOutcome(slot=s.slot_name, model_id=s.model_id or "")

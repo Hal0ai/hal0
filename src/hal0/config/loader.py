@@ -15,6 +15,7 @@ See PLAN.md §3 and §5 Tier 1.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -285,6 +286,12 @@ def save_hal0_config(cfg: Hal0Config, path: Path | None = None) -> None:
 #     ``/etc/hal0/*.lock`` already has a perms row, so no new install surface.
 
 
+#: Task holding an open :func:`hal0_config_txn` per hal0.toml path. Only ever
+#: read/written from the loop thread while the locks are held, so a plain dict
+#: is sufficient.
+_TXN_OWNERS: dict[str, Any] = {}
+
+
 class Hal0ConfigTxn:
     """Handle yielded by :func:`hal0_config_txn` — a locked RMW on hal0.toml."""
 
@@ -340,6 +347,17 @@ async def hal0_config_txn(
         ConfigLockBusy: Another process held the advisory lock too long.
     """
     target = Path(path) if path is not None else paths.hal0_toml()
+
+    # Re-entrancy (#1721 review): ``HAL0_TOML_LOCK`` is reached BEFORE the file
+    # lock's own owner check, so a writer that opened a txn and then called a
+    # helper which opens another would hang here forever rather than fail. The
+    # holding task passes straight through — it already owns both locks, and
+    # re-reading from disk under them yields the same consistent view.
+    current_task = asyncio.current_task()
+    if current_task is not None and _TXN_OWNERS.get(str(target)) is current_task:
+        yield Hal0ConfigTxn(load_hal0_config(target), target, request)
+        return
+
     async with HAL0_TOML_LOCK:
         # ``acquired`` narrows the except to the ACQUIRE. A body that raises its
         # own TimeoutError (the memory route awaits a bounded hindsight-api
@@ -349,7 +367,13 @@ async def hal0_config_txn(
         try:
             async with async_file_lock(target, timeout=timeout):
                 acquired = True
-                yield Hal0ConfigTxn(load_hal0_config(target), target, request)
+                if current_task is not None:
+                    _TXN_OWNERS[str(target)] = current_task
+                try:
+                    yield Hal0ConfigTxn(load_hal0_config(target), target, request)
+                finally:
+                    if current_task is not None:
+                        _TXN_OWNERS.pop(str(target), None)
         except TimeoutError as exc:
             if acquired:
                 raise
