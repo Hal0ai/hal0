@@ -3,8 +3,12 @@
 Updater handles the full update lifecycle:
   1. Check ``{HAL0_RELEASES_URL}`` (or ``https://releases.hal0.dev/{channel}.json``)
      for a newer version.
-  2. Download tarball + cosign signature to ``/var/lib/hal0/cache/<version>/``.
-  3. Verify the SHA-256 digest against the release manifest.
+  2. Download tarball + cosign signature into a root-only ``0700`` staging
+     directory under the install root (#1738 — never the service-writable
+     ``/var/lib/hal0/cache/<version>/``, which only holds the verified
+     manifest ``commit()`` re-reads).
+  3. Verify the SHA-256 digest against the release manifest, and re-derive it
+     from the same open file object the tarball is extracted from.
   4. ``cosign verify-blob`` against the exact GitHub Actions OIDC identity
      derived from the authenticated release kind and version.
   5. Extract to ``/usr/lib/hal0-<version>/`` (refuses non-empty paths).
@@ -46,8 +50,9 @@ import sys
 import tarfile
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 from urllib.parse import urlparse
 
 import structlog
@@ -1000,47 +1005,199 @@ async def _fetch_verified_release_manifest(
 # ── Extraction + migration helpers ─────────────────────────────────────────────
 
 
+#: Written into a destination directory for the duration of an extraction and
+#: removed on success. Its presence means "a stage started here and did not
+#: finish" — the only marker that is reliable for *every* interruption shape,
+#: including the ones that leave no recognisable file layout behind at all.
+_STAGING_SENTINEL = ".hal0-staging"
+
+#: Quarantined trees (``<install-dir>.stale-<unix-ts>``) are kept so an
+#: operator can recover from a half-failed apply, but they were never cleaned
+#: up — one full install tree leaked per retry, forever. Keep the newest few
+#: regardless of age, and reap anything older than this.
+_QUARANTINE_KEEP = 3
+_QUARANTINE_MAX_AGE_S = 30 * 86400
+
+
 def _looks_like_hal0_install(path: Path) -> bool:
     """Heuristic: does ``path`` look like a prior hal0 tarball extraction?
 
-    A safe quarantine candidate has either a top-level ``VERSION`` file
-    or a ``pyproject.toml`` whose ``name`` is ``hal0ai`` (or the legacy
-    pre-rename ``hal0``). We deliberately refuse to touch unrelated
-    non-empty directories.
+    A safe quarantine candidate is one of:
+
+    * a leftover :data:`_STAGING_SENTINEL` — an extraction started here and
+      never completed, whatever it managed to write;
+    * a top-level ``VERSION`` file;
+    * an un-flattened ``hal0-<version>/`` prefix directory containing a
+      ``VERSION`` — the exact shape ``tf.extractall`` leaves when it is
+      interrupted before :func:`_extract_tarball` flattens the prefix away;
+    * a ``pyproject.toml`` whose ``name`` is ``hal0ai`` (or the legacy
+      pre-rename ``hal0``).
+
+    We deliberately refuse to touch unrelated non-empty directories: an
+    operator's own files at this path must never be silently moved aside.
+
+    The pyproject check reads the **whole** file. It used to read only
+    ``[:512]``, which never matched hal0's own manifest — ``name = "hal0ai"``
+    starts at byte 512 exactly — so the fallback was dead code, masked only
+    by release tarballs happening to ship a ``VERSION``. An installer rsync
+    tree has no ``VERSION``, so the fallback is the only thing that can
+    recognise it, and it has to actually run.
     """
+    if (path / _STAGING_SENTINEL).exists():
+        return True
     if (path / "VERSION").is_file():
         return True
+    for child in _iterdir_safe(path):
+        if child.is_dir() and child.name.startswith("hal0-") and (child / "VERSION").is_file():
+            return True
     pp = path / "pyproject.toml"
     if pp.is_file():
         try:
-            head = pp.read_text(encoding="utf-8", errors="replace")[:512]
+            body = pp.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return False
         return any(
-            marker in head
+            marker in body
             for marker in ('name = "hal0ai"', "name = 'hal0ai'", 'name = "hal0"', "name = 'hal0'")
         )
     return False
 
 
-def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) -> None:
+def _iterdir_safe(path: Path) -> list[Path]:
+    """``path.iterdir()`` as a list, empty on any filesystem error."""
+    try:
+        return list(path.iterdir())
+    except OSError:
+        return []
+
+
+def _reap_stale_quarantines(
+    install_dir: Path,
+    *,
+    keep: int = _QUARANTINE_KEEP,
+    max_age_s: int = _QUARANTINE_MAX_AGE_S,
+    job_id: str | None = None,
+) -> None:
+    """Delete old ``<install_dir>.stale-<unix-ts>`` quarantine trees.
+
+    Quarantining is a self-heal (see :func:`_extract_tarball`) but nothing
+    ever removed the result, so a box that retried a failed apply a few times
+    accumulated whole install trees under ``/usr/lib/hal0`` indefinitely. The
+    newest ``keep`` are retained — recovery material for the failure that just
+    happened — and everything else, plus anything older than ``max_age_s``, is
+    removed. Best-effort and logged: failing to tidy is never a reason to
+    fail an update.
+    """
+    prefix = f"{install_dir.name}.stale-"
+    candidates: list[tuple[int, Path]] = []
+    for entry in _iterdir_safe(install_dir.parent):
+        if not entry.name.startswith(prefix) or not entry.is_dir():
+            continue
+        suffix = entry.name[len(prefix) :]
+        if not suffix.isdigit():
+            continue
+        candidates.append((int(suffix), entry))
+    if not candidates:
+        return
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    cutoff = int(time.time()) - max_age_s
+    for index, (stamp, entry) in enumerate(candidates):
+        # Two independent bounds, because either alone leaks: an age-only
+        # rule keeps every quarantine from a same-day retry storm, and a
+        # count-only rule keeps three full install trees forever.
+        if index < keep and stamp > cutoff:
+            continue
+        try:
+            shutil.rmtree(entry)
+        except OSError as exc:
+            log.warning(
+                "updater.quarantine_reap_failed", job_id=job_id, path=str(entry), error=str(exc)
+            )
+            continue
+        log.info("updater.quarantine_reaped", job_id=job_id, path=str(entry), stamp=stamp)
+
+
+@contextlib.contextmanager
+def _root_only_staging_dir(version: str, *, job_id: str | None = None) -> Iterator[Path]:
+    """Yield a fresh 0700 staging dir under the **root-owned** install root.
+
+    #1738: the release artifact used to be downloaded into
+    ``/var/lib/hal0/cache/<version>/`` and then re-opened *by path* four
+    times — download, sha256, ``cosign verify-blob`` (a subprocess), and
+    finally ``tarfile.open``. ``/var/lib/hal0`` is ``hal0:hal0`` ``0o2775``
+    with no sticky bit, and :func:`_restore_service_ownership` hands the
+    cache version dir back to the service account after every successful
+    stage — so the unprivileged account could substitute its own tarball in
+    the window between cosign exiting and root extracting, and root would
+    pip-install it. That defeats the entire "root re-fetches and re-verifies
+    the bytes itself" argument the privileged seam rests on.
+
+    ``mkdtemp`` creates the directory ``0700``, atomically and owned by the
+    creating euid — root on the seam path. Nothing but root can traverse it,
+    so no other principal can even name, let alone replace, the artifact
+    between verification and extraction. The dot-prefixed name can never
+    collide with a release-dir token (those forbid a leading ``.``; see the
+    token regex above), and the tree is removed unconditionally on the way
+    out so a failed stage leaks nothing.
+    """
+    root = _usr_lib_root()
+    root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".stage-{version}-", dir=root))
+    try:
+        os.chmod(staging, 0o700)
+        yield staging
+    finally:
+        try:
+            shutil.rmtree(staging)
+        except OSError as exc:
+            log.warning(
+                "updater.staging_cleanup_failed", job_id=job_id, path=str(staging), error=str(exc)
+            )
+
+
+def _extract_tarball(
+    tarball: Path,
+    dest: Path,
+    *,
+    job_id: str | None = None,
+    expected_digest: str | None = None,
+) -> None:
     """Extract ``tarball`` to ``dest``.
 
     The tarball is expected to contain a top-level directory matching
     ``hal0-<version>/``; we strip that prefix to land files directly under
     ``dest`` (which the caller names ``/usr/lib/hal0-<version>/``).
 
+    ``expected_digest`` (#1738) is the authenticated ``manifest.digest_sha256``.
+    When given, the file is opened **once** and that single file object is used
+    for both the digest and the extraction — the bytes that are hashed are, by
+    construction, the bytes that are unpacked. Any substitution after
+    ``cosign verify-blob`` returned (a rename, a replace, or an in-place
+    rewrite of the same inode) fails the check and aborts the stage before a
+    single member is written. The caller additionally stages inside a
+    root-only directory (:func:`_root_only_staging_dir`) so no unprivileged
+    principal can reach the artifact in the first place; this check is the
+    inner, non-negotiable guarantee, not a substitute for that isolation.
+
     If ``dest`` already exists and looks like a prior hal0 extraction
-    (has ``VERSION`` or a hal0 ``pyproject.toml``), it is renamed aside
+    (see :func:`_looks_like_hal0_install`), it is renamed aside
     to ``dest.with_suffix(.stale-<unix-ts>)`` so a retry after a half-
     failed apply isn't permanently wedged. Unrelated non-empty dirs are
     still refused — we will not silently destroy whatever the operator
     parked there.
 
     Raises ``UpdateExtractError`` on filesystem issues, malformed
-    tarballs, or unsafe paths.
+    tarballs, or unsafe paths, and ``UpdateVerifyError`` when
+    ``expected_digest`` does not match the bytes about to be extracted.
     """
     dest = Path(dest)
+    # Open the artifact exactly once, and re-derive its digest from *that*
+    # handle, before anything on disk is disturbed — a mismatch must abort
+    # without quarantining the operator's existing install. The handle is
+    # what ``tarfile`` reads from below, so there is no second name lookup
+    # between the check and the use. On any raise before the ExitStack takes
+    # ownership, the handle is dropped and closed with the last reference.
+    handle = _open_digest_verified(tarball, expected_digest)
     if dest.exists():
         if not dest.is_dir():
             raise UpdateExtractError(
@@ -1120,10 +1277,22 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
     dest.mkdir(parents=True, exist_ok=True, mode=0o700)
     dest.chmod(0o700)
 
+    # Mark the destination as mid-stage for the whole extraction window. If we
+    # are killed anywhere below, the next attempt sees this sentinel, treats
+    # the tree as a prior (incomplete) hal0 extraction and quarantines it —
+    # instead of hitting "refusing to extract over non-empty directory" on
+    # every retry forever, which is unrecoverable for the unprivileged daemon
+    # because the wedged tree is root-owned.
+    sentinel = dest / _STAGING_SENTINEL
+    with contextlib.suppress(OSError):
+        sentinel.write_text("", encoding="utf-8")
+
     log.info("updater.extract_start", job_id=job_id, tarball=str(tarball), dest=str(dest))
     strip_prefix: str | None = None
     try:
-        with tarfile.open(tarball, "r:*") as tf:
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(contextlib.closing(handle))
+            tf = stack.enter_context(tarfile.open(fileobj=handle, mode="r:*"))
             members = tf.getmembers()
             if not members:
                 raise UpdateExtractError(
@@ -1172,6 +1341,11 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
             with contextlib.suppress(OSError):
                 inner.rmdir()
 
+    # Extraction (and its flatten) completed — drop the mid-stage marker so
+    # this tree reads as a finished install from here on.
+    with contextlib.suppress(OSError):
+        sentinel.unlink(missing_ok=True)
+
     # Now that extraction is complete and `dest` is no longer racing anyone,
     # widen it back to its final, correct mode: normalize the whole tree
     # (not just the top level) so assert_trusted_release_dir's precondition
@@ -1180,7 +1354,58 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
     # go-w-clean too, not just readable-only-by-owner forever.
     _normalize_staged_tree(dest, job_id=job_id)
 
+    # Tidy older quarantines now that a good tree exists at `dest` — the
+    # recovery material for *this* failure is kept, ancient copies are not.
+    _reap_stale_quarantines(dest, job_id=job_id)
+
     log.info("updater.extract_ok", job_id=job_id, dest=str(dest))
+
+
+def _open_digest_verified(tarball: Path, expected_digest: str | None) -> BinaryIO:
+    """Open ``tarball`` once and confirm its bytes match ``expected_digest``.
+
+    Returns the still-open, rewound binary handle. When ``expected_digest``
+    is ``None`` (callers outside the privileged release path) the file is
+    simply opened.
+
+    This is the #1738 fix's inner guarantee: hashing and extracting share a
+    single file object, so nothing that happens to the *path* between
+    ``cosign verify-blob`` and ``tarfile.open`` can change what gets
+    unpacked, and an in-place rewrite of the same inode is caught by the
+    digest itself.
+    """
+    try:
+        # SIM115 off: returning the *still-open* handle is the entire point —
+        # the caller closes it through an ExitStack once tarfile is done with
+        # it, so hashing and extraction cannot be split across two opens.
+        handle = open(tarball, "rb")  # noqa: SIM115
+    except OSError as exc:
+        raise UpdateExtractError(
+            f"could not open release tarball: {exc}",
+            details={"tarball": str(tarball), "error": str(exc)},
+        ) from exc
+    if expected_digest is None:
+        return handle
+    try:
+        h = hashlib.sha256()
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+        got = h.hexdigest()
+        handle.seek(0)
+    except OSError as exc:
+        handle.close()
+        raise UpdateExtractError(
+            f"could not read release tarball: {exc}",
+            details={"tarball": str(tarball), "error": str(exc)},
+        ) from exc
+    if got != expected_digest:
+        handle.close()
+        raise UpdateVerifyError(
+            "release tarball digest changed after verification — refusing to extract "
+            f"(expected {expected_digest}, got {got})",
+            details={"expected": expected_digest, "got": got, "tarball": str(tarball)},
+        )
+    return handle
 
 
 def _normalize_staged_tree(dest: Path, *, job_id: str | None = None) -> None:
@@ -2709,51 +2934,67 @@ async def stage_release(
     # scope; signed immutable same-version assets limit current release risk
     # because both prepares authenticate the same publisher-pinned bytes.
 
-    # Step 3: download tarball + Sigstore bundle (survives cert expiry, #1159).
+    # Steps 3-6 all happen inside a root-only staging directory (#1738). The
+    # artifact is downloaded, digested, cosign-verified and extracted without
+    # ever existing at a path a non-root principal can reach — the cache dir
+    # under /var/lib/hal0 is service-owned and must never hold bytes root is
+    # about to trust. The directory (and the artifact in it) is destroyed on
+    # the way out, success or failure.
     cache = _cache_dir(target_version)
     cache.mkdir(parents=True, exist_ok=True)
-    tarball_path = cache / f"hal0-{target_version}.tar.gz"
-    bundle_path = cache / f"hal0-{target_version}.tar.gz.bundle"
-    log.info("updater.download_start", job_id=job_id, version=target_version, url=manifest.url)
-    await _download(manifest.url, tarball_path)
-    await _download(manifest.bundle_url, bundle_path)
-    log.info(
-        "updater.download_ok",
-        job_id=job_id,
-        tarball=str(tarball_path),
-        bundle=str(bundle_path),
-    )
-
-    # Step 4: sha256 verify.
-    got_digest = _sha256_file(tarball_path)
-    if got_digest != manifest.digest_sha256:
-        raise UpdateVerifyError(
-            f"sha256 digest mismatch (expected {manifest.digest_sha256}, got {got_digest})",
-            details={
-                "expected": manifest.digest_sha256,
-                "got": got_digest,
-                "tarball": str(tarball_path),
-            },
-        )
-    log.info("updater.sha256_ok", job_id=job_id, digest=got_digest)
-
-    # Step 5: verify against the identity derived from authenticated release
-    # policy, never a manifest-selected broader expression.
-    expected_identity = exact_manifest_identity(manifest.release_kind, manifest.version)
-    await asyncio.to_thread(
-        _verify_cosign,
-        tarball_path,
-        bundle_path,
-        identity_regexp=expected_identity,
-        issuer=_MANIFEST_SIGNER_ISSUER,
-        job_id=job_id,
-    )
-
-    # Step 6: extract. `_extract_tarball` quarantines a prior hal0
-    # extraction at the same path (see its docstring) so a retry
-    # after a half-failed apply isn't permanently wedged.
     install_dir = _versioned_install_dir(target_version)
-    await asyncio.to_thread(_extract_tarball, tarball_path, install_dir, job_id=job_id)
+    with _root_only_staging_dir(target_version, job_id=job_id) as staging:
+        # Step 3: download tarball + Sigstore bundle (survives cert expiry, #1159).
+        tarball_path = staging / f"hal0-{target_version}.tar.gz"
+        bundle_path = staging / f"hal0-{target_version}.tar.gz.bundle"
+        log.info("updater.download_start", job_id=job_id, version=target_version, url=manifest.url)
+        await _download(manifest.url, tarball_path)
+        await _download(manifest.bundle_url, bundle_path)
+        log.info(
+            "updater.download_ok",
+            job_id=job_id,
+            tarball=str(tarball_path),
+            bundle=str(bundle_path),
+        )
+
+        # Step 4: sha256 verify.
+        got_digest = _sha256_file(tarball_path)
+        if got_digest != manifest.digest_sha256:
+            raise UpdateVerifyError(
+                f"sha256 digest mismatch (expected {manifest.digest_sha256}, got {got_digest})",
+                details={
+                    "expected": manifest.digest_sha256,
+                    "got": got_digest,
+                    "tarball": str(tarball_path),
+                },
+            )
+        log.info("updater.sha256_ok", job_id=job_id, digest=got_digest)
+
+        # Step 5: verify against the identity derived from authenticated release
+        # policy, never a manifest-selected broader expression.
+        expected_identity = exact_manifest_identity(manifest.release_kind, manifest.version)
+        await asyncio.to_thread(
+            _verify_cosign,
+            tarball_path,
+            bundle_path,
+            identity_regexp=expected_identity,
+            issuer=_MANIFEST_SIGNER_ISSUER,
+            job_id=job_id,
+        )
+
+        # Step 6: extract. The authenticated digest is re-derived from the very
+        # file object the tarball is read out of, so the bytes cosign accepted
+        # in step 5 are provably the bytes that land on disk. `_extract_tarball`
+        # also quarantines a prior hal0 extraction at the same path (see its
+        # docstring) so a retry after a half-failed apply isn't permanently
+        # wedged.
+        await asyncio.to_thread(
+            _extract_tarball,
+            tarball_path,
+            install_dir,
+            job_id=job_id,
+            expected_digest=manifest.digest_sha256,
+        )
 
     # Cache the verified manifest so commit() reads min_data_version without a
     # re-fetch (which could resolve a *newer* release than the one just
