@@ -326,7 +326,7 @@ class TestParseBenchmarksHappy:
     def test_engine_observed_is_guidellm_with_version(self, doc):
         parsed = parse_benchmarks(doc, "constant")
         assert parsed.engine_observed.kind == "guidellm"
-        assert parsed.engine_observed.llamacpp_build == "0.7.3"
+        assert parsed.engine_observed.tool_version == "0.7.3"
 
     def test_config_observed_captures_resolved_strategy(self, doc):
         parsed = parse_benchmarks(doc, "constant")

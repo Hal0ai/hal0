@@ -287,8 +287,8 @@ def test_parse_benchy_is_depth_aware_multi_depth():
 def test_parse_benchy_engine_observed_stamps_version():
     doc = _load("happy_single_depth.json")
     parsed = parse_benchy(doc, kind="pp", depth=0)
-    assert parsed.engine_observed.kind == "llama-server"
-    assert doc["version"] in parsed.engine_observed.llamacpp_build
+    assert parsed.engine_observed.kind == "llama-benchy"
+    assert parsed.engine_observed.tool_version == doc["version"]
 
 
 def test_parse_benchy_no_matching_depth_falls_back_to_last_row():

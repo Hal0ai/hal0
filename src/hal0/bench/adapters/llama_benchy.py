@@ -37,13 +37,10 @@ type. :func:`parse_benchy` is therefore called twice per cell-pair (once with
 same way a caller reads two different fields off one measurement rather than
 locating two different rows.
 
-Known schema gap (report this at integration, do not patch schema.py here):
-``schema.Engine`` has no generic "load-gen tool + version" field — only
-``kind`` ("llama-bench" | "llama-server") and ``llamacpp_build`` (a llama.cpp
-build string). This adapter reports ``kind="llama-server"`` (it measures an
-HTTP llama-server-compatible endpoint, like ``parse_server_ab``) and stashes
-``"llama-benchy <version>"`` in ``llamacpp_build`` as a DISPLAY-only stopgap —
-flagged, not silently repurposed.
+Engine provenance: ``kind="llama-benchy"`` (the adapter tool name — see
+``schema.Engine.kind``'s docstring, which explicitly allows an adapter tool
+name alongside ``"llama-bench"``/``"llama-server"``) and ``tool_version`` is
+the tool's own self-reported version string, stamped verbatim.
 """
 
 from __future__ import annotations
@@ -377,11 +374,7 @@ def parse_benchy(doc: dict[str, Any] | None, kind: str, depth: int | None = None
         summary.ttft_ms_p95 = _p95(ttft_values)
 
     version = (doc or {}).get("version", "") if doc else ""
-    engine = Engine(
-        kind="llama-server",
-        image="",
-        llamacpp_build=f"llama-benchy:{version}" if version else "",
-    )
+    engine = Engine(kind="llama-benchy", image="", tool_version=str(version or ""))
     return Parsed(
         reps=reps,
         summary=summary,

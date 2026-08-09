@@ -407,7 +407,7 @@ def parse_benchmarks(doc: dict[str, Any], kind: str) -> Parsed:
 
     engine = Engine(
         kind="guidellm",
-        llamacpp_build=str((doc.get("metadata") or {}).get("guidellm_version") or ""),
+        tool_version=str((doc.get("metadata") or {}).get("guidellm_version") or ""),
     )
     return Parsed(
         reps=reps,
