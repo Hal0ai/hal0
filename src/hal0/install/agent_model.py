@@ -1,21 +1,23 @@
 """Install-time OPT-IN provisioning of the `agent` anchor model (v1.0).
 
-Why this exists — the tool-calling gap it closes
-------------------------------------------------
-:mod:`hal0.install.brain_model` makes the steward chat work out of the box.
-It does not make the steward's TOOLS work. Measured directly on a GPU box:
-given the ``hal0-function-xml`` contract and an explicit tool request, the
-1.08B brain model reasons and returns an EMPTY ``content`` with no function
-block — exactly what ``installer/etc-hal0/slots/brain.toml`` predicts ("on the
-FPX brain runtime a 1B can't emit tool calls the native parser accepts"). The
-documented remedy is ``[brain_chat] tool_model`` (:class:`~hal0.config.schema.
-BrainChatConfig`), whose default is ``"hal0/agent"``.
+Why this exists — the fallback gap it closes
+--------------------------------------------
+:mod:`hal0.install.brain_model` makes the steward work out of the box: as of
+runner ade07ba (``DEFAULT_ROCMFPX_IMAGE``) the brain models are NATIVE
+tool-callers, so the steward chats AND executes its own calls on the brain
+slot (``installer/etc-hal0/slots/brain.toml``, verified live on the SFT
+quants and the MiniCPM5 base). The ``[brain_chat] tool_model`` reroute
+(:class:`~hal0.config.schema.BrainChatConfig`, default ``"hal0/agent"``)
+remains as the FALLBACK: it catches artefact rounds and covers older runner
+images or off-dialect models — and a bound agent model is also simply a much
+bigger tool-caller than the ~1B brain.
 
 But ``installer/etc-hal0/slots/agent.toml`` ships WITHOUT a ``[model].default``
 — deliberately, per spec-p3-brain §5b/5c: model-presence is the activation
 signal (#1369) and a surprise 20 GB download during a platform install is not
-acceptable. So on a fresh box the tool-routing target resolves to a slot with
-no model, and brain tool calling is dead until an operator picks something.
+acceptable. So on a fresh box the fallback resolves to a slot with no model:
+the steward still tool-calls, but without a net and without the quality
+upgrade, until an operator picks something.
 
 This module is the bridge, and the shape of it is the whole point:
 
@@ -69,10 +71,11 @@ AGENT_MODEL_IDS = (AGENT_MODEL_QUALITY, AGENT_MODEL_ANCHOR, AGENT_MODEL_LEAN)
 #: skipped, headless, no fitting rung, or a failed pull. The one thing an
 #: operator must not have to discover from a silent empty reply.
 SKIP_NOTICE = (
-    "brain chat works, but TOOL CALLS need an agent model: the steward routes "
-    "tool turns to [brain_chat] tool_model (default hal0/agent) and the agent "
-    "slot has no model bound. Assign one from the dashboard, or run "
-    "'hal0 model pull <id> && hal0 slot load agent', whenever you like."
+    "the brain steward chats and calls tools on its own; the [brain_chat] "
+    "tool_model fallback (default hal0/agent) has no live target until an "
+    "agent model is bound to the agent slot. Bind one from the dashboard, or "
+    "run 'hal0 model pull <id> && hal0 slot load agent --model <id>', "
+    "whenever you like."
 )
 
 
