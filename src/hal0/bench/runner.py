@@ -267,7 +267,7 @@ def _run_subprocess(cmd: list[str], timeout_s: float, log_path: Path) -> tuple[i
     only the parent, orphaning e.g. a server_ab HTTP wait). The Tier-A ``sudo``
     child is root-owned and unkillable from here (kill(2) → EPERM — the old
     code would CRASH the session with PermissionError on a Tier-A hang); its
-    real timeout runs INSIDE the seam (``benchctl sweep --timeout-s``), and
+    real timeout runs INSIDE the seam (``benchctl exec --timeout-s``), and
     this watchdog is sized above the seam's worst case as a backstop."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
@@ -307,18 +307,26 @@ def _classify(rc: int, tail: str) -> Outcome:
     return Outcome.OK
 
 
-def _tier_a_timeouts(cell) -> tuple[int, int]:
-    """(per-attempt seam timeout, outer watchdog) for a Tier-A sweep, seconds.
+def _tier_a_per_attempt_s(cell) -> int:
+    """The per-attempt seam timeout for a Tier-A sweep, seconds.
 
     The REAL kill lives in the seam (``timeout`` around the podman run — the
     unprivileged runner cannot signal the root-owned sudo child). One attempt
     covers the shared pp+tg sweep, scaled by depth (a 128k KV fill takes
-    minutes before any measurement). The outer watchdog must outlast the
-    harness's 6 crash-retry attempts so a legitimate retry loop is never
-    classified HANG — it exists only to catch a wedged seam."""
-    per_attempt = 3 * (_EXPECTED_S["pp"] + _EXPECTED_S["tg"]) + cell.depth // 50
-    outer = 6 * per_attempt + 120
-    return per_attempt, outer
+    minutes before any measurement).
+
+    This is the ONLY number the runner picks; the actual outer bound on a
+    cell is now emergent, not a separately-sized watchdog:
+      * the shim wraps each attempt in ``timeout --kill-after=30 N`` on the
+        ROOT side (N = this value);
+      * ``_tier_a_runner``'s Python-side backstop adds another +35s margin
+        per attempt, for the case sudo/the shim itself wedges before ever
+        reaching its own timeout;
+      * ``harness.run_cell`` retries a crash (not a timeout) up to
+        ``harness.MAX_ATTEMPTS`` (6) times.
+    So the true worst case for one cell is ``MAX_ATTEMPTS * (N + 35)``
+    seconds, not a separately-enforced outer watchdog."""
+    return int(3 * (_EXPECTED_S["pp"] + _EXPECTED_S["tg"]) + cell.depth // 50)
 
 
 # --------------------------------------------------------------------------- #
@@ -354,13 +362,18 @@ def _tier_a_cmd(cell, pp_prompt: int, tg_gen: int, devices: BenchDeviceSpec) -> 
     ``hal0.bench.harness``). Exclusivity no longer rides the argv at all: it is
     a Python-side context manager (``harness.ExclusiveSlots``) the caller wraps
     around the actual execution, so this function is pure command COMPOSITION
-    (safe to call from ``describe_worklist`` with no slots touched)."""
+    (safe to call from ``describe_worklist`` with no slots touched).
+
+    Raises ``KeyError`` for an unknown ``cell.lane`` — planner.plan() rejects
+    that at plan time (finding 5), but a defensive caller (tests, a future
+    plan-bypassing entry point) can still land here, so the KeyError is a
+    deliberate, documented failure mode rather than a silent default."""
     spec = harness.lane_specs()[cell.lane]
     model_root = _model_root()
     model_path = f"{model_root}/{_rel_gguf(cell.identity.model.gguf)}"
     flags = _tier_a_flags(cell, pp_prompt, tg_gen)
     podman_argv = harness.compose_podman_argv(spec, devices, model_path, model_root, flags)
-    per_attempt, _ = _tier_a_timeouts(cell)
+    per_attempt = _tier_a_per_attempt_s(cell)
     return harness.benchctl_exec_argv(podman_argv, per_attempt)
 
 
@@ -426,6 +439,14 @@ def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]
             key = _group_key(c)
             if key in seen:
                 cmd_str = "(reuses this group's memoised sweep — no extra GPU load)"
+            elif c.lane not in harness.lane_specs():
+                # Defensive (finding 5): planner.plan() rejects an unknown
+                # lane at plan time, but this function's docstring promises
+                # it NEVER raises, so a cell that reached here some other way
+                # (a hand-built worklist, a future bypass) degrades to a note
+                # instead of a bare KeyError.
+                seen.add(key)
+                cmd_str = f"(! unknown lane {c.lane!r} — no seam command composed)"
             else:
                 seen.add(key)
                 pp, tg = sizes.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
@@ -500,7 +521,7 @@ def run_session(
                 # as --timeout-s); the OUTER 6-attempt bound is now an emergent
                 # property of harness.run_cell's own retry loop rather than a
                 # separately-enforced Python watchdog (see harness.py header).
-                per_attempt, _outer = _tier_a_timeouts(cell)
+                per_attempt = _tier_a_per_attempt_s(cell)
                 record = _tier_a_record(
                     cell,
                     artifacts,
@@ -632,7 +653,6 @@ def _tier_a_record(
         tail = ""
     else:
         pp, tg = sizes.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
-        spec = harness.lane_specs()[cell.lane]
         model_root = _model_root()
         model_rel = _rel_gguf(cell.identity.model.gguf)
         flags = _tier_a_flags(cell, pp, tg)
@@ -646,16 +666,22 @@ def _tier_a_record(
             "runner": _tier_a_runner(per_attempt),
         }
         try:
+            # The lane lookup lives INSIDE this try (finding 5): planner.plan()
+            # already rejects an unknown lane at plan time, but a bogus-lane
+            # cell that reaches here some other way must record FAILED, not
+            # crash the whole session with a bare KeyError.
+            spec = harness.lane_specs()[cell.lane]
             devices = resolve_bench_devices()
             if exclusive:
                 with harness.ExclusiveSlots():
                     result = harness.run_cell(spec, devices, **run_kwargs)
             else:
                 result = harness.run_cell(spec, devices, **run_kwargs)
-        except (BenchDeviceError, RuntimeError) as exc:
-            # Device resolution failed, or ExclusiveSlots could not stop a
-            # slot — a bad cell records its outcome and the session CONTINUES
-            # (DESIGN §5.3), it never crashes run_session.
+        except (BenchDeviceError, RuntimeError, KeyError) as exc:
+            # Device resolution failed, ExclusiveSlots could not stop a slot,
+            # or the cell's lane isn't in harness.lane_specs() — a bad cell
+            # records its outcome and the session CONTINUES (DESIGN §5.3), it
+            # never crashes run_session.
             rows, meta, outcome, tail = [], {}, Outcome.FAILED, str(exc)
         else:
             rows, meta, tail = result.rows, result.meta, result.tail
