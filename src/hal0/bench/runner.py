@@ -82,7 +82,7 @@ def _model_root() -> str:
     """The LIVE model-store root (``hal0.config.paths.model_store_root``) —
     the same resolver ``hal0-benchctl``'s ``exec`` verb uses independently to
     compute its own ``$MODEL_ROOT``. The composed ``--volume=``/``-m`` argv
-    must use THIS root, not whichever legacy root a registry path happened to
+    must use THIS root, not whichever historic root a registry path happened to
     be stripped against (see ``_rel_gguf``): the shim re-resolves the root
     itself and will reject an argv built against a different one (#1516)."""
     from hal0.config.paths import model_store_root

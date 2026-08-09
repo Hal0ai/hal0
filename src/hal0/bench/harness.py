@@ -46,9 +46,9 @@ What ported, and where it changed shape:
   Tier-A group's sweep (not per-attempt — one stop/restart serves every
   retry AND the pp/tg sibling that reuses the same memoised sweep).
 * **Result provenance** (the ``.meta.json`` sidecar ``cat`` heredoc) →
-  built inside :func:`run_cell` with the exact legacy keys (``parsers.py``
+  built inside :func:`run_cell` with the exact v1 keys (``parsers.py``
   reads ``meta["image"]``). Three keys — ``context``, ``tag``, ``extra`` —
-  are legacy v1 concepts with no v2 equivalent: the planner's depth axis
+  are v1 concepts with no v2 equivalent: the planner's depth axis
   replaces the named ``ctx32k``/``ctx65k`` configs, and a cell's tuning
   ``flags`` are already a structured list rather than one free-form
   ``--extra`` string or ``--tag`` label. They are kept in the dict (readers
@@ -282,7 +282,7 @@ def _build_meta(
     model_path: str,
     flags: list[tuple[str, str]],
 ) -> dict[str, Any]:
-    """The ``.meta.json`` provenance dict, exact legacy keys (see module
+    """The ``.meta.json`` provenance dict, exact v1 keys (see module
     docstring for which are always-empty v1 concepts with no v2 equivalent)."""
     reps: int | None = None
     for flag, value in flags:
