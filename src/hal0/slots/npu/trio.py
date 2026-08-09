@@ -26,7 +26,7 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
-from hal0.slot_config import write_slot_toml
+from hal0.slot_config import slot_scalar_table, write_slot_toml
 from hal0.slots._cfg_helpers import _cfg_to_dict
 from hal0.slots.layout import is_id_stem, resolve_slot_stem
 
@@ -55,21 +55,6 @@ def _log_renamed(old: str, canon: str) -> None:
     log.info("slot.trio_shadow_renamed", extra={"from": old, "to": canon})
 
 
-def _slot_table(raw: dict[str, Any]) -> dict[str, Any]:
-    """The table a slot's SCALAR fields actually live in.
-
-    Two on-disk shapes are supported: flat (scalars at the root, what the
-    runtime writes) and nested (scalars under ``[slot]``, the haloai shape the
-    id-keying migration preserves verbatim). ``_flatten_slot_toml`` treats
-    ``[slot]`` as authoritative and drops root scalars into ``extra`` when it
-    exists, so a writer that normalizes at the root of a nested file produces a
-    change the runtime never sees — and, worse, one that looks converged on the
-    next pass. Every field write here goes through this accessor instead.
-    """
-    table = raw.get("slot")
-    return table if isinstance(table, dict) else raw
-
-
 async def _relabel_shadow_in_place(mgr: NpuTrioHost, path: Path, old: str, canon: str) -> None:
     """Relabel an id-keyed shadow: TOML body + identity row, no file moves.
 
@@ -89,7 +74,7 @@ async def _relabel_shadow_in_place(mgr: NpuTrioHost, path: Path, old: str, canon
     import tomllib
 
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    _slot_table(raw)["name"] = canon
+    slot_scalar_table(raw)["name"] = canon
     write_slot_toml(path, raw)
     identity = getattr(mgr, "_identity", None)
     if identity is not None and is_id_stem(path.stem):
@@ -232,7 +217,7 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
                     _log_renamed(prior, canon)
                 else:
                     raw_before = tomllib.loads(prior_path.read_text(encoding="utf-8"))
-                    _slot_table(raw_before)["name"] = canon
+                    slot_scalar_table(raw_before)["name"] = canon
                     canon_path = slots_dir / f"{canon}.toml"
                     write_slot_toml(canon_path, raw_before)
                     with contextlib.suppress(FileNotFoundError):
@@ -249,7 +234,7 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
                 # in: normalizing at the root of a ``[slot]``-nested file is
                 # invisible to the loader, and the duplicated root values then
                 # make the next pass look converged and suppress the repair.
-                table = _slot_table(raw)
+                table = slot_scalar_table(raw)
                 desired = {
                     "device": "npu",
                     "profile": "flm",

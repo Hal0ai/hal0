@@ -100,9 +100,15 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
 
     No-ops for slots without a GPU profile (npu/cpu/img profiles declare
     ``backend=None``) and for ``auto`` device (empty) unless the profile
-    itself changed. Mutates ``cfg_dict`` in place.
+    itself changed. Mutates ``cfg_dict`` in place — through
+    :func:`hal0.slot_config.slot_scalar_table` (#1685), since ``device``/
+    ``profile`` are scalar fields that live under ``[slot]`` on a
+    nested-shape config, not at ``cfg_dict``'s root.
     """
-    profile_name = cfg_dict.get("profile")
+    from hal0.slot_config import slot_scalar_table
+
+    scalars = slot_scalar_table(cfg_dict)
+    profile_name = scalars.get("profile")
     if not isinstance(profile_name, str) or not profile_name:
         return
 
@@ -117,7 +123,7 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
     from hal0.config.schema import map_backend_to_device
     from hal0.model_meta import device_to_backend
 
-    device = cfg_dict.get("device")
+    device = scalars.get("device")
     dev_backend = device_to_backend(str(device))[1] if device else None
     if dev_backend == prof_backend:
         return  # already coherent
@@ -129,14 +135,14 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
         # ``auto``/unset device: only adopt the profile's backend when the
         # operator explicitly (re)selected the profile; otherwise leave auto.
         if prof_changed:
-            cfg_dict["device"] = map_backend_to_device(prof_backend)
+            scalars["device"] = map_backend_to_device(prof_backend)
         return
 
     if prof_changed and not dev_changed:
-        cfg_dict["device"] = map_backend_to_device(prof_backend)
+        scalars["device"] = map_backend_to_device(prof_backend)
     elif dev_changed and not prof_changed and dev_backend is not None:
         catalog = load_profiles_config()
-        cfg_dict["profile"] = _base_profile_for_backend(catalog, dev_backend)
+        scalars["profile"] = _base_profile_for_backend(catalog, dev_backend)
     elif prof_changed and dev_changed:
         raise SlotConfigError(
             f"slot device {device!r} (backend {dev_backend!r}) conflicts with "

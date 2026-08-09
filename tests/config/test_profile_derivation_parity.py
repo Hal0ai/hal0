@@ -191,3 +191,34 @@ def test_reconcile_device_flip_stays_non_mtp(tmp_hal0_home: str) -> None:
     cfg_dict2: dict[str, object] = {"device": "gpu-vulkan", "profile": "chat"}
     _reconcile_device_profile(cfg_dict2, changed={"device"})
     assert cfg_dict2["profile"] == "chat"
+
+
+def test_reconcile_device_profile_writes_into_nested_slot_table(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1685: _reconcile_device_profile must read/write device+profile
+    through slot_scalar_table, not the dict root — on a nested-shape
+    cfg_dict (scalars under [slot]) it used to always no-op (profile_name
+    read from the root came back None) and, worse, a write would have
+    landed on a root key _flatten_slot_toml discards."""
+    from hal0.config.schema import ProfileConfig, ProfilesConfig
+    from hal0.slots.config_write import _reconcile_device_profile
+
+    # Deliberately NOT named "chat" -- _base_profile_for_backend prefers a
+    # literal "chat" profile over any backend match, which would mask the
+    # thing this test is pinning.
+    catalog = ProfilesConfig(
+        profile={
+            "gpu-rocm-base": ProfileConfig(backend="rocm"),
+            "gpu-vulkan-base": ProfileConfig(backend="vulkan"),
+        }
+    )
+    monkeypatch.setattr("hal0.config.loader.load_profiles_config", lambda: catalog)
+
+    # A conflicting-backend flip (device -> vulkan, profile stayed the
+    # rocm-backed profile) must derive a coherent vulkan profile -- and land
+    # it in [slot], not the root, on a nested-shape cfg_dict.
+    cfg_dict: dict[str, object] = {"slot": {"device": "gpu-vulkan", "profile": "gpu-rocm-base"}}
+    _reconcile_device_profile(cfg_dict, changed={"device"})
+    assert cfg_dict["slot"]["profile"] == "gpu-vulkan-base"
+    assert "profile" not in cfg_dict
