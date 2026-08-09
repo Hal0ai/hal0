@@ -66,7 +66,7 @@ def _write_exe(path: Path, body: str = "#!/usr/bin/env bash\nexit 0\n") -> None:
 # need real distro.sh logic (probing the restricted PATH via `command -v`)
 # to meaningfully exercise the apt-get auto-install branch below. That
 # source needs `dirname` on PATH; the apt-get-mock scripts need `cat`.
-_BASE_TOOLS = ("bash", "dirname", "cat")
+_BASE_TOOLS = ("bash", "dirname", "cat", "chmod")
 
 
 def _seed_base_tools(d: Path) -> None:

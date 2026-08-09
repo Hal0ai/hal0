@@ -2838,12 +2838,19 @@ else
         # general preflight (above, ~L346) doesn't cover git, so a stock
         # minimal image without it sailed through every earlier check only to
         # have this step die deep inside pip with "Cannot find command 'git'"
-        # (#1726). Gate here, defense-in-depth: HAL0_GIT_REQUIRED=1
-        # auto-installs it via the detected package manager. Consistent with
-        # the #1584 graceful-degradation precedent, a git install failure
-        # does NOT abort the overall install — it fails this provisioning
-        # step loudly, with a git-specific remediation line, exactly like any
-        # other Hermes provisioning failure below.
+        # (#1726). Gate here as a FAST, install.sh-local defense-in-depth
+        # check: HAL0_GIT_REQUIRED=1 auto-installs it via the detected
+        # package manager before we even shell out to the CLI. The
+        # AUTHORITATIVE fix lives in installer/agents/hermes-prereqs.sh (also
+        # updated for #1726) — that script is the shared choke point for
+        # BOTH this inline call and the standalone/deferred `hal0 agent
+        # install hermes` an operator runs manually later, so it's the one
+        # place that must not miss git regardless of entry point (#1727
+        # review). Consistent with the #1584 graceful-degradation precedent,
+        # a git install failure here does NOT abort the overall install — it
+        # fails this provisioning step loudly, with a git-specific
+        # remediation line, exactly like any other Hermes provisioning
+        # failure below.
         elif ! HAL0_GIT_REQUIRED=1 preflight_git; then
             warn "hermes provisioning skipped — git is required (pip installs hermes-agent from a git URL) and could not be installed"
             warn "  install git manually ($(pkg_install_cmd git 2>/dev/null || echo 'via your distro package manager')), then run '${HAL0_BIN} agent install hermes'"

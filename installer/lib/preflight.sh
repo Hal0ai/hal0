@@ -641,14 +641,25 @@ preflight_docker() { preflight_container_runtime "$@"; }
 #
 #   Unset (default, e.g. `hal0 doctor` / preflight_all) — soft: warn +
 #     return 1 so a read-only report finishes without mutating the system.
+#
+# Codex review (#1727): `command -v git` only proves a `git` file resolves
+# on PATH, not that it runs — a non-executable file (permissions drift, a
+# half-finished package install) still resolves via `command -v` and would
+# have reported success right up until pip's own `git clone` failed with
+# the original error. `git --version` is the actual functional probe: it
+# both resolves the binary AND proves the OS will exec it.
+_git_usable() {
+    git --version >/dev/null 2>&1
+}
+
 preflight_git() {
-    if command -v git >/dev/null 2>&1; then
+    if _git_usable; then
         info "git: $(git --version 2>/dev/null | head -n1 || echo present)"
         return 0
     fi
 
     if [[ "${HAL0_GIT_REQUIRED:-0}" != "1" ]]; then
-        warn "git not found — Hermes agent provisioning (pip install git+...) will fail until it's installed"
+        warn "git not found or not runnable — Hermes agent provisioning (pip install git+...) will fail until it's installed"
         return 1
     fi
 
@@ -665,7 +676,7 @@ preflight_git() {
             apk) apk add git || ok=0 ;;
             *) ok=0 ;;
         esac
-        if [[ "${ok}" -eq 1 ]] && command -v git >/dev/null 2>&1; then
+        if [[ "${ok}" -eq 1 ]] && _git_usable; then
             info "git: $(git --version 2>/dev/null | head -n1 || echo present)"
             return 0
         fi
