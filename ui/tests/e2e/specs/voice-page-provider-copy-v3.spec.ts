@@ -69,7 +69,7 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
     await page.route('**/api/slots/tts/config', (route) => json(route, {}))
     await page.route('**/api/slots/tts/voices', (route) => json(route, { source: 'offline', voices: [] }))
     await page.goto('/#settings/voice')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Voice')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
 
     const ttsPanel = page.locator('.s-panel').filter({ has: page.locator('.k span', { hasText: /^TTS$/ }) })
 
@@ -93,7 +93,7 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
     await page.route('**/api/slots/tts/config', (route) => json(route, {}))
     await page.route('**/api/slots/tts/voices', (route) => json(route, { source: 'offline', voices: [] }))
     await page.goto('/#settings/voice')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Voice')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
 
     const ttsPanel = page.locator('.s-panel').filter({ has: page.locator('.k span', { hasText: /^TTS$/ }) })
 
