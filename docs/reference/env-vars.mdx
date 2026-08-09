@@ -117,9 +117,9 @@ rely on the default rather than setting it explicitly, verify which code path ap
 | Variable | Default | Controls |
 |---|---|---|
 | `HAL0_ACTIVITY_RETENTION_DAYS` | falls back to `[activity].retention_days` | — |
-| `HAL0_BENCH_SUITE_DIR`, `BENCHLAB_SUITE_DIR` | unset (first-set wins) | — |
+| `HAL0_BENCH_SUITE_DIR` | unset | — |
 | `HAL0_BENCH_API` | module-local default constant | — |
-| `HAL0_BENCH_STATE`, `BENCHLAB_STATE` | `/var/lib/hal0-bench` (first-set wins) | — |
+| `HAL0_BENCH_STATE` | `/var/lib/hal0-bench` (`$HAL0_HOME/var-lib/hal0-bench` under HAL0_HOME) | — |
 | `HAL0_BENCH_HOST`, `HAL0_BENCH_PLATFORM`, `HAL0_BENCH_GPU`, `HAL0_BENCH_HAL0_VERSION` | probed values | Override the identity fields `hal0 bench` records with a run. |
 
 ## Misc

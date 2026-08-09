@@ -27,6 +27,7 @@ REPS_OVERRIDE=""
 MODELS_ARG=""
 EXTRA=""
 TAG=""
+CELL_TIMEOUT=""
 
 usage() {
   cat <<EOF
@@ -43,6 +44,8 @@ Usage: $(basename "$0") [options]
                      Supports llama-bench value sweeps, e.g. --extra "-ub 512,1024,2048"
   --tag NAME         Label appended to result filenames (use with --extra to keep
                      tuning runs separate from baseline results)
+  --cell-timeout N   Per-attempt wall-clock cap in seconds (timeout(1) around the
+                     container run; a capped attempt fails without crash-retry)
   --exclusive        Stop active GPU inference slots for the run, then restart
                      them on exit (Tier-2: only use when no one is serving)
   --force            Run even if GPU slots are active (numbers WILL be skewed)
@@ -64,6 +67,7 @@ while [[ $# -gt 0 ]]; do
       else IFS=',' read -ra SEL_CONTEXTS <<<"$2"; fi; shift 2;;
     --reps)        REPS_OVERRIDE="$2"; shift 2;;
     --extra)       EXTRA="$2"; shift 2;;
+    --cell-timeout) CELL_TIMEOUT="$2"; shift 2;;
     --tag)         TAG="$2"; shift 2;;
     --exclusive)   EXCLUSIVE=1; shift;;
     --force)       FORCE=1; shift;;
@@ -75,6 +79,26 @@ done
 
 mkdir -p "$RUNS_DIR" "$LOG_DIR"
 tagsuffix=""; [[ -n "$TAG" ]] && tagsuffix="__$(printf '%s' "$TAG" | tr -c 'A-Za-z0-9._-' '_')"
+
+# llama-bench folds a REPEATED flag into a value-sweep dimension instead of
+# overriding (-fa 1 … -fa 0 runs BOTH and doubles the rows), so later sources
+# must replace earlier ones: common < lane dev_args < context < caller --extra.
+# Keep only the LAST value of each flag, first-seen order. Comma-list sweeps in
+# a single value (-ub 512,1024) pass through untouched. Input must be strict
+# "-flag value" pairs — everything this harness composes is.
+dedupe_flag_pairs() {
+  local -a order=()
+  local -A val=()
+  local flag
+  while (( $# >= 2 )); do
+    flag="$1"
+    [[ -n "${val[$flag]+x}" ]] || order+=("$flag")
+    val["$flag"]="$2"
+    shift 2
+  done
+  (( $# == 0 )) || { echo "dedupe_flag_pairs: dangling flag: $1" >&2; return 1; }
+  for flag in "${order[@]}"; do printf '%s\n%s\n' "$flag" "${val[$flag]}"; done
+}
 
 # --- GPU-idle preflight -----------------------------------------------------
 # The production hal0-slot@agent inference slot shares this iGPU. Running
@@ -172,12 +196,27 @@ for backend in "${SEL_BACKENDS[@]}"; do
         echo "[skip exists] $(basename "$out")"; ((skip_count++)); continue
       fi
 
-      # shellcheck disable=SC2206  # intentional word-split of ctxargs / EXTRA / devargs
+      # Compose the tuning flags with later-source-wins semantics. $EXTRA is
+      # LAST so a caller's -r/-p/-n/-d/-fa/… overrides the harness defaults
+      # (the old order put -r "$reps" after $EXTRA, silently forcing reps=5 on
+      # every seam-driven sweep regardless of what the runner asked for).
+      # shellcheck disable=SC2086  # intentional word-split of ctxargs / EXTRA / devargs
+      if ! flat_flags="$(dedupe_flag_pairs "${COMMON_BENCH_ARGS[@]}" $devargs $ctxargs -r "$reps" $EXTRA)"; then
+        echo "[skip] $backend / $mstem / $ctx: malformed flag list" >&2
+        ((fail_count++)); continue
+      fi
+      mapfile -t bench_flags <<<"$flat_flags"
+      # The EFFECTIVE repetitions (a caller's --extra "-r N" wins over the ctx
+      # default) — .meta.json must record what actually ran.
+      eff_reps="$reps"
+      for ((i = 0; i < ${#bench_flags[@]} - 1; i += 2)); do
+        [[ "${bench_flags[i]}" == "-r" ]] && eff_reps="${bench_flags[i + 1]}"
+      done
       cmd=("$RUNTIME" run "${COMMON_RUN_FLAGS[@]}" "${env_flags[@]}"
            --entrypoint "$bench_bin" "$image"
-           -m "$model_path" "${COMMON_BENCH_ARGS[@]}" $devargs $ctxargs $EXTRA -r "$reps" -o json)
+           -m "$model_path" "${bench_flags[@]}" -o json)
 
-      echo "[run] $backend / $mstem / $ctx${TAG:+ / $TAG} (reps=$reps)"
+      echo "[run] $backend / $mstem / $ctx${TAG:+ / $TAG} (reps=$eff_reps)"
       if [[ $DRYRUN -eq 1 ]]; then printf '   '; printf '%q ' "${cmd[@]}"; echo; continue; fi
 
       ts="$(date -Iseconds)"
@@ -186,9 +225,23 @@ for backend in "${SEL_BACKENDS[@]}"; do
       # on-box 2026-07-10; llama-server in the same image is unaffected). A
       # signal exit (rc>=128) therefore retries without biasing numbers — no
       # rep ever ran. Real errors (rc<128, e.g. failed-to-load) never retry.
+      # Per-attempt wall-clock cap (--cell-timeout): `timeout` TERMs the podman
+      # client, podman forwards it to the container process and `--rm` reaps
+      # the container — no orphan holding the GPU. rc=124 is < 128, so a
+      # timed-out attempt is a real failure, never crash-retried.
+      runcmd=("${cmd[@]}")
+      [[ -n "$CELL_TIMEOUT" ]] && runcmd=(timeout --kill-after=30 "$CELL_TIMEOUT" "${cmd[@]}")
       rc=1
       for attempt in 1 2 3 4 5 6; do
-        "${cmd[@]}" >"$out" 2>"$log"; rc=$?
+        t_start=$SECONDS
+        "${runcmd[@]}" >"$out" 2>"$log"; rc=$?
+        # A timed-out attempt must NOT crash-retry: `timeout` exits 124 (TERM)
+        # or 137 (KILL escalation — indistinguishable from a container SIGKILL
+        # except by elapsed wall-clock).
+        if [[ -n "$CELL_TIMEOUT" ]] && { (( rc == 124 )) || { (( rc == 137 )) && (( SECONDS - t_start >= CELL_TIMEOUT )); }; }; then
+          echo "   [timeout] attempt exceeded ${CELL_TIMEOUT}s cap" >&2
+          break
+        fi
         if (( rc == 0 )) && [[ -s "$out" ]]; then break; fi
         # rc 0 with EMPTY output is the same crash: the container died to the
         # SIGSEGV but `podman run --rm` raced its own cleanup and lost the real
@@ -207,7 +260,7 @@ for backend in "${SEL_BACKENDS[@]}"; do
         # cell for the same model/backend are indistinguishable once the
         # per-tier v1.0 baselines are merged.
         cat >"$meta" <<META
-{"backend":"$backend","image":"$image","context":"$ctx","tag":"$TAG","extra":"$extra_json","reps":$reps,"ubatch":$ubatch,"model_rel":"$rel","model_path":"$model_path","host":"$HOST_LABEL","tier":"$BENCH_TIER","gpu":"$GPU_LABEL","timestamp":"$ts"}
+{"backend":"$backend","image":"$image","context":"$ctx","tag":"$TAG","extra":"$extra_json","reps":$eff_reps,"ubatch":$ubatch,"model_rel":"$rel","model_path":"$model_path","host":"$HOST_LABEL","tier":"$BENCH_TIER","gpu":"$GPU_LABEL","timestamp":"$ts"}
 META
         echo "   -> $(basename "$out")"; ((run_count++))
       else

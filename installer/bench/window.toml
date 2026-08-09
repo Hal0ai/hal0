@@ -11,11 +11,7 @@
 #   (a) the current time must fall inside [window] below (default
 #       Sun 03:00-07:00 local time on the box);
 #   (b) hal0-api's throughput history must show no active /v1/* traffic
-#       for at least `min_idle_min` trailing minutes;
-#   (c) no battery/thermal alarm active (checks below are enabled by
-#       default; the box is normally on mains and unthrottled, but the
-#       checks are cheap insurance against benchmarking through an
-#       alarm condition).
+#       for at least `min_idle_min` trailing minutes.
 #
 # If ANY check fails, the run exits 0 and does nothing. The next timer
 # tick retries — hal0-bench.timer sets Persistent=true, so a tick
@@ -31,6 +27,4 @@ end   = "07:00"
 tz    = "local"
 
 [politeness]
-min_idle_min  = 10    # no /v1/* traffic in this many trailing minutes
-check_battery = true
-check_thermal = true
+min_idle_min = 10    # no /v1/* traffic in this many trailing minutes

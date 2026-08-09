@@ -17,6 +17,11 @@ priority    = 40
 # / ...), not every installed chat+coder model. The include list below is
 # operator-set — there is no auto-derived default because "representative"
 # is a judgment call. Update it when the profile-class lineup changes.
+#
+# include_only: with the list unset this suite selects NOTHING. Without it,
+# an empty include fell back to "every installed GGUF x 2 lanes x 3 depths" —
+# an accidental multi-day exclusive GPU job.
+include_only = true
 include = [
   # "REPLACE-ME-dense-class-representative",
   # "REPLACE-ME-moe-class-representative",

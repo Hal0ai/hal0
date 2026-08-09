@@ -12,10 +12,10 @@ exclusive   = false                  # allowed to run even while GPU slots are b
 priority    = 90                     # ...but jumps the queue when it does get a window
 
 [selector]
-# The pull-completion hook invokes `hal0 bench run --suite smoke --trigger
-# model-pull <id>`; the runner scopes this invocation to exactly that
-# model id. caps_any/installed below are only the fallback used if this
-# suite is ever run standalone (e.g. a manual re-check).
+# NOTE: the model-pull trigger hook is NOT wired yet — there is no
+# `--trigger` CLI argument. Until it lands, run this suite manually after a
+# pull (`hal0 bench run --suite smoke`); the staleness rule below means it
+# only measures models with no record yet, so a manual run is cheap.
 caps_any  = ["chat", "coder"]
 installed = true
 

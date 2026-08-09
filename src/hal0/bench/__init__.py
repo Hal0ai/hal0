@@ -12,8 +12,8 @@ store it publishes the public model-roster contract and flags regressions.
 
 Ported in-tree from the out-of-tree benchlab lab repo (Hal0ai/hal0-bench) on
 2026-07-10; the record schema, store layout, and CLI verbs are unchanged.
-State root: `/var/lib/hal0-bench` (override: $HAL0_BENCH_STATE, legacy
-$BENCHLAB_STATE). Surfaces: `hal0 bench <verb>` (cli.py) and
+State root: `/var/lib/hal0-bench` (override: $HAL0_BENCH_STATE;
+HAL0_HOME-sandbox-aware). Surfaces: `hal0 bench <verb>` (cli.py) and
 `/api/benchmarks/*` (hal0.api.routes.benchmarks).
 """
 

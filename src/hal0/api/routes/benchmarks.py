@@ -23,7 +23,6 @@ import json
 import os
 import secrets
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 
@@ -41,17 +40,9 @@ from hal0.bench.planner import (
 )
 from hal0.bench.publish import build_roster
 from hal0.bench.store import Store
-from hal0.bench.suites import load_suites
+from hal0.bench.suites import load_suites, suite_dir
 
 router = APIRouter(prefix="/api/benchmarks", tags=["benchmarks"])
-
-# Suite directory (design §4). Mirrors hal0.bench.cli.SUITE_DIR — kept as its
-# own constant so this module doesn't import argparse-only code; keep in sync.
-SUITE_DIR = Path(
-    os.environ.get("HAL0_BENCH_SUITE_DIR")
-    or os.environ.get("BENCHLAB_SUITE_DIR")
-    or "/etc/hal0/bench/suites"
-)
 
 
 def _api_base() -> str:
@@ -194,11 +185,11 @@ def get_plan(suite: str | None = None) -> dict[str, Any]:
     than failing the whole dashboard load."""
     api = _api_base()
     store = _store()
-    suites = load_suites(SUITE_DIR)
+    suites = load_suites(suite_dir())
     if suite:
         if suite not in suites:
             raise NotFound(
-                f"unknown suite {suite!r} (looked in {SUITE_DIR})",
+                f"unknown suite {suite!r} (looked in {suite_dir()})",
                 code="bench.unknown_suite",
             )
         target_suites = [suites[suite]]
@@ -267,6 +258,19 @@ def get_cells(
         if raw:
             r["record"] = json.loads(raw)
     return {"count": len(rows), "cells": rows}
+
+
+@router.get("/regressions")
+def get_regressions() -> dict[str, Any]:
+    """Current regression flags (design §11) — the same ``regress.check`` the
+    CLI and worker print at session end, as JSON so the dashboard can badge
+    flagged roster rows instead of the flags living only in service stdout."""
+    from dataclasses import asdict
+
+    from hal0.bench.regress import check as regress_check
+
+    flags = [asdict(f) for f in regress_check(_store())]
+    return {"count": len(flags), "flags": flags}
 
 
 @router.get("/history")
@@ -419,7 +423,7 @@ def post_queue(body: dict[str, Any]) -> dict[str, Any]:
     if kind == "eval" and not model:
         raise BadRequest("kind='eval' requires body.model", code="bench.invalid_envelope")
     if suite:
-        suites = load_suites(SUITE_DIR)
+        suites = load_suites(suite_dir())
         if suite not in suites:
             raise NotFound(f"unknown suite {suite!r}", code="bench.unknown_suite")
     # Optional per-model run shape: lanes (compare backends) + configs (flag grid)

@@ -1005,7 +1005,7 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
   const exclusive = queue?.control?.exclusive ?? true;
   const items = queue?.items || [];
   const active = queue?.active;
-  const suites: string[] = plan?.suites_considered?.length ? plan.suites_considered : ['roster', 'smoke', 'lane-matrix', 'concurrency'];
+  const suites: string[] = plan?.suites_considered?.length ? plan.suites_considered : ['roster', 'smoke', 'lane-matrix'];
   const staleBySuite: Record<string, number> = {};
   for (const c of plan?.cells || []) staleBySuite[c.suite] = (staleBySuite[c.suite] || 0) + 1;
 
