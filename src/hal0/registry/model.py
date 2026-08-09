@@ -83,6 +83,21 @@ class ModelDefaults(BaseModel):
         default=None,
         description="Chat template id from /api/chat-templates, or 'auto'/None for the GGUF-embedded template.",
     )
+    tokenizer_repo: str | None = Field(
+        default=None,
+        description=(
+            "HF repo id (e.g. 'Qwen/Qwen3-4B-GGUF') a load-gen tool can resolve a "
+            "tokenizer from for THIS model — issue #1773: a local-only model id "
+            "(e.g. a GGUF slot name) is not itself a HF repo, so GuideLLM's "
+            "'--tokenizer kind=huggingface_auto,model=<id>' fails hard without one. "
+            "The pull path (registry/pull.py _register_pulled) defaults this from "
+            "Model.hf_repo when the model was pulled from HF and no value is set "
+            "yet; an operator may always override it (e.g. when the tokenizer lives "
+            "in a different repo than the GGUF weights). None = not resolvable — "
+            "hal0.bench.planner falls back to Model.hf_repo directly, and rejects a "
+            "'chat' cell for this model at plan time if neither is set."
+        ),
+    )
     profile: str | None = Field(
         default=None,
         description=(
