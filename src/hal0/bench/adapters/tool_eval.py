@@ -243,6 +243,11 @@ def build_argv(request: ToolEvalRequest) -> list[str]:
         argv.append("--no-live")
     argv += ["--json", "--json-file", str(request.output_path)]
     argv += list(request.extra_args)
+    # Pin the tool's working data/output dir next to the json file: with no
+    # --output-dir the tool mkdirs ./data relative to the CWD, and a service
+    # CWD the hal0 user cannot write (found on-box 2026-08-09: sudo kept
+    # CWD=/root -> PermissionError before any scenario ran).
+    argv += ["--output-dir", str(Path(request.output_path).parent)]
     return argv
 
 
@@ -270,7 +275,11 @@ def _default_runner(argv: list[str], timeout_s: float) -> tuple[int, str, str]:
     hardened callable with their own process-group watchdog (same rationale
     as ``harness._default_runner``); tests inject a fake that runs neither
     the tool nor a network."""
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
+    import tempfile
+
+    proc = subprocess.run(
+        argv, capture_output=True, text=True, timeout=timeout_s, cwd=tempfile.gettempdir()
+    )
     return proc.returncode, proc.stdout, proc.stderr
 
 

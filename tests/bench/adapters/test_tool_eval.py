@@ -372,3 +372,18 @@ def test_scoring_eras_are_never_silently_equal() -> None:
     if it broke."""
     assert tool_eval.classify_scoring_era("2.5.0") != tool_eval.classify_scoring_era("2.4.9")
     assert tool_eval.classify_scoring_era("2.5.0") != tool_eval.classify_scoring_era("garbage")
+
+
+def test_argv_pins_output_dir_next_to_the_json_file(tmp_path):
+    """No --output-dir means the tool mkdirs ./data relative to the CWD —
+    which a service CWD may not permit (on-box PermissionError, 2026-08-09)."""
+    req = tool_eval.ToolEvalRequest(
+        python_exe="/usr/bin/python3",
+        base_url="http://127.0.0.1:8080/v1",
+        model="m",
+        output_path=tmp_path / "runs" / "out.json",
+        scenarios=("TC-68",),
+    )
+    argv = tool_eval.build_argv(req)
+    i = argv.index("--output-dir")
+    assert argv[i + 1] == str(tmp_path / "runs")
