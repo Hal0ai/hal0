@@ -61,4 +61,20 @@ describe('slotModelRow', () => {
   it('skips null entries in the list instead of throwing', () => {
     expect(slotModelRow({ model_id: 'qwen3.6-27b' }, [null, ...ROWS])).toBe(ROWS[0])
   })
+
+  it('falls back to a row carrying the id in `aliases` (#1656 legacy FLM id)', () => {
+    const rows = [{ id: 'gemma4-it:e4b', aliases: ['gemma4-it-e4b-FLM'] }, ...ROWS]
+    expect(slotModelRow({ model_id: 'gemma4-it-e4b-FLM' }, rows)).toBe(rows[0])
+  })
+
+  it('prefers an exact id match over an alias match', () => {
+    const exact = { id: 'gemma4-it-e4b-FLM' }
+    const aliased = { id: 'gemma4-it:e4b', aliases: ['gemma4-it-e4b-FLM'] }
+    expect(slotModelRow({ model_id: 'gemma4-it-e4b-FLM' }, [aliased, exact])).toBe(exact)
+  })
+
+  it('tolerates rows with a non-array `aliases`', () => {
+    const rows = [{ id: 'x', aliases: 'not-an-array' }]
+    expect(slotModelRow({ model_id: 'gone' }, rows)).toBeNull()
+  })
 })
