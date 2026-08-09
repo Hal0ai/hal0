@@ -11,17 +11,29 @@
 # informational `version` field from pyproject.toml so it can't rot.
 #
 # For each entry under `toolbox_images`, the script:
-#   1. parses `ghcr.io/hal0ai/<image>:<tag>` out of the `.tag` field,
-#   2. resolves the published content digest from ghcr.io anonymously
-#      (registry v2 manifest API; falls back to `docker buildx imagetools
-#      inspect` if the curl/token flow is unavailable),
+#   1. parses the `.tag` field (usually `ghcr.io/hal0ai/<image>:<tag>`, but a
+#      few entries — e.g. comfyui — pin a non-ghcr, digest-referenced image
+#      like `docker.io/<owner>/<repo>@sha256:...`),
+#   2. resolves the published content digest:
+#        - a digest-pinned ref (`@sha256:...`) is authoritative BY
+#          CONSTRUCTION — the digest is read straight out of the ref, no
+#          registry round-trip;
+#        - otherwise resolves from ghcr.io anonymously (registry v2 manifest
+#          API), falling back to `docker buildx imagetools inspect` (works
+#          against any registry, ghcr.io included) if the curl/token flow is
+#          unavailable,
 #   3. patches manifest.json in place via python3 so JSON formatting stays
 #      stable.
 #
-# A missing/unpublished image leaves its digest as null and emits a warning —
-# matching the runtime contract (null digest => pull-by-tag + warn). The
-# script never hard-fails on a single unpublished image; it exits non-zero
-# only on a usage / environment error.
+# A ghcr.io image that fails resolution leaves its digest null and emits a
+# warning — matching the runtime contract (null digest => pull-by-tag +
+# warn); that image really is unpublished/unreachable. A NON-ghcr image that
+# fails resolution (no authoritative path here beyond the two above) instead
+# KEEPS whatever digest is already recorded and warns — a transient/offline
+# lookup must never regress a previously-valid pin to null, which used to
+# fail release.yml's null-digest gate on the very manifest this script
+# prepares (#1676). The script never hard-fails on a single unresolved
+# image; it exits non-zero only on a usage / environment error.
 #
 # Usage:
 #   scripts/update-toolbox-digests.sh [path/to/manifest.json]
@@ -67,6 +79,18 @@ PY
 resolve_digest() {
     local image_ref="$1"
     local registry repo_ref repo reference token digest
+
+    # A digest-pinned ref ("registry/repo@sha256:...") is authoritative by
+    # construction — the digest IS the reference, no registry round-trip
+    # needed (and none is possible for a non-ghcr registry anyway). This
+    # also fixes the comfyui entry (a docker.io@sha256 pin): the split below
+    # only understands a ":tag" suffix, so an "@sha256:..." ref used to mis-
+    # parse into a bogus repo/reference pair, fail both the ghcr curl path
+    # and the registry mismatch, and null out a perfectly valid pin (#1676).
+    if [[ "${image_ref}" == *@sha256:* ]]; then
+        printf 'sha256:%s\n' "${image_ref##*@sha256:}"
+        return 0
+    fi
 
     # Split "ghcr.io/owner/name:tag" into registry / repo / reference.
     registry="${image_ref%%/*}"
@@ -118,6 +142,21 @@ resolve_digest() {
     fi
 
     return 1
+}
+
+# Read the currently-recorded toolbox_images.<name>.digest, or "" if unset.
+current_digest() {
+    local name="$1"
+    python3 - "${MANIFEST}" "${name}" <<'PY'
+import json
+import sys
+
+path, name = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    manifest = json.load(fh)
+entry = (manifest.get("toolbox_images") or {}).get(name) or {}
+print(entry.get("digest") or "")
+PY
 }
 
 # Patch a single toolbox_images.<name>.digest in place via python3.
@@ -180,8 +219,22 @@ while IFS=$'\t' read -r name tag; do
         echo "    -> ${digest}"
         updated=$((updated + 1))
     else
-        echo "warn: ${name}: ${tag} is unpublished or unreachable — leaving digest null (runtime pulls by tag)" >&2
-        patch_digest "${name}" ""
+        # Never regress a valid pin to null. A ghcr.io image that fails
+        # resolution really is unpublished/unreachable — null is correct,
+        # the runtime falls back to pull-by-tag. A non-ghcr registry (no
+        # authoritative resolution path here beyond the digest-pinned-ref
+        # shortcut and the docker buildx fallback above) that fails is far
+        # more likely a transient/offline lookup than an actual unpublish —
+        # keep whatever digest is already recorded and warn instead (#1676).
+        registry="${tag%%/*}"
+        existing="$(current_digest "${name}")"
+        if [[ "${registry}" != "ghcr.io" && -n "${existing}" ]]; then
+            echo "warn: ${name}: ${tag} could not be resolved on ${registry} — keeping existing digest ${existing} (never regress a valid pin to null)" >&2
+            patch_digest "${name}" "${existing}"
+        else
+            echo "warn: ${name}: ${tag} is unpublished or unreachable — leaving digest null (runtime pulls by tag)" >&2
+            patch_digest "${name}" ""
+        fi
         warned=$((warned + 1))
     fi
 done < <(list_images)
