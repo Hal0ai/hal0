@@ -1216,6 +1216,19 @@ def _native_ctx(model_info: dict[str, Any]) -> int | None:
     Read straight off the GGUF arch max at import time — still a MODEL fact, but
     a derived one, so it only applies when nobody made an explicit choice, and it
     is dense-capped by the caller.
+
+    Falls back to the curated catalogue's ``context_length`` (#1617) when the
+    registry row itself carries no metadata at all. ``registry.pull._register``
+    only started stamping ``metadata.context_length`` on a completed pull as of
+    #1657/#1707 — a row created before that fix landed (e.g. the seeded brain
+    model on a box provisioned with an older build, or any curated pick that
+    predates the stamp) has an empty ``metadata`` dict forever, since nothing
+    re-runs detection on already-downloaded bytes. Without this, such a row
+    falls all the way through to :data:`_CTX_SAFE_FALLBACK` (8192) regardless
+    of how new the code is — the fix only helps FUTURE pulls, not boxes that
+    already have the file. Consulting the catalogue here means the resolver
+    self-heals on every launch, fresh install or upgrade alike, with no
+    migration step required.
     """
     md = model_info.get("metadata")
     if isinstance(md, dict) and md.get("context_length"):
@@ -1223,6 +1236,16 @@ def _native_ctx(model_info: dict[str, Any]) -> int | None:
             return int(md["context_length"])
         except (TypeError, ValueError):
             pass
+    model_id = model_info.get("_model_key")
+    if model_id:
+        try:
+            from hal0.registry.curated import get_curated
+
+            curated = get_curated(str(model_id))
+        except Exception:  # curated lookup must never break a launch
+            curated = None
+        if curated is not None and curated.context_length:
+            return int(curated.context_length)
     return None
 
 
