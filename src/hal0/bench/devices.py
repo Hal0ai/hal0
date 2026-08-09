@@ -148,6 +148,13 @@ class BenchDeviceSpec:
         flags += [f"--group-add={g}" for g in self.group_ids]
         return flags
 
+    @property
+    def run_flags(self) -> list[str]:
+        """Alias for :meth:`podman_flags` under the name
+        :func:`hal0.bench.harness.compose_podman_argv` spreads directly into a
+        ``podman run`` argv — a pure accessor, no resolution logic here."""
+        return self.podman_flags()
+
     def to_dict(self) -> dict[str, object]:
         return {
             "tier": self.tier,
