@@ -13,7 +13,7 @@ import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
-import { MODEL_SORT_FIELDS, sortModels, fmtAdded } from '@/dash/model-sort.js'
+import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
 import { RunnerImagesView, RunnerImagesSyncButton } from '@/dash/runner-images.jsx'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
@@ -21,14 +21,10 @@ const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 // ── Simplified filter chips ────────────────────────────────────────────
 // Each chip is a multi-select toggle with OR semantics (empty = show all).
 // "DENSE" means neither MTP nor MOE; checked by absence of those tags.
-// mtp/moe read typed facts first (defaults.mtp, architecture) and fall back
-// to legacy tags for rows an older release stamped — the curated type-tag
-// editor is retired and the boot migration strips behaviour tags.
-const isMtpModel = m =>
-  m?.defaults?.mtp === true || (m.tags || []).some(t => String(t).toLowerCase() === "mtp");
-const isMoeModel = m =>
-  String(m.architecture || "").toLowerCase().includes("moe") ||
-  (m.tags || []).some(t => String(t).toLowerCase() === "moe");
+// isMtpModel/isMoeModel live in model-sort.js (dependency-free, unit
+// tested) — they mirror the backend's own MTP/MoE detection so the chips
+// key on the same signal the server acts on, not on `Model.architecture`
+// (never persisted on a registry row — #1649) or the retired `moe` tag.
 const FILTER_CHIPS = [
   { id: "mtp",    label: "MTP",   check: isMtpModel },
   { id: "moe",    label: "MOE",   check: isMoeModel },
