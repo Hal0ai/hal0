@@ -148,8 +148,13 @@ export function LoadedModelsPage() {
           </div>
           {types.map(type => {
             const cur = (byType[type].find(s => s.isDefault) || {}).name || "";
+            // Plain `.s-row` — `form-row` (the drawer/modal grid) used to ride
+            // along, but it is declared after `.s-row` in dashboard.css and
+            // carries `padding: 12px 0`, so it stripped the panel's 18px
+            // horizontal padding and pulled the modality labels out of line
+            // with every other row. `.default-slot-row` is a test hook only.
             return (
-              <div className="default-slot-row form-row s-row" key={type}>
+              <div className="default-slot-row s-row" key={type}>
                 <div className="k"><span>{type}</span></div>
                 <div className="v">
                   <select
