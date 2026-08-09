@@ -143,9 +143,15 @@ async def update_settings(request: Request) -> dict[str, Any]:
     # could land mid-flight, persisting a config snapshot taken before the
     # propagation started and clobbering the graph section it just wrote.
     async with HAL0_TOML_LOCK:
-        current = getattr(request.app.state, "hal0_config", None)
-        if current is None:
-            current = load_hal0_config()
+        # Always reload from disk here (#1717 review), never trust
+        # ``app.state.hal0_config`` — the graph route saves its section
+        # straight to disk without updating that cache, so a settings PUT
+        # that waited behind a graph PUT would otherwise resume on the
+        # STALE cached snapshot, merge its own (unrelated) patch into it,
+        # and overwrite the graph section the preceding request just wrote.
+        # One extra read under an already-held lock is cheap; a lost write
+        # is not.
+        current = load_hal0_config()
 
         merged_raw = _deep_merge(current.model_dump(mode="python"), body)
 

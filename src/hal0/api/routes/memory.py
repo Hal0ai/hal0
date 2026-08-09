@@ -494,36 +494,44 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         slot_changed = new_cfg.extraction_slot != cfg.memory.graph.extraction_slot
         timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
 
-        # Whether this PUT needs to propagate to hindsight-api: an explicit
-        # slot/timeout change, or (#1682 review) the on-disk drop-in has
-        # drifted from what hal0.toml already claims to be running — a host
-        # stuck in the pre-seam-bug broken state (toml already says slot A,
-        # drop-in never written) must still reconcile on the next PUT of its
-        # unchanged slot, not no-op on config equality. Computed here (a pure
-        # read, no side effects) so the validation below can cover it too.
-        needs_propagation = slot_changed or timeout_changed
-        if not needs_propagation:
-            from hal0.memory.extraction_env import drop_in_matches
-
-            needs_propagation = not drop_in_matches(new_cfg.extraction_slot, new_cfg.llm_timeout_s)
-
-        # Validate extraction_slot against the live slot set whenever it is
-        # about to be applied to hindsight-api — reject an unknown / non-llm
-        # slot with the valid options so the gate never flips onto (or, via
-        # reconciliation, restarts hindsight-api onto) a target that can't
-        # serve extraction. Covers BOTH an explicit change AND a
-        # reconciliation propagation (#1717 review): an unrelated PUT like
-        # {"enabled": true} with slot_changed=False must not silently
-        # restart hindsight-api onto a slot that's since been
-        # deleted/disabled just because the on-disk drop-in also happened
-        # to be stale.
-        if slot_changed or needs_propagation:
+        # Validate an EXPLICIT slot change against the live slot set —
+        # reject an unknown / non-llm slot with the valid options so the
+        # gate never flips onto a target that can't serve extraction.
+        if slot_changed:
             available = await _enabled_llm_slots(request)
             if available and new_cfg.extraction_slot not in available:
                 raise MemoryGraphSlotInvalid(
                     f"extraction_slot {new_cfg.extraction_slot!r} is not an enabled llm slot",
                     details={"available_slots": ", ".join(available)},
                 )
+
+        # Whether this PUT needs to propagate to hindsight-api: an explicit
+        # slot/timeout change, or (#1682 review) the on-disk drop-in has
+        # drifted from what hal0.toml already claims to be running — a host
+        # stuck in the pre-seam-bug broken state (toml already says slot A,
+        # drop-in never written) must still reconcile on the next PUT of its
+        # unchanged slot, not no-op on config equality.
+        #
+        # Reconciliation only runs while the gate is meant to be enabled
+        # (#1717 review): a bare {"enabled": false} must always be able to
+        # disable, even with a stale/deleted configured slot — disabling
+        # doesn't need the (unchanged) slot to be valid.
+        needs_propagation = slot_changed or timeout_changed
+        if not needs_propagation and new_cfg.enabled:
+            from hal0.memory.extraction_env import drop_in_matches
+
+            if not drop_in_matches(new_cfg.extraction_slot, new_cfg.llm_timeout_s):
+                # Reconciliation is inferred work we chose to do ourselves,
+                # not an explicit operator action — only do it when we can
+                # POSITIVELY confirm the unchanged slot is still valid
+                # (#1717 review). An empty/unknown available set (no slots
+                # enabled, or enumeration failed) means we can't tell, and
+                # forcing a restart onto an unverifiable slot could replace
+                # a possibly-still-working drop-in with a broken one; skip
+                # reconciliation instead of erroring this — often
+                # unrelated — request.
+                available = await _enabled_llm_slots(request)
+                needs_propagation = new_cfg.extraction_slot in available
 
         # Flip the live wrapper's reported state BEFORE persisting.
         try:

@@ -300,14 +300,16 @@ def test_put_reconciles_when_toml_matches_but_drop_in_does_not(
     apply_mock.assert_called_once_with("utility", timeout_s=300)
 
 
-def test_put_reconciliation_still_validates_the_unchanged_slot(
+def test_put_reconciliation_skipped_when_unchanged_slot_is_unavailable(
     stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
     """#1717 review: an unrelated PUT (e.g. just {"enabled": true}) with
     slot_changed=False must not silently restart hindsight-api onto a slot
     that's since been deleted/disabled just because the on-disk drop-in also
-    happened to be stale. Reconciliation must go through the same
-    live-slot-set validation as an explicit slot change, not bypass it."""
+    happened to be stale. Unlike an explicit slot change, reconciliation is
+    inferred work — when we can't positively confirm the (unchanged) slot is
+    still valid, skip the reconciliation attempt rather than erroring this
+    otherwise-unrelated request."""
     # "utility" (the config default / stub_wrapper's default extraction_slot)
     # is deliberately NOT in the enabled llm slot set here.
     app = _build_app(stub_wrapper, "agent")
@@ -318,12 +320,57 @@ def test_put_reconciliation_still_validates_the_unchanged_slot(
     ):
         r = client.put("/api/memory/graph", json={"enabled": True})
 
-    assert r.status_code == 422, r.text
-    assert r.json()["error"]["code"] == "config.memory_graph_slot_invalid"
+    assert r.status_code == 200, r.text
+    assert "propagation" not in r.json()
     apply_mock.assert_not_called()
-    # Rejected before any wrapper flip / persist, same as an explicit
-    # unknown-slot request.
-    assert stub_wrapper.set_calls == []
+    # The gate itself still flips — reconciliation just declined to touch
+    # hindsight-api, it didn't block the (unrelated) enable request.
+    assert stub_wrapper.set_calls == [(True, "utility")]
+
+
+def test_put_reconciliation_skipped_when_no_slots_are_known(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """#1717 review: an empty/unknown available set (slot_manager unwired,
+    or enumeration failed) must not be treated as "anything goes" for
+    reconciliation the way it is for an explicit operator-driven slot
+    change — we can't verify the slot, so we must not force a restart onto
+    it just because the drop-in happens to be stale too."""
+    app = _build_app(stub_wrapper)  # no slot_manager at all
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.drop_in_matches", return_value=False),
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+    ):
+        r = client.put("/api/memory/graph", json={"enabled": True})
+
+    assert r.status_code == 200, r.text
+    assert "propagation" not in r.json()
+    apply_mock.assert_not_called()
+
+
+def test_put_disable_succeeds_despite_a_stale_unavailable_configured_slot(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """#1717 review: `hal0 memory graph disable` sends only
+    {"enabled": false}. Disabling must always succeed — including when the
+    configured extraction slot has since been deleted/disabled and the
+    drop-in is also stale — because disabling doesn't need the (unchanged,
+    now-irrelevant) slot to be valid. Reconciliation must not even be
+    attempted while enabled=False."""
+    app = _build_app(stub_wrapper, "agent")  # "utility" not available
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.drop_in_matches") as matches_mock,
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+    ):
+        r = client.put("/api/memory/graph", json={"enabled": False})
+
+    assert r.status_code == 200, r.text
+    assert "propagation" not in r.json()
+    matches_mock.assert_not_called()
+    apply_mock.assert_not_called()
+    assert stub_wrapper.set_calls == [(False, "utility")]
 
 
 def test_put_disable_idempotent(client: TestClient, stub_wrapper: StubWrapper) -> None:

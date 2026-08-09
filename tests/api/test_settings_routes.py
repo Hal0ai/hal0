@@ -48,6 +48,42 @@ def test_get_settings_returns_default_config_when_no_toml(isolated_client: TestC
     assert body["telemetry"]["channel"] == "stable"
 
 
+def test_put_settings_reloads_disk_instead_of_a_stale_cache(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """#1717 review: routes/memory.py's PUT /graph writes its section
+    straight to disk without touching ``app.state.hal0_config``. A settings
+    PUT that resumes after waiting on the shared HAL0_TOML_LOCK must reload
+    from disk rather than trusting that (now stale) cache — otherwise it
+    merges its own unrelated patch into the pre-graph-write snapshot and
+    overwrites the section the other route just saved."""
+    # Simulate exactly that: hal0.toml on disk now has a graph section the
+    # app's in-memory ``hal0_config`` (still whatever create_app()'s
+    # lifespan loaded at startup) knows nothing about.
+    cfg_dir = Path(tmp_hal0_home) / "etc" / "hal0"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "hal0.toml").write_text(
+        '[memory.graph]\nenabled = true\nextraction_slot = "agent"\n',
+        encoding="utf-8",
+    )
+
+    # An unrelated PUT — must not clobber the graph section above.
+    r = isolated_client.put("/api/settings", json={"telemetry": {"enabled": True}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["telemetry"]["enabled"] is True
+    assert body["memory"]["graph"]["enabled"] is True
+    assert body["memory"]["graph"]["extraction_slot"] == "agent"
+
+    # And the on-disk file reflects both, not just the settings PUT's patch.
+    toml_path = cfg_dir / "hal0.toml"
+    import tomllib
+
+    parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    assert parsed["telemetry"]["enabled"] is True
+    assert parsed["memory"]["graph"]["extraction_slot"] == "agent"
+
+
 def test_put_settings_partial_update_persists_to_disk(
     isolated_client: TestClient, tmp_hal0_home: str
 ) -> None:
