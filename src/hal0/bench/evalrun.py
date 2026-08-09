@@ -48,7 +48,10 @@ from .store import state_root
 #: eval has no planner, so cmd_eval/cmd_worker check this directly).
 TOOL_EVAL_BENCH_BIN = "tool-eval-bench"
 
-_DEFAULT_TASK_TIMEOUT_S = 180.0
+# Sized to the SLOWEST of the retired hand-rolled tasks (420s): an agentic
+# scenario against a large local model on this thermal-limited APU legitimately
+# runs for minutes, and a timeout here records a failure a re-run won't fix.
+_DEFAULT_TASK_TIMEOUT_S = 420.0
 
 
 def tool_eval_missing() -> str | None:
