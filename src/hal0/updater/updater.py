@@ -1066,6 +1066,32 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
                 original=str(dest),
                 quarantine=str(stale),
             )
+        elif os.geteuid() == 0 and dest.stat().st_uid != 0:
+            # Codex follow-up: an *empty* pre-existing dest was previously
+            # reused untouched aside from a later chmod — but chmod cannot
+            # revoke the owning user's own access. If this inode's owner
+            # isn't root, root reusing it and merely chmod-ing to 0700
+            # would still leave the ORIGINAL (untrusted) owner with full
+            # rwx, because 0700's owner bits are unchanged. Only meaningful
+            # at euid 0 — the privileged seam path with a trust boundary to
+            # defend; a dev/CI/HAL0_HOME run has none. Quarantine it exactly
+            # like a suspicious non-empty dir, so the fresh `mkdir(mode=
+            # 0o700)` below always creates (and therefore owns) `dest`
+            # itself rather than trusting whatever created it before.
+            stale = dest.with_name(f"{dest.name}.stale-{int(time.time())}")
+            try:
+                dest.rename(stale)
+            except OSError as exc:
+                raise UpdateExtractError(
+                    f"could not quarantine untrusted empty install dir {dest}: {exc}",
+                    details={"path": str(dest), "quarantine": str(stale), "error": str(exc)},
+                ) from exc
+            log.warning(
+                "updater.extract_quarantined_untrusted_empty",
+                job_id=job_id,
+                original=str(dest),
+                quarantine=str(stale),
+            )
     # #1723 / Codex follow-up: lock `dest` to owner-only *before* anything is
     # extracted into it. A directory's own children are unreachable to
     # non-owners as long as the directory itself denies traversal (x) — so
