@@ -10,13 +10,15 @@ validate-and-exec: the unprivileged caller composes the FULL
 element structurally, then execs it. No matrix knowledge, no retries, no
 shell evaluation.
 
-These tests exercise the shim as a subprocess with a stubbed ``$PATH``:
+These tests exercise the shim as a subprocess. The shim pins its own ``PATH``
+(never trusting the caller's at a root boundary), so stubs are injected via
+the explicit test seams sudo's ``env_reset`` strips on the privileged path:
 
-* ``podman`` and ``timeout`` are recording stubs that append their argv to a
-  log file — real execution never happens.
-* ``python3`` is a one-line stub that prints a fake model-store root, so
-  ``MODEL_ROOT`` resolves to a ``tmp_path`` directory instead of touching a
-  real hal0 install or ``/mnt/ai-models``.
+* ``HAL0_BENCHCTL_PODMAN`` / ``HAL0_BENCHCTL_TIMEOUT`` point at recording
+  stubs that append their argv to a log file — real execution never happens.
+* ``HAL0_BENCH_PYTHON`` points at a one-line stub that prints a fake
+  model-store root, so ``MODEL_ROOT`` resolves to a ``tmp_path`` directory
+  instead of touching a real hal0 install or ``/mnt/ai-models``.
 * device nodes are provided via ``HAL0_BENCH_KFD_PATH`` / ``HAL0_BENCH_DRI_DIR``
   — ``/dev/null`` is used as a stand-in character device (the shim only
   checks ``S_ISCHR``, never the node's real purpose).
@@ -61,23 +63,22 @@ def _sh_quote(s: str) -> str:
 
 
 def _stub_bin(tmp_path: Path, model_root: Path, *, argv_log: Path | None = None) -> Path:
-    """A ``$PATH`` dir with a ``python3`` that resolves ``MODEL_ROOT`` to
-    ``model_root``, plus (optionally) recording ``podman``/``timeout`` stubs.
+    """A dir of stub binaries the shim reaches via its explicit test seams
+    (``HAL0_BENCH_PYTHON`` / ``HAL0_BENCHCTL_PODMAN`` / ``HAL0_BENCHCTL_TIMEOUT``
+    — set in ``_env``). ``$PATH`` stubbing no longer works on purpose: the
+    shim pins its own ``PATH`` before doing anything else.
 
     Two independent mechanisms pin ``MODEL_ROOT`` to ``model_root``, because
-    the shim's own resolver checks ``/usr/lib/hal0/venv/bin/python3`` (an
-    ABSOLUTE path — not shadowable via ``$PATH``) before ever falling back to
-    ``command -v python3``: on a box with a real hal0 install, that absolute
-    candidate exists and wins, bypassing this stub entirely.
+    the shim's resolver checks ``/usr/lib/hal0/venv/bin/python3`` (an
+    ABSOLUTE path) after the ``HAL0_BENCH_PYTHON`` override:
 
     * ``HAL0_MODEL_STORE`` (an env var ``hal0.config.store.store_root``
       honours directly) makes ANY real, hal0-package-aware python resolve to
       ``model_root``, whichever interpreter the shim happens to invoke.
-    * The ``python3`` stub here is the fallback for a box with NO hal0
-      install reachable by any system python at all (a bare CI box): it
-      never imports hal0, just echoes ``$HAL0_MODEL_STORE`` (or
-      ``model_root`` if that is somehow unset) — kept in lockstep with the
-      env var above rather than a second hardcoded value.
+    * The ``python3`` stub (wired via ``HAL0_BENCH_PYTHON``) never imports
+      hal0, just echoes ``$HAL0_MODEL_STORE`` (or ``model_root`` if that is
+      somehow unset) — kept in lockstep with the env var above rather than a
+      second hardcoded value.
     """
     bindir = tmp_path / "stub-bin"
     bindir.mkdir(exist_ok=True)
@@ -87,31 +88,15 @@ def _stub_bin(tmp_path: Path, model_root: Path, *, argv_log: Path | None = None)
     )
     if argv_log is not None:
         _recording_stub(bindir / "podman", argv_log)
-        # `timeout` re-execs its trailing argv through the recording stub too
-        # so the test can see whether the wrap actually happened.
+        # `timeout` logs its argv, then drops `--kill-after=30 <secs>` and
+        # execs the rest, so the test can see whether the wrap happened AND
+        # the podman recording still fires. POSIX sh only — CI's /bin/sh is
+        # dash, not bash.
         timeout_log = argv_log.with_name(argv_log.name + ".timeout")
         body = (
             f'{{ for a in "$@"; do printf \'%s\\n\' "$a"; done; printf \'\\n\'; }} >> "{timeout_log}"\n'
-            "shift_count=0\n"
-            'for a in "$@"; do\n'
-            '  case "$a" in\n'
-            "    --kill-after=*) shift; continue;;\n"
-            "    *) break;;\n"
-            "  esac\n"
-            "done\n"
-            # drop --kill-after=N and the numeric seconds arg, exec the rest
-            'args=("$@")\n'
-            "idx=0\n"
-            'for a in "${args[@]}"; do\n'
-            '  case "$a" in\n'
-            "    --kill-after=*) idx=$((idx+1)); continue;;\n"
-            "  esac\n"
-            "  break\n"
-            "done\n"
-            # first surviving positional after --kill-after=N is the numeric
-            # timeout, then the real command
-            'rest=("${args[@]:$((idx+1))}")\n'
-            'exec "${rest[@]}"\n'
+            "shift 2\n"
+            'exec "$@"\n'
         )
         _write_stub(bindir / "timeout", body)
     return bindir
@@ -146,12 +131,16 @@ def _env(
     tmp_path: Path, bindir: Path, model_root: Path, *, kfd: str = "", dri: str = ""
 ) -> dict[str, str]:
     env = {
-        "PATH": f"{bindir}:/usr/bin:/bin",
+        "PATH": "/usr/bin:/bin",  # ignored: the shim pins its own PATH
         "HOME": str(tmp_path),
         # Belt-and-braces MODEL_ROOT pin — see _stub_bin's docstring for why
         # both this and the python3 stub exist.
         "HAL0_MODEL_STORE": str(model_root),
+        "HAL0_BENCH_PYTHON": str(bindir / "python3"),
     }
+    if (bindir / "podman").exists():
+        env["HAL0_BENCHCTL_PODMAN"] = str(bindir / "podman")
+        env["HAL0_BENCHCTL_TIMEOUT"] = str(bindir / "timeout")
     if kfd:
         env["HAL0_BENCH_KFD_PATH"] = kfd
     if dri:
@@ -277,7 +266,10 @@ class TestExecAccepts:
         wrapped = timeout_log.read_text().strip("\n").split("\n\n")[0].splitlines()
         assert wrapped[0] == "--kill-after=30"
         assert wrapped[1] == "5"
-        assert wrapped[2:] == podman_argv
+        # The shim replaces the caller's "podman" token with ITS OWN binary
+        # (the test seam here) — argv[0] is never caller-controlled.
+        assert wrapped[2] == env["HAL0_BENCHCTL_PODMAN"]
+        assert wrapped[3:] == podman_argv[1:]
 
 
 # ── exec: rejections ─────────────────────────────────────────────────────────
@@ -319,7 +311,7 @@ class TestExecRejects:
         proc = _run(["exec", "--", *argv], env)
 
         assert proc.returncode != 0
-        assert "not allowed" in proc.stderr or "die" not in proc.stderr
+        assert "podman flag not allowed: --privileged" in proc.stderr
 
     def test_rejects_bad_security_opt(self, tmp_path) -> None:
         model_root, model_abs, env = self._base(tmp_path)
@@ -388,6 +380,73 @@ class TestExecRejects:
 
         assert proc.returncode != 0
 
+    def test_rejects_a_runtime_hook_env_value(self, tmp_path) -> None:
+        """The -e allowlist is exact-value: ROCr dlopen()s $HSA_TOOLS_LIB
+        inside the rootful container, and the caller writes the model store
+        the shim bind-mounts — a pattern that admits a path is root code
+        execution."""
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        argv[argv.index("--entrypoint") : argv.index("--entrypoint")] = [
+            "-e",
+            f"HSA_TOOLS_LIB={model_root}/evil.so",
+        ]
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+        assert "env not allowed" in proc.stderr
+
+    def test_rejects_a_device_outside_the_allowed_roots(self, tmp_path) -> None:
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        argv.insert(argv.index("--rm") + 1, "--device=/dev/sda")
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+
+    def test_rejects_a_non_numeric_group_add(self, tmp_path) -> None:
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        argv.insert(argv.index("--rm") + 1, "--group-add=video")
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+
+    def test_rejects_group_add_zero(self, tmp_path) -> None:
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        argv.insert(argv.index("--rm") + 1, "--group-add=0")
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+
+    def test_rejects_a_second_entrypoint(self, tmp_path) -> None:
+        """A repeated --entrypoint lands in the image slot and dies on the
+        image pattern — nothing can re-open the pre-image flag loop."""
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        i = argv.index("--entrypoint")
+        argv[i:i] = ["--entrypoint", "/usr/local/bin/llama-bench"]
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+
+    def test_rejects_a_flag_smuggled_after_o_json(self, tmp_path) -> None:
+        """Every pair after the image is validated — -o json is not a
+        terminator that stops parsing."""
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        argv += ["-m", str(model_abs)]  # a second -m is not whitelisted here
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+
 
 # ── retired verbs ────────────────────────────────────────────────────────────
 
@@ -445,10 +504,3 @@ class TestTelemetrySampler:
 def test_the_shim_is_syntactically_valid() -> None:
     proc = subprocess.run(["bash", "-n", str(BENCHCTL)], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
-
-
-def test_no_test_here_needed_real_hardware() -> None:
-    """Documentation-as-assertion: nothing above may reach a real GPU node."""
-    import os
-
-    assert not os.environ.get("HAL0_BENCH_GPU_DEVICES")

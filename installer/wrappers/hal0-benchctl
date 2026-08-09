@@ -31,6 +31,17 @@
 
 set -euo pipefail
 
+# Never trust the caller's PATH at a root boundary: every binary this script
+# reaches must come from the system dirs, not from wherever the invoking
+# environment points. The HAL0_BENCHCTL_{PODMAN,TIMEOUT} / HAL0_BENCH_PYTHON
+# overrides below exist for the test suite only — a caller going through the
+# sudoers grant cannot use them, because sudo's default env_reset strips them
+# before this script runs (and a caller NOT going through sudo runs this
+# script with their own uid, where an override buys them nothing).
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PODMAN_BIN="${HAL0_BENCHCTL_PODMAN:-podman}"
+TIMEOUT_BIN="${HAL0_BENCHCTL_TIMEOUT:-timeout}"
+
 RESULTS=/var/lib/hal0/benchmarks
 
 # The model-store root, from the SAME resolver the pull engine and slot mounts
@@ -40,7 +51,7 @@ RESULTS=/var/lib/hal0/benchmarks
 # venv is unreachable.
 _resolve_model_root() {
   local py
-  for py in /usr/lib/hal0/venv/bin/python3 "$(command -v python3 2>/dev/null || true)"; do
+  for py in "${HAL0_BENCH_PYTHON:-}" /usr/lib/hal0/venv/bin/python3 "$(command -v python3 2>/dev/null || true)"; do
     [[ -n "$py" && -x "$py" ]] || continue
     if out="$("$py" -c 'from hal0.config.paths import model_store_root; print(model_store_root())' 2>/dev/null)" \
        && [[ "$out" == /* ]]; then
@@ -55,9 +66,12 @@ die() { echo "hal0-benchctl: $1" >&2; exit 2; }
 
 # --- exec-verb validators ---------------------------------------------------
 
-# Permitted device roots — kept relocatable in lock-step with the Python
-# resolver (hal0.bench.devices honours the same overrides), so a test or an
-# unusual passthrough layout is still CHECKED rather than waved through.
+# Permitted device roots. The overrides mirror hal0.bench.devices' names so a
+# relocated root is still CHECKED rather than waved through — but note they
+# only take effect for direct (non-sudo) invocations such as the test suite:
+# the sudoers grant has no env_keep, so through `sudo hal0-benchctl` the shim
+# always validates against the real /dev roots regardless of the caller's
+# environment. That is the intended posture at this boundary.
 _KFD_ROOT="${HAL0_BENCH_KFD_PATH:-/dev/kfd}"
 _DRI_ROOT="${HAL0_BENCH_DRI_DIR:-/dev/dri}"
 
@@ -68,7 +82,10 @@ validate_device_flag() {
   local flag="$1" node name
   [[ "$flag" != *..* ]] || return 1
   case "$flag" in
-    --group-add=*) [[ "${flag#--group-add=}" =~ ^[0-9]+$ ]]; return $? ;;
+    --group-add=*)
+      # Numeric and never gid 0 — the resolver only ever emits the probed
+      # render/video gids, so root here is caller-shaped state with no use.
+      [[ "${flag#--group-add=}" =~ ^[0-9]+$ && ! "${flag#--group-add=}" =~ ^0+$ ]]; return $? ;;
     --device=nvidia.com/gpu=*)
       [[ "${flag#--device=nvidia.com/gpu=}" =~ ^([0-9]+|all)$ ]]; return $? ;;
     --device=*) node="${flag#--device=}" ;;
@@ -109,8 +126,7 @@ validate_entrypoint() {
   esac
 }
 
-# Runner images are pinned to the hal0 GHCR namespace (plus the upstream
-# toolbox namespace the CPU lane's lean image lives in).
+# Runner images are pinned to the hal0 GHCR namespace.
 validate_image() {
   [[ "$1" =~ ^ghcr\.io/hal0ai/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*:[A-Za-z0-9._-]+$ ]] \
     || die "image not allowed: $1"
@@ -160,8 +176,16 @@ case "$cmd" in
             || die "volume not allowed: $1"
           volume_ok=1; shift ;;
         -e)
-          [[ "${2:-}" =~ ^(GGML|HSA)_[A-Z0-9_]+=[A-Za-z0-9._/,:=-]*$ ]] \
-            || die "env not allowed: ${2:-}"
+          # EXACT-value allowlist, never a pattern. A pattern wide enough for
+          # "harmless" env strings admits runtime hook variables — e.g. ROCr
+          # dlopen()s $HSA_TOOLS_LIB inside the (rootful) container, and the
+          # unprivileged caller writes the model store this shim bind-mounts,
+          # so a pattern that lets a path through is root code execution.
+          # Growing this list is a reviewable one-line diff.
+          case "${2:-}" in
+            GGML_HIP_ENABLE_UNIFIED_MEMORY=1) ;;
+            *) die "env not allowed: ${2:-}" ;;
+          esac
           shift 2 ;;
         --entrypoint)
           validate_entrypoint "${2:-}"
@@ -201,10 +225,13 @@ case "$cmd" in
     done
     [[ $output_json -eq 1 ]] || die "-o json is required"
 
+    # Exec the validated command with THIS script's binaries, never the
+    # caller's argv[0] (the leading "podman" token was validated as a literal
+    # and is replaced here; PATH was pinned at the top of the script).
     if [[ -n "$cell_timeout" ]]; then
-      exec timeout --kill-after=30 "$cell_timeout" "${cmd_argv[@]}"
+      exec "$TIMEOUT_BIN" --kill-after=30 "$cell_timeout" "$PODMAN_BIN" "${cmd_argv[@]:1}"
     fi
-    exec "${cmd_argv[@]}"
+    exec "$PODMAN_BIN" "${cmd_argv[@]:1}"
     ;;
 
   telemetry)                 # 1 Hz GPU sampler → artifacts/<run_id>/telemetry.jsonl
@@ -216,6 +243,11 @@ case "$cmd" in
     # for direct root invocations, then to probing.
     tier="${3:-${HAL0_BENCH_TIER:-}}"
     validate_tier "$tier"
+    # run_id becomes a root-owned path component — pin its shape (no
+    # separators, no traversal, no leading dash) before any mkdir/kill.
+    if [[ -n "$run_id" ]]; then
+      [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || die "bad run_id: $run_id"
+    fi
     shift 2 2>/dev/null || true
     case "$action" in
       start)
@@ -300,7 +332,12 @@ case "$cmd" in
         ARTIFACTS_DIR="$RESULTS/v2/artifacts/$run_id"
         PID_FILE="$ARTIFACTS_DIR/telemetry.pid"
         if [[ -f "$PID_FILE" ]]; then
-          kill $(cat "$PID_FILE") 2>/dev/null || true
+          # One plain numeric pid only — never word-split file content into
+          # kill's argv (a crafted "-9 -1" would signal every process).
+          pid="$(head -n 1 "$PID_FILE" 2>/dev/null)"
+          if [[ "$pid" =~ ^[0-9]+$ ]]; then
+            kill "$pid" 2>/dev/null || true
+          fi
           rm -f "$PID_FILE"
           echo "[telemetry] stopped"
         else
