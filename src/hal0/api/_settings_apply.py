@@ -98,6 +98,41 @@ SERVICE_HAL0_API: str = "hal0-api"
 #   * ``[meta].schema_version``             → manual-restart (migrations
 #                                            run on next hal0-api boot
 #                                            after the value is bumped).
+#   * ``[security].{require_auth,          → immediate (api/auth.py reads
+#     trust_forwarded_for}``                  both live off hal0.toml, cached
+#                                            on (path, mtime) — a Settings
+#                                            save bumps the mtime so the very
+#                                            next request picks it up, no
+#                                            restart needed).
+#   * ``[slots].network_mode``              → service-restart[slots] (same
+#                                            "baked into the rendered
+#                                            quadlet unit" pattern as
+#                                            publish_host — existing slot
+#                                            units must be restarted to
+#                                            observe a new podman network
+#                                            mode).
+#   * ``[slots].{preload_evict_enabled,    → service-restart[hal0-api]
+#     preload_evict_headroom_mb}``           (constructor args to
+#                                            SlotManager, built once at
+#                                            create_app time).
+#   * ``[dispatcher].direct_read_timeout_s`` → service-restart[hal0-api]
+#                                            (threaded into the dispatcher
+#                                            Router at create_app time,
+#                                            same as the other two
+#                                            dispatcher knobs above).
+#   * ``[memory].unified_bank``             → service-restart[hal0-api]
+#                                            (constructor arg to
+#                                            HindsightProvider, built once
+#                                            at create_app time — same
+#                                            pattern as memory.enabled /
+#                                            memory.engine above).
+#   * ``[realtime].*``                      → immediate (routes/realtime.py
+#                                            reads ``app.state.hal0_config
+#                                            .realtime`` fresh on every WS
+#                                            connect; the settings PUT
+#                                            refreshes app.state.hal0_config
+#                                            in place, same as brain_chat.*
+#                                            above — no restart needed).
 #
 # Nested field names are written dot-notation (``slots.max_slots``)
 # because the registry is keyed off the path the PUT body uses. The
@@ -188,6 +223,46 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "brain_chat.completion_timeout_s": {"apply_class": "immediate", "services": []},
     # [meta]
     "meta.schema_version": {"apply_class": "manual-restart", "services": []},
+    # [security] — both toggles are read live off hal0.toml with an
+    # (path, mtime) cache in api/auth.py; a Settings save rewrites the
+    # file (bumping mtime), so the very next request observes the change.
+    "security.require_auth": {"apply_class": "immediate", "services": []},
+    "security.trust_forwarded_for": {"apply_class": "immediate", "services": []},
+    # [slots] — network_mode is baked into each slot's rendered quadlet
+    # unit the same way publish_host is; preload_evict_* are SlotManager
+    # constructor args fixed at create_app time.
+    "slots.network_mode": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
+    "slots.preload_evict_enabled": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "slots.preload_evict_headroom_mb": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    # [dispatcher] — same create_app-time wiring as the other two entries.
+    "dispatcher.direct_read_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    # [memory] — HindsightProvider constructor arg, built once at boot.
+    "memory.unified_bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    # [realtime] — every key is read live off app.state.hal0_config.realtime
+    # on each WS connect (routes/realtime.py), which the settings PUT
+    # refreshes in place, so all of them apply immediately.
+    "realtime.enabled": {"apply_class": "immediate", "services": []},
+    "realtime.sample_rate": {"apply_class": "immediate", "services": []},
+    "realtime.default_model": {"apply_class": "immediate", "services": []},
+    "realtime.stt_model": {"apply_class": "immediate", "services": []},
+    "realtime.tts_model": {"apply_class": "immediate", "services": []},
+    "realtime.tts_voice": {"apply_class": "immediate", "services": []},
+    "realtime.vad_energy_threshold": {"apply_class": "immediate", "services": []},
+    "realtime.vad_silence_ms": {"apply_class": "immediate", "services": []},
+    "realtime.vad_min_speech_ms": {"apply_class": "immediate", "services": []},
+    "realtime.vad_window_ms": {"apply_class": "immediate", "services": []},
+    "realtime.frame_ms": {"apply_class": "immediate", "services": []},
+    "realtime.approval_wait_s": {"apply_class": "immediate", "services": []},
+    "realtime.max_buffer_seconds": {"apply_class": "immediate", "services": []},
 }
 
 
