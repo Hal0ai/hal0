@@ -111,6 +111,46 @@ async def test_rename_rejects_name_collision(hal0_home: Path) -> None:
         await sm.rename("chat", "agent")
 
 
+async def test_renaming_a_static_seed_tombstones_the_old_name(hal0_home: Path) -> None:
+    # #1651: rename() relabelled the identity row and moved/rewrote the TOML
+    # but wrote no tombstone for the vacated name. The boot-time seeding pass
+    # (hal0.install.static_seeds.seed_static_slots) then sees `brain` as
+    # neither known (identity now carries `steward`) nor on disk (id-keyed
+    # slots carry no <name>.toml) and re-materialises a fresh seed under the
+    # OLD name — the operator ends up with both `steward` and a duplicate
+    # `brain` after a plain restart. Mirror delete()'s tombstone write.
+    sm = _manager(hal0_home)
+    await _create(sm, "brain", port=8085)
+    await sm.rename("brain", "steward")
+
+    from hal0.install.static_seeds import read_seed_tombstones, seed_static_slots
+
+    assert "brain" in read_seed_tombstones()
+    # The seeding pass must honour that tombstone, not resurrect a duplicate.
+    seeded = seed_static_slots(existing_names=sm.identity_names())
+    assert "brain" not in seeded
+    assert sm._identity.get_by_name("brain") is None
+    assert sm._identity.get_by_name("steward") is not None
+
+
+async def test_renaming_into_a_tombstoned_seed_name_clears_it(hal0_home: Path) -> None:
+    # Mirror hazard called out in #1651: renaming INTO a previously-deleted
+    # seed name must clear that name's tombstone the same way create() does,
+    # or the stale tombstone silently blocks that name from ever being
+    # seeded again even though a live slot now legitimately owns it.
+    sm = _manager(hal0_home)
+    await _create(sm, "rerank", port=8083)
+    await sm.delete("rerank", force=True)
+
+    from hal0.install.static_seeds import read_seed_tombstones
+
+    assert "rerank" in read_seed_tombstones()
+
+    await _create(sm, "utility", port=8091)
+    await sm.rename("utility", "rerank")
+    assert "rerank" not in read_seed_tombstones()
+
+
 async def test_slot_id_to_name_roundtrip(hal0_home: Path) -> None:
     sm = _manager(hal0_home)
     snap = await _create(sm, "chat", port=8081)

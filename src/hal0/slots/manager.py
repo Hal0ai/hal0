@@ -994,6 +994,12 @@ class SlotManager:
         also moves those two artefacts and re-keys the in-memory caches. To
         avoid orphaning a live ``hal0-slot@<oldname>`` unit, rename is refused
         unless the slot is OFFLINE.
+
+        If ``slot_name`` is a static seed (:data:`hal0.install.static_seeds.
+        STATIC_SEED_SLOTS`), the vacated name is tombstoned so the boot-time
+        seeding pass does not resurrect a duplicate under the old label
+        (#1651); renaming into a tombstoned ``new_name`` clears it, mirroring
+        :meth:`create`.
         """
         if self._identity is None:
             raise SlotConfigError(
@@ -1088,6 +1094,26 @@ class SlotManager:
                 self._name_to_key.pop(canonical, None)
                 self._bind_key(new_name, key)
                 self._cfg_cache.pop(key, None)
+                # 5. Seed-tombstone bookkeeping (#1651). Renaming a static seed
+                #    vacates `canonical` — without a tombstone the boot-time
+                #    seeding pass (hal0.install.static_seeds.seed_static_slots)
+                #    sees that name as neither known (identity now carries
+                #    `new_name`) nor on disk (id-keyed slots carry no
+                #    <name>.toml) and re-materialises a fresh seed under the
+                #    OLD name, duplicating the slot. Mirror delete()'s
+                #    tombstone write. Renaming INTO a tombstoned name must
+                #    also clear it — mirrors create() — or the stale
+                #    tombstone blocks that name from ever being seeded again
+                #    even though a live slot now legitimately owns it.
+                from hal0.install.static_seeds import (
+                    STATIC_SEED_SLOTS,
+                    add_seed_tombstone,
+                    clear_seed_tombstone,
+                )
+
+                if canonical in STATIC_SEED_SLOTS:
+                    add_seed_tombstone(canonical)
+                clear_seed_tombstone(new_name)
         return await self.status(new_name)
 
     def _ensure_known(self, name: str) -> None:
