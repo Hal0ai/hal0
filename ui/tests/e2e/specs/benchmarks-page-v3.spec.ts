@@ -85,7 +85,25 @@ const RUN_SUMMARY = {
   config: 'default',
 }
 
-const RUNS = { count: 1, outcomes: { ok: 1 }, runs: [RUN_SUMMARY] }
+// A second, failed record on the Runs tab's own page — mixed outcomes, so
+// the tab's default-to-ok filtering is actually exercised (prod data is
+// currently ok-only after a historical-record prune, so this can't be
+// verified against live data right now).
+const RUN_SUMMARY_FAILED = {
+  run_id: '2026-07-30T08:00:00Z-oom1',
+  suite: 'roster',
+  trigger: 'manual',
+  model: 'qwen3.6-35b-a3b',
+  lane: 'vulkan_radv',
+  kind: 'tg',
+  depth: 2048,
+  outcome: 'oom',
+  decode_ts_med: null,
+  reps: 0,
+  config: 'default',
+}
+
+const RUNS = { count: 2, outcomes: { ok: 1, oom: 1 }, runs: [RUN_SUMMARY, RUN_SUMMARY_FAILED] }
 
 const RUN_RECORD = {
   run_id: RUN_SUMMARY.run_id,
@@ -119,17 +137,30 @@ const HISTORY = {
   ],
 }
 
-// 7 raw run records for the model-detail accordion, MIXED across both lanes
-// and newer than 2 minutes apart (so each is its own sweep) — one more
-// record than the backend would ever return under a correct limit=5
-// request, so the display's defensive slice(0, 5) is actually exercised,
-// AND enough of a lane mix to prove the single-lane run-list filter works.
-// Sorted newest-first (matches the real API): the latest 5 are rocm@76/75/74
-// and vulkan_radv@61/60; the two oldest (vulkan_radv@59, rocm@71.4) are
-// dropped by the cap. run3 (vulkan_radv, within the latest-5 window) is
-// outcome:'failed' — the accordion trend must count it as a sweep but not
-// plot it, and say so in the caption.
+// 8 raw run records for the model-detail accordion, MIXED across both lanes
+// and newer than 2 minutes apart (so each is its own sweep):
+//   run7  2026-08-08  rocm         FAILED  — the newest rocm attempt overall.
+//   run0  2026-08-07  rocm         ok  76
+//   run1  2026-08-06  vulkan_radv  ok  61
+//   run2  2026-08-05  rocm         ok  75
+//   run3  2026-08-04  vulkan_radv  FAILED  60
+//   run4  2026-08-03  rocm         ok  74
+//   run5  2026-08-02  vulkan_radv  ok  59
+//   run6  2026-08-01  rocm         ok  71.4
+//
+// The roster accordion is ok-only (failed runs live on the Runs tab only):
+// run3 and run7 never appear as rows, never count toward a sweep total, and
+// never plot. rocm's ok sweeps are run0/run2/run4/run6 (4 total, all plot —
+// this is also what proves the fix: a limit=5-of-raw-runs fetch used to
+// truncate this to 3). vulkan_radv's ok sweeps are run1/run5 (2 total, both
+// plot). run7 (rocm, FAILED, newest overall) exercises the one failure
+// signal the roster DOES carry: rocm's "last attempt failed" badge, since
+// rocm's most recent attempt (run7) didn't succeed — even though rocm's
+// plotted trend (run0/run2/run4/run6) is unaffected. vulkan_radv's most
+// recent attempt (run1) succeeded, so vulkan_radv gets no badge despite
+// run3's older failure.
 const MODEL_RUNS_QWEN = [
+  { run_id: '2026-08-08T09:00:00Z-run7', lane: 'rocm', decode_ts_med: null, outcome: 'failed' },
   { run_id: '2026-08-07T09:00:00Z-run0', lane: 'rocm', decode_ts_med: 76 },
   { run_id: '2026-08-06T09:00:00Z-run1', lane: 'vulkan_radv', decode_ts_med: 61 },
   { run_id: '2026-08-05T09:00:00Z-run2', lane: 'rocm', decode_ts_med: 75 },
@@ -259,19 +290,35 @@ test('roster row expands and flags the regressed model', async ({ page }) => {
   await expect(page.getByText('current summary')).toBeVisible()
 })
 
-test('runs tab: outcome segmented filter narrows the table', async ({ page }) => {
+test('runs tab defaults its outcome filter to ok; the failed record is one click away via its chip', async ({ page }) => {
   await page.goto('/#benchmarks')
   await page.getByRole('tab', { name: 'Runs' }).click()
+
+  // Default view: the ok row shows, the oom row is hidden — the failure log
+  // opens quiet, not a wall of failures.
   await expect(page.locator('[data-testid="bench-run-row-2026-08-01T10:00:00Z-abc123"]')).toBeVisible()
+  await expect(page.locator('[data-testid="bench-run-row-2026-07-30T08:00:00Z-oom1"]')).toHaveCount(0)
 
   const okBtn = page.locator('button[title="filter: outcome = ok"]')
   await expect(okBtn).toBeVisible()
-  await okBtn.click()
   await expect(okBtn).toHaveClass(/on/)
+
+  // The chip counts every outcome regardless of the active filter — the
+  // failure volume is visible at a glance without the rows cluttering the view.
+  const oomBtn = page.locator('button[title="filter: outcome = oom"]')
+  await expect(oomBtn).toContainText('oom 1')
+
+  // Click the oom chip: reveals the failed row (still hides the ok one — a
+  // real single-outcome filter, not an "expand" toggle).
+  await oomBtn.click()
+  await expect(oomBtn).toHaveClass(/on/)
+  await expect(page.locator('[data-testid="bench-run-row-2026-07-30T08:00:00Z-oom1"]')).toBeVisible()
+  await expect(page.locator('[data-testid="bench-run-row-2026-08-01T10:00:00Z-abc123"]')).toHaveCount(0)
+
+  // "all" clears back to showing both.
+  await page.locator('.mtp-seg-btn', { hasText: 'all' }).click()
   await expect(page.locator('[data-testid="bench-run-row-2026-08-01T10:00:00Z-abc123"]')).toBeVisible()
-  // toggling back off
-  await okBtn.click()
-  await expect(okBtn).not.toHaveClass(/on/)
+  await expect(page.locator('[data-testid="bench-run-row-2026-07-30T08:00:00Z-oom1"]')).toBeVisible()
 })
 
 test('run drawer opens with real fixture data: identity, resolved flags + copy, summary', async ({ page }) => {
@@ -303,7 +350,7 @@ test('run drawer sparkline renders from the mocked /history payload with a regre
   await row.click()
 
   await expect(page.getByText(/history · decode t\/s · 3 pts for this cell/)).toBeVisible()
-  const spark = page.locator('svg').filter({ has: page.locator('circle') }).last()
+  const spark = page.locator('[data-testid="bench-sparkline"]')
   await expect(spark).toBeVisible()
   // The dip-highlighted stroke (the 08-01 point drops >10% off the trailing median).
   await expect(page.getByText(/regression flagged for this cell/)).toBeVisible()
@@ -351,7 +398,7 @@ test('roster columns are clickable sort headers with a direction indicator', asy
   await expect(decodeHeader).toHaveAttribute('aria-sort', 'none')
 })
 
-test('expanded accordion run history is capped to the latest 5 runs', async ({ page }) => {
+test('accordion fetches the FULL run history (limit=200) so the trend graph is never truncated', async ({ page }) => {
   await page.goto('/#benchmarks')
   const row = page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]')
   await expect(row).toBeVisible()
@@ -361,18 +408,21 @@ test('expanded accordion run history is capped to the latest 5 runs', async ({ p
   )
   await row.click()
   const req = await runsRequest
-  // Frontend requests exactly the latest-5 page from the backend...
-  expect(new URL(req.url()).searchParams.get('limit')).toBe('5')
+  // Frontend requests the full history page, not a 5-record slice — the
+  // prior limit=5 fetch fed the trend ~2.5 sweeps (a sweep is a pp row AND
+  // a tg row) and silently truncated the graph.
+  expect(new URL(req.url()).searchParams.get('limit')).toBe('200')
 
-  // ...and even though the mocked fixture hands back 7 records (MODEL_RUNS),
-  // the accordion's run-history chips never exceed 5 — the defensive
-  // client-side cap holds regardless of what the route returns.
-  await expect(page.getByText(/runs — \d+ sweep/)).toBeVisible()
+  // Only the DISPLAYED run list caps at the latest 5 sweeps — the fixture
+  // has 6 ok sweeps total (rocm×4 + vulkan_radv×2; the two FAILED records
+  // don't count at all on the roster tab, see the failure-handling tests
+  // below), so Compare's interleaved list caps down to 5 groups.
+  await expect(page.getByText('runs — 5 sweeps')).toBeVisible()
   const chipCount = await page.locator('text=/^\\d{4}-\\d{2}-\\d{2} /').count()
-  expect(chipCount).toBeLessThanOrEqual(5)
+  expect(chipCount).toBe(5)
 })
 
-test('a two-lane model defaults to Compare and renders two distinct decode series', async ({ page }) => {
+test('a two-lane model defaults to Compare and renders both lanes\' full (uncapped) trend', async ({ page }) => {
   await page.goto('/#benchmarks')
   await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
   await expect(page.getByText('current summary')).toBeVisible()
@@ -382,50 +432,87 @@ test('a two-lane model defaults to Compare and renders two distinct decode serie
   await expect(seg.locator('.mtp-seg-btn.on')).toHaveText('Compare')
   await expect(page.getByText('decode history · compare')).toBeVisible()
 
-  // Compare renders a rocm series (3 ok sweeps → 3 circle markers, its
-  // style). vulkan_radv only has 1 plotted point in this fixture (see the
-  // failed-sweep test below) so no dashed line draws yet — that's covered
-  // on its own further down; here we confirm rocm's series is real and
-  // undiluted by pooling.
+  // rocm has 4 ok sweeps in the FULL history (run0/run2/run4/run6) — all 4
+  // plot, not the 3 a latest-5-of-raw-runs truncation used to leave. run7
+  // (rocm, FAILED, the newest rocm record overall) never counts or plots —
+  // see the failure-handling test below. Circle markers are rocm's style.
   const chartSvg = page.locator('[data-testid="bench-compare-sparkline"]')
   await expect(chartSvg).toBeVisible()
-  await expect(chartSvg.locator('circle')).toHaveCount(3)
+  await expect(chartSvg.locator('circle')).toHaveCount(4)
+  // vulkan_radv has 2 ok sweeps (run1, run5 — run3 is outcome:'failed' and
+  // never counts either) — 2 square markers, its style.
+  await expect(chartSvg.locator('rect')).toHaveCount(2)
+
+  // The legend is a SIMPLE swatch + lane name — no counts inline.
+  const legend = page.locator('span[title*="sweep"]')
+  await expect(legend).toHaveCount(2)
+  await expect(legend.filter({ hasText: 'ROCM' })).toHaveText('ROCM')
+  await expect(legend.filter({ hasText: 'VULK' })).toHaveText('VULK')
 })
 
-test('sparkline series come from the runs list, not a content-addressed cell_key: two sweeps with unrelated identities still both plot', async ({ page }) => {
+test('sparkline series come from the runs list, not a content-addressed cell_key: every ok sweep in the full history plots', async ({ page }) => {
   await page.goto('/#benchmarks')
   await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
   await expect(page.getByText('current summary')).toBeVisible()
 
-  // Switch to ROCm-only: 3 ok sweeps at the same lane/kind/depth/config,
+  // Switch to ROCm-only: 4 ok sweeps at the same lane/kind/depth/config,
   // fetched purely from GET /api/benchmarks/runs?model= (RunSummary carries
-  // no cell_key at all) — every one of them plots.
+  // no cell_key at all) — every one of them plots, from the full history.
   await page.locator('.mtp-seg-btn', { hasText: 'ROCM' }).click()
-  await expect(page.getByText('ROCM · default · 3 sweeps · 3 plotted')).toBeVisible()
-  const spark = page.locator('svg').filter({ has: page.locator('circle') }).first()
-  await expect(spark.locator('circle')).toHaveCount(3)
+  // Caption is a simple legend now — "decode · ROCM", no numbers inline.
+  const caption = page.locator('div[title*="sweep"]')
+  await expect(caption).toHaveText('■ decode · ROCM')
+  // The honest counts live in the tooltip, one hover away.
+  await expect(caption).toHaveAttribute('title', 'ROCM: 4 sweeps · 4 plotted')
+
+  const spark = page.locator('[data-testid="bench-sparkline"]')
+  await expect(spark.locator('circle')).toHaveCount(4)
 })
 
-test('a failed sweep is excluded from the plotted series but counted in the honest caption', async ({ page }) => {
+test('the roster accordion is ok-only: failed runs never appear as rows, never count, never say "failed" in a tooltip', async ({ page }) => {
   await page.goto('/#benchmarks')
   await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
   await expect(page.getByText('current summary')).toBeVisible()
 
-  // vulkan_radv has 2 sweeps in the latest-5 window: run1 (ok) and run3
-  // (outcome:'failed'). The caption must show 2 sweeps / 1 plotted and name
-  // the excluded one — never silently show fewer points than "runs — N sweeps"
-  // implies without saying why (the operator-reported bug).
-  await expect(page.getByText('VULK · 2 sweeps · 1 plotted (1 failed / other-config)')).toBeVisible()
-
-  // Confirm the run-list heading directly below agrees on the same total —
-  // this is the number the operator compared against the sparkline.
   await page.locator('.mtp-seg-btn', { hasText: 'VULK' }).click()
+
+  // vulkan_radv has 3 RAW records (run1 ok, run3 FAILED, run5 ok) but only
+  // 2 sweeps on the roster tab — the failed one doesn't count at all, not
+  // even as an "excluded" tally item.
+  const caption = page.locator('div[title*="sweep"]')
+  await expect(caption).toHaveText('■ decode · VULK')
+  await expect(caption).toHaveAttribute('title', 'VULK: 2 sweeps · 2 plotted')
   await expect(page.getByText('runs — 2 sweeps')).toBeVisible()
 
-  // The run-list dot for the failed sweep is tooltip-labelled with the real
-  // outcome, not left unexplained.
-  const failedChip = page.locator('span', { hasText: '2026-08-04' })
-  await expect(failedChip.locator('span[title*="failed"]')).toHaveCount(1)
+  // No row, anywhere on this tab, for the failed sweep's date.
+  await expect(page.locator('span', { hasText: '2026-08-04' })).toHaveCount(0)
+  // "failed" never appears anywhere in this panel's text or tooltips — the
+  // Runs tab is the failure log, not here.
+  await expect(page.locator('[title*="failed" i]')).toHaveCount(0)
+  await expect(page.getByText('failed', { exact: false })).toHaveCount(0)
+})
+
+test('a lane\'s stat card shows a last-attempt-failed badge only when its MOST RECENT run did not succeed', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
+  await expect(page.getByText('current summary')).toBeVisible()
+
+  // rocm's newest record overall (run7, 2026-08-08) is FAILED — even though
+  // rocm's plotted trend (run0/run2/run4/run6) is unaffected, the stale-
+  // because-broken current number gets flagged.
+  const rocmBadge = page.locator('span', { hasText: 'last attempt failed 2026-08-08' })
+  await expect(rocmBadge).toBeVisible()
+  await expect(rocmBadge).toHaveAttribute('title', 'failed · 2026-08-08T09:00:00Z-run7')
+
+  // vulkan_radv's newest record (run1, 2026-08-06) succeeded — no badge,
+  // even though an OLDER vulkan_radv run (run3) failed.
+  await expect(page.locator('span', { hasText: 'last attempt failed 2026-08-04' })).toHaveCount(0)
+
+  // Same badge, same rule, in single-lane mode.
+  await page.locator('.mtp-seg-btn', { hasText: 'ROCM' }).click()
+  await expect(page.locator('span', { hasText: 'last attempt failed 2026-08-08' })).toBeVisible()
+  await page.locator('.mtp-seg-btn', { hasText: 'VULK' }).click()
+  await expect(page.locator('span', { hasText: 'last attempt failed' })).toHaveCount(0)
 })
 
 test('compare-mode delta badge is computed from the two lanes\' decode median', async ({ page }) => {
@@ -442,11 +529,14 @@ test('lane segment filters the run list to that lane (interleaved order in Compa
   await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
   await expect(page.getByText('current summary')).toBeVisible()
 
-  // Compare (default): interleaved, latest-5-capped => 5 distinct sweeps (3 rocm + 2 vulkan_radv).
+  // Compare (default): interleaved, latest-5-capped => 5 distinct ok sweeps (3 rocm + 2 vulkan_radv).
   await expect(page.getByText('runs — 5 sweeps')).toBeVisible()
 
+  // Single-lane: the cap applies to that lane's OWN full ok-sweep count, not
+  // a slice of the cross-lane cap — rocm's 4 sweeps and vulkan's 2 both fit
+  // under 5, so nothing is dropped by switching lanes.
   await page.locator('.mtp-seg-btn', { hasText: 'ROCM' }).click()
-  await expect(page.getByText('runs — 3 sweeps')).toBeVisible()
+  await expect(page.getByText('runs — 4 sweeps')).toBeVisible()
 
   await page.locator('.mtp-seg-btn', { hasText: 'VULK' }).click()
   await expect(page.getByText('runs — 2 sweeps')).toBeVisible()
@@ -462,4 +552,23 @@ test('a single-lane model hides the empty segment and skips Compare', async ({ p
   await expect(page.locator('.mtp-seg')).toHaveCount(0)
   await expect(page.getByText('throughput history')).toBeVisible()
   await expect(page.getByText('decode history · compare')).toHaveCount(0)
+})
+
+test('a single-sweep lane plots a marker, not a placeholder sentence', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  // llama-3.1-8b has exactly ONE ok sweep on its one lane (MODEL_RUNS_LLAMA) —
+  // the single-point case: it must still be PLOTTED (a centered marker +
+  // value), never "1 data point" text and never the "no series yet" empty state.
+  await page.locator('[data-testid="bench-model-row-llama-3.1-8b"]').click()
+  await expect(page.getByText('current summary')).toBeVisible()
+
+  const spark = page.locator('[data-testid="bench-sparkline"]')
+  await expect(spark).toBeVisible()
+  await expect(spark.locator('circle')).toHaveCount(1)
+  await expect(spark.getByText('18.6')).toBeVisible()
+  await expect(spark.getByText('1 data point')).toHaveCount(0)
+  await expect(spark.getByText('no series yet')).toHaveCount(0)
+
+  const caption = page.locator('div[title*="sweep"]')
+  await expect(caption).toHaveAttribute('title', 'VULK: 1 sweep · 1 plotted')
 })

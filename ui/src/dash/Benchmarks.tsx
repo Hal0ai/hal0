@@ -339,11 +339,21 @@ function CapIcons({ caps }: { caps: string[] }) {
 function Sparkline({ points }: { points: HistoryPoint[] }) {
   const W = 260, H = 54, pad = 6;
   const pts = points.map((p, i) => ({ i, v: p.decode_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
-  if (pts.length < 2) {
+  if (pts.length === 0) {
     return (
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
-        <text x={W / 2} y={H / 2 + 3} textAnchor="middle" fill="var(--fg-4)" fontSize={9}>
-          {pts.length === 1 ? '1 data point' : 'no series yet'}
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-sparkline">
+        <text x={W / 2} y={H / 2 + 3} textAnchor="middle" fill="var(--fg-4)" fontSize={9}>no series yet</text>
+      </svg>
+    );
+  }
+  if (pts.length === 1) {
+    // A single sweep still gets PLOTTED (centered marker + value), not a
+    // placeholder sentence — the next sweep extends it into a line.
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-sparkline">
+        <circle cx={W / 2} cy={H / 2} r={2.5} fill="var(--accent)" />
+        <text x={W / 2} y={H / 2 - 7} textAnchor="middle" fill="var(--fg-3)" fontSize={9} fontFamily="var(--mono)">
+          {pts[0].v.toFixed(1)}
         </text>
       </svg>
     );
@@ -373,7 +383,7 @@ function Sparkline({ points }: { points: HistoryPoint[] }) {
   }
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-sparkline">
       {pfPath && <path d={pfPath} fill="none" stroke="var(--fg-4)" strokeWidth={1.5} opacity={0.6} />}
       <path d={path} fill="none" stroke={dipped ? 'var(--warn)' : 'var(--accent)'} strokeWidth={1.5} />
       {pts.map((p, k) => (
@@ -515,10 +525,11 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
     const [cellsR, histR, runsR] = await Promise.all([
       apiGet<{ cells: CellRow[] }>(`/api/benchmarks/cells?model=${q}`).catch(() => ({ cells: [] })),
       apiGet<{ points: HistoryPoint[] }>(`/api/benchmarks/history?model=${q}`).catch(() => ({ points: [] })),
-      // Accordion run history is capped to the latest 5 runs — fetch exactly
-      // that page (the API returns newest-first) rather than 24 and trimming
-      // client-side.
-      apiGet<{ runs: RunSummary[] }>(`/api/benchmarks/runs?model=${q}&limit=5`).catch(() => ({ runs: [] })),
+      // Fetch the model's FULL run history: the trend sparkline needs every
+      // sweep (a limit-5 fetch fed it ~2.5 sweeps — each sweep is a pp row
+      // AND a tg row — which silently truncated the graph). The displayed
+      // run list caps itself to the latest 5 sweeps client-side.
+      apiGet<{ runs: RunSummary[] }>(`/api/benchmarks/runs?model=${q}&limit=200`).catch(() => ({ runs: [] })),
     ]);
     setDetailCache(prev => ({
       ...prev,
@@ -750,8 +761,19 @@ function CompareSparkline({ series }: { series: { lane: string; points: HistoryP
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-compare-sparkline">
       {prepared.map(s => {
-        if (s.pts.length < 2) return null;
+        if (s.pts.length === 0) return null;
         const x = (i: number) => pad + (s.n === 1 ? (W - 2 * pad) / 2 : (i * (W - 2 * pad)) / (s.n - 1));
+        if (s.pts.length === 1) {
+          // One sweep on this lane: plot its marker on the shared y-scale.
+          const style1 = laneStyleFor(s.lane);
+          return (
+            <g key={s.lane}>
+              {style1.marker === 'square'
+                ? <rect x={x(s.pts[0].i) - 2.2} y={y(s.pts[0].v) - 2.2} width={4.4} height={4.4} fill={laneColor(s.lane)} />
+                : <circle cx={x(s.pts[0].i)} cy={y(s.pts[0].v)} r={2.4} fill={laneColor(s.lane)} />}
+            </g>
+          );
+        }
         const dipIdx = s.pts.findIndex((p, k) => k > 0 && p.v < s.pts[k - 1].v * 0.9);
         const style = laneStyleFor(s.lane);
         const path = s.pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
@@ -807,6 +829,22 @@ function LaneDot({ lane }: { lane: string }) {
   return <span aria-hidden="true" style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: laneColor(lane) }} />;
 }
 
+// The roster tab's one failure signal: the lane's current number is stale
+// because its most recent attempt didn't succeed.
+function LastAttemptBadge({ run }: { run: RunSummary }) {
+  return (
+    <span
+      title={`${run.outcome} · ${run.run_id}`}
+      style={{
+        fontSize: 9, padding: '0.05rem 0.4rem', borderRadius: '0.3rem',
+        border: '1px solid var(--err)', color: 'var(--err)', whiteSpace: 'nowrap',
+      }}
+    >
+      last attempt failed {runDate(run.run_id)}
+    </span>
+  );
+}
+
 type RunGroup = { lane: string; depth: number | null; config: string; t: number; runs: RunSummary[] };
 
 // The accordion's trend, built from the model-scoped RUNS list (never
@@ -835,7 +873,6 @@ function ModelDetail({ model: m, detail }: {
   model: RosterModel;
   detail: { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] };
 }) {
-  const d = m.detail || {};
   const { cells, points, runs } = detail;
 
   // Lanes with actual data for this model — segments with zero runs are
@@ -870,13 +907,18 @@ function ModelDetail({ model: m, detail }: {
   })();
   const matrix = mode === 'compare' || !mode ? matrixAll : matrixAll.filter(g => g.lane === mode);
 
-  // group runs by (lane, depth, config), clustered within 2 minutes
+  // group OK runs by (lane, depth, config), clustered within 2 minutes.
+  // Failed runs live on the Runs tab only — the roster accordion (run list,
+  // sweep counts, trend series) is ok-only: a sweep that never succeeded
+  // isn't a data point to plot or a row to show here, it's a failure to
+  // look up in the failure log.
   const runGroupsAll = (() => {
-    // Latest 5 runs only — `runs` is already newest-first off the API, so
-    // this is a defensive cap independent of the fetch's own `limit`.
-    const latest = runs.slice(0, 5);
+    // Group over the FULL history: the trend sparkline consumes these
+    // groups, and capping here silently truncated the graph. The rendered
+    // run list applies its own latest-5 cap below.
     const byLD = new Map<string, RunSummary[]>();
-    for (const r of latest) {
+    for (const r of runs) {
+      if (r.outcome !== 'ok') continue;
       const k = `${r.lane}|${r.depth}|${r.config || 'default'}`;
       if (!byLD.has(k)) byLD.set(k, []);
       byLD.get(k)!.push(r);
@@ -895,10 +937,32 @@ function ModelDetail({ model: m, detail }: {
     return groups;
   })();
   // Interleaved chronological order is kept in Compare; a single-lane
-  // segment filters the (already latest-5-capped) list down to that lane.
-  const runGroups = mode === 'compare' || !mode ? runGroupsAll : runGroupsAll.filter(g => g.lane === mode);
+  // segment filters down to that lane. Only the DISPLAYED list caps at the
+  // latest 5 sweeps — the sparklines above read the uncapped groups.
+  const runGroups = (mode === 'compare' || !mode ? runGroupsAll : runGroupsAll.filter(g => g.lane === mode)).slice(0, 5);
 
   const laneStats = Object.fromEntries(lanesPresent.map(lane => [lane, laneSummary(lane, cells)]));
+
+  // The one failure signal the roster carries: if a lane's MOST RECENT
+  // attempt (looking at the raw, unfiltered runs — not the ok-only groups
+  // above) didn't succeed, the lane's current numbers are stale-because-
+  // broken. Hiding that would misrepresent health, so it gets a small badge
+  // on the lane's headline card — the only place "failed" appears on the
+  // roster tab.
+  const lastAttemptFailed: Record<string, RunSummary | null> = (() => {
+    const newestByLane: Record<string, RunSummary> = {};
+    for (const r of runs) {
+      if (!r.lane) continue;
+      const prev = newestByLane[r.lane];
+      if (!prev || String(r.run_id) > String(prev.run_id)) newestByLane[r.lane] = r;
+    }
+    const out: Record<string, RunSummary | null> = {};
+    for (const lane of lanesPresent) {
+      const newest = newestByLane[lane];
+      out[lane] = newest && newest.outcome !== 'ok' ? newest : null;
+    }
+    return out;
+  })();
 
   return (
     <div>
@@ -936,6 +1000,7 @@ function ModelDetail({ model: m, detail }: {
                       {lanesPresent.map((lane, i) => {
                         const val = laneStats[lane]?.[key] as number | null;
                         const delta = i > 0 && baseVal != null && val != null && baseVal !== 0 ? ((val - baseVal) / baseVal) * 100 : null;
+                        const failedRun = label === 'decode' ? lastAttemptFailed[lane] : null;
                         return (
                           <div key={lane} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: mono, fontSize: 12 }}>
                             <LaneDot lane={lane} />
@@ -946,6 +1011,7 @@ function ModelDetail({ model: m, detail }: {
                                 {delta >= 0 ? '+' : ''}{delta.toFixed(1)}%
                               </span>
                             )}
+                            {failedRun && <LastAttemptBadge run={failedRun} />}
                           </div>
                         );
                       })}
@@ -981,6 +1047,9 @@ function ModelDetail({ model: m, detail }: {
                   <div style={{ fontFamily: mono, fontSize: 8.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-4)', marginTop: 2 }}>
                     {label}
                   </div>
+                  {i === 0 && lastAttemptFailed[mode] && (
+                    <div style={{ marginTop: 4 }}><LastAttemptBadge run={lastAttemptFailed[mode]!} /></div>
+                  )}
                 </div>
               ))}
             </div>
@@ -1014,17 +1083,21 @@ function ModelDetail({ model: m, detail }: {
             {mode === 'compare' ? (
               <>
                 <CompareSparkline series={lanesPresent.map(lane => ({ lane, points: sweepSeries(lane, laneStats[lane]?.depth ?? null, runGroupsAll).points }))} />
+                {/* Simple legend only — swatch + lane name. The honest sweep
+                    counts (why fewer points than the run list below implies)
+                    live in the title tooltip, one hover away, not inline. */}
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.7rem', fontSize: 10, color: 'var(--fg-4)', marginTop: '0.3rem' }}>
                   {lanesPresent.map(lane => {
                     const style = laneStyleFor(lane);
                     const s = sweepSeries(lane, laneStats[lane]?.depth ?? null, runGroupsAll);
+                    const tip = `${laneLabel(lane)}: ${s.total} sweep${s.total === 1 ? '' : 's'} · ${s.plotted} plotted`
+                      + (s.excluded > 0 ? ` (${s.excluded} other-config)` : '');
                     return (
-                      <span key={lane} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                      <span key={lane} title={tip} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                         <svg width={16} height={8} aria-hidden="true">
                           <line x1={0} y1={4} x2={16} y2={4} stroke={laneColor(lane)} strokeWidth={1.5} strokeDasharray={style.dash} />
                         </svg>
-                        {laneLabel(lane)} &middot; {s.total} sweep{s.total === 1 ? '' : 's'} &middot; {s.plotted} plotted
-                        {s.excluded > 0 && <span> ({s.excluded} failed / other-config)</span>}
+                        {laneLabel(lane)}
                       </span>
                     );
                   })}
@@ -1034,14 +1107,14 @@ function ModelDetail({ model: m, detail }: {
               <>
                 {(() => {
                   const s = sweepSeries(mode, laneStats[mode]?.depth ?? null, runGroupsAll);
+                  const tip = `${laneLabel(mode)}: ${s.total} sweep${s.total === 1 ? '' : 's'} · ${s.plotted} plotted`
+                    + (s.excluded > 0 ? ` (${s.excluded} other-config)` : '');
                   return (
                     <>
                       <Sparkline points={s.points} />
-                      <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
-                        <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode
-                        &middot; {laneLabel(mode)} &middot; default &middot; {s.total} sweep{s.total === 1 ? '' : 's'} &middot; {s.plotted} plotted
-                        {s.excluded > 0 && <span> ({s.excluded} failed / other-config)</span>}
-                        {d.image && <span> &middot; {d.image.split('/').pop()}</span>}
+                      {/* Simple legend only — see the Compare branch's comment above. */}
+                      <div title={tip} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
+                        <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode &middot; {laneLabel(mode)}
                       </div>
                     </>
                   );
@@ -1092,7 +1165,10 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('');
-  const [outcomeFilter, setOutcomeFilter] = useState<string | null>(null);
+  // Default to ok — this is the failure log, but a wall of failures on open
+  // is noise; the chips (still counted over every outcome) reveal
+  // failed/oom/etc on click. "all" resets to null.
+  const [outcomeFilter, setOutcomeFilter] = useState<string | null>('ok');
   const [expanded, setExpanded] = useState<string | null>(null);
   const [recordCache, setRecordCache] = useState<Record<string, any>>({});
 
