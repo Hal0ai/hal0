@@ -1626,8 +1626,19 @@ fi
 # convergent fix writes `[containers] apparmor_profile="unconfined"` to
 # /etc/containers/containers.conf and retries — detected from the podman SMOKE
 # FAILURE (not OS/LXC sniffing), idempotent, unit-tested against recorded fakes
-# (see src/hal0/agents/containers_apparmor.py). Runs the shared, tested Python
-# module via the FHS venv so bash and Python never diverge.
+# (see src/hal0/agents/containers_apparmor.py).
+#
+# #1563: this used to be the ONLY place this fix ran — long after
+# `preflight_container_runtime` (line ~338, required mode) had already
+# hard-`die()`d on the exact same failure, making this dead code on the
+# platform shape it exists for. `_container_runtime_gate` in
+# installer/lib/preflight.sh now runs the same remediation (as a bare script,
+# since the venv/hal0 package don't exist yet at that earlier point) and
+# retries before failing, so this block is reached only once podman already
+# works. It stays as a defensive, idempotent no-op re-check via the FHS venv
+# — e.g. if `install.sh` is ever invoked with the early gate skipped/patched
+# out, or a future non-install caller reaches this point with a still-broken
+# profile.
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/null 2>&1 \
     && [[ -x "${VENV_DIR}/bin/python" ]]; then
     if "${VENV_DIR}/bin/python" -m hal0.agents.containers_apparmor; then

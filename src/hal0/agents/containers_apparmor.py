@@ -19,10 +19,21 @@ config written (once) and the smoke retried.
 
 Every subprocess is injected (``run``) so the whole detect→write→retry chain is
 unit-tested against recorded fakes with no real podman or ``/etc`` writes.
+
+#1563: this module is also invoked as a bare script (``python
+containers_apparmor.py``, NOT ``python -m hal0.agents.containers_apparmor``)
+from ``installer/lib/preflight.sh``'s ``_container_runtime_gate`` — the EARLY
+hard podman preflight gate that runs before the venv exists / hal0 is
+pip-installed. Bare-script invocation skips the ``hal0.agents`` package
+``__init__`` (and its heavy transitive deps), but this file is still imported
+directly, so ``structlog`` — the one third-party import here — is made
+optional below with a stdlib fallback. Everything else is stdlib-only
+(``tomllib`` has been stdlib since 3.11; hal0's floor is 3.12).
 """
 
 from __future__ import annotations
 
+import os
 import subprocess  # nosec B404 — smoke-tests the local podman
 import tomllib
 from collections.abc import Callable
@@ -30,9 +41,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import structlog
+try:
+    import structlog
 
-log = structlog.get_logger(__name__)
+    log = structlog.get_logger(__name__)
+except ImportError:  # pragma: no cover - exercised by the early-installer path
+    # structlog isn't on the interpreter yet when this runs as a bare script
+    # before `pip install`. Fall back to a tiny stdlib logger with the same
+    # `log.info(event, **kw)` call shape used below.
+    import logging
+
+    class _FallbackLog:
+        _logger = logging.getLogger(__name__)
+
+        def info(self, event: str, **kw: Any) -> None:
+            extra = " ".join(f"{k}={v}" for k, v in kw.items())
+            self._logger.info("%s", f"{event} {extra}".rstrip())
+
+    log = _FallbackLog()  # type: ignore[assignment]
 
 #: Canonical podman config the fix lands in (halo150 R4).
 CONTAINERS_CONF = Path("/etc/containers/containers.conf")
@@ -214,13 +240,21 @@ __all__ = [
 
 
 def _main() -> int:
-    """CLI entry (``python -m hal0.agents.containers_apparmor``) for install.sh.
+    """CLI entry — run both as ``python -m hal0.agents.containers_apparmor``
+    (install.sh's post-install re-check) and as a bare script
+    (``python containers_apparmor.py``, install.sh's early
+    ``_container_runtime_gate`` remediation, #1563).
 
     Runs the convergent preflight and prints ``<outcome> wrote=<bool>``. Exit 0
     unless the retry still failed after writing the fix (``retry_failed`` → 1),
     so the installer can surface a genuine, unresolved apparmor blocker.
+
+    ``HAL0_APPARMOR_CONF`` overrides the target config path — used by tests to
+    point this at a throwaway file instead of the real
+    ``/etc/containers/containers.conf``.
     """
-    result = ensure_podman_apparmor_usable()
+    conf_path = Path(os.environ.get("HAL0_APPARMOR_CONF", str(CONTAINERS_CONF)))
+    result = ensure_podman_apparmor_usable(conf_path=conf_path)
     print(f"apparmor-preflight: {result.outcome} wrote={result.wrote_config}")
     if result.detail:
         print(f"apparmor-preflight-detail: {result.detail}")
