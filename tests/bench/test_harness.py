@@ -26,6 +26,13 @@ from __future__ import annotations
 import json
 
 import pytest
+
+from hal0.bench.devices import (
+    TIER_AMD,
+    TIER_CPU,
+    TIER_NVIDIA,
+    BenchDeviceSpec,
+)
 from hal0.bench.harness import (
     BENCHCTL,
     MAX_ATTEMPTS,
@@ -38,13 +45,6 @@ from hal0.bench.harness import (
     default_lanes,
     lane_specs,
     run_cell,
-)
-
-from hal0.bench.devices import (
-    TIER_AMD,
-    TIER_CPU,
-    TIER_NVIDIA,
-    BenchDeviceSpec,
 )
 from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE
 
