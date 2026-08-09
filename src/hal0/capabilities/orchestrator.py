@@ -709,10 +709,14 @@ class CapabilityOrchestrator:
     async def _ensure_slot_exists(self, slot_name: str, selection: CapabilitySelection) -> None:
         """Auto-create the slot TOML on first use of a non-builtin child.
 
-        ``rerank`` is the canonical example: it isn't a builtin
-        slot, so the SlotManager would raise SlotNotFound on the first
-        load. We synthesise a minimal config from the selection and let
-        ``SlotManager.create()`` do the persist + state initialisation.
+        Guards a hypothetical capability slot with no static install seed:
+        without a TOML on disk, ``SlotManager`` would raise ``SlotNotFound``
+        on the first load. We synthesise a minimal config from the selection
+        and let ``SlotManager.create()`` do the persist + state
+        initialisation. In practice every current capability slot (``rerank``,
+        ``tts``, ``img``, ...) ships a static install seed
+        (``installer/etc-hal0/slots/*.toml``), so the ``resolve_slot_stem``
+        probe below finds it already on disk and this method no-ops.
 
         The "does it already exist?" probe goes through the bilingual layout
         seam (#1643): a literal ``<name>.toml`` probe missed every slot on an

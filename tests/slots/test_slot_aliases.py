@@ -78,6 +78,29 @@ def test_resolve_alias_unknown_passthrough():
     assert SlotManager._resolve_alias("my-custom-slot") == "my-custom-slot"
 
 
+def test_resolve_alias_embed_rerank_with_no_literal_file_resolves_to_rerank(tmp_path):
+    """No literal ``embed-rerank.toml`` on disk → the alias redirect applies."""
+    slots_dir = tmp_path / "slots"
+    slots_dir.mkdir()
+    with patch("hal0.config.paths.slots_config_dir", return_value=slots_dir):
+        assert SlotManager._resolve_alias("embed-rerank") == "rerank"
+
+
+def test_resolve_alias_literal_embed_rerank_on_disk_takes_precedence(tmp_path):
+    """A literal orphaned ``embed-rerank.toml`` (pre-rename box) must NOT be
+    shadowed by the alias redirect — otherwise every public method (delete
+    included, since ``_resolve_alias`` gates all of them) would silently
+    retarget the orphan onto the canonical ``rerank`` slot. See the policy
+    documented at ``hal0.api.hal0_chat_slot_alias_map`` (api/__init__.py)."""
+    slots_dir = tmp_path / "slots"
+    slots_dir.mkdir()
+    (slots_dir / "embed-rerank.toml").write_text(
+        '[slot]\nname = "embed-rerank"\ntype = "embedding"\nenabled = true\n'
+    )
+    with patch("hal0.config.paths.slots_config_dir", return_value=slots_dir):
+        assert SlotManager._resolve_alias("embed-rerank") == "embed-rerank"
+
+
 # ── 3. Temp slot dir fixtures ────────────────────────────────────────────────
 
 
