@@ -1120,7 +1120,62 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
             with contextlib.suppress(OSError):
                 inner.rmdir()
 
+    # #1723: `dest.mkdir()` above is subject to the invoking process's umask.
+    # On a box with UMASK 002 the staged tree lands mode 0775 (group-
+    # writable), which `assert_trusted_release_dir` then correctly refuses at
+    # activate time — stage manufactured the exact condition the gate exists
+    # to reject. Normalize unconditionally so the gate's precondition holds
+    # by construction, independent of whatever umask the caller happens to
+    # run under.
+    _normalize_staged_tree(dest, job_id=job_id)
+
     log.info("updater.extract_ok", job_id=job_id, dest=str(dest))
+
+
+def _normalize_staged_tree(dest: Path, *, job_id: str | None = None) -> None:
+    """Strip group/other write bits from ``dest`` and chown it root:root.
+
+    Defends the precondition ``assert_trusted_release_dir`` enforces at
+    activate time: the staged tree and its parent must be uid-0-owned and
+    not group/other writable. ``assert_trusted_release_dir`` only inspects
+    the top-level directory today, but this normalizes every entry
+    ``tf.extractall`` wrote — defense in depth so a future recursive gate,
+    or a subdirectory an operator inspects by hand, is never the surprise.
+
+    Ownership is reset to root:root only when running as root (the
+    privileged seam path, where root just extracted the tree and files are
+    already root-owned by construction — this is belt-and-suspenders, not
+    load-bearing). A dev/CI/``HAL0_HOME`` run has no privilege boundary to
+    protect and no permission to chown to root anyway, so it only fixes
+    mode bits. Failures are raised, not swallowed: an un-normalized stage is
+    exactly the bug this function exists to prevent, so a silent best-effort
+    here would just move the failure to a more confusing place (activate).
+    """
+    if os.geteuid() == 0:
+        try:
+            os.chown(dest, 0, 0)
+            for path in dest.rglob("*"):
+                os.chown(path, 0, 0, follow_symlinks=False)
+        except OSError as exc:
+            raise UpdateExtractError(
+                f"failed to normalize staged release tree ownership: {exc}",
+                details={"path": str(dest), "error": str(exc)},
+            ) from exc
+
+    try:
+        entries = (dest, *dest.rglob("*"))
+        for path in entries:
+            if path.is_symlink():
+                continue
+            mode = path.stat().st_mode
+            normalized = mode & ~0o022
+            if normalized != mode:
+                path.chmod(normalized)
+    except OSError as exc:
+        raise UpdateExtractError(
+            f"failed to normalize staged release tree permissions: {exc}",
+            details={"path": str(dest), "error": str(exc)},
+        ) from exc
 
 
 def _maybe_run_config_migrations(
