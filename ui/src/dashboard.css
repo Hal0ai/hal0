@@ -351,36 +351,28 @@ a { color: inherit; text-decoration: none; }
 
 /* Notification bell — icon-only launcher + anchored dropdown panel. */
 .tb-bell-wrap { position: relative; display: inline-flex; }
+/* Topbar bell — the shared .iconbtn idiom (class kept for testids/selectors).
+   Amber is reserved for the live signals: unread state and the open popover. */
 .tb-bell {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  background: var(--bg-2);
-  color: var(--fg-2);
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--rad-sm);
+  background: transparent;
+  color: var(--fg-3);
   cursor: pointer;
-  transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
-.tb-bell svg {
-  color: #fff;
-  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.55));
-  transition: color .16s ease, filter .16s ease;
-}
-.tb-bell:hover { border-color: var(--accent-line); background: var(--accent-soft); }
-.tb-bell:hover svg,
-.tb-bell.on svg,
-.tb-bell.has svg {
-  color: var(--accent);
-  filter: drop-shadow(0 0 5px var(--accent)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
-}
+.tb-bell:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
+.tb-bell.has svg { color: var(--accent); }
 .tb-bell.on {
+  color: var(--accent);
   border-color: var(--accent-line);
   background: var(--accent-soft);
-  box-shadow: 0 0 0 1px var(--accent-line), 0 0 14px -4px var(--accent);
 }
 .tb-bell-badge {
   position: absolute;
@@ -402,30 +394,22 @@ a { color: inherit; text-decoration: none; }
   box-shadow: 0 0 0 2px var(--bg-1);
 }
 /* Documentation launcher — same icon-button chrome as the notification bell. */
+/* Topbar docs link — shared .iconbtn idiom. */
 .tb-docs {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  background: var(--bg-2);
-  color: var(--fg-2);
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--rad-sm);
+  background: transparent;
+  color: var(--fg-3);
   cursor: pointer;
   text-decoration: none;
-  transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
-.tb-docs svg {
-  color: #fff;
-  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.55));
-  transition: color .16s ease, filter .16s ease;
-}
-.tb-docs:hover { border-color: var(--accent-line); background: var(--accent-soft); }
-.tb-docs:hover svg {
-  color: var(--accent);
-  filter: drop-shadow(0 0 5px var(--accent)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
-}
+.tb-docs:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
 .notif-pop {
   position: absolute;
   top: calc(100% + 8px);
@@ -2294,15 +2278,22 @@ select.npu-sel {
 }
 .mdl-sort-grp { flex-shrink: 0; flex-wrap: nowrap; }
 .mdl-clear:hover { color: var(--err); border-color: var(--err-line); }
+/* Filter chips — the shared .fpill idiom (kept under the .mdl-chip name
+   because e2e selectors target it). */
 .mdl-chip {
-  padding: 3px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px;
   border: 1px solid var(--line);
-  border-radius: 3px;
-  background: transparent;
+  border-radius: var(--rad-pill);
+  background: var(--bg-1);
   font-family: var(--jbm);
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--fg-3);
   cursor: pointer;
+  transition: all var(--dur-fast) var(--ease);
 }
 .mdl-chip:hover { color: var(--fg); border-color: var(--line-strong); }
 .mdl-chip.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
@@ -2704,16 +2695,16 @@ select.npu-sel {
   display: none;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  color: var(--fg-2);
+  border: 1px solid transparent;
+  border-radius: var(--rad-sm);
+  color: var(--fg-3);
   cursor: pointer;
 }
-.tb-menu:hover { color: var(--fg); border-color: var(--line-strong); }
+.tb-menu:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
 
 .nav-drawer-backdrop {
   position: fixed;

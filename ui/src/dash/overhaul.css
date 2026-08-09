@@ -157,10 +157,10 @@
 .sh {
   height: 28px;
   font-family: var(--jbm);
-  font-size: 9px;
+  font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--fg-4);
+  letter-spacing: 0.1em;
+  color: var(--fg-3);
   border-bottom: 1px solid var(--line);
 }
 
