@@ -77,7 +77,7 @@ def base_bin_dir(tmp_path: Path) -> Path:
     # Tests run as a non-root user, so hermes-prereqs.sh's `id -u` check
     # keeps the `sudo ` prefix pkg_install_cmd emits — a passthrough fake
     # sudo keeps the install commands runnable without real privileges.
-    _write_exe(d / "sudo", "#!/usr/bin/env bash\nexec \"$@\"\n")
+    _write_exe(d / "sudo", '#!/usr/bin/env bash\nexec "$@"\n')
     return d
 
 
