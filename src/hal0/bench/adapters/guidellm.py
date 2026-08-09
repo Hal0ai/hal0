@@ -188,6 +188,13 @@ def _default_runner(argv: list[str], timeout_s: float | None) -> tuple[int, str,
     timeout kills guidellm's whole worker pool, not just the parent (mirrors
     ``runner._run_subprocess``). Tests inject a fake that needs no real
     ``guidellm`` on PATH at all."""
+    # Resolve the console-script through PATH-or-venv-bin: the service PATH
+    # never includes the venv bin where a pip-installed tool's script lands.
+    from . import resolve_tool
+
+    head = resolve_tool(argv[0])
+    if head is not None:
+        argv = [head, *argv[1:]]
     proc = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,

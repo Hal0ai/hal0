@@ -70,12 +70,14 @@ class TestEnsureTasks:
         assert evalrun.ensure_tasks() == []
 
 
-def test_tool_eval_missing_checks_path(monkeypatch):
-    monkeypatch.setattr(evalrun.shutil, "which", lambda name: None)
-    msg = evalrun.tool_eval_missing()
-    assert msg and "tool-eval-bench" in msg
+def test_tool_eval_missing_checks_importability(monkeypatch):
+    import importlib.util
 
-    monkeypatch.setattr(evalrun.shutil, "which", lambda name: "/usr/bin/tool-eval-bench")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    msg = evalrun.tool_eval_missing()
+    assert msg and "tool_eval_bench" in msg
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
     assert evalrun.tool_eval_missing() is None
 
 

@@ -40,7 +40,7 @@ def _adapter_tools_present(monkeypatch):
     KIND). CI has neither guidellm nor llama-benchy installed, so every test
     in this module that plans one of those kinds needs the gate satisfied —
     autouse so individual tests don't have to remember it."""
-    monkeypatch.setattr(planner.shutil, "which", lambda _name: "/usr/bin/true")
+    monkeypatch.setattr(planner.adapters, "resolve_tool", lambda _name: "/usr/bin/true")
 
 
 @pytest.fixture
@@ -173,7 +173,7 @@ class TestTierBCCmd:
         """Bench Phase 3 design decision 5: a kind whose adapter binary is
         missing fails at PLAN time, naming the pin — never a mid-session
         per-cell failure loop."""
-        monkeypatch.setattr(planner.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(planner.adapters, "resolve_tool", lambda _name: None)
         with pytest.raises(ValueError, match=r"guidellm==0\.7\.3"):
             plan(_suite(["chat"]), _registry(), Store(tmp_path))
 

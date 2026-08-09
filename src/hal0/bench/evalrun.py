@@ -29,7 +29,6 @@ scores across the hardening boundary" contract).
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -59,10 +58,12 @@ def tool_eval_missing() -> str | None:
     it can). Checked up-front by the CLI and worker so a box without it gets
     one clean message instead of a per-scenario traceback (the same #1526
     rule the old ``hermes_missing`` enforced, now for the pinned tool)."""
-    if shutil.which(TOOL_EVAL_BENCH_BIN) is None:
+    import importlib.util
+
+    if importlib.util.find_spec("tool_eval_bench") is None:
         return (
-            f"{TOOL_EVAL_BENCH_BIN!r} not found on PATH (pin: {TOOL_EVAL_BENCH_PIN}) — "
-            "agentic eval needs tool-eval-bench installed"
+            f"tool_eval_bench is not importable by this interpreter (pin: {TOOL_EVAL_BENCH_PIN}) — "
+            "agentic eval needs tool-eval-bench installed in hal0's venv"
         )
     return None
 
