@@ -354,11 +354,13 @@ full detail in the
 
 These carry forward from `1.0.0-rc.1`. The first two concern **upgrading from
 0.9.8** — the path most existing boxes take into 1.0; the third affects
-**fresh installs**.
+**fresh installs**; the fourth affects boxes that skipped straight from
+`rc.1` to this release.
 
 - **The profile-catalog reset does not fire during the 0.9.8 → 1.0 update itself** (#1585, still open). The update's commit phase runs inside the *old* (0.9.8) daemon, which predates the reset — so an upgraded box keeps its `profiles.toml` and `meta.schema_version = 1` until the **next** update applied by v1.0 code. Nothing is lost (the reset is biased against deletion), but `hal0 update` on such a box reports "nothing to apply" without mentioning the outstanding reset.
 - **Updating *from* 0.9.8 ends with a spurious error from the old client.** The 0.9.8 CLI polls job status through the API it is restarting, treats the mid-restart connection refusal as fatal, and exits 1 after the update has in fact applied. The fix (#1540) ships in the v1.0 CLI, but the client driving a 0.9.8 → 1.0 update is by definition the old one. Verify the real outcome with `hal0 --version` and `curl http://127.0.0.1:8080/api/health`.
 - **First-boot installs can lose the dpkg lock race to `unattended-upgrades`** (#1584, still open) — the hermes-agent provisioning step degrades gracefully with a remediation line (`hal0 agent install hermes`) rather than failing the install.
+- **A box still on `1.0.0-rc.1` sees no update available for this GA release** (#1663/#1640, fixed going forward but not retroactively — a running rc.1 daemon can't rerun its own fix). Its venv predates the prerelease-aware version comparison, so the old naive tuple fallback ranks `1.0.0rc1` above `1.0.0` and `hal0 update`/`/api/updates/check` both report nothing to do. Boxes that updated `rc.1` → `rc.2` first are unaffected — the rc-vs-rc comparison orders correctly even on the old fallback. If you're still on `rc.1`, pull this release directly with `hal0 update --target 1.0.0`, which bypasses the `update_available` gate entirely.
 
 ### Security
 
