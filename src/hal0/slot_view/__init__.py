@@ -51,7 +51,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from hal0.model_meta import device_to_backend
-from hal0.slots.activation import autoload_enabled, claims_npu_anchor, npu_modality_active
+from hal0.slots.activation import (
+    autoload_enabled,
+    claims_npu_anchor,
+    effective_npu_table,
+    npu_modality_active,
+)
 from hal0.slots.naming import slot_instance_token, slot_unit_name
 from hal0.slots.reaper import eviction_priority
 from hal0.slots.reaper import is_pinned as reaper_is_pinned
@@ -371,11 +376,13 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         entry["llamacpp_args"] = extra_args
 
         # [npu] table: expose asr/embed toggles so the dashboard can seed
-        # its NPU modality controls. Raw TOML dict carries [npu] at the
-        # top level; also check extra["npu"] as a fallback for any
-        # validated-dump shape.
-        npu_table = cfg.get("npu") or (cfg.get("extra") or {}).get("npu")
-        if npu_table and isinstance(npu_table, dict):
+        # its NPU modality controls. effective_npu_table() also folds in the
+        # pre-[npu]-table [defaults].load_asr/load_embed fallback
+        # providers/flm.py still honors when a pre-1.0 config has no [npu]
+        # table at all (#1670) -- without it the pill renders off even while
+        # the modality is actually running.
+        npu_table = effective_npu_table(cfg)
+        if npu_table:
             entry["npu"] = {
                 "asr": bool(npu_table.get("asr")),
                 "embed": bool(npu_table.get("embed")),
@@ -589,10 +596,11 @@ async def container_enrichment(
 
         # [npu] table: expose asr/embed toggles so the dashboard can seed
         # its NPU modality controls without a separate /config fetch.
-        # Raw TOML dict carries [npu] at the top level; also check
-        # extra["npu"] as a fallback for any validated-dump shape.
-        npu_table = cfg.get("npu") or (cfg.get("extra") or {}).get("npu")
-        if npu_table and isinstance(npu_table, dict):
+        # effective_npu_table() also folds in the pre-[npu]-table
+        # [defaults].load_asr/load_embed fallback providers/flm.py still
+        # honors when a pre-1.0 config has no [npu] table at all (#1670).
+        npu_table = effective_npu_table(cfg)
+        if npu_table:
             entry["npu"] = {
                 "asr": bool(npu_table.get("asr")),
                 "embed": bool(npu_table.get("embed")),

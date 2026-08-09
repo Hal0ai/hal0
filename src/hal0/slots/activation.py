@@ -32,6 +32,7 @@ __all__ = [
     "NPU_MODALITY_KEY",
     "autoload_enabled",
     "claims_npu_anchor",
+    "effective_npu_table",
     "is_activated",
     "npu_anchor_config",
     "npu_modality_active",
@@ -128,14 +129,52 @@ def npu_anchor_config(configs: list[dict[str, Any]]) -> dict[str, Any] | None:
     return fallback
 
 
+def effective_npu_table(cfg: dict[str, Any] | None) -> dict[str, Any]:
+    """The slot's effective ``[npu]`` modality table, pre-``[npu]``-table
+    configs included.
+
+    ``providers/flm.py`` still honors the pre-container ``[defaults].load_asr``/
+    ``load_embed`` keys at launch when a slot's TOML has no ``[npu]`` table at
+    all — but nothing folded that fallback forward into the READ paths
+    (``npu_modality_active`` here, and the ``entry["npu"]`` lift in
+    ``slot_view``), so a pre-1.0 config with no ``[npu]`` table renders every
+    NPU pill off even while ASR/embed are actually running (#1670).
+
+    ``[npu]`` is PRIMARY whenever the table exists at all — an explicit
+    ``asr = false`` must win even if a stale ``[defaults]`` pair says
+    otherwise, same precedence ``flm.py`` itself uses. The pre-``[npu]``
+    fallback is also scoped to ``device == "npu"`` slots only: a chat slot's
+    unrelated ``[defaults]`` table (chat_template, etc.) must never be
+    misread as NPU modality flags.
+    """
+    if not isinstance(cfg, dict):
+        return {}
+    table = cfg.get("npu")
+    if not isinstance(table, dict):
+        table = (cfg.get("extra") or {}).get("npu") if isinstance(cfg.get("extra"), dict) else None
+    if isinstance(table, dict):
+        return table
+    if cfg.get("device") != "npu":
+        return {}
+    defaults = cfg.get("defaults")
+    if not isinstance(defaults, dict) or (
+        "load_asr" not in defaults and "load_embed" not in defaults
+    ):
+        return {}
+    return {"asr": bool(defaults.get("load_asr")), "embed": bool(defaults.get("load_embed"))}
+
+
 def npu_modality_active(configs: list[dict[str, Any]], slot_type: str) -> bool:
     """True when the NPU anchor is live AND ``slot_type``'s modality is on.
 
     The one gate for "should an NPU request of this type route to FLM". Reads
-    the ANCHOR's ``[npu]`` table rather than the child shadow's own config,
+    the ANCHOR's ``[npu]`` table (falling back to the pre-``[npu]``-table
+    ``[defaults].load_asr``/``load_embed`` keys, #1670 — see
+    :func:`effective_npu_table`) rather than the child shadow's own config,
     because a shadow's placeholder model makes it look permanently activated
-    (see :data:`NPU_MODALITY_KEY`). ``chat`` defaults ON when the key is
-    absent, matching ``NpuConfig.chat``; ``asr``/``embed`` default OFF.
+    (see :data:`NPU_MODALITY_KEY`).
+    ``chat`` defaults ON when the key is absent, matching ``NpuConfig.chat``;
+    ``asr``/``embed`` default OFF.
     """
     key = NPU_MODALITY_KEY.get(slot_type)
     if key is None:
@@ -143,15 +182,7 @@ def npu_modality_active(configs: list[dict[str, Any]], slot_type: str) -> bool:
     anchor = npu_anchor_config(configs)
     if anchor is None or not is_activated(anchor):
         return False
-    table = anchor.get("npu")
-    if not isinstance(table, dict):
-        table = (
-            (anchor.get("extra") or {}).get("npu")
-            if isinstance(anchor.get("extra"), dict)
-            else None
-        )
-    if not isinstance(table, dict):
-        table = {}
+    table = effective_npu_table(anchor)
     if key == "chat":
         return table.get("chat", True) is not False
     return bool(table.get(key))

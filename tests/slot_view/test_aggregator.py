@@ -355,6 +355,74 @@ class TestConfigEnrichment:
         # The anchor itself is not a shadow — no lifted modality key.
         assert "npu_modality_active" not in out["flm"]
 
+    def test_shadow_modality_falls_back_to_legacy_load_asr_load_embed(self) -> None:
+        """#1670: a pre-1.0 anchor with no [npu] table at all still honors
+        providers/flm.py's legacy [defaults].load_asr/load_embed keys at
+        launch — the lifted pill must agree, not render every NPU pill off."""
+        configs = [
+            _llm_cfg(
+                name="flm",
+                device="npu",
+                defaults={"load_asr": True, "load_embed": False},
+            ),
+            {
+                "name": "flm-stt",
+                "device": "npu",
+                "type": "transcription",
+                "model": {"default": "whisper-v3"},
+            },
+            {
+                "name": "flm-embed",
+                "device": "npu",
+                "type": "embedding",
+                "model": {"default": "embed-gemma"},
+            },
+        ]
+        out = config_enrichment(configs)
+        assert out["flm-stt"]["npu_modality_active"] is True
+        assert out["flm-embed"]["npu_modality_active"] is False
+
+    def test_explicit_npu_table_outranks_stale_legacy_defaults(self) -> None:
+        """[npu] is PRIMARY whenever it exists at all — an explicit
+        asr=false must win even if legacy defaults.load_asr is still True,
+        same precedence providers/flm.py itself uses."""
+        configs = [
+            _llm_cfg(
+                name="flm",
+                device="npu",
+                npu={"asr": False},
+                defaults={"load_asr": True},
+            ),
+            {
+                "name": "flm-stt",
+                "device": "npu",
+                "type": "transcription",
+                "model": {"default": "whisper-v3"},
+            },
+        ]
+        out = config_enrichment(configs)
+        assert out["flm-stt"]["npu_modality_active"] is False
+
+    def test_anchor_npu_entry_folds_in_legacy_defaults(self) -> None:
+        """The anchor's OWN lifted `entry["npu"]` (drawer/card seed) must
+        also see the legacy fallback, not just the shadow's derived
+        npu_modality_active."""
+        configs = [
+            _llm_cfg(name="flm", device="npu", defaults={"load_asr": True, "load_embed": True}),
+        ]
+        out = config_enrichment(configs)
+        assert out["flm"]["npu"] == {"asr": True, "embed": True, "chat": True}
+
+    def test_legacy_defaults_ignored_on_non_npu_slots(self) -> None:
+        """A chat slot's unrelated [defaults] table (chat_template, etc.)
+        must never be misread as NPU modality flags — the fallback is
+        scoped to device=="npu" slots only."""
+        configs = [
+            _llm_cfg(name="chat", defaults={"load_asr": True, "load_embed": True}),
+        ]
+        out = config_enrichment(configs)
+        assert "npu" not in out["chat"]
+
     def test_config_fields_surfaced(self) -> None:
         # spec-hw-slot-ownership §1: enable_thinking/mtp/vision are no longer
         # slot facts (they moved to ModelDefaults) — a stray raw TOML key
@@ -635,6 +703,16 @@ class TestContainerEnrichment:
             provider=FakeContainerProvider(active=False),
         )
         assert out["gpu-chat"]["npu"] == {"asr": True, "embed": True, "chat": True}
+
+    async def test_npu_table_falls_back_to_legacy_defaults(self) -> None:
+        """#1670: same legacy-defaults fallback as config_enrichment, for
+        the /status aggregator's lifted entry."""
+        out = await container_enrichment(
+            [_container_cfg(device="npu", defaults={"load_asr": True, "load_embed": False})],
+            pull_jobs={},
+            provider=FakeContainerProvider(active=False),
+        )
+        assert out["gpu-chat"]["npu"] == {"asr": True, "embed": False, "chat": True}
 
 
 class MapContainerProvider(FakeContainerProvider):
