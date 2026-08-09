@@ -26,6 +26,7 @@ import sys
 import urllib.error
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import hal0
 
@@ -37,6 +38,9 @@ from .runner import _traffic_in_flight as traffic_in_flight
 from .schema import Host
 from .store import Store
 from .suites import Suite, load_suite_file, load_suites, suite_dir, window_file
+
+if TYPE_CHECKING:
+    from .evalrun import EvalRecord
 
 # Politeness policy for --scheduled (DESIGN §6): only proceed inside the
 # maintenance window and when the GPU is quiet. Window default is Sun 03:00-07:00
@@ -687,18 +691,24 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 rec = evalrun.run_task(task, model, run_id, args.api, workroot)
                 evalrun.append_eval(rec)
                 rows.append(rec)
-                mark = "OK " if rec.correct else ("~  " if rec.score > 0 else "X  ")
-                m = rec.metrics
-                print(
-                    f"  {mark} score={rec.score} got={rec.answer!r} "
-                    f"want={rec.expected!r} wall={m.get('wall_s')}s "
-                    f"tools={m.get('tool_calls')} tok_out={m.get('tokens_out')} "
-                    f"steps={len(rec.checkpoints_hit)}/{rec.checkpoints_total}"
-                )
+                print(_format_eval_row(rec))
 
     if rows:
         print("\n" + _eval_table(rows))
     return 0
+
+
+def _format_eval_row(rec: EvalRecord) -> str:
+    """One scenario's result line, in tool-eval-bench's own vocabulary
+    (scenario id / status / points / duration / the run's final score) — NOT
+    the retired hand-rolled columns (``got/want/wall/tools/tok_out/steps``)
+    that tool-eval-bench (Bench Phase 3) never produces (#1775)."""
+    mark = "OK " if rec.correct else ("~  " if rec.score > 0 else "X  ")
+    m = rec.metrics
+    return (
+        f"  {mark} {rec.task_id} status={rec.outcome} points={m.get('points')} "
+        f"duration={m.get('duration_seconds')}s final_score={m.get('final_score')}"
+    )
 
 
 def _eval_table(rows: list) -> str:
@@ -718,7 +728,7 @@ def _eval_table(rows: list) -> str:
                 continue
             scores.append(r.score)
             tag = "ok" if r.correct else f"{r.score:.2f}"
-            cells.append(f"{tag} {r.metrics.get('wall_s', '?')}s".ljust(14))
+            cells.append(f"{tag} {r.metrics.get('duration_seconds', '?')}s".ljust(14))
         avg = f"{sum(scores) / len(scores):.2f}" if scores else "-"
         out.append(m.ljust(w) + "  " + "  ".join(cells) + f"  {avg}")
     return "\n".join(out)

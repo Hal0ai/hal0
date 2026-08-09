@@ -424,7 +424,9 @@ def _task_outcome(status: str, failure_kind: str | None) -> str:
     return "ok" if status == "pass" else "failed"
 
 
-def _parse_task(row: dict[str, Any], tool_version: str, scoring_era: str) -> ToolEvalTaskRecord:
+def _parse_task(
+    row: dict[str, Any], tool_version: str, scoring_era: str, run_final_score: int | None = None
+) -> ToolEvalTaskRecord:
     status = str(row.get("status") or "")
     points = row.get("points")
     score = round(points / 2, 3) if isinstance(points, int | float) else 0.0
@@ -436,6 +438,12 @@ def _parse_task(row: dict[str, Any], tool_version: str, scoring_era: str) -> Too
         "ttft_ms": row.get("ttft_ms"),
         "prompt_tokens": row.get("prompt_tokens"),
         "completion_tokens": row.get("completion_tokens"),
+        # Raw per-scenario points ({0,1,2} per the tool's own scale) and the
+        # RUN-level final_score (0-100, tool-eval-bench's own headline
+        # number) — both needed by the CLI table (#1775: the old table read
+        # neither and printed retired hand-rolled columns instead).
+        "points": points if isinstance(points, int | float) else None,
+        "final_score": run_final_score,
     }
     return ToolEvalTaskRecord(
         task_id=str(row.get("scenario_id") or ""),
@@ -470,18 +478,23 @@ def parse_scores(doc: dict[str, Any]) -> ToolEvalSuiteRecord:
     tool_version = str(raw_version) if raw_version else ""
     scoring_era = classify_scoring_era(tool_version)
 
+    status = str(doc.get("status") or "")
+    final_score = doc.get("final_score")
+    total_scenarios = doc.get("total_scenarios")
+
     scores = doc.get("scores") if isinstance(doc.get("scores"), dict) else {}
     scenario_results = scores.get("scenario_results")
     rows = scenario_results if isinstance(scenario_results, list) else []
-    tasks = [_parse_task(row, tool_version, scoring_era) for row in rows if isinstance(row, dict)]
+    run_final_score = final_score if isinstance(final_score, int) else None
+    tasks = [
+        _parse_task(row, tool_version, scoring_era, run_final_score)
+        for row in rows
+        if isinstance(row, dict)
+    ]
 
     metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
     config = doc.get("config") if isinstance(doc.get("config"), dict) else {}
     model = str(metadata.get("model") or config.get("model") or "")
-
-    status = str(doc.get("status") or "")
-    final_score = doc.get("final_score")
-    total_scenarios = doc.get("total_scenarios")
 
     return ToolEvalSuiteRecord(
         run_id=str(doc.get("run_id") or ""),

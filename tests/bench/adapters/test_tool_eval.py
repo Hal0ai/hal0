@@ -235,6 +235,32 @@ def test_parse_scores_happy_run() -> None:
     assert task.answer  # summary prose carried through
 
 
+def test_parse_scores_passing_run_never_maps_to_score_zero() -> None:
+    """Regression for #1775: a real v2.5.0 document for a scenario that
+    tool-eval-bench itself scored ``final_score: 100`` (pass, points=2) must
+    never come out of this parser as ``score: 0.0``. ``passing_run.json`` is
+    hand-crafted (not machine-captured — a genuine tool-executing PASS
+    requires reproducing tool-eval-bench's internal tool-call protocol in
+    the fake server, out of scope here) but mirrors ``happy_run.json``'s
+    real captured key set exactly (schema_version/tool_eval_bench_version/
+    final_score/rating/deployability/responsiveness/total_scenarios/run_id/
+    status/config incl. config_fingerprint/scores incl. category_scores and
+    scenario_results/metadata/safety_gate/report_path) — see module
+    docstring and the issue for the real shape this pins down."""
+    doc = _load("passing_run.json")
+    suite = tool_eval.parse_scores(doc)
+
+    assert suite.final_score == 100
+    task = next(t for t in suite.tasks if t.task_id == "TC-68")
+    assert task.outcome == "ok"
+    assert task.correct is True
+    assert task.score == 1.0
+    assert task.score != 0.0
+    assert task.metrics["points"] == 2
+    assert task.metrics["final_score"] == 100
+    assert task.metrics["duration_seconds"] == 6.22
+
+
 def test_parse_scores_dev_version_stamps_lenient_version() -> None:
     doc = _load("dev_version_run.json")
     suite = tool_eval.parse_scores(doc)
