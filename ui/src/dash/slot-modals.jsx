@@ -12,6 +12,7 @@ import {
 	useSlotLoad,
 	useSlotSwap,
 	useSlotResolved,
+	useSlots,
 } from "@/api/hooks/useSlots";
 import { useHardware } from "@/api/hooks/useHardware";
 import { useModels, usePullJob } from "@/api/hooks/useModels";
@@ -22,7 +23,7 @@ import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
 import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
 import { npuModalityOn } from "./npu-modality.js";
-import { slotModelRow } from "./slots/slot-shared.js";
+import { slotModelRow, npuAnchorSlot } from "./slots/slot-shared.js";
 
 // The slot edit drawer's own width, and therefore the offset the stacked model
 // drawer docks at so its right edge lands flush against this drawer's left one.
@@ -216,6 +217,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const swapMut = useSlotSwap();
 	const profilesQuery = useProfiles();
 	const modelsQuery = useModels();
+	// Full slot list — needed only to resolve a shadow's anchor STRUCTURALLY
+	// (see the NPU-modalities row below); #1637 already pays this same query
+	// in npu-pane.jsx, so react-query serves it from cache here.
+	const slotsQuery = useSlots();
 	// HW grid (spec-hw-slot-ownership §2): BINARY options + fit-check metadata
 	// from system-info (RUNNER_IMAGES). The device ENUM is no longer read here —
 	// device rides the model at creation and is not editable post-create, so the
@@ -1620,7 +1625,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-ctl">
 							<div className="hint">
 								{(() => {
-									const anchor = slot.name.replace(/-(stt|embed)$/, "") || "flm";
+									// Resolved STRUCTURALLY (#1662, mirrors #1637's npu-pane.jsx
+									// fix) — never by stripping a `-stt`/`-embed` suffix off THIS
+									// slot's own name. `reconcile_trio_slots` names new shadows
+									// after the anchor but never renames pre-existing ones, so a
+									// renamed anchor ('flm' → 'npu') leaves old shadows pointing
+									// at a name-derived '#slots/flm' that no longer exists. Falls
+									// back to the old heuristic only if the slot list hasn't
+									// loaded yet.
+									const anchorSlot = npuAnchorSlot(slotsQuery.data);
+									const anchor =
+										anchorSlot?.name || slot.name.replace(/-(stt|embed)$/, "") || "flm";
 									return (
 										<>
 											This capability is served by the anchor FLM slot — STT and
