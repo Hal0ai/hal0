@@ -125,3 +125,28 @@ def test_extracted_tree_has_no_group_or_world_write_bits_recursively(
         if not p.is_symlink() and (p.stat().st_mode & 0o022)
     ]
     assert offenders == []
+
+
+def test_extracted_tree_stays_readable_after_the_extraction_lockdown(
+    tmp_path: Path,
+) -> None:
+    """Locking `dest` to owner-only during extraction must not stick.
+
+    `_extract_tarball` chmods `dest` to 0700 for the duration of extraction
+    (closing the plant-a-file race a co-resident process could otherwise
+    win — see the module-level docstring above). If the final
+    normalization pass only ever *masked off* write bits (`mode & ~0o022`)
+    instead of setting directories back to a real, traversable mode, that
+    0700 lockdown would become permanent: the activated tree would be
+    unreadable by the very service account that has to run it. Every
+    directory in the finished tree — including `dest` itself — must end up
+    at least group/other readable and traversable.
+    """
+    tarball = _build_tarball(tmp_path, "1.0.0")
+    dest = tmp_path / "install" / "hal0-1.0.0"
+
+    _extract_tarball(tarball, dest)
+
+    for d in (dest, *(p for p in dest.rglob("*") if p.is_dir())):
+        mode = d.stat().st_mode & 0o777
+        assert mode & 0o555 == 0o555, f"{d} is not group/other readable+traversable: {mode:04o}"

@@ -1146,7 +1146,7 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
 
 
 def _normalize_staged_tree(dest: Path, *, job_id: str | None = None) -> None:
-    """Strip group/other write bits from ``dest`` and chown it root:root.
+    """Set the staged tree's final mode/ownership after extraction.
 
     Defends the precondition ``assert_trusted_release_dir`` enforces at
     activate time: the staged tree and its parent must be uid-0-owned and
@@ -1154,6 +1154,17 @@ def _normalize_staged_tree(dest: Path, *, job_id: str | None = None) -> None:
     the top-level directory today, but this normalizes every entry
     ``tf.extractall`` wrote — defense in depth so a future recursive gate,
     or a subdirectory an operator inspects by hand, is never the surprise.
+
+    Directories are explicitly set to ``0755``, not merely masked — the
+    caller locked ``dest`` to ``0700`` for the extraction window (see
+    ``_extract_tarball``), and a mask (``mode & ~0o022``) can only ever
+    remove bits, so it would leave the real, activated install root-only
+    and unreadable by the service account that has to run it. Files keep
+    whatever mode the tarball's own member metadata gave them (tarfile
+    ``chmod``s each member explicitly, independent of umask) with only
+    group/other write bits stripped — there is no equivalent "restore
+    executable bit" ambiguity for files the way there is for the
+    deliberately-locked-down directory.
 
     Ownership is reset to root:root only when running as euid 0 (the
     privileged seam path, where root just extracted the tree and files are
@@ -1183,7 +1194,7 @@ def _normalize_staged_tree(dest: Path, *, job_id: str | None = None) -> None:
             if path.is_symlink():
                 continue
             mode = path.stat().st_mode
-            normalized = mode & ~0o022
+            normalized = 0o755 if path.is_dir() else mode & ~0o022
             if normalized != mode:
                 path.chmod(normalized)
     except OSError as exc:
