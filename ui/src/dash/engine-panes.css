@@ -928,8 +928,20 @@
   display: grid;
   gap: 12px;
 }
+/* Capability slots (embed / rerank / tts / stt) sit four to a row so a full
+   utility loadout reads as one complete rank; collapses on narrow panes. */
 :is(.infer-pane, .npu-pane) .scards.compact {
-  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+@media (max-width: 1100px) {
+  :is(.infer-pane, .npu-pane) .scards.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 560px) {
+  :is(.infer-pane, .npu-pane) .scards.compact {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 :is(.infer-pane, .npu-pane) .scards.full {
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -958,6 +970,7 @@
   width: 2px;
   background: var(--bk, transparent);
   opacity: 0.85;
+  z-index: 1; /* stays visible over the full-bleed .scard-foot bar */
 }
 :is(.infer-pane, .npu-pane) .scard:hover {
   border-color: var(--line-strong);
@@ -1149,17 +1162,18 @@
 :is(.infer-pane, .npu-pane) .scard-meta .m .v.muted {
   color: var(--fg-5);
 }
+/* Bottom action bar — the same full-bleed dark strip the stack cards
+   (.stk-lib-f) and profile cards use: sunken fill, top hairline, pinned to
+   the card's bottom edge. Negative margins escape .scard-b's 10px/12px pad. */
 :is(.infer-pane, .npu-pane) .scard-foot {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  padding-top: 9px;
+  margin: auto -12px -10px;
+  padding: 8px 11px;
   border-top: 1px solid var(--line-soft);
-}
-:is(.infer-pane, .npu-pane) .scard-foot.bare {
-  border-top: none;
-  padding-top: 0;
+  background: var(--bg);
 }
 :is(.infer-pane, .npu-pane) .scard-foot .grow {
   flex: 1;
