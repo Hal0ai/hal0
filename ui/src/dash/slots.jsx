@@ -607,7 +607,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // slots, and is mutually exclusive with the LLM stack — so it gets its own
   // tab instead of a SlotCard in the Image group.
   const [tab, setTab] = useStateS(
-    slotParam === "endpoints" || slotParam === "profiles" || slotParam === "stacks"
+    slotParam === "endpoints" || slotParam === "profiles" || slotParam === "stacks" || slotParam === "image"
       ? slotParam
       : "inference",
   );
@@ -659,10 +659,11 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   }, [slotParam, slots]);
 
   // v0.5 nav: sidebar sub-links #slots/endpoints and #slots/profiles select the
-  // matching tab; navigating back to bare #slots (or a slot-name param) drops
-  // out of a sub-tab back to Inference.
+  // matching tab; #slots/image deep-links the ComfyUI pane (AI Capabilities →
+  // Image generation links here); navigating back to bare #slots (or a
+  // slot-name param) drops out of a sub-tab back to Inference.
   React.useEffect(() => {
-    if (slotParam === "endpoints" || slotParam === "profiles" || slotParam === "stacks") setTab(slotParam);
+    if (slotParam === "endpoints" || slotParam === "profiles" || slotParam === "stacks" || slotParam === "image") setTab(slotParam);
     else setTab((t) => (t === "endpoints" || t === "profiles" || t === "stacks" ? "inference" : t));
   }, [slotParam]);
 
