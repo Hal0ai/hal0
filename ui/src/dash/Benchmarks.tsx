@@ -54,7 +54,14 @@ interface CellRow {
   lane: string; depth: number; kind: string;
   cell_key?: string; trigger?: string; config?: string; run_id?: string;
   decode_ts_med?: number | null;
-  record?: { summary?: { decode_ts_med?: number | null; prefill_ts_med?: number | null }; config?: string };
+  record?: {
+    summary?: {
+      decode_ts_med?: number | null; prefill_ts_med?: number | null;
+      accept_med?: number | null; ttft_ms_p50?: number | null; decode_ts_stddev?: number | null;
+    };
+    config?: string;
+    reps?: unknown[];
+  };
 }
 
 interface HistoryPoint {
@@ -695,6 +702,111 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail, flags }: {
   );
 }
 
+// Known lanes, canonical display order; anything else present sorts after,
+// alphabetically, so an unexpected lane still shows up rather than vanishing.
+const KNOWN_LANE_ORDER = ['rocm', 'vulkan_radv'];
+
+// Compare-mode series must never rely on colour alone — pair each lane's
+// colour with a distinct line dash + endpoint marker shape.
+const LANE_STYLE: Record<string, { dash?: string; marker: 'circle' | 'square' | 'triangle' }> = {
+  rocm: { marker: 'circle' },
+  vulkan_radv: { dash: '5 3', marker: 'square' },
+};
+const laneStyleFor = (lane: string) => LANE_STYLE[lane] || { dash: '1 2', marker: 'triangle' };
+
+function Marker({ shape, cx, cy, r, fill, title }: {
+  shape: 'circle' | 'square' | 'triangle'; cx: number; cy: number; r: number; fill: string; title?: string;
+}) {
+  if (shape === 'square') {
+    return <rect x={cx - r} y={cy - r} width={r * 2} height={r * 2} fill={fill}>{title && <title>{title}</title>}</rect>;
+  }
+  if (shape === 'triangle') {
+    const pts = `${cx},${cy - r * 1.3} ${cx - r * 1.15},${cy + r} ${cx + r * 1.15},${cy + r}`;
+    return <polygon points={pts} fill={fill}>{title && <title>{title}</title>}</polygon>;
+  }
+  return <circle cx={cx} cy={cy} r={r} fill={fill}>{title && <title>{title}</title>}</circle>;
+}
+
+// Compare-mode sparkline: DECODE ONLY, one series per lane, sharing a y-scale
+// so the two lines are directly comparable. Each series keeps its own x-scale
+// (its own point count) — series are never pooled into one array.
+function CompareSparkline({ series }: { series: { lane: string; points: HistoryPoint[] }[] }) {
+  const W = 260, H = 54, pad = 6;
+  const prepared = series.map(s => ({
+    lane: s.lane,
+    n: s.points.length,
+    pts: s.points.map((p, i) => ({ i, v: p.decode_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[],
+  }));
+  const allVals = prepared.flatMap(s => s.pts.map(p => p.v));
+  if (!allVals.length) {
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
+        <text x={W / 2} y={H / 2 + 3} textAnchor="middle" fill="var(--fg-4)" fontSize={9}>no series yet</text>
+      </svg>
+    );
+  }
+  const min = Math.min(...allVals), max = Math.max(...allVals), span = max - min || 1;
+  const y = (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-compare-sparkline">
+      {prepared.map(s => {
+        if (s.pts.length < 2) return null;
+        const x = (i: number) => pad + (s.n === 1 ? (W - 2 * pad) / 2 : (i * (W - 2 * pad)) / (s.n - 1));
+        const dipIdx = s.pts.findIndex((p, k) => k > 0 && p.v < s.pts[k - 1].v * 0.9);
+        const style = laneStyleFor(s.lane);
+        const path = s.pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+        const baseColor = dipIdx > -1 ? 'var(--warn)' : laneColor(s.lane);
+        return (
+          <g key={s.lane}>
+            <path d={path} fill="none" stroke={baseColor} strokeWidth={1.5} strokeDasharray={style.dash} />
+            {s.pts.map((p, k) => (
+              <Marker
+                key={k}
+                shape={style.marker}
+                cx={x(p.i)} cy={y(p.v)}
+                r={k === dipIdx ? 2.6 : 1.7}
+                fill={k === dipIdx ? 'var(--warn)' : laneColor(s.lane)}
+                title={`${laneLabel(s.lane)} ${fmt(p.v)} t/s${k === dipIdx ? ' — regression dip' : ''}`}
+              />
+            ))}
+          </g>
+        );
+      })}
+      <text x={pad} y={10} fill="var(--fg-4)" fontSize={8}>{fmt(max)}</text>
+      <text x={pad} y={H - 1} fill="var(--fg-4)" fontSize={8}>{fmt(min)}</text>
+    </svg>
+  );
+}
+
+// The one cell that represents "this lane's current number": config==='default',
+// highest depth if more than one is measured. Everything lane-scoped (stat
+// cards, per-lane history fetch) is derived from this single cell so a
+// variant sweep never leaks into the headline figures.
+function pickDefaultCell(lane: string, cells: CellRow[]): CellRow | undefined {
+  const candidates = cells.filter(c => c.lane === lane && (c.record?.config || c.config || 'default') === 'default');
+  if (!candidates.length) return undefined;
+  return [...candidates].sort((a, b) => (b.depth || 0) - (a.depth || 0))[0];
+}
+
+function laneSummary(lane: string, cells: CellRow[]) {
+  const c = pickDefaultCell(lane, cells);
+  const sum = c?.record?.summary || {};
+  return {
+    cellKey: c?.cell_key,
+    depth: c?.depth ?? null,
+    decode: c?.decode_ts_med ?? sum.decode_ts_med ?? null,
+    prefill: sum.prefill_ts_med ?? null,
+    accept: sum.accept_med != null ? Math.round(sum.accept_med * 100) : null,
+    ttftP50: sum.ttft_ms_p50 ?? null,
+    stddev: sum.decode_ts_stddev ?? null,
+    reps: c?.record?.reps?.length ?? null,
+  };
+}
+
+function LaneDot({ lane }: { lane: string }) {
+  return <span aria-hidden="true" style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: laneColor(lane) }} />;
+}
+
 function ModelDetail({ model: m, detail }: {
   model: RosterModel;
   detail: { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] };
@@ -702,23 +814,43 @@ function ModelDetail({ model: m, detail }: {
   const d = m.detail || {};
   const { cells, points, runs } = detail;
 
-  // The winning record — the one that fed the headline decode/prefill tiles —
-  // so lane/depth/config can be shown next to the number instead of leaving it
-  // ambiguous which variant it came from.
-  const winningCell = d.run_id ? cells.find(c => c.run_id === d.run_id) : undefined;
-  const winningConfig = winningCell?.config || winningCell?.record?.config || 'default';
-  const winningLane = winningCell?.lane ?? d.lane;
-  const winningDepth = winningCell?.depth ?? d.depth;
+  // Lanes with actual data for this model — segments with zero runs are
+  // never shown (no empty segments in the control).
+  const lanesPresentSet = new Set<string>();
+  for (const c of cells) if (c.lane) lanesPresentSet.add(c.lane);
+  for (const r of runs) if (r.lane) lanesPresentSet.add(r.lane);
+  const lanesPresent = [
+    ...KNOWN_LANE_ORDER.filter(l => lanesPresentSet.has(l)),
+    ...[...lanesPresentSet].filter(l => !KNOWN_LANE_ORDER.includes(l)).sort(),
+  ];
 
-  // Sparkline history mixes configs into one meaningless line unless filtered
-  // down to a single variant — 'default' when present, else whatever the only
-  // config in the series is.
-  const sparkConfigs = [...new Set(points.map(p => p.config || 'default'))];
-  const sparkConfig = sparkConfigs.includes('default') ? 'default' : sparkConfigs[0];
-  const sparkPoints = points.filter(p => (p.config || 'default') === sparkConfig);
+  // Default: Compare when both lanes have runs, else the single lane that
+  // does. No lane data at all (unmeasured model) => no control, no scoping.
+  const [mode, setMode] = useState<string>(() => (lanesPresent.length >= 2 ? 'compare' : (lanesPresent[0] || '')));
 
-  // matrix: one card per (lane, depth, config)
-  const matrix = (() => {
+  // Per-lane history — one GET /history?cell_key=<that lane's default cell>
+  // per present lane. Never pooled: each lane gets its own series array.
+  const [laneHistory, setLaneHistory] = useState<Record<string, HistoryPoint[]>>({});
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const entries = await Promise.all(lanesPresent.map(async lane => {
+        const cell = pickDefaultCell(lane, cells);
+        if (!cell?.cell_key) return [lane, []] as const;
+        try {
+          const resp = await apiGet<{ points: HistoryPoint[] }>(`/api/benchmarks/history?cell_key=${encodeURIComponent(cell.cell_key)}`);
+          return [lane, resp.points || []] as const;
+        } catch { return [lane, []] as const; }
+      }));
+      if (live) setLaneHistory(Object.fromEntries(entries));
+    })();
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [m.id]);
+
+  // matrix: one card per (lane, depth, config), scoped to the active lane
+  // outside Compare mode.
+  const matrixAll = (() => {
     const groups = new Map<string, { lane: string; depth: number; config: string; decode: number | null; prefill: number | null }>();
     for (const c of cells) {
       const cfg = c.record?.config || 'default';
@@ -732,9 +864,10 @@ function ModelDetail({ model: m, detail }: {
     return [...groups.values()].filter(g => g.decode != null || g.prefill != null)
       .sort((a, b) => String(a.lane).localeCompare(String(b.lane)) || (a.depth - b.depth));
   })();
+  const matrix = mode === 'compare' || !mode ? matrixAll : matrixAll.filter(g => g.lane === mode);
 
   // group runs by (lane, depth, config), clustered within 2 minutes
-  const runGroups = (() => {
+  const runGroupsAll = (() => {
     // Latest 5 runs only — `runs` is already newest-first off the API, so
     // this is a defensive cap independent of the fetch's own `limit`.
     const latest = runs.slice(0, 5);
@@ -757,108 +890,186 @@ function ModelDetail({ model: m, detail }: {
     groups.sort((a, b) => b.t - a.t);
     return groups;
   })();
+  // Interleaved chronological order is kept in Compare; a single-lane
+  // segment filters the (already latest-5-capped) list down to that lane.
+  const runGroups = mode === 'compare' || !mode ? runGroupsAll : runGroupsAll.filter(g => g.lane === mode);
 
-  const tiles: [string, number | null | undefined, string][] = [
-    ['decode', m.decode_ts, 't/s'],
-    ['prefill', m.prefill_ts, 't/s'],
-    ['accept', m.accept != null ? Math.round(m.accept * 100) : null, '%'],
-    ['ttft p50', d.ttft_ms_p50, 'ms'],
-    ['stddev', d.stddev, ''],
-    ['size', m.size_gb, 'GB'],
-    ['reps', d.reps, ''],
-  ];
+  const laneStats = Object.fromEntries(lanesPresent.map(lane => [lane, laneSummary(lane, cells)]));
 
   return (
-    <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: '1.1fr 1fr' }}>
-      <div>
-        <h4 style={h4Style}>current summary</h4>
-        {(winningLane || winningDepth != null) && (
-          <div style={{ display: 'flex', gap: '0.3rem', marginBottom: '0.4rem' }}>
-            {winningLane && (
-              <span style={{ ...chipStyle, fontSize: 9, padding: '0.08rem 0.4rem', color: laneColor(winningLane), background: 'transparent' }}>
-                {laneLabel(winningLane)}
-              </span>
-            )}
-            {winningDepth != null && <span style={{ ...chipStyle, fontSize: 9 }}>d{winningDepth}</span>}
-            {winningConfig !== 'default' && <span style={{ ...chipStyle, fontSize: 9, color: 'var(--accent)' }}>{winningConfig}</span>}
-          </div>
-        )}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-          {tiles.map(([label, val, unit], i) => (
-            <div key={label} style={{
-              border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.4rem 0.6rem',
-              background: 'var(--bg-2)', minWidth: 92,
-            }}>
-              <div style={{
-                fontFamily: mono, fontSize: 15, color: i === 0 ? 'var(--accent)' : 'var(--fg)',
-                fontVariantNumeric: 'tabular-nums' as any,
-              }}>
-                {val != null ? fmt(val) + (unit ? ` ${unit}` : '') : '—'}
-              </div>
-              <div style={{ fontFamily: mono, fontSize: 8.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-4)', marginTop: 2 }}>
-                {label}
-              </div>
-            </div>
+    <div>
+      {lanesPresent.length >= 2 && (
+        <div className="mtp-seg" style={{ marginBottom: '0.8rem' }} title="scope this panel to one lane, or compare both">
+          {lanesPresent.map(lane => (
+            <button key={lane} className={'mtp-seg-btn' + (mode === lane ? ' on' : '')} onClick={() => setMode(lane)}>
+              {laneLabel(lane)}
+            </button>
           ))}
+          <button className={'mtp-seg-btn' + (mode === 'compare' ? ' on' : '')} onClick={() => setMode('compare')}>
+            Compare
+          </button>
         </div>
+      )}
 
-        <h4 style={{ ...h4Style, margin: '1rem 0 0.5rem' }}>lane &times; depth &times; config</h4>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-          {matrix.length ? matrix.map((g, i) => (
-            <div key={i} style={{ border: '1px solid var(--line)', borderRadius: '0.35rem', padding: '0.35rem 0.5rem', background: 'var(--bg-2)', minWidth: 96 }}>
-              <div style={{ fontFamily: mono, fontSize: 8.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--fg-4)', marginBottom: 2 }}>
-                <span style={{ ...chipStyle, fontSize: 9, padding: '0.08rem 0.4rem', color: laneColor(g.lane), background: 'transparent' }}>
-                  {laneLabel(g.lane)}
-                </span>
-                {' '}d{g.depth}
-                {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{` · ${g.config}`}</span>}
-              </div>
-              <div style={{ fontFamily: mono, fontSize: 13, color: 'var(--fg-2)' }}>
-                <DecodeMeter v={g.decode} />
-              </div>
-              {g.prefill != null && (
-                <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--fg-4)' }}>{fmt(g.prefill)} t/s pf</div>
+      <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: '1.1fr 1fr' }}>
+        <div>
+          <h4 style={h4Style}>current summary</h4>
+
+          {mode === 'compare' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+              {([
+                ['decode', 'decode', 't/s'],
+                ['prefill', 'prefill', 't/s'],
+                ['accept', 'accept', '%'],
+                ['ttft p50', 'ttftP50', 'ms'],
+              ] as [string, keyof ReturnType<typeof laneSummary>, string][]).map(([label, key]) => {
+                const baseLane = lanesPresent[0];
+                const baseVal = laneStats[baseLane]?.[key] as number | null;
+                return (
+                  <div key={label} style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.4rem 0.6rem', background: 'var(--bg-2)' }}>
+                    <div style={{ fontFamily: mono, fontSize: 8.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-4)', marginBottom: 4 }}>{label}</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem' }}>
+                      {lanesPresent.map((lane, i) => {
+                        const val = laneStats[lane]?.[key] as number | null;
+                        const delta = i > 0 && baseVal != null && val != null && baseVal !== 0 ? ((val - baseVal) / baseVal) * 100 : null;
+                        return (
+                          <div key={lane} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: mono, fontSize: 12 }}>
+                            <LaneDot lane={lane} />
+                            <span style={{ color: 'var(--fg-4)', fontSize: 9 }}>{laneLabel(lane)}</span>
+                            <span style={{ fontVariantNumeric: 'tabular-nums' as any }}>{val != null ? `${fmt(val)}${unit(label)}` : '—'}</span>
+                            {delta != null && (
+                              <span style={{ fontSize: 9.5, color: delta < 0 ? 'var(--err)' : delta > 0 ? 'var(--ok)' : 'var(--fg-4)' }}>
+                                {delta >= 0 ? '+' : ''}{delta.toFixed(1)}%
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+              {m.size_gb != null && (
+                <div style={{ fontFamily: mono, fontSize: 10.5, color: 'var(--fg-4)' }}>size {fmt(m.size_gb)} GB</div>
               )}
             </div>
-          )) : <div style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no measured cells for this model.</div>}
-        </div>
-      </div>
+          ) : (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+              {([
+                ['decode', laneStats[mode]?.decode, 't/s'],
+                ['prefill', laneStats[mode]?.prefill, 't/s'],
+                ['accept', laneStats[mode]?.accept, '%'],
+                ['ttft p50', laneStats[mode]?.ttftP50, 'ms'],
+                ['stddev', laneStats[mode]?.stddev, ''],
+                ['size', m.size_gb, 'GB'],
+                ['reps', laneStats[mode]?.reps, ''],
+              ] as [string, number | null | undefined, string][]).map(([label, val, u], i) => (
+                <div key={label} style={{
+                  border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.4rem 0.6rem',
+                  background: 'var(--bg-2)', minWidth: 92,
+                }}>
+                  <div style={{
+                    fontFamily: mono, fontSize: 15, color: i === 0 ? 'var(--accent)' : 'var(--fg)',
+                    fontVariantNumeric: 'tabular-nums' as any,
+                  }}>
+                    {val != null ? fmt(val) + (u ? ` ${u}` : '') : '—'}
+                  </div>
+                  <div style={{ fontFamily: mono, fontSize: 8.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-4)', marginTop: 2 }}>
+                    {label}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
-      <div>
-        <h4 style={h4Style}>throughput history</h4>
-        <div style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.5rem 0.6rem', background: 'var(--bg-2)' }}>
-          <Sparkline points={sparkPoints} />
-          <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
-            <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode <span style={{ color: 'var(--fg-4)' }}>{'■'}</span> prefill
-            &middot; {sparkConfig} &middot; {sparkPoints.length} pt{sparkPoints.length === 1 ? '' : 's'}
-            {d.image && <span> &middot; {d.image.split('/').pop()}</span>}
+          <h4 style={{ ...h4Style, margin: '1rem 0 0.5rem' }}>lane &times; depth &times; config</h4>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+            {matrix.length ? matrix.map((g, i) => (
+              <div key={i} style={{ border: '1px solid var(--line)', borderRadius: '0.35rem', padding: '0.35rem 0.5rem', background: 'var(--bg-2)', minWidth: 96 }}>
+                <div style={{ fontFamily: mono, fontSize: 8.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--fg-4)', marginBottom: 2 }}>
+                  <span style={{ ...chipStyle, fontSize: 9, padding: '0.08rem 0.4rem', color: laneColor(g.lane), background: 'transparent' }}>
+                    {laneLabel(g.lane)}
+                  </span>
+                  {' '}d{g.depth}
+                  {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{` · ${g.config}`}</span>}
+                </div>
+                <div style={{ fontFamily: mono, fontSize: 13, color: 'var(--fg-2)' }}>
+                  <DecodeMeter v={g.decode} />
+                </div>
+                {g.prefill != null && (
+                  <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--fg-4)' }}>{fmt(g.prefill)} t/s pf</div>
+                )}
+              </div>
+            )) : <div style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no measured cells for this model.</div>}
           </div>
         </div>
 
-        <h4 style={{ ...h4Style, margin: '1rem 0 0.5rem' }}>runs — {runGroups.length} sweep{runGroups.length === 1 ? '' : 's'}</h4>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
-          {runGroups.length ? runGroups.map((g, i) => {
-            const kinds = [...new Set(g.runs.map(r => r.kind))].join('+');
-            const reps = Math.max(0, ...g.runs.map(r => r.reps || 0));
-            const outcomes = g.runs.map(r => r.outcome);
-            const worst = outcomes.every(o => o === 'ok') ? 'ok'
-              : outcomes.some(o => o !== 'ok' && o !== 'skipped-contended') ? 'failed' : 'skipped-contended';
-            return (
-              <span key={i} style={chipStyle}>
-                {runDate(g.runs[0].run_id)} {runTime(g.runs[0].run_id)}
-                <span style={{ ...chipStyle, fontSize: 9, padding: '0.05rem 0.35rem', color: laneColor(g.lane), background: 'transparent' }}>
-                  {laneLabel(g.lane)}
+        <div>
+          <h4 style={h4Style}>{mode === 'compare' ? 'decode history · compare' : 'throughput history'}</h4>
+          <div style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.5rem 0.6rem', background: 'var(--bg-2)' }}>
+            {mode === 'compare' ? (
+              <>
+                <CompareSparkline series={lanesPresent.map(lane => ({ lane, points: laneHistory[lane] || [] }))} />
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.7rem', fontSize: 10, color: 'var(--fg-4)', marginTop: '0.3rem' }}>
+                  {lanesPresent.map(lane => {
+                    const style = laneStyleFor(lane);
+                    return (
+                      <span key={lane} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                        <svg width={16} height={8} aria-hidden="true">
+                          <line x1={0} y1={4} x2={16} y2={4} stroke={laneColor(lane)} strokeWidth={1.5} strokeDasharray={style.dash} />
+                        </svg>
+                        {laneLabel(lane)} &middot; {(laneHistory[lane] || []).length} pt{(laneHistory[lane] || []).length === 1 ? '' : 's'}
+                      </span>
+                    );
+                  })}
+                </div>
+              </>
+            ) : mode ? (
+              <>
+                <Sparkline points={laneHistory[mode] || []} />
+                <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
+                  <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode <span style={{ color: 'var(--fg-4)' }}>{'■'}</span> prefill
+                  &middot; {laneLabel(mode)} &middot; default &middot; {(laneHistory[mode] || []).length} pt{(laneHistory[mode] || []).length === 1 ? '' : 's'}
+                  {d.image && <span> &middot; {d.image.split('/').pop()}</span>}
+                </div>
+              </>
+            ) : (
+              <>
+                <Sparkline points={points} />
+                <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>no lane data yet &middot; {points.length} pt{points.length === 1 ? '' : 's'} pooled</div>
+              </>
+            )}
+          </div>
+
+          <h4 style={{ ...h4Style, margin: '1rem 0 0.5rem' }}>runs — {runGroups.length} sweep{runGroups.length === 1 ? '' : 's'}</h4>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
+            {runGroups.length ? runGroups.map((g, i) => {
+              const kinds = [...new Set(g.runs.map(r => r.kind))].join('+');
+              const reps = Math.max(0, ...g.runs.map(r => r.reps || 0));
+              const outcomes = g.runs.map(r => r.outcome);
+              const worst = outcomes.every(o => o === 'ok') ? 'ok'
+                : outcomes.some(o => o !== 'ok' && o !== 'skipped-contended') ? 'failed' : 'skipped-contended';
+              return (
+                <span key={i} style={chipStyle}>
+                  {runDate(g.runs[0].run_id)} {runTime(g.runs[0].run_id)}
+                  <span style={{ ...chipStyle, fontSize: 9, padding: '0.05rem 0.35rem', color: laneColor(g.lane), background: 'transparent' }}>
+                    {laneLabel(g.lane)}
+                  </span>
+                  d{g.depth} {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{g.config}</span>}
+                  {kinds} &middot; {reps > 0 ? `${reps} rep${reps === 1 ? '' : 's'}` : `${g.runs.length} rec`}
+                  <span style={{ color: outcomeColor(worst) }}>{'●'}</span>
                 </span>
-                d{g.depth} {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{g.config}</span>}
-                {kinds} &middot; {reps > 0 ? `${reps} rep${reps === 1 ? '' : 's'}` : `${g.runs.length} rec`}
-                <span style={{ color: outcomeColor(worst) }}>{'●'}</span>
-              </span>
-            );
-          }) : <span style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no runs recorded.</span>}
+              );
+            }) : <span style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no runs recorded{mode && mode !== 'compare' ? ` on ${laneLabel(mode)}` : ''}.</span>}
+          </div>
         </div>
       </div>
     </div>
   );
+}
+
+function unit(label: string): string {
+  return label === 'accept' ? '%' : label === 'ttft p50' ? ' ms' : ' t/s';
 }
 
 /* ── Runs tab ── */

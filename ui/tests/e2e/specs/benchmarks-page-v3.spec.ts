@@ -119,23 +119,77 @@ const HISTORY = {
   ],
 }
 
-// 7 raw run records for the model-detail accordion — one more than the
-// backend would ever return under a correct limit=5 request, and enough to
-// prove the frontend's defensive slice(0, 5) actually caps the display even
-// if a route mock (or a future backend bug) hands back more than asked.
-const MODEL_RUNS = Array.from({ length: 7 }, (_, i) => ({
-  run_id: `2026-08-0${7 - i}T09:00:00Z-run${i}`,
-  suite: 'roster',
-  trigger: 'scheduled',
-  model: 'qwen3.6-35b-a3b',
-  lane: 'rocm',
-  kind: 'tg',
-  depth: 2048,
-  outcome: 'ok',
-  decode_ts_med: 70 + i,
-  reps: 5,
-  config: 'default',
+// 7 raw run records for the model-detail accordion, MIXED across both lanes
+// and newer than 2 minutes apart (so each is its own sweep) — one more
+// record than the backend would ever return under a correct limit=5
+// request, so the display's defensive slice(0, 5) is actually exercised,
+// AND enough of a lane mix to prove the single-lane run-list filter works.
+// Sorted newest-first (matches the real API): the latest 5 are rocm@76/75/74
+// and vulkan_radv@61/60; the two oldest (vulkan_radv@59, rocm@71.4) are
+// dropped by the cap.
+const MODEL_RUNS_QWEN = [
+  { run_id: '2026-08-07T09:00:00Z-run0', lane: 'rocm', decode_ts_med: 76 },
+  { run_id: '2026-08-06T09:00:00Z-run1', lane: 'vulkan_radv', decode_ts_med: 61 },
+  { run_id: '2026-08-05T09:00:00Z-run2', lane: 'rocm', decode_ts_med: 75 },
+  { run_id: '2026-08-04T09:00:00Z-run3', lane: 'vulkan_radv', decode_ts_med: 60 },
+  { run_id: '2026-08-03T09:00:00Z-run4', lane: 'rocm', decode_ts_med: 74 },
+  { run_id: '2026-08-02T09:00:00Z-run5', lane: 'vulkan_radv', decode_ts_med: 59 },
+  { run_id: '2026-08-01T09:00:00Z-run6', lane: 'rocm', decode_ts_med: 71.4 },
+].map((r) => ({
+  suite: 'roster', trigger: 'scheduled', model: 'qwen3.6-35b-a3b',
+  kind: 'tg', depth: 2048, outcome: 'ok', reps: 5, config: 'default', ...r,
 }))
+
+const MODEL_RUNS_LLAMA = [
+  { run_id: '2026-07-20T09:00:00Z-def456', lane: 'vulkan_radv', decode_ts_med: 18.6 },
+].map((r) => ({
+  suite: 'roster', trigger: 'scheduled', model: 'llama-3.1-8b',
+  kind: 'tg', depth: 2048, outcome: 'ok', reps: 3, config: 'default', ...r,
+}))
+
+// Per-lane default cells — one per (model, lane), config='default', the
+// basis for the lane segmented control, the paired stat cards, and the
+// per-lane /history?cell_key= fetch.
+const QWEN_ROCM_CELL_KEY = 'qwen3.6-35b-a3b|rocm|tg|2048|default'
+const QWEN_VULKAN_CELL_KEY = 'qwen3.6-35b-a3b|vulkan_radv|tg|2048|default'
+const LLAMA_VULKAN_CELL_KEY = 'llama-3.1-8b|vulkan_radv|tg|2048|default'
+
+const CELLS_QWEN = [
+  {
+    lane: 'rocm', depth: 2048, kind: 'tg', cell_key: QWEN_ROCM_CELL_KEY, config: 'default', decode_ts_med: 71.4,
+    record: { config: 'default', summary: { decode_ts_med: 71.4, prefill_ts_med: 812.3, accept_med: 0.82, ttft_ms_p50: 220, decode_ts_stddev: 1.2 }, reps: [1, 2, 3, 4, 5] },
+  },
+  {
+    lane: 'vulkan_radv', depth: 2048, kind: 'tg', cell_key: QWEN_VULKAN_CELL_KEY, config: 'default', decode_ts_med: 60.0,
+    record: { config: 'default', summary: { decode_ts_med: 60.0, prefill_ts_med: 700.0, accept_med: 0.75, ttft_ms_p50: 260, decode_ts_stddev: 0.9 }, reps: [1, 2, 3] },
+  },
+]
+
+const CELLS_LLAMA = [
+  {
+    lane: 'vulkan_radv', depth: 2048, kind: 'tg', cell_key: LLAMA_VULKAN_CELL_KEY, config: 'default', decode_ts_med: 18.6,
+    record: { config: 'default', summary: { decode_ts_med: 18.6, prefill_ts_med: 210.0, accept_med: null, ttft_ms_p50: null }, reps: [1, 2, 3] },
+  },
+]
+
+// Per-lane history series — deliberately DIFFERENT arrays per cell_key, never
+// pooled, so a compare-mode test can assert two distinct series render.
+const HISTORY_BY_CELL: Record<string, { points: any[] }> = {
+  [QWEN_ROCM_CELL_KEY]: HISTORY, // reuse the existing dip-series fixture (used by the run-drawer test too)
+  [QWEN_VULKAN_CELL_KEY]: {
+    points: [
+      { ts: '2026-07-20T10:00:00Z', decode_ts_med: 58.0, prefill_ts_med: 690 },
+      { ts: '2026-07-27T10:00:00Z', decode_ts_med: 59.1, prefill_ts_med: 695 },
+      { ts: '2026-08-04T10:00:00Z', decode_ts_med: 60.0, prefill_ts_med: 700.0 },
+    ],
+  },
+  [LLAMA_VULKAN_CELL_KEY]: {
+    points: [
+      { ts: '2026-07-13T10:00:00Z', decode_ts_med: 17.0 },
+      { ts: '2026-07-20T10:00:00Z', decode_ts_med: 18.6 },
+    ],
+  },
+}
 
 async function installBenchRoutes(page: any) {
   await page.route('**/api/benchmarks/roster', (route: any) => json(route, ROSTER))
@@ -144,13 +198,30 @@ async function installBenchRoutes(page: any) {
   // fetch (?limit=200, no model) need different fixtures — route on the URL.
   await page.route('**/api/benchmarks/runs?**', (route: any) => {
     const url = new URL(route.request().url())
-    if (url.searchParams.get('model')) {
-      return json(route, { count: MODEL_RUNS.length, outcomes: { ok: MODEL_RUNS.length }, runs: MODEL_RUNS })
+    const model = url.searchParams.get('model')
+    if (model === 'qwen3.6-35b-a3b') {
+      return json(route, { count: MODEL_RUNS_QWEN.length, outcomes: { ok: MODEL_RUNS_QWEN.length }, runs: MODEL_RUNS_QWEN })
+    }
+    if (model === 'llama-3.1-8b') {
+      return json(route, { count: MODEL_RUNS_LLAMA.length, outcomes: { ok: MODEL_RUNS_LLAMA.length }, runs: MODEL_RUNS_LLAMA })
     }
     return json(route, RUNS)
   })
+  await page.route('**/api/benchmarks/cells?**', (route: any) => {
+    const url = new URL(route.request().url())
+    const model = url.searchParams.get('model')
+    if (model === 'qwen3.6-35b-a3b') return json(route, { count: CELLS_QWEN.length, cells: CELLS_QWEN })
+    if (model === 'llama-3.1-8b') return json(route, { count: CELLS_LLAMA.length, cells: CELLS_LLAMA })
+    return json(route, { count: 0, cells: [] })
+  })
   await page.route(`**/api/benchmarks/runs/${encodeURIComponent(RUN_SUMMARY.run_id)}`, (route: any) => json(route, RUN_RECORD))
-  await page.route('**/api/benchmarks/history?**', (route: any) => json(route, HISTORY))
+  await page.route('**/api/benchmarks/history?**', (route: any) => {
+    const url = new URL(route.request().url())
+    const cellKey = url.searchParams.get('cell_key')
+    if (cellKey && HISTORY_BY_CELL[cellKey]) return json(route, { cell_key: cellKey, points: HISTORY_BY_CELL[cellKey].points })
+    if (cellKey) return json(route, { cell_key: cellKey, points: [] })
+    return json(route, HISTORY) // pooled ?model= fallback (used only by the no-lane-data path)
+  })
   await page.route('**/api/benchmarks/queue', (route: any) => json(route, { control: { state: 'stopped', exclusive: true }, active: null, updated: null, items: [] }))
 }
 
@@ -297,4 +368,62 @@ test('expanded accordion run history is capped to the latest 5 runs', async ({ p
   await expect(page.getByText(/runs — \d+ sweep/)).toBeVisible()
   const chipCount = await page.locator('text=/^\\d{4}-\\d{2}-\\d{2} /').count()
   expect(chipCount).toBeLessThanOrEqual(5)
+})
+
+test('a two-lane model defaults to Compare and renders two distinct decode series', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
+  await expect(page.getByText('current summary')).toBeVisible()
+
+  const seg = page.locator('.mtp-seg')
+  await expect(seg).toBeVisible()
+  await expect(seg.locator('.mtp-seg-btn.on')).toHaveText('Compare')
+  await expect(page.getByText('decode history · compare')).toBeVisible()
+
+  // Two series in the compare chart: rocm solid (no dasharray), vulkan_radv
+  // dashed — colour is never the only differentiator.
+  const chartSvg = page.locator('[data-testid="bench-compare-sparkline"]')
+  await expect(chartSvg).toBeVisible()
+  await expect(chartSvg.locator('path[stroke-dasharray]')).toHaveCount(1)
+  await expect(chartSvg.locator('path:not([stroke-dasharray])')).toHaveCount(1)
+
+  // Inline legend names both lanes with their own point counts (never pooled).
+  await expect(page.getByText(/ROCM.*3 pts/)).toBeVisible()
+  await expect(page.getByText(/VULK.*3 pts/)).toBeVisible()
+})
+
+test('compare-mode delta badge is computed from the two lanes\' decode median', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
+  await expect(page.getByText('current summary')).toBeVisible()
+
+  // rocm decode 71.4 (baseline) vs vulkan_radv decode 60.0 => (60-71.4)/71.4*100 ≈ -16.0%
+  await expect(page.getByText('-16.0%')).toBeVisible()
+})
+
+test('lane segment filters the run list to that lane (interleaved order in Compare)', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
+  await expect(page.getByText('current summary')).toBeVisible()
+
+  // Compare (default): interleaved, latest-5-capped => 5 distinct sweeps (3 rocm + 2 vulkan_radv).
+  await expect(page.getByText('runs — 5 sweeps')).toBeVisible()
+
+  await page.locator('.mtp-seg-btn', { hasText: 'ROCM' }).click()
+  await expect(page.getByText('runs — 3 sweeps')).toBeVisible()
+
+  await page.locator('.mtp-seg-btn', { hasText: 'VULK' }).click()
+  await expect(page.getByText('runs — 2 sweeps')).toBeVisible()
+})
+
+test('a single-lane model hides the empty segment and skips Compare', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  await page.locator('[data-testid="bench-model-row-llama-3.1-8b"]').click()
+  await expect(page.getByText('current summary')).toBeVisible()
+
+  // Only vulkan_radv has data for this model — no segmented control at all
+  // (nothing to toggle), and today's single-lane presentation renders directly.
+  await expect(page.locator('.mtp-seg')).toHaveCount(0)
+  await expect(page.getByText('throughput history')).toBeVisible()
+  await expect(page.getByText('decode history · compare')).toHaveCount(0)
 })
