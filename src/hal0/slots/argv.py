@@ -130,9 +130,16 @@ SLOT_HARDWARE_FLAGS: frozenset[str] = frozenset(
 #     row's free-form launcher flags; NOT the schema-computed ``-ngl`` from
 #     ``defaults.n_gpu_layers``, which rides the trusted ``model_defaults``
 #     segment — see ``container._llama_argv_segments``).
+#   * ``slot_profile``     — a DIVERGENT slot profile's flag text (#1636):
+#     emitted only when ``slot.profile`` differs from the model's stamped
+#     provenance (``defaults.profile``). Profile saves already screen these
+#     flags, but the profile file is operator-editable on disk, so the launch
+#     merge re-screens them like any other free-form source.
 # A future request-level ``llamacpp_args`` segment (§7.1a 5-tier precedence
 # rewrite) adds its own label here so it rides the same guard.
-UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset({"extra_args", "model_extra_args"})
+UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset(
+    {"extra_args", "model_extra_args", "slot_profile"}
+)
 
 
 @dataclass(frozen=True)
@@ -377,12 +384,26 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
 
     Raises:
         hal0.errors.BadRequest: an untrusted segment sets a managed flag.
+
+    ``slot_profile`` (#1636) additionally gets its hardware flags
+    (``SLOT_HARDWARE_FLAGS``) silently stripped rather than hard-rejected: the
+    profile save path only started enforcing the §5 partition guard after
+    grandfathered/hand-edited profiles could already carry ``-dev``/
+    ``--threads``. Before the divergence overlay existed, those flags were
+    never read at launch at all (live profile flags were inert); stripping
+    here preserves that "ignored" behaviour instead of failing the launch,
+    while still guaranteeing the slot's typed hardware fields are the only
+    source for those flags — even when the typed field is unset and would
+    otherwise leave nothing to out-rank the profile's stale value in the
+    last-wins dedup.
     """
     tokens: list[str] = []
     sources: list[str] = []
     for label, seg in segments:
         if label in UNTRUSTED_SEGMENT_LABELS:
             _deny_managed_flags(seg, segment=label)
+        if label == "slot_profile":
+            seg, _stripped = strip_managed_flags(seg, denylist=SLOT_HARDWARE_FLAGS)
         for tok in seg:
             tokens.append(tok)
             sources.append(label)
