@@ -140,7 +140,13 @@ WantedBy=multi-user.target
   (`write-hindsight-dropin` + `svc-restart hindsight`). If the wrapper or its
   sudoers grant is missing, the API's response carries a non-null
   `propagation.error` and the engine keeps its previous extraction target —
-  check `hal0 doctor` for the seam rows.
+  check `hal0 doctor` for the seam rows. The wrapper allow-lists the drop-in
+  body on the root side: only `#` comments, a single `[Service]` header and the
+  two `Environment=HINDSIGHT_API_LLM_*` assignments are accepted, so a
+  hand-crafted fragment (`ExecStart=`, `User=`, any other directive) is
+  rejected rather than written. Run
+  `hal0-systemctl check-dropin hindsight < body` to see why a body was refused;
+  it validates and echoes without writing anything.
 - **Data root** — embedded Postgres at `/var/lib/hal0/memory/hindsight/.pg0`,
   pinned via the unit's `HOME=` env (Hindsight has no dedicated data-dir
   variable of its own).

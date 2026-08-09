@@ -22,6 +22,18 @@
 # built HERE from a validated id (the caller never supplies a unit string),
 # the systemctl verb is a literal, no shell, no wildcards.
 #
+# DROP-IN CONTENT (#1716): the two drop-in verbs take their whole payload on
+# stdin, and stdin is attacker-controlled at this privilege boundary — the
+# sudoers grant lets the unprivileged `hal0` account run this script as root.
+# Copying that payload verbatim into a root-owned systemd fragment is a direct
+# path to root: a `[Service]` body with `User=root` + a replaced `ExecStart=`,
+# followed by this same wrapper's `daemon-reload` and `svc-restart` verbs, runs
+# an arbitrary command as root. Pinning the destination path (already true for
+# both verbs) does not constrain the directives written there. So the body is
+# ALLOW-LISTED here, on the root side of the boundary — see
+# validate_dropin_body below. The unprivileged caller's own templating is a
+# convenience, never a control.
+#
 # NOTE: the iptables FORWARD-chain repair the original P3-perms design doc
 # sketched for this seam is NOT needed — that repair already runs as its own
 # independent root oneshot unit (packaging/systemd/hal0-podman-forward.service,
@@ -79,6 +91,128 @@ validate_agent_id() {  # arg: agent id (the "<id>" in hal0-agent@<id>.service)
   [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || die "bad agent id: $id"
 }
 
+# ── drop-in content allow-list (#1716) ─────────────────────────────────────
+#
+# Root-side validation for the `write-*-dropin` verbs. Deliberately in the same
+# style as the id validators above: strict regexes, a closed set of accepted
+# tokens, no shell evaluation of anything read from stdin, and a loud `die` on
+# the first thing that is not explicitly permitted.
+#
+# The grammar accepted is a small subset of systemd unit syntax:
+#   * `#` comment lines and blank lines,
+#   * exactly one `[Service]` section header, before any directive,
+#   * `Key=Value` directives whose Key is in the per-verb allow-list below and
+#     whose Value matches that key's regex.
+# Everything else — any other section, any other directive (`ExecStart`,
+# `ExecStartPre`, `User`, `Group`, …), leading whitespace, tabs, `;` comments,
+# CR, a trailing backslash (systemd line continuation, which would let a second
+# logical directive hide on a "value" line), any control byte — is rejected.
+#
+# On success DROPIN_BODY holds the RECONSTRUCTION of the validated lines, and
+# that — not the raw stdin — is what the write arms persist. What was checked
+# is therefore byte-for-byte what lands in /etc.
+
+DROPIN_BODY=""
+
+_DROPIN_MAX_LINES=200
+_DROPIN_MAX_LINE=512
+
+validate_dropin_directive() {  # args: kind, "Key=Value" line
+  local kind="$1" line="$2" key value ename evalue
+  [[ "$line" == *=* ]] || die "drop-in rejected: not a Key=Value directive: $line"
+  key="${line%%=*}"
+  value="${line#*=}"
+  # No spaces, no tabs, no quoting around the key — a systemd-legal `Key = v`
+  # or ` Key=v` is rejected rather than normalised, so there is exactly one
+  # accepted spelling per directive.
+  [[ "$key" =~ ^[A-Za-z]+$ ]] || die "drop-in rejected: bad directive key: $key"
+
+  case "$kind" in
+    hindsight)
+      # ADR-0023: the extraction drop-in sets two Environment= assignments and
+      # nothing else. `Environment=` takes `NAME=VALUE`, so the NAME is checked
+      # against its own closed list; the value charsets exclude whitespace, so
+      # a second `NAME=VALUE` pair cannot ride along on one line.
+      [[ "$key" == "Environment" ]] || die "drop-in rejected: directive not allowed here: $key"
+      [[ "$value" == *=* ]] || die "drop-in rejected: Environment= needs NAME=VALUE: $value"
+      ename="${value%%=*}"
+      evalue="${value#*=}"
+      case "$ename" in
+        HINDSIGHT_API_LLM_MODEL)
+          # Always the `hal0/<slot>` virtual (never a raw model id), and a slot
+          # id is the same bounded identifier the slot verbs accept.
+          [[ "$evalue" =~ ^hal0/[A-Za-z0-9_.-]{1,64}$ ]] \
+            || die "drop-in rejected: bad HINDSIGHT_API_LLM_MODEL value: $evalue"
+          ;;
+        HINDSIGHT_API_LLM_TIMEOUT)
+          [[ "$evalue" =~ ^[0-9]{1,9}$ ]] \
+            || die "drop-in rejected: bad HINDSIGHT_API_LLM_TIMEOUT value: $evalue"
+          ;;
+        *) die "drop-in rejected: environment name not allowed here: $ename" ;;
+      esac
+      ;;
+    gateway)
+      # #437: the gateway drop-in only points systemd at the hal0 secrets
+      # vault. The value is confined to that directory (an EnvironmentFile
+      # anywhere else would let a compromised caller inject env — LD_PRELOAD —
+      # into a root unit); a leading `-` (optional-file marker) is allowed.
+      [[ "$key" == "EnvironmentFile" ]] || die "drop-in rejected: directive not allowed here: $key"
+      [[ "$value" =~ ^-?/var/lib/hal0/secrets/[A-Za-z0-9_./-]{1,128}$ ]] \
+        || die "drop-in rejected: EnvironmentFile outside the hal0 secrets vault: $value"
+      [[ "$value" != *".."* ]] || die "drop-in rejected: EnvironmentFile traversal: $value"
+      ;;
+    *) die "unknown drop-in kind: $kind" ;;
+  esac
+}
+
+validate_dropin_body() {  # arg: kind (gateway|hindsight); body on stdin
+  local kind="$1"
+  local LC_ALL=C
+  local line out="" seen_service=0 directives=0
+  local -a lines=()
+
+  case "$kind" in
+    gateway|hindsight) ;;
+    *) die "unknown drop-in kind: $kind" ;;
+  esac
+
+  mapfile -t lines
+  (( ${#lines[@]} <= _DROPIN_MAX_LINES )) \
+    || die "drop-in rejected: too many lines (${#lines[@]} > ${_DROPIN_MAX_LINES})"
+
+  for line in "${lines[@]}"; do
+    (( ${#line} <= _DROPIN_MAX_LINE )) || die "drop-in rejected: line too long (${#line} bytes)"
+    # No control bytes: rejects CR, tab, NUL and the rest of C0/DEL in one
+    # check, so nothing can smuggle a second logical line or an invisible
+    # directive. High bytes are allowed — the managed headers are UTF-8 prose
+    # ("—") and comments are inert; every *directive* is separately pinned by
+    # its own regex below.
+    [[ ! "$line" =~ [[:cntrl:]] ]] || die "drop-in rejected: control byte in line: $line"
+    # A trailing backslash continues the directive onto the next line in
+    # systemd's parser, which would defeat the per-line checks below.
+    [[ "$line" != *\\ ]] || die "drop-in rejected: line continuation: $line"
+
+    case "$line" in
+      "")   ;;                                            # blank line
+      "#"*) ;;                                            # comment (control-byte-free, checked above)
+      "["*)
+        [[ "$line" == "[Service]" ]] || die "drop-in rejected: section not allowed: $line"
+        (( seen_service == 0 )) || die "drop-in rejected: duplicate [Service] section"
+        seen_service=1
+        ;;
+      *)
+        (( seen_service == 1 )) || die "drop-in rejected: directive before [Service]: $line"
+        validate_dropin_directive "$kind" "$line"
+        directives=$(( directives + 1 ))
+        ;;
+    esac
+    out+="${line}"$'\n'
+  done
+
+  (( directives > 0 )) || die "drop-in rejected: no allowed directives in body"
+  DROPIN_BODY="$out"
+}
+
 cmd="${1:-help}"; shift || true
 
 case "$cmd" in
@@ -110,11 +244,15 @@ case "$cmd" in
     # 0600 vault, not here. Atomic (tmp + mv), mirroring hal0-agentenv's
     # write-driver-env — `install /dev/stdin` misbehaves overwriting an
     # existing target when the source is a pipe.
+    #
+    # #1716: the body is allow-listed BEFORE anything is created, and what gets
+    # written is the validated reconstruction ($DROPIN_BODY), never raw stdin.
+    validate_dropin_body gateway
     install -d -m 0755 -o root -g root "$GATEWAY_DROPIN_DIR"
     umask 022
     tmp="$(mktemp "${GATEWAY_DROPIN_FILE}.XXXXXX")"
     trap 'rm -f "$tmp"' EXIT
-    cat > "$tmp"
+    printf '%s' "$DROPIN_BODY" > "$tmp"
     chown root:root "$tmp"
     chmod 0644 "$tmp"
     mv -f "$tmp" "$GATEWAY_DROPIN_FILE"
@@ -125,15 +263,30 @@ case "$cmd" in
     # Literal fixed path — the caller never supplies it, so this verb can only
     # ever reach that one file. 0644 root:root so systemd can read the fragment.
     # Atomic (tmp + mv), same shape as write-gateway-dropin.
+    #
+    # #1716: allow-listed body (only the two ADR-0023 Environment= keys), and
+    # the validated reconstruction is what is written — never raw stdin.
+    validate_dropin_body hindsight
     install -d -m 0755 -o root -g root "$HINDSIGHT_DROPIN_DIR"
     umask 022
     tmp="$(mktemp "${HINDSIGHT_DROPIN_FILE}.XXXXXX")"
     trap 'rm -f "$tmp"' EXIT
-    cat > "$tmp"
+    printf '%s' "$DROPIN_BODY" > "$tmp"
     chown root:root "$tmp"
     chmod 0644 "$tmp"
     mv -f "$tmp" "$HINDSIGHT_DROPIN_FILE"
     trap - EXIT
+    ;;
+
+  check-dropin)               # check-dropin <gateway|hindsight>   (body on stdin)
+    # Side-effect-free dry run of the #1716 allow-list: validates the body and
+    # echoes back exactly what a write would persist, or dies 64 with the
+    # reason. Writes nothing, touches no unit, reloads nothing — it exists so
+    # the allow-list can be exercised (by the test suite, and by an operator
+    # debugging a rejected body) without a privileged write.
+    kind="${1:-}"
+    validate_dropin_body "$kind"
+    printf '%s' "$DROPIN_BODY"
     ;;
 
   daemon-reload)
@@ -210,6 +363,7 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   remove-quadlet <slot-id>         rm -f ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container
   write-gateway-dropin             write ${GATEWAY_DROPIN_FILE} (body on stdin)
   write-hindsight-dropin           write ${HINDSIGHT_DROPIN_FILE} (body on stdin)
+  check-dropin <gateway|hindsight> validate a drop-in body (stdin) without writing it
   daemon-reload                    systemctl daemon-reload
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
   enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service

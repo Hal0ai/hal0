@@ -24,6 +24,25 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Security
+
+- The privileged `hal0-systemctl` wrapper now allow-lists the *content* of the
+  two systemd drop-ins it writes as root (`write-gateway-dropin`,
+  `write-hindsight-dropin`). Both verbs take their whole payload on stdin, and
+  the sudoers grant lets the unprivileged `hal0` service account run the
+  wrapper as root — so a process compromised as `hal0` could previously supply
+  a `[Service]` fragment with `User=root` and a replaced `ExecStart=`, then use
+  the wrapper's own `daemon-reload` + `svc-restart` verbs to run it as root.
+  Validation is parsed on the root side of that boundary: only `#` comments,
+  blank lines, a single `[Service]` header and a closed set of directives per
+  verb (`Environment=HINDSIGHT_API_LLM_MODEL` / `…_TIMEOUT`; an
+  `EnvironmentFile=` confined to the hal0 secrets vault) are accepted, each
+  with a pinned value charset. Anything else — any other section or directive,
+  a line continuation, a control byte, leading whitespace — is rejected with a
+  loud error and nothing is written. The wrapper persists the validated
+  reconstruction rather than raw stdin, and a new side-effect-free
+  `check-dropin <gateway|hindsight>` verb dry-runs the allow-list.
+
 ## [1.0.0-rc.3] — 2026-08-09
 
 The hardening candidate: rc.2 plus the full yield of the pre-1.0 review —
