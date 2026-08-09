@@ -1901,8 +1901,8 @@ fi
 #
 # The AGENT anchor offer below shares this step (no extra ui_step banner, so
 # UI_STEP_TOTAL is unchanged) because it is the second half of one story: the
-# brain pull makes steward CHAT work; the agent pull is what makes steward
-# TOOL CALLS work.
+# brain pull makes the steward work out of the box (chat AND native tool
+# calls); the agent pull adds the bigger fallback tool-caller.
 ui_step "Steward + agent models"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -1916,16 +1916,18 @@ else
 fi
 
 # ── agent anchor model — OPT-IN, size disclosed, default SKIP ───────────────
-# Measured on a GPU box: the 1B brain model does NOT emit tool calls. Given the
-# `hal0-function-xml` contract and an explicit tool request it reasons and
-# returns an empty `content` with no function block — exactly what
-# installer/etc-hal0/slots/brain.toml predicts. Tool turns are therefore routed
-# to `[brain_chat] tool_model`, whose code default is "hal0/agent"
-# (src/hal0/config/schema.py). But agent.toml ships model-less on purpose
-# (#1369: model-presence is the activation signal), so on a fresh box brain
-# tool calling is DEAD until someone binds an agent model.
+# As of runner ade07ba (DEFAULT_ROCMFPX_IMAGE) the brain models are NATIVE
+# tool-callers — the steward executes its own calls on the brain slot
+# (installer/etc-hal0/slots/brain.toml, verified live on the SFT quants and
+# the MiniCPM5 base). The `[brain_chat] tool_model` reroute, code default
+# "hal0/agent" (src/hal0/config/schema.py), remains as the FALLBACK: it
+# catches artefact rounds and covers older runner images or off-dialect
+# models. agent.toml still ships model-less on purpose (#1369: model-presence
+# is the activation signal), so on a fresh box that fallback has no live
+# target — and a bound agent model is also simply a much bigger tool-caller
+# than the ~1B brain.
 #
-# That is what this offer fixes — and the shape of the offer is the whole
+# That is what this offer provides — and the shape of the offer is the whole
 # point. Unlike the brain pull (unconditional, ~1-2 GB) the anchor is 15-31 GB,
 # so:
 #
@@ -1954,7 +1956,7 @@ if [[ "${DEV_MODE}" -eq 1 ]]; then
     :  # dev mode writes nothing to the system store — no offer, no notice
 elif [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_PULL_AGENT_MODEL:-}" == "0" ]]; then
     info "Skipping the agent model (HAL0_SKIP_SETUP/HAL0_PULL_AGENT_MODEL=0 set)."
-    info "brain chat works, but TOOL CALLS need an agent model bound to the agent slot ([brain_chat] tool_model, default hal0/agent)."
+    info "The brain steward chats and calls tools on its own; an agent model is the optional bigger tool-caller behind the [brain_chat] tool_model fallback (default hal0/agent)."
 else
     # `|| true`: a plan that cannot be computed is simply no offer. Never fatal.
     _agent_plan="$(HAL0_AGENT_MODEL="${HAL0_AGENT_MODEL:-}" \
@@ -1970,7 +1972,7 @@ else
             _agent_wanted=1
         elif _interactive; then
             printf '\n' >/dev/tty 2>/dev/null || true
-            info "The brain steward can chat now, but it cannot CALL TOOLS on its own — it routes tool turns to the agent slot, which has no model yet."
+            info "The brain steward chats and calls tools on its own. An agent model adds a bigger tool-caller and gives the [brain_chat] tool_model fallback (default hal0/agent) a live target."
             info "Optional download: ${_agent_desc}"
             _tty_read _agent_answer "Download the agent model now? [y/N]" "n"
             case "${_agent_answer}" in
@@ -1993,8 +1995,8 @@ else
         fi
     fi
     if [[ "${_agent_wanted}" -ne 1 ]]; then
-        info "brain chat works, but TOOL CALLS need an agent model: the steward routes tool turns to [brain_chat] tool_model (default hal0/agent) and the agent slot has no model bound."
-        info "Assign one from the dashboard, or 'hal0 model pull <id> && hal0 slot load agent', whenever you like."
+        info "The brain steward keeps chatting and calling tools on its own; the [brain_chat] tool_model fallback (default hal0/agent) just has no live target until an agent model is bound."
+        info "Bind one from the dashboard, or 'hal0 model pull <id> && hal0 slot load agent --model <id>', whenever you like."
     fi
 fi
 
