@@ -34,9 +34,10 @@ function capabilityRow(device: string, provider: string, model: string | null, s
 
 // Scopes a `Model` row (`.s-row` with `.k span` text "Model") to the panel
 // whose own title (`.s-panel`'s `.k span`) matches `title` — the AI
-// Capabilities page renders five Model rows (TTS, STT, Embed, Rerank,
-// Image), so a bare index into a page-wide `.s-row` collection is no longer
-// stable; scope by panel instead. Each test builds its own bound
+// Capabilities page renders four Model rows (TTS, STT, Embed, Rerank;
+// Image deliberately has none — ComfyUI workflows pick their own
+// checkpoint), so a bare index into a page-wide `.s-row` collection is no
+// longer stable; scope by panel instead. Each test builds its own bound
 // `panelModelRow` from its `page` fixture, mirroring how the neighbouring
 // panel locators (e.g. `ttsPanel` in voice-page-provider-copy-v3) are
 // built fresh per test.
@@ -124,18 +125,17 @@ test.describe('Capability catalog pickers (#1454)', () => {
     await expect(ttsRow).not.toContainText('no installed TTS models')
   })
 
-  test('Image-gen page: img Model picker renders as <select> populated from the bare-array catalog', async ({ page }) => {
+  test('Image-gen panel has no Model row — checkpoint choice belongs to ComfyUI workflows', async ({ page }) => {
     await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
     await page.goto('/#settings/imagegen')
     await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
-    const panelModelRow = makePanelModelRow(page)
 
-    const modelRow = panelModelRow(/^Image generation$/)
-    await expect(modelRow).toHaveCount(1)
-    const select = modelRow.locator('select')
-    await expect(select).toBeVisible()
-    await expect(select.locator('option', { hasText: 'sd-turbo' })).toHaveCount(1)
-    await expect(modelRow).not.toContainText('no installed image models')
+    const panel = page.locator('.s-panel').filter({ has: page.locator('.k span', { hasText: /^Image generation$/ }) })
+    // Engine select must still render before we assert the Model row away
+    // (guards against a blank-panel false pass).
+    await expect(panel.locator('select option', { hasText: 'comfyui' })).toHaveCount(1)
+    await expect(makePanelModelRow(page)(/^Image generation$/)).toHaveCount(0)
+    await expect(panel.locator('a[href="#slots/image"]')).toHaveCount(1)
   })
 
   test('Voice page: empty catalog still shows the honest "no installed" hint (not a false negative)', async ({ page }) => {

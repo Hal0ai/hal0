@@ -9,7 +9,7 @@ import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import { SRow } from '../../shared/SRow.jsx'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { useCapabilitySelection } from './useCapabilitySelection.js'
-import { statusChip, PanelHeader, PanelFooter, EnabledRow, ModelRow, selStyle, inputStyle } from './shared.jsx'
+import { statusChip, PanelHeader, PanelFooter, EnabledRow, selStyle, inputStyle } from './shared.jsx'
 
 const DEF_SIZE = "1024x1024"
 const DEF_STEPS = "0"
@@ -73,9 +73,12 @@ export function ImagePanel({ registry }) {
           <option value="comfyui">comfyui</option>
         </select>
       } />
-      <ModelRow items={sel.catalogItems} value={sel.model} onChange={sel.setModel}
-        placeholder="model id (e.g. sdxl-turbo-fp16)"
-        emptyHint="no capability-tagged image models installed — ComfyUI workflows pick their own checkpoint, so leaving this unset is normal" />
+      {/* No Model row here on purpose: ComfyUI workflows select their own
+          checkpoint per generation, so an img-slot model pick would be dead
+          config. Inventory and workflows live on the ComfyUI pane. */}
+      <SRow k="Checkpoint" sub="selected per-workflow by ComfyUI — manage models and workflows on the ComfyUI pane" v={
+        <a href="#slots/image" className="mono" style={{fontSize: 11, color: "var(--accent)"}}>ComfyUI pane →</a>
+      } />
 
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
         <div className="k">
