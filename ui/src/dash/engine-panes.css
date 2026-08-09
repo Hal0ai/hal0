@@ -928,20 +928,8 @@
   display: grid;
   gap: 12px;
 }
-/* Capability slots (embed / rerank / tts / stt) sit four to a row so a full
-   utility loadout reads as one complete rank; collapses on narrow panes. */
 :is(.infer-pane, .npu-pane) .scards.compact {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-@media (max-width: 1100px) {
-  :is(.infer-pane, .npu-pane) .scards.compact {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-@media (max-width: 560px) {
-  :is(.infer-pane, .npu-pane) .scards.compact {
-    grid-template-columns: minmax(0, 1fr);
-  }
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
 }
 :is(.infer-pane, .npu-pane) .scards.full {
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -1409,10 +1397,22 @@
    A tighter grid below the headline chat/agent cards: header = dot + name +
    port, body = model text + a minimal Start/Stop/Restart cluster. No meta row,
    no model picker. Scoped to .infer-pane (the NPU pane has its own markup). */
+/* Capability slots (embed / rerank / tts / stt) sit four to a row so a full
+   utility loadout reads as one complete rank; collapses on narrow panes. */
 .infer-pane .util-mini {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(218px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+@media (max-width: 1100px) {
+  .infer-pane .util-mini {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 560px) {
+  .infer-pane .util-mini {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .infer-pane .mcard {
   position: relative;
@@ -1474,11 +1474,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Body doubles as the card's bottom action bar — same sunken strip as the
+   stack/profile/slot cards. */
 .infer-pane .mcard-b {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
+  background: var(--bg);
 }
 .infer-pane .mcard-b .smodel {
   flex: 1;
