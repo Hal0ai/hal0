@@ -11,9 +11,12 @@ shells out to a real tool-eval-bench binary (CI has none installed).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from hal0.bench import evalrun
 from hal0.bench.adapters.tool_eval import ERA_HARDENED
+
+_TOOL_EVAL_FIXTURES = Path(__file__).resolve().parent / "adapters" / "fixtures" / "tool_eval"
 
 
 def _scenario_doc(ids: list[str]) -> str:
@@ -155,6 +158,47 @@ class TestRunTask:
         assert rec.outcome == "failed"
         assert rec.correct is False
         assert rec.score == 0.0
+
+    def test_real_shaped_v2_5_0_passing_document_never_maps_to_score_zero(self, tmp_path):
+        """Regression for #1775: ``hal0 bench eval`` mapped a passing
+        tool-eval-bench run (real ``final_score: 100``) to ``score=0.0``,
+        printed with the retired hand-rolled table columns (``got/want/
+        wall/tools/tok_out/steps``, all empty/None — the ``_failed_record``
+        defaults). This feeds ``run_task`` a document shaped exactly like a
+        real v2.5.0 ``--json-file`` envelope (see
+        ``tests/bench/adapters/fixtures/tool_eval/passing_run.json``, and
+        ``adapters/tool_eval.py``'s module docstring for the real shape) and
+        asserts the score survives the full evalrun -> adapter round trip —
+        not just the adapter's own parser (already covered by
+        ``test_tool_eval.py::test_parse_scores_passing_run_never_maps_to_score_zero``)."""
+        doc = json.loads((_TOOL_EVAL_FIXTURES / "passing_run.json").read_text())
+        task = evalrun.Task(id="TC-68", kind="A")
+
+        def fake_runner(argv, timeout_s):
+            out_path = argv[argv.index("--json-file") + 1]
+            with open(out_path, "w") as fh:
+                json.dump(doc, fh)
+            return 0, "", ""
+
+        rec = evalrun.run_task(
+            task,
+            "chadrock-35b-ace-saber-rocmfp4-mtp",
+            "run-1",
+            "http://127.0.0.1:8080",
+            tmp_path,
+            runner=fake_runner,
+        )
+
+        assert rec.outcome == "ok"
+        assert rec.correct is True
+        assert rec.score == 1.0
+        assert rec.score != 0.0
+        assert rec.answer  # not '' like the _failed_record default
+        assert rec.expected  # not '' like the _failed_record default
+        assert rec.metrics["duration_seconds"] == 6.22
+        assert rec.metrics["wall_s"] == 6.22  # legacy alias still populated
+        assert rec.metrics["points"] == 2
+        assert rec.metrics["final_score"] == 100
 
     def test_connection_failure_never_raises(self, tmp_path):
         """A pre-flight connection failure (adapters/tool_eval.py's real

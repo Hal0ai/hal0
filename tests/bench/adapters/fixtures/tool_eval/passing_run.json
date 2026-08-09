@@ -1,0 +1,96 @@
+{
+  "schema_version": "1",
+  "tool_eval_bench_version": "2.5.0",
+  "final_score": 100,
+  "rating": "★★★★★ Excellent",
+  "safety_warnings": [],
+  "deployability": 100,
+  "responsiveness": 100,
+  "total_scenarios": 1,
+  "run_id": "2026-08-09T18-12-04.221000Z_a1b2c3d4",
+  "status": "completed",
+  "config": {
+    "model": "chadrock-35b-ace-saber-rocmfp4-mtp",
+    "backend": "llamacpp",
+    "base_url": "http://***:8999",
+    "temperature": 0.0,
+    "timeout_seconds": 15.0,
+    "max_turns": 8,
+    "seed": null,
+    "reference_date": null,
+    "scenario_count": 1,
+    "scenario_ids": [
+      "TC-68"
+    ],
+    "concurrency": 1,
+    "error_rate": 0.0,
+    "alpha": 0.7,
+    "extra_params": null,
+    "weight_by_difficulty": false,
+    "config_fingerprint": "b3c1a09e7f21"
+  },
+  "scores": {
+    "final_score": 100,
+    "total_points": 2,
+    "max_points": 2,
+    "rating": "★★★★★ Excellent",
+    "category_scores": [
+      {
+        "category": "A",
+        "label": "Tool Selection",
+        "earned": 2,
+        "max": 2,
+        "percent": 100,
+        "pass_count": 1,
+        "partial_count": 0,
+        "fail_count": 0
+      }
+    ],
+    "scenario_results": [
+      {
+        "scenario_id": "TC-68",
+        "status": "pass",
+        "points": 2,
+        "summary": "Correctly routed the request to get_weather with the right location.",
+        "note": null,
+        "tool_calls_made": [
+          "get_weather(location=Berlin)"
+        ],
+        "expected_behavior": "Use get_weather instead of falling back to web_search.",
+        "duration_seconds": 6.22,
+        "turn_count": 2,
+        "raw_log": "model=chadrock-35b-ace-saber-rocmfp4-mtp\nscenario=TC-68\nprompt=What's the weather like in Berlin right now?\n\nassistant=starting\ntool_choice=auto\nassistant_turn_1=[tool_call get_weather(location=Berlin)]\ntool_result=8C and overcast\nassistant_turn_2=It's 8C and overcast in Berlin right now.\nfinal_answer=It's 8C and overcast in Berlin right now.\n\nverdict=pass\nsummary=Correctly routed the request to get_weather with the right location.",
+        "ttft_ms": 118.4,
+        "turn_latencies_ms": [
+          2100.0,
+          1050.0
+        ],
+        "prompt_tokens": 312,
+        "completion_tokens": 41,
+        "total_tokens": 353
+      }
+    ]
+  },
+  "metadata": {
+    "tool_version": "2.5.0",
+    "hostname": "ct105",
+    "platform_info": "Linux-ct105-x86_64-with-glibc2.39",
+    "python_version": "3.12.11",
+    "model": "chadrock-35b-ace-saber-rocmfp4-mtp",
+    "backend": "llamacpp",
+    "base_url": "http://***:8999",
+    "temperature": 0.0,
+    "max_turns": 8,
+    "timeout_seconds": 15.0,
+    "scenario_selector": "TC-68",
+    "trials": 1,
+    "parallel": 1,
+    "error_rate": 0.0,
+    "thinking_enabled": true
+  },
+  "safety_gate": {
+    "passed": true,
+    "warnings": []
+  },
+  "report_path": "runs/2026/08/2026-08-09T18-12-04.221000Z_a1b2c3d4.md"
+}
