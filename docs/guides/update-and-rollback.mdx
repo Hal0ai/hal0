@@ -59,6 +59,22 @@ To pin a specific version instead of the latest:
 hal0 update --target v1.0.0
 ```
 
+<Aside type="caution" title="Stuck on 1.0.0-rc.1? Use --target">
+A box still running `1.0.0-rc.1` can't see later releases as available: its
+CLI predates the prerelease-aware version comparison that shipped in `rc.2`
+(#1663), so the old fallback ranks `1.0.0rc1` above plain `1.0.0` and both
+`hal0 update --check` and a plain `hal0 update` report nothing to do. This
+only affects boxes that go straight from `rc.1` to a later release — updating
+`rc.1` → `rc.2` first works normally.
+
+`--target` bypasses the availability check entirely and pulls the requested
+release directly:
+
+```sh
+hal0 update --target 1.0.0
+```
+</Aside>
+
 <Aside type="note">
 `hal0 update` refuses outright on an editable/dev install (`pip install
 -e`), with an actionable message to install from a release wheel instead.
