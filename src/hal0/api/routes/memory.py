@@ -19,6 +19,7 @@ veneer that:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from typing import Any
@@ -432,6 +433,12 @@ async def _propagate_shielded(slot: str, timeout_s: int) -> dict[str, Any]:
     the *caller's* await is cancelled anyway, wait out the (already-running,
     un-cancellable) worker before re-raising — so the lock is held for the
     worker's true lifetime, not just until the first cancellation.
+
+    That cleanup wait is ALSO shielded, in a loop (#1717 review): a second
+    cancellation arriving while we're waiting out the first one (e.g. a
+    request timeout followed by server shutdown) must not re-propagate
+    early either — an unshielded ``await task`` there would exit and
+    release the lock exactly like the bug this function exists to close.
     """
     from hal0.memory.extraction_env import apply_extraction_slot
 
@@ -441,7 +448,9 @@ async def _propagate_shielded(slot: str, timeout_s: int) -> dict[str, Any]:
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        await task
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
         raise
 
 
@@ -482,12 +491,33 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
                 details=_validation_error_details(exc),
             ) from exc
 
-        # Validate extraction_slot against the live slot set when it is being
-        # changed — reject an unknown / non-llm slot with the valid options so
-        # the gate never flips onto a target that can't serve extraction.
         slot_changed = new_cfg.extraction_slot != cfg.memory.graph.extraction_slot
         timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
-        if slot_changed:
+
+        # Whether this PUT needs to propagate to hindsight-api: an explicit
+        # slot/timeout change, or (#1682 review) the on-disk drop-in has
+        # drifted from what hal0.toml already claims to be running — a host
+        # stuck in the pre-seam-bug broken state (toml already says slot A,
+        # drop-in never written) must still reconcile on the next PUT of its
+        # unchanged slot, not no-op on config equality. Computed here (a pure
+        # read, no side effects) so the validation below can cover it too.
+        needs_propagation = slot_changed or timeout_changed
+        if not needs_propagation:
+            from hal0.memory.extraction_env import drop_in_matches
+
+            needs_propagation = not drop_in_matches(new_cfg.extraction_slot, new_cfg.llm_timeout_s)
+
+        # Validate extraction_slot against the live slot set whenever it is
+        # about to be applied to hindsight-api — reject an unknown / non-llm
+        # slot with the valid options so the gate never flips onto (or, via
+        # reconciliation, restarts hindsight-api onto) a target that can't
+        # serve extraction. Covers BOTH an explicit change AND a
+        # reconciliation propagation (#1717 review): an unrelated PUT like
+        # {"enabled": true} with slot_changed=False must not silently
+        # restart hindsight-api onto a slot that's since been
+        # deleted/disabled just because the on-disk drop-in also happened
+        # to be stale.
+        if slot_changed or needs_propagation:
             available = await _enabled_llm_slots(request)
             if available and new_cfg.extraction_slot not in available:
                 raise MemoryGraphSlotInvalid(
@@ -520,20 +550,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
 
         # Propagate the extraction slot + LLM timeout to hindsight-api (drop-in
         # + restart) so the engine's native extraction LLM follows the choice.
-        needs_propagation = slot_changed or timeout_changed
-        if not needs_propagation:
-            from hal0.memory.extraction_env import drop_in_matches
-
-            # #1682 review: hal0.toml equality alone is not enough to skip
-            # propagation. A host hit by the pre-seam write bug (or any other
-            # silent failure) can already have hal0.toml recording this exact
-            # slot while hindsight-api's drop-in was never actually written
-            # or still names a different target — re-requesting the
-            # unchanged value must still reconcile instead of no-op'ing on
-            # config equality. The drop-in is 0644 root:root (#1641), so this
-            # is a plain unprivileged read, not a seam round trip.
-            needs_propagation = not drop_in_matches(new_cfg.extraction_slot, new_cfg.llm_timeout_s)
-
+        # ``needs_propagation`` was already computed (and validated) above.
         propagation: dict[str, Any] | None = None
         if needs_propagation:
             # Thread hop (#1641): the propagation shells out to the privileged

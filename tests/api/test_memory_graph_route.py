@@ -209,6 +209,42 @@ async def test_propagate_shielded_does_not_resolve_until_worker_finishes() -> No
         assert order == ["worker_done"]
 
 
+async def test_propagate_shielded_survives_a_second_cancellation() -> None:
+    """#1717 review: a second cancellation arriving while we're already
+    waiting out the first (request timeout, then server shutdown) must not
+    re-propagate early either — an unshielded ``await task`` in the cleanup
+    path would exit (and release HAL0_TOML_LOCK) exactly like the bug this
+    helper exists to close, just one cancellation later."""
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    order: list[str] = []
+
+    def _slow_apply(slot: str, *, timeout_s: int) -> dict[str, Any]:
+        worker_started.set()
+        assert release_worker.wait(timeout=5), "test bug: never released"
+        order.append("worker_done")
+        return {"slot": slot, "written": True, "error": None}
+
+    with patch("hal0.memory.extraction_env.apply_extraction_slot", side_effect=_slow_apply):
+        task = asyncio.ensure_future(memory_routes._propagate_shielded("agent", 300))
+        await asyncio.get_running_loop().run_in_executor(None, worker_started.wait, 5)
+
+        task.cancel()
+        await asyncio.sleep(0)  # let the first cancellation reach the shield
+        task.cancel()  # a second cancellation, while still cleaning up from the first
+
+        # Worker is still blocked — even with two cancellations queued, the
+        # helper must not have resolved.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
+        assert order == []
+
+        release_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert order == ["worker_done"]
+
+
 def test_put_enable_with_unknown_slot_rejected(
     client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
@@ -262,6 +298,32 @@ def test_put_reconciles_when_toml_matches_but_drop_in_does_not(
     assert body["extraction_slot"] == "utility"
     assert body["propagation"]["written"] is True
     apply_mock.assert_called_once_with("utility", timeout_s=300)
+
+
+def test_put_reconciliation_still_validates_the_unchanged_slot(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """#1717 review: an unrelated PUT (e.g. just {"enabled": true}) with
+    slot_changed=False must not silently restart hindsight-api onto a slot
+    that's since been deleted/disabled just because the on-disk drop-in also
+    happened to be stale. Reconciliation must go through the same
+    live-slot-set validation as an explicit slot change, not bypass it."""
+    # "utility" (the config default / stub_wrapper's default extraction_slot)
+    # is deliberately NOT in the enabled llm slot set here.
+    app = _build_app(stub_wrapper, "agent")
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.drop_in_matches", return_value=False),
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+    ):
+        r = client.put("/api/memory/graph", json={"enabled": True})
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "config.memory_graph_slot_invalid"
+    apply_mock.assert_not_called()
+    # Rejected before any wrapper flip / persist, same as an explicit
+    # unknown-slot request.
+    assert stub_wrapper.set_calls == []
 
 
 def test_put_disable_idempotent(client: TestClient, stub_wrapper: StubWrapper) -> None:

@@ -131,11 +131,15 @@ def drop_in_matches(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> bool:
     The drop-in is 0644 root:root (world-readable, #1641), so this is a
     plain, unprivileged read — no seam round trip. Any read failure (missing
     file on a fresh install or a host that never propagated, a permission
-    oddity) counts as "does not match": propagate.
+    oddity, or — #1717 review — undecodable bytes from manual tampering or a
+    locale mismatch, which ``Path.read_text()`` raises as a
+    ``UnicodeDecodeError`` rather than an ``OSError``) counts as "does not
+    match": propagate and let the atomic rewrite repair it, instead of an
+    otherwise-idempotent PUT 500ing.
     """
     try:
         return DROP_IN_PATH.read_text() == render_drop_in(slot, timeout_s)
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return False
 
 

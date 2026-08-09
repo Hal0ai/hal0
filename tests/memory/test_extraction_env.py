@@ -259,6 +259,20 @@ def test_drop_in_matches_false_when_missing(monkeypatch, tmp_path: Path):
     assert drop_in_matches("agent", 300) is False
 
 
+def test_drop_in_matches_false_on_undecodable_bytes(monkeypatch, tmp_path: Path):
+    """#1717 review: ``Path.read_text()`` raises ``UnicodeDecodeError`` (NOT
+    an ``OSError``) on malformed/tampered content. That must still read as
+    "does not match" so the caller reconciles by rewriting the file, instead
+    of an otherwise-idempotent graph PUT 500ing on a decode failure."""
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "extraction-model.conf"
+    path.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+
+    assert drop_in_matches("agent", 300) is False
+
+
 def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Path):
     """Root / dev / CI keeps the pre-seam behaviour: a direct atomic write."""
     import hal0.memory.extraction_env as ee
