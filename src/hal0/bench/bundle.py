@@ -162,6 +162,8 @@ def write_bundle(
             data = payload[name]
             info = tarfile.TarInfo(name)
             info.size = len(data)
-            info.mtime = 0  # deterministic archive for byte-identical re-packs
+            info.mtime = (
+                0  # stable member metadata; determinism lives in bundle_id, not archive bytes
+            )
             tf.addfile(info, io.BytesIO(data))
     return out, manifest

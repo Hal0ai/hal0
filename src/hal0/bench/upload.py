@@ -18,6 +18,20 @@ from typing import Any
 DEFAULT_API_BASE = "https://api.hal0.dev"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse all redirects on the upload POST: the Authorization: Bearer
+    header must never follow a redirect off-host — urllib's default redirect
+    handler would happily re-send it to whatever Location the server names.
+    Returning None here makes urllib raise HTTPError for any 3xx response,
+    which the existing HTTPError handler below turns into an UploadError."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 class UploadError(Exception):
     def __init__(self, message: str, status: int | None = None) -> None:
         super().__init__(message)
@@ -52,11 +66,11 @@ def upload_bundle(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with _opener.open(req, timeout=120) as resp:
             return json.loads(resp.read().decode() or "{}")
     except urllib.error.HTTPError as exc:
         try:
-            payload = json.loads(exc.read().decode() or "{}")
+            payload = json.loads(exc.read().decode(errors="replace") or "{}")
         except json.JSONDecodeError:
             payload = {}
         detail = payload.get("errors") or payload.get("error") or exc.reason

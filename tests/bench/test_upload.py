@@ -24,6 +24,12 @@ class _Handler(BaseHTTPRequestHandler):
             {"path": self.path, "auth": self.headers.get("Authorization"), "len": len(body)}
         )
         auth = self.headers.get("Authorization", "")
+        if auth == "Bearer redirect-token":
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:1/elsewhere")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if auth != "Bearer good-token":
             code, payload = 401, {"error": "unauthorized"}
         elif len(body) == 0:
@@ -91,3 +97,9 @@ def test_missing_token_is_a_clean_error(bundle_file, monkeypatch):
     monkeypatch.delenv("HAL0_BENCH_TOKEN", raising=False)
     with pytest.raises(UploadError, match="HAL0_BENCH_TOKEN"):
         upload_bundle(bundle_file, api="http://127.0.0.1:1")
+
+
+def test_upload_does_not_follow_redirect_with_bearer_token(server, bundle_file):
+    with pytest.raises(UploadError) as ei:
+        upload_bundle(bundle_file, api=server, token="redirect-token")
+    assert ei.value.status == 302
