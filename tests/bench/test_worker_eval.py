@@ -119,9 +119,9 @@ def _worker_args() -> types.SimpleNamespace:
 
 def test_deferred_eval_yields_head_of_line(monkeypatch, tmp_path):
     monkeypatch.setenv("HAL0_BENCH_STATE", str(tmp_path))
-    # The worker drops eval items outright when the hermes binary is absent
-    # (a real guard, #1526) — stub it so these tests run on hermes-less CI.
-    monkeypatch.setattr(evalrun, "hermes_missing", lambda: None)
+    # The worker drops eval items outright when tool-eval-bench is absent
+    # (a real guard, #1526) — stub it so these tests run on tool-less CI.
+    monkeypatch.setattr(evalrun, "tool_eval_missing", lambda: None)
     control.set_control(state="running")
     control.enqueue({"id": "ev1", "model": "m-eval", "kind": "eval"})
     control.enqueue({"id": "su1", "suite": "roster"})
@@ -146,9 +146,9 @@ def test_deferred_eval_yields_head_of_line(monkeypatch, tmp_path):
 
 def test_stopped_eval_keeps_head_of_line(monkeypatch, tmp_path):
     monkeypatch.setenv("HAL0_BENCH_STATE", str(tmp_path))
-    # The worker drops eval items outright when the hermes binary is absent
-    # (a real guard, #1526) — stub it so these tests run on hermes-less CI.
-    monkeypatch.setattr(evalrun, "hermes_missing", lambda: None)
+    # The worker drops eval items outright when tool-eval-bench is absent
+    # (a real guard, #1526) — stub it so these tests run on tool-less CI.
+    monkeypatch.setattr(evalrun, "tool_eval_missing", lambda: None)
     control.set_control(state="running")
     control.enqueue({"id": "ev1", "model": "m-eval", "kind": "eval"})
     control.enqueue({"id": "su1", "suite": "roster"})
@@ -175,14 +175,14 @@ def test_stopped_eval_keeps_head_of_line(monkeypatch, tmp_path):
     assert [i["id"] for i in control.read_queue()] == ["ev1", "su1"]
 
 
-def test_eval_item_dropped_when_hermes_is_missing(monkeypatch, tmp_path):
-    """No hermes binary on the box: the worker drops the eval item with one
-    clean message instead of failing every task (#1526)."""
+def test_eval_item_dropped_when_tool_eval_bench_is_missing(monkeypatch, tmp_path):
+    """No tool-eval-bench binary on the box: the worker drops the eval item
+    with one clean message instead of failing every task (#1526)."""
     monkeypatch.setenv("HAL0_BENCH_STATE", str(tmp_path))
     control.set_control(state="running")
     control.enqueue({"id": "ev1", "kind": "eval", "model": "m"})
     monkeypatch.setattr(cli, "fetch_registry_models", lambda api: [])
-    monkeypatch.setattr(evalrun, "hermes_missing", lambda: "no hermes here")
+    monkeypatch.setattr(evalrun, "tool_eval_missing", lambda: "no tool-eval-bench here")
 
     import time as _time
 

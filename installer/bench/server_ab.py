@@ -8,6 +8,16 @@ or the embed/rerank endpoints. This script measures those against LIVE slots
 through hal0-api + the slot's own llama-server port. It supersedes the ad-hoc
 /root/bench_mtp.py with a versioned, restorable harness.
 
+Bench Phase 3 (docs/superpowers/plans/2026-08-09-bench-phase3-oss-adapters.md):
+the bench runner's ``chat`` cell kind no longer drives this script's ``ab``
+mode — it now drives GuideLLM (``hal0.bench.adapters.guidellm``) against the
+slot's HTTP endpoint directly, for real TTFT/ITL/TPOT distributions instead of
+this script's hand-rolled sequential N-timed-calls loop. ``reuse``/``embed``/
+``rerank`` (and ``batch``/``mtp``, not runner-wired) still measure server-only
+levers GuideLLM has no vocabulary for, so this script is NOT retired — ``ab``
+mode itself is kept working (manual/direct invocation), just no longer reached
+by the automated planner/runner for the ``chat`` kind.
+
 Runs as the unprivileged hal0/agent user — no sudo, no seam: it only PUTs slot
 config through hal0-api (same surface the dashboard uses) and always restores
 the slot's original extra_args afterwards (try/finally).

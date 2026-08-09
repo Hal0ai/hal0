@@ -301,12 +301,13 @@ def _eval_run_id(item: dict) -> str:
 
 
 def _worker_eval(model: str, api: str, item: dict) -> bool:
-    """Run the full agentic-eval task set for one queued model (the dashboard's
-    Tool Bench). Unlike suite runs this drives the LIVE inference endpoint via
-    Hermes, so it never takes the GPU seam. Same politeness rule as cmd_eval:
-    re-check for live traffic before each task and back off (leave the item
-    queued) rather than pile onto production. Returns True when every task ran;
-    False when the operator hit Stop/Pause or traffic appeared mid-run.
+    """Run the full agentic-eval scenario set for one queued model (the
+    dashboard's Tool Bench). Unlike suite runs this drives the LIVE inference
+    endpoint through tool-eval-bench, so it never takes the GPU seam. Same
+    politeness rule as cmd_eval: re-check for live traffic before each
+    scenario and back off (leave the item queued) rather than pile onto
+    production. Returns True when every scenario ran; False when the
+    operator hit Stop/Pause or traffic appeared mid-run.
 
     Resumable across defers (like the suite path): tasks already recorded under
     this item's stable run_id in a prior tick are skipped, so a resumed eval runs
@@ -315,6 +316,7 @@ def _worker_eval(model: str, api: str, item: dict) -> bool:
 
     from . import control, evalrun
 
+    evalrun.ensure_tasks()
     run_id = _eval_run_id(item)
     done = {r.get("task_id") for r in evalrun.read_evals() if r.get("run_id") == run_id}
     pending = [t for t in evalrun.TASKS if t.id not in done]
@@ -370,7 +372,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 resolved = _resolve_model_id(item["model"], models)
                 from . import evalrun
 
-                missing = evalrun.hermes_missing()
+                missing = evalrun.tool_eval_missing()
                 if missing:
                     print(f"[worker] {missing} — dropping eval item {item.get('id')}")
                     control.dequeue(item.get("id"))
@@ -617,38 +619,49 @@ def cmd_bundle(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    """Agentic task eval (the quality tier): drive each model as a real Hermes
-    agent through verifiable-value tasks and score correctness + speed.
+    """Agentic scenario eval (the quality tier): drive each model through
+    tool-eval-bench's tool-calling scenarios and score correctness + safety.
 
     Unlike ``run`` (which takes EXCLUSIVE GPU via the seam), eval sends requests
-    to the LIVE hal0 inference endpoint through Hermes — so the target model must
-    already be serveable, and eval competes with production traffic. Same
-    politeness rule as scheduled benchmarks: unless --force, decline over live
-    traffic (re-checked before each task) so we never pile onto production."""
+    to the LIVE hal0 inference endpoint (hal0's own ``/v1``) — so the target
+    model must already be serveable, and eval competes with production
+    traffic. Same politeness rule as scheduled benchmarks: unless --force,
+    decline over live traffic (re-checked before each scenario) so we never
+    pile onto production."""
     import tempfile
 
     from . import evalrun
 
-    tasks = evalrun.TASKS if not args.task else [t for t in evalrun.TASKS if t.id in args.task]
+    missing = evalrun.tool_eval_missing()
+    if missing and not args.dry_run:
+        print(missing)
+        return 2
+    if not missing:
+        evalrun.ensure_tasks()
+
+    if args.task:
+        known = {t.id for t in evalrun.TASKS}
+        tasks = [evalrun.get_task(t) or evalrun.Task(id=t) for t in args.task]
+        unknown = [t for t in args.task if t not in known] if known else []
+        if unknown:
+            print(f"no such task(s): {unknown}; known: {sorted(known)}")
+            return 2
+    else:
+        tasks = evalrun.TASKS
     if not tasks:
-        print(f"no such task(s): {args.task}; known: {[t.id for t in evalrun.TASKS]}")
+        print("no tasks available (tool-eval-bench scenario listing returned nothing)")
         return 2
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     if not models:
         print("--models is required (comma-separated model ids)")
         return 2
 
-    missing = evalrun.hermes_missing()
-    if missing and not args.dry_run:
-        print(missing)
-        return 2
-
     if args.dry_run:
         print(f"[dry-run] {len(models)} model(s) x {len(tasks)} task(s); no GPU, no writes\n")
         for model in models:
             for task in tasks:
-                cmd = evalrun.hermes_cmd(task, model, args.api)
-                print(f"  {model} :: {task.id} ({task.kind}, {task.timeout_s}s)")
+                cmd = evalrun.tool_eval_cmd(task, model, args.api)
+                print(f"  {model} :: {task.id} ({task.kind or 'unknown'})")
                 print("    " + " ".join(_shquote(c) for c in cmd) + "\n")
         return 0
 
@@ -835,7 +848,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--models", required=True, help="comma-separated model ids to eval/compare")
     p.add_argument("--task", action="append", help="limit to task id(s); repeatable (default: all)")
     p.add_argument("--api", default=DEFAULT_API, help=f"hal0 API base (default {DEFAULT_API})")
-    p.add_argument("--dry-run", action="store_true", help="print the exact hermes commands; no GPU")
+    p.add_argument(
+        "--dry-run", action="store_true", help="print the exact tool-eval-bench commands; no GPU"
+    )
     p.add_argument(
         "--force", action="store_true", help="run even over live traffic (skip politeness)"
     )

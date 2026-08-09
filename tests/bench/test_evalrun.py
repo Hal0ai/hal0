@@ -1,98 +1,208 @@
-"""test_evalrun.py — the agentic-eval scorer (pure, no live agent).
+"""test_evalrun.py — the agentic-eval shim over the tool-eval-bench adapter.
 
-The scorer is the trust boundary of the quality tier: a task passes only if the
-DERIVED expected value actually appears in the agent's final answer, and partial
-credit tracks how many hidden checkpoints the trace reached. These exercise both
-against mock transcripts so scoring is verified without a GPU.
+Bench Phase 3 (docs/superpowers/plans/2026-08-09-bench-phase3-oss-adapters.md,
+design decision 4) replaced the hand-rolled Hermes-driven scorer with the
+pinned OSS harness ``tool-eval-bench``. These tests exercise evalrun.py's thin
+integration layer — task-catalogue fetching, argv composition, and
+result-shape translation — entirely against injected fakes: nothing here
+shells out to a real tool-eval-bench binary (CI has none installed).
 """
 
 from __future__ import annotations
 
-from hal0.bench.evalrun import (
-    extract_answer,
-    get_task,
-    hermes_cmd,
-    score_task,
-)
+import json
+
+from hal0.bench import evalrun
+from hal0.bench.adapters.tool_eval import ERA_HARDENED
 
 
-def _codebase_task():
-    return get_task("codebase-combine")
-
-
-def test_extract_answer_last_nonempty_line():
-    assert extract_answer("thinking...\n\n  8549  \n") == "8549"
-    assert extract_answer("") == ""
-
-
-def test_correct_final_answer_scores_one():
-    task = _codebase_task()
-    transcript = "read src/config.py -> 8412\nread lib/util.py -> 137\nsum is:\n8549"
-    sc = score_task(task, transcript, expected="8549")
-    assert sc.correct is True
-    assert sc.score == 1.0
-    assert set(sc.checkpoints_hit) == {"8412", "137"}
-
-
-def test_wrong_answer_but_reached_one_checkpoint_gets_partial():
-    task = _codebase_task()
-    # found BASE_PORT but never the offset, and answered wrong
-    transcript = "found BASE_PORT 8412\nI think the port is 8412"
-    sc = score_task(task, transcript, expected="8549")
-    assert sc.correct is False
-    assert sc.checkpoints_hit == ["8412"]
-    assert sc.score == 0.25  # 0.5 * (1/2), capped below a pass
-
-
-def test_wrong_answer_no_checkpoints_scores_zero():
-    task = _codebase_task()
-    sc = score_task(task, "I could not find the files.\nunknown", expected="8549")
-    assert sc.correct is False
-    assert sc.score == 0.0
-
-
-def test_answer_may_be_wrapped_in_prose():
-    task = _codebase_task()
-    # lenient: expected value present in the last line even amid words
-    sc = score_task(task, "8412\n137\nThe health-check port is 8549.", expected="8549")
-    assert sc.correct is True
-
-
-def test_checkpoints_scanned_in_trace_not_just_stdout():
-    # hermes -z prints only the final answer to stdout; the intermediate hidden
-    # values live in the exported tool-call trace. Correct answer on stdout,
-    # checkpoints only in the trace -> still full credit + both checkpoints hit.
-    task = _codebase_task()
-    stdout = "8549"
-    trace = '[{"role":"tool","content":"config.py: BASE_PORT=8412"},{"content":"util: 137"}]'
-    sc = score_task(task, stdout, expected="8549", trace=trace)
-    assert sc.correct and sc.score == 1.0
-    assert set(sc.checkpoints_hit) == {"8412", "137"}
-
-
-def test_fixture_derived_answers_are_stable():
-    # the derive-from-fixture helpers must stay in sync with the checked-in
-    # fixtures — a drift (edited fixture, broken cipher) fails here, not silently
-    # mis-scores a live run.
-    from hal0.bench.evalrun import (
-        _cipher_answer,
-        _dep_answer,
-        _grep_answer,
-        _loop_answer,
-        _recurrence_answer,
+def _scenario_doc(ids: list[str]) -> str:
+    return json.dumps(
+        {
+            "total_scenarios": len(ids),
+            "categories": ["A"],
+            "scenarios": [{"id": i, "category": "A", "difficulty": "easy"} for i in ids],
+        }
     )
 
-    assert _cipher_answer() == "7391"
-    assert _loop_answer() == "465"
-    assert _dep_answer() == "4471"
-    assert _grep_answer() == "144"
-    assert _recurrence_answer() == "87"
+
+class TestListTasks:
+    def test_parses_dry_run_scenario_listing(self):
+        def fake_runner(argv, timeout_s):
+            assert "--dry-run" in argv and "--json" in argv
+            return 0, _scenario_doc(["s1", "s2"]), ""
+
+        tasks = evalrun.list_tasks(runner=fake_runner)
+        assert [t.id for t in tasks] == ["s1", "s2"]
+        assert all(t.kind == "A" for t in tasks)
+
+    def test_never_raises_on_a_broken_tool(self):
+        def boom(argv, timeout_s):
+            raise OSError("no such file")
+
+        assert evalrun.list_tasks(runner=boom) == []
+
+    def test_nonzero_exit_degrades_to_empty_list(self):
+        assert evalrun.list_tasks(runner=lambda a, t: (2, "", "boom")) == []
+
+    def test_malformed_json_degrades_to_empty_list(self):
+        assert evalrun.list_tasks(runner=lambda a, t: (0, "not json", "")) == []
 
 
-def test_hermes_cmd_shape():
-    task = _codebase_task()
-    cmd = hermes_cmd(task, "some-model", "http://127.0.0.1:8080")
-    assert cmd[1] == "-z" and cmd[2] == task.prompt
-    assert "--yolo" in cmd and "--provider" in cmd and "custom" in cmd
-    assert "-m" in cmd and cmd[cmd.index("-m") + 1] == "some-model"
-    assert cmd[cmd.index("-t") + 1] == task.toolsets
+class TestEnsureTasks:
+    def test_skips_the_fetch_when_already_populated(self, monkeypatch):
+        monkeypatch.setattr(evalrun, "TASKS", [evalrun.Task(id="existing")])
+
+        def boom(*a, **k):
+            raise AssertionError("list_tasks must not run when TASKS is already set")
+
+        monkeypatch.setattr(evalrun, "list_tasks", boom)
+        assert evalrun.ensure_tasks() == [evalrun.Task(id="existing")]
+
+    def test_skips_the_fetch_when_the_tool_is_missing(self, monkeypatch):
+        monkeypatch.setattr(evalrun, "TASKS", [])
+        monkeypatch.setattr(evalrun, "tool_eval_missing", lambda: "not installed")
+
+        def boom(*a, **k):
+            raise AssertionError("list_tasks must not run when the tool is missing")
+
+        monkeypatch.setattr(evalrun, "list_tasks", boom)
+        assert evalrun.ensure_tasks() == []
+
+
+def test_tool_eval_missing_checks_path(monkeypatch):
+    monkeypatch.setattr(evalrun.shutil, "which", lambda name: None)
+    msg = evalrun.tool_eval_missing()
+    assert msg and "tool-eval-bench" in msg
+
+    monkeypatch.setattr(evalrun.shutil, "which", lambda name: "/usr/bin/tool-eval-bench")
+    assert evalrun.tool_eval_missing() is None
+
+
+def test_tool_eval_cmd_shape():
+    task = evalrun.Task(id="scenario-1", kind="A")
+    cmd = evalrun.tool_eval_cmd(
+        task, "some-model", "http://127.0.0.1:8080", python_exe="/usr/bin/python3"
+    )
+    assert cmd[0] == "/usr/bin/python3"
+    assert "run" in cmd
+    assert cmd[cmd.index("--model") + 1] == "some-model"
+    assert cmd[cmd.index("--base-url") + 1] == "http://127.0.0.1:8080/v1"
+    assert cmd[cmd.index("--scenarios") + 1] == "scenario-1"
+
+
+class TestRunTask:
+    def _happy_doc(self, scenario_id="s1", points=2):
+        return {
+            "status": "completed",
+            "run_id": "r1",
+            "tool_eval_bench_version": "2.5.0",
+            "final_score": points,
+            "total_scenarios": 1,
+            "scores": {
+                "scenario_results": [
+                    {
+                        "scenario_id": scenario_id,
+                        "status": "pass" if points == 2 else "fail",
+                        "points": points,
+                        "summary": "did the thing",
+                        "expected_behavior": "do the thing",
+                        "tool_calls_made": ["a", "b"],
+                        "duration_seconds": 12.5,
+                        "turn_count": 3,
+                        "prompt_tokens": 100,
+                        "completion_tokens": 50,
+                    }
+                ]
+            },
+        }
+
+    def test_ok_scenario_translates_to_an_eval_record(self, tmp_path):
+        task = evalrun.Task(id="s1", kind="A")
+
+        def fake_runner(argv, timeout_s):
+            out_path = argv[argv.index("--json-file") + 1]
+            with open(out_path, "w") as fh:
+                json.dump(self._happy_doc(), fh)
+            return 0, "", ""
+
+        rec = evalrun.run_task(task, "m1", "run-1", "http://x:8080", tmp_path, runner=fake_runner)
+
+        assert rec.outcome == "ok"
+        assert rec.correct is True
+        assert rec.score == 1.0
+        assert rec.tool_version == "2.5.0"
+        assert rec.scoring_era == ERA_HARDENED
+        # legacy metric names are still populated (design decision 4: no
+        # shape change for downstream consumers of evals.jsonl)
+        assert rec.metrics["wall_s"] == 12.5
+        assert rec.metrics["tool_calls"] == 2
+        assert rec.metrics["tokens_out"] == 50
+        assert rec.metrics["duration_seconds"] == 12.5  # raw name also present
+
+    def test_failed_scenario_translates_to_a_failed_record(self, tmp_path):
+        task = evalrun.Task(id="s1", kind="A")
+
+        def fake_runner(argv, timeout_s):
+            out_path = argv[argv.index("--json-file") + 1]
+            with open(out_path, "w") as fh:
+                json.dump(self._happy_doc(points=0), fh)
+            return 0, "", ""
+
+        rec = evalrun.run_task(task, "m1", "run-1", "http://x:8080", tmp_path, runner=fake_runner)
+        assert rec.outcome == "failed"
+        assert rec.correct is False
+        assert rec.score == 0.0
+
+    def test_connection_failure_never_raises(self, tmp_path):
+        """A pre-flight connection failure (adapters/tool_eval.py's real
+        behaviour): rc!=0, no --json-file written. Must return a FAILED
+        record, never an exception."""
+        task = evalrun.Task(id="s1", kind="A")
+        rec = evalrun.run_task(
+            task,
+            "m1",
+            "run-1",
+            "http://x:8080",
+            tmp_path,
+            runner=lambda a, t: (2, "", "conn refused"),
+        )
+        assert rec.outcome == "failed"
+        assert rec.score == 0.0
+
+    def test_timeout_never_raises(self, tmp_path):
+        import subprocess
+
+        task = evalrun.Task(id="s1", kind="A")
+
+        def timeout_runner(argv, timeout_s):
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout_s)
+
+        rec = evalrun.run_task(
+            task, "m1", "run-1", "http://x:8080", tmp_path, runner=timeout_runner
+        )
+        assert rec.outcome == "hang"
+
+    def test_scenario_missing_from_output_is_a_failed_record_not_a_crash(self, tmp_path):
+        """An unknown --scenarios id filters down to total_scenarios: 0 with
+        no error (adapters/tool_eval.py module docstring's "missing task"
+        case) — the row this task expects just isn't there."""
+        task = evalrun.Task(id="does-not-exist", kind="")
+
+        def fake_runner(argv, timeout_s):
+            out_path = argv[argv.index("--json-file") + 1]
+            with open(out_path, "w") as fh:
+                json.dump(self._happy_doc(scenario_id="s1"), fh)
+            return 0, "", ""
+
+        rec = evalrun.run_task(task, "m1", "run-1", "http://x:8080", tmp_path, runner=fake_runner)
+        assert rec.outcome == "failed"
+        assert "missing" in rec.note
+
+
+def test_never_invokes_hermes(tmp_path, monkeypatch):
+    """Design decision 4: the new path must not invoke hermes at all. There
+    is no HERMES constant or hermes_missing() left to accidentally call."""
+    assert not hasattr(evalrun, "HERMES")
+    assert not hasattr(evalrun, "hermes_missing")
+    assert not hasattr(evalrun, "hermes_cmd")

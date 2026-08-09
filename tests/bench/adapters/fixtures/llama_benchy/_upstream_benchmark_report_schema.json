@@ -1,0 +1,283 @@
+{
+  "$defs": {
+    "BenchmarkMetric": {
+      "properties": {
+        "mean": {
+          "description": "Mean value",
+          "title": "Mean",
+          "type": "number"
+        },
+        "std": {
+          "description": "Standard deviation",
+          "title": "Std",
+          "type": "number"
+        },
+        "values": {
+          "description": "Raw values",
+          "items": {
+            "type": "number"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "mean",
+        "std",
+        "values"
+      ],
+      "title": "BenchmarkMetric",
+      "type": "object"
+    },
+    "BenchmarkRun": {
+      "properties": {
+        "concurrency": {
+          "description": "Concurrency level for this run",
+          "title": "Concurrency",
+          "type": "integer"
+        },
+        "context_size": {
+          "description": "Context size (prefix tokens)",
+          "title": "Context Size",
+          "type": "integer"
+        },
+        "prompt_size": {
+          "description": "Prompt size (tokens)",
+          "title": "Prompt Size",
+          "type": "integer"
+        },
+        "response_size": {
+          "description": "Response size (tokens)",
+          "title": "Response Size",
+          "type": "integer"
+        },
+        "is_context_prefill_phase": {
+          "description": "Whether this was a context prefill phase run",
+          "title": "Is Context Prefill Phase",
+          "type": "boolean"
+        },
+        "pp_throughput": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Prefill tokens per second (total)"
+        },
+        "pp_req_throughput": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Prefill tokens per second (per request)"
+        },
+        "tg_throughput": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Generation tokens per second (total)"
+        },
+        "tg_req_throughput": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Generation tokens per second (per request)"
+        },
+        "peak_throughput": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Peak generation tokens per second (total)"
+        },
+        "peak_req_throughput": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Peak generation tokens per second (per request)"
+        },
+        "ttfr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Time to First Response (ms)"
+        },
+        "est_ppt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Estimated pure processing time (ms)"
+        },
+        "e2e_ttft": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "End-to-end Time to First Token (ms)"
+        },
+        "throughput_over_time": {
+          "anyOf": [
+            {
+              "items": {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A collection of time series data capturing the aggregated throughput over time. Each item in the list represents a sequence of [timestamp, value] pairs for a specific execution batch or iteration.",
+          "title": "Throughput Over Time"
+        },
+        "requests_throughput_over_time": {
+          "anyOf": [
+            {
+              "items": {
+                "items": {
+                  "items": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "type": "array"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A collection of time series data for individual requests. Organized as a list of lists, where the outer list represents batches and the inner list contains the throughput time series for each request in that batch.",
+          "title": "Requests Throughput Over Time"
+        }
+      },
+      "required": [
+        "concurrency",
+        "context_size",
+        "prompt_size",
+        "response_size",
+        "is_context_prefill_phase"
+      ],
+      "title": "BenchmarkRun",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "version": {
+      "description": "Benchmark tool version",
+      "title": "Version",
+      "type": "string"
+    },
+    "timestamp": {
+      "description": "Run timestamp",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "latency_mode": {
+      "description": "Latency measurement mode used",
+      "title": "Latency Mode",
+      "type": "string"
+    },
+    "latency_ms": {
+      "description": " measured or assumed latency in ms",
+      "title": "Latency Ms",
+      "type": "number"
+    },
+    "model": {
+      "description": "Model name",
+      "title": "Model",
+      "type": "string"
+    },
+    "prefix_caching_enabled": {
+      "description": "Whether prefix caching was enabled",
+      "title": "Prefix Caching Enabled",
+      "type": "boolean"
+    },
+    "max_concurrency": {
+      "description": "Maximum concurrency level used in the suite",
+      "title": "Max Concurrency",
+      "type": "integer"
+    },
+    "benchmarks": {
+      "description": "List of benchmark run results",
+      "items": {
+        "$ref": "#/$defs/BenchmarkRun"
+      },
+      "title": "Benchmarks",
+      "type": "array"
+    }
+  },
+  "required": [
+    "version",
+    "timestamp",
+    "latency_mode",
+    "latency_ms",
+    "model",
+    "prefix_caching_enabled",
+    "max_concurrency",
+    "benchmarks"
+  ],
+  "title": "BenchmarkReport",
+  "type": "object"
+}

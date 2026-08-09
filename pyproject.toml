@@ -98,6 +98,18 @@ sentry = [
   "sentry-sdk>=2.20",
 ]
 
+# Bench load-gen tooling (Phase 3 of the bench overhaul). Deliberately NOT in
+# `dependencies`: the adapters (src/hal0/bench/adapters/) drive the tool via
+# its CLI — nothing imports it — and only a box that runs serving-perf suites
+# needs it. The other two Phase-3 tools (llama-benchy, tool-eval-bench) have
+# no PyPI release, and hal0ai publishes to PyPI, which forbids git direct
+# references in this file — their exact git pins live in
+# src/hal0/bench/adapters/__init__.py and install box-side, not as extras of
+# this distribution.
+bench-guidellm = [
+  "guidellm==0.7.3",
+]
+
 [project.scripts]
 hal0 = "hal0.cli.main:app"
 # hal0-agent is the small subprocess wrapper invoked by the systemd

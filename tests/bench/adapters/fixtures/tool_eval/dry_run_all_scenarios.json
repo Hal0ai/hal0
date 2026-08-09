@@ -1,0 +1,577 @@
+{
+  "event": "dry_run",
+  "total_scenarios": 84,
+  "estimated_minutes": 25.2,
+  "categories": {
+    "A": {
+      "label": "Tool Selection",
+      "count": 3
+    },
+    "B": {
+      "label": "Parameter Precision",
+      "count": 3
+    },
+    "C": {
+      "label": "Multi-Step Chains",
+      "count": 4
+    },
+    "D": {
+      "label": "Restraint & Refusal",
+      "count": 3
+    },
+    "E": {
+      "label": "Error Recovery",
+      "count": 3
+    },
+    "F": {
+      "label": "Localization",
+      "count": 3
+    },
+    "G": {
+      "label": "Structured Reasoning",
+      "count": 3
+    },
+    "H": {
+      "label": "Instruction Following",
+      "count": 5
+    },
+    "I": {
+      "label": "Context & State",
+      "count": 10
+    },
+    "J": {
+      "label": "Code Patterns",
+      "count": 3
+    },
+    "K": {
+      "label": "Safety & Boundaries",
+      "count": 13
+    },
+    "L": {
+      "label": "Toolset Scale",
+      "count": 4
+    },
+    "M": {
+      "label": "Autonomous Planning",
+      "count": 3
+    },
+    "N": {
+      "label": "Creative Composition",
+      "count": 3
+    },
+    "O": {
+      "label": "Structured Output",
+      "count": 6
+    },
+    "P": {
+      "label": "Hard Mode",
+      "count": 15
+    }
+  },
+  "scenarios": [
+    {
+      "id": "TC-01",
+      "title": "Direct Specialist Match",
+      "category": "A",
+      "difficulty": 1
+    },
+    {
+      "id": "TC-02",
+      "title": "Distractor Resistance",
+      "category": "A",
+      "difficulty": 1
+    },
+    {
+      "id": "TC-03",
+      "title": "Implicit Tool Need",
+      "category": "A",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-04",
+      "title": "Unit Handling",
+      "category": "B",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-05",
+      "title": "Date and Time Parsing",
+      "category": "B",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-06",
+      "title": "Multi-Value Extraction",
+      "category": "B",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-07",
+      "title": "Search \u2192 Read \u2192 Act",
+      "category": "C",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-08",
+      "title": "Conditional Branching",
+      "category": "C",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-09",
+      "title": "Parallel Independence",
+      "category": "C",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-10",
+      "title": "Trivial Knowledge",
+      "category": "D",
+      "difficulty": 1
+    },
+    {
+      "id": "TC-11",
+      "title": "Simple Math",
+      "category": "D",
+      "difficulty": 1
+    },
+    {
+      "id": "TC-12",
+      "title": "Impossible Request",
+      "category": "D",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-13",
+      "title": "Empty Results",
+      "category": "E",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-14",
+      "title": "Malformed Response",
+      "category": "E",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-15",
+      "title": "Conflicting Information",
+      "category": "E",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-16",
+      "title": "German Language Tool Call",
+      "category": "F",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-17",
+      "title": "Timezone-Aware Scheduling",
+      "category": "F",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-18",
+      "title": "Translate & Forward",
+      "category": "F",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-19",
+      "title": "Message Routing",
+      "category": "G",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-20",
+      "title": "Data Extraction & Calculation",
+      "category": "G",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-21",
+      "title": "Constraint Validation",
+      "category": "G",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-22",
+      "title": "Output Format Compliance",
+      "category": "H",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-23",
+      "title": "Explicit Tool Prohibition",
+      "category": "H",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-24",
+      "title": "Multi-Constraint Instruction",
+      "category": "H",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-25",
+      "title": "Cross-Reference Prior Results",
+      "category": "I",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-26",
+      "title": "State Consistency (Multi-Turn)",
+      "category": "I",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-27",
+      "title": "Deduplication Awareness",
+      "category": "I",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-28",
+      "title": "Read-Before-Write",
+      "category": "J",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-29",
+      "title": "Explain Without Executing",
+      "category": "J",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-30",
+      "title": "Chained Conditional Execution",
+      "category": "J",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-31",
+      "title": "Ambiguity Resolution",
+      "category": "K",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-32",
+      "title": "Scope Limitation",
+      "category": "K",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-33",
+      "title": "Hallucination Resistance",
+      "category": "K",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-34",
+      "title": "Prompt Injection Resistance",
+      "category": "K",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-35",
+      "title": "Contradictory Parameters",
+      "category": "K",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-36",
+      "title": "Missing Required Info",
+      "category": "K",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-37",
+      "title": "Needle in a Haystack",
+      "category": "L",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-38",
+      "title": "Multi-Step Crowded Namespace",
+      "category": "L",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-39",
+      "title": "Restraint Under Abundance",
+      "category": "L",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-40",
+      "title": "Domain Confusion",
+      "category": "L",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-41",
+      "title": "Wrong Parameter Type",
+      "category": "K",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-42",
+      "title": "Extra Parameter Injection",
+      "category": "K",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-43",
+      "title": "Omitted Required Parameter",
+      "category": "K",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-44",
+      "title": "tool_choice=none Compliance",
+      "category": "H",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-45",
+      "title": "tool_choice=required Compliance",
+      "category": "H",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-46",
+      "title": "Deep Multi-Turn Research (5 turns)",
+      "category": "I",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-47",
+      "title": "Correction Across Turns",
+      "category": "I",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-48",
+      "title": "Additive Context (CC)",
+      "category": "I",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-49",
+      "title": "Cancellation Across Turns",
+      "category": "I",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-50",
+      "title": "Information Reveal",
+      "category": "I",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-51",
+      "title": "Goal-Level Planning",
+      "category": "M",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-52",
+      "title": "Open-Ended Research",
+      "category": "M",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-53",
+      "title": "Conditional Planning",
+      "category": "M",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-54",
+      "title": "Cross-Tool Synthesis",
+      "category": "N",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-55",
+      "title": "Data Pipeline",
+      "category": "N",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-56",
+      "title": "Notification Workflow",
+      "category": "N",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-57",
+      "title": "Injection via Search Results",
+      "category": "K",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-58",
+      "title": "Fake System Message in File",
+      "category": "K",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-59",
+      "title": "Authority Escalation",
+      "category": "K",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-60",
+      "title": "Cross-Turn Sleeper Injection",
+      "category": "K",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-61",
+      "title": "Async Polling",
+      "category": "C",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-62",
+      "title": "6-Turn Research Chain",
+      "category": "I",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-63",
+      "title": "Accumulating Constraints",
+      "category": "I",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-64",
+      "title": "Simple Schema Compliance",
+      "category": "O",
+      "difficulty": 2
+    },
+    {
+      "id": "TC-65",
+      "title": "Tool \u2192 Structured Output",
+      "category": "O",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-66",
+      "title": "Nested Schema (Array of Objects)",
+      "category": "O",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-67",
+      "title": "Enum Constraint + Analysis",
+      "category": "O",
+      "difficulty": 3
+    },
+    {
+      "id": "TC-68",
+      "title": "Schema Violation Resistance",
+      "category": "O",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-69",
+      "title": "Multi-Tool \u2192 Complex Schema",
+      "category": "O",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-70",
+      "title": "Adversarial Near-Duplicate Tools",
+      "category": "P",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-71",
+      "title": "Ambiguous Recipient",
+      "category": "P",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-72",
+      "title": "Cascading Error Recovery",
+      "category": "P",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-73",
+      "title": "Multi-Constraint Composition",
+      "category": "P",
+      "difficulty": 5
+    },
+    {
+      "id": "TC-74",
+      "title": "Stateful Multi-Turn Corrections",
+      "category": "P",
+      "difficulty": 5
+    },
+    {
+      "id": "TC-75",
+      "title": "Missing Required Parameter",
+      "category": "P",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-76",
+      "title": "Missing Capability",
+      "category": "P",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-77",
+      "title": "Irrelevant Tool Trap",
+      "category": "P",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-78",
+      "title": "Independent Portfolio Valuation",
+      "category": "P",
+      "difficulty": 4
+    },
+    {
+      "id": "TC-79",
+      "title": "Dependency-Aware Event Planning",
+      "category": "P",
+      "difficulty": 5
+    },
+    {
+      "id": "TC-80",
+      "title": "Transactional Update With Rollback",
+      "category": "P",
+      "difficulty": 5
+    },
+    {
+      "id": "TC-81",
+      "title": "Tool-Output Prompt Injection",
+      "category": "P",
+      "difficulty": 5
+    },
+    {
+      "id": "TC-82",
+      "title": "Stale Memory Conflict Resolution",
+      "category": "P",
+      "difficulty": 5
+    },
+    {
+      "id": "TC-83",
+      "title": "Format-Sensitive Chained Summary",
+      "category": "P",
+      "difficulty": 5
+    },
+    {
+      "id": "TC-84",
+      "title": "Long-Horizon Recovery With Constraint Retention",
+      "category": "P",
+      "difficulty": 5
+    }
+  ]
+}

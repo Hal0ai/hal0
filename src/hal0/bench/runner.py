@@ -29,10 +29,14 @@ corrects every place the stubs assumed a contract that differs from the real box
     against, or clear before a re-measure; artifacts are written straight from
     the parsed rows. ``-d`` is the cell's depth axis (KV fill); ``-p``/``-n``
     are the fixed pp/tg measurement sizes.
-  * Tier B/C (chat/embed/rerank/reuse) go through the installed ``server_ab.py``
-    (modes ab/reuse/embed/rerank; no depth/mtp/batch on this build). A chat
-    cell passes its config variant as the single ``--variant`` so the record's
-    config label matches what the server actually ran.
+  * Tier B/C (embed/rerank/reuse) go through the installed ``server_ab.py``
+    (modes reuse/embed/rerank; no depth/mtp/batch on this build). Bench Phase 3
+    (docs/superpowers/plans/2026-08-09-bench-phase3-oss-adapters.md): ``chat``
+    no longer goes through server_ab at all — it drives GuideLLM
+    (``adapters/guidellm.py``) against the slot's HTTP endpoint directly, and
+    two new kinds (``http_pp``/``http_tg``) drive llama-benchy
+    (``adapters/llama_benchy.py``) the same way for llama-bench vocabulary
+    (pp/tg x depth) measured over HTTP.
 
 Per-cell watchdog = 3x expected (DESIGN §5.3); a bad cell records its outcome and
 the session CONTINUES. Resumable by construction (DESIGN §5.4): each record is
@@ -60,9 +64,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import harness
+from .adapters import guidellm, llama_benchy
 from .devices import BenchDeviceError, BenchDeviceSpec, resolve_bench_devices
-from .parsers import parse_llama_bench, parse_server_ab
-from .schema import Host, Outcome, Record
+from .parsers import Parsed, parse_llama_bench, parse_server_ab
+from .schema import Engine, Host, Outcome, Record
 from .store import Store
 
 if TYPE_CHECKING:
@@ -115,12 +120,23 @@ _EXPECTED_S = {
     "rerank": 120,
     "batch": 600,
     "mtp": 300,
+    # Phase-3 OSS-adapter kinds (llama-benchy over HTTP): a bit more than the
+    # Tier-A seam values above for the HTTP round-trip + warmup overhead.
+    "http_pp": 150,
+    "http_tg": 210,
 }
 _TIER_A_KINDS = {"pp", "tg"}
-# Tier-B cell kind -> server_ab.py --mode (this build: ab/reuse/embed/rerank).
+# Bench Phase 3 (docs/superpowers/plans/2026-08-09-bench-phase3-oss-adapters.md
+# design decision 1): "chat" drives GuideLLM (adapters/guidellm.py), not
+# server_ab, so it is deliberately NOT in this map any more. "http_pp"/
+# "http_tg" drive llama-benchy (adapters/llama_benchy.py) — also not
+# server_ab, so also not here.
+_GUIDELLM_KINDS = {"chat"}
+_LLAMA_BENCHY_KINDS = {"http_pp", "http_tg"}
+# Tier-B cell kind -> server_ab.py --mode (this build: reuse/embed/rerank).
 # No .get() fallback anywhere: an unknown kind is rejected at plan time
 # (planner.KNOWN_KINDS) and raises here if one slips through.
-_KIND_TO_MODE = {"chat": "ab", "reuse": "reuse", "embed": "embed", "rerank": "rerank"}
+_KIND_TO_MODE = {"reuse": "reuse", "embed": "embed", "rerank": "rerank"}
 # Default tg decode length when a group has no explicit tg cell n_gen, and the
 # fixed pp prompt length (mirrors planner._PP_PROMPT — the depth axis is -d,
 # not the prompt length).
@@ -380,13 +396,12 @@ def _tier_a_cmd(cell, pp_prompt: int, tg_gen: int, devices: BenchDeviceSpec) -> 
 def _tier_bc_cmd(
     cell, slot: str, api: str, out: Path | str = "<artifacts>/server-ab.json"
 ) -> list[str]:
-    """The exact `server_ab.py` argv for a Tier-B/C cell. A chat cell carries
-    its config variant as the single ``--variant "<label>:<flags>"`` so the
-    server actually runs the flags the record is labelled with (the old shape
-    passed no --variant at all, which server_ab rejected: every chat cell
-    failed with exit 2)."""
+    """The exact `server_ab.py` argv for a Tier-B/C cell (reuse/embed/rerank —
+    "chat" moved to GuideLLM in Phase 3, see ``_GUIDELLM_KINDS`` /
+    ``_guidellm_record``, so this never composes an ``ab``-mode argv any
+    more)."""
     mode = _KIND_TO_MODE[cell.kind]
-    cmd = [
+    return [
         SERVER_AB,
         "--mode",
         mode,
@@ -399,12 +414,6 @@ def _tier_bc_cmd(
         "--out",
         str(out),
     ]
-    if mode == "ab":
-        label = getattr(cell, "config_label", "default")
-        flags = getattr(cell, "flags", None) or {}
-        flag_str = " ".join(f"{k} {flags[k]}" for k in sorted(flags))
-        cmd += ["--variant", f"{label}:{flag_str}"]
-    return cmd
 
 
 def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]:
@@ -451,6 +460,30 @@ def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]
                 seen.add(key)
                 pp, tg = sizes.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
                 cmd_str = " ".join(_tier_a_cmd(c, pp, tg, devices))
+        elif c.kind in _GUIDELLM_KINDS:
+            profile_kind, profile_options = _guidellm_profile(c)
+            guidellm_req = guidellm.GuidellmRequest(
+                endpoint=f"http://127.0.0.1:<port-for:{c.model_id}>",
+                model=c.model_id,
+                profile_kind=profile_kind,
+                output_path="<artifacts>/guidellm-benchmarks.json",
+                profile_options=profile_options,
+                max_requests=max(int(c.reps), 1),
+            )
+            cmd_str = " ".join(guidellm.build_argv(guidellm_req))
+        elif c.kind in _LLAMA_BENCHY_KINDS:
+            pp = int(c.identity.workload.n_prompt or _DEFAULT_PP_PROMPT)
+            tg = int(c.identity.workload.n_gen or _DEFAULT_TG_GEN)
+            benchy_req = llama_benchy.LlamaBenchyRequest(
+                endpoint=f"http://127.0.0.1:<port-for:{c.model_id}>/v1",
+                model=c.model_id,
+                pp=pp,
+                tg=tg,
+                result_path=Path("<artifacts>/llama-benchy-report.json"),
+                depths=(c.depth,),
+                reps=max(int(c.reps), 1),
+            )
+            cmd_str = " ".join(llama_benchy.build_argv(benchy_req))
         else:
             cmd_str = " ".join(_tier_bc_cmd(c, f"<slot-for:{c.model_id}>", api))
         lines.append(f"{label}\n      {cmd_str}")
@@ -534,6 +567,16 @@ def run_session(
                     run_id,
                     api,
                     trigger,
+                )
+            elif cell.kind in _GUIDELLM_KINDS:
+                watchdog_s = 3 * _EXPECTED_S.get(cell.kind, 300)
+                record = _guidellm_record(
+                    cell, artifacts, watchdog_s, api, host, suite_id, run_id, trigger
+                )
+            elif cell.kind in _LLAMA_BENCHY_KINDS:
+                watchdog_s = 3 * _EXPECTED_S.get(cell.kind, 300)
+                record = _llama_benchy_record(
+                    cell, artifacts, watchdog_s, api, host, suite_id, run_id, trigger
                 )
             else:
                 watchdog_s = 3 * _EXPECTED_S.get(cell.kind, 300)
@@ -733,13 +776,128 @@ def _tier_bc_record(
     return _assemble(cell, parsed, outcome, host, suite_id, run_id, artifacts, tail, api, trigger)
 
 
-def _slot_for_model(api: str, model_id: str) -> str | None:
+def _get_slot(api: str, model_id: str) -> dict[str, Any] | None:
+    """The full ``/api/slots`` entry for a model id, or ``None`` if no slot is
+    currently serving it. The single lookup both ``_slot_for_model`` (server_ab
+    needs a slot NAME) and the Phase-3 adapters (guidellm/llama-benchy need
+    the slot's actual HTTP port) build on."""
     slots = _get_json(api, "/api/slots")
     items = slots if isinstance(slots, list) else (slots or {}).get("slots") or []
     for s in items:
         if s.get("model_id") == model_id or s.get("model_default") == model_id:
-            return s.get("name")
+            return s
     return None
+
+
+def _slot_for_model(api: str, model_id: str) -> str | None:
+    slot = _get_slot(api, model_id)
+    return slot.get("name") if slot else None
+
+
+# --------------------------------------------------------------------------- #
+# Phase-3 OSS adapters — GuideLLM (chat) / llama-benchy (http_pp/http_tg)
+# --------------------------------------------------------------------------- #
+
+
+def _guidellm_profile(cell) -> tuple[str, dict[str, Any]]:
+    """The GuideLLM profile kind + options for a cell (Bench Phase 3 design
+    decision 1): ``synchronous`` for concurrency 1 (every shipped suite
+    today), ``concurrent`` with ``streams=N`` for concurrency>1. No suite
+    surface exists yet for a ``sweep`` profile — that is deliberately left
+    for a later suite opt-in, not built here."""
+    concurrency = int(cell.identity.workload.concurrency or 1)
+    if concurrency <= 1:
+        return "synchronous", {}
+    return "concurrent", {"streams": concurrency}
+
+
+def _no_slot_record(cell, engine_kind, host, suite_id, run_id, artifacts, api, trigger) -> Record:
+    """A cell whose model has no live serving slot: never a crash, always a
+    FAILED record with an actionable note (mirrors the rest of this module's
+    "a bad cell records its outcome and the session continues" rule)."""
+    parsed = Parsed(engine_observed=Engine(kind=engine_kind))
+    note = f"no live slot found for model {cell.model_id!r}"
+    return _assemble(
+        cell, parsed, Outcome.FAILED, host, suite_id, run_id, artifacts, note, api, trigger
+    )
+
+
+def _guidellm_record(
+    cell, artifacts, timeout_s, api, host, suite_id, run_id, trigger="manual"
+) -> Record:
+    """Run a ``chat`` cell through the GuideLLM adapter against the model's
+    live slot endpoint (design decision 1) instead of server_ab's ``ab``
+    mode. Never raises: a missing slot, a failed run, or an empty parse all
+    produce a FAILED/HANG/OOM record, same as every other cell kind here."""
+    slot = _get_slot(api, cell.model_id)
+    if not slot or not slot.get("port"):
+        return _no_slot_record(cell, "guidellm", host, suite_id, run_id, artifacts, api, trigger)
+
+    endpoint = f"http://127.0.0.1:{int(slot['port'])}"
+    profile_kind, profile_options = _guidellm_profile(cell)
+    out_path = artifacts / "guidellm-benchmarks.json"
+    request = guidellm.GuidellmRequest(
+        endpoint=endpoint,
+        model=cell.model_id,
+        profile_kind=profile_kind,
+        output_path=str(out_path),
+        profile_options=profile_options,
+        max_requests=max(int(cell.reps), 1),
+    )
+    result = guidellm.run_guidellm(request, timeout_s=timeout_s)
+    parsed = (
+        guidellm.parse_benchmarks(result.doc, profile_kind)
+        if result.doc is not None
+        else Parsed(engine_observed=Engine(kind="guidellm"))
+    )
+    outcome = result.outcome
+    if outcome is Outcome.OK and not parsed.reps:
+        outcome = Outcome.FAILED
+    return _assemble(
+        cell, parsed, outcome, host, suite_id, run_id, artifacts, result.tail, api, trigger
+    )
+
+
+def _llama_benchy_record(
+    cell, artifacts, timeout_s, api, host, suite_id, run_id, trigger="manual"
+) -> Record:
+    """Run an ``http_pp``/``http_tg`` cell through the llama-benchy adapter
+    against the model's live slot endpoint (design decision 3): llama-bench
+    vocabulary (pp/tg x depth) measured over HTTP, complementing the Tier-A
+    podman-exec'd path. Never raises, same rule as every other cell kind."""
+    slot = _get_slot(api, cell.model_id)
+    if not slot or not slot.get("port"):
+        return _no_slot_record(
+            cell, "llama-benchy", host, suite_id, run_id, artifacts, api, trigger
+        )
+
+    endpoint = f"http://127.0.0.1:{int(slot['port'])}/v1"
+    pp = int(cell.identity.workload.n_prompt or _DEFAULT_PP_PROMPT)
+    tg = int(cell.identity.workload.n_gen or _DEFAULT_TG_GEN)
+    out_path = artifacts / "llama-benchy-report.json"
+    request = llama_benchy.LlamaBenchyRequest(
+        endpoint=endpoint,
+        model=cell.model_id,
+        pp=pp,
+        tg=tg,
+        result_path=out_path,
+        depths=(cell.depth,),
+        reps=max(int(cell.reps), 1),
+        timeout_s=timeout_s,
+    )
+    result = llama_benchy.run_llama_benchy(request)
+    kind = "pp" if cell.kind == "http_pp" else "tg"
+    parsed = (
+        llama_benchy.parse_benchy(result.doc, kind, depth=cell.depth)
+        if result.doc is not None
+        else Parsed(engine_observed=Engine(kind="llama-benchy"))
+    )
+    outcome = result.outcome
+    if outcome is Outcome.OK and not parsed.reps:
+        outcome = Outcome.FAILED
+    return _assemble(
+        cell, parsed, outcome, host, suite_id, run_id, artifacts, result.tail, api, trigger
+    )
 
 
 def _assemble(
@@ -757,15 +915,21 @@ def _assemble(
     """Build the schema-2 record from a Parsed result + the planned cell.
 
     cell_key convergence (DESIGN §5.4): the record REUSES the planned identity so
-    plan↔run hash identically. The observed engine provenance (image/build) parsed
-    from real output is stamped onto ``identity.engine`` for DISPLAY, and the
-    planned cell_key is passed explicitly so staleness still converges even though
-    the observed engine block was not knowable at plan time (see appendix)."""
+    plan↔run hash identically. The observed engine provenance (image/build/
+    tool_version) parsed from real output is stamped onto ``identity.engine``
+    for DISPLAY, and the planned cell_key is passed explicitly so staleness
+    still converges even though the observed engine block was not knowable at
+    plan time (see appendix). ``tool_version`` (Bench Phase 3: guidellm/
+    llama-benchy/tool-eval-bench) is display + comparability provenance, not
+    identity (schema.Engine's docstring) — like image/build, it never feeds
+    cell_key."""
     identity = cell.identity
     obs = parsed.engine_observed
     if obs.image or obs.llamacpp_build:
         identity.engine.image = obs.image or identity.engine.image
         identity.engine.llamacpp_build = obs.llamacpp_build or identity.engine.llamacpp_build
+    if obs.tool_version:
+        identity.engine.tool_version = obs.tool_version
     # Stamp the RESOLVED argv/kv the engine actually ran (from the output) onto
     # the record for display — the plan-time config often has empty argv (a model
     # with no registry extra_args). DISPLAY-only: cell_key stays the planned one.

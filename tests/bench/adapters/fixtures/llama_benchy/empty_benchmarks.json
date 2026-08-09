@@ -1,0 +1,10 @@
+{
+  "version": "0.4.0",
+  "timestamp": "2026-08-09 00:00:00Z",
+  "latency_mode": "none",
+  "latency_ms": 0.0,
+  "model": "mock-model",
+  "prefix_caching_enabled": false,
+  "max_concurrency": 1,
+  "benchmarks": []
+}
