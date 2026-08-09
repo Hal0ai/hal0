@@ -19,10 +19,17 @@
 //     keeps calling `window.__hal0Toast(...)`.
 
 import React from 'react'
-import * as ReactDOM from 'react-dom/client'
+import * as ReactDOMClient from 'react-dom/client'
+import { createPortal } from 'react-dom'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClient } from './lib/queryClient'
 import { installToastGlobal, installToastQueueHook } from './stores/useToastStore'
+
+// react-dom/client only exports createRoot/hydrateRoot; createPortal lives on
+// the main 'react-dom' entry. Dash prototype code (e.g. FieldInfoIcon) needs
+// createPortal to escape overflow:hidden ancestors, so merge it onto the same
+// global object rather than installing a second global.
+const ReactDOM = { ...ReactDOMClient, createPortal }
 
 ;(globalThis as any).React = React
 ;(globalThis as any).ReactDOM = ReactDOM

@@ -127,10 +127,17 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(input).toHaveValue('-1')
     const row = page.locator('.drawer .form-row', { hasText: 'NGL' })
     const info = row.getByRole('button', { name: 'Info' })
+    // #1683: the popup portals to document.body (so overflow:hidden panels
+    // can't clip it), so it's no longer a DOM descendant of `row` — find it
+    // via the button's aria-describedby instead of a row-scoped locator.
+    const popupId = await info.getAttribute('aria-describedby')
+    // useId() ids contain colons (e.g. ":r0:"), invalid in a raw #id CSS
+    // selector — use an attribute selector, which doesn't need escaping.
+    const popup = page.locator(`[id="${popupId}"]`)
     await info.hover()
-    await expect(row.locator('.field-info-pop')).toContainText('emits -ngl')
+    await expect(popup).toContainText('emits -ngl')
     await page.mouse.move(0, 0)
-    await expect(row.locator('.field-info-pop')).toBeHidden()
+    await expect(popup).toBeHidden()
   })
 
   test('C5 — editing NGL Save PUTs /config { n_gpu_layers } (top-level)', async ({ page }) => {

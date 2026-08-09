@@ -16,6 +16,17 @@
  * facts as a regression guard.
  */
 import { test, expect, json } from '../fixtures/apiMock'
+import type { Locator } from '@playwright/test'
+
+// #1683: FieldInfoIcon's description now portals to document.body (so
+// overflow:hidden panels can't clip it), so it's no longer a DOM descendant
+// of its row — `row.textContent` (what `toContainText` reads) doesn't see it
+// anymore. Look the popup up via the Info button's aria-describedby instead.
+async function fieldInfoPopup(row: Locator) {
+  const btn = row.getByRole('button', { name: 'Info' })
+  const id = await btn.getAttribute('aria-describedby')
+  return row.page().locator(`[id="${id}"]`)
+}
 
 function capabilityRow(device: string, provider: string, model: string | null, slot: string, status: string) {
   return { device, backend: device, provider, model, enabled: !!model, slot, status }
@@ -91,7 +102,7 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
 
     const sampleRateRow = ttsPanel.locator('.s-row').filter({ hasText: 'Sample rate' })
     await expect(sampleRateRow).toContainText('24 kHz')
-    await expect(sampleRateRow).toContainText('Kokoro')
+    await expect(await fieldInfoPopup(sampleRateRow)).toContainText('Kokoro')
   })
 
   test('moonshine STT selection keeps the English-only language copy, other providers do not claim it', async ({ page }) => {
@@ -102,6 +113,6 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
 
     const languageRow = page.locator('.s-row').filter({ hasText: 'Language' })
     await expect(languageRow).toContainText('English')
-    await expect(languageRow).toContainText('moonshine is English-only')
+    await expect(await fieldInfoPopup(languageRow)).toContainText('moonshine is English-only')
   })
 })

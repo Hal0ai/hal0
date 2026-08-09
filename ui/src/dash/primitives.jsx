@@ -715,11 +715,78 @@ function FieldGroup({ label, hint, children }) {
 // Generalized from slots.jsx NpuSwitch.
 // Fixed label; the on/off STATE is shown by the pill, never by a changing label.
 // ─── FieldInfoIcon — hover/focus-only help for drawer field descriptions ───
+// The popup renders through a portal at document.body so no overflow:hidden
+// ancestor (e.g. .s-panel on narrow viewports, issue #1683) can clip it. Its
+// position is computed from the trigger icon's getBoundingClientRect() and
+// re-clamped to the viewport — flip above the icon when there isn't room
+// below, and clamp the left edge so the box never runs off either side.
 function FieldInfoIcon({ description }) {
   const descriptionId = React.useId();
+  const triggerRef = useRefP(null);
+  const popRef = useRefP(null);
+  const [open, setOpen] = useStateP(false);
+  const [pos, setPos] = useStateP(null);
+  // Popup stays open while either the icon or the popup itself has
+  // hover/focus — tracked in refs (not state) so mouseleave on one doesn't
+  // race a mouseenter on the other.
+  const hoverRef = useRefP(false);
+  const focusRef = useRefP(false);
+
+  const updatePosition = React.useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const popEl = popRef.current;
+    const popWidth = popEl ? popEl.offsetWidth : 260;
+    const popHeight = popEl ? popEl.offsetHeight : 40;
+    const margin = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    let left = rect.left;
+    left = Math.min(left, vw - popWidth - margin);
+    left = Math.max(left, margin);
+
+    let top = rect.bottom + 6;
+    let placement = "below";
+    if (top + popHeight + margin > vh && rect.top - popHeight - 6 > margin) {
+      top = rect.top - popHeight - 6;
+      placement = "above";
+    }
+    setPos({ top, left, placement });
+  }, []);
+
+  const show = React.useCallback(() => setOpen(true), []);
+  const maybeHide = React.useCallback(() => {
+    if (!hoverRef.current && !focusRef.current) setOpen(false);
+  }, []);
+
+  React.useLayoutEffect(() => {
+    if (!open) return undefined;
+    updatePosition();
+    const onReflow = () => updatePosition();
+    window.addEventListener("scroll", onReflow, true);
+    window.addEventListener("resize", onReflow);
+    return () => {
+      window.removeEventListener("scroll", onReflow, true);
+      window.removeEventListener("resize", onReflow);
+    };
+  }, [open, updatePosition]);
+
+  // Always portal-mounted (never conditionally rendered) so `[data-open]` on
+  // its own element owns visibility — mirrors the old CSS-only
+  // display:none/block toggle and keeps a stable node for aria-describedby
+  // and for measuring offsetWidth/offsetHeight before the first open.
   return (
-    <span className="field-info-wrap">
+    <span
+      className="field-info-wrap"
+      onMouseEnter={() => { hoverRef.current = true; show(); }}
+      onMouseLeave={() => { hoverRef.current = false; maybeHide(); }}
+      onFocus={() => { focusRef.current = true; show(); }}
+      onBlur={() => { focusRef.current = false; maybeHide(); }}
+    >
       <button
+        ref={triggerRef}
         type="button"
         className="field-info-btn"
         aria-label="Info"
@@ -728,9 +795,21 @@ function FieldInfoIcon({ description }) {
       >
         i
       </button>
-      <span id={descriptionId} role="tooltip" className="field-info-pop">
-        {description}
-      </span>
+      {ReactDOM.createPortal(
+        <span
+          ref={popRef}
+          id={descriptionId}
+          role="tooltip"
+          className={`field-info-pop field-info-pop--${pos ? pos.placement : "below"}`}
+          data-open={open ? "1" : undefined}
+          style={pos ? { top: `${pos.top}px`, left: `${pos.left}px` } : { top: "-9999px", left: "-9999px" }}
+          onMouseEnter={() => { hoverRef.current = true; show(); }}
+          onMouseLeave={() => { hoverRef.current = false; maybeHide(); }}
+        >
+          {description}
+        </span>,
+        document.body,
+      )}
     </span>
   );
 }

@@ -117,10 +117,61 @@ test.describe('Voice section — Kokoro label', () => {
       has: page.locator('.k > span', { hasText: /^Default voice$/ }),
     })
     await expect(defaultVoiceRow).toBeVisible()
-    await defaultVoiceRow.getByRole('button', { name: 'Info' }).click()
-    await expect(defaultVoiceRow.locator('.field-info-pop')).toContainText(
+    const info = defaultVoiceRow.getByRole('button', { name: 'Info' })
+    await info.click()
+    // #1683: the popup portals to document.body (so overflow:hidden panels
+    // can't clip it), so it's no longer a DOM descendant of the row — find
+    // it via the button's aria-describedby instead of a row-scoped locator.
+    const popupId = await info.getAttribute('aria-describedby')
+    // useId() ids contain colons (e.g. ":r0:"), invalid in a raw #id CSS
+    // selector — use an attribute selector, which doesn't need escaping.
+    await expect(page.locator(`[id="${popupId}"]`)).toContainText(
       'bundled voices (Kokoro v1)',
     )
+  })
+
+  // #1683: `.s-panel` sets `overflow: hidden`. The popup used to render as a
+  // DOM descendant of the row inside that panel, so on narrow viewports an
+  // icon near the panel's edge could have its popup clipped even though it
+  // fit the viewport. The fix portals the popup to document.body — assert
+  // that ancestry directly (proves it can no longer be clipped by any
+  // ancestor's overflow) and that it still lands fully on-screen.
+  test('#1683 — popup escapes the overflow:hidden .s-panel via a body-level portal', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 700 })
+    await page.goto('/#settings')
+    await page.locator('.nav-item', { hasText: 'Voice' }).click()
+    const defaultVoiceRow = page.locator('.settings-content .s-row').filter({
+      has: page.locator('.k > span', { hasText: /^Default voice$/ }),
+    })
+    await expect(defaultVoiceRow).toBeVisible()
+    const panel = page.locator('.s-panel', {
+      has: page.locator('.k > span', { hasText: /^Default voice$/ }),
+    })
+    await expect(panel).toHaveCSS('overflow', 'hidden')
+
+    const info = defaultVoiceRow.getByRole('button', { name: 'Info' })
+    await info.click()
+    const popupId = await info.getAttribute('aria-describedby')
+    // useId() ids contain colons (e.g. ":r0:"), invalid in a raw #id CSS
+    // selector — use an attribute selector, which doesn't need escaping.
+    const popup = page.locator(`[id="${popupId}"]`)
+    await expect(popup).toBeVisible()
+
+    // Structural proof: the popup is a direct child of <body>, not nested
+    // inside the clipped .s-panel — an overflow:hidden ancestor can only
+    // clip its own DOM descendants.
+    const isBodyChild = await popup.evaluate((el) => el.parentElement === document.body)
+    expect(isBodyChild).toBe(true)
+
+    // And it still fully fits on-screen at this narrow width (the
+    // viewport-aware clamp/flip logic).
+    const viewport = page.viewportSize()
+    const box = await popup.boundingBox()
+    expect(box).toBeTruthy()
+    expect(box!.x).toBeGreaterThanOrEqual(0)
+    expect(box!.y).toBeGreaterThanOrEqual(0)
+    expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width + 1)
+    expect(box!.y + box!.height).toBeLessThanOrEqual(viewport!.height + 1)
   })
 })
 
