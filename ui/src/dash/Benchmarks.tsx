@@ -367,7 +367,7 @@ function Sparkline({ points }: { points: HistoryPoint[] }) {
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
-      {pfPath && <path d={pfPath} fill="none" stroke="var(--fg-4)" strokeWidth={1} opacity={0.6} />}
+      {pfPath && <path d={pfPath} fill="none" stroke="var(--fg-4)" strokeWidth={1.5} opacity={0.6} />}
       <path d={path} fill="none" stroke={dipped ? 'var(--warn)' : 'var(--accent)'} strokeWidth={1.5} />
       {pts.map((p, k) => (
         <circle key={p.i} cx={x(p.i).toFixed(1)} cy={y(p.v).toFixed(1)} r={k === dipIdx ? 2.4 : 1.7} fill={k === dipIdx ? 'var(--warn)' : 'var(--accent)'}>
@@ -488,6 +488,17 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detailCache, setDetailCache] = useState<Record<string, { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] }>>({});
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+
+  const onSortClick = useCallback((key: string) => {
+    if (sortKey === key) {
+      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  }, [sortKey]);
 
   const toggleExpand = useCallback(async (id: string) => {
     if (expanded === id) { setExpanded(null); return; }
@@ -497,7 +508,10 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
     const [cellsR, histR, runsR] = await Promise.all([
       apiGet<{ cells: CellRow[] }>(`/api/benchmarks/cells?model=${q}`).catch(() => ({ cells: [] })),
       apiGet<{ points: HistoryPoint[] }>(`/api/benchmarks/history?model=${q}`).catch(() => ({ points: [] })),
-      apiGet<{ runs: RunSummary[] }>(`/api/benchmarks/runs?model=${q}&limit=24`).catch(() => ({ runs: [] })),
+      // Accordion run history is capped to the latest 5 runs — fetch exactly
+      // that page (the API returns newest-first) rather than 24 and trimming
+      // client-side.
+      apiGet<{ runs: RunSummary[] }>(`/api/benchmarks/runs?model=${q}&limit=5`).catch(() => ({ runs: [] })),
     ]);
     setDetailCache(prev => ({
       ...prev,
@@ -513,6 +527,38 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
     if (!regByModel.has(f.model_id)) regByModel.set(f.model_id, []);
     regByModel.get(f.model_id)!.push(f);
   }
+
+  // Sortable roster columns — "Click any header to sort" (bucket legend
+  // wording). Null/undefined values always sort to the bottom regardless of
+  // direction so an empty column doesn't dominate either end.
+  const ROSTER_COLUMNS: { key: string; label: string; align: 'left' | 'right'; get: (m: RosterModel) => string | number | null }[] = [
+    { key: 'model', label: 'model', align: 'left', get: m => (m.name || cleanName(m.id)).toLowerCase() },
+    { key: 'decode', label: 'decode', align: 'right', get: m => m.decode_ts },
+    { key: 'prefill', label: 'prefill', align: 'right', get: m => m.prefill_ts },
+    { key: 'acc', label: 'acc', align: 'right', get: m => m.accept },
+    { key: 'caps', label: 'caps', align: 'left', get: m => (m.caps || []).length },
+    { key: 'spec_kv', label: 'spec / kv', align: 'left', get: m => [m.spec, m.kv].filter(Boolean).join(' / ') || null },
+    { key: 'size', label: 'size', align: 'right', get: m => m.size_gb },
+    { key: 'last_run', label: 'last run', align: 'right', get: m => m.last_run || null },
+    { key: 'runs', label: 'runs', align: 'right', get: m => m.runs ?? 0 },
+  ];
+
+  const sortedRoster = (() => {
+    if (!sortKey) return roster;
+    const col = ROSTER_COLUMNS.find(c => c.key === sortKey);
+    if (!col) return roster;
+    const dirMul = sortDir === 'asc' ? 1 : -1;
+    return [...roster].sort((a, b) => {
+      const av = col.get(a), bv = col.get(b);
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1; // nulls last, always
+      if (bv == null) return -1;
+      if (typeof av === 'string' || typeof bv === 'string') {
+        return dirMul * String(av).localeCompare(String(bv));
+      }
+      return dirMul * (av < bv ? -1 : av > bv ? 1 : 0);
+    });
+  })();
 
   return (
     <>
@@ -532,13 +578,28 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
       </colgroup>
       <thead>
         <tr>
-          {(['model', 'decode', 'prefill', 'acc', 'caps', 'spec / kv', 'size', 'last run', 'runs', ''] as const).map((h, i) => (
-            <th key={i} style={thStyle(h === 'model' || h === 'caps' || h === 'spec / kv' ? 'left' : 'right')}>{h}</th>
-          ))}
+          {ROSTER_COLUMNS.map(col => {
+            const active = sortKey === col.key;
+            return (
+              <th
+                key={col.key}
+                style={{ ...thStyle(col.align), cursor: 'pointer', userSelect: 'none', color: active ? 'var(--fg-2)' : thStyle(col.align).color }}
+                onClick={() => onSortClick(col.key)}
+                title={`sort by ${col.label}`}
+                aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+              >
+                {col.label}
+                <span style={{ display: 'inline-block', width: '0.9em', marginLeft: 3, color: active ? 'var(--accent)' : 'var(--fg-5)' }}>
+                  {active ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                </span>
+              </th>
+            );
+          })}
+          <th style={thStyle('right')} />
         </tr>
       </thead>
       <tbody>
-        {roster.map(m => (
+        {sortedRoster.map(m => (
           <ModelRow
             key={m.id}
             model={m}
@@ -674,8 +735,11 @@ function ModelDetail({ model: m, detail }: {
 
   // group runs by (lane, depth, config), clustered within 2 minutes
   const runGroups = (() => {
+    // Latest 5 runs only — `runs` is already newest-first off the API, so
+    // this is a defensive cap independent of the fetch's own `limit`.
+    const latest = runs.slice(0, 5);
     const byLD = new Map<string, RunSummary[]>();
-    for (const r of runs) {
+    for (const r of latest) {
       const k = `${r.lane}|${r.depth}|${r.config || 'default'}`;
       if (!byLD.has(k)) byLD.set(k, []);
       byLD.get(k)!.push(r);

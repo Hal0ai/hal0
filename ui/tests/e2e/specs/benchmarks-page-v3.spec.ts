@@ -119,10 +119,36 @@ const HISTORY = {
   ],
 }
 
+// 7 raw run records for the model-detail accordion — one more than the
+// backend would ever return under a correct limit=5 request, and enough to
+// prove the frontend's defensive slice(0, 5) actually caps the display even
+// if a route mock (or a future backend bug) hands back more than asked.
+const MODEL_RUNS = Array.from({ length: 7 }, (_, i) => ({
+  run_id: `2026-08-0${7 - i}T09:00:00Z-run${i}`,
+  suite: 'roster',
+  trigger: 'scheduled',
+  model: 'qwen3.6-35b-a3b',
+  lane: 'rocm',
+  kind: 'tg',
+  depth: 2048,
+  outcome: 'ok',
+  decode_ts_med: 70 + i,
+  reps: 5,
+  config: 'default',
+}))
+
 async function installBenchRoutes(page: any) {
   await page.route('**/api/benchmarks/roster', (route: any) => json(route, ROSTER))
   await page.route('**/api/benchmarks/regressions', (route: any) => json(route, REGRESSIONS))
-  await page.route('**/api/benchmarks/runs?**', (route: any) => json(route, RUNS))
+  // Model-detail accordion fetch (?model=...&limit=5) vs the Runs tab's own
+  // fetch (?limit=200, no model) need different fixtures — route on the URL.
+  await page.route('**/api/benchmarks/runs?**', (route: any) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get('model')) {
+      return json(route, { count: MODEL_RUNS.length, outcomes: { ok: MODEL_RUNS.length }, runs: MODEL_RUNS })
+    }
+    return json(route, RUNS)
+  })
   await page.route(`**/api/benchmarks/runs/${encodeURIComponent(RUN_SUMMARY.run_id)}`, (route: any) => json(route, RUN_RECORD))
   await page.route('**/api/benchmarks/history?**', (route: any) => json(route, HISTORY))
   await page.route('**/api/benchmarks/queue', (route: any) => json(route, { control: { state: 'stopped', exclusive: true }, active: null, updated: null, items: [] }))
@@ -208,4 +234,67 @@ test('run drawer sparkline renders from the mocked /history payload with a regre
   await expect(spark).toBeVisible()
   // The dip-highlighted stroke (the 08-01 point drops >10% off the trailing median).
   await expect(page.getByText(/regression flagged for this cell/)).toBeVisible()
+})
+
+test('roster columns are clickable sort headers with a direction indicator', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  await expect(page.locator('[data-testid="benchmarks-view"]')).toBeVisible()
+
+  const rowOrder = () => page.locator('tbody tr[data-testid^="bench-model-row-"]').evaluateAll(
+    (rows) => rows.map((r) => r.getAttribute('data-testid'))
+  )
+
+  // Natural (unsorted) order: fixture order — qwen (71.4 t/s) before llama (18.6 t/s).
+  await expect.poll(rowOrder).toEqual([
+    'bench-model-row-qwen3.6-35b-a3b',
+    'bench-model-row-llama-3.1-8b',
+  ])
+
+  const decodeHeader = page.locator('th[title="sort by decode"]')
+  await expect(decodeHeader).toBeVisible()
+
+  // First click: ascending — slower model (llama, 18.6) first.
+  await decodeHeader.click()
+  await expect(decodeHeader).toHaveAttribute('aria-sort', 'ascending')
+  await expect(decodeHeader).toContainText('▲')
+  await expect.poll(rowOrder).toEqual([
+    'bench-model-row-llama-3.1-8b',
+    'bench-model-row-qwen3.6-35b-a3b',
+  ])
+
+  // Second click on the same header: descending — faster model (qwen, 71.4) first.
+  await decodeHeader.click()
+  await expect(decodeHeader).toHaveAttribute('aria-sort', 'descending')
+  await expect(decodeHeader).toContainText('▼')
+  await expect.poll(rowOrder).toEqual([
+    'bench-model-row-qwen3.6-35b-a3b',
+    'bench-model-row-llama-3.1-8b',
+  ])
+
+  // A different header takes over the active-sort indicator.
+  const modelHeader = page.locator('th[title="sort by model"]')
+  await modelHeader.click()
+  await expect(modelHeader).toHaveAttribute('aria-sort', 'ascending')
+  await expect(decodeHeader).toHaveAttribute('aria-sort', 'none')
+})
+
+test('expanded accordion run history is capped to the latest 5 runs', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  const row = page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]')
+  await expect(row).toBeVisible()
+
+  const runsRequest = page.waitForRequest((req: any) =>
+    req.url().includes('/api/benchmarks/runs') && req.url().includes('model=')
+  )
+  await row.click()
+  const req = await runsRequest
+  // Frontend requests exactly the latest-5 page from the backend...
+  expect(new URL(req.url()).searchParams.get('limit')).toBe('5')
+
+  // ...and even though the mocked fixture hands back 7 records (MODEL_RUNS),
+  // the accordion's run-history chips never exceed 5 — the defensive
+  // client-side cap holds regardless of what the route returns.
+  await expect(page.getByText(/runs — \d+ sweep/)).toBeVisible()
+  const chipCount = await page.locator('text=/^\\d{4}-\\d{2}-\\d{2} /').count()
+  expect(chipCount).toBeLessThanOrEqual(5)
 })
