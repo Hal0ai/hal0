@@ -1066,81 +1066,80 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
                 original=str(dest),
                 quarantine=str(stale),
             )
-    # #1723: everything this function creates — `dest` itself, every
-    # directory `tf.extractall` makes along the way, the flattened entries —
-    # is subject to the invoking process's umask. On a box with UMASK 002
-    # that leaves the staged tree, and every directory in it, transiently
-    # group-writable *during* extraction. A merely-after-the-fact chmod
-    # (below) still closes that gap eventually, but leaves a real window: a
-    # co-resident process that can write into a group-writable staging dir
-    # could plant a file there before the final chmod runs, and flattening's
-    # "skip if target already exists" means that planted file survives.
-    # Force a strict umask for the whole create-and-populate sequence so
-    # nothing is ever created writable to begin with — no window, by
-    # construction — independent of whatever umask the caller runs under.
-    old_umask = os.umask(0o022)
-    try:
-        dest.mkdir(parents=True, exist_ok=True)
+    # #1723 / Codex follow-up: lock `dest` to owner-only *before* anything is
+    # extracted into it, and do it unconditionally — including the branch
+    # above that reuses an already-existing empty `dest` untouched, and
+    # regardless of the caller's umask. A directory's own children are
+    # unreachable to non-owners as long as the directory itself denies
+    # traversal (x) — so an owner-only top-level `dest` closes the whole
+    # plant-a-file-during-extraction race by construction, without needing
+    # to touch every path underneath or mutate the process-wide umask (which
+    # would race other concurrent `asyncio.to_thread` extractions sharing
+    # the same process). `dest.mkdir()` may itself land group/other-writable
+    # under a permissive umask for the instant before this chmod runs, but
+    # that instant is this function's own uninterrupted execution — no
+    # other code gets scheduled between the two calls.
+    dest.mkdir(parents=True, exist_ok=True)
+    dest.chmod(0o700)
 
-        log.info("updater.extract_start", job_id=job_id, tarball=str(tarball), dest=str(dest))
-        strip_prefix: str | None = None
-        try:
-            with tarfile.open(tarball, "r:*") as tf:
-                members = tf.getmembers()
-                if not members:
+    log.info("updater.extract_start", job_id=job_id, tarball=str(tarball), dest=str(dest))
+    strip_prefix: str | None = None
+    try:
+        with tarfile.open(tarball, "r:*") as tf:
+            members = tf.getmembers()
+            if not members:
+                raise UpdateExtractError(
+                    "release tarball is empty",
+                    details={"tarball": str(tarball)},
+                )
+
+            # Refuse absolute paths and parent-dir escapes (tar slip).
+            for m in members:
+                p = Path(m.name)
+                if p.is_absolute() or ".." in p.parts:
                     raise UpdateExtractError(
-                        "release tarball is empty",
-                        details={"tarball": str(tarball)},
+                        f"unsafe path in tarball: {m.name!r}",
+                        details={"tarball": str(tarball), "member": m.name},
                     )
 
-                # Refuse absolute paths and parent-dir escapes (tar slip).
-                for m in members:
-                    p = Path(m.name)
-                    if p.is_absolute() or ".." in p.parts:
-                        raise UpdateExtractError(
-                            f"unsafe path in tarball: {m.name!r}",
-                            details={"tarball": str(tarball), "member": m.name},
-                        )
+            # Determine top-level prefix (first path component shared by all entries).
+            top_levels = {Path(m.name).parts[0] for m in members if m.name and m.name != "."}
+            if len(top_levels) == 1:
+                strip_prefix = next(iter(top_levels))
 
-                # Determine top-level prefix (first path component shared by all entries).
-                top_levels = {Path(m.name).parts[0] for m in members if m.name and m.name != "."}
-                if len(top_levels) == 1:
-                    strip_prefix = next(iter(top_levels))
+            # Python 3.12+ supports filter='data' which blocks unsafe members.
+            # We already vetted paths above, but pass it through for defence-in-depth.
+            try:
+                tf.extractall(path=dest, filter="data")  # type: ignore[arg-type]
+            except TypeError:
+                # Older Python without the filter kwarg — already vetted.
+                tf.extractall(path=dest)
+    except UpdateExtractError:
+        raise
+    except (tarfile.TarError, OSError) as exc:
+        raise UpdateExtractError(
+            f"failed to extract release tarball: {exc}",
+            details={"tarball": str(tarball), "dest": str(dest), "error": str(exc)},
+        ) from exc
 
-                # Python 3.12+ supports filter='data' which blocks unsafe members.
-                # We already vetted paths above, but pass it through for defence-in-depth.
-                try:
-                    tf.extractall(path=dest, filter="data")  # type: ignore[arg-type]
-                except TypeError:
-                    # Older Python without the filter kwarg — already vetted.
-                    tf.extractall(path=dest)
-        except UpdateExtractError:
-            raise
-        except (tarfile.TarError, OSError) as exc:
-            raise UpdateExtractError(
-                f"failed to extract release tarball: {exc}",
-                details={"tarball": str(tarball), "dest": str(dest), "error": str(exc)},
-            ) from exc
+    # If extractall landed everything under dest/<prefix>/..., flatten it.
+    if strip_prefix:
+        inner = dest / strip_prefix
+        if inner.is_dir():
+            for entry in list(inner.iterdir()):
+                target = dest / entry.name
+                if target.exists():
+                    continue
+                shutil.move(str(entry), str(target))
+            with contextlib.suppress(OSError):
+                inner.rmdir()
 
-        # If extractall landed everything under dest/<prefix>/..., flatten it.
-        if strip_prefix:
-            inner = dest / strip_prefix
-            if inner.is_dir():
-                for entry in list(inner.iterdir()):
-                    target = dest / entry.name
-                    if target.exists():
-                        continue
-                    shutil.move(str(entry), str(target))
-                with contextlib.suppress(OSError):
-                    inner.rmdir()
-    finally:
-        os.umask(old_umask)
-
-    # Belt and suspenders on top of the umask 022 forced above: normalize
-    # unconditionally so the gate's precondition holds even for a dest that
-    # already existed with the wrong mode (the stale-quarantine-and-reuse
-    # path above only renames the *old* dir aside; it does not touch modes)
-    # or a tarball with unusual member permissions.
+    # Now that extraction is complete and `dest` is no longer racing anyone,
+    # widen it back to its final, correct mode: normalize the whole tree
+    # (not just the top level) so assert_trusted_release_dir's precondition
+    # holds, and every subdirectory tarfile created — which inherited
+    # whatever mode its tar member or the caller's umask gave it — is
+    # go-w-clean too, not just readable-only-by-owner forever.
     _normalize_staged_tree(dest, job_id=job_id)
 
     log.info("updater.extract_ok", job_id=job_id, dest=str(dest))
