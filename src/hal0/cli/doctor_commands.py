@@ -599,7 +599,8 @@ def _diagnose_audit_rows(
     :func:`check_hermes_ownership`, :func:`check_tree_group_share`, and
     ``hal0.install.perms.audit_rows`` all share this exact row vocabulary
     (``{path,label,status,detail}``), so one adapter covers every
-    ``doctor perms`` sub-check (§2.1). ``absent`` rows carry no finding.
+    ``doctor perms`` sub-check (§2.1). ``absent`` and ``symlink`` rows carry
+    no finding (a ``symlink`` row is one perms deliberately left alone, #1739).
     ``drift`` rows each become one ``fail`` Diagnosis; when nothing drifted,
     a single ``HAL0-DOCTOR-OK`` info row is emitted instead of an empty list
     so a clean ``--json`` run still has something to show.
@@ -749,6 +750,9 @@ def _render_audit(title: str, rows: list[dict[str, str]]) -> None:
         "ok": "[green]ok[/green]",
         "drift": "[red]DRIFT[/red]",
         "absent": "[dim]absent[/dim]",
+        # #1739: perms deliberately never follows a symlink, so its target
+        # (outside the declared tree) is never chowned.
+        "symlink": "[dim]symlink[/dim]",
     }
     table = Table(title=title)
     table.add_column("Check", style="bold")

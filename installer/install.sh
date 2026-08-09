@@ -2685,10 +2685,14 @@ ui_step "Service start"
 # #1615) and/or ComfyUI checkpoints (on-disk pass, "comfyui" v0.1.x dir)
 # ends up with those links outstanding — `hal0 doctor migrations` then
 # opens day one with a spurious "N link(s) pending" warning on a box that
-# has never run anything but this installer. Applying here, before the
-# P3-perms fix below, means any symlinks it plants get swept into that
-# recursive re-chown instead of sitting root-owned under the hal0-owned
-# models/ tree. Idempotent (a no-op on re-run) and non-destructive: it only
+# has never run anything but this installer. Ordering against the P3-perms
+# fix below no longer matters (#1739): the perms table deliberately SKIPS
+# symlinks — chown/chmod follow them, so sweeping the planted links into the
+# recursive re-chown, as this step originally intended, rewrote the
+# operator's real files under /mnt/ai-models. The links are left exactly as
+# migrate created them, which is also what migrate's "does not write to
+# /mnt/ai-models at all" invariant requires. Idempotent (a no-op on re-run)
+# and non-destructive: it only
 # ever creates symlinks or reports a conflict, never overwrites one it
 # doesn't own (no --force) — a genuine conflict just resurfaces via
 # `hal0 doctor migrations` after install instead of aborting it.
