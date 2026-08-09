@@ -73,6 +73,7 @@ applying. Add those subsections to a version's section to surface them; see
 ### Fixed
 
 - Enabling the rerank capability now creates/loads the `rerank` slot the dispatcher actually routes `/v1/rerankings` to (was `embed-rerank`, which nothing routed to); `embed-rerank` resolves as an alias.
+- `hal0 update` on an already-current box now converges an outstanding one-shot v1.0 profile-catalog reset instead of printing "nothing to apply" and hiding it (#1585). The reset rides `commit()`, but a box updated 0.9.8→1.0 ran commit under the *old* daemon, which had no reset — so it landed converged-except-for-this and then went silent. `/api/updates/check` now carries a read-only `profile_reset` snapshot, and a new local `POST /api/updates/converge-profiles` runs the reset with no download or swap. The up-to-date CLI path consults the snapshot: it converges (prompting or honoring `--yes` for the consent-needing case), converges silently when there's nothing to lose, and otherwise reports the reset as outstanding and exits 2 (up to date, convergence outstanding) rather than exiting 0 in silence.
 
 ## [1.0.0-rc.3] — 2026-08-09
 

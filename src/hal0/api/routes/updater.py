@@ -48,7 +48,14 @@ from hal0.config import paths
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import Hal0Config
 from hal0.release.policy import ReleaseKind
-from hal0.updater import Updater, fetch_release_manifest, releases_url, validate_release_version
+from hal0.updater import (
+    Updater,
+    fetch_release_manifest,
+    profile_reset_status,
+    releases_url,
+    reset_profile_catalog,
+    validate_release_version,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -660,6 +667,11 @@ async def check_updates(request: Request) -> dict[str, Any]:
 
     # A revoked (yanked) latest is never offered as an available update.
     update_available = bool(latest) and not revoked and _is_newer(latest, __version__)
+    # #1585: the one-shot v1.0 profile-catalog reset runs inside commit(), so a
+    # box updated 0.9.8→1.0 by the OLD daemon (which had no reset) lands
+    # converged-except-for-this and then goes silent — `hal0 update` says
+    # "nothing to apply" and never mentions it. Surfacing the read-only status
+    # here lets the up-to-date CLI path converge it locally without an update.
     return {
         "current": __version__,
         "latest": latest or None,
@@ -669,6 +681,7 @@ async def check_updates(request: Request) -> dict[str, Any]:
         "revoked_reason": revoked_reason,
         "manifest_url": url,
         "manifest": manifest if isinstance(manifest, dict) else {},
+        "profile_reset": await asyncio.to_thread(profile_reset_status),
     }
 
 
@@ -835,6 +848,36 @@ async def commit_update(request: Request) -> dict[str, Any]:
     _persist_job(jobs[job_id])
     _spawn_update_task(request, _run_commit_job(jobs, job_id, channel, version, reset_profiles))
     return dict(jobs[job_id])
+
+
+@router.post("/converge-profiles")
+async def converge_profiles(request: Request) -> dict[str, Any]:
+    """Run the one-shot v1.0 profile-catalog reset as a standalone convergence.
+
+    #1585: the reset normally rides ``commit()``, but a box updated 0.9.8→1.0
+    ran commit under the *old* daemon, which had no reset — so it lands
+    converged-except-for-this and the up-to-date ``hal0 update`` path used to go
+    silent. This endpoint converges it without an update: no download, no
+    staging, no symlink swap — a purely local read-modify-write of
+    ``/etc/hal0``. It is idempotent (a stamped box reports ``already_reset`` and
+    changes nothing) and synchronous (the op is a backup + unlink + stamp, not a
+    job worth polling).
+
+    Body (optional): ``{"reset_profiles": true}`` — the operator's explicit
+    consent, exactly as ``/commit`` takes it. Omitted / false means no consent:
+    if the reset would destroy operator-authored profiles it is left outstanding
+    (``outcome: "declined"``); a no-op reset (fresh box, seeds only, or an
+    unparseable file) converges regardless. This daemon has no TTY, so consent
+    is always the caller's to supply.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reset_profiles = body.get("reset_profiles") if isinstance(body, dict) else None
+    approved = True if reset_profiles is True else None
+    result = await asyncio.to_thread(reset_profile_catalog, approved=approved)
+    return dict(result)
 
 
 @router.get("/status/{job_id}")

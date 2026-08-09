@@ -307,6 +307,105 @@ def test_tty_decline_stages_without_commit(stub_api: dict, monkeypatch: pytest.M
     assert stub_api["commit_json"] is None  # declined → no commit
 
 
+def _up_to_date_stub(
+    monkeypatch: pytest.MonkeyPatch, *, profile_reset: dict, converge_result: dict
+) -> dict:
+    """Wire the CLI so /check reports no update but the given profile_reset, and
+    /converge-profiles returns ``converge_result``. Returns a captured dict."""
+    captured: dict = {"posts": [], "converge_json": None}
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        return {
+            "current": "1.0.0",
+            "latest": "1.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "manifest": {},
+            "profile_reset": profile_reset,
+        }
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        captured["posts"].append(path)
+        if path == "/api/updates/converge-profiles":
+            captured["converge_json"] = json
+            return converge_result
+        return {}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    return captured
+
+
+def test_up_to_date_converges_outstanding_reset_with_yes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1585: no update available but the v1.0 reset is due — `--yes` converges
+    it via /converge-profiles instead of printing a silent "nothing to apply"."""
+    cap = _up_to_date_stub(
+        monkeypatch,
+        profile_reset={"due": True, "needs_consent": True, "custom_profiles": ["mine"]},
+        converge_result={"performed": True, "outcome": "reset", "backup": "/var/lib/hal0/b.toml"},
+    )
+    result = runner.invoke(app, ["update", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "/api/updates/converge-profiles" in cap["posts"]
+    assert cap["converge_json"] == {"reset_profiles": True}
+    assert "profile catalog converged" in result.output
+    assert "nothing to apply" not in result.output
+
+
+def test_up_to_date_outstanding_reset_headless_exits_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Headless without --yes: a consent-needing reset is left outstanding, and
+    the CLI exits 2 (up to date, convergence outstanding) — never silent."""
+    cap = _up_to_date_stub(
+        monkeypatch,
+        profile_reset={"due": True, "needs_consent": True, "custom_profiles": ["mine"]},
+        converge_result={},
+    )
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 2, result.output
+    assert "NOT fully converged" in result.output
+    # Nothing was posted — consent was absent, so no wipe was attempted.
+    assert "/api/updates/converge-profiles" not in cap["posts"]
+
+
+def test_up_to_date_no_consent_needed_converges_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A due reset with nothing to lose (no custom profiles) converges without a
+    prompt even headless — reset_profiles is not sent, but the call is made."""
+    cap = _up_to_date_stub(
+        monkeypatch,
+        profile_reset={"due": True, "needs_consent": False, "custom_profiles": []},
+        converge_result={"performed": True, "outcome": "reset", "backup": None},
+    )
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 0, result.output
+    assert cap["converge_json"] == {}  # no consent flag needed
+    assert "profile catalog converged" in result.output
+
+
+def test_up_to_date_no_reset_due_says_nothing_to_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary up-to-date box (reset already done) still says so, cleanly."""
+    cap = _up_to_date_stub(
+        monkeypatch,
+        profile_reset={"due": False, "reason": "already_reset", "needs_consent": False},
+        converge_result={},
+    )
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 0, result.output
+    assert "nothing to apply" in result.output
+    assert "/api/updates/converge-profiles" not in cap["posts"]
+
+
 def test_rollback_headless_proceeds_without_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Headless/piped (non-TTY) rollback proceeds unattended, like apply."""
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)

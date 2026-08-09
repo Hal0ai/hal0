@@ -266,6 +266,63 @@ def _decide_profile_reset(status: dict | None, *, yes: bool) -> bool | None:
     return None
 
 
+def _maybe_converge_profiles(status: dict | None, *, yes: bool) -> bool:
+    """Converge an outstanding v1.0 profile-catalog reset when no update is due.
+
+    #1585: the reset rides ``commit()``, but a box updated 0.9.8→1.0 ran commit
+    under the old daemon (no reset), so it lands converged-except-for-this and
+    the up-to-date path used to print "nothing to apply" and hide it. When the
+    ``/check`` snapshot says a reset is still due, converge it here — a local
+    ``/converge-profiles`` call, no download or swap.
+
+    Returns True when it handled the situation (converged, or raised ``Exit(2)``
+    because a consent-needing reset is outstanding). Returns False when there is
+    nothing due — the caller then prints its usual "nothing to apply".
+    """
+    if not isinstance(status, dict) or not status.get("due"):
+        return False
+
+    reset_profiles = _decide_profile_reset(status, yes=yes)
+
+    # Consent needed but not given (headless, or interactively declined): honor
+    # the half-converged contract — name it as outstanding and exit 2, distinct
+    # from a clean "up to date" (0).
+    if status.get("needs_consent") and reset_profiles is not True:
+        console.print(
+            Panel(
+                "[yellow]up to date, but this install is NOT fully converged.[/yellow]\n"
+                "The one-shot v1.0 profile-catalog reset is still outstanding.\n"
+                "[dim]Re-run `hal0 update --yes` on a terminal to converge. "
+                "(exit 2 = up to date, convergence outstanding)[/dim]",
+                border_style="yellow",
+            )
+        )
+        raise typer.Exit(2)
+
+    convergence_body: dict[str, object] = {}
+    if reset_profiles is True:
+        convergence_body["reset_profiles"] = True
+    try:
+        result = api_post("/api/updates/converge-profiles", json=convergence_body)
+    except CliApiError as exc:
+        die(str(exc))
+        return True
+
+    if result.get("performed"):
+        backup = result.get("backup")
+        console.print(
+            Panel(
+                "[green]profile catalog converged.[/green]"
+                + (f"\n[dim]backup: {backup}[/dim]" if backup else ""),
+                border_style="green",
+            )
+        )
+    else:
+        # already_reset / no_config — nothing was outstanding after all.
+        console.print("[dim]nothing to apply.[/dim]")
+    return True
+
+
 def _print_convergence(convergence: dict | None) -> bool:
     """Report how far the updated box is from the v1.0 on-disk shape.
 
@@ -516,6 +573,12 @@ def update(
 
     target_version = (target or "").lstrip("v") or None
     if not body.get("update_available") and not target_version:
+        # No new version — but a v1.0 profile-catalog reset may still be
+        # outstanding (#1585): it runs in commit(), which on the 0.9.8→1.0
+        # update ran under the old daemon that had no reset. Converge it here
+        # rather than going silent.
+        if _maybe_converge_profiles(body.get("profile_reset"), yes=yes):
+            return
         console.print("[dim]nothing to apply.[/dim]")
         return
 
