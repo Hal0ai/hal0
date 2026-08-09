@@ -31,3 +31,34 @@ test('Default slots pane sets the chosen slot default and clears the prior one',
   await expect.poll(() => puts.primary.length).toBeGreaterThan(0)
   expect(puts.primary[0].default).toBe(false)
 })
+
+// The modality rows carried `form-row` alongside `s-row`; `.form-row` is
+// declared later in dashboard.css with `padding: 12px 0`, so it stripped the
+// panel's 18px horizontal padding and left "llm" hanging outside the panel
+// while every sibling row stayed indented.
+test('modality rows share the panel indent with the other settings rows', async ({ page }) => {
+  await seedSlots(page, [A, B])
+  await page.goto('/#settings/slots')
+  const modality = page.locator('.default-slot-row .k').first()
+  await expect(modality).toBeVisible()
+
+  const header = await page.locator('.s-panel .s-row .k', { hasText: 'Default slots' }).first().boundingBox()
+  const row = await modality.boundingBox()
+  expect(Math.round(row!.x)).toBe(Math.round(header!.x))
+})
+
+// AdvRow used to slice descriptions at 150 chars, which silently dropped the
+// tail of deliberately long copy — slots.publish_host loses its "only widen
+// this on a trusted network" warning. The popup wraps and caps its own width,
+// so there is nothing for the truncation to protect.
+test('settings info popups carry the whole description, untruncated', async ({ page }) => {
+  await seedSlots(page, [A, B])
+  await page.goto('/#settings/slots')
+  const row = page.locator('.s-row', { has: page.locator('.k > span', { hasText: 'publish_host' }) })
+  await row.locator('.field-info-btn').hover()
+
+  const pop = page.locator('.field-info-pop[data-open="1"]')
+  await expect(pop).toBeVisible()
+  await expect(pop).toContainText('only widen this on a trusted network')
+  await expect(pop).not.toContainText('…')
+})

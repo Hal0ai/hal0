@@ -89,10 +89,13 @@ export const _advInputStyle = {
 // validator also accepts "cognee"/"mem0", which the factory silently maps to
 // hindsight — offering them would lie, so the page passes its own allowlist).
 // `descriptions` lets a page override a stale/missing schema description.
+// The description goes to SRow whole — the info popup wraps and caps its own
+// width, so truncating here only ever dropped the tail of a deliberate
+// multi-sentence warning (e.g. slots.publish_host's "only widen this on a
+// trusted network"). An empty description now yields no info icon at all.
 export function AdvRow({ dotKey, field, live, buf, onChange, registry, label: labelOverride, options: optionsOverride, description: descriptionOverride }) {
   const label = labelOverride || dotKey.split(".").slice(1).join(".");
   const desc = descriptionOverride || field?.description || "";
-  const shortDesc = desc.length > 150 ? desc.slice(0, 147) + "…" : desc;
   const options = optionsOverride || field?.enum || null;
   const isBool = field?.type === "boolean";
   const isNum = field?.type === "integer" || field?.type === "number";
@@ -136,7 +139,7 @@ export function AdvRow({ dotKey, field, live, buf, onChange, registry, label: la
   return (
     <SRow
       k={label}
-      sub={<span title={desc}>{shortDesc}</span>}
+      sub={desc}
       v={control}
       actions={<ApplyBadge settingsKey={dotKey} registry={registry} />}
     />
