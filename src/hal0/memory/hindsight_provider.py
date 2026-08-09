@@ -932,6 +932,17 @@ class HindsightProvider(MemoryProvider):
         * Over-fetch per bank so a heavily-filtered page can still fill, and
           only advertise a ``next_cursor`` when the bank actually reported more
           rows behind the offset we consumed.
+
+        Cursor math (#1667): the resume offset for a bank cut mid-page is
+        derived from the RAW row that produced the last item actually
+        returned, not from ``raw_offset - overflow_count``. The two only
+        agree when the ACL filter drops nothing from the tail of the last
+        fetched chunk — in unified-bank mode the shared bank interleaves
+        other agents' private docs and out-of-scope project docs, so a page
+        routinely filters unevenly, and the visible-count correction
+        under-rewinds and strands unreturned visible rows behind the next
+        cursor forever. Tracking each visible item's raw offset directly
+        keeps the walk exact regardless of what the ACL withheld.
         """
         banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
         start_bank, offset = _decode_cursor(cursor, banks)
@@ -952,7 +963,12 @@ class HindsightProvider(MemoryProvider):
         # the first one only — later banks start from the top.
         for bank in banks[banks.index(start_bank) :]:
             bank_offset = offset if bank == start_bank else 0
-            while len(items) < limit:
+            # Every item this bank contributes, paired with the raw offset
+            # immediately after the row that produced it — the exact point a
+            # resumed walk must start from to neither skip nor repeat a row.
+            bank_items: list[dict[str, Any]] = []
+            bank_offsets: list[int] = []
+            while len(items) + len(bank_items) < limit:
                 try:
                     # Over-fetch: the ACL filter below may discard most of a page.
                     fetch = max(limit * 2, 50)
@@ -964,27 +980,38 @@ class HindsightProvider(MemoryProvider):
                 raw = resp.get("items", []) or []
                 if not raw:
                     break
+                row_start = bank_offset
                 bank_offset += len(raw)
                 # Same read ACL as recall: in unified mode the shared bank holds
                 # every agent's private docs AND every project's docs, so list
                 # must not surface other agents' private items or out-of-scope
                 # project items. No-op in pre-unified multi-bank mode. Applied
                 # BEFORE the page cut so the page fills with visible rows.
-                page = self._filter_visible(
-                    [self._list_fact_to_item(fact, bank) for fact in raw], client_id, dataset
-                )
+                candidates = [self._list_fact_to_item(fact, bank) for fact in raw]
+                visible = self._filter_visible(candidates, client_id, dataset)
                 if private_only:
-                    page = [it for it in page if _VISIBILITY_PRIVATE in (it.get("tags") or [])]
-                items.extend(page)
+                    visible = [
+                        it for it in visible if _VISIBILITY_PRIVATE in (it.get("tags") or [])
+                    ]
+                visible_ids = {id(it) for it in visible}
+                for i, cand in enumerate(candidates):
+                    if id(cand) in visible_ids:
+                        bank_items.append(cand)
+                        bank_offsets.append(row_start + i + 1)
                 total = resp.get("total")
                 exhausted = len(raw) < fetch if not isinstance(total, int) else bank_offset >= total
                 if exhausted:
                     break
+            items.extend(bank_items)
             if len(items) >= limit:
-                # More may remain in THIS bank — resume here next call. The
-                # offset counts raw rows consumed, not visible ones, so the
-                # walk stays stable regardless of what the ACL filtered.
-                consumed = bank_offset - max(0, len(items) - limit)
+                # This bank overflowed the page. Resume at the raw offset
+                # right after the last item we're keeping FROM THIS BANK —
+                # not the bank's total raw offset — so any visible row that
+                # sat behind an ACL-withheld one in the same fetched chunk is
+                # still reachable on the next call.
+                overflow = len(items) - limit
+                keep_from_bank = len(bank_items) - overflow
+                consumed = bank_offsets[keep_from_bank - 1] if keep_from_bank > 0 else bank_offset
                 next_cursor = _encode_cursor(bank, consumed)
                 break
         return {"items": items[:limit], "next_cursor": next_cursor}
