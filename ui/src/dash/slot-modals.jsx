@@ -87,6 +87,50 @@ function compatibleModels(models, { type, backend }) {
 		);
 }
 
+// Device-class token for profile/runner fit filters — mirrors the backend
+// derivation in profile_adopt (gpu-* → gpu; npu/cpu/img as-is). ONE helper so
+// the drawer's baseline deviceClass and the cross-profile target-device class
+// (below) can't drift apart.
+function deviceClassOf(device) {
+	return device.startsWith("gpu")
+		? "gpu"
+		: ["npu", "cpu", "img"].includes(device)
+			? device
+			: "cpu";
+}
+
+// A GPU/CPU backend a profile can declare → the device it drives
+// (map_backend_to_device's FE mirror). Module-level so the cross-device
+// picker (#1636) and its Codex-flagged fixes share one source of truth
+// instead of three independently-drifting inline copies.
+const BACKEND_DEVICE = {
+	rocm: "gpu-rocm",
+	vulkan: "gpu-vulkan",
+	cuda: "gpu-cuda",
+	cpu: "cpu",
+};
+
+// Cross-device target for a candidate profile (#1636 + Codex P2 fixes):
+// - must declare a recognized backend that ACTUALLY differs from the slot's
+//   current backend (same-backend device_class mismatches are not a "switch"
+//   — _reconcile_device_profile leaves `device` alone when backends already
+//   agree, so admitting them here would silently persist a profile the
+//   normal `fit` predicate rejects, e.g. device_class:"cpu"/backend:"rocm" on
+//   a gpu-rocm slot).
+// - its device_class (if declared) must be compatible with the CLASS OF THE
+//   TARGET device, not the slot's current class.
+// Returns the target device string, or null when the profile doesn't
+// resolve to a genuine cross-backend switch.
+function crossDeviceTarget(profile, devBackend) {
+	if (!profile?.backend || !BACKEND_DEVICE[profile.backend]) return null;
+	if (profile.backend === devBackend) return null;
+	const targetDevice = BACKEND_DEVICE[profile.backend];
+	const targetClass = deviceClassOf(targetDevice);
+	if (profile.device_class && profile.device_class !== targetClass)
+		return null;
+	return targetDevice;
+}
+
 // ─── Create-slot modal ──────────────────────────────────────────
 // Decomposed (D2) into dash/slots/CreateSlotModal.jsx — the create flow is now
 // a pure instance: pick a model (it carries tune/device/runner) + name it. The
@@ -679,11 +723,36 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 	// Device-class token for profile/runner fit filters — mirrors the
 	// backend derivation in profile_adopt (gpu-* → gpu; npu/cpu/img as-is).
-	const deviceClass = device.startsWith("gpu")
-		? "gpu"
-		: ["npu", "cpu", "img"].includes(device)
-			? device
-			: "cpu";
+	const deviceClass = deviceClassOf(device);
+
+	// Pending cross-device target (#1636 Codex fix): when the selected
+	// profile is a genuine cross-backend switch (see crossDeviceTarget), the
+	// device this slot will actually launch on AFTER Save is the profile's
+	// backend device, not the still-persisted `device` state — the drawer
+	// has no direct device control, so `device` never moves on its own.
+	// Every dependent filter below (Runner Image/Binary fit, the Model
+	// swap picker's rocmfp4 gate) reads `pendingDevice`/`pendingDeviceClass`
+	// instead of `device` so they preview the POST-save world rather than
+	// hiding the very runner/model the operator is being told to pick.
+	const pendingDevice = (() => {
+		// Only a live in-drawer edit counts as "pending" — a persisted slot
+		// whose device and profile already disagree (a pre-existing
+		// misconfiguration the HW fit-check warning exists to surface) must
+		// keep reading its REAL device here, not a profile-implied one the
+		// operator never picked.
+		if (profileSel === (slot.profile || "")) return device;
+		const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
+		const typeFit = all.filter(
+			(p) =>
+				!Array.isArray(p.supported_slot_types) ||
+				p.supported_slot_types.includes(slot.type),
+		);
+		const p = typeFit.find((x) => x.name === profileSel);
+		if (!p) return device;
+		const target = crossDeviceTarget(p, deviceBackend(device));
+		return target || device;
+	})();
+	const pendingDeviceClass = deviceClassOf(pendingDevice);
 
 	// Instant-apply pin/unpin for the drawer header toggle (§21.10, #1367).
 	// Fires the PUT, toasts the result, and lets the slots poll re-render from
@@ -875,33 +944,40 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// _reconcile_device_profile flips the slot's device to match (profile
 		// changed alone → device rederived). Only gpu/cpu-class slots
 		// transition (npu/img route to different runtime families —
-		// hard-blocked in model_fit), and only a backend-declaring profile can
-		// drive the flip; a bare device_class hint cannot.
-		const BACKEND_DEVICE = {
-			rocm: "gpu-rocm",
-			vulkan: "gpu-vulkan",
-			cuda: "gpu-cuda",
-			cpu: "cpu",
-		};
+		// hard-blocked in model_fit), and only a GENUINE backend switch can
+		// drive the flip — crossDeviceTarget excludes same-backend
+		// device_class mismatches (those aren't a switch;
+		// _reconcile_device_profile leaves `device` alone when the backend
+		// already agrees, so admitting them here would silently persist a
+		// profile the normal `fit` predicate rejects, e.g.
+		// device_class:"cpu"/backend:"rocm" on a gpu-rocm slot) and requires
+		// the profile's device_class (if any) to match the TARGET class.
 		const crossFit = ["gpu", "cpu"].includes(deviceClass)
 			? typeFit.filter(
-					(p) =>
-						!fit.includes(p) &&
-						p.backend &&
-						BACKEND_DEVICE[p.backend] &&
-						!["npu", "img"].includes(p.device_class || ""),
+					(p) => !fit.includes(p) && !!crossDeviceTarget(p, devBackend),
 				)
 			: [];
 		const fitNames = fit.map((p) => p.name);
 		const listedNames = [...fitNames, ...crossFit.map((p) => p.name)];
 		const adoptedFromModel = !!profileSel && profileSel === modelProfile;
+		// Does the selected profile even resolve? A deleted/renamed profile
+		// stays selectable (out-of-vocab option below) but
+		// _resolve_profile_or_base falls back to the backend's base profile
+		// and _resolve_llama_scalars suppresses the overlay when the
+		// resolved name doesn't match the configured one — so an
+		// unresolvable profile never injects flags. Gate the divergence hint
+		// on actually resolving, or it tells the operator about an overlay
+		// that will not launch.
+		const profileResolves = all.some((p) => p.name === profileSel);
 		// Divergence overlay (#1636): a slot profile that differs from the
 		// model's stamped provenance layers its flags over the model tune at
 		// launch (the slot_profile argv segment).
 		const diverges =
-			!!profileSel && !!modelProfile && profileSel !== modelProfile;
+			profileResolves && !!modelProfile && profileSel !== modelProfile;
 		const selCross = crossFit.find((p) => p.name === profileSel) || null;
-		const targetDevice = selCross ? BACKEND_DEVICE[selCross.backend] : null;
+		const targetDevice = selCross
+			? crossDeviceTarget(selCross, devBackend)
+			: null;
 		// Cross-device cautions: an explicit BINARY or a pinned image may not
 		// serve the target backend — warn before Save, never block (§4).
 		const crossCautions = [];
@@ -1271,7 +1347,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					{(() => {
 						const backends = systemInfoQuery.data?.backends ?? {};
 						const binaryKeys = Object.keys(backends);
-						const devBackend = deviceBackend(device);
+						// A pending cross-backend profile switch (#1636 Codex fix) moves
+						// this slot's device on Save even though `device` itself never
+						// changes in this drawer — read the pending device/class here so
+						// Runner Image/Binary options preview the POST-save fit instead
+						// of hiding the very runner the divergence hint tells the
+						// operator to pick.
+						const devBackend = deviceBackend(pendingDevice);
 						// Runner options filtered down to the ones that fit this slot:
 						// device_class exact (runner_matches), the family's slot types
 						// (_supported_slot_types — so a gpu llm slot is not offered
@@ -1280,7 +1362,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						// selectable underneath.
 						const deviceFitBinaryKeys = binaryKeys.filter((k) => {
 							const r = backends[k] || {};
-							if (r.device_class && r.device_class !== deviceClass)
+							if (r.device_class && r.device_class !== pendingDeviceClass)
 								return false;
 							const types = FAMILY_SLOT_TYPES[r.runtime_family];
 							if (types && slot.type && !types.includes(slot.type))
@@ -1575,8 +1657,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							// Derive the backend from the SELECTED device (reactive) so the rocmfp4
 							// filter re-evaluates immediately when the operator switches the HW-grid
 							// device — before Save is clicked. (Device is the single owner of the
-							// rocm/vulkan axis now — spec-hw-slot-ownership §2.)
-							const selBackend = deviceBackend(device) || slot.backend;
+							// rocm/vulkan axis now — spec-hw-slot-ownership §2.) A pending
+							// cross-backend profile switch (#1636 Codex fix) also moves this
+							// slot's eventual device, so read pendingDevice rather than the
+							// still-unchanged `device` state — otherwise this list keeps
+							// offering rocmfp4-only models a ROCm→Vulkan switch will no
+							// longer fit.
+							const selBackend = deviceBackend(pendingDevice) || slot.backend;
 							const compatible = compatibleModels(modelsQuery.data, {
 								type: slot.type,
 								backend: selBackend,
