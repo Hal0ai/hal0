@@ -1142,14 +1142,17 @@ def _normalize_staged_tree(dest: Path, *, job_id: str | None = None) -> None:
     ``tf.extractall`` wrote — defense in depth so a future recursive gate,
     or a subdirectory an operator inspects by hand, is never the surprise.
 
-    Ownership is reset to root:root only when running as root (the
+    Ownership is reset to root:root only when running as euid 0 (the
     privileged seam path, where root just extracted the tree and files are
-    already root-owned by construction — this is belt-and-suspenders, not
-    load-bearing). A dev/CI/``HAL0_HOME`` run has no privilege boundary to
-    protect and no permission to chown to root anyway, so it only fixes
-    mode bits. Failures are raised, not swallowed: an un-normalized stage is
-    exactly the bug this function exists to prevent, so a silent best-effort
-    here would just move the failure to a more confusing place (activate).
+    already root-owned by construction — this chown is belt-and-suspenders,
+    not load-bearing for that path). Mirrors :func:`_restore_service_ownership`
+    just below: best-effort and logged, never raised — a process can be euid
+    0 in a container without CAP_CHOWN (or in a test that stubs ``geteuid``
+    without stubbing the filesystem), and failing loudly there would turn an
+    inert edge case into a hard stage failure. The *mode* normalization
+    below is what actually fixes #1723 and is not best-effort: unlike
+    ownership, a plain-file owner can always chmod their own files, so a
+    failure there is a real, actionable problem worth surfacing.
     """
     if os.geteuid() == 0:
         try:
@@ -1157,10 +1160,9 @@ def _normalize_staged_tree(dest: Path, *, job_id: str | None = None) -> None:
             for path in dest.rglob("*"):
                 os.chown(path, 0, 0, follow_symlinks=False)
         except OSError as exc:
-            raise UpdateExtractError(
-                f"failed to normalize staged release tree ownership: {exc}",
-                details={"path": str(dest), "error": str(exc)},
-            ) from exc
+            log.warning(
+                "updater.extract_chown_failed", job_id=job_id, path=str(dest), error=str(exc)
+            )
 
     try:
         entries = (dest, *dest.rglob("*"))
