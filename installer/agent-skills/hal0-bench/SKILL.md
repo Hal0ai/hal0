@@ -50,8 +50,7 @@ hal0 bench reindex                              # rebuild bench.db from records.
 hal0 bench devices [--format text|env|json|flags]  # GPU device nodes a run will use
 hal0 bench publish [--check] [--site-ts PATH]   # regenerate roster.json
 hal0 bench eval    --models A,B [--task ID ...] [--dry-run] [--force]  # agentic eval
-hal0 bench bundle  [--list | filters]           # package ok records into a shareable archive
-hal0 bench upload  <bundle.tar.gz>              # push a bundle to the public benchmarks API
+hal0 bench bundle  [--list | filters]           # package ok records into a shareable archive (e.g. for the forums)
 ```
 
 `--suite` accepts a suite id (looked up under `/etc/hal0/bench/suites/`, e.g. `roster`,
