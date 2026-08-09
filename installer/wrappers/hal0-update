@@ -93,13 +93,25 @@ validate_dir_name() {
 #
 # Root does NOT accept the URL via sudo argv or the caller's environment —
 # both are an injection surface into a root process. Instead it reads the
-# SAME root-owned trusted config the daemon reads, itself, as root. No
-# `source`/`eval` of the file (it also carries provider tokens and
-# HAL0_ADMIN_KEY/HAL0_CLIENT_KEY): exactly the ``HAL0_RELEASES_URL=`` line is
-# grep+cut out, and it must look like an http(s)/file URL before it is
-# exported into the Python re-entry's environment. A present-but-malformed
-# value dies loudly here rather than silently falling back to the default —
-# that silent fallback is the exact bug being fixed.
+# SAME api.env the daemon reads, itself, as root. No `source`/`eval` of the
+# file (it also carries provider tokens and HAL0_ADMIN_KEY/HAL0_CLIENT_KEY):
+# exactly the ``HAL0_RELEASES_URL=`` line is grep+cut out. A present-but-
+# malformed value dies loudly here rather than silently falling back to the
+# default — that silent fallback is the exact bug #1690 fixed.
+#
+# #1751 — api.env is NOT root-owned trusted config: under the hardened perms
+# flip (src/hal0/install/perms.py, etc_owner=service_user — the shipped v1.0
+# default), api.env is hal0:hal0 0600, so the unprivileged `hal0` account
+# fully controls this value, including whatever scheme it names. `https://`
+# is safe (root just fetches a URL, same as any client). `file://` on THIS
+# privileged path is not: it would let a hal0-writable value steer root's
+# manifest read at Path(path).read_bytes()/shutil.copyfile() (see
+# hal0.updater.updater._fetch_release_manifest_bytes/_download) against an
+# arbitrary local path — cosign identity+issuer pinning would be the only
+# remaining backstop, and this wrapper must not rely on that. The daemon-side
+# (unprivileged) resolver in hal0.updater.updater.releases_url() keeps
+# file:// for tests and local-mirror dev installs; only the root re-entry
+# below is restricted.
 resolve_releases_url() {
   local etc_root="/etc/hal0"
   # HAL0_HOME sandboxes the whole config root for dev installs + integration
@@ -128,8 +140,8 @@ resolve_releases_url() {
 
   [[ -n "${raw}" ]] || return 0
   case "${raw}" in
-    https://*|file://*) export HAL0_RELEASES_URL="${raw}" ;;
-    *) die "bad HAL0_RELEASES_URL in ${env_file} (must be https:// or file://): ${raw}" ;;
+    https://*) export HAL0_RELEASES_URL="${raw}" ;;
+    *) die "bad HAL0_RELEASES_URL in ${env_file} (must be https://): ${raw}" ;;
   esac
 }
 

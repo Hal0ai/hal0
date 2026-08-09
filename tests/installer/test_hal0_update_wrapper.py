@@ -151,14 +151,21 @@ def test_stage_reads_releases_url_from_hal0_home_api_env(installed: Path, tmp_pa
     assert _released_url(installed) == "https://mirror.example/preview.json"
 
 
-def test_stage_accepts_a_file_url(installed: Path, tmp_path: Path) -> None:
+def test_stage_refuses_a_file_url(installed: Path, tmp_path: Path) -> None:
+    """#1751 — api.env is hal0:hal0 0600 under the hardened perms flip (the
+    shipped v1.0 default), so the unprivileged `hal0` account fully controls
+    this value. A `file://` scheme on the PRIVILEGED path would let it steer
+    root's manifest fetch at Path(path).read_bytes()/shutil.copyfile against
+    an arbitrary local path. Only https:// is trusted here; the daemon-side
+    (unprivileged) resolver in updater.py keeps file:// for tests/dev."""
     hal0_home = tmp_path / "sandbox"
     _write_api_env(hal0_home, "HAL0_RELEASES_URL=file:///srv/hal0-releases/stable.json\n")
 
-    rc, _, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+    rc, argv, stderr = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
 
-    assert rc == 0
-    assert _released_url(installed) == "file:///srv/hal0-releases/stable.json"
+    assert rc == 64
+    assert argv == [], "a hal0-writable file:// override must never reach the interpreter"
+    assert "hal0-update:" in stderr
 
 
 def test_stage_strips_matching_quotes_around_releases_url(installed: Path, tmp_path: Path) -> None:
@@ -250,7 +257,7 @@ def test_stage_never_forwards_unrelated_api_env_secrets(installed: Path, tmp_pat
         "javascript:alert(1)",
         "ftp://mirror.example/stable.json",
         "not-a-url",
-        "http://mirror.example/stable.json",  # https:// or file:// only, per #1690
+        "http://mirror.example/stable.json",  # https:// only, per #1751
     ],
 )
 def test_stage_refuses_a_releases_url_with_a_disallowed_scheme(
