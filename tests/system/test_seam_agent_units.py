@@ -335,7 +335,7 @@ def _reject(argv: object) -> None:
         ["systemctl", "stop", "hal0-agent@hermes.service"],
         ["sudo", "-n", SEAM_BIN, "stop-agent", "hermes"],
         ["sudo", "-n", SEAM_BIN, "disable-agent", "hermes"],
-        ["sudo", "-n", SEAM_BIN, "write-unit", "slot"],
+        ["sudo", "-n", SEAM_BIN, "write-quadlet", "slot"],
         ["sudo", "systemctl", "restart", "hal0-api.service"],
         ["sudo", "-u", "hal0", "systemctl", "stop", "x.service"],
         "sudo -n /usr/lib/hal0/bin/hal0-systemctl stop-agent hermes",

@@ -2,15 +2,33 @@
 #
 # hal0-api runs as the unprivileged `hal0` system user (User=hal0,
 # installer/install.sh). It delegates the genuinely-root slot-lifecycle ops —
-# writing a per-slot unit under /etc/systemd/system, writing the fixed
-# hermes-gateway secrets drop-in, daemon-reload,
+# writing a per-slot Podman Quadlet under /etc/containers/systemd, writing the
+# fixed hermes-gateway and hindsight-api drop-ins, daemon-reload,
 # start/stop/restart/enable/disable/reset-failed of a slot unit,
 # stop/disable of a bundled-agent unit (hal0-agent@<id>.service, the #453
 # uninstall teardown), and restarting itself on self-update — to
 # /usr/lib/hal0/bin/hal0-systemctl, which is the entire privileged surface:
 # the helper validates every slot id AND every agent id (strict identifier
-# regexes), builds every unit name and target path itself (the gateway drop-in
-# path is a literal), never evaluates a shell, and accepts no wildcards.
+# regexes), builds every unit name and target path itself (the drop-in paths
+# are literals), never evaluates a shell, and accepts no wildcards.
+#
+# CONTENT, not just argv (#1716 + #1740): every verb that takes a payload on
+# stdin — write-gateway-dropin, write-hindsight-dropin, write-quadlet — parses
+# that payload against a root-side ALLOW-LIST of the exact sections, directive
+# keys and value shapes its renderer emits, and writes its own validated
+# reconstruction rather than the bytes it was handed. The raw-stdin verb
+# write-unit was deleted in #1740. Without this the grant was effectively
+# "hal0 may run any command as root": a .container carries [Service] straight
+# into the generated system unit, so an ExecStartPre= plus this helper's own
+# daemon-reload + start verbs was a one-shot root exec.
+#
+# WHAT THIS GRANT DOES *NOT* CLAIM: it is not a sandbox around slot content.
+# Slots run under rootful podman, and a slot's [Container] section legitimately
+# carries Image=/Volume=/AddDevice=/PodmanArgs=/Exec= whose values come from
+# runtime config, so an attacker who owns the hal0 account can still author a
+# container that mounts host paths. Closing THAT means running slots rootless
+# or pinning mount roots — not a sudoers change. See the HONEST BOUNDARY note
+# at the top of installer/wrappers/hal0-systemctl.
 #
 # NOTE: the grant is pinned to the helper BINARY, not to an argv list, so
 # adding stop-agent/disable-agent needs no sudoers change — the helper's own

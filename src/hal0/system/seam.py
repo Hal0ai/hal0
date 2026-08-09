@@ -255,20 +255,14 @@ class SystemCtlSeam:
     def _seam_argv(self, *parts: str) -> list[str]:
         return ["sudo", "-n", self._seam_bin, *parts]
 
-    def write_unit(self, unit_path: Path, unit_text: str) -> None:
-        """Write a ``hal0-slot@<id>.service`` unit file."""
-        if not self._is_hal0_user():
-            unit_path.write_text(unit_text)
-            return
-        slot_id = _slot_id_from_unit(unit_path.name)
-        if slot_id is None:
-            raise ValueError(f"not a hal0-slot@ unit: {unit_path.name!r}")
-        self._run(
-            self._seam_argv("write-unit", slot_id),
-            input=unit_text,
-            text=True,
-            check=True,
-        )
+    # ``write_unit`` (and the wrapper's ``write-unit`` verb) were REMOVED in
+    # #1740. It shipped an unvalidated body to a root-owned
+    # ``/etc/systemd/system/hal0-slot@<id>.service`` — an unconditional root
+    # exec primitive reachable from the unprivileged hal0 account — and
+    # P3-quadlet had already left it with no producer: the sole renderer of
+    # slot-unit text (``_render_quadlet_from_plan``) emits a ``.container``,
+    # written via :meth:`write_quadlet`. ``remove_unit`` stays for legacy
+    # pre-quadlet ``.service`` cleanup.
 
     def remove_unit(self, unit_path: Path) -> None:
         """Delete a ``hal0-slot@<id>.service`` unit file (no-op if absent)."""
@@ -285,11 +279,19 @@ class SystemCtlSeam:
     def write_quadlet(self, quadlet_path: Path, unit_text: str) -> None:
         """Write a ``hal0-slot@<token>.container`` Quadlet source file (P3-quadlet).
 
-        The declarative Quadlet replacement for :meth:`write_unit`: root-owned by
-        design under ``/etc/containers/systemd/``, so a hal0-service-user install
-        routes the write through ``hal0-systemctl write-quadlet <token>`` (body on
-        stdin). Dev/CI/test (not the hal0 user) writes directly, exactly as
-        before P3-perms.
+        The declarative Quadlet replacement for the removed ``write_unit``:
+        root-owned by design under ``/etc/containers/systemd/``, so a
+        hal0-service-user install routes the write through ``hal0-systemctl
+        write-quadlet <token>`` (body on stdin). Dev/CI/test (not the hal0 user)
+        writes directly, exactly as before P3-perms.
+
+        #1740: ``unit_text`` is NOT trusted by the root side. The wrapper
+        allow-lists the body against exactly the sections/keys
+        ``_render_quadlet_from_plan`` emits and persists its own validated
+        reconstruction, so a body this (unprivileged) process could tamper with
+        can no longer carry a host-side ``[Service] ExecStartPre=``. Rendering
+        here is a convenience, never the control — see the wrapper's HONEST
+        BOUNDARY note for what the allow-list does and does not claim.
         """
         if not self._is_hal0_user():
             quadlet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -324,7 +326,7 @@ class SystemCtlSeam:
     ) -> None:
         """Write the hindsight-api extraction drop-in (#1641).
 
-        Unlike :meth:`write_unit` / :meth:`write_quadlet` there is no id to
+        Unlike :meth:`write_quadlet` there is no id to
         validate: the target is a single fixed file, so the seam verb takes only
         the body on stdin and the root side owns the path outright (the
         ``write-gateway-dropin`` posture). ``path`` is therefore used **only** on

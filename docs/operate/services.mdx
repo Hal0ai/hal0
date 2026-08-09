@@ -54,7 +54,16 @@ WantedBy=multi-user.target
 - **User/group** — `hal0:hal0`. Root-only operations (writing per-slot
   units, `daemon-reload`, restarting itself during an update) go through a
   narrow `sudo -n` wrapper (`hal0-systemctl`) rather than running the daemon
-  as root.
+  as root. Every wrapper verb that takes a payload on stdin allow-lists that
+  payload on the root side and writes its own validated reconstruction, so a
+  hand-crafted unit body cannot smuggle a host-side `ExecStartPre=` or
+  `User=root` past it. Use `hal0-systemctl check-quadlet < unit` (or
+  `check-dropin <gateway|hindsight> < body`) to see why something was refused;
+  both validate and echo without writing anything. Note the limit of that
+  boundary: slots run under rootful podman and a slot's `[Container]` section
+  legitimately mounts host paths and passes through devices, so an attacker who
+  owns the `hal0` account can still author a privileged container. The wrapper
+  is a check on the unit *file*, not a sandbox around slot content.
 - **WorkingDirectory** — the `current` symlink in a production install, so
   `hal0 update`'s atomic swap moves it without rewriting the unit.
 - **ExecStart** — no `--host` flag. The bind host comes from
