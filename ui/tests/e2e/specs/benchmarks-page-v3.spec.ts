@@ -159,15 +159,19 @@ const HISTORY = {
 // plotted trend (run0/run2/run4/run6) is unaffected. vulkan_radv's most
 // recent attempt (run1) succeeded, so vulkan_radv gets no badge despite
 // run3's older failure.
+// prefill_ts_med is set on the rocm entries (and left absent on vulkan_radv's)
+// so specs can assert: (a) the backend-added field flows through to a
+// dashed prefill series where present, and (b) a lane with decode-only data
+// (no prefill series) doesn't render one.
 const MODEL_RUNS_QWEN = [
   { run_id: '2026-08-08T09:00:00Z-run7', lane: 'rocm', decode_ts_med: null, outcome: 'failed' },
-  { run_id: '2026-08-07T09:00:00Z-run0', lane: 'rocm', decode_ts_med: 76 },
+  { run_id: '2026-08-07T09:00:00Z-run0', lane: 'rocm', decode_ts_med: 76, prefill_ts_med: 820 },
   { run_id: '2026-08-06T09:00:00Z-run1', lane: 'vulkan_radv', decode_ts_med: 61 },
-  { run_id: '2026-08-05T09:00:00Z-run2', lane: 'rocm', decode_ts_med: 75 },
+  { run_id: '2026-08-05T09:00:00Z-run2', lane: 'rocm', decode_ts_med: 75, prefill_ts_med: 800 },
   { run_id: '2026-08-04T09:00:00Z-run3', lane: 'vulkan_radv', decode_ts_med: 60, outcome: 'failed' },
-  { run_id: '2026-08-03T09:00:00Z-run4', lane: 'rocm', decode_ts_med: 74 },
+  { run_id: '2026-08-03T09:00:00Z-run4', lane: 'rocm', decode_ts_med: 74, prefill_ts_med: 790 },
   { run_id: '2026-08-02T09:00:00Z-run5', lane: 'vulkan_radv', decode_ts_med: 59 },
-  { run_id: '2026-08-01T09:00:00Z-run6', lane: 'rocm', decode_ts_med: 71.4 },
+  { run_id: '2026-08-01T09:00:00Z-run6', lane: 'rocm', decode_ts_med: 71.4, prefill_ts_med: 780 },
 ].map((r) => ({
   suite: 'roster', trigger: 'scheduled', model: 'qwen3.6-35b-a3b',
   kind: 'tg', depth: 2048, outcome: 'ok', reps: 5, config: 'default', ...r,
@@ -422,7 +426,7 @@ test('accordion fetches the FULL run history (limit=200) so the trend graph is n
   expect(chipCount).toBe(5)
 })
 
-test('a two-lane model defaults to Compare and renders both lanes\' full (uncapped) trend', async ({ page }) => {
+test('a two-lane model defaults to Compare: lane = colour + marker shape everywhere, decode solid + prefill dashed', async ({ page }) => {
   await page.goto('/#benchmarks')
   await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
   await expect(page.getByText('current summary')).toBeVisible()
@@ -435,38 +439,60 @@ test('a two-lane model defaults to Compare and renders both lanes\' full (uncapp
   // rocm has 4 ok sweeps in the FULL history (run0/run2/run4/run6) — all 4
   // plot, not the 3 a latest-5-of-raw-runs truncation used to leave. run7
   // (rocm, FAILED, the newest rocm record overall) never counts or plots —
-  // see the failure-handling test below. Circle markers are rocm's style.
+  // see the failure-handling test below.
   const chartSvg = page.locator('[data-testid="bench-compare-sparkline"]')
   await expect(chartSvg).toBeVisible()
-  await expect(chartSvg.locator('circle')).toHaveCount(4)
-  // vulkan_radv has 2 ok sweeps (run1, run5 — run3 is outcome:'failed' and
-  // never counts either) — 2 square markers, its style.
-  await expect(chartSvg.locator('rect')).toHaveCount(2)
 
-  // The legend is a SIMPLE swatch + lane name — no counts inline.
-  const legend = page.locator('span[title*="sweep"]')
-  await expect(legend).toHaveCount(2)
-  await expect(legend.filter({ hasText: 'ROCM' })).toHaveText('ROCM')
-  await expect(legend.filter({ hasText: 'VULK' })).toHaveText('VULK')
+  // Lane = marker shape (asserted via data-lane, not a raw colour string):
+  // rocm's decode markers are circles, vulkan_radv's are squares (rects).
+  await expect(chartSvg.locator('circle[data-lane="rocm"][data-metric="decode"]')).toHaveCount(4);
+  // vulkan_radv has 2 ok sweeps (run1, run5 — run3 is outcome:'failed' and
+  // never counts either) — 2 square decode markers.
+  await expect(chartSvg.locator('rect[data-lane="vulkan_radv"][data-metric="decode"]')).toHaveCount(2)
+
+  // Metric = line style: rocm's decode path is solid (no dasharray); rocm
+  // also carries a prefill_ts_med series in this fixture, which must be
+  // DASHED and on its own (independent) vertical scale — not asserted
+  // numerically, just that it renders as a distinct dashed path.
+  await expect(chartSvg.locator('path[data-lane="rocm"][data-metric="decode"]:not([stroke-dasharray])')).toHaveCount(1)
+  await expect(chartSvg.locator('path[data-lane="rocm"][data-metric="prefill"][stroke-dasharray]')).toHaveCount(1)
+  // vulkan_radv has no prefill_ts_med in this fixture — no prefill series
+  // for it, not a fabricated flat line.
+  await expect(chartSvg.locator('[data-lane="vulkan_radv"][data-metric="prefill"]')).toHaveCount(0)
+
+  // The legend is a SIMPLE swatch + lane name per visible series (solid
+  // decode / dashed prefill, per lane, only where that series exists).
+  await expect(page.locator('span[data-lane="rocm"][data-metric="decode"]')).toHaveText('ROCM')
+  await expect(page.locator('span[data-lane="rocm"][data-metric="prefill"]')).toHaveText('ROCM pf')
+  await expect(page.locator('span[data-lane="vulkan_radv"][data-metric="decode"]')).toHaveText('VULK')
+  await expect(page.locator('span[data-lane="vulkan_radv"][data-metric="prefill"]')).toHaveCount(0)
 })
 
-test('sparkline series come from the runs list, not a content-addressed cell_key: every ok sweep in the full history plots', async ({ page }) => {
+test('sparkline series come from the runs list, not a content-addressed cell_key: every ok sweep in the full history plots (single-lane, decode + prefill)', async ({ page }) => {
   await page.goto('/#benchmarks')
   await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
   await expect(page.getByText('current summary')).toBeVisible()
 
   // Switch to ROCm-only: 4 ok sweeps at the same lane/kind/depth/config,
   // fetched purely from GET /api/benchmarks/runs?model= (RunSummary carries
-  // no cell_key at all) — every one of them plots, from the full history.
+  // no cell_key — the field this whole test class exists to prove doesn't
+  // matter) — every one of them plots, from the full history.
   await page.locator('.mtp-seg-btn', { hasText: 'ROCM' }).click()
-  // Caption is a simple legend now — "decode · ROCM", no numbers inline.
-  const caption = page.locator('div[title*="sweep"]')
-  await expect(caption).toHaveText('■ decode · ROCM')
-  // The honest counts live in the tooltip, one hover away.
-  await expect(caption).toHaveAttribute('title', 'ROCM: 4 sweeps · 4 plotted')
 
   const spark = page.locator('[data-testid="bench-sparkline"]')
-  await expect(spark.locator('circle')).toHaveCount(4)
+  // Decode: rocm's marker shape (circle), 4 of them, solid lane-coloured line.
+  await expect(spark.locator('circle[data-lane="rocm"][data-metric="decode"]')).toHaveCount(4)
+  await expect(spark.locator('path[data-lane="rocm"][data-metric="decode"]:not([stroke-dasharray])')).toHaveCount(1)
+  // Prefill: same lane colour, dashed, independent scale (not asserted numerically).
+  await expect(spark.locator('path[data-lane="rocm"][data-metric="prefill"][stroke-dasharray]')).toHaveCount(1)
+
+  // Caption is a simple lane-colour legend now — decode swatch always,
+  // prefill swatch only because this fixture's rocm sweeps carry prefill data.
+  const caption = page.locator('div[title*="sweep"]')
+  await expect(caption.locator('span[data-lane="rocm"][data-metric="decode"]')).toHaveText('ROCM')
+  await expect(caption.locator('span[data-lane="rocm"][data-metric="prefill"]')).toHaveText('ROCM pf')
+  // The honest counts live in the tooltip, one hover away.
+  await expect(caption).toHaveAttribute('title', 'ROCM: 4 sweeps · 4 plotted')
 })
 
 test('the roster accordion is ok-only: failed runs never appear as rows, never count, never say "failed" in a tooltip', async ({ page }) => {
@@ -480,7 +506,7 @@ test('the roster accordion is ok-only: failed runs never appear as rows, never c
   // 2 sweeps on the roster tab — the failed one doesn't count at all, not
   // even as an "excluded" tally item.
   const caption = page.locator('div[title*="sweep"]')
-  await expect(caption).toHaveText('■ decode · VULK')
+  await expect(caption).toHaveText('VULK')
   await expect(caption).toHaveAttribute('title', 'VULK: 2 sweeps · 2 plotted')
   await expect(page.getByText('runs — 2 sweeps')).toBeVisible()
 
@@ -554,21 +580,28 @@ test('a single-lane model hides the empty segment and skips Compare', async ({ p
   await expect(page.getByText('decode history · compare')).toHaveCount(0)
 })
 
-test('a single-sweep lane plots a marker, not a placeholder sentence', async ({ page }) => {
+test('a single-sweep lane plots a lane-coloured, lane-shaped marker, not a placeholder sentence', async ({ page }) => {
   await page.goto('/#benchmarks')
-  // llama-3.1-8b has exactly ONE ok sweep on its one lane (MODEL_RUNS_LLAMA) —
-  // the single-point case: it must still be PLOTTED (a centered marker +
-  // value), never "1 data point" text and never the "no series yet" empty state.
+  // llama-3.1-8b has exactly ONE ok sweep on its one lane (MODEL_RUNS_LLAMA,
+  // vulkan_radv, no prefill data) — the single-point case: it must still be
+  // PLOTTED (a centered, lane-shaped marker + value), never "1 data point"
+  // text and never the "no series yet" empty state.
   await page.locator('[data-testid="bench-model-row-llama-3.1-8b"]').click()
   await expect(page.getByText('current summary')).toBeVisible()
 
   const spark = page.locator('[data-testid="bench-sparkline"]')
   await expect(spark).toBeVisible()
-  await expect(spark.locator('circle')).toHaveCount(1)
-  await expect(spark.getByText('18.6')).toBeVisible()
+  // vulkan_radv's marker shape is a square (rect), not the generic accent
+  // circle the old single-lane view used regardless of lane.
+  await expect(spark.locator('rect[data-lane="vulkan_radv"][data-metric="decode"]')).toHaveCount(1)
+  await expect(spark.locator('circle')).toHaveCount(0)
+  await expect(spark.getByText('18.6', { exact: true })).toBeVisible()
   await expect(spark.getByText('1 data point')).toHaveCount(0)
   await expect(spark.getByText('no series yet')).toHaveCount(0)
+  // No prefill data for this fixture — no hollow prefill marker fabricated.
+  await expect(spark.locator('[data-metric="prefill"]')).toHaveCount(0)
 
   const caption = page.locator('div[title*="sweep"]')
   await expect(caption).toHaveAttribute('title', 'VULK: 1 sweep · 1 plotted')
+  await expect(caption.locator('span[data-metric="prefill"]')).toHaveCount(0)
 })

@@ -77,7 +77,7 @@ interface RegressionFlag {
 interface RunSummary {
   run_id: string; suite: string; trigger: string; model: string | null;
   lane: string; kind: string; depth: number | null; outcome: string;
-  decode_ts_med: number | null; reps: number; config: string;
+  decode_ts_med: number | null; prefill_ts_med?: number | null; reps: number; config: string;
 }
 
 interface QueueState {
@@ -336,63 +336,84 @@ function CapIcons({ caps }: { caps: string[] }) {
 
 /* ── sparkline ── */
 
-function Sparkline({ points }: { points: HistoryPoint[] }) {
+// Single-lane sparkline: decode (solid) + prefill (dashed), both in the
+// lane's colour with the lane's marker shape — colour is a lane signal
+// everywhere now, not a generic "accent decode" convention. `lane` is
+// optional only for the one truly-unscoped fallback (a model with no lane
+// data at all, rendering the pooled /history?model= series) — falls back to
+// the old accent/circle look there.
+function Sparkline({ points, lane }: { points: HistoryPoint[]; lane?: string }) {
   const W = 260, H = 54, pad = 6;
-  const pts = points.map((p, i) => ({ i, v: p.decode_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
-  if (pts.length === 0) {
+  const color = lane ? laneColor(lane) : 'var(--accent)';
+  const shape = lane ? laneMarkerFor(lane) : ('circle' as const);
+  const decodePts = points.map((p, i) => ({ i, v: p.decode_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
+  const prefillPts = points.map((p, i) => ({ i, v: p.prefill_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
+
+  if (decodePts.length === 0 && prefillPts.length === 0) {
     return (
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-sparkline">
         <text x={W / 2} y={H / 2 + 3} textAnchor="middle" fill="var(--fg-4)" fontSize={9}>no series yet</text>
       </svg>
     );
   }
-  if (pts.length === 1) {
+  if (points.length === 1) {
     // A single sweep still gets PLOTTED (centered marker + value), not a
-    // placeholder sentence — the next sweep extends it into a line.
+    // placeholder sentence — the next sweep extends it into a line. Decode
+    // is filled; prefill (if this sweep has it) is a hollow ring at the same
+    // spot — a dashed LINE has no point analogue, so fill state carries the
+    // metric signal here.
     return (
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-sparkline">
-        <circle cx={W / 2} cy={H / 2} r={2.5} fill="var(--accent)" />
-        <text x={W / 2} y={H / 2 - 7} textAnchor="middle" fill="var(--fg-3)" fontSize={9} fontFamily="var(--mono)">
-          {pts[0].v.toFixed(1)}
-        </text>
+        {prefillPts.length === 1 && (
+          <Marker lane={lane} metric="prefill" shape={shape} cx={W / 2} cy={H / 2} r={4} fill="none" stroke={color} title={`prefill ${fmt(prefillPts[0].v)} t/s`} />
+        )}
+        {decodePts.length === 1 && (
+          <>
+            <Marker lane={lane} metric="decode" shape={shape} cx={W / 2} cy={H / 2} r={2.5} fill={color} title={`decode ${fmt(decodePts[0].v)} t/s`} />
+            <text x={W / 2} y={H / 2 - 9} textAnchor="middle" fill="var(--fg-3)" fontSize={9} fontFamily="var(--mono)">
+              {decodePts[0].v.toFixed(1)}
+            </text>
+          </>
+        )}
       </svg>
     );
   }
-  const ys = pts.map(p => p.v);
-  const min = Math.min(...ys), max = Math.max(...ys), span = max - min || 1;
+
   const N = points.length;
-  const x = (i: number) => pad + (N === 1 ? (W - 2 * pad) / 2 : (i * (W - 2 * pad)) / (N - 1));
-  const y = (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad);
-  const path = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+  const x = (i: number) => pad + (i * (W - 2 * pad)) / (N - 1);
+  const decodeScale = metricScale(decodePts.map(p => p.v), H, pad);
+  const prefillScale = metricScale(prefillPts.map(p => p.v), H, pad);
 
-  // Regression-dip highlighting: a >10% drop against the prior point in the
-  // series turns the line + that point's marker to the warn colour, matching
-  // the design's Spark() dip detection.
-  const dipIdx = pts.findIndex((p, k) => k > 0 && p.v < pts[k - 1].v * 0.9);
-  const dipped = dipIdx > -1;
+  // Regression-dip highlighting (decode only): a >10% drop against the prior
+  // point turns the line + that point's marker to the warn colour.
+  const dipIdx = decodePts.findIndex((p, k) => k > 0 && p.v < decodePts[k - 1].v * 0.9);
 
-  // Prefill is a separate signal on its own scale — a lighter, thinner path
-  // just to show the trend shape alongside decode, not a directly comparable magnitude.
-  const pfPts = points.map((p, i) => ({ i, v: p.prefill_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
-  let pfPath = '';
-  if (pfPts.length >= 2) {
-    const pfYs = pfPts.map(p => p.v);
-    const pfMin = Math.min(...pfYs), pfMax = Math.max(...pfYs), pfSpan = pfMax - pfMin || 1;
-    const pfY = (v: number) => H - pad - ((v - pfMin) / pfSpan) * (H - 2 * pad);
-    pfPath = pfPts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${pfY(p.v).toFixed(1)}`).join(' ');
-  }
+  const decodePath = decodeScale ? decodePts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${decodeScale.y(p.v).toFixed(1)}`).join(' ') : '';
+  const prefillPath = prefillScale && prefillPts.length >= 2
+    ? prefillPts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${prefillScale.y(p.v).toFixed(1)}`).join(' ')
+    : '';
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-sparkline">
-      {pfPath && <path d={pfPath} fill="none" stroke="var(--fg-4)" strokeWidth={1.5} opacity={0.6} />}
-      <path d={path} fill="none" stroke={dipped ? 'var(--warn)' : 'var(--accent)'} strokeWidth={1.5} />
-      {pts.map((p, k) => (
-        <circle key={p.i} cx={x(p.i).toFixed(1)} cy={y(p.v).toFixed(1)} r={k === dipIdx ? 2.4 : 1.7} fill={k === dipIdx ? 'var(--warn)' : 'var(--accent)'}>
-          <title>{fmt(p.v)} t/s{k === dipIdx ? ' — regression dip' : ''}</title>
-        </circle>
+      {prefillPath && (
+        <path data-lane={lane} data-metric="prefill" d={prefillPath} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="4 3" opacity={0.75} />
+      )}
+      {prefillScale && prefillPts.length === 1 && (
+        <Marker lane={lane} metric="prefill" shape={shape} cx={x(prefillPts[0].i)} cy={prefillScale.y(prefillPts[0].v)} r={2.4} fill="none" stroke={color} title={`prefill ${fmt(prefillPts[0].v)} t/s`} />
+      )}
+      {decodePath && (
+        <path data-lane={lane} data-metric="decode" d={decodePath} fill="none" stroke={dipIdx > -1 ? 'var(--warn)' : color} strokeWidth={1.5} />
+      )}
+      {decodeScale && decodePts.map((p, k) => (
+        <Marker
+          key={p.i} lane={lane} metric="decode" shape={shape}
+          cx={x(p.i)} cy={decodeScale.y(p.v)} r={k === dipIdx ? 2.4 : 1.7}
+          fill={k === dipIdx ? 'var(--warn)' : color}
+          title={`${fmt(p.v)} t/s${k === dipIdx ? ' — regression dip' : ''}`}
+        />
       ))}
-      <text x={pad} y={10} fill="var(--fg-4)" fontSize={8}>{fmt(max)}</text>
-      <text x={pad} y={H - 1} fill="var(--fg-4)" fontSize={8}>{fmt(min)}</text>
+      {decodeScale && <text x={pad} y={10} fill="var(--fg-4)" fontSize={8}>{fmt(decodeScale.max)}</text>}
+      {decodeScale && <text x={pad} y={H - 1} fill="var(--fg-4)" fontSize={8}>{fmt(decodeScale.min)}</text>}
     </svg>
   );
 }
@@ -717,85 +738,112 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail, flags }: {
 // alphabetically, so an unexpected lane still shows up rather than vanishing.
 const KNOWN_LANE_ORDER = ['rocm', 'vulkan_radv'];
 
-// Compare-mode series must never rely on colour alone — pair each lane's
-// colour with a distinct line dash + endpoint marker shape.
-const LANE_STYLE: Record<string, { dash?: string; marker: 'circle' | 'square' | 'triangle' }> = {
-  rocm: { marker: 'circle' },
-  vulkan_radv: { dash: '5 3', marker: 'square' },
+// Lane identity is colour EVERYWHERE (laneColor()) plus, so colour is never
+// the only signal, a fixed marker shape per lane on every data point —
+// including lone points. Metric identity (decode vs prefill) is line dash,
+// handled per-call by Sparkline/CompareSparkline, not here.
+const LANE_MARKER: Record<string, 'circle' | 'square' | 'triangle'> = {
+  rocm: 'circle',
+  vulkan_radv: 'square',
 };
-const laneStyleFor = (lane: string) => LANE_STYLE[lane] || { dash: '1 2', marker: 'triangle' };
+const laneMarkerFor = (lane: string): 'circle' | 'square' | 'triangle' => LANE_MARKER[lane] || 'triangle';
 
-function Marker({ shape, cx, cy, r, fill, title }: {
-  shape: 'circle' | 'square' | 'triangle'; cx: number; cy: number; r: number; fill: string; title?: string;
+function Marker({ shape, cx, cy, r, fill, stroke, title, lane, metric }: {
+  shape: 'circle' | 'square' | 'triangle'; cx: number; cy: number; r: number;
+  fill: string; stroke?: string; title?: string; lane?: string; metric?: 'decode' | 'prefill';
 }) {
+  const common = { 'data-lane': lane, 'data-metric': metric } as Record<string, string | undefined>;
   if (shape === 'square') {
-    return <rect x={cx - r} y={cy - r} width={r * 2} height={r * 2} fill={fill}>{title && <title>{title}</title>}</rect>;
+    return <rect {...common} x={cx - r} y={cy - r} width={r * 2} height={r * 2} fill={fill} stroke={stroke} strokeWidth={stroke ? 1.2 : undefined}>{title && <title>{title}</title>}</rect>;
   }
   if (shape === 'triangle') {
     const pts = `${cx},${cy - r * 1.3} ${cx - r * 1.15},${cy + r} ${cx + r * 1.15},${cy + r}`;
-    return <polygon points={pts} fill={fill}>{title && <title>{title}</title>}</polygon>;
+    return <polygon {...common} points={pts} fill={fill} stroke={stroke} strokeWidth={stroke ? 1.2 : undefined}>{title && <title>{title}</title>}</polygon>;
   }
-  return <circle cx={cx} cy={cy} r={r} fill={fill}>{title && <title>{title}</title>}</circle>;
+  return <circle {...common} cx={cx} cy={cy} r={r} fill={fill} stroke={stroke} strokeWidth={stroke ? 1.2 : undefined}>{title && <title>{title}</title>}</circle>;
 }
 
-// Compare-mode sparkline: DECODE ONLY, one series per lane, sharing a y-scale
-// so the two lines are directly comparable. Each series keeps its own x-scale
-// (its own point count) — series are never pooled into one array.
+// One (x, y) mapper + scale for one metric across ALL lanes combined — every
+// lane's line for that metric is directly comparable on the same axis, but
+// decode and prefill NEVER share a scale (prefill runs 10-100x decode's
+// magnitude; sparklines are shape-readers, the numbers live in the cards).
+function metricScale(allVals: number[], H: number, pad: number) {
+  if (!allVals.length) return null;
+  const min = Math.min(...allVals), max = Math.max(...allVals), span = max - min || 1;
+  return { min, max, y: (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad) };
+}
+
+// Compare-mode sparkline: decode (solid) + prefill (dashed) per lane, both in
+// that lane's colour, each series keeping its own x-scale (its own point
+// count — series are never pooled into one array).
 function CompareSparkline({ series }: { series: { lane: string; points: HistoryPoint[] }[] }) {
   const W = 260, H = 54, pad = 6;
   const prepared = series.map(s => ({
     lane: s.lane,
     n: s.points.length,
-    pts: s.points.map((p, i) => ({ i, v: p.decode_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[],
+    decode: s.points.map((p, i) => ({ i, v: p.decode_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[],
+    prefill: s.points.map((p, i) => ({ i, v: p.prefill_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[],
   }));
-  const allVals = prepared.flatMap(s => s.pts.map(p => p.v));
-  if (!allVals.length) {
+  const decodeScale = metricScale(prepared.flatMap(s => s.decode.map(p => p.v)), H, pad);
+  const prefillScale = metricScale(prepared.flatMap(s => s.prefill.map(p => p.v)), H, pad);
+  if (!decodeScale && !prefillScale) {
     return (
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-compare-sparkline">
         <text x={W / 2} y={H / 2 + 3} textAnchor="middle" fill="var(--fg-4)" fontSize={9}>no series yet</text>
       </svg>
     );
   }
-  const min = Math.min(...allVals), max = Math.max(...allVals), span = max - min || 1;
-  const y = (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad);
+
+  function renderMetric(
+    lane: string, pts: { i: number; v: number }[], n: number, scale: NonNullable<ReturnType<typeof metricScale>>,
+    metric: 'decode' | 'prefill',
+  ) {
+    if (!pts.length) return null;
+    const x = (i: number) => pad + (n === 1 ? (W - 2 * pad) / 2 : (i * (W - 2 * pad)) / (n - 1));
+    const shape = laneMarkerFor(lane);
+    const color = laneColor(lane);
+    const dashed = metric === 'prefill';
+    if (pts.length === 1) {
+      // One sweep: plot its marker on the shared-per-metric y-scale. Decode
+      // is filled, prefill is hollow (a dashed LINE has no point analogue,
+      // so the fill state carries the metric signal for a lone point).
+      return (
+        <Marker
+          key={metric} lane={lane} metric={metric} shape={shape}
+          cx={x(pts[0].i)} cy={scale.y(pts[0].v)} r={2.4}
+          fill={dashed ? 'none' : color} stroke={dashed ? color : undefined}
+          title={`${laneLabel(lane)} ${metric} ${fmt(pts[0].v)} t/s`}
+        />
+      );
+    }
+    const dipIdx = metric === 'decode' ? pts.findIndex((p, k) => k > 0 && p.v < pts[k - 1].v * 0.9) : -1;
+    const path = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${scale.y(p.v).toFixed(1)}`).join(' ');
+    const baseColor = dipIdx > -1 ? 'var(--warn)' : color;
+    return (
+      <g data-lane={lane} data-metric={metric}>
+        <path data-lane={lane} data-metric={metric} d={path} fill="none" stroke={baseColor} strokeWidth={1.5} strokeDasharray={dashed ? '4 3' : undefined} opacity={dashed ? 0.75 : 1} />
+        {metric === 'decode' && pts.map((p, k) => (
+          <Marker
+            key={k} lane={lane} metric={metric} shape={shape}
+            cx={x(p.i)} cy={scale.y(p.v)} r={k === dipIdx ? 2.6 : 1.7}
+            fill={k === dipIdx ? 'var(--warn)' : color}
+            title={`${laneLabel(lane)} ${fmt(p.v)} t/s${k === dipIdx ? ' — regression dip' : ''}`}
+          />
+        ))}
+      </g>
+    );
+  }
+
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} data-testid="bench-compare-sparkline">
-      {prepared.map(s => {
-        if (s.pts.length === 0) return null;
-        const x = (i: number) => pad + (s.n === 1 ? (W - 2 * pad) / 2 : (i * (W - 2 * pad)) / (s.n - 1));
-        if (s.pts.length === 1) {
-          // One sweep on this lane: plot its marker on the shared y-scale.
-          const style1 = laneStyleFor(s.lane);
-          return (
-            <g key={s.lane}>
-              {style1.marker === 'square'
-                ? <rect x={x(s.pts[0].i) - 2.2} y={y(s.pts[0].v) - 2.2} width={4.4} height={4.4} fill={laneColor(s.lane)} />
-                : <circle cx={x(s.pts[0].i)} cy={y(s.pts[0].v)} r={2.4} fill={laneColor(s.lane)} />}
-            </g>
-          );
-        }
-        const dipIdx = s.pts.findIndex((p, k) => k > 0 && p.v < s.pts[k - 1].v * 0.9);
-        const style = laneStyleFor(s.lane);
-        const path = s.pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
-        const baseColor = dipIdx > -1 ? 'var(--warn)' : laneColor(s.lane);
-        return (
-          <g key={s.lane}>
-            <path d={path} fill="none" stroke={baseColor} strokeWidth={1.5} strokeDasharray={style.dash} />
-            {s.pts.map((p, k) => (
-              <Marker
-                key={k}
-                shape={style.marker}
-                cx={x(p.i)} cy={y(p.v)}
-                r={k === dipIdx ? 2.6 : 1.7}
-                fill={k === dipIdx ? 'var(--warn)' : laneColor(s.lane)}
-                title={`${laneLabel(s.lane)} ${fmt(p.v)} t/s${k === dipIdx ? ' — regression dip' : ''}`}
-              />
-            ))}
-          </g>
-        );
-      })}
-      <text x={pad} y={10} fill="var(--fg-4)" fontSize={8}>{fmt(max)}</text>
-      <text x={pad} y={H - 1} fill="var(--fg-4)" fontSize={8}>{fmt(min)}</text>
+      {prepared.map(s => (
+        <g key={s.lane}>
+          {prefillScale && renderMetric(s.lane, s.prefill, s.n, prefillScale, 'prefill')}
+          {decodeScale && renderMetric(s.lane, s.decode, s.n, decodeScale, 'decode')}
+        </g>
+      ))}
+      {decodeScale && <text x={pad} y={10} fill="var(--fg-4)" fontSize={8}>{fmt(decodeScale.max)}</text>}
+      {decodeScale && <text x={pad} y={H - 1} fill="var(--fg-4)" fontSize={8}>{fmt(decodeScale.min)}</text>}
     </svg>
   );
 }
@@ -827,6 +875,20 @@ function laneSummary(lane: string, cells: CellRow[]) {
 
 function LaneDot({ lane }: { lane: string }) {
   return <span aria-hidden="true" style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: laneColor(lane) }} />;
+}
+
+// A single legend entry: a solid or dashed line swatch in the lane's colour,
+// labelled with the lane (dashed = prefill; solid = decode). One swatch per
+// visible series — never colour alone (the dash pattern is the metric signal).
+function MetricLegendSwatch({ lane, dashed, title }: { lane: string; dashed: boolean; title?: string }) {
+  return (
+    <span title={title} data-lane={lane} data-metric={dashed ? 'prefill' : 'decode'} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <svg width={16} height={8} aria-hidden="true">
+        <line x1={0} y1={4} x2={16} y2={4} stroke={laneColor(lane)} strokeWidth={1.5} strokeDasharray={dashed ? '4 3' : undefined} />
+      </svg>
+      {laneLabel(lane)}{dashed ? ' pf' : ''}
+    </span>
+  );
 }
 
 // The roster tab's one failure signal: the lane's current number is stale
@@ -864,7 +926,7 @@ function sweepSeries(lane: string, targetDepth: number | null, allGroups: RunGro
   const points: HistoryPoint[] = [];
   for (const g of ascending) {
     const okRun = g.runs.find(r => r.kind === 'tg' && r.outcome === 'ok' && r.decode_ts_med != null);
-    if (okRun) points.push({ ts: okRun.run_id, decode_ts_med: okRun.decode_ts_med });
+    if (okRun) points.push({ ts: okRun.run_id, decode_ts_med: okRun.decode_ts_med, prefill_ts_med: okRun.prefill_ts_med });
   }
   return { points, total, plotted: points.length, excluded: total - points.length };
 }
@@ -1039,7 +1101,7 @@ function ModelDetail({ model: m, detail }: {
                   background: 'var(--bg-2)', minWidth: 92,
                 }}>
                   <div style={{
-                    fontFamily: mono, fontSize: 15, color: i === 0 ? 'var(--accent)' : 'var(--fg)',
+                    fontFamily: mono, fontSize: 15, color: i === 0 && mode ? laneColor(mode) : 'var(--fg)',
                     fontVariantNumeric: 'tabular-nums' as any,
                   }}>
                     {val != null ? fmt(val) + (u ? ` ${u}` : '') : '—'}
@@ -1083,22 +1145,21 @@ function ModelDetail({ model: m, detail }: {
             {mode === 'compare' ? (
               <>
                 <CompareSparkline series={lanesPresent.map(lane => ({ lane, points: sweepSeries(lane, laneStats[lane]?.depth ?? null, runGroupsAll).points }))} />
-                {/* Simple legend only — swatch + lane name. The honest sweep
+                {/* Simple legend only — one swatch per visible series (solid
+                    decode / dashed prefill, per lane). The honest sweep
                     counts (why fewer points than the run list below implies)
                     live in the title tooltip, one hover away, not inline. */}
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.7rem', fontSize: 10, color: 'var(--fg-4)', marginTop: '0.3rem' }}>
                   {lanesPresent.map(lane => {
-                    const style = laneStyleFor(lane);
                     const s = sweepSeries(lane, laneStats[lane]?.depth ?? null, runGroupsAll);
+                    const hasPrefill = s.points.some(p => typeof p.prefill_ts_med === 'number');
                     const tip = `${laneLabel(lane)}: ${s.total} sweep${s.total === 1 ? '' : 's'} · ${s.plotted} plotted`
                       + (s.excluded > 0 ? ` (${s.excluded} other-config)` : '');
                     return (
-                      <span key={lane} title={tip} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                        <svg width={16} height={8} aria-hidden="true">
-                          <line x1={0} y1={4} x2={16} y2={4} stroke={laneColor(lane)} strokeWidth={1.5} strokeDasharray={style.dash} />
-                        </svg>
-                        {laneLabel(lane)}
-                      </span>
+                      <React.Fragment key={lane}>
+                        <MetricLegendSwatch lane={lane} dashed={false} title={tip} />
+                        {hasPrefill && <MetricLegendSwatch lane={lane} dashed={true} title={tip} />}
+                      </React.Fragment>
                     );
                   })}
                 </div>
@@ -1107,14 +1168,16 @@ function ModelDetail({ model: m, detail }: {
               <>
                 {(() => {
                   const s = sweepSeries(mode, laneStats[mode]?.depth ?? null, runGroupsAll);
+                  const hasPrefill = s.points.some(p => typeof p.prefill_ts_med === 'number');
                   const tip = `${laneLabel(mode)}: ${s.total} sweep${s.total === 1 ? '' : 's'} · ${s.plotted} plotted`
                     + (s.excluded > 0 ? ` (${s.excluded} other-config)` : '');
                   return (
                     <>
-                      <Sparkline points={s.points} />
+                      <Sparkline points={s.points} lane={mode} />
                       {/* Simple legend only — see the Compare branch's comment above. */}
-                      <div title={tip} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
-                        <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode &middot; {laneLabel(mode)}
+                      <div title={tip} style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
+                        <MetricLegendSwatch lane={mode} dashed={false} />
+                        {hasPrefill && <MetricLegendSwatch lane={mode} dashed={true} />}
                       </div>
                     </>
                   );
@@ -1323,7 +1386,7 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function RunHistory({ cellKey, regressed }: { cellKey: string; regressed: boolean }) {
+function RunHistory({ cellKey, regressed, lane }: { cellKey: string; regressed: boolean; lane?: string }) {
   const [points, setPoints] = useState<HistoryPoint[] | null>(null);
   useEffect(() => {
     let live = true;
@@ -1340,7 +1403,7 @@ function RunHistory({ cellKey, regressed }: { cellKey: string; regressed: boolea
     <section>
       <h4 style={h4Style}>history &middot; decode t/s &middot; {points.length} pts for this cell</h4>
       <div style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.5rem 0.6rem', background: 'var(--bg-2)' }}>
-        <Sparkline points={points} />
+        <Sparkline points={points} lane={lane} />
         {regressed && (
           <div style={{ marginTop: 6, fontFamily: mono, fontSize: 10.5, color: 'var(--warn)' }}>
             {'▼'} regression flagged for this cell — see the dip above.
@@ -1451,7 +1514,7 @@ function RunDetail({ rec, regressions }: { rec: any; regressions?: RegressionFla
         )}
         {cellKey && (
           <div style={{ marginTop: '0.8rem' }}>
-            <RunHistory cellKey={cellKey} regressed={!!regressions?.some(f => f.cell_key === cellKey)} />
+            <RunHistory cellKey={cellKey} regressed={!!regressions?.some(f => f.cell_key === cellKey)} lane={id.lane} />
           </div>
         )}
       </div>

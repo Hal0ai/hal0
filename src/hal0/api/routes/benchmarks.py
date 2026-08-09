@@ -75,6 +75,7 @@ def _run_summary(rec: dict[str, Any]) -> dict[str, Any]:
         "depth": workload.get("depth"),
         "outcome": rec.get("outcome"),
         "decode_ts_med": summary.get("decode_ts_med"),
+        "prefill_ts_med": summary.get("prefill_ts_med"),
         "reps": len(rec.get("reps") or []),
         "config": rec.get("config") or "default",
     }
