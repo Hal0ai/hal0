@@ -123,6 +123,9 @@ class ConvergeReport:
     unloaded: list[str]
     capabilities_applied: list[str]
     errors: list[tuple[str, str]]
+    #: Slots restarted because their config changed while the model didn't
+    #: (profile/flags-only edits — the running server had stale args).
+    reloaded: list[str] = field(default_factory=list)
 
 
 class StackApplyEngine:
@@ -409,7 +412,9 @@ class StackApplyEngine:
 
     # ── converge (Phase B — runtime lifecycle) ───────────────────────────────
 
-    async def converge(self, stack: StackConfig) -> ConvergeReport:
+    async def converge(
+        self, stack: StackConfig, changed_slots: set[str] | frozenset[str] = frozenset()
+    ) -> ConvergeReport:
         """Drive SlotManager/orchestrator so live runtime matches ``stack``.
 
         Three passes over one ``SlotManager.list()`` snapshot: load/swap the
@@ -418,6 +423,11 @@ class StackApplyEngine:
         (declarative replace). Per-slot failures are recorded in the report,
         never raised — a committed config (PR-2a) is never unwound by a
         lifecycle hiccup.
+
+        ``changed_slots`` names the slots whose config Phase A rewrote. A
+        dispatchable slot already on the stack's model but listed here is
+        restarted so the running server picks up the new config (a profile-only
+        change would otherwise leave it serving with stale args).
         """
         if self._slot_manager is None or self._orchestrator is None:
             raise RuntimeError("converge() requires slot_manager and orchestrator")
@@ -431,7 +441,7 @@ class StackApplyEngine:
             if not entry.model:
                 continue
             touched.add(entry.slot)
-            await self._converge_primary(entry, snapshots.get(entry.slot), report)
+            await self._converge_primary(entry, snapshots.get(entry.slot), report, changed_slots)
 
         # Pass 2 — capability children (enabled rows only).
         await self._converge_capabilities(stack, touched, report)
@@ -442,9 +452,13 @@ class StackApplyEngine:
         return report
 
     async def _converge_primary(
-        self, entry: StackSlotEntry, snap: Any, report: ConvergeReport
+        self,
+        entry: StackSlotEntry,
+        snap: Any,
+        report: ConvergeReport,
+        changed_slots: set[str] | frozenset[str] = frozenset(),
     ) -> None:
-        """Load / swap / skip one primary slot to match ``entry.model``."""
+        """Load / swap / reload / skip one primary slot to match ``entry``."""
         try:
             if snap is not None and snap.state in _TRANSITIONAL:
                 report.skipped.append(entry.slot)
@@ -460,6 +474,12 @@ class StackApplyEngine:
             elif snap.model_id != entry.model:
                 await self._slot_manager.swap(entry.slot, entry.model)
                 report.swapped.append(entry.slot)
+            elif entry.slot in changed_slots:
+                # Same model, new config (profile/flags edit): restart so the
+                # server relaunches with the rewritten slot file instead of
+                # serving on stale args.
+                await self._slot_manager.restart(entry.slot)
+                report.reloaded.append(entry.slot)
             else:
                 report.skipped.append(entry.slot)
         except Exception as exc:  # per-slot failures are reported, not raised

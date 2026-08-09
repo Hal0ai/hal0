@@ -63,6 +63,10 @@ class RecordingSlotManager:
         self.calls.append(("unload", slot_name, None))
         return FakeSnap(slot_name, SlotState.OFFLINE, None)
 
+    async def restart(self, slot_name: str) -> FakeSnap:
+        self.calls.append(("restart", slot_name, None))
+        return FakeSnap(slot_name, SlotState.READY, None)
+
 
 class RecordingOrchestrator:
     """Records capability apply() calls."""

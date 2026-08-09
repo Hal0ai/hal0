@@ -435,11 +435,16 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
         converged: dict[str, Any] = {}
         converge_ok = not create_errors
         if slot_manager is not None and orchestrator is not None:
-            report = await engine.converge(cfg)
+            # Slots whose file Phase A rewrote — converge restarts the ones
+            # whose model didn't change so a profile/flags edit reaches the
+            # running server instead of waiting for the next manual reload.
+            changed_slots = {row["slot"] for row in _diff_rows(plan) if row["changed"]}
+            report = await engine.converge(cfg, changed_slots)
             converge_ok = converge_ok and not report.errors
             converged = {
                 "loaded": report.loaded,
                 "swapped": report.swapped,
+                "reloaded": report.reloaded,
                 "skipped": report.skipped,
                 "unloaded": report.unloaded,
                 "capabilities_applied": report.capabilities_applied,
