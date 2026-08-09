@@ -10,7 +10,9 @@ imports this module for its pipeline step) to avoid a cycle.
 
 from __future__ import annotations
 
+import os
 import secrets
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,3 +85,64 @@ def ensure_env(tree: Path, venv: Path) -> StepOutcome:
         ok=True, changed=True,
         detail=f"seeded {', '.join(k for k, _ in missing)}",
     )
+
+
+_GIT_TIMEOUT = 120
+
+
+def ensure_tree(
+    tree: Path,
+    *,
+    ref: str = WEBUI_PINNED_REF,
+    repo_url: str = WEBUI_REPO_URL,
+    run=subprocess.run,
+) -> StepOutcome:
+    """Converge ``tree`` to the vetted pinned ref.
+
+    Adoption-safe: an existing checkout already at the pin is untouched; a
+    dirty checkout or a non-git directory is refused (ok=False) rather than
+    clobbered — the caller downgrades that to a SKIP with this detail.
+    """
+    if ref not in VETTED_HERMES_WEBUI_REFS and not os.environ.get(
+        "HAL0_ALLOW_UNVETTED_HERMES_WEBUI", ""
+    ).strip():
+        return StepOutcome(ok=False, changed=False, detail=f"unvetted ref {ref[:12]}")
+
+    def _git(*args: str, cwd: Path | None = None):
+        argv = ["git", *(("-C", str(cwd)) if cwd else ()), *args]
+        return run(argv, check=False, capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+
+    if (tree / ".git").exists():
+        head = _git("rev-parse", "HEAD", cwd=tree)
+        if head.returncode == 0 and head.stdout.strip() == ref:
+            return StepOutcome(ok=True, changed=False, detail=f"tree at pinned ref {ref[:12]}")
+        dirty = _git("status", "--porcelain", cwd=tree)
+        if dirty.returncode != 0 or dirty.stdout.strip():
+            return StepOutcome(ok=False, changed=False,
+                               detail="tree dirty or unreadable; refusing to move ref")
+        fetch = _git("fetch", "origin", ref, cwd=tree)
+        if fetch.returncode != 0:
+            return StepOutcome(ok=False, changed=False,
+                               detail=f"git fetch failed: {(fetch.stderr or '').strip()[-200:]}")
+        co = _git("checkout", "--detach", ref, cwd=tree)
+        if co.returncode != 0:
+            return StepOutcome(ok=False, changed=False,
+                               detail=f"git checkout failed: {(co.stderr or '').strip()[-200:]}")
+        return StepOutcome(ok=True, changed=True, detail=f"checked out pinned ref {ref[:12]}")
+
+    if tree.exists() and any(tree.iterdir()):
+        return StepOutcome(
+            ok=False, changed=False,
+            detail="unmanaged non-git tree present; move it aside or set HAL0_SKIP_HERMES_WEBUI=1",
+        )
+
+    clone = run(["git", "clone", "--filter=blob:none", repo_url, str(tree)],
+                check=False, capture_output=True, text=True, timeout=600)
+    if clone.returncode != 0:
+        return StepOutcome(ok=False, changed=False,
+                           detail=f"git clone failed: {(clone.stderr or '').strip()[-200:]}")
+    co = _git("checkout", "--detach", ref, cwd=tree)
+    if co.returncode != 0:
+        return StepOutcome(ok=False, changed=False,
+                           detail=f"git checkout failed: {(co.stderr or '').strip()[-200:]}")
+    return StepOutcome(ok=True, changed=True, detail=f"cloned at pinned ref {ref[:12]}")
