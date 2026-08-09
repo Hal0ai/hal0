@@ -24,8 +24,57 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] — 2026-08-09
+
+The hardening candidate: rc.2 plus the full yield of the pre-1.0 review —
+38 changes, all defect fixes, dependency bumps, and doc corrections; no new
+features and no breaking changes. Every fix landed with a red-first test
+through its own reviewed PR.
+
+### Highlights
+
+- **The update path works end-to-end on real hosting.** The release-manifest fetch follows redirects, so `HAL0_RELEASES_URL` can point straight at a GitHub release asset (#1692); the privileged stage seam resolves the same operator-configured URL as the daemon instead of silently falling back to the default (#1700); `hal0 update` refreshes the privileged sudo wrappers on every activate, so seam fixes now reach existing boxes without an `install.sh` re-run (#1720); and a signal-killed self-restart reports as ambiguous instead of a spurious failure (#1713).
+- **Id-keyed boxes are first-class.** The capability enable/disable lane resolves slots bilingually, so a box migrated with `hal0 slot migrate-id-keying` no longer strands a disabled slot bound-and-routable (#1681); the NPU trio's shadow drawer and scalar config writes are shape-aware to match (#1708, #1719).
+- **Memory surfaces tell the truth.** The Operations panel reads the engine's real envelope (#1674), the bank-delete preview reports the real blast radius (#1678), per-agent stats are scoped to the agent (#1679), list pagination no longer skips rows under ACL filtering (#1697), and extraction-slot changes actually reach the hindsight-api daemon through the privileged seam (#1682).
+
 ### Fixed
 
+- Updater: release-manifest fetch follows redirects (#1692); the root-side
+  stage seam honours `HAL0_RELEASES_URL` from root-owned config (#1700);
+  privileged wrappers refresh on every activate (#1720); config migrations
+  no longer TOML-dump `None` (#1686); a signal-killed self-restart is
+  reported as ambiguous rather than failed (#1713).
+- Slots: capability lane resolves id-keyed and name-keyed layouts (#1681);
+  renaming a static seed tombstones the vacated name instead of re-seeding
+  a duplicate (#1698); `install.sh`'s seed loop honours `.seed-tombstones`
+  (#1693); `merge_slot_config` writes scalars into `[slot]` on nested-shape
+  files instead of a root key nobody reads (#1719); legacy
+  `load_asr`/`load_embed` keys fold into the lifted `[npu]` table (#1710).
+- Models: FLM probe capabilities survive dedupe (#1695) and the legacy
+  `<tag>-FLM` id stays resolvable (#1706); a re-pull's `context_length`
+  wins over its own prior stamp (#1707); ROCmFPX quant detection runs
+  before the generic regex on the lazy path (#1694).
+- Memory: operations envelope (#1674), bank-delete preview keys (#1678),
+  per-agent stats scoping (#1679), ACL-aware list pagination (#1697),
+  project-scope dedupe on both sides (#1702), `bank=private__<agent>`
+  resolves through the read resolver and fails closed (#1711); extraction
+  propagation reconciles drop-in drift on already-broken hosts, survives
+  request cancellation without a stale clobber, and shares one hal0.toml
+  write lock with the settings route (#1717).
+- Settings/config: `[brain_chat] tool_model = "off"` (#1672) and
+  `activity.max_rows = null` (#1704) survive the save/load round-trip; the
+  20 registry-gap keys are classified in the apply plan (#1712).
+- Brain: native tool attach checks the serving slot's runner first and
+  reroutes instead of 500ing on a pre-tool-support image (#1699).
+- UI: MTP eligibility mirrors `defaults.mtp` post-tag-retirement (#1671);
+  the MOE filter chip keys on a real signal (#1701); NPU STT/Embed pills
+  reflect `npu_modality_active` (#1696); field-info popups portal-render
+  to escape clipped panels (#1709); dead #1632 tag helpers removed (#1705).
+- Release tooling: `update-toolbox-digests.sh` honours digest-pinned refs
+  instead of nulling them (#1703).
+- Deps: cryptography 50.0.0, js-yaml 4.3.1 (both dependabot highs, #1684,
+  #1680). Docs: `docs/README.md` canonical-home flip (#1714) and the
+  `hal0 update --target` recovery path for rc.1 boxes jumping to GA (#1715).
 - Field-info popups (the `(i)` descriptions in the slot/model drawers and
   settings pages) no longer collapse to one word per line — the popup was
   shrink-to-fit against its tiny icon wrapper; it now sizes to its text up
@@ -56,6 +105,43 @@ applying. Add those subsections to a version's section to surface them; see
   disagreeing. Upgrading in place refreshes the wrapper only on
   an `install.sh` re-run; until then the failure is loud
   (`propagation.error`) instead of silent.
+
+### Audience
+
+Preview-channel operators validating the 1.0 line ahead of GA, and fresh
+installs that want the current build. Boxes on the stable channel are not
+offered this tag.
+
+### Supported upgrades
+
+- `1.0.0-rc.2` → `1.0.0-rc.3` via `hal0 update` (preview channel). With
+  #1692/#1700 in rc.3, this is the last upgrade that needs a
+  directly-servable manifest URL workaround on the rc.2 side.
+- `1.0.0-rc.1` → `1.0.0-rc.3` directly, same mechanism.
+- `0.9.8` → `1.0.0-rc.3` in place — re-run the installer or `hal0 update`
+  on the preview channel; the R5 migration set applies (see the
+  [1.0.0 changelog section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100--2026-08-07)).
+- Older than 0.9.8: step through 0.9.8 first.
+
+### Known issues
+
+The three rc.1 items carry forward unchanged (profile-catalog reset defers
+when coming from 0.9.8, #1585; the 0.9.8 CLI's spurious end-of-update error;
+the first-boot `unattended-upgrades` dpkg race, #1584). Additionally: a box
+still on rc.1 or rc.2 whose venv predates #1663 will not be *offered* a
+stable tag by the passive check — `hal0 update --target <version>` is the
+recovery path (documented in #1715).
+
+### Operator migrations
+
+None. All rc.3 changes are self-applying fixes; the R5 operator-run
+migrators (slot-flag fold, id-keying) are unchanged from rc.1.
+
+### Rollback
+
+Release tarballs are immutable and cosign-signed; roll back by
+re-installing the previous tag (`v1.0.0-rc.2`) from its GitHub release.
+No rc.3 change writes a state shape rc.2 cannot read.
 
 ## [1.0.0-rc.2] — 2026-08-08
 
