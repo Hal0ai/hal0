@@ -9,7 +9,7 @@
 declare global {
   interface Window {
     React: typeof import('react')
-    ReactDOM: typeof import('react-dom/client')
+    ReactDOM: typeof import('react-dom/client') & { createPortal: typeof import('react-dom').createPortal }
 
     // dash/data.jsx
     HAL0_DATA: any
@@ -24,7 +24,7 @@ declare global {
   // dash/*.jsx side-effect module runs. The .jsx files reference `React`
   // directly (e.g. `const { useState } = React`).
   var React: typeof import('react')
-  var ReactDOM: typeof import('react-dom/client')
+  var ReactDOM: typeof import('react-dom/client') & { createPortal: typeof import('react-dom').createPortal }
 }
 
 export {}

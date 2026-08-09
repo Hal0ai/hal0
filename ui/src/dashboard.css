@@ -3157,18 +3157,18 @@ select.npu-sel {
   outline: 1px solid var(--accent);
   outline-offset: 2px;
 }
+/* Rendered through a portal at document.body (#1683) so no overflow:hidden
+   ancestor — .s-panel, .drawer, etc. — can clip it. FieldInfoIcon computes
+   `top`/`left` from the trigger's getBoundingClientRect() and writes them as
+   inline styles; this rule only owns paint/visibility, never placement. */
 .field-info-pop {
-  position: absolute;
-  left: 22px;
-  top: -4px;
-  z-index: 60;
+  position: fixed;
+  z-index: 250;
   display: none;
-  /* Shrink-to-fit for an absolutely-positioned box resolves against the
-     containing block — the ~19px icon wrapper — which collapsed the popup
-     to one word per line. max-content sizes it to the text instead, with
-     max-width as the wrap point. */
+  /* Shrink-to-fit sized to the text; max-width caps it and leaves room for
+     the JS-computed horizontal clamp to keep it fully on-screen. */
   width: max-content;
-  max-width: 280px;
+  max-width: min(280px, calc(100vw - 16px));
   padding: 6px 10px;
   color: var(--fg-2);
   background: var(--bg-2);
@@ -3179,20 +3179,8 @@ select.npu-sel {
   line-height: 1.5;
   white-space: normal;
 }
-.field-info-wrap:hover .field-info-pop,
-.field-info-wrap:focus-within .field-info-pop {
+.field-info-pop[data-open="1"] {
   display: block;
-}
-/* On narrow screens the to-the-right placement runs the (now content-width)
-   popup past the right edge of overflow-clipped panels (.s-panel). Drop it
-   below the icon, centred, with a viewport-derived cap instead. */
-@media (max-width: 720px) {
-  .field-info-pop {
-    left: 50%;
-    top: 20px;
-    transform: translateX(-50%);
-    max-width: min(260px, calc(100vw - 48px));
-  }
 }
 /* Visually hidden but exposed to assistive tech (toggle descriptions etc.). */
 .sr-only {

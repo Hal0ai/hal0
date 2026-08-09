@@ -16,6 +16,17 @@
  * being absent.
  */
 import { test, expect, json } from '../fixtures/apiMock'
+import type { Locator } from '@playwright/test'
+
+// #1683: FieldInfoIcon's description now portals to document.body (so
+// overflow:hidden panels can't clip it), so it's no longer a DOM descendant
+// of its row — `row.textContent` (what `toContainText` reads) doesn't see it
+// anymore. Look the popup up via the Info button's aria-describedby instead.
+async function fieldInfoPopup(row: Locator) {
+  const btn = row.getByRole('button', { name: 'Info' })
+  const id = await btn.getAttribute('aria-describedby')
+  return row.page().locator(`[id="${id}"]`)
+}
 
 function capabilityRow(device: string, provider: string, model: string | null, slot: string, status: string) {
   return { device, backend: device, provider, model, enabled: !!model, slot, status }
@@ -109,8 +120,8 @@ test.describe('Capability catalog pickers (#1454)', () => {
     await expect(page.locator('.settings-content h2').first()).toHaveText('Voice')
 
     const modelRows = page.locator('.s-row').filter({ has: page.locator('.k span', { hasText: /^Model$/ }) })
-    await expect(modelRows.nth(0)).toContainText('no installed STT models')
-    await expect(modelRows.nth(1)).toContainText('no installed TTS models')
+    await expect(await fieldInfoPopup(modelRows.nth(0))).toContainText('no installed STT models')
+    await expect(await fieldInfoPopup(modelRows.nth(1))).toContainText('no installed TTS models')
     // Genuinely-empty catalog falls back to the free-text input, not a <select>.
     await expect(modelRows.nth(0).locator('select')).toHaveCount(0)
   })

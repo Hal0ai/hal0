@@ -157,7 +157,13 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     const displayNameLabel = labels.filter({ hasText: 'Display name' })
     const info = displayNameLabel.getByRole('button', { name: 'Info' })
-    const popover = displayNameLabel.locator('.field-info-pop')
+    // #1683: the popup portals to document.body (so overflow:hidden panels
+    // can't clip it), so it's no longer a DOM descendant of the label — find
+    // it via the button's aria-describedby instead of a row-scoped locator.
+    const popupId = await info.getAttribute('aria-describedby')
+    // useId() ids contain colons (e.g. ":r0:"), invalid in a raw #id CSS
+    // selector — use an attribute selector, which doesn't need escaping.
+    const popover = page.locator(`[id="${popupId}"]`)
     await expect(popover).toHaveCount(1)
     await expect(popover).toBeHidden()
 
