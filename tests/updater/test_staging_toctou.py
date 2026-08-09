@@ -25,6 +25,7 @@ tests exercise the same synthetic release the rest of the updater suite does.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -215,6 +216,51 @@ def test_old_quarantine_dirs_are_reaped(
     assert not ancient.exists(), "an ancient quarantine dir was not reaped"
     assert not old.exists(), "an old quarantine dir was not reaped"
     assert recent.is_dir(), "a recent quarantine dir must be kept for recovery"
+
+
+def test_orphaned_staging_dirs_are_reaped(
+    synthetic_release: dict[str, Any],  # noqa: F811
+    cosign_skip: None,  # noqa: F811
+) -> None:
+    """A ``.stage-*`` dir left by a SIGKILLed stage is swept on the next apply.
+
+    ``_root_only_staging_dir`` only cleans up in a ``finally``, so a stage
+    killed by SIGKILL / OOM / power-cut leaks a fresh ``mkdtemp`` dir holding a
+    full release tarball under the root filesystem, forever. An in-flight
+    stage's own dir is fresh and must survive.
+    """
+    root = _usr_lib_root()
+    root.mkdir(parents=True, exist_ok=True)
+
+    orphan = root / ".stage-0.0.1-deadbeef"
+    orphan.mkdir()
+    (orphan / "hal0-0.0.1.tar.gz").write_bytes(b"\x1f\x8b" + b"leaked tarball" * 64)
+    old_time = time.time() - 3 * 3600
+    os.utime(orphan, (old_time, old_time))
+
+    asyncio.run(Updater().apply())
+
+    assert not orphan.exists(), "an orphaned staging dir was not reaped"
+    # The apply's own (now torn-down) staging dir left nothing either.
+    leftovers = [p for p in root.iterdir() if p.name.startswith(".stage-")]
+    assert leftovers == [], f"staging dirs leaked: {leftovers}"
+
+
+def test_live_staging_dir_is_not_reaped(
+    synthetic_release: dict[str, Any],  # noqa: F811
+    cosign_skip: None,  # noqa: F811
+) -> None:
+    """A freshly-created ``.stage-*`` dir (a concurrent live stage) is spared."""
+    root = _usr_lib_root()
+    root.mkdir(parents=True, exist_ok=True)
+
+    fresh = root / ".stage-9.9.9-livestage"
+    fresh.mkdir()
+    (fresh / "in-flight.tar.gz").write_bytes(b"\x1f\x8b" + b"live" * 8)
+
+    asyncio.run(Updater().apply())
+
+    assert fresh.is_dir(), "a fresh (live) staging dir must not be reaped"
 
 
 # ── P3: the pyproject fallback must actually work ──────────────────────────────

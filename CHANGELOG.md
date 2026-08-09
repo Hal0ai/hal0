@@ -53,6 +53,12 @@ applying. Add those subsections to a version's section to surface them; see
   directories, which accumulated one whole install tree per retry and were
   never cleaned up, are now reaped: the newest three are kept for recovery and
   anything older than 30 days goes.
+- The root-only `.stage-<version>-XXXXXX` staging directory (#1738) is now also
+  reaped on the next apply. Its teardown runs in a `finally`, which a SIGKILL /
+  OOM / power-cut skips, leaking a full release tarball under the root
+  filesystem per killed stage. Orphans older than an hour — comfortably above
+  the 30-minute privileged stage timeout, so a live concurrent stage is never
+  touched — are swept. (#1754)
 - The privileged `hal0-systemctl` wrapper now allow-lists the *content* of the
   two systemd drop-ins it writes as root (`write-gateway-dropin`,
   `write-hindsight-dropin`). Both verbs take their whole payload on stdin, and
