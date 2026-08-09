@@ -4,7 +4,7 @@ Mounted under ``/api/memory/*``. The dashboard's Memory tab + the
 ``hal0 memory graph {enable,disable,status}`` CLI both read + write
 through this surface; there is no other writer for ``[memory.graph]``
 so a swap-flip from either client lands atomically through the same
-``save_hal0_config`` pipeline.
+``hal0_config_txn`` pipeline.
 
 The actual graph-extraction dispatch lives in the active memory provider
 (:class:`hal0.memory.MemoryProvider`); this module is the thin HTTP
@@ -29,7 +29,7 @@ from pydantic import ValidationError
 
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
-from hal0.config.loader import HAL0_TOML_LOCK, load_hal0_config, save_hal0_config
+from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import MemoryGraphConfig
 from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
@@ -423,7 +423,7 @@ async def _propagate_shielded(slot: str, timeout_s: int) -> dict[str, Any]:
     to a real OS thread; cancelling the awaiting coroutine (client disconnect,
     shutdown, request timeout) does NOT stop that thread — it just makes the
     ``await`` raise early while the write/restart keeps running in the
-    background. This is called from inside :data:`HAL0_TOML_LOCK`'s critical
+    background. This is called from inside :func:`hal0_config_txn`'s critical
     section (#1682 review): an early return there would release the lock
     while the orphaned worker could still clobber the drop-in, letting a
     second PUT's propagation interleave with it — one write wins the drop-in,
@@ -478,8 +478,14 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
 
     wrapper = _wrapper(request)
 
-    async with HAL0_TOML_LOCK:
-        cfg = load_hal0_config()
+    # One serialized RMW path for every hal0.toml writer (#1721): the txn takes
+    # the shared in-process lock plus the cross-process advisory lock and loads
+    # the config from disk inside both. The whole critical section — including
+    # the propagation below — stays inside it, deliberately: an unrelated writer
+    # persisting a pre-propagation snapshot mid-flight is exactly the lost
+    # update #1682 found.
+    async with hal0_config_txn(request) as txn:
+        cfg = txn.config
         current_raw = cfg.memory.graph.model_dump(mode="python")
         merged_raw = {**current_raw, **body}
 
@@ -549,7 +555,10 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         # the ordering that cannot produce a silent divergence.
         cfg.memory.graph = new_cfg
         try:
-            save_hal0_config(cfg)
+            # ``txn.save`` also refreshes ``app.state.hal0_config`` — this route
+            # writing straight to disk and leaving that cache stale is what let
+            # a later settings PUT clobber the graph section (#1717 review).
+            txn.save(cfg)
         except OSError as exc:
             raise Hal0Error(
                 f"could not persist hal0 config: {exc}",

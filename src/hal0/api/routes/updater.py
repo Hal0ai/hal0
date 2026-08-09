@@ -45,7 +45,7 @@ from fastapi import APIRouter, Request
 from hal0 import __version__
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config import paths
-from hal0.config.loader import load_hal0_config, save_hal0_config
+from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import Hal0Config
 from hal0.release.policy import ReleaseKind
 from hal0.updater import Updater, fetch_release_manifest, releases_url, validate_release_version
@@ -936,33 +936,37 @@ async def set_channel(request: Request) -> dict[str, str]:
             code="channel.unknown",
         )
 
-    current = getattr(request.app.state, "hal0_config", None)
-    if current is None:
-        current = load_hal0_config()
-    merged_raw = current.model_dump(mode="python")
-    merged_raw.setdefault("telemetry", {})["channel"] = channel
-    try:
-        merged = Hal0Config.model_validate(merged_raw)
-    except Exception as exc:
-        raise BadRequest(
-            f"could not validate channel update: {exc}",
-            details={"error": str(exc)},
-            code="channel.invalid",
-        ) from exc
-
-    # Validate before touching either the file or the app-state cache. This is
-    # required even for an idempotent PUT: success authenticates the channel's
-    # current manifest, not merely the requested config value.
+    # Validate BEFORE taking the config lock and before touching either the
+    # file or the app-state cache. This is required even for an idempotent
+    # PUT: success authenticates the channel's current manifest, not merely
+    # the requested config value. It is also a network round-trip, so it stays
+    # outside the critical section — no other config writer should queue
+    # behind a manifest fetch (#1721).
     await Updater(channel=channel).check()
 
-    try:
-        save_hal0_config(merged)
-    except OSError as exc:
-        raise UpdateError(
-            f"could not persist channel to hal0.toml: {exc}",
-            details={"error": str(exc)},
-        ) from exc
-    request.app.state.hal0_config = merged
+    # Serialized read-modify-write (#1721). Unlocked, and starting from the
+    # possibly-stale ``app.state.hal0_config`` startup snapshot, this route
+    # could persist a whole pre-read config over a concurrent settings /
+    # memory-graph / models / auth write and erase that section.
+    async with hal0_config_txn(request) as txn:
+        merged_raw = txn.config.model_dump(mode="python")
+        merged_raw.setdefault("telemetry", {})["channel"] = channel
+        try:
+            merged = Hal0Config.model_validate(merged_raw)
+        except Exception as exc:
+            raise BadRequest(
+                f"could not validate channel update: {exc}",
+                details={"error": str(exc)},
+                code="channel.invalid",
+            ) from exc
+
+        try:
+            txn.save(merged)
+        except OSError as exc:
+            raise UpdateError(
+                f"could not persist channel to hal0.toml: {exc}",
+                details={"error": str(exc)},
+            ) from exc
     return {"channel": channel}
 
 

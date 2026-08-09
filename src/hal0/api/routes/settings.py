@@ -1,7 +1,7 @@
 """Settings (config) endpoints (mounted under /api/settings).
 
 Typed read/write of ``/etc/hal0/hal0.toml`` (or the HAL0_HOME-rooted
-override). All writes go through ``hal0.config.loader.save_hal0_config``
+override). All writes go through ``hal0.config.loader.hal0_config_txn``
 which uses the same tempfile+fsync+os.replace pattern as
 ``write_env_atomic`` — never a partial-write.
 
@@ -41,7 +41,7 @@ from pydantic import ValidationError
 from hal0.api._redact import redact_config
 from hal0.api._settings_apply import APPLY_CLASSES, apply_plan, get_registry
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
-from hal0.config.loader import HAL0_TOML_LOCK, load_hal0_config, save_hal0_config
+from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import Hal0Config
 from hal0.registry.model_store import (
     MigrationPlan,
@@ -137,23 +137,15 @@ async def update_settings(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise Hal0Error("request body must be a JSON object")
 
-    # Shared with routes/memory.py's PUT /graph (#1682 review): that route
-    # can hold its own critical section across a ~60s extraction-slot
-    # propagation, and without a lock SHARED across both routes this save
-    # could land mid-flight, persisting a config snapshot taken before the
-    # propagation started and clobbering the graph section it just wrote.
-    async with HAL0_TOML_LOCK:
-        # Always reload from disk here (#1717 review), never trust
-        # ``app.state.hal0_config`` — the graph route saves its section
-        # straight to disk without updating that cache, so a settings PUT
-        # that waited behind a graph PUT would otherwise resume on the
-        # STALE cached snapshot, merge its own (unrelated) patch into it,
-        # and overwrite the graph section the preceding request just wrote.
-        # One extra read under an already-held lock is cheap; a lost write
-        # is not.
-        current = load_hal0_config()
-
-        merged_raw = _deep_merge(current.model_dump(mode="python"), body)
+    # One serialized RMW path for every hal0.toml writer (#1721). The txn
+    # holds the shared in-process lock AND the cross-process advisory lock,
+    # and hands back a config read from DISK inside both — never
+    # ``app.state.hal0_config``, which any other writer may have invalidated
+    # (#1717 review: a settings PUT waiting behind a ~60s graph PUT used to
+    # resume on the stale cached snapshot, merge its own unrelated patch into
+    # it, and overwrite the graph section the graph route had just written).
+    async with hal0_config_txn(request) as txn:
+        merged_raw = _deep_merge(txn.config.model_dump(mode="python"), body)
 
         try:
             merged = Hal0Config.model_validate(merged_raw)
@@ -163,16 +155,16 @@ async def update_settings(request: Request) -> dict[str, Any]:
                 details=_validation_error_details(exc),
             ) from exc
 
-        # Atomic write via the loader's write_toml_atomic-backed helper.
+        # Atomic write via the txn — which also refreshes
+        # ``app.state.hal0_config`` so no writer can leave that cache stale.
         try:
-            save_hal0_config(merged)
+            txn.save(merged)
         except OSError as exc:
             raise Hal0Error(
                 f"could not persist hal0 config: {exc}",
                 details={"error": str(exc), "errno": getattr(exc, "errno", None)},
             ) from exc
 
-        request.app.state.hal0_config = merged
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
         # Surface a footer chip when the operator saves the config. The
@@ -489,6 +481,19 @@ async def _apply_store_change(
 
     Slot containers mount the store path; they observe the new value on
     their next restart (the apply-plan badge tells the operator).
+
+    Lock scope (#1721). The file move is deliberately kept OUTSIDE the config
+    lock and only the read-modify-write is serialized: a real multi-file store
+    migration can run for minutes, and holding the one hal0.toml lock across it
+    would stall every other config writer — including the API's own settings
+    and memory/graph routes — for the whole move. Nothing in the move reads or
+    writes hal0.toml, so it needs no protection; what needed fixing was the
+    save, which used to persist ``current`` — a snapshot taken BEFORE the move,
+    possibly minutes stale and possibly the startup ``app.state`` cache — and
+    could therefore erase a concurrent writer's section. The txn below re-reads
+    from disk under the lock and applies only ``[models].store`` to that fresh
+    config, so a concurrent settings/graph/auth/channel write survives and the
+    critical section stays as short as every other writer's.
     """
     migration_result_dict: dict[str, Any] | None = None
     if plan.needed:
@@ -521,25 +526,27 @@ async def _apply_store_change(
             "failed": list(mig.failed),
         }
 
-    # Persist hal0.toml.
-    new_models_raw = dict(current.models.model_dump(mode="python"))
-    new_models_raw["store"] = path
-    try:
-        merged_models = current.models.__class__.model_validate(new_models_raw)
-    except ValidationError as exc:
-        raise ConfigInvalidError(
-            "models config failed schema validation",
-            details=_validation_error_details(exc),
-        ) from exc
-    merged = current.model_copy(update={"models": merged_models})
-    try:
-        save_hal0_config(merged)
-    except OSError as exc:
-        raise Hal0Error(
-            f"could not persist hal0 config: {exc}",
-            details={"error": str(exc), "errno": getattr(exc, "errno", None)},
-        ) from exc
-    request.app.state.hal0_config = merged
+    # Persist hal0.toml — short critical section, fresh read (see the
+    # lock-scope note in this function's docstring).
+    async with hal0_config_txn(request) as txn:
+        fresh = txn.config
+        new_models_raw = dict(fresh.models.model_dump(mode="python"))
+        new_models_raw["store"] = path
+        try:
+            merged_models = fresh.models.__class__.model_validate(new_models_raw)
+        except ValidationError as exc:
+            raise ConfigInvalidError(
+                "models config failed schema validation",
+                details=_validation_error_details(exc),
+            ) from exc
+        merged = fresh.model_copy(update={"models": merged_models})
+        try:
+            txn.save(merged)
+        except OSError as exc:
+            raise Hal0Error(
+                f"could not persist hal0 config: {exc}",
+                details={"error": str(exc), "errno": getattr(exc, "errno", None)},
+            ) from exc
 
     # A store change usually means model files already live at the new path
     # (that's why the operator pointed hal0 there). Register them NOW —

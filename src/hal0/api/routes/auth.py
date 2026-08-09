@@ -24,7 +24,7 @@ from hal0.api.auth import (
     trust_forwarded_for_enabled,
     verify_admin_key,
 )
-from hal0.config.loader import load_hal0_config, save_hal0_config
+from hal0.config.loader import hal0_config_txn
 from hal0.errors import BadRequest, TooManyRequests, Unauthorized
 from hal0.security.exposure import OPEN_ALLOWLIST, RULES, AuthClass
 from hal0.service_identity import rotate_api_env_key
@@ -167,12 +167,15 @@ async def set_require_auth(body: RequireAuthRequest, request: Request) -> dict[s
             code="auth.no_admin_key",
         )
 
-    cfg = load_hal0_config()
-    cfg.security.require_auth = body.require_auth
-    save_hal0_config(cfg)
-    # Keep the in-process settings view (app.state.hal0_config) coherent with
-    # what other settings surfaces read, matching routes/settings.py.
-    request.app.state.hal0_config = cfg
+    # Serialized read-modify-write (#1721): unlocked, this toggle could
+    # persist its own pre-read snapshot over a concurrent settings /
+    # memory-graph / models / channel write. ``txn.save`` also keeps the
+    # in-process settings view (app.state.hal0_config) coherent with what the
+    # other settings surfaces read.
+    async with hal0_config_txn(request) as txn:
+        cfg = txn.config
+        cfg.security.require_auth = body.require_auth
+        txn.save(cfg)
     log.info("hal0.auth.require_toggled", require_auth=body.require_auth)
     return {"require_auth": body.require_auth, "applies_live": True}
 

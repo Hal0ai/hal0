@@ -57,6 +57,7 @@ import hal0
 from hal0.config import paths
 from hal0.config.loader import (
     ConfigParseError,
+    hal0_config_file_lock,
     load_hal0_config,
     save_profiles_config,
     write_toml_atomic,
@@ -1166,6 +1167,23 @@ def _maybe_run_config_migrations(
         )
         return (target, target)
 
+    # Cross-process serialization (#1721). This runs either on an
+    # ``asyncio.to_thread`` inside the live API process (Updater.commit) or as
+    # a bare ``hal0`` process from ``install.sh`` — and install.sh runs this
+    # step BEFORE it restarts hal0-api, i.e. against a daemon that may be
+    # serving a settings PUT right now. Same ``hal0.toml.lock`` the API's
+    # ``hal0_config_txn`` takes, held across this read-modify-write.
+    with hal0_config_file_lock(toml_path):
+        return _run_config_migrations_locked(toml_path, target, job_id=job_id)
+
+
+def _run_config_migrations_locked(
+    toml_path: Path,
+    target: int,
+    *,
+    job_id: str | None = None,
+) -> tuple[int, int]:
+    """Body of :func:`_maybe_run_config_migrations`, run under the config lock."""
     cfg = load_hal0_config(toml_path)
     source = int(getattr(cfg.meta, "schema_version", 1) or 1)
     if source >= target:
@@ -1871,16 +1889,22 @@ def _stamp_profile_catalog_version(*, job_id: str | None = None) -> bool:
     """
     from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
 
-    raw = _raw_hal0_toml()
-    if raw is None:
-        log.warning("updater.profile_reset_stamp_skipped", job_id=job_id, reason="hal0.toml absent")
-        return False
-    try:
-        new_raw, version = run_migrations(raw, target_version=PROFILE_CATALOG_SCHEMA_VERSION)
-        write_toml_atomic(paths.hal0_toml(), new_raw)
-    except Exception as exc:
-        log.warning("updater.profile_reset_stamp_failed", job_id=job_id, error=str(exc))
-        return False
+    # Same cross-process lock as every other hal0.toml read-modify-write
+    # (#1721) — the raw round-trip below is exactly the read → modify → write
+    # shape that loses a concurrent API writer's section.
+    with hal0_config_file_lock():
+        raw = _raw_hal0_toml()
+        if raw is None:
+            log.warning(
+                "updater.profile_reset_stamp_skipped", job_id=job_id, reason="hal0.toml absent"
+            )
+            return False
+        try:
+            new_raw, version = run_migrations(raw, target_version=PROFILE_CATALOG_SCHEMA_VERSION)
+            write_toml_atomic(paths.hal0_toml(), new_raw)
+        except Exception as exc:
+            log.warning("updater.profile_reset_stamp_failed", job_id=job_id, error=str(exc))
+            return False
     log.info("updater.profile_reset_stamped", job_id=job_id, schema_version=version)
     return True
 

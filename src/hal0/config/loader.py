@@ -15,18 +15,19 @@ See PLAN.md §3 and §5 Tier 1.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 import os
 import tempfile
 import tomllib
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
 import tomli_w
 
 from hal0.config import paths
+from hal0.config.locking import PerLoopLock, async_file_lock, file_lock
 from hal0.config.schema import (
     CURRENT_SCHEMA_VERSION,
     SEED_PROFILES,
@@ -207,20 +208,36 @@ def load_hal0_config(path: Path | None = None) -> Hal0Config:
         ) from exc
 
 
-#: Serializes concurrent hal0.toml read-modify-write across API routes
-#: (routes/settings.py's ``PUT /api/settings``, routes/memory.py's
-#: ``PUT /api/memory/graph``). One in-process lock is sufficient — hal0-api
-#: is the only writer process. A per-route lock is not enough on its own
-#: (#1682 review): the memory/graph route holds its critical section across
-#: a multi-second-to-~60s extraction-slot propagation, and without a SHARED
-#: lock an unrelated settings save can land mid-flight, persisting a config
-#: snapshot taken before the propagation started and clobbering the section
-#: it just wrote.
-HAL0_TOML_LOCK: asyncio.Lock = asyncio.Lock()
+#: Serializes concurrent hal0.toml read-modify-write between coroutines in the
+#: API process. Held by :func:`hal0_config_txn`, which is the ONLY supported way
+#: to run a read-modify-write on hal0.toml from the event loop — do not acquire
+#: this by hand at a call site (#1721: four routes each hand-rolled the RMW and
+#: three of them forgot the lock entirely).
+#:
+#: A per-route lock is not enough on its own (#1682 review): the memory/graph
+#: route holds its critical section across a multi-second-to-~60s
+#: extraction-slot propagation, and without a SHARED lock an unrelated settings
+#: save can land mid-flight, persisting a config snapshot taken before the
+#: propagation started and clobbering the section it just wrote.
+HAL0_TOML_LOCK: PerLoopLock = PerLoopLock()
+
+
+class ConfigLockBusy(ConfigError):
+    """Another writer held hal0.toml's advisory lock past the wait timeout."""
+
+    code = "config.lock_busy"
+    status = 503
 
 
 def save_hal0_config(cfg: Hal0Config, path: Path | None = None) -> None:
     """Atomically write hal0.toml.
+
+    Low-level writer: it takes NO lock. Any read-modify-write (load → mutate →
+    save) must run inside :func:`hal0_config_txn` (async) or
+    :func:`hal0_config_file_lock` (sync/threaded) instead of calling this
+    directly, or it can clobber a concurrent writer's section. Calling it bare
+    is correct only when the whole config is being written from nothing (tests,
+    first-run seeding).
 
     Args:
         cfg: Validated Hal0Config to persist.
@@ -233,6 +250,132 @@ def save_hal0_config(cfg: Hal0Config, path: Path | None = None) -> None:
     # safe for any field whose default is None.
     data = cfg.model_dump(mode="python", exclude_none=True)
     write_toml_atomic(target, data)
+
+
+# ── the one serialized hal0.toml read-modify-write path (#1721) ───────────────
+#
+# Every writer that reads hal0.toml, changes part of it and writes it back is a
+# lost-update hazard against every other writer. #1717 fixed one PAIR of them
+# by sharing an asyncio lock between two routes; #1721 is the same bug arriving
+# from the four routes that were never taught about it. A lock every future
+# caller has to remember is the failure mode, so the lock now lives INSIDE the
+# accessor and the accessor is the API:
+#
+#   async with hal0_config_txn(request) as txn:      # loads fresh under lock
+#       txn.config.security.require_auth = True
+#       txn.save()                                   # writes + refreshes cache
+#
+# Three properties fall out of putting it here rather than at each call site:
+#
+#   * **Fresh read.** The config handed to the body is loaded from DISK inside
+#     the critical section, never ``app.state.hal0_config`` — the cache is a
+#     startup snapshot that any other writer may have invalidated (#1717
+#     review found exactly this: a settings PUT waiting behind a graph PUT
+#     merged into the pre-graph snapshot and erased the graph section).
+#   * **Cache coherence.** ``txn.save()`` refreshes ``app.state.hal0_config``
+#     when a request was passed, so the "writer forgot to update the cache"
+#     variant of the same bug cannot come back either.
+#   * **Cross-process exclusion.** The in-process ``asyncio.Lock`` cannot see
+#     the CLI, the installer, or ``installer/install.sh``'s post-activation
+#     migration step — and that step deliberately runs BEFORE it restarts
+#     hal0-api, i.e. against a live daemon that may be serving a settings PUT.
+#     So the txn also takes the same ``fcntl`` advisory lock
+#     (``hal0.toml.lock``) that the sync writers in the updater and installer
+#     now take, which is what actually serializes those two processes.
+#     ``/etc/hal0/*.lock`` already has a perms row, so no new install surface.
+
+
+class Hal0ConfigTxn:
+    """Handle yielded by :func:`hal0_config_txn` — a locked RMW on hal0.toml."""
+
+    def __init__(self, config: Hal0Config, path: Path, request: Any | None = None) -> None:
+        #: Config loaded from disk inside the lock. Mutate it (or build a
+        #: replacement) and hand the result to :meth:`save`.
+        self.config = config
+        self.path = path
+        self._request = request
+
+    def save(self, cfg: Hal0Config | None = None) -> Hal0Config:
+        """Persist ``cfg`` (default: :attr:`config`) and refresh the app cache.
+
+        Returns the config that was written, so callers can echo it back.
+        """
+        new = self.config if cfg is None else cfg
+        save_hal0_config(new, self.path)
+        self.config = new
+        request = self._request
+        if request is not None:
+            with contextlib.suppress(AttributeError):
+                request.app.state.hal0_config = new
+        return new
+
+
+@contextlib.asynccontextmanager
+async def hal0_config_txn(
+    request: Any | None = None,
+    *,
+    path: Path | None = None,
+    timeout: float | None = 60.0,
+) -> AsyncIterator[Hal0ConfigTxn]:
+    """Serialized read-modify-write of hal0.toml, for the event loop.
+
+    Holds :data:`HAL0_TOML_LOCK` (in-process) and the ``hal0.toml.lock``
+    advisory file lock (cross-process) for the whole body, and yields a
+    :class:`Hal0ConfigTxn` whose ``config`` was loaded from disk under both.
+
+    The body may await: the memory/graph route deliberately keeps its
+    hindsight-api propagation inside the critical section so no other writer
+    can persist a pre-propagation snapshot over it. A cross-process writer
+    blocking behind that is the intended outcome — waiting is strictly better
+    than the lost update it would otherwise commit.
+
+    Args:
+        request: Optional Starlette request; when given, ``txn.save()`` also
+            refreshes ``request.app.state.hal0_config``.
+        path: Override hal0.toml path (tests).
+        timeout: Seconds to wait for the cross-process lock before failing the
+            request with :class:`ConfigLockBusy`.
+
+    Raises:
+        ConfigLockBusy: Another process held the advisory lock too long.
+    """
+    target = Path(path) if path is not None else paths.hal0_toml()
+    async with HAL0_TOML_LOCK:
+        # ``acquired`` narrows the except to the ACQUIRE. A body that raises its
+        # own TimeoutError (the memory route awaits a bounded hindsight-api
+        # restart in here) must surface as itself, not be relabelled "another
+        # process is writing hal0.toml".
+        acquired = False
+        try:
+            async with async_file_lock(target, timeout=timeout):
+                acquired = True
+                yield Hal0ConfigTxn(load_hal0_config(target), target, request)
+        except TimeoutError as exc:
+            if acquired:
+                raise
+            raise ConfigLockBusy(
+                f"another process is writing {target} — try again",
+                details={"path": str(target)},
+            ) from exc
+
+
+@contextlib.contextmanager
+def hal0_config_file_lock(path: Path | None = None) -> Iterator[Path]:
+    """Serialized read-modify-write of hal0.toml, for sync/threaded writers.
+
+    The blocking counterpart of :func:`hal0_config_txn` for code that is not on
+    the event loop — the updater's schema-migration passes (``asyncio.to_thread``
+    inside the API process, or a bare ``hal0`` process from ``install.sh``) and
+    the installer's storage-choice writer. Takes the same ``hal0.toml.lock``, so
+    those writers serialize against the API's routes and each other; it
+    deliberately does NOT touch :data:`HAL0_TOML_LOCK`, which is an
+    ``asyncio.Lock`` and cannot be acquired off-loop.
+
+    Yields the locked hal0.toml path so callers can read it inside the body.
+    """
+    target = Path(path) if path is not None else paths.hal0_toml()
+    with file_lock(target):
+        yield target
 
 
 # ── slots/<name>.toml ─────────────────────────────────────────────────────────
@@ -1001,9 +1144,14 @@ def manifest_image_ref(
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
+    "HAL0_TOML_LOCK",
     "ConfigError",
+    "ConfigLockBusy",
     "ConfigNotFound",
     "ConfigParseError",
+    "Hal0ConfigTxn",
+    "hal0_config_file_lock",
+    "hal0_config_txn",
     "list_agent_configs",
     "list_slot_layout",
     "list_slots",

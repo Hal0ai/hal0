@@ -444,16 +444,26 @@ def _persist_store_dir(storage_dir: str) -> None:
     flm_target = _colocated_flm_store(s)
 
     try:
-        from hal0.config.loader import load_hal0_config, save_hal0_config
+        from hal0.config.loader import (
+            hal0_config_file_lock,
+            load_hal0_config,
+            save_hal0_config,
+        )
 
-        cfg = load_hal0_config()
-        store_ok = (cfg.models.store or "").strip() == s
-        flm_ok = (cfg.models.flm_store or "").strip() == flm_target
-        if store_ok and flm_ok:
-            return
-        cfg.models.store = s
-        cfg.models.flm_store = flm_target
-        save_hal0_config(cfg)
+        # Cross-process serialization (#1721): the installer is a separate
+        # process from hal0-api and can run against a live daemon, so this
+        # read-modify-write takes the same ``hal0.toml.lock`` the API's
+        # ``hal0_config_txn`` holds — otherwise it can persist its pre-read
+        # snapshot over a concurrent settings write.
+        with hal0_config_file_lock() as toml_path:
+            cfg = load_hal0_config(toml_path)
+            store_ok = (cfg.models.store or "").strip() == s
+            flm_ok = (cfg.models.flm_store or "").strip() == flm_target
+            if store_ok and flm_ok:
+                return
+            cfg.models.store = s
+            cfg.models.flm_store = flm_target
+            save_hal0_config(cfg, toml_path)
     except Exception:
         # Config persistence is best-effort: pulls fall back to the default
         # store and the rest of setup must proceed regardless.
