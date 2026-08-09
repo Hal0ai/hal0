@@ -330,6 +330,25 @@ def test_resolve_argv_rejects_multiple_managed_flags_in_one_extra_args() -> None
     assert exc_info.value.details["flags"] == ["--model", "--port"]
 
 
+def test_resolve_argv_rejects_managed_flag_equals_form_in_extra_args() -> None:
+    """GNU ``--flag=value`` join form must canonicalize the same as the
+    two-token form — a caller can't bypass the §21.7 denylist just by using
+    ``=`` instead of a space."""
+    segments = [*_BASE_SEGMENTS, ("extra_args", ["--host=0.0.0.0"])]
+    with pytest.raises(BadRequest) as exc_info:
+        resolve_argv(segments)
+    assert exc_info.value.code == "slot.managed_arg_denied"
+
+
+def test_resolve_argv_rejects_managed_flag_equals_form_in_slot_profile() -> None:
+    """The #1636 ``slot_profile`` untrusted segment is equally exposed to the
+    ``=`` join-form bypass."""
+    segments = [*_BASE_SEGMENTS, ("slot_profile", ["--model=/etc/passwd"])]
+    with pytest.raises(BadRequest) as exc_info:
+        resolve_argv(segments)
+    assert exc_info.value.code == "slot.managed_arg_denied"
+
+
 def test_resolve_argv_allows_clean_extra_args() -> None:
     """A slot's real extra_args (bench tuning, no managed flags) passes through."""
     segments = [*_BASE_SEGMENTS, ("extra_args", ["--flash-attn", "on", "--threads", "8"])]
