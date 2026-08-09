@@ -125,7 +125,7 @@ curated per-*profile*, not per-model, and is distinct from the JSONL pipeline ab
 ### CLI
 
 ```sh
-hal0 bench plan|run|status|worker|results|history|reindex|devices|publish|eval|bundle|upload
+hal0 bench plan|run|status|worker|results|history|reindex|devices|publish|eval|bundle
 ```
 
 `hal0 bench` is a raw argparse passthrough (not a Typer sub-app) — run
@@ -137,9 +137,9 @@ hal0 bench plan|run|status|worker|results|history|reindex|devices|publish|eval|b
 
 ### Sharing results
 
-Benchmark results never leave the box automatically. To share a run, package
-it as a self-contained bundle and attach it wherever you discuss it (forum
-thread, issue, chat):
+Benchmark results never leave the box — there is no upload path. To share a
+run, package it as a self-contained bundle and attach it wherever you discuss
+it (forum thread, issue, chat):
 
 ```bash
 hal0 bench bundle --list                       # see what's eligible
@@ -151,7 +151,3 @@ telemetry), the profile/suite TOMLs you pass with `--profile`, and optional
 raw artifacts (`--with-artifacts`). `host.name` is redacted by default, the
 manifest carries a sha256 for every member, and the whole archive is
 content-addressed — anyone can verify and reproduce what you measured.
-
-`hal0 bench upload` is a maintainer tool for publishing curated results to
-the hal0.dev roster; it requires a publishing token and does nothing without
-one.
