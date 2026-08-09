@@ -101,6 +101,36 @@ def test_registry_declares_three_apply_classes() -> None:
         ("activity.max_rows", "service-restart", [SERVICE_HAL0_API]),
         # [meta]
         ("meta.schema_version", "manual-restart", []),
+        # [security] — both read live off hal0.toml, (path, mtime)-cached
+        # in api/auth.py; a Settings save bumps mtime so the next request
+        # picks it up.
+        ("security.require_auth", "immediate", []),
+        ("security.trust_forwarded_for", "immediate", []),
+        # [slots] — network_mode is baked into the rendered quadlet unit
+        # like publish_host; preload_evict_* are SlotManager constructor
+        # args fixed at create_app time.
+        ("slots.network_mode", "service-restart", [SERVICE_SLOTS]),
+        ("slots.preload_evict_enabled", "service-restart", [SERVICE_HAL0_API]),
+        ("slots.preload_evict_headroom_mb", "service-restart", [SERVICE_HAL0_API]),
+        # [dispatcher] — same create_app-time wiring as the other two knobs.
+        ("dispatcher.direct_read_timeout_s", "service-restart", [SERVICE_HAL0_API]),
+        # [memory] — HindsightProvider constructor arg, built once at boot.
+        ("memory.unified_bank", "service-restart", [SERVICE_HAL0_API]),
+        # [realtime] — read live off app.state.hal0_config.realtime on
+        # every WS connect; the settings PUT refreshes app.state in place.
+        ("realtime.enabled", "immediate", []),
+        ("realtime.sample_rate", "immediate", []),
+        ("realtime.default_model", "immediate", []),
+        ("realtime.stt_model", "immediate", []),
+        ("realtime.tts_model", "immediate", []),
+        ("realtime.tts_voice", "immediate", []),
+        ("realtime.vad_energy_threshold", "immediate", []),
+        ("realtime.vad_silence_ms", "immediate", []),
+        ("realtime.vad_min_speech_ms", "immediate", []),
+        ("realtime.vad_window_ms", "immediate", []),
+        ("realtime.frame_ms", "immediate", []),
+        ("realtime.approval_wait_s", "immediate", []),
+        ("realtime.max_buffer_seconds", "immediate", []),
     ],
 )
 def test_registry_hal0_keys_have_expected_class(
@@ -350,6 +380,27 @@ def test_put_settings_apply_plan_flattens_nested_keys(
     assert plan["service_restart"] == {"hal0-api": ["slots.idle_timeout_s"]}
     assert plan["manual_restart"] == []
     assert plan["unknown"] == []
+
+
+def test_put_settings_surfaces_unknown_keys(isolated_client: TestClient) -> None:
+    """A touched key the registry has no class for must land in the PUT
+    response's ``unknown`` bucket, not be silently dropped (issue #1666).
+
+    ``update_settings`` used to pre-filter the touched-key list with
+    ``if k in REGISTRY`` before calling ``apply_plan``, so
+    ``ApplyPlanResult.unknown`` was structurally always ``[]`` on this
+    route -- contradicting the documented contract that the route
+    "surfaces the list verbatim" for the UI's informational chip.
+    ``Hal0Config`` has ``extra="allow"`` at the top level, so a
+    forward-compat key validates fine but has no registry row."""
+    r = isolated_client.put(
+        "/api/settings",
+        json={"telemetry": {"enabled": True}, "totally_new_field": {"foo": "bar"}},
+    )
+    assert r.status_code == 200, r.text
+    plan = r.json()["_hal0"]["apply_plan"]
+    assert plan["immediate"] == ["telemetry.enabled"]
+    assert plan["unknown"] == ["totally_new_field.foo"]
 
 
 def test_put_settings_response_preserves_existing_top_level_shape(

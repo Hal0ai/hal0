@@ -39,7 +39,7 @@ from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
-from hal0.api._settings_apply import APPLY_CLASSES, REGISTRY, apply_plan, get_registry
+from hal0.api._settings_apply import APPLY_CLASSES, apply_plan, get_registry
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
@@ -186,9 +186,15 @@ async def update_settings(request: Request) -> dict[str, Any]:
     # normal nested PUT ({"slots": {"max_slots": 4}}) previously produced
     # an all-empty plan because only top-level body keys were matched
     # against the registry, so the UI's restart hint never fired for
-    # generic-endpoint edits. Keys the registry doesn't know stay out of
-    # the list (they'd land in "unknown"; section names and forward-compat
-    # extras aren't actionable).
+    # generic-endpoint edits.
+    #
+    # Every touched leaf goes to apply_plan() unfiltered — a key the
+    # registry doesn't know about lands in ApplyPlanResult.unknown rather
+    # than being silently dropped here. Pre-filtering with `if k in
+    # REGISTRY` made `unknown` structurally always `[]` on this route,
+    # contradicting the documented contract on ApplyPlanResult (the UI is
+    # supposed to render an informational chip for a gap key instead of
+    # guessing at its class).
     def _dotted_leaf_keys(node: dict[str, Any], prefix: str = "") -> list[str]:
         out: list[str] = []
         for k, v in node.items():
@@ -199,9 +205,9 @@ async def update_settings(request: Request) -> dict[str, Any]:
                 out.append(path)
         return out
 
-    touched_registry_keys = [k for k in _dotted_leaf_keys(body) if k in REGISTRY]
+    touched_keys = _dotted_leaf_keys(body)
     config_view = _config_to_dict(merged)
-    config_view["_hal0"] = {"apply_plan": apply_plan(touched_registry_keys)}
+    config_view["_hal0"] = {"apply_plan": apply_plan(touched_keys)}
     return config_view
 
 
