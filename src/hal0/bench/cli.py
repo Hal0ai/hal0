@@ -33,6 +33,7 @@ import hal0
 from .planner import fetch_registry_models, plan
 from .publish import build_roster, emit_site_ts, write_roster
 from .regress import check as regress_check
+from .regress import journal_flags as regress_journal
 from .runner import DEFAULT_API, describe_worklist, fetch_host, run_session
 from .runner import _traffic_in_flight as traffic_in_flight
 from .schema import Host
@@ -235,6 +236,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"[regress] {len(flags)} cell(s) flagged:")
             for f in flags:
                 print(f"  {f.model_id} {f.cell_key[:16]} {f.delta_pct}% vs {f.trailing_median}")
+            regress_journal(flags, suite.id)
     event = {
         "event": "bench.session.completed",
         "suite": result.suite_id,
@@ -476,6 +478,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 print(f"[worker] [regress] {len(flags)} cell(s) flagged:")
                 for f in flags:
                     print(f"  {f.model_id} {f.cell_key[:16]} {f.delta_pct}% vs {f.trailing_median}")
+                regress_journal(flags, suite.id)
             control.dequeue(item.get("id"))
             print(f"[worker] {suite.id} done: ok={result.cells_ok} failed={result.cells_failed}")
             control.write_status(None, _now_stamp())

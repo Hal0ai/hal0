@@ -14,7 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from hal0.bench.parsers import llama_bench_row_kind, parse_llama_bench, parse_server_ab
+from hal0.bench.parsers import (
+    llama_bench_row_kind,
+    parse_llama_bench,
+    parse_server_ab,
+    parse_telemetry_samples,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -162,3 +167,102 @@ def test_parse_server_ab_drafts_without_accepted_does_not_crash():
     assert p.reps[0].decode_ts == 40.0
     assert p.reps[0].accept_rate is None  # unknowable, never invented, never crash
     assert p.reps[0].drafted == 12
+
+
+# --------------------------------------------------------------------------- #
+# Telemetry (Phase 4) — hal0-benchctl's 1 Hz sampler JSONL rows
+# --------------------------------------------------------------------------- #
+
+
+def _sample(ts="2026-08-09T00:00:00Z", **kw):
+    row = {
+        "ts": ts,
+        "temp_c": None,
+        "power_mw": None,
+        "gpu_busy_pct": None,
+        "vram_b": None,
+        "gtt_b": None,
+        "sclk_mhz": None,
+    }
+    row.update(kw)
+    return row
+
+
+def test_telemetry_empty_samples_is_all_none():
+    t = parse_telemetry_samples([])
+    assert t.vram_peak_mb is None
+    assert t.gtt_peak_mb is None
+    assert t.gpu_edge_temp_max_c is None
+    assert t.gpu_power_avg_w is None
+    assert t.throttled is None
+
+
+def test_telemetry_unit_conversions():
+    samples = [
+        _sample(
+            vram_b=2 * 1024 * 1024 * 1024,
+            gtt_b=512 * 1024 * 1024,
+            temp_c=45000,
+            power_mw=120000,
+        ),
+        _sample(
+            vram_b=3 * 1024 * 1024 * 1024,
+            gtt_b=256 * 1024 * 1024,
+            temp_c=52000,
+            power_mw=140000,
+        ),
+    ]
+    t = parse_telemetry_samples(samples)
+    assert t.vram_peak_mb == 3072  # bytes -> MB, peak (max) over samples
+    assert t.gtt_peak_mb == 512  # peak, not the last sample
+    assert t.gpu_edge_temp_max_c == 52  # millidegrees -> degrees C, max
+    assert t.gpu_power_avg_w == 130  # mW -> W, MEAN not max: (120000+140000)/2/1000
+
+
+def test_telemetry_missing_counter_stays_null_independently():
+    # gtt_b is unreadable on every sample (debugfs locked down) but vram_b
+    # isn't — one dead counter must not blank the others (§14.3).
+    samples = [
+        _sample(vram_b=1024 * 1024, gtt_b=None),
+        _sample(vram_b=2 * 1024 * 1024, gtt_b=None),
+    ]
+    t = parse_telemetry_samples(samples)
+    assert t.vram_peak_mb == 2
+    assert t.gtt_peak_mb is None
+
+
+def test_telemetry_throttle_flags_three_consecutive_drops_below_ten_percent():
+    # Peak sclk 2000 MHz; threshold is 1800 MHz. Three consecutive samples
+    # below that trips throttled=True.
+    samples = [
+        _sample(sclk_mhz=2000),
+        _sample(sclk_mhz=1700),
+        _sample(sclk_mhz=1600),
+        _sample(sclk_mhz=1650),
+    ]
+    t = parse_telemetry_samples(samples)
+    assert t.throttled is True
+
+
+def test_telemetry_throttle_false_when_drop_never_reaches_three_consecutive():
+    samples = [
+        _sample(sclk_mhz=2000),
+        _sample(sclk_mhz=1700),  # one drop...
+        _sample(sclk_mhz=2000),  # ...then recovers, streak resets
+        _sample(sclk_mhz=1700),
+    ]
+    t = parse_telemetry_samples(samples)
+    assert t.throttled is False
+
+
+def test_telemetry_throttle_false_within_ten_percent_band():
+    # 2000 -> 1900 is exactly a 5% drop, inside the >10% threshold.
+    samples = [_sample(sclk_mhz=2000), _sample(sclk_mhz=1900), _sample(sclk_mhz=1900)]
+    t = parse_telemetry_samples(samples)
+    assert t.throttled is False
+
+
+def test_telemetry_throttle_none_when_sclk_never_sampled():
+    samples = [_sample(vram_b=1024), _sample(vram_b=2048)]  # no sclk_mhz at all
+    t = parse_telemetry_samples(samples)
+    assert t.throttled is None

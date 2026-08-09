@@ -6,7 +6,10 @@
 [suite]
 id          = "lane-matrix"
 description = "Lane x depth sweep on profile-class representatives, for hal0-tune"
-schedule    = "monthly"
+# No systemd timer runs this one at all (only hal0-bench.timer exists, and it
+# always runs "roster") — on-demand only: `hal0 bench run --suite lane-matrix`.
+# A [suite].schedule = "monthly" key used to be parsed here but nothing ever
+# read it or wired a monthly timer.
 budget_min  = 240
 exclusive   = true
 priority    = 40

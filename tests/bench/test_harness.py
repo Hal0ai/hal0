@@ -60,6 +60,7 @@ from hal0.bench.harness import (
     default_lanes,
     lane_specs,
     run_cell,
+    telemetry_argv,
 )
 from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE
 
@@ -413,6 +414,27 @@ class TestBenchctlExecArgv:
         argv = benchctl_exec_argv(["podman"], 0)
 
         assert "--timeout-s" not in argv
+
+
+# ── telemetry_argv (Phase 4) ────────────────────────────────────────────────
+
+
+class TestTelemetryArgv:
+    def test_start_carries_the_tier(self) -> None:
+        argv = telemetry_argv("start", "run-1", "amd")
+
+        assert argv == ["sudo", "-n", BENCHCTL, "telemetry", "start", "run-1", "amd"]
+
+    def test_end_never_carries_a_tier(self) -> None:
+        argv = telemetry_argv("end", "run-1")
+
+        assert argv == ["sudo", "-n", BENCHCTL, "telemetry", "end", "run-1"]
+
+    def test_empty_tier_is_omitted_not_passed_as_empty_string(self) -> None:
+        argv = telemetry_argv("start", "run-1", "")
+
+        assert argv == ["sudo", "-n", BENCHCTL, "telemetry", "start", "run-1"]
+        assert "" not in argv
 
 
 # ── run_cell ──────────────────────────────────────────────────────────────────

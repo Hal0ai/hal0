@@ -2,7 +2,10 @@
 [suite]
 id          = "roster"
 description = "Uniform head-to-head across the chat+coding roster"
-schedule    = "weekly"           # consumed by the timer policy (§6)
+# Weekly cadence lives in installer/systemd/hal0-bench.timer (fires `hal0
+# bench run --suite roster --scheduled`) + window.toml's politeness window,
+# not a field here — a [suite].schedule key used to be parsed but nothing
+# ever read it.
 budget_min  = 240                # hard wall-clock cap per session; planner orders cells by value
 exclusive   = true               # uses --exclusive windows; never publishes contended numbers
 priority    = 50
