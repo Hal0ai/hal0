@@ -687,42 +687,126 @@ fi
 HAL0_TOML="${ETC_DIR}/hal0.toml"
 if [[ "${MODELS_DIR}" != "/var/lib/hal0/models" ]]; then
     if ! grep -qE "^\\s*store\\s*=\\s*\"${MODELS_DIR//\//\\/}\"" "${HAL0_TOML}" 2>/dev/null; then
-        if [[ -f "${HAL0_TOML}" ]] && grep -q "^\\[models\\]" "${HAL0_TOML}"; then
-            # [models] table exists — patch store + pull_root in place (or
-            # append under the existing table). Cheap regex pass; no toml
-            # parser so we accept the limitation that nested tables under
-            # [models.xxx] aren't supported (the schema has none).
-            python3 - "${HAL0_TOML}" "${MODELS_DIR}" <<'PYEOF'
-import sys, re, pathlib
+        # ONE locked read-modify-write for every case (existing [models] table,
+        # table-less file, no file at all). This step runs BEFORE hal0-api is
+        # restarted below, i.e. against a possibly-live daemon that may be
+        # serving a settings PUT, so it takes the same `hal0.toml.lock` advisory
+        # lock every in-process writer holds (hal0.config.locking / #1721) —
+        # otherwise the installer and the API can erase each other's section.
+        # Plain fcntl on purpose: this is system python3, which cannot import
+        # hal0 (the venv does not exist yet at this point).
+        mkdir -p "${ETC_DIR}"
+        python3 - "${HAL0_TOML}" "${MODELS_DIR}" <<'PYEOF'
+import fcntl, os, pathlib, re, stat, sys, tempfile
 path = pathlib.Path(sys.argv[1])
 new_root = sys.argv[2]
-text = path.read_text(encoding="utf-8")
-# Replace existing store/pull_root inside [models], else append before the
-# next [section]. The section body is "every following line that does not
-# START with '['" — NOT `[^\[]*`, which the old patcher used and which
-# stopped at the first '[' of a list value like roots = ["/x"], splicing
-# the table in half and corrupting the TOML.
-m = re.search(r"^\[models\][ \t]*\n(?:(?!\[).*\n?)*", text, flags=re.MULTILINE)
-if m:
-    block = m.group(0)
-    for key in ("store", "pull_root"):
-        if re.search(rf"^\s*{key}\s*=", block, flags=re.MULTILINE):
-            block = re.sub(rf"^\s*{key}\s*=.*$",
-                           f'{key} = "{new_root}"',
-                           block, count=1, flags=re.MULTILINE)
+
+# Same lock file, same O_NOFOLLOW discipline as hal0.config.locking.file_lock:
+# /etc/hal0 is service-writable under the ownership flip while this script runs
+# as root, so following a symlink here would be a privilege hole.
+lock_path = pathlib.Path(f"{path}.lock")
+created = False
+try:
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o664)
+    created = True
+except FileExistsError:
+    fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise SystemExit(f"lock path is not a regular file: {lock_path}")
+    if created:
+        # This script runs as root under `umask 022`, so the creation mode
+        # would land 0644 root:root and the hal0 daemon — which opens the lock
+        # O_RDWR — could then never take it, failing EVERY config write until a
+        # doctor perms --fix. Set the mode explicitly and adopt the guarded
+        # file's owner so the lock follows the service-user ownership flip.
+        os.fchmod(fd, 0o664)
+        src = path if path.exists() else path.parent
+        try:
+            st_src = src.stat()
+            if (st_src.st_uid, st_src.st_gid) != (0, 0):
+                os.fchown(fd, st_src.st_uid, st_src.st_gid)
+        except OSError:
+            pass
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    # Read the TARGET through O_NOFOLLOW too, not just the lock file. This runs
+    # as root while /etc/hal0 is writable by the hal0 service account, so a
+    # symlinked hal0.toml would otherwise be followed: the read would slurp a
+    # root-only file and the replace below would copy its contents into
+    # /etc/hal0/hal0.toml, which the installer's later `doctor perms --fix`
+    # step then hands to the hal0 account. Refuse the symlink instead.
+    if path.is_symlink():
+        raise SystemExit(f"refusing to write through a symlinked config: {path}")
+    text = ""
+    if path.exists():
+        try:
+            tfd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise SystemExit(f"refusing to read config {path}: {exc}") from None
+        try:
+            if not stat.S_ISREG(os.fstat(tfd).st_mode):
+                raise SystemExit(f"config is not a regular file: {path}")
+            with os.fdopen(tfd, "r", encoding="utf-8") as fh_target:
+                tfd = -1
+                text = fh_target.read()
+        finally:
+            if tfd >= 0:
+                os.close(tfd)
+    # Replace existing store/pull_root inside [models], else append before the
+    # next [section]. The section body is "every following line that does not
+    # START with '['" — NOT `[^\[]*`, which the old patcher used and which
+    # stopped at the first '[' of a list value like roots = ["/x"], splicing
+    # the table in half and corrupting the TOML.
+    m = re.search(r"^\[models\][ \t]*\n(?:(?!\[).*\n?)*", text, flags=re.MULTILINE)
+    if m:
+        block = m.group(0)
+        for key in ("store", "pull_root"):
+            if re.search(rf"^\s*{key}\s*=", block, flags=re.MULTILINE):
+                block = re.sub(rf"^\s*{key}\s*=.*$",
+                               f'{key} = "{new_root}"',
+                               block, count=1, flags=re.MULTILINE)
+            else:
+                block = block.rstrip() + f'\n{key} = "{new_root}"\n'
+        if not block.endswith("\n"):
+            block += "\n"
+        text = text[:m.start()] + block + text[m.end():]
+    else:
+        text = text.rstrip() + f'\n\n[models]\nstore = "{new_root}"\npull_root = "{new_root}"\n'
+        text = text.lstrip("\n")
+
+    # Same-dir tempfile + fsync + os.replace, exactly like
+    # hal0.config.loader.write_toml_atomic. The advisory lock binds only
+    # COOPERATING writers; every API read path calls load_hal0_config()
+    # unlocked, so a truncate-then-write here is observable by a live daemon as
+    # an empty file (= silently all-defaults) or as half-written TOML that
+    # fails to parse. The rename is atomic, so a reader sees either the old
+    # file or the new one and never a torn one.
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        if path.exists():
+            # Preserve the config's existing mode/ownership across the replace
+            # (0600 root:root, or hal0-owned under the service-user flip).
+            st = path.stat()
+            os.chmod(tmp_name, stat.S_IMODE(st.st_mode))
+            try:
+                os.chown(tmp_name, st.st_uid, st.st_gid)
+            except PermissionError:
+                pass
         else:
-            block = block.rstrip() + f'\n{key} = "{new_root}"\n'
-    if not block.endswith("\n"):
-        block += "\n"
-    text = text[:m.start()] + block + text[m.end():]
-else:
-    text = text.rstrip() + f'\n\n[models]\nstore = "{new_root}"\npull_root = "{new_root}"\n'
-path.write_text(text, encoding="utf-8")
+            os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+        tmp_name = None
+    finally:
+        if tmp_name is not None and os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+finally:
+    os.close(fd)
 PYEOF
-        else
-            mkdir -p "${ETC_DIR}"
-            printf '\n[models]\nstore = "%s"\npull_root = "%s"\n' "${MODELS_DIR}" "${MODELS_DIR}" >> "${HAL0_TOML}"
-        fi
         info "wrote [models].store (+pull_root) → ${HAL0_TOML}"
     fi
 fi

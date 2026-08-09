@@ -23,7 +23,7 @@ from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
-from hal0.config.loader import load_hal0_config, save_hal0_config
+from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import scan_and_register
 
@@ -284,32 +284,37 @@ async def update_models_config(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise Hal0Error("request body must be a JSON object")
 
-    cfg = load_hal0_config()
-    merged_raw = {**cfg.models.model_dump(mode="python"), **body}
-    try:
-        new_models = ModelsConfig.model_validate(merged_raw)
-    except ValidationError as exc:
-        raise ConfigInvalidError(
-            "models config failed schema validation",
-            details=_validation_error_details(exc),
-        ) from exc
+    # Serialized read-modify-write (#1721): this route used to load, merge and
+    # save hal0.toml with no lock at all, so it could persist its own
+    # pre-read snapshot over a concurrent settings / memory-graph / auth /
+    # channel write and erase that section.
+    async with hal0_config_txn(request) as txn:
+        cfg = txn.config
+        merged_raw = {**cfg.models.model_dump(mode="python"), **body}
+        try:
+            new_models = ModelsConfig.model_validate(merged_raw)
+        except ValidationError as exc:
+            raise ConfigInvalidError(
+                "models config failed schema validation",
+                details=_validation_error_details(exc),
+            ) from exc
 
-    # pull_root is always implicitly scanned — otherwise a user who only
-    # ever pulls (never points roots at an external dir) gets an empty
-    # registry after a save.
-    if new_models.pull_root not in new_models.roots:
-        new_models = new_models.model_copy(
-            update={"roots": [*new_models.roots, new_models.pull_root]},
-        )
+        # pull_root is always implicitly scanned — otherwise a user who only
+        # ever pulls (never points roots at an external dir) gets an empty
+        # registry after a save.
+        if new_models.pull_root not in new_models.roots:
+            new_models = new_models.model_copy(
+                update={"roots": [*new_models.roots, new_models.pull_root]},
+            )
 
-    cfg.models = new_models
-    try:
-        save_hal0_config(cfg)
-    except OSError as exc:
-        raise Hal0Error(
-            f"could not persist hal0 config: {exc}",
-            details={"error": str(exc), "errno": getattr(exc, "errno", None)},
-        ) from exc
+        cfg.models = new_models
+        try:
+            txn.save(cfg)
+        except OSError as exc:
+            raise Hal0Error(
+                f"could not persist hal0 config: {exc}",
+                details={"error": str(exc), "errno": getattr(exc, "errno", None)},
+            ) from exc
 
     # Run a discovery scan so newly-added roots produce results immediately.
     # The scan walks the filesystem synchronously (potentially seconds on

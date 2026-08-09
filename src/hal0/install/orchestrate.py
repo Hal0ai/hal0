@@ -7,6 +7,7 @@ post-install. Deps are injected so there is no hidden ``app.state`` coupling.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -444,20 +445,54 @@ def _persist_store_dir(storage_dir: str) -> None:
     flm_target = _colocated_flm_store(s)
 
     try:
-        from hal0.config.loader import load_hal0_config, save_hal0_config
+        from hal0.config.loader import (
+            hal0_config_file_lock,
+            load_hal0_config,
+            save_hal0_config,
+        )
 
-        cfg = load_hal0_config()
-        store_ok = (cfg.models.store or "").strip() == s
-        flm_ok = (cfg.models.flm_store or "").strip() == flm_target
-        if store_ok and flm_ok:
-            return
-        cfg.models.store = s
-        cfg.models.flm_store = flm_target
-        save_hal0_config(cfg)
+        # Cross-process serialization (#1721): the installer is a separate
+        # process from hal0-api and can run against a live daemon, so this
+        # read-modify-write takes the same ``hal0.toml.lock`` the API's
+        # ``hal0_config_txn`` holds — otherwise it can persist its pre-read
+        # snapshot over a concurrent settings write.
+        with hal0_config_file_lock() as toml_path:
+            cfg = load_hal0_config(toml_path)
+            store_ok = (cfg.models.store or "").strip() == s
+            flm_ok = (cfg.models.flm_store or "").strip() == flm_target
+            if store_ok and flm_ok:
+                return
+            cfg.models.store = s
+            cfg.models.flm_store = flm_target
+            save_hal0_config(cfg, toml_path)
     except Exception:
         # Config persistence is best-effort: pulls fall back to the default
         # store and the rest of setup must proceed regardless.
         pass
+
+
+async def _persist_store_dir_shielded(storage_dir: str) -> None:
+    """Run :func:`_persist_store_dir` off-loop, safe against cancellation.
+
+    ``asyncio.to_thread`` cancels only the awaiter, never the worker. If the
+    installer request is cancelled (shutdown, request-timeout middleware) while
+    that worker is blocked on ``hal0.toml.lock``, the orphan can acquire the
+    lock afterwards and persist the CANCELLED request's storage choice — over a
+    newer setup request, and without provisioning the slots that were supposed
+    to accompany it (#1721 review round 4).
+
+    Same shape as ``routes/memory.py``'s ``_propagate_shielded``: shield the
+    wait, and if the caller is cancelled anyway, wait the worker out in a
+    shielded loop so a second cancellation cannot exit early either.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(_persist_store_dir, storage_dir))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
+        raise
 
 
 def install_extension(ext_id: str) -> ExtensionOutcome:
@@ -509,7 +544,12 @@ async def apply_setup(
     # Honour the operator's chosen store BEFORE planning pulls: the pull engine
     # reads ``[models].store`` lazily at pull time, so persisting it here is
     # what threads ``storage_dir`` all the way to the pull destination (#1095).
-    _persist_store_dir(selections.storage_dir)
+    # Off-loop (#1721 review): ``apply_setup`` is awaited by
+    # ``POST /api/installer/apply*`` on the API event loop, and
+    # ``_persist_store_dir`` takes the BLOCKING hal0.toml advisory lock. Run on
+    # the loop it would freeze the whole daemon while any peer holds that lock
+    # (and deadlock outright behind a txn on the same loop).
+    await _persist_store_dir_shielded(selections.storage_dir)
 
     for s in selections.slots:
         rec = SlotOutcome(slot=s.slot_name, model_id=s.model_id or "")

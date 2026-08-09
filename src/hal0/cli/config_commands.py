@@ -131,15 +131,28 @@ def config_migrate() -> None:
     version actually advanced. If the config is already current (or
     absent), nothing is written and that is reported honestly.
     """
-    import tomllib
-
-    from hal0.config.loader import write_toml_atomic
+    from hal0.config.loader import hal0_config_file_lock
     from hal0.config.migrations import MigrationError, latest_version, run_migrations
 
     path = _hal0_toml_path()
     if not path.exists():
         console.print(f"[dim]No config at {path} - nothing to migrate.[/dim]")
         raise typer.Exit(0)
+
+    # Cross-process serialization (#1721): the CLI can migrate hal0.toml while
+    # hal0-api is live and serving a settings PUT, and this read → migrate →
+    # write is precisely the shape that loses the other writer's section. Same
+    # advisory lock the API's ``hal0_config_txn`` holds, taken across the whole
+    # round-trip rather than only the write.
+    with hal0_config_file_lock(path):
+        _run_config_migration(path, latest_version(), run_migrations, MigrationError)
+
+
+def _run_config_migration(path, target, run_migrations, MigrationError) -> None:  # type: ignore[no-untyped-def]
+    """Body of ``hal0 config migrate``, run under the hal0.toml advisory lock."""
+    import tomllib
+
+    from hal0.config.loader import write_toml_atomic
 
     try:
         with open(path, "rb") as f:
@@ -149,7 +162,6 @@ def config_migrate() -> None:
         return
 
     current = int((data.get("meta") or {}).get("schema_version", 1) or 1)
-    target = latest_version()
 
     if current >= target:
         console.print(
