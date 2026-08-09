@@ -53,17 +53,21 @@
 # removes the DIRECT host-side exec primitive — no host `[Service]`/`[Unit]`
 # directive beyond the five/three fixed ones, no `Exec*=` on the host side, no
 # `User=`/`Group=`, no second section, no `[Install] WantedBy=` other than
-# hal0.target. It does NOT make an hal0-account compromise non-root-equivalent:
-# `[Container]` legitimately carries `Image=`, `Volume=`, `AddDevice=`,
-# `PodmanArgs=` and `Exec=`, whose values are operator/config-derived and cannot
-# be pinned here (the model-store and data roots are runtime config, and a
-# path allow-list would be bypassable via a symlink under a root the hal0 user
-# already owns). Slots run under ROOTFUL podman, so anyone who can author a
-# slot's container spec can mount host paths into a container they control.
-# That is a property of the slot feature itself, not of this wrapper; the
-# containment for it is "run slots rootless / pin mount roots", tracked
-# separately. Claim only what is true: this seam is a *syntactic* boundary on
-# the unit file, and a hard boundary against direct host exec.
+# hal0.target. `PodmanArgs=` IS host-side too — quadlet copies it into the
+# generated unit's `podman run` argv — so it is pinned to exactly the flags
+# hal0's providers emit (`--group-add`/`--security-opt`/`--ipc`/`--ulimit`); a
+# `--runtime`/`--hooks-dir` root exec is refused (#1759, validate_podman_args).
+# It does NOT make an
+# hal0-account compromise non-root-equivalent: `[Container]` still legitimately
+# carries `Image=`, `Volume=`, `AddDevice=` and in-container `Exec=`, whose
+# values are operator/config-derived and cannot be pinned here (the model-store
+# and data roots are runtime config, and a path allow-list would be bypassable
+# via a symlink under a root the hal0 user already owns). Slots run under ROOTFUL
+# podman, so anyone who can author a slot's container spec can mount host paths
+# into a container they control. That containment is "run slots rootless / pin
+# mount roots", tracked separately. Claim only what is true: this seam is a
+# *syntactic* boundary on the unit file, and a hard boundary against direct host
+# exec — including the PodmanArgs host-exec flags, now that they are pinned.
 #
 # NOTE: the iptables FORWARD-chain repair the original P3-perms design doc
 # sketched for this seam is NOT needed — that repair already runs as its own
@@ -299,8 +303,63 @@ _QRE_DURATION='^[0-9]{1,9}(ns|us|ms|s|m|h|d|w)?$'
 _QRE_RETRIES='^[0-9]{1,4}$'
 _QRE_RESTART='^(always|on-failure|no)$'
 _QRE_WANTEDBY='^hal0\.target$'
+# The four flags hal0's providers emit into PodmanArgs= (GPU/llama:
+# --group-add/--security-opt; comfyui: --ipc=host; flm: --ulimit memlock=-1).
+# See validate_podman_args (#1759).
+_QRE_GID='^[0-9]{1,7}$'
+_QRE_SECOPT='^[A-Za-z0-9_.:=@,+-]{1,128}$'
+_QRE_IPC='^(host|none|private|shareable|container:[A-Za-z0-9_.-]{1,64})$'
+_QRE_ULIMIT='^[a-z]{1,16}=-?[0-9]{1,20}(:-?[0-9]{1,20})?$'
 
 _quadlet_die() { die "quadlet rejected: $1"; }
+
+# PodmanArgs= is NOT in-container argv — podman's quadlet generator copies it
+# VERBATIM into the generated root unit's ExecStart
+# `/usr/bin/podman run … <PodmanArgs> … <image> <Exec>`, so a persistent flag
+# like `--runtime <path>` or `--hooks-dir <dir>` makes podman EXEC an
+# attacker-named binary as root with no container in the way (#1759). It cannot
+# be left as a "non-empty" charset pin. Allow-list exactly the flags hal0's
+# own providers emit — nothing else, fail-closed:
+#   --group-add <numeric-gid>   GPU/llama-server compat (render group ids)
+#   --security-opt <token>      GPU/llama-server + comfyui (seccomp/apparmor/label)
+#   --ipc <host|none|…>         comfyui (--ipc=host)
+#   --ulimit <name=soft[:hard]> flm/NPU (--ulimit memlock=-1)
+# The exec-family (--runtime/--hooks-dir/…) and everything else is refused. The
+# deprecated free-form `extra_args` escape hatch (which already logs
+# container.extra_args_deprecated) is only honoured insofar as its flags fall in
+# this list; anything outside it is refused at the seam.
+#
+# Both `--flag=value` (one token) and `--flag value` (two tokens) are accepted —
+# comfyui emits the `=` form, the GPU path emits the space form.
+validate_podman_args() {  # arg: the PodmanArgs= value
+  local value="$1"
+  local -a toks=()
+  # The renderer joins shlex.quote'd tokens with single spaces; every value we
+  # emit (gids, security-opt/ipc/ulimit tokens) is quote-free, so a plain
+  # word-split is exact. A value that DID carry a quote/space fails closed here.
+  read -r -a toks <<<"$value"
+  local n=${#toks[@]} i=0 t flag arg
+  (( n >= 1 )) || _quadlet_die "empty PodmanArgs"
+  while (( i < n )); do
+    t="${toks[i]}"
+    if [[ "$t" == --*=* ]]; then
+      flag="${t%%=*}"; arg="${t#*=}"; i=$(( i + 1 ))
+    elif [[ "$t" == --* ]]; then
+      flag="$t"
+      (( i + 1 < n )) || _quadlet_die "PodmanArgs $flag missing value"
+      arg="${toks[i+1]}"; i=$(( i + 2 ))
+    else
+      _quadlet_die "PodmanArgs expected a --flag, got: $t"
+    fi
+    case "$flag" in
+      --group-add)    [[ "$arg" =~ $_QRE_GID ]]    || _quadlet_die "bad --group-add gid: $arg" ;;
+      --security-opt) [[ "$arg" =~ $_QRE_SECOPT ]] || _quadlet_die "bad --security-opt: $arg" ;;
+      --ipc)          [[ "$arg" =~ $_QRE_IPC ]]    || _quadlet_die "bad --ipc: $arg" ;;
+      --ulimit)       [[ "$arg" =~ $_QRE_ULIMIT ]] || _quadlet_die "bad --ulimit: $arg" ;;
+      *) _quadlet_die "PodmanArgs flag not allowed: $flag" ;;
+    esac
+  done
+}
 
 validate_quadlet_directive() {  # args: section, "Key=Value" line
   local section="$1" line="$2" key value
@@ -341,13 +400,12 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
     'Container|HealthStartPeriod'|'Container|HealthInterval'|'Container|HealthTimeout')
       [[ "$value" =~ $_QRE_DURATION ]] || _quadlet_die "bad $key: $value" ;;
     'Container|HealthRetries')  [[ "$value" =~ $_QRE_RETRIES ]]  || _quadlet_die "bad HealthRetries: $value" ;;
-    # PodmanArgs= is podman's own flag passthrough (--group-add/--security-opt,
-    # plus the deprecated extra_args escape hatch) and Exec= is the argv INSIDE
-    # the container. Neither has a fixed shape in the render contract, so both
-    # are bounded (non-empty, control-byte-free, length-capped by the per-line
-    # check) and nothing more. Constraining them further would buy nothing while
-    # Volume=/AddDevice= remain open — see HONEST BOUNDARY.
-    'Container|PodmanArgs')     [[ -n "$value" ]]                || _quadlet_die "empty PodmanArgs" ;;
+    # PodmanArgs= lands host-side in the generated unit's `podman run` argv, so
+    # it is allow-listed to the flag shapes hal0's providers emit — anything
+    # else (notably --runtime/--hooks-dir, a direct root exec) is refused. See
+    # validate_podman_args (#1759). Exec= is the argv INSIDE the container
+    # (after the image), so it has no fixed shape and stays bounded only.
+    'Container|PodmanArgs')     validate_podman_args "$value" ;;
     'Container|Exec')           [[ -n "$value" ]]                || _quadlet_die "empty Exec" ;;
 
     # ── [Service] ───────────────────────────────────────────────────────

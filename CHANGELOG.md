@@ -30,6 +30,21 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Security
 
+- The `hal0-systemctl write-quadlet` allow-list now pins `PodmanArgs=` to the
+  exact flags hal0's providers emit — `--group-add <gid>`, `--security-opt
+  <token>` (GPU/llama-server), `--ipc <mode>` (comfyui), `--ulimit
+  <name=v[:v]>` (flm/NPU) — instead of accepting any non-empty value (#1759).
+  Podman's quadlet generator copies `PodmanArgs=` verbatim into the generated
+  root unit's `podman run` argv, so a persistent flag like `--runtime <path>`
+  or `--hooks-dir <dir>` made podman exec an attacker-named binary **as root
+  with no container involved** — a direct host-exec primitive reachable from
+  the unprivileged `hal0` account, exactly what #1740 set out to close. All
+  shipped providers keep loading; only out-of-list flags are refused. **Minor
+  breaking (deprecated feature):** the free-form `extra_args` escape hatch
+  (already logging `container.extra_args_deprecated`) is honoured on a
+  hal0-service install only for flags in that list — an out-of-list flag now
+  makes the slot refuse at the root seam. Move those to typed Quadlet keys in a
+  `hal0-slot@<token>.container.d/` drop-in.
 - The privileged update stage no longer downloads, verifies and extracts the
   release tarball out of the service-writable `/var/lib/hal0/cache/<version>/`
   (#1738). That directory is `hal0:hal0` `0o2775` with no sticky bit, and the

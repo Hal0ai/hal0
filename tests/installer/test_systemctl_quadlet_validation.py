@@ -174,17 +174,53 @@ _PLANS: dict[str, tuple[RuntimeLaunchPlan, dict[str, Any]]] = {
         ),
         {"autoload": False},
     ),
-    "deprecated-extra-args": (
+    # #1759: the two shipped providers that emit PodmanArgs= flags beyond the
+    # GPU compat pair. Their rendered bodies must still pass the seam, or the
+    # slot fails to load on a hal0-service install.
+    "comfyui-ipc-host": (
         RuntimeLaunchPlan(
-            image="ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-            command=["llama-server"],
-            extra_args=["--ipc=host", "--ulimit memlock=-1"],
-            port=8101,
+            image="ghcr.io/hal0ai/hal0-comfyui:v1",
+            command=["python", "main.py"],
+            port=8188,
+            network_mode="host",
+            extra_args=["--ipc=host"],
+        ),
+        {},
+    ),
+    "flm-ulimit-memlock": (
+        RuntimeLaunchPlan(
+            image="ghcr.io/hal0ai/hal0-flm:v1",
+            command=["flm", "serve"],
+            port=8110,
             network_mode="",
+            extra_args=["--ulimit memlock=-1"],
         ),
         {},
     ),
 }
+
+
+# The deprecated `extra_args` escape hatch renders arbitrary `podman run` flags
+# into PodmanArgs=. #1759 allow-lists only the flags hal0's providers emit
+# (--group-add/--security-opt/--ipc/--ulimit), so an out-of-list flag is refused
+# at the root seam — that was the surviving root-exec vector. Pinned here.
+def test_out_of_allowlist_podman_args_are_refused_at_the_seam() -> None:
+    """A slot whose extra_args carry a flag outside the provider allow-list
+    (e.g. --privileged) is rejected on the root side after #1759, by design."""
+    from hal0.providers.base import RuntimeLaunchPlan as _Plan
+    from hal0.providers.container import _render_quadlet_from_plan as _render
+
+    plan = _Plan(
+        image="ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
+        command=["llama-server"],
+        extra_args=["--privileged"],
+        port=8101,
+        network_mode="",
+    )
+    body = _render("chat", plan)
+    assert "PodmanArgs=" in body  # the renderer still emits it (with a warning)
+    err = _rejects(body, "chat")
+    assert "PodmanArgs" in err
 
 
 @pytest.mark.parametrize("shape", sorted(_PLANS))
@@ -192,6 +228,17 @@ _PLANS: dict[str, tuple[RuntimeLaunchPlan, dict[str, Any]]] = {
 def test_rendered_units_are_accepted_byte_for_byte(shape: str, token: str) -> None:
     plan, kwargs = _PLANS[shape]
     _accepts(_render_quadlet_from_plan(token, plan, **kwargs), token)
+
+
+def test_podman_args_allows_only_the_rendered_compat_flags() -> None:
+    """#1759: the two flags the renderer emits into PodmanArgs= are accepted,
+    in the multi-pair shape a GPU slot actually produces."""
+    body = (
+        "[Container]\nImage=ghcr.io/hal0ai/x:v1\nContainerName=hal0-slot-chat\n"
+        "PodmanArgs=--group-add 44 --group-add 991 "
+        "--security-opt seccomp=unconfined --security-opt label=disable\n"
+    )
+    _accepts(body, "chat")
 
 
 def test_live_container_provider_render_is_accepted() -> None:
@@ -271,6 +318,17 @@ ESCALATIONS = {
     "health-interval-not-a-duration": f"{_HEAD}HealthInterval=30 seconds\n",
     "unknown-container-key": f"{_HEAD}Rootfs=/\n",
     "notify-key": f"{_HEAD}Notify=true\n",
+    # #1759: PodmanArgs= lands host-side in `podman run` argv — a persistent
+    # flag pointing at an attacker binary is a direct root exec, no container.
+    "podmanargs-runtime": f"{_HEAD}PodmanArgs=--runtime /tmp/evil.sh\n",
+    "podmanargs-hooks-dir": f"{_HEAD}PodmanArgs=--hooks-dir /tmp/hooks\n",
+    "podmanargs-privileged": f"{_HEAD}PodmanArgs=--privileged\n",
+    "podmanargs-bind-root": f"{_HEAD}PodmanArgs=--volume /:/host\n",
+    "podmanargs-group-add-nonnumeric": f"{_HEAD}PodmanArgs=--group-add root\n",
+    "podmanargs-security-opt-then-runtime": (
+        f"{_HEAD}PodmanArgs=--security-opt label=disable --runtime /tmp/evil.sh\n"
+    ),
+    "podmanargs-group-add-missing-value": f"{_HEAD}PodmanArgs=--group-add\n",
     # [Service] value pinning.
     "service-standardoutput-file": f"{_HEAD}\n[Service]\nStandardOutput=file:/root/.ssh/authorized_keys\n",
     "service-syslogidentifier-free": f"{_HEAD}\n[Service]\nSyslogIdentifier=../evil\n",
