@@ -146,9 +146,7 @@ async def test_duplicate_project_entry_does_not_widen_recall_to_unscoped() -> No
     await p.add("apollo secret", dataset="project:apollo", client_id="hermes")
     await p.add("everyone knows", dataset="shared", client_id="hermes")
 
-    out = await p.recall(
-        "x", dataset=["project:apollo", "project:apollo"], client_id="hermes"
-    )
+    out = await p.recall("x", dataset=["project:apollo", "project:apollo"], client_id="hermes")
     assert _texts(out) == {"apollo secret"}, "duplicate entry must not leak unscoped shared docs"
 
 
