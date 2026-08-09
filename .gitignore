@@ -142,3 +142,6 @@ node_modules
 
 # Local docs scratch — never committed, never mirrored
 docs/.dev/
+
+# Serena MCP project config (per-developer, local only)
+/.serena/
