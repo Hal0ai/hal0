@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from . import harness
 from .schema import Config, Engine, Identity, Model, Workload, cell_key
 from .store import Store
 from .suites import Suite
@@ -65,6 +66,12 @@ _PP_PROMPT = 512
 # plan() rejects a suite kind outside this set loudly — the old behavior
 # silently fell back to server_ab `--mode ab`, which mislabeled the record.
 KNOWN_KINDS = frozenset({"pp", "tg", "chat", "reuse", "embed", "rerank"})
+
+# Tier-A kinds — the only ones that ever reach harness.lane_specs()[cell.lane]
+# (runner._tier_a_cmd / _tier_a_record). A Tier-B/C cell's lane is display-only
+# (server_ab never looks it up), so only a Tier-A cell's resolved lane is
+# validated against the harness's known lanes (finding 5).
+_TIER_A_KINDS = frozenset({"pp", "tg"})
 
 
 @dataclass
@@ -379,6 +386,7 @@ def plan(
         )
     current = store.newest_ok_by_cell()  # cell_key -> newest ok record
     max_age = timedelta(days=suite.staleness.max_age_days)
+    known_lanes = set(harness.lane_specs())
 
     configs = _validated_configs(suite.matrix.configs)
     stale: list[Cell] = []
@@ -386,6 +394,16 @@ def plan(
         for lane_token in suite.matrix.lanes:
             lane = _resolve_lane(model, lane_token)
             for kind in suite.cells.kinds:
+                if kind in _TIER_A_KINDS and lane not in known_lanes:
+                    # Fail fast at plan time, not with a bare KeyError out of
+                    # the runner (finding 5) — e.g. a suite spelling the
+                    # registry's own "vulkan" hint instead of the lane token
+                    # "vulkan_radv" that _BACKEND_TO_LANE maps it to.
+                    raise ValueError(
+                        f"suite {suite.id!r}: unknown lane {lane!r} (from matrix lane "
+                        f"{lane_token!r}, model {model.get('id')!r}) for Tier-A kind "
+                        f"{kind!r} — known lanes: {sorted(known_lanes)}"
+                    )
                 for depth in suite.matrix.depths:
                     for sampler in suite.matrix.samplers:
                         for cfg in configs:

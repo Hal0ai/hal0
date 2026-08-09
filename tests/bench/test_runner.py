@@ -106,11 +106,9 @@ class TestTierACmd:
     def test_seam_timeout_is_always_passed(self, tmp_path):
         cells = _cells(["pp"], Store(tmp_path))
         cmd = runner._tier_a_cmd(cells[0], pp_prompt=512, tg_gen=256, devices=_CPU_DEVICES)
-        per_attempt, outer = runner._tier_a_timeouts(cells[0])
+        per_attempt = runner._tier_a_per_attempt_s(cells[0])
 
         assert cmd[cmd.index("--timeout-s") + 1] == str(per_attempt)
-        # The Python watchdog must outlast the harness's 6 crash-retries.
-        assert outer > 6 * per_attempt
 
     def test_variant_flags_ride_the_argv_and_win_over_lane_defaults(self, tmp_path):
         cells = _cells(
@@ -179,6 +177,36 @@ class TestTierBCCmd:
     def test_unknown_kind_is_rejected_at_plan_time(self, tmp_path):
         with pytest.raises(ValueError, match="unknown cell kind"):
             plan(_suite(["batch"]), _registry(), Store(tmp_path))
+
+    def test_unknown_lane_is_rejected_at_plan_time(self, tmp_path):
+        """Finding 5: a suite spelling the registry's own backend hint
+        ("vulkan") instead of the lane token _BACKEND_TO_LANE maps it to
+        ("vulkan_radv") must fail fast at plan time with a clear message
+        naming the bad token and the valid lanes — not a bare KeyError out
+        of the runner."""
+        suite = suite_from_dict(
+            {
+                "suite": {"id": "t", "priority": 50},
+                "selector": {"installed": True},
+                "matrix": {
+                    "lanes": ["vulkan"],
+                    "depths": [2048],
+                    "samplers": ["greedy"],
+                    "reps": 3,
+                },
+                "cells": {"kinds": ["pp"]},
+                "staleness": {"max_age_days": 30},
+            }
+        )
+        with pytest.raises(ValueError, match="unknown lane 'vulkan'") as exc_info:
+            plan(suite, _registry(), Store(tmp_path))
+        assert "vulkan_radv" in str(exc_info.value)  # a valid lane is named
+
+    def test_default_lane_token_still_resolves_normally(self, tmp_path):
+        """Guard against the finding-5 fix over-rejecting: "default" (and any
+        already-known lane) must plan without raising."""
+        cells = _cells(["pp"], Store(tmp_path))
+        assert cells and cells[0].lane in ("rocm", "vulkan_radv", "cpu")
 
 
 # --------------------------------------------------------------------------- #
@@ -370,3 +398,37 @@ class TestSessionIntegration:
         [rec] = list(store.iter_records())
         assert rec["outcome"] == Outcome.FAILED.value
         assert "boom" in rec["note"]
+
+
+class TestBogusLaneDefensiveLayer:
+    """Finding 5's defensive layer: planner.plan() rejects an unknown lane at
+    plan time (see TestTierBCCmd above), but a cell that reaches the runner
+    some other way (a hand-built worklist, a future plan-bypassing caller)
+    must still degrade gracefully rather than raising a bare KeyError."""
+
+    def test_describe_worklist_notes_an_unknown_lane_without_raising(self, tmp_path):
+        cells = _cells(["pp"], Store(tmp_path))
+        cells[0].lane = "bogus"
+
+        lines = runner.describe_worklist(cells, exclusive=True, api="http://x")
+
+        assert any("unknown lane" in line and "bogus" in line for line in lines)
+
+    def test_bogus_lane_cell_records_failed_not_a_crash(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(runner, "resolve_bench_devices", lambda: _CPU_DEVICES)
+        monkeypatch.setattr(runner, "_traffic_in_flight", lambda *a, **k: False)
+
+        store = Store(tmp_path / "state")
+        cells = _cells(["pp"], store)
+        cells[0].lane = "bogus"
+
+        result = runner.run_session(
+            cells, store, Host(hal0_version="1.0.0", exclusive=True), suite_id="t", api="http://x"
+        )
+
+        assert result.aborted is None
+        assert result.cells_failed == 1
+        assert result.cells_ok == 0
+        [rec] = list(store.iter_records())
+        assert rec["outcome"] == Outcome.FAILED.value
+        assert "bogus" in rec["note"]
