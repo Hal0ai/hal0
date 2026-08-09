@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from . import harness
 from .schema import Config, Engine, Identity, Model, Workload, cell_key
 from .store import Store
 from .suites import Suite
@@ -48,8 +49,9 @@ DEFAULT_API = "http://127.0.0.1:8080"
 REGISTRY_PATH = "/api/models"
 
 
-# Tuning flags a config variant may set — the seam whitelist (hal0-benchctl
-# validate_extra) MINUS the ones the runner controls itself (-p/-n/-d/-r). A
+# Tuning flags a config variant may set — the seam's llama-bench flag
+# whitelist (hal0-benchctl exec) MINUS the ones the runner controls itself
+# (-p/-n/-d/-r). A
 # variant flag outside this set is rejected at plan time (fail fast, before the
 # seam does).
 _TUNE_FLAGS = frozenset({"-b", "-ub", "-ngl", "-fa", "-ctk", "-ctv", "-t", "-mmp", "-pg"})
@@ -64,6 +66,12 @@ _PP_PROMPT = 512
 # plan() rejects a suite kind outside this set loudly — the old behavior
 # silently fell back to server_ab `--mode ab`, which mislabeled the record.
 KNOWN_KINDS = frozenset({"pp", "tg", "chat", "reuse", "embed", "rerank"})
+
+# Tier-A kinds — the only ones that ever reach harness.lane_specs()[cell.lane]
+# (runner._tier_a_cmd / _tier_a_record). A Tier-B/C cell's lane is display-only
+# (server_ab never looks it up), so only a Tier-A cell's resolved lane is
+# validated against the harness's known lanes (finding 5).
+_TIER_A_KINDS = frozenset({"pp", "tg"})
 
 
 @dataclass
@@ -108,7 +116,7 @@ def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list
 
 # hal0 /api/models backend token -> benchlab lane token. The registry reports a
 # model's runner backend as "vulkan"/"rocm"; benchlab's lanes are "vulkan_radv"/
-# "rocm" (the llama-bench backend names the seam whitelists, hal0-benchctl:34).
+# "rocm" (the lane names harness.lane_specs() defines).
 _BACKEND_TO_LANE = {"vulkan": "vulkan_radv", "vulkan_radv": "vulkan_radv", "rocm": "rocm"}
 
 
@@ -378,6 +386,7 @@ def plan(
         )
     current = store.newest_ok_by_cell()  # cell_key -> newest ok record
     max_age = timedelta(days=suite.staleness.max_age_days)
+    known_lanes = set(harness.lane_specs())
 
     configs = _validated_configs(suite.matrix.configs)
     stale: list[Cell] = []
@@ -385,6 +394,16 @@ def plan(
         for lane_token in suite.matrix.lanes:
             lane = _resolve_lane(model, lane_token)
             for kind in suite.cells.kinds:
+                if kind in _TIER_A_KINDS and lane not in known_lanes:
+                    # Fail fast at plan time, not with a bare KeyError out of
+                    # the runner (finding 5) — e.g. a suite spelling the
+                    # registry's own "vulkan" hint instead of the lane token
+                    # "vulkan_radv" that _BACKEND_TO_LANE maps it to.
+                    raise ValueError(
+                        f"suite {suite.id!r}: unknown lane {lane!r} (from matrix lane "
+                        f"{lane_token!r}, model {model.get('id')!r}) for Tier-A kind "
+                        f"{kind!r} — known lanes: {sorted(known_lanes)}"
+                    )
                 for depth in suite.matrix.depths:
                     for sampler in suite.matrix.samplers:
                         for cfg in configs:

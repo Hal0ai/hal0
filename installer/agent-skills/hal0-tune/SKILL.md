@@ -8,7 +8,7 @@ description: Tuning LLM inference settings on hal0 / Strix Halo for throughput, 
 
 Find the flags/values that maximize a target metric for a model on this box, by
 **measuring**, not guessing. The measurement engine is the [`hal0-bench`](../hal0-bench/SKILL.md)
-seam; this skill is the method that drives it.
+CLI; this skill is the method that drives it.
 
 Pick **one** target up front — they trade off:
 - **tg t/s** (decode speed) — memory-bandwidth bound on Strix Halo (unified LPDDR5X).
@@ -18,8 +18,9 @@ Pick **one** target up front — they trade off:
 
 ## The loop (RED→GREEN per change)
 
-1. **Baseline.** `sudo -n /usr/lib/hal0/bin/hal0-benchctl run-model <rel.gguf> --exclusive`,
-   then `… aggregate`; read `/var/lib/hal0/benchmarks/SUMMARY.md`. Record current pp/tg per backend.
+1. **Baseline.** Run the `lane-matrix` suite (or an ad-hoc one-model suite) —
+   `hal0 bench run --suite lane-matrix`, or narrower per the Sweeping section below — then
+   `hal0 bench results --model <id> --json`. Record current pp/tg per lane.
 2. **Research** (below) → a short list of *candidate* flags/values with a hypothesis for *why*
    each should help on gfx1151. Don't apply anything yet.
 3. **Sweep** each candidate against the baseline model + backend (one variable at a time, or a
@@ -31,29 +32,52 @@ Pick **one** target up front — they trade off:
 
 ## Sweeping (the workhorse)
 
-`llama-bench` benchmarks the **cartesian product** of comma-separated values in one run — use
-that. Through the seam:
+There is no standalone `sweep` command any more — a flag-tuning sweep is a **suite**
+whose `[matrix].configs` is a list of `{label, flags}` variants; every variant becomes
+its own measured cell (`hal0.bench.suites.Matrix`). The shipped `lane-matrix` suite
+(`/etc/hal0/bench/suites/lane-matrix.toml`) is the canonical tuning suite — both lanes
+across the 2k/32k/128k depth axis on a small set of profile-class representative models.
+For a narrower, model-specific sweep, write an ad-hoc suite TOML and point `hal0 bench
+run` at its path:
 
-```bash
-S="sudo -n /usr/lib/hal0/bin/hal0-benchctl"
-M=qwen3.6-27b/Qwen3.6-27B-UD-Q5_K_XL.gguf
+```toml
+# /tmp/tune-qwen.toml
+[suite]
+id = "tune-qwen"
+exclusive = true
 
-# ubatch is the biggest single lever; sweep it per backend
-$S sweep "$M" rocm        --exclusive -ub 512,1024,2048,4096 -p 2048 -n 64
-$S sweep "$M" vulkan_radv --exclusive -ub 256,512,1024       -p 2048 -n 64
+[selector]
+include_only = true
+include = ["qwen3.6-27b"]              # registry id, not the gguf path
 
-# batch x flash-attn grid
-$S sweep "$M" rocm --exclusive -b 2048,4096,8192 -fa 0,1 -p 2048 -n 64
+[matrix]
+lanes   = ["rocm", "vulkan_radv"]
+depths  = [2048]
+configs = [
+  { label = "ub512",  flags = { "-ub" = "512" } },
+  { label = "ub1024", flags = { "-ub" = "1024" } },
+  { label = "ub2048", flags = { "-ub" = "2048" } },
+  { label = "ub4096", flags = { "-ub" = "4096" } },
+]
 
-# KV-cache quant (memory + speed vs quality) at depth
-$S sweep "$M" rocm --exclusive -ctk q8_0,f16 -ctv q8_0,f16 -p 2048 -n 64 -d 16384
+[cells]
+kinds = ["pp", "tg"]
 
-$S aggregate   # then read SUMMARY.md — sweep rows are tagged "sweep"
+[staleness]
+max_age_days = 0        # always (re)measure — this is a one-off tuning run
 ```
 
-Allowed sweep flags (seam whitelist): `-b -ub -ngl -fa -ctk -ctv -p -n -d -r -t -mmp -pg`.
-Tuning needs a quiet GPU, so `--exclusive` is normally required — only when nothing is
-serving; it restarts the slots on exit (see hal0-bench's GPU rule).
+```bash
+hal0 bench plan --suite /tmp/tune-qwen.toml         # sanity-check the worklist first
+hal0 bench run  --suite /tmp/tune-qwen.toml
+hal0 bench results --model qwen3.6-27b --json       # then compare configs
+```
+
+Allowed tuning flags (seam whitelist, enforced on the argv `hal0.bench.harness` composes
+before the `hal0-benchctl` `exec` seam re-validates it): `-b -ub -ngl -fa -ctk -ctv -p -n
+-d -r -t -mmp -pg`. Tuning needs a quiet GPU, so `exclusive = true` is normally required
+— only when nothing is serving; the runner stops/restarts the slots around the suite (see
+hal0-bench's GPU rule).
 
 ## What's worth tuning on Strix Halo (gfx1151, Radeon 8060S)
 
@@ -70,7 +94,8 @@ Priors from the production `hal0-slot@agent` config: `-b 8192 -ub 2048 -ctk q8_0
 | `-ngl` | set per lane, not per sweep | 99 (full offload) on `rocm`/`vulkan_radv`, 0 on the `cpu` lane. Only pass your own to study the CPU/GPU split — llama-bench APPENDS it to the lane's value as a second sweep row rather than replacing it. |
 
 Out of llama-bench scope (server-level, tune separately): **draft/MTP speculative decode**
-(`--spec-draft-*`) and `--parallel`/slots — hal0 has `/root/bench_mtp.py` for that.
+(`--spec-draft-*`) and `--parallel`/slots — `installer/bench/server_ab.py` (Tier B) covers
+that, talking to `hal0-api` + the slot port directly, no sudo.
 
 ## External research (then verify locally)
 
@@ -114,4 +139,5 @@ tuned flags:
 
 A short tuning report: target metric, baseline vs best (pp/tg per backend), the winning flags
 with the measured delta and the rationale/source for each, any quality check, and the exact
-`hal0 slot` change to apply it. Raw evidence is in `/var/lib/hal0/benchmarks/` (`index.json`).
+`hal0 slot` change to apply it. Raw evidence is in the v2 store (`hal0 bench results` /
+`hal0 bench history`, backed by `records.jsonl` + `bench.db` under `/var/lib/hal0-bench/`).

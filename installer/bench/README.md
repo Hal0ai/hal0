@@ -1,54 +1,86 @@
-# Strix Halo Benchmark Harness (hal0)
+# Strix Halo Benchmark Support Files (hal0)
 
 GPU inference benchmarking for hal0 / Strix Halo, sweeping **both runtimes — ROCm and
-Vulkan** — with the official `llama-bench`, emitting structured JSON for Hal0 tracking.
+Vulkan** — with the official `llama-bench`, recording structured results for hal0
+tracking.
 
-Ported from
-[`kyuz0/amd-strix-halo-toolboxes/benchmark`](https://github.com/kyuz0/amd-strix-halo-toolboxes/tree/main/benchmark),
-adapted to drive the container images already in root's podman via `podman` (not `toolbox`).
+Phase 2 of the bench overhaul (2026-08) absorbed the shell harness that used to live in
+this directory into Python (`src/hal0/bench/`, driven by the `hal0 bench` CLI). What's
+left here is what genuinely doesn't belong in that package: the server-level A/B
+harness, the operator-facing suite/window seeds, and this README.
+
+## What remains in `installer/bench/`
+
+| Path | What it is |
+|------|-----------|
+| `server_ab.py` | Tier-B server-level A/B harness — the levers `llama-bench` can't see (MTP draft depth, `--cache-reuse`, embed/rerank). Talks to `hal0-api` + the slot port as the unprivileged `hal0` user; no sudo. |
+| `suites/*.toml` | Seed copies of the suite definitions (`roster.toml`, `smoke.toml`, `lane-matrix.toml`) installed to `/etc/hal0/bench/suites/` on first install only — operator-owned after that, never clobbered on upgrade. |
+| `window.toml` | Seed copy of the `--scheduled` politeness window policy, installed to `/etc/hal0/bench/window.toml` the same way. |
+
+`config.sh`, `run_benchmarks.sh`, `generate_results_json.py`, and `profile-matrix.sh` are
+**gone** — the install upgrade path (`installer/install.sh`) actively removes any stale
+copies an earlier install left under `/usr/lib/hal0/bench/`, since a root-owned shell
+script left behind by an old install would otherwise linger as an unmaintained
+privileged surface.
+
+## Where the harness went
+
+The composition, run, and storage logic lives in `src/hal0/bench/`:
+
+- `harness.py` — composes the full `podman run … llama-bench -o json` argv (backend/lane
+  matrix, flag dedupe, crash-retry, exclusivity) and hands it to the `hal0-benchctl`
+  `exec` seam, which re-validates it structurally and execs it. See that module's
+  docstring for the full Phase-1→Phase-2 shape change.
+- `planner.py` — decides what's stale against a suite's selector/matrix/staleness.
+- `runner.py` — drives one run session (a suite's worklist, scheduling, politeness).
+- `store.py` — the result store: append-only `records.jsonl` + derived `bench.db`.
+- `suites.py` — loads suite TOML into typed `Suite`/`Matrix`/`Selector` dataclasses.
+- `devices.py` — GPU device-node resolution (`hal0 bench devices`).
+- `publish.py`, `regress.py`, `cli.py` — roster publishing, regression detection, and the
+  `hal0 bench` CLI itself.
+
+Operators and agents drive all of this through `hal0 bench <verb>` (see
+`installer/agent-skills/hal0-bench/SKILL.md`), not by invoking anything under this
+directory directly.
 
 ## Layout & privilege model (D hardened-perms)
 
-This harness is **root-owned and root-executed**. The unprivileged `hal0` agent never runs
-it directly — it goes through the `hal0-benchctl` sudo seam, exactly like `hal0-slotctl`.
+Benchmark containers are **rootful** (need `/dev/kfd` + root's podman image store); the
+unprivileged `hal0` agent/API process never runs `podman` itself — it goes through the
+`hal0-benchctl` sudo seam, exactly like `hal0-slotctl`. Since Phase 2 the seam is a dumb
+validate-and-exec shim: the Python side composes the argv, the seam only re-checks it.
 
 | Path | Owner | Purpose |
 |------|-------|---------|
-| `/usr/lib/hal0/bench/` | `root:root` | this harness (not agent-writable, off NFS) |
-| `/usr/lib/hal0/bin/hal0-benchctl` | `root:root 0755` | the seam (validates args, execs harness) |
+| `/usr/lib/hal0/bin/hal0-benchctl` | `root:root 0755` | the seam (`exec`/`telemetry` only) |
 | `/etc/sudoers.d/hal0-benchctl` | `root:root 0440` | the grant |
-| `/var/lib/hal0/benchmarks/` | `hal0:hal0` | results (`runs/`, `logs/`, `index.json`, `SUMMARY.md`) |
+| `/usr/lib/hal0/bench/server_ab.py` | `root:root` | the only script installed under the old harness path now |
+| `/var/lib/hal0-bench/` | `hal0:hal0` | the v2 result store — `records.jsonl`, `bench.db`, `artifacts/` |
+| `/var/lib/hal0/benchmarks/server-ab/` | `hal0:hal0` | `server_ab.py` output |
 
 ## Usage
 
-Agents/operators use the seam:
+Agents/operators use the CLI, not the seam directly:
 
 ```bash
-S="sudo -n /usr/lib/hal0/bin/hal0-benchctl"
-$S run --exclusive                 # full curated sweep, clean GPU
-$S run-model <rel.gguf>            # one model, both backends
-$S sweep <rel.gguf> <backend> -ub 512,1024,2048   # tuning (whitelisted flags)
-$S aggregate                       # rebuild index.json + SUMMARY.md
-$S list
+hal0 bench plan --suite roster                      # what's stale (no GPU, no writes)
+hal0 bench run  --suite roster --budget-min 120      # run the plan (or a slice of it)
+hal0 bench run  --suite lane-matrix                  # the tuning-oriented lane/depth sweep
+hal0 bench results --json                            # current values from bench.db
+hal0 bench history --cell <cell_key> --json           # trend for one cell over time
 ```
 
-Direct (root shell, e.g. operator on hal0) — the engine under the seam:
-
-```bash
-/usr/lib/hal0/bench/run_benchmarks.sh --help
-/usr/lib/hal0/bench/run_benchmarks.sh --all-models --contexts all --exclusive
-/usr/lib/hal0/bench/generate_results_json.py /var/lib/hal0/benchmarks
-```
-
-`run_benchmarks.sh` also accepts `--force` (run on a busy GPU; contended numbers) and
-`--dry-run`; the seam deliberately does **not** expose `--force`.
+`hal0 bench run --suite <path-to-toml>` also accepts an ad-hoc suite file directly, not
+just an id under `/etc/hal0/bench/suites/`. See `installer/agent-skills/hal0-bench/
+SKILL.md` for the full verb list and `references/seam.md` for what the seam itself
+validates.
 
 ## GPU device passthrough (issue #1303)
 
-`config.sh` hardcodes **no** device node. It calls `hal0.bench.devices`, which reuses the
-same helpers the production slot containers use (`hal0.providers._gpu`) plus the
-`hal0 probe` snapshot in `hardware.json`, so bench and slot containers derive their GPU
-nodes and render/video GIDs from one source of truth:
+Device selection is never hardcoded — `hal0.bench.devices` reuses the same helpers the
+production slot containers use (`hal0.providers._gpu`) plus the `hal0 probe` snapshot in
+`hardware.json`, so bench and slot containers derive their GPU nodes and render/video
+GIDs from one source of truth:
 
 | Tier | podman flags |
 |------|--------------|
@@ -64,7 +96,7 @@ hal0 bench devices --format json
 ```
 
 Overrides, for unusual passthrough layouts and recovery (each is validated: allowed
-device-node shape + must be a character device, otherwise the sweep aborts **before** any
+device-node shape + must be a character device, otherwise the run aborts **before** any
 container starts, naming the paths it checked):
 
 | Variable | Meaning |
@@ -76,49 +108,41 @@ container starts, naming the paths it checked):
 | `HAL0_BENCH_KFD_PATH` / `HAL0_BENCH_DRI_DIR` | relocate the discovery roots |
 | `HAL0_BENCH_PYTHON` | interpreter used to run the resolver |
 
-## ⚠️ GPU contention
+## GPU contention
 
-One iGPU, shared with the live inference slots. The harness refuses to run while a GPU slot
-is active; `--exclusive` stops/restarts them for clean numbers (briefly offlines production).
-`hal0-slot@npu` is GPU-free and ignored.
+One iGPU, shared with the live inference slots. A suite marked `exclusive = true` stops
+the active GPU slots before running and restarts them on exit (briefly offlines
+production); a non-exclusive suite (e.g. `smoke`) may run over live traffic, and its
+cells are stamped `outcome="skipped-contended"` rather than `"ok"`. `hal0-slot@npu` is
+GPU-free and ignored by exclusivity either way.
 
-## Tuning / extending (operator, edits config.sh)
+## Tuning / extending
 
-- Add a backend: entry in `BACKENDS` (`image|bench_bin|ubatch|env|dev_args`) +
-  `BACKEND_ORDER`, and add the key to `validate_backend` in
-  `installer/wrappers/hal0-benchctl` (the seam rejects anything not on that
-  whitelist, so a matrix-only entry is unreachable through `hal0-benchctl`).
-- Add a context: entry in `CTX_CONFIGS` (`args|reps`, `%UB%` = per-backend ubatch).
-- Curated default model set: `DEFAULT_MODELS`. Common flags: `COMMON_BENCH_ARGS`
-  (`-fa 1 -mmp 0`). `-ngl` belongs in the lane's `dev_args`, not here —
-  llama-bench appends repeated `-ngl` values into a sweep dimension instead of
-  overriding, so a common one would double every cell of any lane that needs a
-  different value (e.g. `cpu`'s `-ngl 0`).
-- Hardware tiers: `BACKEND_ORDER` defaults to `(cpu)` when the device resolver
-  reports `BENCH_TIER=cpu` and to the two GPU lanes otherwise. Pin a tier with
-  `HAL0_BENCH_TIER=cpu|amd|nvidia` to measure a specific v1.0 baseline on a box
-  that has more hardware than the tier under test.
+- **Backend/lane matrix** — `hal0.bench.harness.lane_specs()` (code, not a shell config).
+  Add a lane there, then extend the entrypoint whitelist in
+  `installer/wrappers/hal0-benchctl`'s `validate_entrypoint` if it ships a new binary —
+  the seam rejects anything not on that closed set.
+- **What gets measured, at what depth/config** — a suite TOML under
+  `/etc/hal0/bench/suites/` (seeds in `suites/` here). `[matrix].configs` is the
+  flag-tuning axis: a list of `{label, flags}` variants, each a whitelisted llama-bench
+  tuning-flag set (`-b -ub -ngl -fa -ctk -ctv -t -mmp -pg`); every variant becomes its
+  own measured cell. `lane-matrix.toml` is the suite feeding `hal0-tune`'s sweeps.
+- **When it's polite to run on a schedule** — `window.toml` (seed here, operator-owned
+  at `/etc/hal0/bench/window.toml`), consulted only by `hal0 bench run --scheduled`.
 
-## Profile-matrix (seed-profile re-tune)
+## Server-level A/B (`server_ab.py`)
 
-Two companions script the flag re-tune matrix from the profile-consolidation
-handoff (2026-07-04):
-
-- **`profile-matrix.sh`** — Tier A: the llama-bench cells (batch/ubatch grids
-  per profile class, symmetric KV-quant at depth on both backends, threads
-  sanity) as `hal0-benchctl sweep` calls. Runs as the unprivileged user;
-  `--dry-run` prints the seam commands; `--cell` selects a subset.
-- **`server_ab.py`** — Tier B: the server-only levers llama-bench can't see —
-  MTP draft depth (`--spec-draft-n-max`), `--cache-reuse` on a shared-prefix
-  trace, poll, and the embed/rerank endpoints. Talks to hal0-api + the slot
-  port as the hal0 user (no sudo), always restores the slot's original
-  `extra_args`, and writes JSON to `/var/lib/hal0/benchmarks/server-ab/`.
-  Supersedes the ad-hoc `/root/bench_mtp.py`.
+Tier B: the server-only levers `llama-bench` can't see — MTP draft depth
+(`--spec-draft-n-max`), `--cache-reuse` on a shared-prefix trace, poll, and the
+embed/rerank endpoints. Talks to `hal0-api` + the slot port as the `hal0` user (no
+sudo), always restores the slot's original `extra_args`, and writes JSON to
+`/var/lib/hal0/benchmarks/server-ab/`. Supersedes the ad-hoc `/root/bench_mtp.py`.
 
 ## Scope & roadmap
 
-Now: the kyuz0 **toolbox sweep** (raw `llama-bench` across backends) + a tuning `sweep` verb
-+ the profile-matrix pair above (Tier A seam cells, Tier B server-level A/Bs incl.
-MTP/draft-speculative). Deferred: RPC bench (needs ≥2 nodes), pi-bench (coding-agent eval).
-Upstream end-state: a `hal0 bench` CLI + `/api/benchmarks` route reading `index.json`,
-landed in the hal0 git repo.
+Now: `hal0 bench` (Python harness + CLI + API) drives the toolbox sweep (raw
+`llama-bench` across backends) via declarative suites, including the tuning-oriented
+`lane-matrix` config-grid suite, plus `server_ab.py` for Tier-B server-level A/Bs incl.
+MTP/draft-speculative. Deferred: RPC bench (needs ≥2 nodes), pi-bench (coding-agent
+eval). The `hal0 bench` CLI + `/api/benchmarks` routes are the landed end-state this
+directory used to describe as future work.

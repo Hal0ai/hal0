@@ -148,6 +148,13 @@ class BenchDeviceSpec:
         flags += [f"--group-add={g}" for g in self.group_ids]
         return flags
 
+    @property
+    def run_flags(self) -> list[str]:
+        """Alias for :meth:`podman_flags` under the name
+        :func:`hal0.bench.harness.compose_podman_argv` spreads directly into a
+        ``podman run`` argv — a pure accessor, no resolution logic here."""
+        return self.podman_flags()
+
     def to_dict(self) -> dict[str, object]:
         return {
             "tier": self.tier,
@@ -203,7 +210,7 @@ def _node_allowed(node: str, kfd_path: str, dri_dir: str) -> bool:
     baked-in ``/dev/...`` regex so the ``HAL0_BENCH_KFD_PATH`` /
     ``HAL0_BENCH_DRI_DIR`` seams (tests, unusual passthrough layouts) stay
     covered by the SAME check instead of bypassing it. The privileged
-    ``hal0-benchctl``/``config.sh`` seam mirrors this in shell.
+    ``hal0-benchctl`` seam mirrors this in shell (validate_device_flag).
     """
     if ".." in node:
         return False

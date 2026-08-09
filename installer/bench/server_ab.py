@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""server_ab.py — server-level A/B measurement for hal0 slots (Tier B of the
-profile-matrix; see profile-matrix.sh for Tier A / llama-bench cells).
+"""server_ab.py — server-level A/B measurement for hal0 slots (Tier B; Tier A
+llama-bench cells run through hal0.bench.harness + the hal0-benchctl exec seam).
 
 llama-bench cannot measure the server-only levers: MTP speculative decode
 (``--spec-draft-*``), prompt-cache reuse (``--cache-reuse``), busy-wait poll,

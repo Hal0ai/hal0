@@ -9,18 +9,26 @@ corrects every place the stubs assumed a contract that differs from the real box
     (``/api/slots``, states offline/warming/serving + container_status) and
     throughput history (``/api/stats/throughput/history?window_s=`` — NOT
     ``/api/throughput``). "Busy" = a request in flight; a merely-loaded slot is
-    stopped by the seam's own ``--exclusive``, so an exclusive session may
-    proceed while a slot is loaded-but-idle.
-  * Exclusivity is the seam's own leading ``--exclusive`` flag PER Tier-A sweep
-    (DESIGN §0.5 — the session-level ``gpu-quiesce`` verb was deferred and does
-    not exist on-box). Tier-A sweeps are memoised per (model,lane,depth) so one
-    GPU load (one stop/restart) yields BOTH the pp and tg records.
-  * Tier A (pp/tg) goes through ``hal0-benchctl sweep <rel.gguf> <lane>
-    [--exclusive] -p .. -n .. -d .. -r ..`` (positional, not flags) which writes
-    to ``/var/lib/hal0/benchmarks/runs/<stem>__<lane>__sweep.json``; the runner
-    knows that exact filename (same stem sanitisation as the harness), copies it
-    into the run's artifacts/, and parses it. ``-d`` is the cell's depth axis
-    (KV fill); ``-p``/``-n`` are the fixed pp/tg measurement sizes.
+    stopped by the exclusive window's own slot stop/restart, so an exclusive
+    session may proceed while a slot is loaded-but-idle.
+  * Exclusivity (Phase 2, ``hal0.bench.harness.ExclusiveSlots``) stops every
+    active ``hal0-slot@*`` unit for the duration of ONE Tier-A group's sweep
+    and restarts them on exit — a direct port of the shell harness's per-sweep
+    ``--exclusive`` (DESIGN §0.5 — the session-level ``gpu-quiesce`` verb was
+    deferred and does not exist on-box). Tier-A sweeps are memoised per
+    (model,lane,depth,config) so one GPU load (one stop/restart) yields BOTH
+    the pp and tg records.
+  * Tier A (pp/tg): Phase 2 absorbs the shell harness
+    (``installer/bench/run_benchmarks.sh`` + ``config.sh``) into
+    ``hal0.bench.harness`` — the runner COMPOSES the full ``podman run …
+    llama-bench -o json`` argv itself (``harness.compose_podman_argv``); the
+    privileged ``hal0-benchctl exec`` verb is a dumb validate-and-exec shim
+    with no matrix knowledge of its own. The engine's JSON comes back on
+    STDOUT (``harness.run_cell``, with the Phase-1 crash-retry/normalisation
+    loop now living in Python) — there is no more result FILE to locate, race
+    against, or clear before a re-measure; artifacts are written straight from
+    the parsed rows. ``-d`` is the cell's depth axis (KV fill); ``-p``/``-n``
+    are the fixed pp/tg measurement sizes.
   * Tier B/C (chat/embed/rerank/reuse) go through the installed ``server_ab.py``
     (modes ab/reuse/embed/rerank; no depth/mtp/batch on this build). A chat
     cell passes its config variant as the single ``--variant`` so the record's
@@ -51,6 +59,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from . import harness
+from .devices import BenchDeviceError, BenchDeviceSpec, resolve_bench_devices
 from .parsers import parse_llama_bench, parse_server_ab
 from .schema import Host, Outcome, Record
 from .store import Store
@@ -59,19 +69,25 @@ if TYPE_CHECKING:
     from .planner import Cell
 
 DEFAULT_API = "http://127.0.0.1:8080"
-BENCHCTL = "/usr/lib/hal0/bin/hal0-benchctl"
+# Re-exported for callers/tests that reach the seam path through runner.py;
+# the actual argv composition always uses harness.BENCHCTL directly.
+BENCHCTL = harness.BENCHCTL
 SERVER_AB = "/usr/lib/hal0/bench/server_ab.py"
 # The historic model-store root, kept ONLY as a legacy strip candidate — the
 # live root comes from hal0.config.paths.model_store_root() (see _model_roots).
 LEGACY_MODEL_ROOT = "/mnt/ai-models"
 
 
-def v1_runs_dir() -> Path:
-    """Where the seam's llama-bench harness writes results (hal0-benchctl
-    RESULTS). HAL0_HOME-aware via hal0.config.paths (#1518)."""
-    from hal0.config import paths
+def _model_root() -> str:
+    """The LIVE model-store root (``hal0.config.paths.model_store_root``) —
+    the same resolver ``hal0-benchctl``'s ``exec`` verb uses independently to
+    compute its own ``$MODEL_ROOT``. The composed ``--volume=``/``-m`` argv
+    must use THIS root, not whichever historic root a registry path happened to
+    be stripped against (see ``_rel_gguf``): the shim re-resolves the root
+    itself and will reject an argv built against a different one (#1516)."""
+    from hal0.config.paths import model_store_root
 
-    return paths.var_lib() / "benchmarks" / "runs"
+    return model_store_root().rstrip("/")
 
 
 def _model_roots() -> list[str]:
@@ -251,7 +267,7 @@ def _run_subprocess(cmd: list[str], timeout_s: float, log_path: Path) -> tuple[i
     only the parent, orphaning e.g. a server_ab HTTP wait). The Tier-A ``sudo``
     child is root-owned and unkillable from here (kill(2) → EPERM — the old
     code would CRASH the session with PermissionError on a Tier-A hang); its
-    real timeout runs INSIDE the seam (``benchctl sweep --timeout-s``), and
+    real timeout runs INSIDE the seam (``benchctl exec --timeout-s``), and
     this watchdog is sized above the seam's worst case as a backstop."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
@@ -280,67 +296,6 @@ def _run_subprocess(cmd: list[str], timeout_s: float, log_path: Path) -> tuple[i
         return -9, "watchdog-timeout"
 
 
-def _sweep_stem(gguf: str) -> str:
-    """The result-file stem for a model, using the harness's own sanitisation
-    (``run_benchmarks.sh``: ``tr -c 'A-Za-z0-9._-' '_'``). The runner previously
-    used the raw basename — any out-of-class character made clear/locate miss
-    the file the harness actually wrote (stale numbers or phantom FAILED)."""
-    stem = Path(_rel_gguf(gguf)).name.removesuffix(".gguf")
-    return re.sub(r"[^A-Za-z0-9._-]", "_", stem)
-
-
-def _sweep_output_path(gguf: str, lane: str) -> Path:
-    """The EXACT file the seam's sweep writes for this (model, lane):
-    ``<stem>__<lane>__sweep.json`` (benchctl sweep always passes --tag sweep,
-    context ``default`` adds no suffix). Knowing the exact name kills the old
-    newest-by-mtime glob, which could attribute another model's concurrent or
-    just-written sweep to this cell."""
-    return v1_runs_dir() / f"{_sweep_stem(gguf)}__{lane}__sweep.json"
-
-
-def _clear_stale_sweep(gguf: str, lane: str) -> None:
-    """Remove any prior seam output for this (model,lane) sweep BEFORE running it.
-
-    Verified on-box 2026-07-05: the seam's ``run_benchmarks.sh`` is idempotent —
-    it prints ``[skip exists]`` and does NOTHING if ``<stem>__<lane>__sweep.json``
-    already exists (``ran=0 skipped=1``), so a re-measure (provenance drift, or
-    re-running a failed cell) would otherwise reuse stale numbers / produce no
-    fresh file. benchlab owns the measurement, so it clears the cached artifact
-    (results are chowned hal0:hal0, so the unprivileged runner can remove them)
-    to guarantee the sweep actually runs and writes current numbers."""
-    out = _sweep_output_path(gguf, lane)
-    stale = [
-        out,
-        out.with_name(out.name + ".failed"),
-        out.with_name(out.name.replace(".json", ".meta.json")),
-    ]
-    for path in stale:
-        with contextlib.suppress(OSError):
-            path.unlink()
-
-
-def _locate_sweep_output(gguf: str, lane: str, since_wall: float) -> tuple[list[dict], dict] | None:
-    """Read the exact ``<stem>__<lane>__sweep.json`` (+ sibling ``.meta.json``)
-    the seam just wrote for this cell. ``since_wall`` guards against a file that
-    predates the sweep (should not happen after _clear_stale_sweep, but a stale
-    read must never be attributed to a fresh run)."""
-    out = _sweep_output_path(gguf, lane)
-    try:
-        if out.stat().st_mtime < since_wall - 5:
-            return None
-        rows = json.loads(out.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    meta_path = out.with_name(out.name.replace(".json", ".meta.json"))
-    meta: dict = {}
-    if meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            meta = {}
-    return (rows if isinstance(rows, list) else [], meta)
-
-
 def _classify(rc: int, tail: str) -> Outcome:
     if rc == -9:
         return Outcome.HANG
@@ -352,18 +307,26 @@ def _classify(rc: int, tail: str) -> Outcome:
     return Outcome.OK
 
 
-def _tier_a_timeouts(cell) -> tuple[int, int]:
-    """(per-attempt seam timeout, outer watchdog) for a Tier-A sweep, seconds.
+def _tier_a_per_attempt_s(cell) -> int:
+    """The per-attempt seam timeout for a Tier-A sweep, seconds.
 
     The REAL kill lives in the seam (``timeout`` around the podman run — the
     unprivileged runner cannot signal the root-owned sudo child). One attempt
     covers the shared pp+tg sweep, scaled by depth (a 128k KV fill takes
-    minutes before any measurement). The outer watchdog must outlast the
-    harness's 6 crash-retry attempts so a legitimate retry loop is never
-    classified HANG — it exists only to catch a wedged seam."""
-    per_attempt = 3 * (_EXPECTED_S["pp"] + _EXPECTED_S["tg"]) + cell.depth // 50
-    outer = 6 * per_attempt + 120
-    return per_attempt, outer
+    minutes before any measurement).
+
+    This is the ONLY number the runner picks; the actual outer bound on a
+    cell is now emergent, not a separately-sized watchdog:
+      * the shim wraps each attempt in ``timeout --kill-after=30 N`` on the
+        ROOT side (N = this value);
+      * ``_tier_a_runner``'s Python-side backstop adds another +35s margin
+        per attempt, for the case sudo/the shim itself wedges before ever
+        reaching its own timeout;
+      * ``harness.run_cell`` retries a crash (not a timeout) up to
+        ``harness.MAX_ATTEMPTS`` (6) times.
+    So the true worst case for one cell is ``MAX_ATTEMPTS * (N + 35)``
+    seconds, not a separately-enforced outer watchdog."""
+    return int(3 * (_EXPECTED_S["pp"] + _EXPECTED_S["tg"]) + cell.depth // 50)
 
 
 # --------------------------------------------------------------------------- #
@@ -371,34 +334,47 @@ def _tier_a_timeouts(cell) -> tuple[int, int]:
 # --------------------------------------------------------------------------- #
 
 
-def _tier_a_cmd(cell, exclusive: bool, pp_prompt: int, tg_gen: int) -> list[str]:
-    """The exact `hal0-benchctl sweep` argv for a Tier-A group (positional, the
-    seam's real shape). `--exclusive` is the seam's own GPU stop/restart.
+def _tier_a_flags(cell, pp_prompt: int, tg_gen: int) -> list[tuple[str, str]]:
+    """The cell's own llama-bench flags (before lane/common defaults are
+    folded in by ``harness.compose_podman_argv``'s dedupe): the fixed
+    measurement sizes, the depth axis, repetitions, then any config-variant
+    tuning flags (validated at plan time), sorted for a stable, memoisation-
+    key-matching command.
 
     The depth axis is llama-bench ``-d`` (KV fill before the measurement) —
     NOT ``-p``. The old shape passed ``-p <depth>``, so a tg cell at depth
     32768 decoded from an EMPTY context: different cell_keys, identical
     numbers. ``-p``/``-n`` are the fixed measurement sizes (pp512/tg-n_gen)."""
-    cmd = ["sudo", "-n", BENCHCTL, "sweep", _rel_gguf(cell.identity.model.gguf), cell.lane]
-    if exclusive:
-        cmd.append("--exclusive")
-    per_attempt, _ = _tier_a_timeouts(cell)
-    cmd += ["--timeout-s", str(per_attempt)]
-    cmd += [
-        "-p",
-        str(pp_prompt),
-        "-n",
-        str(tg_gen),
-        "-d",
-        str(cell.depth),
-        "-r",
-        str(cell.reps),
+    flags: list[tuple[str, str]] = [
+        ("-p", str(pp_prompt)),
+        ("-n", str(tg_gen)),
+        ("-d", str(cell.depth)),
+        ("-r", str(cell.reps)),
     ]
-    # config-variant tuning flags (validated at plan time), sorted for a stable
-    # command that matches the memoisation key.
     for flag in sorted(getattr(cell, "flags", None) or {}):
-        cmd += [flag, str(cell.flags[flag])]
-    return cmd
+        flags.append((flag, str(cell.flags[flag])))
+    return flags
+
+
+def _tier_a_cmd(cell, pp_prompt: int, tg_gen: int, devices: BenchDeviceSpec) -> list[str]:
+    """The exact ``sudo -n hal0-benchctl exec -- podman run …`` argv for a
+    Tier-A group (Phase 2: composed here, not by a privileged sweep verb — see
+    ``hal0.bench.harness``). Exclusivity no longer rides the argv at all: it is
+    a Python-side context manager (``harness.ExclusiveSlots``) the caller wraps
+    around the actual execution, so this function is pure command COMPOSITION
+    (safe to call from ``describe_worklist`` with no slots touched).
+
+    Raises ``KeyError`` for an unknown ``cell.lane`` — planner.plan() rejects
+    that at plan time (finding 5), but a defensive caller (tests, a future
+    plan-bypassing entry point) can still land here, so the KeyError is a
+    deliberate, documented failure mode rather than a silent default."""
+    spec = harness.lane_specs()[cell.lane]
+    model_root = _model_root()
+    model_path = f"{model_root}/{_rel_gguf(cell.identity.model.gguf)}"
+    flags = _tier_a_flags(cell, pp_prompt, tg_gen)
+    podman_argv = harness.compose_podman_argv(spec, devices, model_path, model_root, flags)
+    per_attempt = _tier_a_per_attempt_s(cell)
+    return harness.benchctl_exec_argv(podman_argv, per_attempt)
 
 
 def _tier_bc_cmd(
@@ -432,13 +408,28 @@ def _tier_bc_cmd(
 
 
 def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]:
+    # ``exclusive`` no longer changes the composed argv (see _tier_a_cmd) — it
+    # is kept in the signature for parity with run_session/cli.py's call site;
+    # a dry-run listing never touches slots regardless of this flag.
     """Human-readable ordered worklist + the EXACT seam/server_ab command each
     cell would run (for `run --dry-run`, DESIGN §5 / bring-up Phase 4). Pure —
-    resolves no slots, touches no GPU. Marks the pp/tg sibling that reuses a
-    group's single memoised sweep."""
+    resolves no slots, touches no GPU, and NEVER raises: device resolution is
+    attempted once up front (so every Tier-A line shows the real ``--device=``/
+    ``--group-add=`` flags), but a resolution failure degrades to composing
+    without device passthrough plus a trailing note, rather than aborting a
+    read-only preview. Marks the pp/tg sibling that reuses a group's single
+    memoised sweep."""
     sizes = _group_sizes(cells)
     seen: set[tuple] = set()
     lines: list[str] = []
+    device_note = ""
+    try:
+        devices = resolve_bench_devices()
+    except BenchDeviceError as exc:
+        devices = BenchDeviceSpec(tier="cpu")
+        device_note = (
+            f"\n  (! device resolution failed: {exc} — argv shown WITHOUT GPU passthrough)"
+        )
     for i, c in enumerate(cells, 1):
         cfg = (
             f"  cfg:{c.config_label}" if getattr(c, "config_label", "default") != "default" else ""
@@ -448,13 +439,23 @@ def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]
             key = _group_key(c)
             if key in seen:
                 cmd_str = "(reuses this group's memoised sweep — no extra GPU load)"
+            elif c.lane not in harness.lane_specs():
+                # Defensive (finding 5): planner.plan() rejects an unknown
+                # lane at plan time, but this function's docstring promises
+                # it NEVER raises, so a cell that reached here some other way
+                # (a hand-built worklist, a future bypass) degrades to a note
+                # instead of a bare KeyError.
+                seen.add(key)
+                cmd_str = f"(! unknown lane {c.lane!r} — no seam command composed)"
             else:
                 seen.add(key)
                 pp, tg = sizes.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
-                cmd_str = " ".join(_tier_a_cmd(c, exclusive, pp, tg))
+                cmd_str = " ".join(_tier_a_cmd(c, pp, tg, devices))
         else:
             cmd_str = " ".join(_tier_bc_cmd(c, f"<slot-for:{c.model_id}>", api))
         lines.append(f"{label}\n      {cmd_str}")
+    if device_note:
+        lines.append(device_note.strip())
     return lines
 
 
@@ -514,16 +515,17 @@ def run_session(
 
             run_id = _new_run_id()
             artifacts = store.artifacts_dir(run_id)
-            if cell.kind in _TIER_A_KINDS:
-                _, watchdog_s = _tier_a_timeouts(cell)
-            else:
-                watchdog_s = 3 * _EXPECTED_S.get(cell.kind, 300)
 
             if cell.kind in _TIER_A_KINDS:
+                # The per-attempt seam timeout (crosses the privilege boundary
+                # as --timeout-s); the OUTER 6-attempt bound is now an emergent
+                # property of harness.run_cell's own retry loop rather than a
+                # separately-enforced Python watchdog (see harness.py header).
+                per_attempt = _tier_a_per_attempt_s(cell)
                 record = _tier_a_record(
                     cell,
                     artifacts,
-                    watchdog_s,
+                    per_attempt,
                     exclusive,
                     sizes,
                     sweep_cache,
@@ -534,6 +536,7 @@ def run_session(
                     trigger,
                 )
             else:
+                watchdog_s = 3 * _EXPECTED_S.get(cell.kind, 300)
                 record = _tier_bc_record(
                     cell,
                     artifacts,
@@ -583,10 +586,52 @@ def _group_sizes(cells: list[Cell]) -> dict[tuple, tuple[int, int]]:
     return out
 
 
+def _tier_a_runner(
+    per_attempt: int,
+) -> Callable[[list[str], int | None], tuple[int, str, str]]:
+    """The production callable ``harness.run_cell`` uses to execute each
+    attempt: a ``Popen``-based watchdog with its OWN (Python-side) timeout as
+    a backstop above the seam's ``timeout --kill-after=30`` — the sudo/shim
+    child is root-owned and unkillable from here once wedged (``kill(2)`` ->
+    ``EPERM``), so this exists only to bound a wedged ``sudo`` PROMPT or a
+    wedged shim that never reaches its own timeout at all; the shim's real
+    per-attempt cap still does the normal-case killing. stdout/stderr are
+    captured SEPARATELY here, unlike ``_run_subprocess``'s merged stream —
+    the engine's ``-o json`` result now lives on stdout and must never be
+    corrupted by interleaved stderr."""
+    margin = 35  # the shim's own --kill-after=30 grace, plus a little slack
+
+    def _run(argv: list[str], timeout_s: int | None) -> tuple[int, str, str]:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            out, err = proc.communicate(timeout=(timeout_s or per_attempt) + margin)
+            return proc.returncode, out or "", err or ""
+        except subprocess.TimeoutExpired:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    os.killpg(proc.pid, sig)
+                try:
+                    out, err = proc.communicate(timeout=10)
+                    break
+                except subprocess.TimeoutExpired:
+                    out, err = "", ""
+            else:
+                out, err = "", ""
+            return -9, out, (err or "") + "\n[watchdog] outer python-side kill\n"
+
+    return _run
+
+
 def _tier_a_record(
     cell,
     artifacts,
-    timeout_s,
+    per_attempt,
     exclusive,
     sizes,
     cache,
@@ -596,26 +641,51 @@ def _tier_a_record(
     api,
     trigger="manual",
 ) -> Record:
-    """Run (or reuse) the Tier-A sweep for this cell's group and parse its kind."""
+    """Run (or reuse) the Tier-A sweep for this cell's group and parse its kind.
+
+    Exclusivity (``harness.ExclusiveSlots``) wraps ONLY the actual seam
+    execution for a non-memoised group — a cache hit (the pp/tg sibling
+    reusing the group's already-swept output) touches no slots at all,
+    matching the shell harness's per-SWEEP (not per-cell) ``--exclusive``."""
     key = _group_key(cell)
     if key in cache:
         rows, meta, outcome = cache[key]  # sibling already swept this group
         tail = ""
     else:
         pp, tg = sizes.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
-        cmd = _tier_a_cmd(cell, exclusive, pp, tg)
+        model_root = _model_root()
+        model_rel = _rel_gguf(cell.identity.model.gguf)
+        flags = _tier_a_flags(cell, pp, tg)
         log = artifacts / "sweep-benchctl.log"
-        # Force a fresh run: the seam skips a cell whose output already exists.
-        _clear_stale_sweep(cell.identity.model.gguf, cell.lane)
-        since = time.time()
-        rc, tail = _run_subprocess(cmd, timeout_s, log)
-        located = _locate_sweep_output(cell.identity.model.gguf, cell.lane, since)
-        if located is None:
-            rows, meta = [], {}
-            outcome = _classify(rc, tail) if rc != 0 else Outcome.FAILED  # ran ok but no output
+        run_kwargs = {
+            "model_rel": model_rel,
+            "model_root": model_root,
+            "flags": flags,
+            "timeout_s": per_attempt,
+            "log_path": log,
+            "runner": _tier_a_runner(per_attempt),
+        }
+        try:
+            # The lane lookup lives INSIDE this try (finding 5): planner.plan()
+            # already rejects an unknown lane at plan time, but a bogus-lane
+            # cell that reaches here some other way must record FAILED, not
+            # crash the whole session with a bare KeyError.
+            spec = harness.lane_specs()[cell.lane]
+            devices = resolve_bench_devices()
+            if exclusive:
+                with harness.ExclusiveSlots():
+                    result = harness.run_cell(spec, devices, **run_kwargs)
+            else:
+                result = harness.run_cell(spec, devices, **run_kwargs)
+        except (BenchDeviceError, RuntimeError, KeyError) as exc:
+            # Device resolution failed, ExclusiveSlots could not stop a slot,
+            # or the cell's lane isn't in harness.lane_specs() — a bad cell
+            # records its outcome and the session CONTINUES (DESIGN §5.3), it
+            # never crashes run_session.
+            rows, meta, outcome, tail = [], {}, Outcome.FAILED, str(exc)
         else:
-            rows, meta = located
-            outcome = _classify(rc, tail) if (rc != 0 or not rows) else Outcome.OK
+            rows, meta, tail = result.rows, result.meta, result.tail
+            outcome = _classify(result.rc, tail) if (result.rc != 0 or not rows) else Outcome.OK
         cache[key] = (rows, meta, outcome)
 
     # Copy the shared engine output into THIS cell's artifacts (self-contained).
