@@ -807,6 +807,30 @@ function LaneDot({ lane }: { lane: string }) {
   return <span aria-hidden="true" style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: laneColor(lane) }} />;
 }
 
+type RunGroup = { lane: string; depth: number | null; config: string; t: number; runs: RunSummary[] };
+
+// The accordion's trend, built from the model-scoped RUNS list (never
+// /history?cell_key=): a cell_key is a content-addressed identity, so a
+// provenance bump (engine build/image) between two sweeps forks the key and
+// each sweep becomes its own one-point "history" — that's the bug this
+// fixes. A sweep (one group in `allGroups`, already clustered within 2
+// minutes by lane|depth|config) contributes one point when it has an ok tg
+// run at the accordion's active depth/config; `total` counts every sweep for
+// the lane regardless of dims/outcome, so the caption can say exactly how
+// many were dropped and stay honest about it.
+function sweepSeries(lane: string, targetDepth: number | null, allGroups: RunGroup[]) {
+  const laneGroups = allGroups.filter(g => g.lane === lane);
+  const total = laneGroups.length;
+  const dimsMatched = laneGroups.filter(g => g.config === 'default' && (targetDepth == null || g.depth === targetDepth));
+  const ascending = [...dimsMatched].sort((a, b) => a.t - b.t);
+  const points: HistoryPoint[] = [];
+  for (const g of ascending) {
+    const okRun = g.runs.find(r => r.kind === 'tg' && r.outcome === 'ok' && r.decode_ts_med != null);
+    if (okRun) points.push({ ts: okRun.run_id, decode_ts_med: okRun.decode_ts_med });
+  }
+  return { points, total, plotted: points.length, excluded: total - points.length };
+}
+
 function ModelDetail({ model: m, detail }: {
   model: RosterModel;
   detail: { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] };
@@ -827,26 +851,6 @@ function ModelDetail({ model: m, detail }: {
   // Default: Compare when both lanes have runs, else the single lane that
   // does. No lane data at all (unmeasured model) => no control, no scoping.
   const [mode, setMode] = useState<string>(() => (lanesPresent.length >= 2 ? 'compare' : (lanesPresent[0] || '')));
-
-  // Per-lane history — one GET /history?cell_key=<that lane's default cell>
-  // per present lane. Never pooled: each lane gets its own series array.
-  const [laneHistory, setLaneHistory] = useState<Record<string, HistoryPoint[]>>({});
-  useEffect(() => {
-    let live = true;
-    (async () => {
-      const entries = await Promise.all(lanesPresent.map(async lane => {
-        const cell = pickDefaultCell(lane, cells);
-        if (!cell?.cell_key) return [lane, []] as const;
-        try {
-          const resp = await apiGet<{ points: HistoryPoint[] }>(`/api/benchmarks/history?cell_key=${encodeURIComponent(cell.cell_key)}`);
-          return [lane, resp.points || []] as const;
-        } catch { return [lane, []] as const; }
-      }));
-      if (live) setLaneHistory(Object.fromEntries(entries));
-    })();
-    return () => { live = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [m.id]);
 
   // matrix: one card per (lane, depth, config), scoped to the active lane
   // outside Compare mode.
@@ -1009,16 +1013,18 @@ function ModelDetail({ model: m, detail }: {
           <div style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.5rem 0.6rem', background: 'var(--bg-2)' }}>
             {mode === 'compare' ? (
               <>
-                <CompareSparkline series={lanesPresent.map(lane => ({ lane, points: laneHistory[lane] || [] }))} />
+                <CompareSparkline series={lanesPresent.map(lane => ({ lane, points: sweepSeries(lane, laneStats[lane]?.depth ?? null, runGroupsAll).points }))} />
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.7rem', fontSize: 10, color: 'var(--fg-4)', marginTop: '0.3rem' }}>
                   {lanesPresent.map(lane => {
                     const style = laneStyleFor(lane);
+                    const s = sweepSeries(lane, laneStats[lane]?.depth ?? null, runGroupsAll);
                     return (
                       <span key={lane} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                         <svg width={16} height={8} aria-hidden="true">
                           <line x1={0} y1={4} x2={16} y2={4} stroke={laneColor(lane)} strokeWidth={1.5} strokeDasharray={style.dash} />
                         </svg>
-                        {laneLabel(lane)} &middot; {(laneHistory[lane] || []).length} pt{(laneHistory[lane] || []).length === 1 ? '' : 's'}
+                        {laneLabel(lane)} &middot; {s.total} sweep{s.total === 1 ? '' : 's'} &middot; {s.plotted} plotted
+                        {s.excluded > 0 && <span> ({s.excluded} failed / other-config)</span>}
                       </span>
                     );
                   })}
@@ -1026,12 +1032,20 @@ function ModelDetail({ model: m, detail }: {
               </>
             ) : mode ? (
               <>
-                <Sparkline points={laneHistory[mode] || []} />
-                <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
-                  <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode <span style={{ color: 'var(--fg-4)' }}>{'■'}</span> prefill
-                  &middot; {laneLabel(mode)} &middot; default &middot; {(laneHistory[mode] || []).length} pt{(laneHistory[mode] || []).length === 1 ? '' : 's'}
-                  {d.image && <span> &middot; {d.image.split('/').pop()}</span>}
-                </div>
+                {(() => {
+                  const s = sweepSeries(mode, laneStats[mode]?.depth ?? null, runGroupsAll);
+                  return (
+                    <>
+                      <Sparkline points={s.points} />
+                      <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
+                        <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode
+                        &middot; {laneLabel(mode)} &middot; default &middot; {s.total} sweep{s.total === 1 ? '' : 's'} &middot; {s.plotted} plotted
+                        {s.excluded > 0 && <span> ({s.excluded} failed / other-config)</span>}
+                        {d.image && <span> &middot; {d.image.split('/').pop()}</span>}
+                      </div>
+                    </>
+                  );
+                })()}
               </>
             ) : (
               <>
@@ -1057,7 +1071,7 @@ function ModelDetail({ model: m, detail }: {
                   </span>
                   d{g.depth} {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{g.config}</span>}
                   {kinds} &middot; {reps > 0 ? `${reps} rep${reps === 1 ? '' : 's'}` : `${g.runs.length} rec`}
-                  <span style={{ color: outcomeColor(worst) }}>{'●'}</span>
+                  <span title={`outcome: ${[...new Set(outcomes)].join(', ')}`} style={{ color: outcomeColor(worst) }}>{'●'}</span>
                 </span>
               );
             }) : <span style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no runs recorded{mode && mode !== 'compare' ? ` on ${laneLabel(mode)}` : ''}.</span>}

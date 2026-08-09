@@ -126,12 +126,14 @@ const HISTORY = {
 // AND enough of a lane mix to prove the single-lane run-list filter works.
 // Sorted newest-first (matches the real API): the latest 5 are rocm@76/75/74
 // and vulkan_radv@61/60; the two oldest (vulkan_radv@59, rocm@71.4) are
-// dropped by the cap.
+// dropped by the cap. run3 (vulkan_radv, within the latest-5 window) is
+// outcome:'failed' — the accordion trend must count it as a sweep but not
+// plot it, and say so in the caption.
 const MODEL_RUNS_QWEN = [
   { run_id: '2026-08-07T09:00:00Z-run0', lane: 'rocm', decode_ts_med: 76 },
   { run_id: '2026-08-06T09:00:00Z-run1', lane: 'vulkan_radv', decode_ts_med: 61 },
   { run_id: '2026-08-05T09:00:00Z-run2', lane: 'rocm', decode_ts_med: 75 },
-  { run_id: '2026-08-04T09:00:00Z-run3', lane: 'vulkan_radv', decode_ts_med: 60 },
+  { run_id: '2026-08-04T09:00:00Z-run3', lane: 'vulkan_radv', decode_ts_med: 60, outcome: 'failed' },
   { run_id: '2026-08-03T09:00:00Z-run4', lane: 'rocm', decode_ts_med: 74 },
   { run_id: '2026-08-02T09:00:00Z-run5', lane: 'vulkan_radv', decode_ts_med: 59 },
   { run_id: '2026-08-01T09:00:00Z-run6', lane: 'rocm', decode_ts_med: 71.4 },
@@ -380,16 +382,50 @@ test('a two-lane model defaults to Compare and renders two distinct decode serie
   await expect(seg.locator('.mtp-seg-btn.on')).toHaveText('Compare')
   await expect(page.getByText('decode history · compare')).toBeVisible()
 
-  // Two series in the compare chart: rocm solid (no dasharray), vulkan_radv
-  // dashed — colour is never the only differentiator.
+  // Compare renders a rocm series (3 ok sweeps → 3 circle markers, its
+  // style). vulkan_radv only has 1 plotted point in this fixture (see the
+  // failed-sweep test below) so no dashed line draws yet — that's covered
+  // on its own further down; here we confirm rocm's series is real and
+  // undiluted by pooling.
   const chartSvg = page.locator('[data-testid="bench-compare-sparkline"]')
   await expect(chartSvg).toBeVisible()
-  await expect(chartSvg.locator('path[stroke-dasharray]')).toHaveCount(1)
-  await expect(chartSvg.locator('path:not([stroke-dasharray])')).toHaveCount(1)
+  await expect(chartSvg.locator('circle')).toHaveCount(3)
+})
 
-  // Inline legend names both lanes with their own point counts (never pooled).
-  await expect(page.getByText(/ROCM.*3 pts/)).toBeVisible()
-  await expect(page.getByText(/VULK.*3 pts/)).toBeVisible()
+test('sparkline series come from the runs list, not a content-addressed cell_key: two sweeps with unrelated identities still both plot', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
+  await expect(page.getByText('current summary')).toBeVisible()
+
+  // Switch to ROCm-only: 3 ok sweeps at the same lane/kind/depth/config,
+  // fetched purely from GET /api/benchmarks/runs?model= (RunSummary carries
+  // no cell_key at all) — every one of them plots.
+  await page.locator('.mtp-seg-btn', { hasText: 'ROCM' }).click()
+  await expect(page.getByText('ROCM · default · 3 sweeps · 3 plotted')).toBeVisible()
+  const spark = page.locator('svg').filter({ has: page.locator('circle') }).first()
+  await expect(spark.locator('circle')).toHaveCount(3)
+})
+
+test('a failed sweep is excluded from the plotted series but counted in the honest caption', async ({ page }) => {
+  await page.goto('/#benchmarks')
+  await page.locator('[data-testid="bench-model-row-qwen3.6-35b-a3b"]').click()
+  await expect(page.getByText('current summary')).toBeVisible()
+
+  // vulkan_radv has 2 sweeps in the latest-5 window: run1 (ok) and run3
+  // (outcome:'failed'). The caption must show 2 sweeps / 1 plotted and name
+  // the excluded one — never silently show fewer points than "runs — N sweeps"
+  // implies without saying why (the operator-reported bug).
+  await expect(page.getByText('VULK · 2 sweeps · 1 plotted (1 failed / other-config)')).toBeVisible()
+
+  // Confirm the run-list heading directly below agrees on the same total —
+  // this is the number the operator compared against the sparkline.
+  await page.locator('.mtp-seg-btn', { hasText: 'VULK' }).click()
+  await expect(page.getByText('runs — 2 sweeps')).toBeVisible()
+
+  // The run-list dot for the failed sweep is tooltip-labelled with the real
+  // outcome, not left unexplained.
+  const failedChip = page.locator('span', { hasText: '2026-08-04' })
+  await expect(failedChip.locator('span[title*="failed"]')).toHaveCount(1)
 })
 
 test('compare-mode delta badge is computed from the two lanes\' decode median', async ({ page }) => {
