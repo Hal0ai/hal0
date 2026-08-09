@@ -46,10 +46,18 @@ export function slotModelId(slot) {
 // One copy on purpose: the slot edit drawer (slot-modals.jsx) and the slot
 // card (slots.jsx / inference-pane.jsx) both need this exact lookup, and the
 // `model_id || model` precedence is easy to get subtly wrong twice.
+//
+// Falls back to `m.aliases` (#1656): pre-#1629 slots can still be bound to
+// the legacy generated `<tag>-FLM` id, which the catalog's dedupe skip no
+// longer emits as its own row — the surviving registry row carries that id
+// in `aliases` instead so the lookup doesn't go dangling.
 export function slotModelRow(slot, models) {
   const id = slotModelId(slot);
   if (!id) return null;
-  return (models ?? []).find((m) => m?.id === id) || null;
+  const rows = models ?? [];
+  const exact = rows.find((m) => m?.id === id);
+  if (exact) return exact;
+  return rows.find((m) => Array.isArray(m?.aliases) && m.aliases.includes(id)) || null;
 }
 
 // The short device label + hue token for a device string (chip / teach copy).

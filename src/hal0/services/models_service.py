@@ -916,6 +916,20 @@ async def list_all(
                 if row is not None and probe_caps and row.get("capabilities") != probe_caps:
                     row["capabilities"] = probe_caps
                     row["type"] = dispatch_type(row.get("id", ""), capabilities=probe_caps)
+                # #1656: this dedupe skip fires BEFORE the legacy ``<tag>-FLM``
+                # id below is ever computed, so a slot whose persisted model
+                # default is still that pre-#1629 generated id (created
+                # before the dedupe change) no longer finds a matching row
+                # via the UI's exact `m.id === id` lookup — dispatch still
+                # routes it correctly server-side, only the model-editor
+                # reference goes dangling. Stamp the legacy id onto the
+                # surviving row's `aliases` so the UI lookup can fall back to
+                # it (see `slotModelRow` in slot-shared.js).
+                if row is not None:
+                    legacy_id = fm["tag"].replace(":", "-") + "-FLM"
+                    aliases = row.setdefault("aliases", [])
+                    if legacy_id not in aliases:
+                        aliases.append(legacy_id)
                 continue
             mid = fm["tag"].replace(":", "-") + "-FLM"
             if mid in seen:

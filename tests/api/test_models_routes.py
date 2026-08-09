@@ -713,6 +713,40 @@ def test_list_models_dedupe_merges_flm_probe_capabilities_into_registry_row(
     assert row["type"] == "embedding"
 
 
+def test_list_models_dedupe_keeps_legacy_flm_id_as_an_alias(
+    inspect_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1656: a slot created before the #1629 dedupe change can still
+    persist the legacy generated ``<tag>-FLM`` id as its model default.
+    The dedupe skip fires before that id is ever computed, so the surviving
+    registry row must carry it in ``aliases`` — otherwise the UI's exact
+    `m.id === id` lookup (slotModelRow) goes dangling for that slot even
+    though dispatch still routes the model correctly server-side."""
+    fpath = Path(tmp_hal0_home) / "gemma4-e4b.gguf"
+    fpath.write_bytes(b"\x00" * 8)
+    inspect_client.post(
+        "/api/models",
+        json={"id": "gemma4-it:e4b", "path": str(fpath)},
+    )
+    fake = [
+        {
+            "tag": "gemma4-it:e4b",
+            "capabilities": ["chat"],
+            "installed": True,
+            "size_bytes": 1,
+            "footprint_gb": 0.0,
+            "family": "gemma4",
+        },
+    ]
+    monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: fake)
+
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    assert "gemma4-it-e4b-FLM" not in rows
+    assert rows["gemma4-it:e4b"]["aliases"] == ["gemma4-it-e4b-FLM"]
+
+
 # ── upstream provenance in /api/models ─────────────────────────────────────
 
 
