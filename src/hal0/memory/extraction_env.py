@@ -129,16 +129,20 @@ def drop_in_matches(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> bool:
     reconcile.
 
     The drop-in is 0644 root:root (world-readable, #1641), so this is a
-    plain, unprivileged read — no seam round trip. Any read failure (missing
-    file on a fresh install or a host that never propagated, a permission
-    oddity, or — #1717 review — undecodable bytes from manual tampering or a
-    locale mismatch, which ``Path.read_text()`` raises as a
-    ``UnicodeDecodeError`` rather than an ``OSError``) counts as "does not
-    match": propagate and let the atomic rewrite repair it, instead of an
-    otherwise-idempotent PUT 500ing.
+    plain, unprivileged read — no seam round trip. Read as explicit UTF-8
+    (#1717 review): the file is always written UTF-8 by
+    :class:`~hal0.system.seam.SystemCtlSeam`, and the template's em dash
+    would otherwise be locale-dependent — under e.g. ``LC_ALL=C`` a bare
+    ``Path.read_text()`` can fail to decode a byte-for-byte correct file,
+    misreporting a healthy drop-in as drift on every enabled graph PUT.
+    Any read failure (missing file on a fresh install or a host that never
+    propagated, a permission oddity, or genuinely undecodable content —
+    ``Path.read_text()`` raises ``UnicodeDecodeError``, not ``OSError``)
+    counts as "does not match": propagate and let the atomic rewrite
+    repair it, instead of an otherwise-idempotent PUT 500ing.
     """
     try:
-        return DROP_IN_PATH.read_text() == render_drop_in(slot, timeout_s)
+        return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(slot, timeout_s)
     except (OSError, UnicodeDecodeError):
         return False
 

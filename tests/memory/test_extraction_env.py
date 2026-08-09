@@ -273,6 +273,36 @@ def test_drop_in_matches_false_on_undecodable_bytes(monkeypatch, tmp_path: Path)
     assert drop_in_matches("agent", 300) is False
 
 
+def test_drop_in_matches_reads_utf8_regardless_of_locale(monkeypatch, tmp_path: Path):
+    """#1717 review: the drop-in (and the em dash in its header comment) is
+    always written UTF-8 by SystemCtlSeam — the comparison must decode it as
+    UTF-8 explicitly rather than via ``Path.read_text()``'s locale-dependent
+    default, or a byte-for-byte correct file can misread as drift under
+    e.g. ``LC_ALL=C`` and trigger a needless rewrite + restart on every
+    enabled graph PUT."""
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "extraction-model.conf"
+    # The rendered template contains a real em dash (U+2014) in its header.
+    content = render_drop_in("agent", 300)
+    assert "—" in content
+    path.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+
+    real_read_text = Path.read_text
+
+    def _locale_sensitive_read_text(self, *args, **kwargs):
+        # Fail unless the caller passed an explicit encoding — the same
+        # failure mode as a real ASCII-locale default.
+        if kwargs.get("encoding") != "utf-8" and (len(args) < 1 or args[0] != "utf-8"):
+            raise UnicodeDecodeError("ascii", b"\xe2\x80\x94", 0, 1, "ordinal not in range(128)")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _locale_sensitive_read_text)
+
+    assert drop_in_matches("agent", 300) is True
+
+
 def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Path):
     """Root / dev / CI keeps the pre-seam behaviour: a direct atomic write."""
     import hal0.memory.extraction_env as ee
