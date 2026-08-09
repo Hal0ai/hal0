@@ -342,12 +342,14 @@ def test_a_declined_or_failed_agent_pull_still_succeeds(agent_block: str) -> Non
     assert 'if [[ "${_agent_wanted}" -ne 1 ]]; then' in agent_block
 
 
-def test_the_skip_path_explains_what_tool_calls_now_need(agent_block: str) -> None:
-    """A blank tool call must never be a mystery: skipping has to say that brain
-    CHAT works, tool calls do not, and which setting points where."""
+def test_the_skip_path_explains_the_tool_model_fallback(agent_block: str) -> None:
+    """Skipping the agent pull must never read as a degraded install: the brain
+    is a native tool-caller (runner ade07ba), so the notice has to say the
+    steward chats AND calls tools on its own, and name the fallback setting
+    that stays targetless until an agent model is bound."""
     assert "tool_model" in agent_block
     assert "hal0/agent" in agent_block
-    assert "chat works" in agent_block
+    assert "calls tools on its own" in agent_block
 
 
 def test_agent_model_env_overrides_are_wired(install_sh_text: str) -> None:
