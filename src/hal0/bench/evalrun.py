@@ -1,278 +1,146 @@
-"""evalrun.py — agentic task eval (the quality tier, DESIGN §0 "pi-bench" un-deferred).
+"""evalrun.py — agentic-scenario eval (the quality tier).
 
 benchlab's cells measure SPEED. This module measures whether a model actually
-COMPLETES agentic tasks — correctly and in order — by driving it as a real agent
-and scoring a VERIFIABLE final value. No LLM judge: each task hides values across
-sources (a fixture codebase, a page on hal0.dev) and requires the agent to gather
-and combine them into one deterministic answer, so scoring is exact-match, and the
-answer is only reachable if the intermediate steps succeeded.
+completes tool-calling scenarios — correctly, safely, and without fabricating
+data. Bench Phase 3 (docs/superpowers/plans/2026-08-09-bench-phase3-oss-
+adapters.md, design decision 4) replaced the hand-rolled Hermes-driven scorer
+that lived here with the pinned OSS harness ``tool-eval-bench`` (tag v2.5.0,
+offline/deterministic, scoring hardened ~2026-08-03): this module is now a
+thin shim over ``hal0.bench.adapters.tool_eval`` that keeps the CLI/worker
+surface (``hal0 bench eval --models --task --dry-run --force``), the
+politeness gate, and the store path (``<state root>/evals.jsonl``) evalrun
+has always used, so nothing downstream (the ``/api/benchmarks/evals`` route,
+bundle export) has to change shape.
 
-Scaffold: hal0's own Hermes agent (operator choice), driven headless —
-``hermes -z <prompt> -m <model> --provider custom --yolo -t <toolsets>
---pass-session-id`` — so we eval the model as it's actually used, with real
-browser/file/shell tools. Reproducibility: targets are things you CONTROL and
-that don't drift — a checked-in fixture repo, and hal0.dev (your own site). The
-expected value is DERIVED from the source of truth at score time (re-fetch
-hal0.dev / re-read the fixture), so a task never goes stale when the site changes.
+Everything Hermes-specific from the old implementation is gone: there is no
+``HERMES`` binary, no headless ``-z`` invocation, no hand-written task
+catalogue with derive-from-fixture expected answers, no exact-match scorer.
+tool-eval-bench IS the scorer (rubric-graded, its own scenario contracts) and
+IS the task catalogue (``list_tasks`` reads it via its own ``--dry-run
+--json`` listing, never a hardcoded table that could drift from a future
+tool-eval-bench release). This path never invokes hermes.
 
-Three scores per task (all from the transcript, no judge):
-  * correctness — normalized final answer contains the derived expected value;
-  * ordering / partial credit — how many hidden checkpoints appear in the trace
-    (got the code value but failed the browser step → 1/2, diagnostic);
-  * efficiency — wall time, turns, tool-calls, tokens (the speed tie-in).
-
-Records land in ``<state root>/evals.jsonl`` (separate from throughput
-records.jsonl — different shape: a score, not a t/s).
+Records land in ``evals.jsonl`` (separate from throughput records.jsonl —
+different shape: a score, not a t/s), one row per (model, scenario), now also
+stamped with ``tool_version`` + ``scoring_era`` (the adapter's "never compare
+scores across the hardening boundary" contract).
 """
 
 from __future__ import annotations
 
 import json
-import re
+import shutil
 import subprocess
-import time
-import urllib.request
+import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .adapters import TOOL_EVAL_BENCH_PIN, tool_eval
+from .schema import Outcome
 from .store import state_root
 
-FIXTURES = Path(__file__).resolve().parent / "evals" / "agentic" / "fixtures"
-HERMES = "/usr/local/bin/hermes"
+#: The console-script entry point (``[project.scripts]`` in tool-eval-bench's
+#: own pyproject.toml) — checked at plan time, same PATH-lookup pattern as
+#: every other engine binary this codebase shells out to (mirrors
+#: ``planner._ADAPTER_TOOL_FOR_KIND`` for the guidellm/llama-benchy kinds;
+#: eval has no planner, so cmd_eval/cmd_worker check this directly).
+TOOL_EVAL_BENCH_BIN = "tool-eval-bench"
+
+_DEFAULT_TASK_TIMEOUT_S = 180.0
 
 
-def hermes_missing() -> str | None:
-    """An actionable reason string when the Hermes binary can't run (None when
-    it can). Checked up-front by the CLI and worker so a box without Hermes
-    gets one clean message instead of a per-task traceback (#1526)."""
-    import os
-
-    if not os.access(HERMES, os.X_OK):
-        return f"hermes binary not found or not executable at {HERMES} — agentic eval needs Hermes installed"
+def tool_eval_missing() -> str | None:
+    """An actionable reason string when tool-eval-bench can't run (None when
+    it can). Checked up-front by the CLI and worker so a box without it gets
+    one clean message instead of a per-scenario traceback (the same #1526
+    rule the old ``hermes_missing`` enforced, now for the pinned tool)."""
+    if shutil.which(TOOL_EVAL_BENCH_BIN) is None:
+        return (
+            f"{TOOL_EVAL_BENCH_BIN!r} not found on PATH (pin: {TOOL_EVAL_BENCH_PIN}) — "
+            "agentic eval needs tool-eval-bench installed"
+        )
     return None
 
 
 # --------------------------------------------------------------------------- #
-# tasks
+# task catalogue — sourced from tool-eval-bench's own scenario listing
 # --------------------------------------------------------------------------- #
 
 
 @dataclass
 class Task:
-    """One agentic task. ``expected_fn`` DERIVES the correct answer from the
-    source of truth at score time (re-fetch / re-read), so the task self-updates
-    and never hardcodes a value that can drift. ``checkpoints`` are the
-    intermediate hidden values whose presence in the trace scores ordering."""
+    """One tool-eval-bench scenario, as much as the CLI/worker need: an id
+    (passed straight through to ``--scenarios``) and its category letter for
+    display. Deliberately NOT the old hand-rolled ``Task`` (no prompt/
+    checkpoints/expected_fn/fixture) — tool-eval-bench owns the scenario
+    content now; this is just enough to select and label one."""
 
     id: str
-    kind: str  # "code" | "browser" | "combine"
-    prompt: str
-    checkpoints: list[str]
-    expected_fn: Callable[[], str]
-    toolsets: str = "file,terminal,web,browser"
-    timeout_s: int = 300
-    fixture: str | None = None  # subdir under evals/agentic/fixtures/
+    kind: str = ""
 
 
-def _fetch_text(url: str, timeout: float = 15.0) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": "hal0-bench-eval"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", "replace")
+#: The live catalogue, populated by :func:`ensure_tasks` on first use. A
+#: plain module-level list (not a function call) so callers/tests can
+#: monkeypatch it directly, same seam the old hermes-driven ``TASKS`` gave.
+TASKS: list[Task] = []
 
 
-def _discord_code() -> str:
-    """The Discord invite code as it appears on hal0.dev RIGHT NOW (source of
-    truth). Derived live so the task tracks the site — no hardcoded code."""
-    html = _fetch_text("https://hal0.dev")
-    m = re.search(r"discord\.(?:gg|com/invite)/([A-Za-z0-9]+)", html)
-    if not m:
-        raise RuntimeError("no discord invite found on hal0.dev")
-    return m.group(1)
+def _default_dry_run_runner(argv: list[str], timeout_s: float) -> tuple[int, str, str]:
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
+    return proc.returncode, proc.stdout, proc.stderr
 
 
-# --- derive-from-fixture expected answers (read the canonical fixture, so a task
-#     never hardcodes a value that could drift out of sync with its files) ------
+def list_tasks(
+    *,
+    python_exe: str = sys.executable,
+    runner: Callable[[list[str], float], tuple[int, str, str]] | None = None,
+) -> list[Task]:
+    """The real scenario catalogue via ``python -m tool_eval_bench run
+    --dry-run --json`` (needs no server or model at all — see
+    ``adapters/tool_eval.py``'s module docstring). Never raises: a
+    missing/broken tool degrades to an empty list, same "never crash the CLI"
+    rule as the rest of this module — the caller surfaces
+    :func:`tool_eval_missing` separately for the actionable message."""
+    argv = [python_exe, "-m", tool_eval.MODULE, "run", "--dry-run", "--json"]
+    run = runner or _default_dry_run_runner
+    try:
+        rc, out, _err = run(argv, 30.0)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if rc != 0:
+        return []
+    try:
+        doc = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    scenarios = doc.get("scenarios") if isinstance(doc, dict) else None
+    if not isinstance(scenarios, list):
+        return []
+    return [
+        Task(id=str(s["id"]), kind=str(s.get("category") or ""))
+        for s in scenarios
+        if isinstance(s, dict) and s.get("id")
+    ]
 
 
-def _fx(name: str) -> Path:
-    return FIXTURES / name
-
-
-def _cipher_answer() -> str:
-    import base64
-    import codecs
-
-    enc = (_fx("cipher-chain") / "secret.txt").read_text().strip()
-    plain = codecs.encode(base64.b64decode(enc).decode(), "rot13")
-    return re.search(r"\d+", plain).group()
-
-
-def _loop_answer() -> str:
-    import csv
-
-    rows = list(csv.DictReader((_fx("loop-aggregate") / "orders.csv").read_text().splitlines()))
-    shipped = sum(int(r["amount"]) for r in rows if r["status"] == "shipped")
-    refund = int(
-        re.search(r"REFUND:\s*(\d+)", (_fx("loop-aggregate") / "notes.md").read_text()).group(1)
-    )
-    return str(shipped - refund)
-
-
-def _dep_answer() -> str:
-    keys = (_fx("dep-trace") / "keys.py").read_text()
-    active = re.search(r'ACTIVE_KEY\s*=\s*"([^"]+)"', keys).group(1)
-    registry = json.loads((_fx("dep-trace") / "registry.json").read_text())
-    return str(registry[active])
-
-
-def _grep_answer() -> str:
-    seats = int(
-        re.search(
-            r"LICENSE_SEAT_COUNT\s*=\s*(\d+)",
-            (_fx("grep-hunt") / "deep/nested/license.conf").read_text(),
-        ).group(1)
-    )
-    per = int(
-        re.search(r"SEATS_PER_POD:\s*(\d+)", (_fx("grep-hunt") / "pods.yaml").read_text()).group(1)
-    )
-    return str(seats * per)
-
-
-def _recurrence_answer() -> str:
-    n = 3
-    for _ in range(12):
-        n = (n * 2 + 1) % 97
-    return str(n)
-
-
-def _browser_combine_answer() -> str:
-    # BASE_PORT (codebase) + length of the live hal0.dev discord invite code
-    return str(8412 + len(_discord_code()))
-
-
-TASKS: list[Task] = [
-    Task(
-        id="codebase-combine",
-        kind="code",
-        fixture="codebase-combine",
-        toolsets="file,terminal",
-        timeout_s=240,
-        checkpoints=["8412", "137"],
-        expected_fn=lambda: "8549",  # BASE_PORT (src/config.py) + HEALTH_OFFSET (lib/util.py)
-        prompt=(
-            "You are in a small codebase (current directory). Read the code to find two values:\n"
-            "  1) BASE_PORT — the port the primary listener binds.\n"
-            "  2) HEALTH_OFFSET — the offset added to BASE_PORT for the health-check listener.\n"
-            "They are defined in DIFFERENT files. Compute the health-check port = BASE_PORT + HEALTH_OFFSET.\n"
-            "Reply with ONLY that final integer on the last line, nothing else."
-        ),
-    ),
-    Task(
-        id="cipher-chain",
-        kind="cipher",
-        fixture="cipher-chain",
-        toolsets="file,terminal",
-        timeout_s=300,
-        checkpoints=["final code", "7391"],
-        expected_fn=_cipher_answer,
-        prompt=(
-            "The file secret.txt in the current directory contains one line of gibberish. It was "
-            "base64-encoded, and the bytes underneath are ROT13-encrypted. Decode it fully "
-            "(base64 first, then ROT13) to recover an English sentence containing a number. "
-            "Reply with ONLY that number on the last line, nothing else."
-        ),
-    ),
-    Task(
-        id="loop-aggregate",
-        kind="loop",
-        fixture="loop-aggregate",
-        toolsets="file,terminal",
-        timeout_s=300,
-        checkpoints=["525", "60", "shipped"],
-        expected_fn=_loop_answer,
-        prompt=(
-            "orders.csv lists orders with an amount and a status. Sum the `amount` of EVERY row "
-            "whose status is exactly 'shipped'. Then read notes.md, find the REFUND value, and "
-            "subtract it from that sum. Reply with ONLY the final integer on the last line."
-        ),
-    ),
-    Task(
-        id="dep-trace",
-        kind="review",
-        fixture="dep-trace",
-        toolsets="file,terminal",
-        timeout_s=300,
-        checkpoints=["prod_west", "4471"],
-        expected_fn=_dep_answer,
-        prompt=(
-            "In this codebase, a.py sets PRIMARY_PORT = REGISTRY[ACTIVE_KEY]. Follow the chain: "
-            "find which key ACTIVE_KEY holds (defined in keys.py), then look that key up in "
-            "registry.json to get its integer value. Reply with ONLY that integer on the last line."
-        ),
-    ),
-    Task(
-        id="grep-hunt",
-        kind="review",
-        fixture="grep-hunt",
-        toolsets="file,terminal",
-        timeout_s=300,
-        checkpoints=["LICENSE_SEAT_COUNT", "24", "6"],
-        expected_fn=_grep_answer,
-        prompt=(
-            "Search this whole directory tree for the setting named LICENSE_SEAT_COUNT and read its "
-            "number. Then read SEATS_PER_POD from pods.yaml. Multiply the two. "
-            "Reply with ONLY the product on the last line, nothing else."
-        ),
-    ),
-    Task(
-        id="recurrence-loop",
-        kind="loop",
-        toolsets="terminal",
-        timeout_s=240,
-        checkpoints=[],
-        expected_fn=_recurrence_answer,
-        prompt=(
-            "Compute this exactly. Start with n = 3. Repeat the following step 12 times: "
-            "set n = (n * 2 + 1) mod 97. After the 12th iteration, report n. "
-            "Reply with ONLY the final value of n on the last line, nothing else."
-        ),
-    ),
-    Task(
-        id="discord-invite",
-        kind="browser",
-        toolsets="browser,web",
-        timeout_s=360,
-        # no partial-credit checkpoints: the obvious ones ("hal0.dev","discord")
-        # are words in the prompt itself, so they'd always match without the agent
-        # doing anything. For a pure browser task, correctness is the honest signal.
-        checkpoints=[],
-        expected_fn=_discord_code,
-        prompt=(
-            "Open a browser, navigate to https://hal0.dev, and find the link to the project's "
-            "Discord community. Extract the invite CODE — the part after 'discord.gg/' (or "
-            "'discord.com/invite/'). Reply with ONLY that invite code on the last line, nothing else."
-        ),
-    ),
-    Task(
-        id="browser-combine",
-        kind="combine",
-        fixture="codebase-combine",
-        toolsets="browser,web,file,terminal",
-        timeout_s=420,
-        # only the code-side value is an honest progress signal ("discord" is in
-        # the prompt); reaching 8412 means the agent actually read the codebase.
-        checkpoints=["8412"],
-        expected_fn=_browser_combine_answer,
-        prompt=(
-            "Two steps, then combine. (1) Open https://hal0.dev, find the Discord invite code (the "
-            "part after discord.gg/), and count how many characters it has — call that N. "
-            "(2) In this codebase, read BASE_PORT from src/config.py. Report BASE_PORT + N. "
-            "Reply with ONLY that final integer on the last line, nothing else."
-        ),
-    ),
-]
+def ensure_tasks(
+    *,
+    python_exe: str = sys.executable,
+    runner: Callable[[list[str], float], tuple[int, str, str]] | None = None,
+) -> list[Task]:
+    """Populate :data:`TASKS` from the real tool on first use; a no-op if
+    already populated (a test's ``monkeypatch.setattr(evalrun, "TASKS", …)``
+    is never overwritten) or if the tool isn't installed (``TASKS`` stays
+    empty — the caller checks :func:`tool_eval_missing` for why)."""
+    global TASKS
+    if TASKS:
+        return TASKS
+    if tool_eval_missing():
+        return TASKS
+    TASKS = list_tasks(python_exe=python_exe, runner=runner)
+    return TASKS
 
 
 def get_task(task_id: str) -> Task | None:
@@ -280,132 +148,37 @@ def get_task(task_id: str) -> Task | None:
 
 
 # --------------------------------------------------------------------------- #
-# scoring (pure — unit-tested without a live agent)
+# argv — pure, used by the runner and by `eval --dry-run`
 # --------------------------------------------------------------------------- #
 
 
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", "", (s or "").strip().lower())
-
-
-def extract_answer(stdout: str) -> str:
-    """The agent's final answer: the last non-empty line of its output (the tasks
-    instruct 'reply with ONLY … on the last line')."""
-    lines = [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
-    return lines[-1] if lines else ""
-
-
-@dataclass
-class Score:
-    correct: bool
-    expected: str
-    answer: str
-    checkpoints_hit: list[str]
-    checkpoints_total: int
-    score: float  # 1.0 correct; else partial from checkpoints (max 0.5)
-
-
-def score_task(task: Task, stdout: str, expected: str, trace: str = "") -> Score:
-    """Score a finished run against the derived expected value.
-
-    Correctness is lenient on formatting: the normalized expected value appearing
-    anywhere in the final answer (or the stdout tail) counts — the agent may wrap
-    it in prose. Ordering credit scans the tool-call TRACE (plus stdout) for each
-    checkpoint (the intermediate hidden values) — hermes -z prints only the final
-    answer to stdout, so the intermediate values live in the exported trace."""
-    answer = extract_answer(stdout)
-    ne = _norm(expected)
-    correct = bool(ne) and (ne in _norm(answer) or ne in _norm(stdout[-2000:]))
-    haystack = _norm(stdout + " " + trace)
-    hits = [c for c in task.checkpoints if _norm(c) in haystack]
-    # full marks on a correct answer; else partial credit for reaching the
-    # hidden checkpoint values, capped below a pass.
-    val = 1.0 if correct else round(0.5 * (len(hits) / max(1, len(task.checkpoints))), 3)
-    return Score(
-        correct=correct,
-        expected=expected,
-        answer=answer[:400],
-        checkpoints_hit=hits,
-        checkpoints_total=len(task.checkpoints),
-        score=val,
+def tool_eval_cmd(
+    task: Task,
+    model: str,
+    api: str,
+    *,
+    python_exe: str = sys.executable,
+    output_path: Path | str = "<out>",
+) -> list[str]:
+    """The exact tool-eval-bench argv for one scenario against one model
+    (pure — used by ``eval --dry-run`` and mirrored by :func:`run_task`).
+    Routes through hal0's own OpenAI-compatible gateway (``{api}/v1``), the
+    same endpoint the old Hermes ``--provider custom`` path resolved a model
+    id through — so this needs no separate slot/port lookup."""
+    request = tool_eval.ToolEvalRequest(
+        python_exe=python_exe,
+        base_url=f"{api.rstrip('/')}/v1",
+        model=model,
+        output_path=Path(output_path),
+        scenarios=(task.id,),
+        timeout_s=_DEFAULT_TASK_TIMEOUT_S,
     )
+    return tool_eval.build_argv(request)
 
 
 # --------------------------------------------------------------------------- #
-# hermes driver + metrics
+# records
 # --------------------------------------------------------------------------- #
-
-
-def hermes_cmd(task: Task, model: str, api: str) -> list[str]:
-    """The exact headless Hermes invocation (pure — used by the runner and by
-    `eval --dry-run`)."""
-    return [
-        HERMES,
-        "-z",
-        task.prompt,
-        "-m",
-        model,
-        "--provider",
-        "custom",
-        "--yolo",
-        "-t",
-        task.toolsets,
-        "--pass-session-id",
-    ]
-
-
-def _collect_metrics(workdir: Path, wall_s: float) -> tuple[dict[str, Any], str]:
-    """Real trace metrics + the tool-call trace text for the session that ran in
-    ``workdir``.
-
-    hermes -z prints neither the session id nor the tool-call trace to stdout —
-    both live in the SQLite session store — so we export recent sessions
-    (newest-first) and match the one whose ``cwd`` is our workdir. The workdir is
-    unique per (task, run), so this is concurrency-safe and unambiguous. Returns
-    (metrics, trace_text); trace_text is the serialized messages so the scorer can
-    scan it for the intermediate checkpoint values. Falls back to wall time only
-    if the export isn't available."""
-    metrics: dict[str, Any] = {
-        "wall_s": round(wall_s, 1),
-        "turns": None,
-        "tool_calls": None,
-        "tokens_in": None,
-        "tokens_out": None,
-        "api_calls": None,
-    }
-    trace = ""
-    try:
-        out = subprocess.run(
-            [HERMES, "sessions", "export", "-"], capture_output=True, text=True, timeout=30
-        )
-    except (OSError, subprocess.SubprocessError):
-        return metrics, trace
-    target = str(workdir)
-    for line in (out.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(d, dict) or d.get("cwd") != target:
-            continue
-        metrics.update(
-            turns=d.get("message_count"),
-            tool_calls=d.get("tool_call_count"),
-            tokens_in=d.get("input_tokens"),
-            tokens_out=d.get("output_tokens"),
-            api_calls=d.get("api_call_count"),
-        )
-        msgs = d.get("messages")
-        if isinstance(msgs, list):
-            try:
-                trace = json.dumps(msgs, ensure_ascii=False)
-            except (TypeError, ValueError):
-                trace = str(msgs)
-        break  # newest-first, so the first cwd match is this run
-    return metrics, trace
 
 
 @dataclass
@@ -415,7 +188,7 @@ class EvalRecord:
     task_id: str
     kind: str
     model: str
-    outcome: str  # "ok" | "failed" | "hang"
+    outcome: str  # "ok" | "failed" | "hang" — schema.Outcome vocabulary
     score: float
     correct: bool
     expected: str
@@ -424,6 +197,12 @@ class EvalRecord:
     checkpoints_total: int
     metrics: dict[str, Any]
     note: str = ""
+    # Bench Phase 3: which tool-eval-bench build produced this score, and
+    # which side of the ~2026-08-03 scoring-hardening boundary it falls on
+    # (adapters/tool_eval.py) — a score from before that boundary is not
+    # comparable to one from after it. Empty for pre-Phase-3 records.
+    tool_version: str = ""
+    scoring_era: str = ""
     schema: int = 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -456,77 +235,106 @@ def read_evals() -> list[dict[str, Any]]:
     return out
 
 
-def run_task(task: Task, model: str, run_id: str, api: str, workroot: Path) -> EvalRecord:
-    """Drive one task through Hermes for one model, then score it.
+# --------------------------------------------------------------------------- #
+# run — one scenario, through the tool-eval-bench adapter
+# --------------------------------------------------------------------------- #
 
-    Prepares an isolated workdir (a copy of the fixture, if any), runs Hermes
-    headless there with a watchdog (3x the task timeout), extracts + scores the
-    final answer, and returns the record. Never raises on a bad run — a failed
-    task records outcome=failed/hang and continues (like the sweep runner)."""
-    import shutil
 
-    workdir = workroot / f"{task.id}-{run_id[-6:]}"
-    workdir.mkdir(parents=True, exist_ok=True)
-    if task.fixture:
-        src = FIXTURES / task.fixture
-        if src.is_dir():
-            shutil.copytree(src, workdir / task.fixture, dirs_exist_ok=True)
-            workdir = workdir / task.fixture  # run the agent inside the fixture
-
-    cmd = hermes_cmd(task, model, api)
-    started = time.time()
-    try:
-        proc = subprocess.run(
-            cmd, cwd=str(workdir), capture_output=True, text=True, timeout=task.timeout_s * 3
-        )
-        stdout = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        outcome = "ok" if proc.returncode == 0 else "failed"
-    except subprocess.TimeoutExpired as exc:
-        stdout = (exc.stdout if isinstance(exc.stdout, str) else "") or ""
-        outcome = "hang"
-    except (FileNotFoundError, PermissionError) as exc:
-        # No hermes binary on this box (#1526): a clean failed record with an
-        # actionable note, not a raw traceback out of the CLI.
-        stdout = f"cannot execute {cmd[0]}: {exc}"
-        outcome = "failed"
-    wall = time.time() - started
-
-    try:
-        expected = task.expected_fn()
-    except Exception as exc:  # deriving the answer failed (e.g. hal0.dev unreachable)
-        return EvalRecord(
-            run_id=run_id,
-            suite="agentic",
-            task_id=task.id,
-            kind=task.kind,
-            model=model,
-            outcome="failed",
-            score=0.0,
-            correct=False,
-            expected="",
-            answer="",
-            checkpoints_hit=[],
-            checkpoints_total=len(task.checkpoints),
-            metrics={"wall_s": round(wall, 1)},
-            note=f"expected-derive failed: {exc}",
-        )
-
-    metrics, trace = _collect_metrics(workdir, wall)
-    sc = score_task(task, stdout, expected, trace)
-    note = f"{outcome}: {stdout[-200:]}" if outcome != "ok" and not sc.correct else ""
+def _failed_record(
+    task: Task, model: str, run_id: str, outcome: str, note: str, tool_version: str = ""
+) -> EvalRecord:
     return EvalRecord(
         run_id=run_id,
         suite="agentic",
         task_id=task.id,
         kind=task.kind,
         model=model,
-        outcome="ok" if sc.correct or outcome == "ok" else outcome,
-        score=sc.score,
-        correct=sc.correct,
-        expected=sc.expected,
-        answer=sc.answer,
-        checkpoints_hit=sc.checkpoints_hit,
-        checkpoints_total=sc.checkpoints_total,
-        metrics=metrics,
+        outcome=outcome,
+        score=0.0,
+        correct=False,
+        expected="",
+        answer="",
+        checkpoints_hit=[],
+        checkpoints_total=0,
+        metrics={},
         note=note,
+        tool_version=tool_version,
+        scoring_era=tool_eval.classify_scoring_era(tool_version),
+    )
+
+
+def _normalize_metrics(raw: dict[str, Any], checkpoints_hit: list[str]) -> dict[str, Any]:
+    """tool-eval-bench's own metric names (``duration_seconds``/
+    ``completion_tokens``/``prompt_tokens``) PLUS the pre-Phase-3 names
+    (``wall_s``/``tool_calls``/``tokens_out``/``tokens_in``) the CLI table
+    and the ``/api/benchmarks/evals`` route already read — so neither
+    downstream consumer needed a shape change for Phase 3 (design decision
+    4: "Records keep the store path evalrun uses today")."""
+    metrics = dict(raw)
+    metrics.setdefault("wall_s", raw.get("duration_seconds"))
+    metrics.setdefault("tool_calls", len(checkpoints_hit))
+    metrics.setdefault("tokens_out", raw.get("completion_tokens"))
+    metrics.setdefault("tokens_in", raw.get("prompt_tokens"))
+    return metrics
+
+
+def run_task(
+    task: Task,
+    model: str,
+    run_id: str,
+    api: str,
+    workroot: Path,
+    *,
+    runner: Callable[[list[str], float], tuple[int, str, str]] | None = None,
+    python_exe: str = sys.executable,
+) -> EvalRecord:
+    """Drive ONE tool-eval-bench scenario for one model, then translate its
+    result into evalrun's :class:`EvalRecord` shape. Never raises on a bad
+    run — a timeout, a missing tool, a connection failure, or a scenario the
+    tool doesn't recognize all produce a returned FAILED/HANG record, not an
+    exception (mirrors ``harness.run_cell`` / the old hermes-driven
+    ``run_task``)."""
+    out_path = workroot / f"{task.id}-{run_id[-6:]}.json"
+    request = tool_eval.ToolEvalRequest(
+        python_exe=python_exe,
+        base_url=f"{api.rstrip('/')}/v1",
+        model=model,
+        output_path=out_path,
+        scenarios=(task.id,),
+        timeout_s=_DEFAULT_TASK_TIMEOUT_S,
+    )
+    result = tool_eval.run_tool_eval(request, runner=runner)
+    if result.doc is None:
+        outcome = "hang" if result.outcome is Outcome.HANG else "failed"
+        return _failed_record(task, model, run_id, outcome, result.note or f"rc={result.rc}")
+
+    suite_rec = tool_eval.parse_scores(result.doc)
+    row = next((t for t in suite_rec.tasks if t.task_id == task.id), None)
+    if row is None:
+        return _failed_record(
+            task,
+            model,
+            run_id,
+            "failed",
+            "scenario missing from tool-eval-bench output (unknown --scenarios id?)",
+            suite_rec.tool_version,
+        )
+
+    return EvalRecord(
+        run_id=run_id,
+        suite="agentic",
+        task_id=row.task_id,
+        kind=row.kind or task.kind,
+        model=model,
+        outcome=row.outcome,
+        score=row.score,
+        correct=row.correct,
+        expected=row.expected,
+        answer=row.answer,
+        checkpoints_hit=row.checkpoints_hit,
+        checkpoints_total=row.checkpoints_total,
+        metrics=_normalize_metrics(row.metrics, row.checkpoints_hit),
+        note=row.note,
+        tool_version=row.tool_version,
+        scoring_era=row.scoring_era,
     )
