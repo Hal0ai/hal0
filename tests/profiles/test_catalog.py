@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig
-from hal0.errors import Conflict
+from hal0.errors import Conflict, UnprocessableEntity
 from hal0.profiles import ProfileCatalog, ProfilePatch
 
 
@@ -59,6 +59,36 @@ def test_create_update_delete_profile(tmp_hal0_home: str) -> None:
 
     catalog.delete("my-rocm")
     assert all(profile.name != "my-rocm" for profile in catalog.list())
+
+
+# ── #1730: malformed shell quoting must never reach disk ─────────────────
+#
+# #1639 added a launch-time guard (providers.container, code
+# slot.profile_flags_malformed) so a divergent profile with unmatched quotes
+# no longer 500s the launch/preview path — but that only fires for a profile
+# that ALREADY made it onto disk. The actual write seam
+# (screen_profile_flags, called by both ProfileCatalog.create/update and the
+# API routes) used to swallow the shlex.split ValueError and return, letting
+# bad quoting sail straight through to persistence.
+
+
+def test_create_rejects_unmatched_quoting(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+    with pytest.raises(UnprocessableEntity) as exc_info:
+        catalog.create("bad-quotes", ProfileConfig(flags='-fa on "unterminated'))
+    assert exc_info.value.code == "profiles.flags_malformed"
+    # Never persisted — a re-list must not show the rejected profile.
+    assert all(profile.name != "bad-quotes" for profile in catalog.list())
+
+
+def test_update_rejects_unmatched_quoting(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+    catalog.create("good-profile", ProfileConfig(flags="-fa on"))
+    with pytest.raises(UnprocessableEntity) as exc_info:
+        catalog.update("good-profile", ProfilePatch(flags="-fa on 'unterminated"))
+    assert exc_info.value.code == "profiles.flags_malformed"
+    # The prior valid flags must survive an update rejected on save.
+    assert catalog.resolve("good-profile").flags == "-fa on"
 
 
 def test_delete_profile_in_use_raises_conflict(tmp_hal0_home: str) -> None:

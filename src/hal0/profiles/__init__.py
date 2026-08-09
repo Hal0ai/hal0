@@ -36,7 +36,7 @@ from hal0.config.schema import (
     ProfileConfig,
     resolve_profile_flags,
 )
-from hal0.errors import Conflict, NotFound
+from hal0.errors import Conflict, NotFound, UnprocessableEntity
 
 log = logging.getLogger(__name__)
 
@@ -392,13 +392,29 @@ def screen_profile_flags(flags: str | None, *, grandfathered: str | None = None)
     the §5 hardware set ONLY: #1404's load-path sanitizer already strips the
     §21.7 managed args from stored profiles, so a managed flag can never be
     inherited in the first place.
+
+    ``flags`` itself must be valid shell text (#1730). #1639 added a
+    launch-time guard (``providers.container``, ``slot.profile_flags_malformed``)
+    so a divergent profile with unmatched quoting no longer 500s the
+    launch/preview path — but that only covers a profile that ALREADY made it
+    onto disk. This screen is the actual write seam (routes/import/CLI all
+    funnel through it), and until now it silently returned on a
+    ``shlex.split`` failure instead of rejecting it, so bad quoting sailed
+    straight through to persistence — the root cause #1639 patched around
+    rather than fixed. Reject it here instead, with the same error family the
+    launch-time guard uses, so the operator sees the problem at save time
+    instead of the next launch.
     """
     if not flags or not flags.strip():
         return
     try:
         tokens = shlex.split(flags)
-    except ValueError:
-        return  # schema/parser owns malformed quoting diagnostics
+    except ValueError as exc:
+        raise UnprocessableEntity(
+            f"profile flags are not valid shell text: {exc}",
+            code="profiles.flags_malformed",
+            details={"flags": flags},
+        ) from exc
     from hal0.slots.argv import (
         SLOT_HARDWARE_FLAGS,
         _canon,
