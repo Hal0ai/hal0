@@ -18,7 +18,8 @@ Modes
           [server].extra_args (appended after the originals, so last-wins dedup
           lets the variant override profile/bundle flags), restart, wait ready,
           run N timed /completion calls. Reports prefill+decode t/s medians and
-          draft-acceptance when the server exposes it in timings.
+          draft-acceptance when the server exposes it in timings. One variant =
+          a plain labelled measurement; two or more = a side-by-side A/B.
   reuse   Built-in A/B of --cache-reuse 256 vs 0 on a shared-prefix trace:
           per variant, two /completion calls with the same long prefix and
           different suffixes; the second call's prompt timings show the reuse
@@ -587,8 +588,11 @@ def main() -> None:
     ap.add_argument("--note", default=None, help="free-text note for the results header")
     args = ap.parse_args()
 
-    if args.mode == "ab" and len(args.variant) < 2:
-        ap.error("--mode ab needs at least two --variant entries")
+    # One --variant is a plain labelled measurement (the bench runner's chat
+    # cells pass exactly one, carrying the cell's config variant); two or more
+    # is an A/B comparison. Zero would measure nothing.
+    if args.mode == "ab" and not args.variant:
+        ap.error("--mode ab needs at least one --variant entry")
 
     fn = {
         "ab": mode_ab,

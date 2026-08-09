@@ -43,6 +43,17 @@ FIXTURES = Path(__file__).resolve().parent / "evals" / "agentic" / "fixtures"
 HERMES = "/usr/local/bin/hermes"
 
 
+def hermes_missing() -> str | None:
+    """An actionable reason string when the Hermes binary can't run (None when
+    it can). Checked up-front by the CLI and worker so a box without Hermes
+    gets one clean message instead of a per-task traceback (#1526)."""
+    import os
+
+    if not os.access(HERMES, os.X_OK):
+        return f"hermes binary not found or not executable at {HERMES} — agentic eval needs Hermes installed"
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # tasks
 # --------------------------------------------------------------------------- #
@@ -473,6 +484,11 @@ def run_task(task: Task, model: str, run_id: str, api: str, workroot: Path) -> E
     except subprocess.TimeoutExpired as exc:
         stdout = (exc.stdout if isinstance(exc.stdout, str) else "") or ""
         outcome = "hang"
+    except (FileNotFoundError, PermissionError) as exc:
+        # No hermes binary on this box (#1526): a clean failed record with an
+        # actionable note, not a raw traceback out of the CLI.
+        stdout = f"cannot execute {cmd[0]}: {exc}"
+        outcome = "failed"
     wall = time.time() - started
 
     try:

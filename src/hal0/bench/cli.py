@@ -12,9 +12,10 @@ modules — the CLI holds no logic of its own beyond wiring + output formatting:
     reindex    rebuild bench.db from records.jsonl (store.reindex)
     devices    GPU device nodes benchmark containers use (devices.resolve_bench_devices)
     publish    regenerate roster.json (+ --check diff) (publish.*)
-    import-v1  one-time: hal0 v1 index.json + server-ab/*.json → v2 records
 
-Runs unprivileged; Tier A cells go through the seam inside ``run``.
+Runs unprivileged; Tier A cells go through the seam inside ``run``. (The
+one-time ``import-v1`` migration verb was removed after every box migrated —
+records it produced are ordinary schema-2 rows and remain valid.)
 """
 
 from __future__ import annotations
@@ -33,32 +34,13 @@ from .publish import build_roster, emit_site_ts, write_roster
 from .regress import check as regress_check
 from .runner import DEFAULT_API, describe_worklist, fetch_host, run_session
 from .runner import _traffic_in_flight as traffic_in_flight
-from .schema import (
-    Config,
-    Engine,
-    Host,
-    Identity,
-    Model,
-    Outcome,
-    Record,
-    Rep,
-    Summary,
-    Workload,
-)
+from .schema import Host
 from .store import Store
-from .suites import Suite, load_suite_file, load_suites
-
-# Where operator suite TOMLs live (DESIGN §4). Virtual seed suites would be
-# merged in here in a fuller build; for now the dir is the source.
-SUITE_DIR = Path("/etc/hal0/bench/suites")
-
-# hal0 v1 result locations (DESIGN §3.1, §5 import-v1).
-V1_BENCH_DIR = Path("/var/lib/hal0/benchmarks")
+from .suites import Suite, load_suite_file, load_suites, suite_dir, window_file
 
 # Politeness policy for --scheduled (DESIGN §6): only proceed inside the
 # maintenance window and when the GPU is quiet. Window default is Sun 03:00-07:00
-# LOCAL, overridable via /etc/hal0/bench/window.toml.
-WINDOW_FILE = Path("/etc/hal0/bench/window.toml")
+# LOCAL, overridable via the window.toml under suites' etc dir (suites.window_file).
 _DAY_IDX = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
 
@@ -79,11 +61,12 @@ def _load_window() -> tuple[set[int], tuple[int, int], tuple[int, int], int]:
     Sun 03:00-07:00 / 10 min; a malformed file falls back to the safe default."""
     days = {6}
     start, end, min_idle = (3, 0), (7, 0), 10
-    if WINDOW_FILE.exists():
+    wf = window_file()
+    if wf.exists():
         try:
             import tomllib
 
-            doc = tomllib.loads(WINDOW_FILE.read_text())
+            doc = tomllib.loads(wf.read_text())
             w = doc.get("window", {})
             raw_days = w.get("days") or ([w["day"]] if w.get("day") else [])
             parsed = {
@@ -119,13 +102,14 @@ def _scheduled_politeness(api: str, now: datetime | None = None) -> tuple[bool, 
 
 def _load_suite(ref: str) -> Suite:
     """Resolve a --suite argument: a filesystem path to a .toml, else an id
-    looked up in SUITE_DIR."""
+    looked up in the suite dir (suites.suite_dir — shared with the API)."""
     p = Path(ref)
     if p.suffix == ".toml" and p.exists():
         return load_suite_file(p)
-    suites = load_suites(SUITE_DIR)
+    d = suite_dir()
+    suites = load_suites(d)
     if ref not in suites:
-        sys.exit(f"unknown suite {ref!r} (looked in {SUITE_DIR} and as a path)")
+        sys.exit(f"unknown suite {ref!r} (looked in {d} and as a path)")
     return suites[ref]
 
 
@@ -237,6 +221,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         budget_min=args.budget_min or suite.budget_min,
         exclusive=suite.exclusive,
         dry_run=args.dry_run,
+        trigger="scheduled" if args.scheduled else "manual",
     )
     # DESIGN §5.5: end-of-session — reindex + regression check + journal event.
     if not args.dry_run and result.run_ids:
@@ -385,6 +370,13 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 resolved = _resolve_model_id(item["model"], models)
                 from . import evalrun
 
+                missing = evalrun.hermes_missing()
+                if missing:
+                    print(f"[worker] {missing} — dropping eval item {item.get('id')}")
+                    control.dequeue(item.get("id"))
+                    control.write_status(None, _now_stamp())
+                    continue
+
                 control.write_status(
                     {
                         "item": item,
@@ -456,8 +448,10 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 _session_host(args.api, ctrl["exclusive"]),
                 suite_id=suite.id,
                 api=args.api,
+                budget_min=suite.budget_min,  # queued items were unbounded
                 exclusive=ctrl["exclusive"],
                 should_continue=control.worker_should_run,
+                trigger="queue",
             )
             if result.aborted == "stopped":
                 print(
@@ -471,12 +465,32 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 time.sleep(args.poll)
                 continue  # leave queued; never bench a busy GPU
             store.reindex()
+            flags = regress_check(store)
+            if flags:
+                print(f"[worker] [regress] {len(flags)} cell(s) flagged:")
+                for f in flags:
+                    print(f"  {f.model_id} {f.cell_key[:16]} {f.delta_pct}% vs {f.trailing_median}")
             control.dequeue(item.get("id"))
             print(f"[worker] {suite.id} done: ok={result.cells_ok} failed={result.cells_failed}")
             control.write_status(None, _now_stamp())
         except Exception as exc:  # a bad item must never crash-loop the worker
-            print(f"[worker] error on item {item.get('id')}: {exc!r} — dropping it and continuing")
+            # …but a TRANSIENT failure (registry blip, API restart) must not
+            # silently discard operator work either (the old behavior). Retry
+            # up to 3 attempts, re-queued at the tail so it can't head-of-line
+            # block; give up loudly after that.
+            attempts = int(item.get("attempts") or 0) + 1
             control.dequeue(item.get("id"))
+            if attempts < 3:
+                control.enqueue({**item, "attempts": attempts})
+                print(
+                    f"[worker] error on item {item.get('id')} "
+                    f"(attempt {attempts}/3): {exc!r} — re-queued at the tail"
+                )
+            else:
+                print(
+                    f"[worker] error on item {item.get('id')} "
+                    f"(attempt {attempts}/3): {exc!r} — giving up on this item"
+                )
             control.write_status(None, _now_stamp())
             time.sleep(args.poll)
     return 0
@@ -589,6 +603,11 @@ def cmd_eval(args: argparse.Namespace) -> int:
         print("--models is required (comma-separated model ids)")
         return 2
 
+    missing = evalrun.hermes_missing()
+    if missing and not args.dry_run:
+        print(missing)
+        return 2
+
     if args.dry_run:
         print(f"[dry-run] {len(models)} model(s) x {len(tasks)} task(s); no GPU, no writes\n")
         for model in models:
@@ -665,293 +684,8 @@ def _shquote(s: str) -> str:
     )
 
 
-def cmd_import_v1(args: argparse.Namespace) -> int:
-    """One-time import of hal0 v1 results into v2 records (DESIGN §5, §3.1).
-
-    Implements the ``index.json`` path (the llama-bench aggregate written by
-    generate_results_json.py). Each normalized v1 record becomes one schema-2
-    record with outcome=ok, identity mapped from the v1 fields, and a single
-    synthetic rep carrying the v1 avg/stddev so history is not lost.
-    """
-    store = Store()
-    root = Path(args.bench_dir)
-    n = _import_v1_index(root / "index.json", store)
-    print(f"imported {n} v1 llama-bench record(s) from {root / 'index.json'}")
-    m = _import_v1_server_ab(root / "server-ab", store)
-    print(f"imported {m} v1 server-ab record(s) from {root / 'server-ab'}")
-    store.reindex()
-    return 0
-
-
-def _import_v1_index(index_path: Path, store: Store) -> int:
-    """Convert generate_results_json.py's index.json records to schema-2."""
-    if not index_path.exists():
-        print(f"[import-v1] no index.json at {index_path}; nothing to import")
-        return 0
-    doc = json.loads(index_path.read_text())
-    n = 0
-    for rec in doc.get("records", []):
-        cfg = rec.get("config", {})
-        model = rec.get("model", {})
-        metric = rec.get("metric", {})
-        kind = "pp" if rec.get("test") == "pp" else "tg"
-        ts = rec.get("timestamp") or _now_stamp()
-        identity = Identity(
-            model=Model(
-                id=_norm_v1_model_id(model.get("name") or model.get("path")),
-                gguf=model.get("path", ""),
-                size_bytes=int(model.get("size", 0) or 0),
-            ),
-            engine=Engine(
-                kind="llama-bench",
-                image=rec.get("runtime_image", ""),
-                llamacpp_build=str((rec.get("llamacpp_build") or {}).get("commit") or ""),
-            ),
-            lane=_v1_lane(rec.get("backend")),
-            config=Config(
-                kv={"main_k": cfg.get("type_k", ""), "main_v": cfg.get("type_v", "")},
-                parallel=1,
-                ctx=int(cfg.get("n_depth", 0) or 0) or 32768,
-            ),
-            workload=Workload(
-                kind=kind,
-                depth=int(cfg.get("n_depth", 0) or 0),
-                n_prompt=int(cfg.get("n_prompt", 0) or 0),
-                n_gen=int(cfg.get("n_gen", 0) or 0),
-            ),
-        )
-        summary = Summary(
-            decode_ts_med=metric.get("avg_ts") if kind == "tg" else None,
-            decode_ts_stddev=metric.get("stddev_ts") if kind == "tg" else None,
-            prefill_ts_med=metric.get("avg_ts") if kind == "pp" else None,
-        )
-        record = Record(
-            run_id=_stamp_to_run_id(ts),
-            suite="import-v1",
-            trigger="manual",
-            identity=identity,
-            host=Host(name=rec.get("host") or "hal0", gpu=rec.get("gpu") or "", hal0_version=""),
-            outcome=Outcome.OK,
-            summary=summary,
-            note="imported from v1 index.json",
-        )
-        store.append_record(record)
-        n += 1
-    return n
-
-
-def _norm_v1_model_id(name: str | None) -> str:
-    """Canonicalise a v1 model id so the same model measured under inconsistent
-    names doesn't split into duplicate roster rows. hal0's index.json records the
-    same gguf sometimes as ``dir/File.gguf`` and sometimes as the absolute
-    ``/mnt/ai-models/dir/File.gguf`` (verified on-box) — strip the model-root
-    prefix + leading slash so both collapse to one id."""
-    n = (name or "unknown").lstrip("/")
-    return n[len("mnt/ai-models/") :] if n.startswith("mnt/ai-models/") else n
-
-
-def _v1_lane(backend: str | None) -> str:
-    if not backend:
-        return "rocm"
-    b = backend.lower()
-    if "vulkan" in b:
-        return "vulkan_radv"
-    return "rocm"
-
-
-# --------------------------------------------------------------------------- #
-# import-v1: server-ab/*.json  (DESIGN §5, §3.1)
-# --------------------------------------------------------------------------- #
-
-# server_ab mode -> the v2 workload.kind it maps to (DESIGN §3.2 workload.kind).
-_SA_MODE_TO_KIND = {"ab": "chat", "reuse": "reuse", "embed": "embed", "rerank": "rerank"}
-
-
-def _import_v1_server_ab(sa_dir: Path, store: Store) -> int:
-    """Import hal0's standalone ``server-ab/*.json`` sessions into schema-2.
-
-    Each file is one server_ab.py session (verified on-box 2026-07-05):
-    top-level provenance header ``{timestamp, mode, slot, n, max_tokens}`` +
-    ``results`` whose shape depends on ``mode``:
-
-      * ``ab``    — ``{<variant>: {extra_args, runs:[<run>...], median}}``  → one
-        v2 record per VARIANT, one rep per timed run.
-      * ``reuse`` — ``{<variant>: {extra_args, second_call:<run>}}``        → one
-        record per variant, a single rep from the cache-warmed call.
-      * ``embed`` / ``rerank`` — ``{dims|score_spread, latency_s:[...],
-        median_latency_s}`` → one record, one rep per latency sample.
-
-    Provenance mapping (DESIGN task note "unknown fields → nulls, never guesses"):
-    the header only knows the SLOT name and the variant's ``extra_args`` — not the
-    gguf, image, build, or lane — so those identity fields are left empty/0, never
-    invented. ``extra_args`` becomes the resolved argv so cell_key still separates
-    variants. Files whose shape we don't recognise (e.g. the bespoke
-    ``mtp-sweep-*.json`` matrix) are skipped with a note rather than guessed."""
-    if not sa_dir.is_dir():
-        print(f"[import-v1] no server-ab dir at {sa_dir}; nothing to import")
-        return 0
-    n = 0
-    for path in sorted(sa_dir.glob("*.json")):
-        try:
-            doc = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"[import-v1] skip {path.name}: {exc}")
-            continue
-        if not isinstance(doc, dict) or "mode" not in doc or "results" not in doc:
-            print(f"[import-v1] skip {path.name}: unrecognised shape (not a server_ab session)")
-            continue
-        mode = doc.get("mode")
-        kind = _SA_MODE_TO_KIND.get(mode)
-        if kind is None:
-            print(f"[import-v1] skip {path.name}: unsupported mode {mode!r}")
-            continue
-        results = doc.get("results") or {}
-        stamp = doc.get("timestamp") or ""
-        slot = doc.get("slot") or "unknown"
-        max_tokens = int(doc.get("max_tokens", 0) or 0)
-
-        if mode in ("embed", "rerank"):
-            rec = _sa_latency_record(mode, kind, slot, results, max_tokens, stamp, path.name)
-            if rec is not None:
-                store.append_record(rec)
-                n += 1
-            continue
-
-        # ab / reuse: one record per variant
-        for variant, block in results.items():
-            if not isinstance(block, dict):
-                continue
-            runs = block.get("runs")
-            if runs is None and "second_call" in block:
-                runs = [block["second_call"]]
-            rec = _sa_generative_record(
-                mode,
-                kind,
-                slot,
-                variant,
-                block.get("extra_args", ""),
-                runs or [],
-                max_tokens,
-                stamp,
-                path.name,
-            )
-            if rec is not None:
-                store.append_record(rec)
-                n += 1
-    return n
-
-
-def _sa_run_to_rep(run: dict) -> Rep | None:
-    """One server_ab timed run → a schema-2 Rep. Returns None for an errored run
-    (no throughput numbers), so a failed call is dropped, never counted as ok."""
-    if not isinstance(run, dict) or run.get("error") or run.get("predicted_per_second") is None:
-        return None
-    draft_n = run.get("draft_n")
-    accepted = run.get("draft_n_accepted")
-    accept = (accepted / draft_n) if draft_n else None
-    return Rep(
-        t_s=run.get("wall_s"),
-        prefill_ts=run.get("prompt_per_second"),
-        decode_ts=run.get("predicted_per_second"),
-        ttft_ms=run.get("prompt_ms"),  # prompt-processing time ≈ TTFT proxy
-        accept_rate=accept,
-        drafted=draft_n,
-        accepted=accepted,
-        timings_raw=run,
-    )
-
-
-def _sa_generative_record(
-    mode, kind, slot, variant, extra_args, runs, max_tokens, stamp, fname
-) -> Record | None:
-    reps = [r for r in (_sa_run_to_rep(run) for run in runs) if r is not None]
-    if not reps:
-        return None
-    import shlex
-
-    identity = Identity(
-        model=Model(id=slot),  # v1 server-ab only knows the slot name
-        engine=Engine(kind="llama-server"),
-        lane="",  # unknown from the session file — never guessed
-        config=Config(argv=shlex.split(extra_args or ""), ctx=0),
-        workload=Workload(kind=kind, n_gen=max_tokens, sampler={"mode": "production"}),
-    )
-    return Record(
-        run_id=_stamp_to_run_id(_compact_ts_to_iso(stamp)),
-        suite="import-v1",
-        trigger="manual",
-        identity=identity,
-        host=Host(name="hal0"),
-        outcome=Outcome.OK,
-        reps=reps,
-        summary=Summary(
-            decode_ts_med=_median([r.decode_ts for r in reps]),
-            prefill_ts_med=_median([r.prefill_ts for r in reps]),
-            accept_med=_median([r.accept_rate for r in reps]),
-        ),
-        note=f"imported from v1 server-ab {mode}/{variant} ({fname})",
-    )
-
-
-def _sa_latency_record(mode, kind, slot, results, max_tokens, stamp, fname) -> Record | None:
-    lat = [x for x in (results.get("latency_s") or []) if isinstance(x, (int, float))]
-    if not lat:
-        return None
-    reps = [Rep(t_s=x, timings_raw={"latency_s": x}) for x in lat]
-    identity = Identity(
-        model=Model(id=slot),
-        engine=Engine(kind="llama-server"),
-        lane="",
-        config=Config(ctx=0),
-        workload=Workload(kind=kind, n_gen=max_tokens),
-    )
-    return Record(
-        run_id=_stamp_to_run_id(_compact_ts_to_iso(stamp)),
-        suite="import-v1",
-        trigger="manual",
-        identity=identity,
-        host=Host(name="hal0"),
-        outcome=Outcome.OK,
-        reps=reps,
-        # embed/rerank have no decode t/s; leave summary throughput null (never
-        # guessed). Median latency stays inspectable in reps[].
-        summary=Summary(),
-        note=f"imported from v1 server-ab {mode} ({fname})",
-    )
-
-
-def _median(values: list) -> float | None:
-    import statistics
-
-    vals = [v for v in values if isinstance(v, (int, float))]
-    return round(statistics.median(vals), 4) if vals else None
-
-
-def _compact_ts_to_iso(ts: str) -> str:
-    """server-ab stamps are compact UTC (``20260704T212506Z``); normalise to the
-    ISO form ``_stamp_to_run_id`` understands. Pass ISO/other through unchanged."""
-    try:
-        dt = datetime.strptime(ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
-        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    except (ValueError, TypeError):
-        return ts
-
-
 def _now_stamp() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _stamp_to_run_id(ts: str) -> str:
-    """Normalize a v1 timestamp to a run_id (UTC stamp + suffix). Keeps chrono
-    sort; the suffix ``v1`` marks the provenance."""
-    import secrets
-
-    try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        stamp = dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except (ValueError, AttributeError):
-        stamp = _now_stamp()
-    return f"{stamp}-v1{secrets.token_hex(2)}"
 
 
 # --------------------------------------------------------------------------- #
@@ -1053,14 +787,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="run even over live traffic (skip politeness)"
     )
     p.set_defaults(func=cmd_eval)
-
-    p = sub.add_parser("import-v1", help="import hal0 v1 results into v2 records")
-    p.add_argument(
-        "--bench-dir",
-        default=str(V1_BENCH_DIR),
-        help=f"hal0 v1 benchmarks dir (default {V1_BENCH_DIR})",
-    )
-    p.set_defaults(func=cmd_import_v1)
 
     return ap
 

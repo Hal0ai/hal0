@@ -414,11 +414,11 @@ class TestCpuCellEndToEnd:
         assert argv[argv.index("-ngl") + 1] == "0"
 
     def test_aggregated_records_are_labelled_cpu(self, tmp_path, _ran) -> None:
-        """``index.json`` carries the tier and the v2 export stops calling
-        every host "strix-halo"."""
+        """``index.json`` carries the tier so a CPU cell and an iGPU cell stay
+        distinguishable in the aggregate."""
         results = tmp_path / "results"
         proc = subprocess.run(
-            [sys.executable, str(AGGREGATE_PY), str(results), "--emit-v2"],
+            [sys.executable, str(AGGREGATE_PY), str(results)],
             capture_output=True,
             text=True,
             timeout=120,
@@ -429,11 +429,6 @@ class TestCpuCellEndToEnd:
         record = (index["records"] if isinstance(index, dict) else index)[0]
         assert record["tier"] == "cpu"
         assert record["gpu"] == "CPU (no GPU passthrough)"
-
-        v2 = json.loads((results / "v2" / "records.jsonl").read_text().splitlines()[0])
-        assert v2["host"]["platform"] == "cpu"
-        assert v2["host"]["name"] == "testbox"
-        assert v2["lane"] == "cpu"
 
 
 # ── the privileged seam ──────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .store import Store
+from .store import Store, _record_ts
 
 THRESHOLD_PCT = 10.0  # DESIGN §11: flag if worse by >10%
 TRAILING_N = 5  # DESIGN §11: trailing median of the last 5
@@ -36,7 +36,7 @@ class Flag:
     cell_key: str
     model_id: str
     delta_pct: float  # signed: negative = slower than trailing median
-    newest_ts: float | None
+    newest_ts: str | None  # ISO stamp of the flagged (newest) record
     trailing_median: float | None
     run_ids: list[str]  # [previous_run_id, newest_run_id]
 
@@ -109,7 +109,7 @@ def check(store: Store) -> list[Flag]:
                 cell_key=key,
                 model_id=model_id,
                 delta_pct=round(delta_pct, 1),
-                newest_ts=None,
+                newest_ts=_record_ts(newest) or None,
                 trailing_median=round(baseline, 2),
                 run_ids=[previous.get("run_id"), newest.get("run_id")],
             )

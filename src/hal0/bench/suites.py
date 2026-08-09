@@ -16,9 +16,31 @@ are ignored, not fatal, so a newer suite file stays loadable by an older lab.
 
 from __future__ import annotations
 
+import os
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from hal0.config import paths as _paths
+
+
+def suite_dir() -> Path:
+    """The operator suite-TOML directory. ONE resolver for every surface —
+    the CLI and the API route used to carry separate copies ("keep in sync"),
+    and only the API honoured ``$HAL0_BENCH_SUITE_DIR`` (#1526). Precedence:
+    ``$HAL0_BENCH_SUITE_DIR`` > ``/etc/hal0/bench/suites`` (HAL0_HOME-aware via
+    :func:`hal0.config.paths.etc`, so sandboxed installs never read the real
+    box's suites — #1518)."""
+    env = os.environ.get("HAL0_BENCH_SUITE_DIR")
+    if env:
+        return Path(env)
+    return _paths.etc() / "bench" / "suites"
+
+
+def window_file() -> Path:
+    """The --scheduled maintenance-window policy file (HAL0_HOME-aware)."""
+    return _paths.etc() / "bench" / "window.toml"
 
 
 @dataclass
@@ -26,12 +48,19 @@ class Selector:
     """Which models a suite targets. Resolved against the registry at plan time
     (planner.py), so this is just the declaration. ``caps_any`` matches registry
     capability tags; ``installed`` restricts to models present on the box;
-    explicit include/exclude lists override."""
+    explicit include/exclude lists override.
+
+    ``include_only = true`` makes the include list the ONLY selection source:
+    an empty include selects NOTHING. Without it, an empty include falls back
+    to the caps/installed filters — which for an operator-curated suite like
+    lane-matrix meant its commented-out include list silently selected every
+    installed GGUF (a multi-day accidental sweep)."""
 
     caps_any: list[str] = field(default_factory=list)
     installed: bool = True
     include: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
+    include_only: bool = False
 
 
 def _default_configs() -> list[dict]:
@@ -118,6 +147,7 @@ def suite_from_dict(data: dict, source_path: str = "") -> Suite:
             installed=bool(sel.get("installed", True)),
             include=list(sel.get("include", [])),
             exclude=list(sel.get("exclude", [])),
+            include_only=bool(sel.get("include_only", False)),
         ),
         matrix=Matrix(
             lanes=list(mtx.get("lanes", ["default"])),
@@ -175,7 +205,9 @@ def load_suites(directory: Path | str) -> dict[str, Suite]:
         try:
             suite = load_suite_file(path)
         except (tomllib.TOMLDecodeError, ValueError, OSError) as exc:
-            print(f"[suites] skipping {path}: {exc}")
+            # stderr, not stdout: several callers emit JSON on stdout and a
+            # warning line there corrupts the stream.
+            print(f"[suites] skipping {path}: {exc}", file=sys.stderr)
             continue
         suites[suite.id] = suite
     return suites

@@ -18,8 +18,10 @@ Design choices (deliberate, safety-first):
     worker runs each item with the seam's ``--exclusive`` (stop/restart GPU slots
     for clean numbers); when false it runs politely and marks contended results.
   * Writes are whole-file + atomic (write temp, ``os.replace``) so a concurrent
-    reader never sees a half-written file. Contention is trivially low (one
-    worker, occasional UI writes), so no locking beyond that.
+    reader never sees a half-written file, and every read-modify-write cycle
+    (enqueue/dequeue/set_control) holds the shared state lock — the old
+    lock-free RMW could lose a queue item when the API enqueued while the
+    worker dequeued.
 
 Pausing is between-ITEM, not mid-sweep: a llama-bench sweep can't be suspended,
 so Pause/Stop take effect at the next cell boundary (the worker checks control
@@ -34,7 +36,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .store import state_root
+from .store import state_lock, state_root
 
 _CONTROL_DEFAULT: dict[str, Any] = {"state": "stopped", "exclusive": True}
 
@@ -70,14 +72,15 @@ def read_control() -> dict[str, Any]:
 
 
 def set_control(state: str | None = None, exclusive: bool | None = None) -> dict[str, Any]:
-    c = read_control()
-    if state is not None:
-        if state not in ("stopped", "running", "paused"):
-            raise ValueError(f"bad control state {state!r}")
-        c["state"] = state
-    if exclusive is not None:
-        c["exclusive"] = bool(exclusive)
-    _write("control.json", c)
+    if state is not None and state not in ("stopped", "running", "paused"):
+        raise ValueError(f"bad control state {state!r}")
+    with state_lock(state_root()):
+        c = read_control()
+        if state is not None:
+            c["state"] = state
+        if exclusive is not None:
+            c["exclusive"] = bool(exclusive)
+        _write("control.json", c)
     return c
 
 
@@ -94,26 +97,18 @@ def read_queue() -> list[dict[str, Any]]:
 
 
 def enqueue(item: dict[str, Any]) -> list[dict[str, Any]]:
-    items = read_queue()
-    items.append(item)
-    _write("queue.json", {"items": items})
+    with state_lock(state_root()):
+        items = read_queue()
+        items.append(item)
+        _write("queue.json", {"items": items})
     return items
 
 
 def dequeue(item_id: str) -> list[dict[str, Any]]:
-    items = [i for i in read_queue() if i.get("id") != item_id]
-    _write("queue.json", {"items": items})
+    with state_lock(state_root()):
+        items = [i for i in read_queue() if i.get("id") != item_id]
+        _write("queue.json", {"items": items})
     return items
-
-
-def pop_next() -> dict[str, Any] | None:
-    """Return (and remove) the head of the queue, or None if empty."""
-    items = read_queue()
-    if not items:
-        return None
-    head = items[0]
-    _write("queue.json", {"items": items[1:]})
-    return head
 
 
 # -- status (worker-written) ------------------------------------------------ #

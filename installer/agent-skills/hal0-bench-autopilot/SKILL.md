@@ -25,22 +25,17 @@ manually). Procedure encoded in SKILL.md:
 
 ## Commands
 
+Exclusivity is per-sweep: `hal0 bench run` on an `exclusive = true` suite stops
+and restarts the active GPU slots around each Tier-A sweep itself — there is no
+session-level quiesce verb.
+
 ```bash
 # Run the autopilot pass
-sudo -n /usr/lib/hal0/bin/hal0-benchctl gpu-quiesce start
-hal0 bench plan --json > /tmp/bench-worklist.json
-hal0 bench run --no-exclusive --dry-run  # dry-run first
-hal0 bench run --no-exclusive            # actual run
+hal0 bench plan --suite roster --json > /tmp/bench-worklist.json
+hal0 bench run --suite roster --dry-run  # dry-run first
+hal0 bench run --suite roster            # actual run (prints regression flags at the end)
 hal0 bench status
 hal0 bench publish
-sudo -n /usr/lib/hal0/bin/hal0-benchctl gpu-quiesce end
-```
-
-## Regression Detection
-
-```bash
-# Check for regressions
-python3 /usr/lib/hal0/bench/regression.py
 ```
 
 ## Output

@@ -16,11 +16,15 @@ corrects every place the stubs assumed a contract that differs from the real box
     not exist on-box). Tier-A sweeps are memoised per (model,lane,depth) so one
     GPU load (one stop/restart) yields BOTH the pp and tg records.
   * Tier A (pp/tg) goes through ``hal0-benchctl sweep <rel.gguf> <lane>
-    [--exclusive] -p .. -n .. -r ..`` (positional, not flags) which writes to
-    ``/var/lib/hal0/benchmarks/runs/…__<lane>__sweep.json``; the runner locates
-    that output, copies it into the run's artifacts/, and parses it.
+    [--exclusive] -p .. -n .. -d .. -r ..`` (positional, not flags) which writes
+    to ``/var/lib/hal0/benchmarks/runs/<stem>__<lane>__sweep.json``; the runner
+    knows that exact filename (same stem sanitisation as the harness), copies it
+    into the run's artifacts/, and parses it. ``-d`` is the cell's depth axis
+    (KV fill); ``-p``/``-n`` are the fixed pp/tg measurement sizes.
   * Tier B/C (chat/embed/rerank/reuse) go through the installed ``server_ab.py``
-    (modes ab/reuse/embed/rerank; no depth/mtp/batch on this build).
+    (modes ab/reuse/embed/rerank; no depth/mtp/batch on this build). A chat
+    cell passes its config variant as the single ``--variant`` so the record's
+    config label matches what the server actually ran.
 
 Per-cell watchdog = 3x expected (DESIGN §5.3); a bad cell records its outcome and
 the session CONTINUES. Resumable by construction (DESIGN §5.4): each record is
@@ -33,8 +37,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import secrets
+import signal
 import subprocess
 import time
 import urllib.error
@@ -55,9 +61,32 @@ if TYPE_CHECKING:
 DEFAULT_API = "http://127.0.0.1:8080"
 BENCHCTL = "/usr/lib/hal0/bin/hal0-benchctl"
 SERVER_AB = "/usr/lib/hal0/bench/server_ab.py"
-# Where the seam's llama-bench harness writes results (hal0-benchctl RESULTS).
-V1_RUNS_DIR = Path("/var/lib/hal0/benchmarks/runs")
-MODEL_ROOT = "/mnt/ai-models/"
+# The historic model-store root, kept ONLY as a legacy strip candidate — the
+# live root comes from hal0.config.paths.model_store_root() (see _model_roots).
+LEGACY_MODEL_ROOT = "/mnt/ai-models"
+
+
+def v1_runs_dir() -> Path:
+    """Where the seam's llama-bench harness writes results (hal0-benchctl
+    RESULTS). HAL0_HOME-aware via hal0.config.paths (#1518)."""
+    from hal0.config import paths
+
+    return paths.var_lib() / "benchmarks" / "runs"
+
+
+def _model_roots() -> list[str]:
+    """Roots an absolute registry gguf path may live under, longest first: the
+    box's RESOLVED model store (hal0.config.paths.model_store_root — the same
+    resolver the pull engine and slot mounts use) plus the historic
+    ``/mnt/ai-models``. The old code stripped ONLY the historic literal, so on
+    a default-config box (store at /var/lib/hal0/models) every Tier-A cell
+    reached the seam with an unstrippable absolute path and died "model not
+    found" (#1516)."""
+    from hal0.config.paths import model_store_root
+
+    roots = {model_store_root().rstrip("/"), LEGACY_MODEL_ROOT}
+    return sorted(roots, key=len, reverse=True)
+
 
 # Rough per-cell expected wall-clock (seconds) for the watchdog (fires at 3x).
 # Generous on purpose — it catches a hang, it is not an SLA.
@@ -73,9 +102,14 @@ _EXPECTED_S = {
 }
 _TIER_A_KINDS = {"pp", "tg"}
 # Tier-B cell kind -> server_ab.py --mode (this build: ab/reuse/embed/rerank).
+# No .get() fallback anywhere: an unknown kind is rejected at plan time
+# (planner.KNOWN_KINDS) and raises here if one slips through.
 _KIND_TO_MODE = {"chat": "ab", "reuse": "reuse", "embed": "embed", "rerank": "rerank"}
-# Default tg decode length when a group has no explicit tg cell n_gen.
+# Default tg decode length when a group has no explicit tg cell n_gen, and the
+# fixed pp prompt length (mirrors planner._PP_PROMPT — the depth axis is -d,
+# not the prompt length).
 _DEFAULT_TG_GEN = 256
+_DEFAULT_PP_PROMPT = 512
 
 
 @dataclass
@@ -160,7 +194,16 @@ def _traffic_in_flight(api: str, quiet_min: int = 10) -> bool:
     treated as "in flight" (fail-safe: never measure over live traffic)."""
     data = _get_json(api, f"/api/stats/throughput/history?window_s={quiet_min * 60}")
     if data is None:
-        return True  # fail-safe
+        # Fail-safe: never measure over traffic we can't see. But say so — a
+        # down/renamed stats route otherwise declines every scheduled session
+        # forever with no trace.
+        import sys
+
+        print(
+            f"[gate] cannot read {api}/api/stats/throughput/history — treating GPU as busy",
+            file=sys.stderr,
+        )
+        return True
     samples = data.get("samples") or []
     return any(float(s.get("total_tps") or 0) > 0 for s in samples)
 
@@ -188,24 +231,71 @@ def _gpu_slot_serving(api: str) -> bool:
 
 
 def _rel_gguf(gguf: str) -> str:
-    """The model path the seam expects: relative to /mnt/ai-models, ending .gguf
-    (hal0-benchctl validate_model). Absolute registry paths are stripped."""
-    return gguf[len(MODEL_ROOT) :] if gguf.startswith(MODEL_ROOT) else gguf.lstrip("/")
+    """The model path the seam expects: relative to the model-store root,
+    ending .gguf (hal0-benchctl validate_model). Absolute registry paths are
+    stripped against the RESOLVED store root(s), not a hardcoded literal
+    (#1516)."""
+    for root in _model_roots():
+        prefix = root + "/"
+        if gguf.startswith(prefix):
+            return gguf[len(prefix) :]
+    return gguf.lstrip("/")
 
 
 def _run_subprocess(cmd: list[str], timeout_s: float, log_path: Path) -> tuple[int, str]:
     """Run one engine subprocess under the watchdog, teeing output to ``log_path``.
-    Returns (returncode, tail). A timeout returns rc=-9 → ``hang``."""
+    Returns (returncode, tail). A timeout returns rc=-9 → ``hang``.
+
+    The child gets its own session so a timeout kills the whole PROCESS GROUP,
+    not just the immediate child (the old ``subprocess.run(timeout=)`` killed
+    only the parent, orphaning e.g. a server_ab HTTP wait). The Tier-A ``sudo``
+    child is root-owned and unkillable from here (kill(2) → EPERM — the old
+    code would CRASH the session with PermissionError on a Tier-A hang); its
+    real timeout runs INSIDE the seam (``benchctl sweep --timeout-s``), and
+    this watchdog is sized above the seam's worst case as a backstop."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(cmd, timeout=timeout_s, capture_output=True, text=True)
-        out = (proc.stdout or "") + (proc.stderr or "")
-        log_path.write_text(out, encoding="utf-8")
-        return proc.returncode, out[-4000:]
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout if isinstance(exc.stdout, str) else ""
+        out, _ = proc.communicate(timeout=timeout_s)
+        log_path.write_text(out or "", encoding="utf-8")
+        return proc.returncode, (out or "")[-4000:]
+    except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(proc.pid, sig)
+            try:
+                out, _ = proc.communicate(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                out = ""
+        else:
+            out = ""
         log_path.write_text((out or "") + f"\n[watchdog] killed after {timeout_s:.0f}s\n")
         return -9, "watchdog-timeout"
+
+
+def _sweep_stem(gguf: str) -> str:
+    """The result-file stem for a model, using the harness's own sanitisation
+    (``run_benchmarks.sh``: ``tr -c 'A-Za-z0-9._-' '_'``). The runner previously
+    used the raw basename — any out-of-class character made clear/locate miss
+    the file the harness actually wrote (stale numbers or phantom FAILED)."""
+    stem = Path(_rel_gguf(gguf)).name.removesuffix(".gguf")
+    return re.sub(r"[^A-Za-z0-9._-]", "_", stem)
+
+
+def _sweep_output_path(gguf: str, lane: str) -> Path:
+    """The EXACT file the seam's sweep writes for this (model, lane):
+    ``<stem>__<lane>__sweep.json`` (benchctl sweep always passes --tag sweep,
+    context ``default`` adds no suffix). Knowing the exact name kills the old
+    newest-by-mtime glob, which could attribute another model's concurrent or
+    just-written sweep to this cell."""
+    return v1_runs_dir() / f"{_sweep_stem(gguf)}__{lane}__sweep.json"
 
 
 def _clear_stale_sweep(gguf: str, lane: str) -> None:
@@ -218,26 +308,26 @@ def _clear_stale_sweep(gguf: str, lane: str) -> None:
     fresh file. benchlab owns the measurement, so it clears the cached artifact
     (results are chowned hal0:hal0, so the unprivileged runner can remove them)
     to guarantee the sweep actually runs and writes current numbers."""
-    stem = Path(_rel_gguf(gguf)).name.removesuffix(".gguf")
-    base = f"{stem}__{lane}__sweep"
-    for suffix in (".json", ".meta.json", ".json.failed"):
-        with contextlib.suppress(OSError):
-            (V1_RUNS_DIR / f"{base}{suffix}").unlink()
-
-
-def _locate_sweep_output(lane: str, since_wall: float) -> tuple[list[dict], dict] | None:
-    """Find the ``…__<lane>__sweep.json`` (+ sibling ``.meta.json``) the seam just
-    wrote (DESIGN §1 — the seam owns the results dir, not a --json-out path). Picks
-    the newest matching file modified since the sweep started."""
-    if not V1_RUNS_DIR.is_dir():
-        return None
-    cands = [
-        p for p in V1_RUNS_DIR.glob(f"*__{lane}__sweep.json") if p.stat().st_mtime >= since_wall - 5
+    out = _sweep_output_path(gguf, lane)
+    stale = [
+        out,
+        out.with_name(out.name + ".failed"),
+        out.with_name(out.name.replace(".json", ".meta.json")),
     ]
-    if not cands:
-        return None
-    out = max(cands, key=lambda p: p.stat().st_mtime)
+    for path in stale:
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+def _locate_sweep_output(gguf: str, lane: str, since_wall: float) -> tuple[list[dict], dict] | None:
+    """Read the exact ``<stem>__<lane>__sweep.json`` (+ sibling ``.meta.json``)
+    the seam just wrote for this cell. ``since_wall`` guards against a file that
+    predates the sweep (should not happen after _clear_stale_sweep, but a stale
+    read must never be attributed to a fresh run)."""
+    out = _sweep_output_path(gguf, lane)
     try:
+        if out.stat().st_mtime < since_wall - 5:
+            return None
         rows = json.loads(out.read_text())
     except (OSError, json.JSONDecodeError):
         return None
@@ -262,18 +352,48 @@ def _classify(rc: int, tail: str) -> Outcome:
     return Outcome.OK
 
 
+def _tier_a_timeouts(cell) -> tuple[int, int]:
+    """(per-attempt seam timeout, outer watchdog) for a Tier-A sweep, seconds.
+
+    The REAL kill lives in the seam (``timeout`` around the podman run — the
+    unprivileged runner cannot signal the root-owned sudo child). One attempt
+    covers the shared pp+tg sweep, scaled by depth (a 128k KV fill takes
+    minutes before any measurement). The outer watchdog must outlast the
+    harness's 6 crash-retry attempts so a legitimate retry loop is never
+    classified HANG — it exists only to catch a wedged seam."""
+    per_attempt = 3 * (_EXPECTED_S["pp"] + _EXPECTED_S["tg"]) + cell.depth // 50
+    outer = 6 * per_attempt + 120
+    return per_attempt, outer
+
+
 # --------------------------------------------------------------------------- #
 # Command builders (shared by the executor and `run --dry-run`)
 # --------------------------------------------------------------------------- #
 
 
-def _tier_a_cmd(cell, exclusive: bool, tg_gen: int) -> list[str]:
+def _tier_a_cmd(cell, exclusive: bool, pp_prompt: int, tg_gen: int) -> list[str]:
     """The exact `hal0-benchctl sweep` argv for a Tier-A group (positional, the
-    seam's real shape). `--exclusive` is the seam's own GPU stop/restart."""
+    seam's real shape). `--exclusive` is the seam's own GPU stop/restart.
+
+    The depth axis is llama-bench ``-d`` (KV fill before the measurement) —
+    NOT ``-p``. The old shape passed ``-p <depth>``, so a tg cell at depth
+    32768 decoded from an EMPTY context: different cell_keys, identical
+    numbers. ``-p``/``-n`` are the fixed measurement sizes (pp512/tg-n_gen)."""
     cmd = ["sudo", "-n", BENCHCTL, "sweep", _rel_gguf(cell.identity.model.gguf), cell.lane]
     if exclusive:
         cmd.append("--exclusive")
-    cmd += ["-p", str(cell.depth), "-n", str(tg_gen), "-r", str(cell.reps)]
+    per_attempt, _ = _tier_a_timeouts(cell)
+    cmd += ["--timeout-s", str(per_attempt)]
+    cmd += [
+        "-p",
+        str(pp_prompt),
+        "-n",
+        str(tg_gen),
+        "-d",
+        str(cell.depth),
+        "-r",
+        str(cell.reps),
+    ]
     # config-variant tuning flags (validated at plan time), sorted for a stable
     # command that matches the memoisation key.
     for flag in sorted(getattr(cell, "flags", None) or {}):
@@ -284,11 +404,16 @@ def _tier_a_cmd(cell, exclusive: bool, tg_gen: int) -> list[str]:
 def _tier_bc_cmd(
     cell, slot: str, api: str, out: Path | str = "<artifacts>/server-ab.json"
 ) -> list[str]:
-    """The exact `server_ab.py` argv for a Tier-B/C cell."""
-    return [
+    """The exact `server_ab.py` argv for a Tier-B/C cell. A chat cell carries
+    its config variant as the single ``--variant "<label>:<flags>"`` so the
+    server actually runs the flags the record is labelled with (the old shape
+    passed no --variant at all, which server_ab rejected: every chat cell
+    failed with exit 2)."""
+    mode = _KIND_TO_MODE[cell.kind]
+    cmd = [
         SERVER_AB,
         "--mode",
-        _KIND_TO_MODE.get(cell.kind, "ab"),
+        mode,
         "--slot",
         slot,
         "--api",
@@ -298,6 +423,12 @@ def _tier_bc_cmd(
         "--out",
         str(out),
     ]
+    if mode == "ab":
+        label = getattr(cell, "config_label", "default")
+        flags = getattr(cell, "flags", None) or {}
+        flag_str = " ".join(f"{k} {flags[k]}" for k in sorted(flags))
+        cmd += ["--variant", f"{label}:{flag_str}"]
+    return cmd
 
 
 def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]:
@@ -305,7 +436,7 @@ def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]
     cell would run (for `run --dry-run`, DESIGN §5 / bring-up Phase 4). Pure —
     resolves no slots, touches no GPU. Marks the pp/tg sibling that reuses a
     group's single memoised sweep."""
-    tg_gen = _tg_gen_by_group(cells)
+    sizes = _group_sizes(cells)
     seen: set[tuple] = set()
     lines: list[str] = []
     for i, c in enumerate(cells, 1):
@@ -319,7 +450,8 @@ def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]
                 cmd_str = "(reuses this group's memoised sweep — no extra GPU load)"
             else:
                 seen.add(key)
-                cmd_str = " ".join(_tier_a_cmd(c, exclusive, tg_gen.get(key, _DEFAULT_TG_GEN)))
+                pp, tg = sizes.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
+                cmd_str = " ".join(_tier_a_cmd(c, exclusive, pp, tg))
         else:
             cmd_str = " ".join(_tier_bc_cmd(c, f"<slot-for:{c.model_id}>", api))
         lines.append(f"{label}\n      {cmd_str}")
@@ -342,6 +474,7 @@ def run_session(
     exclusive: bool = True,
     dry_run: bool = False,
     should_continue: Callable[[], bool] | None = None,
+    trigger: str = "manual",
 ) -> SessionResult:
     """Drive a worklist to completion (DESIGN §5). One cell at a time, append as we
     go, honour the budget wall. Tier-A sweeps are memoised per (model,lane,depth)
@@ -357,9 +490,9 @@ def run_session(
 
     started = time.monotonic()
     budget_s = budget_min * 60 if budget_min else None
-    # tg decode length per (model,lane,depth) group, from the group's tg cell.
-    tg_gen = _tg_gen_by_group(cells)
-    sweep_cache: dict[tuple[str, str, int], tuple[list[dict], dict, Outcome]] = {}
+    # (pp prompt, tg decode) sizes per (model,lane,depth,config) group.
+    sizes = _group_sizes(cells)
+    sweep_cache: dict[tuple, tuple[list[dict], dict, Outcome]] = {}
 
     try:
         for cell in cells:
@@ -381,7 +514,10 @@ def run_session(
 
             run_id = _new_run_id()
             artifacts = store.artifacts_dir(run_id)
-            watchdog_s = 3 * _EXPECTED_S.get(cell.kind, 300)
+            if cell.kind in _TIER_A_KINDS:
+                _, watchdog_s = _tier_a_timeouts(cell)
+            else:
+                watchdog_s = 3 * _EXPECTED_S.get(cell.kind, 300)
 
             if cell.kind in _TIER_A_KINDS:
                 record = _tier_a_record(
@@ -389,12 +525,13 @@ def run_session(
                     artifacts,
                     watchdog_s,
                     exclusive,
-                    tg_gen,
+                    sizes,
                     sweep_cache,
                     host,
                     suite_id,
                     run_id,
                     api,
+                    trigger,
                 )
             else:
                 record = _tier_bc_record(
@@ -406,6 +543,7 @@ def run_session(
                     host,
                     suite_id,
                     run_id,
+                    trigger,
                 )
 
             store.append_record(record)  # append-as-we-go = resumable
@@ -427,17 +565,21 @@ def _group_key(c) -> tuple:
     return (c.model_id, c.lane, c.depth, getattr(c, "config_label", "default"))
 
 
-def _tg_gen_by_group(cells: list[Cell]) -> dict[tuple, int]:
-    """Decode length for each group's shared sweep: the tg cell's n_gen if the
-    group has one, else the default."""
-    out: dict[tuple, int] = {}
+def _group_sizes(cells: list[Cell]) -> dict[tuple, tuple[int, int]]:
+    """(pp prompt length, tg decode length) for each group's shared sweep: the
+    pp cell's n_prompt and the tg cell's n_gen where the group has them, else
+    the defaults. One sweep serves both siblings, so both sizes ride one argv."""
+    out: dict[tuple, tuple[int, int]] = {}
     for c in cells:
         if c.kind not in _TIER_A_KINDS:
             continue
         key = _group_key(c)
-        if c.kind == "tg":
-            out[key] = int(c.identity.workload.n_gen or _DEFAULT_TG_GEN)
-        out.setdefault(key, _DEFAULT_TG_GEN)
+        pp, tg = out.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
+        if c.kind == "pp":
+            pp = int(c.identity.workload.n_prompt or _DEFAULT_PP_PROMPT)
+        else:
+            tg = int(c.identity.workload.n_gen or _DEFAULT_TG_GEN)
+        out[key] = (pp, tg)
     return out
 
 
@@ -446,12 +588,13 @@ def _tier_a_record(
     artifacts,
     timeout_s,
     exclusive,
-    tg_gen_map,
+    sizes,
     cache,
     host,
     suite_id,
     run_id,
     api,
+    trigger="manual",
 ) -> Record:
     """Run (or reuse) the Tier-A sweep for this cell's group and parse its kind."""
     key = _group_key(cell)
@@ -459,13 +602,14 @@ def _tier_a_record(
         rows, meta, outcome = cache[key]  # sibling already swept this group
         tail = ""
     else:
-        cmd = _tier_a_cmd(cell, exclusive, tg_gen_map.get(key, _DEFAULT_TG_GEN))
+        pp, tg = sizes.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
+        cmd = _tier_a_cmd(cell, exclusive, pp, tg)
         log = artifacts / "sweep-benchctl.log"
         # Force a fresh run: the seam skips a cell whose output already exists.
         _clear_stale_sweep(cell.identity.model.gguf, cell.lane)
         since = time.time()
         rc, tail = _run_subprocess(cmd, timeout_s, log)
-        located = _locate_sweep_output(cell.lane, since)
+        located = _locate_sweep_output(cell.identity.model.gguf, cell.lane, since)
         if located is None:
             rows, meta = [], {}
             outcome = _classify(rc, tail) if rc != 0 else Outcome.FAILED  # ran ok but no output
@@ -483,7 +627,7 @@ def _tier_a_record(
     parsed = parse_llama_bench(rows, meta, cell.kind, cell.depth)
     if outcome is Outcome.OK and not parsed.reps:
         outcome = Outcome.FAILED  # sweep succeeded but this kind's row is missing
-    return _assemble(cell, parsed, outcome, host, suite_id, run_id, artifacts, tail, api)
+    return _assemble(cell, parsed, outcome, host, suite_id, run_id, artifacts, tail, api, trigger)
 
 
 def _tier_bc_record(
@@ -495,6 +639,7 @@ def _tier_bc_record(
     host,
     suite_id,
     run_id,
+    trigger="manual",
 ) -> Record:
     """Run a Tier-B/C server_ab cell and parse it. Slot name resolves from the
     registry model id via /api/slots (a live server_ab slot), falling back to the
@@ -515,7 +660,7 @@ def _tier_bc_record(
         outcome = _classify(rc, tail) if rc != 0 else Outcome.FAILED
     else:
         outcome = Outcome.OK
-    return _assemble(cell, parsed, outcome, host, suite_id, run_id, artifacts, tail, api)
+    return _assemble(cell, parsed, outcome, host, suite_id, run_id, artifacts, tail, api, trigger)
 
 
 def _slot_for_model(api: str, model_id: str) -> str | None:
@@ -537,6 +682,7 @@ def _assemble(
     artifacts,
     tail,
     api,
+    trigger="manual",
 ) -> Record:
     """Build the schema-2 record from a Parsed result + the planned cell.
 
@@ -573,7 +719,7 @@ def _assemble(
     return Record(
         run_id=run_id,
         suite=suite_id,
-        trigger="manual",
+        trigger=trigger,
         identity=identity,
         host=host,
         outcome=outcome,

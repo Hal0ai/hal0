@@ -15,15 +15,33 @@
 # arbitrary command execution. The harness it execs is root-owned and not
 # writable by the hal0 user.
 #
-# NEW (2026-07-09): Added gpu-quiesce and telemetry verbs for the new
-# benchmark system (v2 store, planner, runner).
+# The telemetry verb (2026-07-09) samples GPU counters for the v2
+# benchmark system (store, planner, runner).
 
 set -euo pipefail
 
 HARNESS=/usr/lib/hal0/bench
-MODEL_ROOT=/mnt/ai-models
 RESULTS=/var/lib/hal0/benchmarks
 RESULTS_OWNER=hal0:hal0
+
+# The model-store root, from the SAME resolver the pull engine and slot mounts
+# use (hal0.config.paths.model_store_root). The old hardcoded /mnt/ai-models
+# broke every Tier-A cell on a default-config box whose store is
+# /var/lib/hal0/models (#1516). Falls back to the historic path only when the
+# venv is unreachable. Exported as MODEL_DIR so bench/config.sh agrees.
+_resolve_model_root() {
+  local py
+  for py in /usr/lib/hal0/venv/bin/python3 "$(command -v python3 2>/dev/null || true)"; do
+    [[ -n "$py" && -x "$py" ]] || continue
+    if out="$("$py" -c 'from hal0.config.paths import model_store_root; print(model_store_root())' 2>/dev/null)" \
+       && [[ "$out" == /* ]]; then
+      printf '%s' "$out"; return 0
+    fi
+  done
+  printf '%s' /mnt/ai-models
+}
+MODEL_ROOT="$(_resolve_model_root)"
+export MODEL_DIR="$MODEL_ROOT"
 
 die() { echo "hal0-benchctl: $1" >&2; exit 2; }
 
@@ -87,13 +105,21 @@ case "$cmd" in
     post; exit $rc ;;
 
   sweep)                     # tuning: one model+backend, whitelisted extra flags
-    rel="${1:-}"; backend="${2:-}"; shift 2 2>/dev/null || die "usage: sweep <model.gguf> <backend> [--exclusive] <flags...>"
+    rel="${1:-}"; backend="${2:-}"; shift 2 2>/dev/null || die "usage: sweep <model.gguf> <backend> [--exclusive] [--timeout-s N] <flags...>"
     validate_model "$rel"
     validate_backend "$backend"
     excl=""; if [[ "${1:-}" == "--exclusive" ]]; then excl="--exclusive"; shift; fi
+    # Optional per-attempt wall-clock cap, enforced INSIDE the harness around
+    # the container run. The unprivileged caller cannot kill this root process
+    # tree, so the timeout must live on this side of the privilege boundary.
+    cell_timeout=""
+    if [[ "${1:-}" == "--timeout-s" ]]; then
+      [[ "${2:-}" =~ ^[0-9]+$ ]] || die "bad --timeout-s value: ${2:-}"
+      cell_timeout="$2"; shift 2
+    fi
     validate_extra "$@"
     rc=0; "$HARNESS/run_benchmarks.sh" --models "$rel" --backends "$backend" \
-            --tag sweep --extra "$*" $excl || rc=$?
+            --tag sweep --extra "$*" ${cell_timeout:+--cell-timeout "$cell_timeout"} $excl || rc=$?
     post; exit $rc ;;
 
   aggregate)                 # rebuild index.json + SUMMARY.md
@@ -103,30 +129,11 @@ case "$cmd" in
   list)
     ls -1 "$RESULTS/runs" 2>/dev/null || true ;;
 
-  # NEW VERBS (2026-07-09)
-  gpu-quiesce)               # bracket an exclusive SESSION
-    action="${1:-start}"
-    shift || true
-    case "$action" in
-      start)
-        echo "[gpu-quiesce] stopping GPU slots..."
-        for slot in hal0-slot@agent hal0-slot@brain hal0-slot@flm hal0-slot@rerank; do
-          systemctl stop "$slot.service" 2>/dev/null || true
-          echo "  stopped $slot"
-        done
-        echo "[gpu-quiesce] GPU quiesced"
-        ;;
-      end)
-        echo "[gpu-quiesce] restarting GPU slots..."
-        for slot in hal0-slot@agent hal0-slot@brain hal0-slot@flm hal0-slot@rerank; do
-          systemctl start "$slot.service" 2>/dev/null || true
-          echo "  restarted $slot"
-        done
-        echo "[gpu-quiesce] GPU restored"
-        ;;
-      *) die "gpu-quiesce: bad action: $action (use start|end)" ;;
-    esac
-    ;;
+  # The session-level gpu-quiesce verb was removed: it never had a caller
+  # (exclusivity is the per-sweep --exclusive in run_benchmarks.sh, which
+  # stops/restarts exactly the slots that were active — the quiesce list was
+  # a hardcoded slot roster that drifted). Narrower grant, one exclusivity
+  # mechanism.
 
   telemetry)                 # 1 Hz GPU sampler → artifacts/<run_id>/telemetry.jsonl
     action="${1:-start}"
@@ -237,10 +244,9 @@ case "$cmd" in
 usage: hal0-benchctl <command>
   run [--exclusive]                              full curated sweep (all contexts)
   run-model <rel.gguf> [--exclusive]            one model, both backends
-  sweep <rel.gguf> <backend> [--exclusive] FLAGS  tuning sweep (whitelisted flags)
+  sweep <rel.gguf> <backend> [--exclusive] [--timeout-s N] FLAGS  tuning sweep (whitelisted flags)
   aggregate                                      rebuild index.json + SUMMARY.md
   list                                           list result files
-  gpu-quiesce start|end                          bracket exclusive session
   telemetry start|end <run_id> [tier]           1 Hz GPU sampler (tier: amd|nvidia|cpu)
 backends: rocm | vulkan_radv | cpu ; results: $RESULTS
 EOF

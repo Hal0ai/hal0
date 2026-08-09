@@ -25,6 +25,7 @@ exactly the cells it changed, no re-bench checklist.
 from __future__ import annotations
 
 import shlex
+import sys
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -52,6 +53,17 @@ REGISTRY_PATH = "/api/models"
 # variant flag outside this set is rejected at plan time (fail fast, before the
 # seam does).
 _TUNE_FLAGS = frozenset({"-b", "-ub", "-ngl", "-fa", "-ctk", "-ctv", "-t", "-mmp", "-pg"})
+
+# Prompt length for the pp measurement at every depth (the community-standard
+# pp512). The depth axis is the KV fill (llama-bench -d): a pp cell measures
+# prefilling _PP_PROMPT tokens ON TOP OF `depth` tokens of context, a tg cell
+# measures decoding n_gen tokens at that same fill.
+_PP_PROMPT = 512
+
+# The measurement kinds the runner can execute (Tier A + server_ab modes).
+# plan() rejects a suite kind outside this set loudly — the old behavior
+# silently fell back to server_ab `--mode ab`, which mislabeled the record.
+KNOWN_KINDS = frozenset({"pp", "tg", "chat", "reuse", "embed", "rerank"})
 
 
 @dataclass
@@ -155,6 +167,14 @@ def _select_models(suite: Suite, registry_models: list[dict[str, Any]]) -> list[
     cells) an extra compatibility gate drops non-generative-GGUF assets that
     hal0's registry mislabels as chat (see ``_is_tier_a_incompatible``)."""
     sel = suite.selector
+    if sel.include_only and not sel.include:
+        # An operator-curated suite with an unset include list selects NOTHING
+        # (suites.Selector.include_only) — never "everything by accident".
+        print(
+            f"[plan] suite {suite.id!r}: include_only with an empty include — selecting no models",
+            file=sys.stderr,
+        )
+        return []
     tier_a = bool({"pp", "tg"}.intersection(suite.cells.kinds))
     chosen: list[dict[str, Any]] = []
     for m in registry_models:
@@ -300,7 +320,7 @@ def _build_identity(
         workload=Workload(
             kind=kind,
             depth=depth,
-            n_prompt=depth if kind == "pp" else 0,
+            n_prompt=_PP_PROMPT if kind == "pp" else 0,
             n_gen=0 if kind == "pp" else int(model.get("n_gen", 256) or 256),
             sampler=_sampler_block(sampler),
             concurrency=1,
@@ -330,7 +350,8 @@ def _validated_configs(configs: list[dict]) -> list[dict]:
                 flags[k] = v
             else:
                 print(
-                    f"[plan] ignoring non-whitelisted config flag {k!r} in variant {c.get('label')!r}"
+                    f"[plan] ignoring non-whitelisted config flag {k!r} in variant {c.get('label')!r}",
+                    file=sys.stderr,  # stdout may be a --json stream
                 )
         out.append({"label": c.get("label") or "default", "flags": flags})
     return out or [{"label": "default", "flags": {}}]
@@ -350,6 +371,11 @@ def plan(
     in. ``now`` is injectable for deterministic staleness tests.
     """
     now = now or datetime.now(UTC)
+    unknown = [k for k in suite.cells.kinds if k not in KNOWN_KINDS]
+    if unknown:
+        raise ValueError(
+            f"suite {suite.id!r}: unknown cell kind(s) {unknown} (known: {sorted(KNOWN_KINDS)})"
+        )
     current = store.newest_ok_by_cell()  # cell_key -> newest ok record
     max_age = timedelta(days=suite.staleness.max_age_days)
 

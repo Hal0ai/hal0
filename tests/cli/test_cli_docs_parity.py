@@ -144,7 +144,7 @@ def test_cli_mdx_documents_every_bench_verb() -> None:
 
     ``_walk()`` can't see past the single top-level ``bench`` typer
     command, so the ~11 real verbs (plan/run/status/worker/results/
-    history/reindex/devices/publish/eval/import-v1) need their own check
+    history/reindex/devices/publish/eval) need their own check
     against the doc, or a new verb can ship silently undocumented the same
     way ``bench`` itself did.
     """

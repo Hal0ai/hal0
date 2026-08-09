@@ -9,7 +9,7 @@ and can be deleted at any time (DESIGN §14.1 explicitly leaves "SQLite vs
 in-memory JSON scan" open — keeping the DB derived means that decision never
 touches the source of truth).
 
-The store owns its state root: ``$HAL0_BENCH_STATE`` (or legacy ``$BENCHLAB_STATE``; default
+The store owns its state root: ``$HAL0_BENCH_STATE`` (default
 ``/var/lib/hal0-bench``), separate from hal0's ``/var/lib/hal0/benchmarks``, per
 the out-of-tree contract (DESIGN preamble). Layout mirrors DESIGN §3.1:
 
@@ -22,6 +22,8 @@ the out-of-tree contract (DESIGN preamble). Layout mirrors DESIGN §3.1:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import sqlite3
@@ -34,12 +36,34 @@ from .schema import Record
 DEFAULT_STATE_ROOT = "/var/lib/hal0-bench"
 
 
+@contextlib.contextmanager
+def state_lock(root: Path) -> Iterator[None]:
+    """Serialise state-root writers (reindex, queue/control RMW) with a blocking
+    flock on one lockfile. Contention is trivially low (one worker, occasional
+    API writes), but the OLD lock-free read-modify-write lost queue items and a
+    concurrent reindex + API read raced on a deleted bench.db."""
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / ".lock"
+    with lock_path.open("a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def state_root() -> Path:
-    """Resolve the state root: ``$BENCHLAB_STATE`` or the default. Read live (not
-    a module constant) so tests can point it at a tmp dir per-call."""
-    return Path(
-        os.environ.get("HAL0_BENCH_STATE", os.environ.get("BENCHLAB_STATE", DEFAULT_STATE_ROOT))
-    )
+    """Resolve the state root. Read live (not a module constant) so tests can
+    point it at a tmp dir per-call. Precedence: ``$HAL0_BENCH_STATE`` > the
+    ``$HAL0_HOME`` sandbox > the box default. The HAL0_HOME clause is #1518:
+    a sandboxed install must never read or write the real box's bench state."""
+    env = os.environ.get("HAL0_BENCH_STATE")
+    if env:
+        return Path(env)
+    home = os.environ.get("HAL0_HOME", "").strip()
+    if home:
+        return Path(home) / "var-lib" / "hal0-bench"
+    return Path(DEFAULT_STATE_ROOT)
 
 
 class Store:
@@ -84,9 +108,11 @@ class Store:
     def iter_records(self) -> Iterator[dict[str, Any]]:
         """Stream every record as a plain dict, in append (chronological) order.
         Blank/corrupt lines are skipped rather than fatal — a torn last line
-        from a killed process must not make the whole history unreadable."""
+        from a killed process must not make the whole history unreadable — but
+        the skip count is surfaced on stderr so silent data loss is visible."""
         if not self.records_path.exists():
             return
+        skipped = 0
         with self.records_path.open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
@@ -95,7 +121,14 @@ class Store:
                 try:
                     yield json.loads(line)
                 except json.JSONDecodeError:
-                    continue
+                    skipped += 1
+        if skipped:
+            import sys
+
+            print(
+                f"[store] WARNING: skipped {skipped} undecodable line(s) in {self.records_path}",
+                file=sys.stderr,
+            )
 
     # -- reindex (derived) --------------------------------------------------- #
 
@@ -112,15 +145,21 @@ class Store:
             is current, older ones are history). A VIEW, not a table, so it can
             never drift from ``records``.
 
-        Rebuilt from scratch every time (drop + recreate) so the DB is always a
-        pure function of the JSONL — never patched incrementally, never
-        authoritative.
+        Rebuilt from scratch every time so the DB is always a pure function of
+        the JSONL — never patched incrementally, never authoritative. Built in
+        a temp file and atomically ``os.replace``d over the live DB (the old
+        delete-then-rebuild left a window where a concurrent API read hit "no
+        such table"), under the state lock so two writers can't interleave.
         """
         self.ensure_dirs()
-        # Fresh DB every reindex: it is derived + disposable.
-        if self.db_path.exists():
-            self.db_path.unlink()
-        conn = sqlite3.connect(self.db_path)
+        with state_lock(self.root):
+            return self._reindex_locked()
+
+    def _reindex_locked(self) -> int:
+        tmp_path = self.db_path.with_suffix(".db.tmp")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        conn = sqlite3.connect(tmp_path)
         try:
             conn.executescript(
                 """
@@ -134,6 +173,7 @@ class Store:
                     lane        TEXT,
                     kind        TEXT,
                     depth       INTEGER,
+                    config      TEXT,
                     outcome     TEXT,
                     decode_ts_med REAL,
                     hal0_version  TEXT,
@@ -154,8 +194,8 @@ class Store:
                 host = rec.get("host", {})
                 conn.execute(
                     "INSERT INTO records (run_id, cell_key, suite, trigger, model_id, "
-                    "lane, kind, depth, outcome, decode_ts_med, hal0_version, ts, raw) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "lane, kind, depth, config, outcome, decode_ts_med, hal0_version, "
+                    "ts, raw) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         rec.get("run_id"),
                         rec.get("cell_key"),
@@ -165,6 +205,12 @@ class Store:
                         identity.get("lane"),
                         workload.get("kind"),
                         workload.get("depth"),
+                        # The config-variant label, first-class: /cells and
+                        # /history consumers must be able to tell a "default"
+                        # point from an A/B variant without parsing raw JSON —
+                        # a model-scoped trend that interleaves variants is a
+                        # meaningless line.
+                        rec.get("config") or "default",
                         rec.get("outcome"),
                         summary.get("decode_ts_med"),
                         host.get("hal0_version"),
@@ -192,9 +238,10 @@ class Store:
                 """
             )
             conn.commit()
-            return n
         finally:
             conn.close()
+        os.replace(tmp_path, self.db_path)
+        return n
 
     # -- query helpers (used by the CLI) ------------------------------------ #
 
@@ -202,6 +249,23 @@ class Store:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _ensure_fresh_db(self) -> None:
+        """Reindex when bench.db is missing OR older than records.jsonl. The old
+        missing-only check meant every append after the first index (eval runs,
+        aborted sessions, worker paths that skipped reindex) served stale
+        /cells + /history until something happened to delete the DB."""
+        try:
+            db_mtime = self.db_path.stat().st_mtime
+        except OSError:
+            self.reindex()
+            return
+        try:
+            records_mtime = self.records_path.stat().st_mtime
+        except OSError:
+            return  # no records at all — an empty index is correct
+        if records_mtime > db_mtime:
+            self.reindex()
 
     def newest_ok_by_cell(self) -> dict[str, dict[str, Any]]:
         """Map cell_key -> the full current (newest ok) record, read straight
@@ -224,10 +288,10 @@ class Store:
         since: str | None = None,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        """Current-value rows for `benchlab results`, from the current_cells view.
-        Optional model filter (substring) and ISO ``since`` lower bound on ts."""
-        if not self.db_path.exists():
-            self.reindex()
+        """Current-value rows for `hal0 bench results`, from the current_cells
+        view. Optional model filter (substring) and ISO ``since`` lower bound
+        on ts."""
+        self._ensure_fresh_db()
         conn = self._connect()
         try:
             sql = "SELECT * FROM current_cells WHERE 1=1"
@@ -251,9 +315,8 @@ class Store:
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         """Time-ordered ok records for a cell (trend line) or a whole model, for
-        `benchlab history`. Oldest-first so a caller can draw a sparkline."""
-        if not self.db_path.exists():
-            self.reindex()
+        `hal0 bench history`. Oldest-first so a caller can draw a sparkline."""
+        self._ensure_fresh_db()
         conn = self._connect()
         try:
             sql = "SELECT * FROM records WHERE outcome = 'ok'"
