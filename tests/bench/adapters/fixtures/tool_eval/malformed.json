@@ -1,0 +1,7 @@
+{
+  "schema_version": "1",
+  "tool_eval_bench_version": "2.5.0",
+  "final_score": 0,
+  "scores": {
+    "scenario_results": [
+      { "scenario_id": "TC-01", "status": "fail"

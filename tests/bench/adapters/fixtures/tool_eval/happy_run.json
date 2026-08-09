@@ -1,0 +1,164 @@
+{
+  "schema_version": "1",
+  "tool_eval_bench_version": "2.5.0",
+  "final_score": 0,
+  "rating": "\u2605 Poor",
+  "safety_warnings": [],
+  "deployability": 30,
+  "responsiveness": 100,
+  "total_scenarios": 3,
+  "run_id": "2026-08-09T14-40-50.049093Z_43efcd82",
+  "status": "completed",
+  "config": {
+    "model": "fake-fixture-model",
+    "backend": "llamacpp",
+    "base_url": "http://***:8999",
+    "temperature": 0.0,
+    "timeout_seconds": 15.0,
+    "max_turns": 3,
+    "seed": null,
+    "reference_date": null,
+    "scenario_count": 3,
+    "scenario_ids": [
+      "TC-01",
+      "TC-04",
+      "TC-40"
+    ],
+    "concurrency": 1,
+    "error_rate": 0.0,
+    "alpha": 0.7,
+    "extra_params": null,
+    "weight_by_difficulty": false,
+    "config_fingerprint": "f02171f4733c"
+  },
+  "scores": {
+    "final_score": 0,
+    "total_points": 0,
+    "max_points": 6,
+    "rating": "\u2605 Poor",
+    "category_scores": [
+      {
+        "category": "A",
+        "label": "Tool Selection",
+        "earned": 0,
+        "max": 2,
+        "percent": 0,
+        "pass_count": 0,
+        "partial_count": 0,
+        "fail_count": 1
+      },
+      {
+        "category": "B",
+        "label": "Parameter Precision",
+        "earned": 0,
+        "max": 2,
+        "percent": 0,
+        "pass_count": 0,
+        "partial_count": 0,
+        "fail_count": 1
+      },
+      {
+        "category": "L",
+        "label": "Toolset Scale",
+        "earned": 0,
+        "max": 2,
+        "percent": 0,
+        "pass_count": 0,
+        "partial_count": 0,
+        "fail_count": 1
+      }
+    ],
+    "scenario_results": [
+      {
+        "scenario_id": "TC-01",
+        "status": "fail",
+        "points": 0,
+        "summary": "Did not cleanly route the request to get_weather.",
+        "note": null,
+        "tool_calls_made": [],
+        "expected_behavior": "Use get_weather instead of falling back to web_search.",
+        "duration_seconds": 0.01,
+        "turn_count": 1,
+        "raw_log": "model=fake-fixture-model\nscenario=TC-01 Direct Specialist Match\nprompt=What's the weather like in Berlin right now?\n\nassistant=starting\navailable_tools=web_search, get_weather, calculator, send_email, search_files, read_file, create_calendar_event, get_contacts, translate_text, get_stock_price, set_reminder, run_code\ntool_choice=auto\nassistant_turn_1=I am not able to help with that request.\nfinal_answer=I am not able to help with that request.\n\nverdict=fail\nsummary=Did not cleanly route the request to get_weather.",
+        "failure_kind": "missing_step",
+        "ttft_ms": 1.8,
+        "turn_latencies_ms": [
+          6.2
+        ],
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15
+      },
+      {
+        "scenario_id": "TC-04",
+        "status": "fail",
+        "points": 0,
+        "summary": "Did not preserve the Fahrenheit instruction.",
+        "note": null,
+        "tool_calls_made": [],
+        "expected_behavior": "Pass the requested units parameter instead of ignoring it.",
+        "duration_seconds": 0.0,
+        "turn_count": 1,
+        "raw_log": "model=fake-fixture-model\nscenario=TC-04 Unit Handling\nprompt=What's the temperature in Tokyo in Fahrenheit?\n\nassistant=starting\navailable_tools=web_search, get_weather, calculator, send_email, search_files, read_file, create_calendar_event, get_contacts, translate_text, get_stock_price, set_reminder, run_code\ntool_choice=auto\nassistant_turn_1=I am not able to help with that request.\nfinal_answer=I am not able to help with that request.\n\nverdict=fail\nsummary=Did not preserve the Fahrenheit instruction.",
+        "failure_kind": "missing_step",
+        "ttft_ms": 1.5,
+        "turn_latencies_ms": [
+          1.7
+        ],
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15
+      },
+      {
+        "scenario_id": "TC-40",
+        "status": "fail",
+        "points": 0,
+        "summary": "Did not use get_order_status to check the customer's order.",
+        "note": null,
+        "tool_calls_made": [],
+        "expected_behavior": "Select get_order_status from similar-named tools (get_shipping_status, get_customer_profile, get_contacts).",
+        "duration_seconds": 0.0,
+        "turn_count": 1,
+        "raw_log": "model=fake-fixture-model\nscenario=TC-40 Domain Confusion\nprompt=Get the current status of the order for customer Sarah Chen.\n\nassistant=starting\navailable_tools=web_search, get_weather, calculator, send_email, search_files, read_file, create_calendar_event, get_contacts, translate_text, get_stock_price, set_reminder, run_code, get_customer_profile, update_customer, create_ticket, resolve_ticket, get_order_status, get_shipping_status, create_return, list_tickets, get_invoice, create_invoice, process_payment, get_account_balance, transfer_funds, generate_financial_report, deploy_service, rollback_deploy, get_service_health, list_containers, scale_service, get_logs, restart_service, get_employee, submit_timesheet, request_leave, get_payslip, get_org_chart, query_database, export_csv, create_dashboard, run_analytics, get_metrics, send_slack_message, create_channel, schedule_meeting, get_meeting_notes, post_announcement, publish_page, draft_blog_post, upload_asset, get_content_calendar\ntool_choice=auto\nassistant_turn_1=I am not able to help with that request.\nfinal_answer=I am not able to help with that request.\n\nverdict=fail\nsummary=Did not use get_order_status to check the customer's order.",
+        "failure_kind": "missing_step",
+        "ttft_ms": 1.7,
+        "turn_latencies_ms": [
+          1.9
+        ],
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15
+      }
+    ],
+    "worst_category": "A Tool Selection (0%)",
+    "worst_category_percent": 0,
+    "deployability": 30,
+    "responsiveness": 100,
+    "median_turn_ms": 1.9,
+    "alpha": 0.7,
+    "total_tokens": 45,
+    "token_efficiency": 0.0
+  },
+  "metadata": {
+    "tool_version": "2.5.0",
+    "hostname": "fixture-host",
+    "platform_info": "Linux-fixture-x86_64-with-glibc2.44",
+    "python_version": "3.12.13",
+    "model": "fake-fixture-model",
+    "backend": "llamacpp",
+    "base_url": "http://***:8999",
+    "temperature": 0.0,
+    "max_turns": 3,
+    "timeout_seconds": 15.0,
+    "scenario_selector": "TC-01, TC-04, TC-40",
+    "trials": 1,
+    "parallel": 1,
+    "error_rate": 0.0,
+    "thinking_enabled": true
+  },
+  "safety_gate": {
+    "passed": true,
+    "warnings": []
+  },
+  "report_path": "runs/2026/08/2026-08-09T14-40-50.049093Z_fake0000.md"
+}
