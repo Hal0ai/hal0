@@ -25,14 +25,13 @@ exactly the cells it changed, no re-bench checklist.
 from __future__ import annotations
 
 import shlex
-import shutil
 import sys
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from . import harness
+from . import adapters, harness
 from .adapters import GUIDELLM_PIN, LLAMA_BENCHY_PIN
 from .adapters.guidellm import GUIDELLM_BIN
 from .adapters.llama_benchy import LLAMA_BENCHY_BIN
@@ -428,14 +427,17 @@ def plan(
     missing_tools = sorted(
         k
         for k in suite.cells.kinds
-        if k in _ADAPTER_TOOL_FOR_KIND and shutil.which(_ADAPTER_TOOL_FOR_KIND[k][0]) is None
+        if k in _ADAPTER_TOOL_FOR_KIND
+        and adapters.resolve_tool(_ADAPTER_TOOL_FOR_KIND[k][0]) is None
     )
     if missing_tools:
         detail = "; ".join(
             f"{k!r} needs {_ADAPTER_TOOL_FOR_KIND[k][0]!r} (pin: {_ADAPTER_TOOL_FOR_KIND[k][1]})"
             for k in missing_tools
         )
-        raise ValueError(f"suite {suite.id!r}: required tool(s) not on PATH — {detail}")
+        raise ValueError(
+            f"suite {suite.id!r}: required tool(s) not found (PATH or venv bin) — {detail}"
+        )
     current = store.newest_ok_by_cell()  # cell_key -> newest ok record
     max_age = timedelta(days=suite.staleness.max_age_days)
     known_lanes = set(harness.lane_specs())

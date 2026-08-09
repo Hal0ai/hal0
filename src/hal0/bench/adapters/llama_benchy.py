@@ -185,6 +185,13 @@ def _default_runner(argv: list[str], timeout_s: float | None) -> tuple[int, str,
     so :func:`run_llama_benchy` can classify it as :attr:`Outcome.HANG`
     without a try/except at the call site.
     """
+    # Resolve the console-script through PATH-or-venv-bin: the service PATH
+    # never includes the venv bin where a pip-installed tool's script lands.
+    from . import resolve_tool
+
+    head = resolve_tool(argv[0])
+    if head is not None:
+        argv = [head, *argv[1:]]
     proc = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,

@@ -12,6 +12,11 @@ integration's job, not the adapter's (docs/superpowers/plans/
 2026-08-09-bench-phase3-oss-adapters.md).
 """
 
+import os
+import shutil
+import sys
+from pathlib import Path
+
 # Pinned tool versions (re-verified 2026-08-09; plan: docs/superpowers/plans/
 # 2026-08-09-bench-phase3-oss-adapters.md). guidellm is a PyPI extra of the
 # hal0ai distribution (`pip install 'hal0ai[bench-guidellm]'`); the other two
@@ -27,3 +32,20 @@ LLAMA_BENCHY_PIN = (
 TOOL_EVAL_BENCH_PIN = (
     "tool-eval-bench @ git+https://github.com/SeraphimSerapis/tool-eval-bench@v2.5.0"
 )
+
+
+def resolve_tool(name: str) -> str | None:
+    """Absolute path of an adapter tool binary, or None if absent.
+
+    ``$PATH`` first, then the running interpreter's own bin directory —
+    console scripts land there when a tool is pip-installed into hal0's
+    venv, and the service PATH never includes the venv bin (found on-box
+    2026-08-09: every venv-installed tool was invisible to the plan-time
+    gate and to the default subprocess runners)."""
+    found = shutil.which(name)
+    if found:
+        return found
+    cand = Path(sys.executable).parent / name
+    if cand.is_file() and os.access(cand, os.X_OK):
+        return str(cand)
+    return None
