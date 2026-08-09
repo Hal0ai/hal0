@@ -85,7 +85,7 @@ from ..schema import Outcome
 
 __all__ = [
     "ERA_HARDENED",
-    "ERA_LEGACY",
+    "ERA_PRE_HARDENING",
     "ERA_UNKNOWN",
     "MODULE",
     "SCORING_ERA_CUTOFF",
@@ -113,7 +113,7 @@ MODULE = "tool_eval_bench"
 # distinguish normal operation.
 SCORING_ERA_CUTOFF: tuple[int, ...] = (2, 5, 0)
 ERA_HARDENED = "hardened-2026-08"
-ERA_LEGACY = "legacy-pre-2026-08"
+ERA_PRE_HARDENING = "pre-hardening-2026-08"
 ERA_UNKNOWN = "unknown"
 
 #: tool-eval-bench's own taxonomy (``domain.scenarios.INFRASTRUCTURE_FAILURE_
@@ -155,7 +155,7 @@ def classify_scoring_era(raw_version: str | None) -> str:
     parsed = parse_tool_version(raw_version)
     if not parsed:
         return ERA_UNKNOWN
-    return ERA_HARDENED if parsed >= SCORING_ERA_CUTOFF else ERA_LEGACY
+    return ERA_HARDENED if parsed >= SCORING_ERA_CUTOFF else ERA_PRE_HARDENING
 
 
 # --------------------------------------------------------------------------- #

@@ -296,7 +296,7 @@ def _build_meta(
         "tag": "",  # v1 free-form result-file label -> not a v2 concept
         "extra": "",  # v1 free-form --extra string -> flags is structured
         "reps": reps,
-        # Legacy key-set compat only (finding 6): the harness never emits
+        # v1 key-set compat only (finding 6): the harness never emits
         # -ub, so every cell runs at llama-bench's own internal ubatch
         # default. Left as an always-None key rather than removed because
         # older readers of this dict/schema shape expect the key to exist.
