@@ -377,10 +377,10 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
 
         # [npu] table: expose asr/embed toggles so the dashboard can seed
         # its NPU modality controls. effective_npu_table() also folds in the
-        # legacy [defaults].load_asr/load_embed fallback providers/flm.py
-        # still honors when a pre-1.0 config has no [npu] table at all
-        # (#1670) -- without it the pill renders off even while the
-        # modality is actually running.
+        # pre-[npu]-table [defaults].load_asr/load_embed fallback
+        # providers/flm.py still honors when a pre-1.0 config has no [npu]
+        # table at all (#1670) -- without it the pill renders off even while
+        # the modality is actually running.
         npu_table = effective_npu_table(cfg)
         if npu_table:
             entry["npu"] = {
@@ -596,9 +596,9 @@ async def container_enrichment(
 
         # [npu] table: expose asr/embed toggles so the dashboard can seed
         # its NPU modality controls without a separate /config fetch.
-        # effective_npu_table() also folds in the legacy [defaults].
-        # load_asr/load_embed fallback providers/flm.py still honors when a
-        # pre-1.0 config has no [npu] table at all (#1670).
+        # effective_npu_table() also folds in the pre-[npu]-table
+        # [defaults].load_asr/load_embed fallback providers/flm.py still
+        # honors when a pre-1.0 config has no [npu] table at all (#1670).
         npu_table = effective_npu_table(cfg)
         if npu_table:
             entry["npu"] = {

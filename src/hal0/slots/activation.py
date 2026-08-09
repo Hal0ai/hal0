@@ -130,7 +130,8 @@ def npu_anchor_config(configs: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def effective_npu_table(cfg: dict[str, Any] | None) -> dict[str, Any]:
-    """The slot's effective ``[npu]`` modality table, legacy keys included.
+    """The slot's effective ``[npu]`` modality table, pre-``[npu]``-table
+    configs included.
 
     ``providers/flm.py`` still honors the pre-container ``[defaults].load_asr``/
     ``load_embed`` keys at launch when a slot's TOML has no ``[npu]`` table at
@@ -140,11 +141,11 @@ def effective_npu_table(cfg: dict[str, Any] | None) -> dict[str, Any]:
     NPU pill off even while ASR/embed are actually running (#1670).
 
     ``[npu]`` is PRIMARY whenever the table exists at all — an explicit
-    ``asr = false`` must win even if stale legacy defaults say otherwise,
-    same precedence ``flm.py`` itself uses. The legacy fallback is also
-    scoped to ``device == "npu"`` slots only: a chat slot's unrelated
-    ``[defaults]`` table (chat_template, etc.) must never be misread as NPU
-    modality flags.
+    ``asr = false`` must win even if a stale ``[defaults]`` pair says
+    otherwise, same precedence ``flm.py`` itself uses. The pre-``[npu]``
+    fallback is also scoped to ``device == "npu"`` slots only: a chat slot's
+    unrelated ``[defaults]`` table (chat_template, etc.) must never be
+    misread as NPU modality flags.
     """
     if not isinstance(cfg, dict):
         return {}
@@ -167,10 +168,11 @@ def npu_modality_active(configs: list[dict[str, Any]], slot_type: str) -> bool:
     """True when the NPU anchor is live AND ``slot_type``'s modality is on.
 
     The one gate for "should an NPU request of this type route to FLM". Reads
-    the ANCHOR's ``[npu]`` table (falling back to the legacy ``[defaults].
-    load_asr``/``load_embed`` keys, #1670 — see :func:`effective_npu_table`)
-    rather than the child shadow's own config, because a shadow's placeholder
-    model makes it look permanently activated (see :data:`NPU_MODALITY_KEY`).
+    the ANCHOR's ``[npu]`` table (falling back to the pre-``[npu]``-table
+    ``[defaults].load_asr``/``load_embed`` keys, #1670 — see
+    :func:`effective_npu_table`) rather than the child shadow's own config,
+    because a shadow's placeholder model makes it look permanently activated
+    (see :data:`NPU_MODALITY_KEY`).
     ``chat`` defaults ON when the key is absent, matching ``NpuConfig.chat``;
     ``asr``/``embed`` default OFF.
     """
