@@ -1327,6 +1327,40 @@ class TestContextSizeOwnership:
         mi = _model_info(defaults={"context_size": ok})
         assert _resolve_context_size(None, mi) == ok
 
+    # ── #1617: a stale/upgraded registry row must not stick at 8192 ─────────
+    #
+    # A row created before registry/pull.py started stamping
+    # ``metadata.context_length`` (#1657/#1707) has empty metadata FOREVER —
+    # nothing re-runs GGUF detection on bytes already on disk. The seeded
+    # brain model is the box-breaking case: its system prompt alone is
+    # ~14k tokens, so an 8192 fallback fails every hal0-brain turn AND every
+    # Hindsight extraction retain out of the box.
+
+    def test_curated_model_with_no_registry_metadata_does_not_fall_to_safe_floor(self) -> None:
+        """A curated id (the seeded brain model) with an empty ``metadata``
+        dict — the exact shape of a pre-#1657 registry row on an upgraded or
+        pre-fix-built box — must resolve from the curated catalogue's
+        ``context_length`` instead of the bare 8192 safe fallback."""
+        mi = _model_info(_model_key="hal0-brain-sft-q8-rocmfpx", metadata={})
+        assert _resolve_context_size(None, mi) != _CTX_SAFE_FALLBACK
+        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
+
+    def test_curated_backfill_is_dense_capped_like_any_native_window(self) -> None:
+        """The curated catalogue's raw 131072 for the brain model must still
+        go through the same dense cap as a GGUF-detected native window — this
+        is a derived fact, not an operator's explicit choice, so an
+        unconfigured slot can't request an impractical KV cache."""
+        mi = _model_info(_model_key="hal0-brain-sft-q8-rocmfpx")
+        mi.pop("metadata", None)
+        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
+
+    def test_unknown_model_with_no_metadata_still_falls_to_safe_floor(self) -> None:
+        """Non-curated ids have nothing to backfill from — the safe floor is
+        still correct there. Pins the existing behaviour so the curated
+        backfill doesn't quietly widen to every model."""
+        mi = _model_info(_model_key="some-operator-pulled-custom-model", metadata={})
+        assert _resolve_context_size(None, mi) == _CTX_SAFE_FALLBACK
+
     def test_bad_model_ctx_reaches_the_launch_command_as_the_fallback(self) -> None:
         """End-to-end through `container_spec`: the emitted `--ctx-size` is a
         usable number, not `-1`."""
