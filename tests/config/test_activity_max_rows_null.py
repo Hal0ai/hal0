@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import ActivityConfig, Hal0Config
@@ -37,7 +38,7 @@ def test_a_real_value_is_kept() -> None:
 
 
 def test_below_the_floor_is_still_rejected() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ActivityConfig(max_rows=50)
 
 
