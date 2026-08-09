@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.api.routes import models as models_route
 from hal0.registry.model import Model, _derive_ns
+from hal0.services.models_service import lazy_quant
 
 # ── _derive_ns ─────────────────────────────────────────────────────────────
 
@@ -56,6 +57,28 @@ def test_derive_ns_empty_path_is_pulled() -> None:
     m = Model(id="ghost", path="/tmp/will-be-cleared")
     object.__setattr__(m, "path", "")
     assert _derive_ns(m) == "pulled"
+
+
+# ── lazy_quant — ROCmFPX family resolver (issue #1659) ──────────────────────
+
+
+def test_lazy_quant_resolves_rocmfpx_family_from_path() -> None:
+    """A pulled ROCmFPX repack must resolve to the family label, not the
+    raw preset token the generic quant regex would greedily match."""
+    dumped = {"path": "/var/lib/hal0/models/hal0-brain/hal0-brain-sft-Q8_0_ROCMFPX.gguf"}
+    assert lazy_quant(dumped) == "ROCmFP8"
+
+
+def test_lazy_quant_resolves_rocmfpx_family_from_hf_filename() -> None:
+    """Same resolver order applies to the HF variant filename fallback."""
+    dumped = {"hf_filename": "hal0-brain-sft-Q4_0_ROCMFP4_FAST.gguf"}
+    assert lazy_quant(dumped) == "ROCmFP4"
+
+
+def test_lazy_quant_still_resolves_generic_quant() -> None:
+    """Non-ROCmFPX filenames keep using the generic quant regex."""
+    dumped = {"path": "/var/lib/hal0/models/qwen3-coder/qwen3-coder-q4_k_m.gguf"}
+    assert lazy_quant(dumped) == "Q4_K_M"
 
 
 def test_derive_ns_blessed_root_with_only_id_segment_is_pulled() -> None:

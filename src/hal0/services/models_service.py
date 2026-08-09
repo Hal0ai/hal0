@@ -237,16 +237,22 @@ def lazy_quant(dumped: dict[str, Any]) -> str | None:
     """Best-effort quant label for a serialised row missing ``quant``.
 
     Filename-token only (cheap enough for the list endpoint's 30s poll):
-    the on-disk basename first, then the HF variant filename. Rows whose
-    quant is only knowable from the GGUF header (hash-named blobs) get it
-    at registration via detect() instead.
+    the on-disk basename first, then the HF variant filename. Checks the
+    ROCmFPX family resolver before the generic quant regex — same order
+    as the eager path in ``detect()`` — so ROCmFPX repacks (hal0's own
+    brain model included) resolve to their family label (``ROCmFP8``)
+    instead of the raw preset token the generic regex would greedily
+    match (``Q8_0_ROCMFPX``). Rows whose quant is only knowable from the
+    GGUF header (hash-named blobs) get it at registration via detect()
+    instead.
     """
-    from hal0.registry.detect import quant_from_filename
+    from hal0.registry.detect import quant_from_filename, quant_from_rocmfpx_filename
 
     for key in ("path", "hf_filename"):
         raw = dumped.get(key)
         if isinstance(raw, str) and raw:
-            quant = quant_from_filename(Path(raw).name)
+            name = Path(raw).name
+            quant = quant_from_rocmfpx_filename(name) or quant_from_filename(name)
             if quant:
                 return quant
     return None
