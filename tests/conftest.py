@@ -130,8 +130,14 @@ def _reject_privileged_systemctl(argv: object) -> None:
         # `<systemctl-verb>-agent` (agent family); both mutate. The
         # non-systemctl file verbs (write-unit, write-quadlet, ...) mutate
         # /etc as root, which a test must never do either.
+        #
+        # `help` and `check-dropin` are the exceptions: both are pure — they
+        # read stdin/argv, write nothing, and never touch systemd. Running the
+        # real script IS the point for those (tests/installer's #1716 suite
+        # exercises the root-side drop-in allow-list against the shipped bash),
+        # and neither needs sudo or root.
         seam_verb = next((p for p in inner[1:] if not p.startswith("-")), "")
-        if seam_verb and seam_verb not in {"help", ""}:
+        if seam_verb and seam_verb not in {"help", "", "check-dropin"}:
             raise AssertionError(
                 f"test tried to run the hal0-systemctl privilege seam for real: {parts!r}. "
                 "Inject a fake runner (or patch hal0.system.seam.agent_unit_argv) instead — "
