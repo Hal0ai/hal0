@@ -298,6 +298,31 @@ def test_plan_exits_zero_even_when_the_probe_explodes(monkeypatch: pytest.Monkey
     assert main(["--plan"]) == 0
 
 
+def test_floor_prints_the_smallest_rungs_vram_floor_as_a_bare_int(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """install.sh's "no agent model fits this box" notice interpolates this
+    figure instead of hardcoding a GB number — it must match the curated
+    ladder's actual smallest rung, not drift from it."""
+    import hal0.install.agent_model as am
+
+    assert main(["--floor"]) == 0
+    out = capsys.readouterr().out
+    assert out == f"{am._smallest_rung_gb():.0f}\n"
+
+
+def test_floor_never_touches_hardware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--floor`` reads the catalogue only — no hardware probe, so it stays
+    correct even when hardware.json is missing or unreadable."""
+    import hal0.install.agent_model as am
+
+    def _boom() -> None:
+        raise AssertionError("--floor must never probe hardware")
+
+    monkeypatch.setattr(am, "_load_hardware", _boom)
+    assert main(["--floor"]) == 0
+
+
 def test_main_returns_nonzero_instead_of_raising(monkeypatch: pytest.MonkeyPatch) -> None:
     import hal0.install.agent_model as am
 
