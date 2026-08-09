@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { npuModalityOn, npuRoleForSlot } from '../npu-modality.js'
+import { npuModalityOn, npuPillOn, npuRoleForSlot } from '../npu-modality.js'
 
 describe('npuModalityOn', () => {
   it('defaults chat ON, asr/embed OFF when the [npu] table is absent', () => {
@@ -31,6 +31,33 @@ describe('npuModalityOn', () => {
     expect(npuModalityOn({ asr: true }, 'asr')).toBe(true)
     expect(npuModalityOn({ asr: true }, 'embed')).toBe(false)
     expect(npuModalityOn({ asr: true }, 'chat')).toBe(true)
+  })
+})
+
+describe('npuPillOn (#1661)', () => {
+  it('asr/embed resolve off npu_modality_active, not the raw [npu] table', () => {
+    // Model-less anchor: the write already landed npu.asr=true on disk (or
+    // is still in flight), but the backend's npu_modality_active gate is
+    // False whenever the anchor has no model bound — the pill must agree.
+    const shadow = { type: 'transcription', npu_modality_active: false }
+    expect(npuPillOn(shadow, { asr: true }, 'asr')).toBe(false)
+  })
+
+  it('reflects npu_modality_active true once the anchor is actually activated', () => {
+    const shadow = { type: 'embedding', npu_modality_active: true }
+    expect(npuPillOn(shadow, { embed: true }, 'embed')).toBe(true)
+  })
+
+  it('treats a missing npu_modality_active field as off', () => {
+    const shadow = { type: 'transcription' }
+    expect(npuPillOn(shadow, { asr: true }, 'asr')).toBe(false)
+  })
+
+  it('chat still reads the raw [npu] table (the anchor carries no npu_modality_active field)', () => {
+    const anchor = { type: 'llm' }
+    expect(npuPillOn(anchor, { chat: true }, 'chat')).toBe(true)
+    expect(npuPillOn(anchor, { chat: false }, 'chat')).toBe(false)
+    expect(npuPillOn(anchor, undefined, 'chat')).toBe(true)
   })
 })
 

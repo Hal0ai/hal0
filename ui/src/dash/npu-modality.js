@@ -21,3 +21,18 @@ export const npuRoleForSlot = (slot) =>
 // True for the trio shadow records (stt/embed) riding the anchor's process.
 export const isNpuShadowSlot = (slot) =>
   slot?.type === 'transcription' || slot?.type === 'embedding'
+
+// Resolved pill state — what the card should actually render as ON/OFF.
+//
+// #1637 guarded the CHAT toggle write against a model-less anchor ("model
+// presence IS the activation signal") but left the asr/embed pills reading
+// the raw [npu] table via npuModalityOn: a model-less anchor that already
+// has (or later gets) `npu.asr=true` on disk renders the STT/Embed pill ON
+// even though `hal0.slots.activation.npu_modality_active` — the one gate
+// for "does an NPU request of this type actually route" — is False whenever
+// `is_activated(anchor)` is False (#1661). The backend already lifts that
+// resolved answer onto each trio SHADOW's `npu_modality_active` field
+// (slot_view config_enrichment); the anchor's own chat entry has no such
+// field (only shadows get it), so chat keeps reading the raw table.
+export const npuPillOn = (slot, anchorNpu, role) =>
+  role === 'chat' ? npuModalityOn(anchorNpu, role) : !!slot?.npu_modality_active

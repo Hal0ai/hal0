@@ -27,7 +27,7 @@ import { slotIndicatorFromPhase } from './slot-status.js'
 // the shared helper folds them through backend_to_device → npu).
 import { devKind } from '@/lib/deviceMeta'
 import { PillToggle } from './primitives.jsx'
-import { npuModalityOn, npuRoleForSlot, isNpuShadowSlot } from './npu-modality.js'
+import { npuPillOn, npuRoleForSlot, isNpuShadowSlot } from './npu-modality.js'
 
 // ─── icons (16×16, hal0 thin-line family — ported from the design) ─────────
 const NI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -332,7 +332,12 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu }) {
             cold restart, same contract as the drawer's applyNpu) — they used
             to merely open the edit drawer, which read as a broken toggle.
             Role comes from the slot TYPE (npuRoleForSlot), not the display
-            name — a non-canonically-named shadow must not flip chat. */}
+            name — a non-canonically-named shadow must not flip chat.
+            "on" reads through npuPillOn: asr/embed resolve off the anchor's
+            server-computed npu_modality_active (False whenever the anchor
+            has no model bound), not the raw [npu] table — else a model-less
+            anchor's stale/pending `npu.asr=true` renders the pill ON while
+            nothing actually routes (#1661). */}
         {(() => {
           const role = npuRoleForSlot(slot)
           const roleLabel = role === 'asr' ? 'STT' : role === 'embed' ? 'Embed' : 'Chat'
@@ -340,7 +345,7 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu }) {
             <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
               <span style={{color: 'var(--fg-2)'}}>{roleLabel}</span>
               <PillToggle
-                on={npuModalityOn(anchorNpu, role)}
+                on={npuPillOn(slot, anchorNpu, role)}
                 label={roleLabel}
                 disabled={handlers.modalityBusy}
                 onToggle={(next) => handlers.onModality(role, next)}
@@ -455,10 +460,14 @@ export function NpuOccupancyCard({ slots }) {
   // their own) and cold-restarts it, mirroring the drawer's applyNpu.
   const applyModality = (role, next) => {
     if (!anchorSlot || editMut.isPending || restartMut.isPending) return
-    // Enabling chat needs a bound model — model presence IS the activation
-    // signal, so a bare chat=true write would show the pill on while the
-    // slot stays unroutable. The model picker lives in the drawer.
-    if (role === 'chat' && next && !(anchorSlot.modelDefault || anchorSlot.model_id || anchorSlot.model)) {
+    // Every NPU modality (chat/asr/embed) rides the one anchor FLM process
+    // and needs a bound model to be routable — model presence IS the
+    // activation signal (hal0.slots.activation.is_activated /
+    // npu_modality_active), so a bare `<role>=true` write on a model-less
+    // anchor would cold-restart the container and leave the pill on while
+    // nothing routes. #1637 guarded chat; asr/embed share the identical
+    // dependency (#1661). The model picker lives in the drawer.
+    if (next && !(anchorSlot.modelDefault || anchorSlot.model_id || anchorSlot.model)) {
       toast('Pick a chat model first — opening the slot editor', 'info')
       window.location.hash = '#slots/' + anchorSlot.name
       return
