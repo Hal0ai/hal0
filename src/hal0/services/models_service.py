@@ -752,6 +752,10 @@ async def list_all(
     now = int(time.time())
     data: list[dict[str, Any]] = []
     seen: set[str] = set()
+    # Registry-sourced rows keyed by id, so the FLM-probe dedupe below can
+    # patch a surviving row in place instead of only being able to skip it
+    # (see the ``fm["tag"] in seen`` branch — #1647).
+    by_id: dict[str, dict[str, Any]] = {}
     filtered = 0
     # Last HF update-check snapshot (populated by /api/models/updates/check;
     # never fetched on this hot path). The flag is recomputed against the
@@ -799,6 +803,7 @@ async def list_all(
                 dumped["comfyui_category"] = _cat
         data.append(dumped)
         seen.add(entry.id)
+        by_id[entry.id] = dumped
     # "Don't surface invisible models": the composite ``hal0``/npu upstream
     # advertises FLM slot-default tags via /v1/models even when the weights are
     # not on disk, so they used to leak into the catalog as available-but-
@@ -893,6 +898,18 @@ async def list_all(
             # with backends=["npu"]) — emitting the probe row too listed every
             # pulled FLM model twice, once undeletable (#duplicate-FLM-rows).
             if fm["tag"] in seen:
+                # The registry row can be mistyped (#1647: the FLM pull path
+                # used to hardcode capabilities=["chat"] regardless of the
+                # model's real modality). The live probe knows better — merge
+                # its classification into the surviving row instead of
+                # silently discarding it, so an embed/stt model pulled via
+                # FLM doesn't masquerade as chat-only forever with no
+                # migration path.
+                row = by_id.get(fm["tag"])
+                probe_caps = list(fm.get("capabilities") or [])
+                if row is not None and probe_caps and row.get("capabilities") != probe_caps:
+                    row["capabilities"] = probe_caps
+                    row["type"] = dispatch_type(row.get("id", ""), capabilities=probe_caps)
                 continue
             mid = fm["tag"].replace(":", "-") + "-FLM"
             if mid in seen:

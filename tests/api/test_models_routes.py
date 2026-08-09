@@ -657,6 +657,39 @@ def test_list_models_dedups_flm_probe_against_registry_rows(
     assert rows["llama3.2-1b-FLM"]["backend"] == "flm"
 
 
+def test_list_models_dedupe_merges_flm_probe_capabilities_into_registry_row(
+    inspect_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry row born from the FLM-pull hardcoded-chat bug (#1647) must
+    have its capabilities/type corrected from the live probe on every list —
+    the dedupe skip must not silently discard the probe's correct embed/stt
+    classification just because the tag is already ``seen``."""
+    fpath = Path(tmp_hal0_home) / "embed-gemma-300m.gguf"
+    fpath.write_bytes(b"\x00" * 8)
+    inspect_client.post(
+        "/api/models",
+        json={"id": "embed-gemma:300m", "path": str(fpath), "capabilities": ["chat"]},
+    )
+    fake = [
+        {
+            "tag": "embed-gemma:300m",
+            "capabilities": ["embed"],
+            "installed": True,
+            "size_bytes": 1,
+            "footprint_gb": 0.0,
+            "family": "embed-gemma",
+        },
+    ]
+    monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: fake)
+
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    row = rows["embed-gemma:300m"]
+    assert row["capabilities"] == ["embed"]
+    assert row["type"] == "embedding"
+
+
 # ── upstream provenance in /api/models ─────────────────────────────────────
 
 
