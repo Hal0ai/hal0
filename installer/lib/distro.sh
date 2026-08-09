@@ -94,7 +94,15 @@ pkg_install_cmd() {
     local pm
     pm="$(pkg_mgr)" || return 1
     case "${pm}" in
-        apt-get) printf 'sudo apt-get install -y %s\n' "$*" ;;
+        # -o DPkg::Lock::Timeout=120: unattended-upgrades runs on every fresh
+        # Ubuntu boot and commonly still holds the dpkg/apt-get lock when a
+        # post-phase installer step (hermes provisioning, NPU prereqs) wins
+        # the race against it (#1584). apt >= 1.9.11 (every supported target)
+        # honours this by polling for the lock instead of failing immediately.
+        # Placed before `install` so the emitted string still ENDS with the
+        # package list (tests/installer/test_distro.sh's "ends with package"
+        # invariant).
+        apt-get) printf 'sudo apt-get -o DPkg::Lock::Timeout=120 install -y %s\n' "$*" ;;
         dnf) printf 'sudo dnf install -y %s\n' "$*" ;;
         yum) printf 'sudo yum install -y %s\n' "$*" ;;
         zypper) printf 'sudo zypper install -y %s\n' "$*" ;;

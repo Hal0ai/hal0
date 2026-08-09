@@ -121,11 +121,14 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 # Debian needs an index refresh before a first install on a fresh image.
+# -o DPkg::Lock::Timeout=120: this script runs well after boot, so
+# unattended-upgrades commonly still holds the dpkg/apt-get lock (#1584) —
+# poll for it instead of dying on the first hit.
 if [ "${family}" = "debian" ]; then
     if [ "$(id -u)" -eq 0 ]; then
-        apt-get update -qq || warn "apt-get update failed — install may still succeed from cache"
+        apt-get -o DPkg::Lock::Timeout=120 update -qq || warn "apt-get update failed — install may still succeed from cache"
     else
-        sudo apt-get update -qq || warn "apt-get update failed — install may still succeed from cache"
+        sudo apt-get -o DPkg::Lock::Timeout=120 update -qq || warn "apt-get update failed — install may still succeed from cache"
     fi
 fi
 
