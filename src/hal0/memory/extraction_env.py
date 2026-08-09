@@ -118,6 +118,35 @@ def render_drop_in(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> str:
     return _DROP_IN_TEMPLATE.format(slot=slot, timeout_s=int(timeout_s))
 
 
+def drop_in_matches(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> bool:
+    """True when the on-disk drop-in already reflects ``(slot, timeout_s)``.
+
+    #1682 review: comparing only against ``hal0.toml`` is not enough to
+    decide propagation is unnecessary. A host hit by the pre-seam write bug
+    (or any other silent failure) can have ``hal0.toml`` already recording
+    this exact slot while the drop-in was never actually written or still
+    names something else — re-requesting the *same* slot would then never
+    reconcile.
+
+    The drop-in is 0644 root:root (world-readable, #1641), so this is a
+    plain, unprivileged read — no seam round trip. Read as explicit UTF-8
+    (#1717 review): the file is always written UTF-8 by
+    :class:`~hal0.system.seam.SystemCtlSeam`, and the template's em dash
+    would otherwise be locale-dependent — under e.g. ``LC_ALL=C`` a bare
+    ``Path.read_text()`` can fail to decode a byte-for-byte correct file,
+    misreporting a healthy drop-in as drift on every enabled graph PUT.
+    Any read failure (missing file on a fresh install or a host that never
+    propagated, a permission oddity, or genuinely undecodable content —
+    ``Path.read_text()`` raises ``UnicodeDecodeError``, not ``OSError``)
+    counts as "does not match": propagate and let the atomic rewrite
+    repair it, instead of an otherwise-idempotent PUT 500ing.
+    """
+    try:
+        return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(slot, timeout_s)
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def apply_extraction_slot(
     slot: str,
     *,
@@ -191,4 +220,4 @@ def apply_extraction_slot(
     return result
 
 
-__all__ = ["DROP_IN_PATH", "apply_extraction_slot", "render_drop_in"]
+__all__ = ["DROP_IN_PATH", "apply_extraction_slot", "drop_in_matches", "render_drop_in"]

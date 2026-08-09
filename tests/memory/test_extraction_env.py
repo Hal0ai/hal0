@@ -15,6 +15,7 @@ from pathlib import Path
 from hal0.memory.extraction_env import (
     DROP_IN_PATH,
     apply_extraction_slot,
+    drop_in_matches,
     render_drop_in,
 )
 from hal0.system.seam import SEAM_BIN, SystemCtlSeam
@@ -222,6 +223,84 @@ def test_apply_does_not_blame_the_wrapper_for_other_failures(monkeypatch, tmp_pa
     seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
 
     assert "install.sh" not in (apply_extraction_slot("utility", seam=seam)["error"] or "")
+
+
+def test_drop_in_matches_true_when_content_is_identical(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "extraction-model.conf"
+    path.write_text(render_drop_in("agent", 300))
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+
+    assert drop_in_matches("agent", 300) is True
+
+
+def test_drop_in_matches_false_on_stale_content(monkeypatch, tmp_path: Path):
+    """The recorded slot changed but the drop-in still names the old one —
+    exactly the divergence a broken host can be stuck in."""
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "extraction-model.conf"
+    path.write_text(render_drop_in("utility", 300))
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+
+    assert drop_in_matches("agent", 300) is False
+
+
+def test_drop_in_matches_false_when_missing(monkeypatch, tmp_path: Path):
+    """#1682 review: a host where the privileged write previously failed
+    silently (pre-seam bug) has hal0.toml recording a slot that was NEVER
+    actually applied — no drop-in file at all. That must read as "does not
+    match", not error out, so the caller knows to (re)propagate."""
+    import hal0.memory.extraction_env as ee
+
+    monkeypatch.setattr(ee, "DROP_IN_PATH", tmp_path / "never-written.conf")
+
+    assert drop_in_matches("agent", 300) is False
+
+
+def test_drop_in_matches_false_on_undecodable_bytes(monkeypatch, tmp_path: Path):
+    """#1717 review: ``Path.read_text()`` raises ``UnicodeDecodeError`` (NOT
+    an ``OSError``) on malformed/tampered content. That must still read as
+    "does not match" so the caller reconciles by rewriting the file, instead
+    of an otherwise-idempotent graph PUT 500ing on a decode failure."""
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "extraction-model.conf"
+    path.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+
+    assert drop_in_matches("agent", 300) is False
+
+
+def test_drop_in_matches_reads_utf8_regardless_of_locale(monkeypatch, tmp_path: Path):
+    """#1717 review: the drop-in (and the em dash in its header comment) is
+    always written UTF-8 by SystemCtlSeam — the comparison must decode it as
+    UTF-8 explicitly rather than via ``Path.read_text()``'s locale-dependent
+    default, or a byte-for-byte correct file can misread as drift under
+    e.g. ``LC_ALL=C`` and trigger a needless rewrite + restart on every
+    enabled graph PUT."""
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "extraction-model.conf"
+    # The rendered template contains a real em dash (U+2014) in its header.
+    content = render_drop_in("agent", 300)
+    assert "—" in content
+    path.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+
+    real_read_text = Path.read_text
+
+    def _locale_sensitive_read_text(self, *args, **kwargs):
+        # Fail unless the caller passed an explicit encoding — the same
+        # failure mode as a real ASCII-locale default.
+        if kwargs.get("encoding") != "utf-8" and (len(args) < 1 or args[0] != "utf-8"):
+            raise UnicodeDecodeError("ascii", b"\xe2\x80\x94", 0, 1, "ordinal not in range(128)")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _locale_sensitive_read_text)
+
+    assert drop_in_matches("agent", 300) is True
 
 
 def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Path):

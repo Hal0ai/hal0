@@ -15,6 +15,7 @@ See PLAN.md §3 and §5 Tier 1.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -204,6 +205,18 @@ def load_hal0_config(path: Path | None = None) -> Hal0Config:
             f"failed to validate hal0 config at {target}: {exc}",
             details={"path": str(target), "reason": str(exc)},
         ) from exc
+
+
+#: Serializes concurrent hal0.toml read-modify-write across API routes
+#: (routes/settings.py's ``PUT /api/settings``, routes/memory.py's
+#: ``PUT /api/memory/graph``). One in-process lock is sufficient — hal0-api
+#: is the only writer process. A per-route lock is not enough on its own
+#: (#1682 review): the memory/graph route holds its critical section across
+#: a multi-second-to-~60s extraction-slot propagation, and without a SHARED
+#: lock an unrelated settings save can land mid-flight, persisting a config
+#: snapshot taken before the propagation started and clobbering the section
+#: it just wrote.
+HAL0_TOML_LOCK: asyncio.Lock = asyncio.Lock()
 
 
 def save_hal0_config(cfg: Hal0Config, path: Path | None = None) -> None:
