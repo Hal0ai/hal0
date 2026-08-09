@@ -295,8 +295,18 @@ def _build_meta(
         "model_rel": model_rel,
         "model_path": model_path,
         "host": os.environ.get("HOST_LABEL", _DEFAULT_HOST_LABEL),
+        # The TIER decides the label, not the probe: the v1.0 CPU baseline is
+        # normally measured with HAL0_BENCH_TIER=cpu on a box that DOES have a
+        # GPU, and the resolver still (correctly) reports that GPU's name.
+        # Taking the probed label first would file those CPU numbers under the
+        # GPU's name — exactly the per-tier corruption the old config.sh block
+        # existed to prevent.
         "tier": devices.tier,
-        "gpu": devices.gpu_label,
+        "gpu": (
+            "CPU (no GPU passthrough)"
+            if devices.tier == TIER_CPU
+            else (devices.gpu_label or "unknown GPU")
+        ),
         "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
