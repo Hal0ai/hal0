@@ -137,9 +137,7 @@ def test_help_lists_exactly_the_granted_verbs(installed: Path) -> None:
 # ── operator releases-URL override (#1690) ──────────────────────────────────
 
 
-def test_stage_reads_releases_url_from_hal0_home_api_env(
-    installed: Path, tmp_path: Path
-) -> None:
+def test_stage_reads_releases_url_from_hal0_home_api_env(installed: Path, tmp_path: Path) -> None:
     """The documented interim mechanism (custom HAL0_RELEASES_URL while
     releases.hal0.dev does not exist) must reach root, or every custom-URL box
     passes /api/updates/check and then always fails stage (#1690)."""
@@ -163,9 +161,7 @@ def test_stage_accepts_a_file_url(installed: Path, tmp_path: Path) -> None:
     assert _released_url(installed) == "file:///srv/hal0-releases/stable.json"
 
 
-def test_stage_strips_matching_quotes_around_releases_url(
-    installed: Path, tmp_path: Path
-) -> None:
+def test_stage_strips_matching_quotes_around_releases_url(installed: Path, tmp_path: Path) -> None:
     hal0_home = tmp_path / "sandbox"
     _write_api_env(hal0_home, 'HAL0_RELEASES_URL="https://mirror.example/stable.json"\n')
 
@@ -216,9 +212,7 @@ def test_stage_ignores_an_api_env_with_no_releases_url_line(
     assert _released_url(installed) is None
 
 
-def test_stage_never_forwards_unrelated_api_env_secrets(
-    installed: Path, tmp_path: Path
-) -> None:
+def test_stage_never_forwards_unrelated_api_env_secrets(installed: Path, tmp_path: Path) -> None:
     """Only HAL0_RELEASES_URL is parsed out — never a `source`/`eval` of the
     whole file, which also carries provider tokens and HAL0_ADMIN_KEY /
     HAL0_CLIENT_KEY."""
