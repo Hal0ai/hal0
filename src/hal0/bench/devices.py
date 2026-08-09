@@ -210,7 +210,7 @@ def _node_allowed(node: str, kfd_path: str, dri_dir: str) -> bool:
     baked-in ``/dev/...`` regex so the ``HAL0_BENCH_KFD_PATH`` /
     ``HAL0_BENCH_DRI_DIR`` seams (tests, unusual passthrough layouts) stay
     covered by the SAME check instead of bypassing it. The privileged
-    ``hal0-benchctl``/``config.sh`` seam mirrors this in shell.
+    ``hal0-benchctl`` seam mirrors this in shell (validate_device_flag).
     """
     if ".." in node:
         return False

@@ -48,8 +48,9 @@ DEFAULT_API = "http://127.0.0.1:8080"
 REGISTRY_PATH = "/api/models"
 
 
-# Tuning flags a config variant may set — the seam whitelist (hal0-benchctl
-# validate_extra) MINUS the ones the runner controls itself (-p/-n/-d/-r). A
+# Tuning flags a config variant may set — the seam's llama-bench flag
+# whitelist (hal0-benchctl exec) MINUS the ones the runner controls itself
+# (-p/-n/-d/-r). A
 # variant flag outside this set is rejected at plan time (fail fast, before the
 # seam does).
 _TUNE_FLAGS = frozenset({"-b", "-ub", "-ngl", "-fa", "-ctk", "-ctv", "-t", "-mmp", "-pg"})
@@ -108,7 +109,7 @@ def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list
 
 # hal0 /api/models backend token -> benchlab lane token. The registry reports a
 # model's runner backend as "vulkan"/"rocm"; benchlab's lanes are "vulkan_radv"/
-# "rocm" (the llama-bench backend names the seam whitelists, hal0-benchctl:34).
+# "rocm" (the lane names harness.lane_specs() defines).
 _BACKEND_TO_LANE = {"vulkan": "vulkan_radv", "vulkan_radv": "vulkan_radv", "rocm": "rocm"}
 
 

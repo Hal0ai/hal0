@@ -7,9 +7,9 @@ already-loaded JSON — no filesystem, no network — so they unit-test directly
 against the captured fixtures and the runner is a thin caller.
 
 Two tiers (DESIGN §1):
-  * Tier A — ``parse_llama_bench``: the seam's ``hal0-benchctl sweep`` writes a
-    llama-bench ``-o json`` ARRAY (one row per pp/tg test) plus a sibling
-    ``.meta.json`` provenance sidecar. Each row carries per-rep ``samples_ts`` /
+  * Tier A — ``parse_llama_bench``: ``harness.run_cell`` captures llama-bench's
+    ``-o json`` ARRAY (one row per pp/tg test) from the seam's stdout plus the
+    provenance dict it builds alongside (the legacy ``.meta.json`` shape). Each row carries per-rep ``samples_ts`` /
     ``samples_ns`` arrays — so ``reps[]`` is the raw per-repetition throughput,
     not just the median (the whole point of schema v2).
   * Tier B — ``parse_server_ab``: server_ab.py writes one session JSON whose

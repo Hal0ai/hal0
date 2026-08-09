@@ -3,9 +3,10 @@
 Keeps a throughput/latency benchmark dataset *current by itself*: an operator
 (or the Hermes agent) declares suites once (§4), a pure-function planner diffs
 those suites against a content-addressed result store to find the exactly-stale
-cells (§6), and a resumable runner drives them through hal0's privileged seam —
-the `hal0-benchctl` sudo wrapper for Tier A llama-bench sweeps and the
-installed `server_ab.py` for Tier B/C live-server measurements — recording a
+cells (§6), and a resumable runner drives them: Tier A composes the full
+`podman run … llama-bench -o json` argv itself (`harness.py`) and runs it
+through the `hal0-benchctl exec` validate-and-exec sudo seam; Tier B/C go
+through the installed `server_ab.py` live-server harness — recording a
 rich per-run schema-2 record (full provenance + raw per-repetition samples +
 telemetry, not just a median) into an append-only `records.jsonl`. From that
 store it publishes the public model-roster contract and flags regressions.
