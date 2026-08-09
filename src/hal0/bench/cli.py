@@ -581,6 +581,41 @@ def cmd_publish(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bundle(args: argparse.Namespace) -> int:
+    from .bundle import BundleSpec, select_records, write_bundle
+
+    store = Store()
+    spec = BundleSpec(
+        run_ids=args.runs.split(",") if args.runs else None,
+        suite=args.bundle_suite,
+        since=args.since,
+        title=args.title,
+        notes=args.notes,
+        with_artifacts=args.with_artifacts,
+        redact_hostname=not args.no_redact_hostname,
+        profile_paths=args.profile or [],
+    )
+    if args.list:
+        recs = select_records(store, spec)
+        print(f"{len(recs)} bundle-eligible record(s):")
+        for r in recs:
+            ident = r.get("identity", {})
+            print(
+                f"  {r['run_id']}  {ident.get('model', {}).get('id', '?'):40s} "
+                f"{ident.get('lane', '?'):12s} "
+                f"{ident.get('workload', {}).get('kind', '?'):6s} "
+                f"suite={r.get('suite', '?')}"
+            )
+        return 0
+    try:
+        path, manifest = write_bundle(store, spec, args.out)
+    except ValueError as exc:
+        print(f"bundle: {exc}", file=sys.stderr)
+        return 1
+    print(f"wrote {path} ({len(manifest['records'])} record(s), {manifest['bundle_id']})")
+    return 0
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     """Agentic task eval (the quality tier): drive each model as a real Hermes
     agent through verifiable-value tasks and score correctness + speed.
@@ -775,6 +810,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check", action="store_true", help="diff without writing")
     p.add_argument("--site-ts", default=None, help="also emit the site data .ts to this path")
     p.set_defaults(func=cmd_publish)
+
+    p = sub.add_parser("bundle", help="package selected ok records into a shareable archive")
+    p.add_argument("--list", action="store_true", help="print bundle-eligible records; no write")
+    p.add_argument("--runs", default=None, help="comma-separated run_ids (default: all ok)")
+    # --suite is taken at the top level; dest avoids colliding with other verbs' args.suite
+    p.add_argument(
+        "--suite", dest="bundle_suite", default=None, help="only records from this suite"
+    )
+    p.add_argument("--since", default=None, help="ISO lower bound on record timestamp")
+    p.add_argument("--title", default="", help="human title stored in the manifest")
+    p.add_argument("--notes", default="", help="free-form notes stored in the manifest")
+    p.add_argument("--with-artifacts", action="store_true", help="include raw artifacts/")
+    p.add_argument(
+        "--no-redact-hostname", action="store_true", help="keep host.name in shared records"
+    )
+    p.add_argument("--profile", action="append", help="profile/suite TOML to include; repeatable")
+    p.add_argument("-o", "--out", default="bench-bundle.hal0bench.tar.gz", help="output path")
+    p.set_defaults(func=cmd_bundle)
 
     p = sub.add_parser(
         "eval", help="agentic task eval (quality tier): score a model as a real agent"
