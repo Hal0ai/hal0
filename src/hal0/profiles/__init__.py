@@ -371,8 +371,7 @@ def screen_profile_flags(flags: str | None, *, grandfathered: str | None = None)
     funnel through :meth:`ProfileCatalog.create` / :meth:`ProfileCatalog.update`
     — so the guard lives here and the HTTP layer delegates to it rather than
     keeping a second copy. Enforces the model/profile ownership partition
-    (§5 hardware flags + §21.7 managed args). Empty/unset ``flags`` is a no-op;
-    malformed quoting is left to the schema layer's own diagnostics.
+    (§5 hardware flags + §21.7 managed args). Empty/unset ``flags`` is a no-op.
 
     ``grandfathered`` is the profile's CURRENTLY STORED flag text on an update
     (#1411). The §5 screen shipped with no data migration, so every custom
@@ -404,12 +403,29 @@ def screen_profile_flags(flags: str | None, *, grandfathered: str | None = None)
     rather than fixed. Reject it here instead, with the same error family the
     launch-time guard uses, so the operator sees the problem at save time
     instead of the next launch.
+
+    Malformed-quoting rejection is ALSO grandfathered (mirroring the §5
+    hardware-flag grandfathering above): a profile persisted before #1737
+    added this check can already carry bad quoting on disk. Routes forward
+    ``body.flags`` on every PUT and the UI drawer resends the stored flags
+    text verbatim, so without grandfathering, a save that only changes e.g.
+    ``device_class`` would re-screen the SAME already-broken flags and 422 —
+    making the profile un-editable for any field, the exact #1411 round-trip
+    trap recreated for quoting instead of hardware flags. The screen only
+    rejects a NEWLY-introduced or CHANGED malformed value; an unchanged
+    inherited one passes through (logged, not silently ignored).
     """
     if not flags or not flags.strip():
         return
     try:
         tokens = shlex.split(flags)
     except ValueError as exc:
+        if grandfathered is not None and flags == grandfathered:
+            log.info(
+                "profile flags carry pre-existing malformed quoting; grandfathered on update",
+                extra={"event": "profile.malformed_flags_grandfathered", "flags": flags},
+            )
+            return
         raise UnprocessableEntity(
             f"profile flags are not valid shell text: {exc}",
             code="profiles.flags_malformed",

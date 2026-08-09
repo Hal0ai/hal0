@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from hal0.config.loader import load_profiles_config, save_profiles_config
 from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig
 from hal0.errors import Conflict, UnprocessableEntity
 from hal0.profiles import ProfileCatalog, ProfilePatch
@@ -89,6 +90,40 @@ def test_update_rejects_unmatched_quoting(tmp_hal0_home: str) -> None:
     assert exc_info.value.code == "profiles.flags_malformed"
     # The prior valid flags must survive an update rejected on save.
     assert catalog.resolve("good-profile").flags == "-fa on"
+
+
+def _persist_grandfathered_malformed_profile(name: str, flags: str) -> None:
+    """Write a profile with malformed flag quoting straight to disk, bypassing
+    ``screen_profile_flags`` — simulating a profile that was persisted before
+    #1737 started rejecting bad quoting at save time (the old code silently
+    swallowed the ``shlex.split`` ``ValueError``)."""
+    cfg = load_profiles_config()
+    cfg.profile[name] = ProfileConfig(flags=flags)
+    save_profiles_config(cfg)
+
+
+def test_update_allows_unchanged_grandfathered_malformed_flags(tmp_hal0_home: str) -> None:
+    """A profile persisted pre-#1737 with malformed quoting must stay editable
+    for OTHER fields: a save that resends the same (still-malformed) flags text
+    unchanged must not 422, mirroring the §5 hardware-flag grandfathering."""
+    _persist_grandfathered_malformed_profile("grandfathered-quotes", '-fa on "unterminated')
+    catalog = ProfileCatalog()
+    updated = catalog.update(
+        "grandfathered-quotes",
+        ProfilePatch(flags='-fa on "unterminated', device_class="cpu"),
+    )
+    assert updated.device_class == "cpu"
+    assert updated.flags == '-fa on "unterminated'
+
+
+def test_update_rejects_new_malformed_flags_even_when_grandfathered(tmp_hal0_home: str) -> None:
+    """Grandfathering only covers the UNCHANGED inherited text — changing the
+    flags to a DIFFERENT malformed value must still 422."""
+    _persist_grandfathered_malformed_profile("grandfathered-quotes-2", '-fa on "unterminated')
+    catalog = ProfileCatalog()
+    with pytest.raises(UnprocessableEntity) as exc_info:
+        catalog.update("grandfathered-quotes-2", ProfilePatch(flags="-fa on 'also-bad"))
+    assert exc_info.value.code == "profiles.flags_malformed"
 
 
 def test_delete_profile_in_use_raises_conflict(tmp_hal0_home: str) -> None:
