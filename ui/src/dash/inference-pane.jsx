@@ -21,6 +21,8 @@
 //   - useMemoryMapModel()  → per-slot resident memory (real mem_mb) + GTT pool
 //   - useSlot{Restart,Unload,Load,Swap} → real lifecycle mutations
 // Absent metrics render an em-dash; the pane never fabricates a number.
+// Serving metrics (tok/s, ttft) are sticky per slot+model: a stopped slot
+// keeps its last live reading (plain, not amber) rather than clearing.
 //
 // Per the design voice: lowercase mono labels, no emoji in the chrome,
 // em-dash for any metric the backend hasn't reported.
@@ -45,6 +47,12 @@ import { useCardReorder } from './slots/card-order.js'
 import { devKind } from '@/lib/deviceMeta'
 
 const { useState: useStateI } = React
+
+// Last live serving metrics per slot+model, so a paused/stopped slot keeps
+// showing its most recent real reading instead of collapsing to an em-dash.
+// Module-level on purpose: survives card unmount/remount within the session;
+// a page reload starts clean.
+const lastServingMetrics = new Map()
 
 // ── icons (16×16, thin-line family — ported from the design's infer-core) ──
 const II = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -393,8 +401,23 @@ export function SlotScard({
   // that never union with /api/status) never trips this.
   const pending = s._enriched === false && ph !== 'off'
   const memGb = typeof s.mem_mb === 'number' && s.mem_mb > 0 ? round1(s.mem_mb / 1024) : null
-  const tps = typeof s.metrics?.toks === 'number' && s.metrics.toks > 0 ? s.metrics.toks : null
-  const ttft = typeof s.metrics?.ttft === 'number' && s.metrics.ttft > 0 ? s.metrics.ttft : null
+  // Serving metrics are sticky: when serving stops the API zeroes them, but
+  // the card keeps the last live reading (keyed per slot+model so a model
+  // swap never inherits the previous model's numbers). Only a live reading
+  // gets the amber .acc emphasis.
+  const tpsLive = typeof s.metrics?.toks === 'number' && s.metrics.toks > 0 ? s.metrics.toks : null
+  const ttftLive = typeof s.metrics?.ttft === 'number' && s.metrics.ttft > 0 ? s.metrics.ttft : null
+  const metricKey = s.name + ' ' + (s.model || '')
+  if (tpsLive != null || ttftLive != null) {
+    const prev = lastServingMetrics.get(metricKey) || {}
+    lastServingMetrics.set(metricKey, {
+      tps: tpsLive ?? prev.tps,
+      ttft: ttftLive ?? prev.ttft,
+    })
+  }
+  const held = lastServingMetrics.get(metricKey) || {}
+  const tps = tpsLive ?? held.tps ?? null
+  const ttft = ttftLive ?? held.ttft ?? null
   return (
     <div
       className={
@@ -445,7 +468,7 @@ export function SlotScard({
           <div className="scard-meta">
             <div className="m">
               <div className="l">tok/s</div>
-              <div className={'v' + (tps ? ' acc' : ' muted')}>{tps || '—'}</div>
+              <div className={'v' + (tpsLive ? ' acc' : tps ? '' : ' muted')}>{tps || '—'}</div>
             </div>
             <div className="m">
               <div className="l">ttft</div>
