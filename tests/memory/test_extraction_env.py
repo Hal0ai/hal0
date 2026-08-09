@@ -15,6 +15,7 @@ from pathlib import Path
 from hal0.memory.extraction_env import (
     DROP_IN_PATH,
     apply_extraction_slot,
+    drop_in_matches,
     render_drop_in,
 )
 from hal0.system.seam import SEAM_BIN, SystemCtlSeam
@@ -222,6 +223,40 @@ def test_apply_does_not_blame_the_wrapper_for_other_failures(monkeypatch, tmp_pa
     seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
 
     assert "install.sh" not in (apply_extraction_slot("utility", seam=seam)["error"] or "")
+
+
+def test_drop_in_matches_true_when_content_is_identical(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "extraction-model.conf"
+    path.write_text(render_drop_in("agent", 300))
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+
+    assert drop_in_matches("agent", 300) is True
+
+
+def test_drop_in_matches_false_on_stale_content(monkeypatch, tmp_path: Path):
+    """The recorded slot changed but the drop-in still names the old one —
+    exactly the divergence a broken host can be stuck in."""
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "extraction-model.conf"
+    path.write_text(render_drop_in("utility", 300))
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+
+    assert drop_in_matches("agent", 300) is False
+
+
+def test_drop_in_matches_false_when_missing(monkeypatch, tmp_path: Path):
+    """#1682 review: a host where the privileged write previously failed
+    silently (pre-seam bug) has hal0.toml recording a slot that was NEVER
+    actually applied — no drop-in file at all. That must read as "does not
+    match", not error out, so the caller knows to (re)propagate."""
+    import hal0.memory.extraction_env as ee
+
+    monkeypatch.setattr(ee, "DROP_IN_PATH", tmp_path / "never-written.conf")
+
+    assert drop_in_matches("agent", 300) is False
 
 
 def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Path):

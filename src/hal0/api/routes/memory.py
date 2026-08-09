@@ -28,7 +28,7 @@ from pydantic import ValidationError
 
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
-from hal0.config.loader import load_hal0_config, save_hal0_config
+from hal0.config.loader import HAL0_TOML_LOCK, load_hal0_config, save_hal0_config
 from hal0.config.schema import MemoryGraphConfig
 from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
@@ -414,13 +414,35 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
 
 # ── PUT /api/memory/graph ──────────────────────────────────────────────────
 
-#: Serializes the graph-config read-modify-write. The propagation awaits a
-#: ~60s hindsight-api restart (#1641), so without this two concurrent PUTs
-#: could interleave — one writing slot A's drop-in, the other overwriting it
-#: with B, and the first still persisting A into ``hal0.toml`` afterwards,
-#: leaving the recorded config and the running daemon on different slots.
-#: hal0-api is the only writer of either, so one in-process lock is enough.
-_GRAPH_CONFIG_LOCK = asyncio.Lock()
+
+async def _propagate_shielded(slot: str, timeout_s: int) -> dict[str, Any]:
+    """Propagate an extraction-slot/timeout change, safe against cancellation.
+
+    ``asyncio.to_thread`` submits :func:`~hal0.memory.extraction_env.apply_extraction_slot`
+    to a real OS thread; cancelling the awaiting coroutine (client disconnect,
+    shutdown, request timeout) does NOT stop that thread — it just makes the
+    ``await`` raise early while the write/restart keeps running in the
+    background. This is called from inside :data:`HAL0_TOML_LOCK`'s critical
+    section (#1682 review): an early return there would release the lock
+    while the orphaned worker could still clobber the drop-in, letting a
+    second PUT's propagation interleave with it — one write wins the drop-in,
+    the other wins ``hal0.toml``, and they can disagree.
+
+    Shield the wait so the underlying task is never itself cancelled, and if
+    the *caller's* await is cancelled anyway, wait out the (already-running,
+    un-cancellable) worker before re-raising — so the lock is held for the
+    worker's true lifetime, not just until the first cancellation.
+    """
+    from hal0.memory.extraction_env import apply_extraction_slot
+
+    task = asyncio.ensure_future(
+        asyncio.to_thread(apply_extraction_slot, slot, timeout_s=timeout_s)
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
 
 
 @router.put("/graph")
@@ -447,7 +469,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
 
     wrapper = _wrapper(request)
 
-    async with _GRAPH_CONFIG_LOCK:
+    async with HAL0_TOML_LOCK:
         cfg = load_hal0_config()
         current_raw = cfg.memory.graph.model_dump(mode="python")
         merged_raw = {**current_raw, **body}
@@ -498,19 +520,29 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
 
         # Propagate the extraction slot + LLM timeout to hindsight-api (drop-in
         # + restart) so the engine's native extraction LLM follows the choice.
-        propagation: dict[str, Any] | None = None
-        if slot_changed or timeout_changed:
-            from hal0.memory.extraction_env import apply_extraction_slot
+        needs_propagation = slot_changed or timeout_changed
+        if not needs_propagation:
+            from hal0.memory.extraction_env import drop_in_matches
 
+            # #1682 review: hal0.toml equality alone is not enough to skip
+            # propagation. A host hit by the pre-seam write bug (or any other
+            # silent failure) can already have hal0.toml recording this exact
+            # slot while hindsight-api's drop-in was never actually written
+            # or still names a different target — re-requesting the
+            # unchanged value must still reconcile instead of no-op'ing on
+            # config equality. The drop-in is 0644 root:root (#1641), so this
+            # is a plain unprivileged read, not a seam round trip.
+            needs_propagation = not drop_in_matches(new_cfg.extraction_slot, new_cfg.llm_timeout_s)
+
+        propagation: dict[str, Any] | None = None
+        if needs_propagation:
             # Thread hop (#1641): the propagation shells out to the privileged
             # seam and then waits on a hindsight-api restart — a bounded but
             # multi-second blocking call that would otherwise stall the whole
-            # event loop for the engine's cold start.
-            propagation = await asyncio.to_thread(
-                apply_extraction_slot,
-                new_cfg.extraction_slot,
-                timeout_s=new_cfg.llm_timeout_s,
-            )
+            # event loop for the engine's cold start. Shielded against
+            # cancellation (see _propagate_shielded) so this lock's critical
+            # section can't be exited early while the worker is still live.
+            propagation = await _propagate_shielded(new_cfg.extraction_slot, new_cfg.llm_timeout_s)
 
         out = new_cfg.model_dump(mode="json")
         # Echo the live status so the dashboard's optimistic-update path

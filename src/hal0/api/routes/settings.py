@@ -41,7 +41,7 @@ from pydantic import ValidationError
 from hal0.api._redact import redact_config
 from hal0.api._settings_apply import APPLY_CLASSES, REGISTRY, apply_plan, get_registry
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
-from hal0.config.loader import load_hal0_config, save_hal0_config
+from hal0.config.loader import HAL0_TOML_LOCK, load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
 from hal0.registry.model_store import (
     MigrationPlan,
@@ -137,30 +137,36 @@ async def update_settings(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise Hal0Error("request body must be a JSON object")
 
-    current = getattr(request.app.state, "hal0_config", None)
-    if current is None:
-        current = load_hal0_config()
+    # Shared with routes/memory.py's PUT /graph (#1682 review): that route
+    # can hold its own critical section across a ~60s extraction-slot
+    # propagation, and without a lock SHARED across both routes this save
+    # could land mid-flight, persisting a config snapshot taken before the
+    # propagation started and clobbering the graph section it just wrote.
+    async with HAL0_TOML_LOCK:
+        current = getattr(request.app.state, "hal0_config", None)
+        if current is None:
+            current = load_hal0_config()
 
-    merged_raw = _deep_merge(current.model_dump(mode="python"), body)
+        merged_raw = _deep_merge(current.model_dump(mode="python"), body)
 
-    try:
-        merged = Hal0Config.model_validate(merged_raw)
-    except ValidationError as exc:
-        raise ConfigInvalidError(
-            "hal0 config failed schema validation",
-            details=_validation_error_details(exc),
-        ) from exc
+        try:
+            merged = Hal0Config.model_validate(merged_raw)
+        except ValidationError as exc:
+            raise ConfigInvalidError(
+                "hal0 config failed schema validation",
+                details=_validation_error_details(exc),
+            ) from exc
 
-    # Atomic write via the loader's write_toml_atomic-backed helper.
-    try:
-        save_hal0_config(merged)
-    except OSError as exc:
-        raise Hal0Error(
-            f"could not persist hal0 config: {exc}",
-            details={"error": str(exc), "errno": getattr(exc, "errno", None)},
-        ) from exc
+        # Atomic write via the loader's write_toml_atomic-backed helper.
+        try:
+            save_hal0_config(merged)
+        except OSError as exc:
+            raise Hal0Error(
+                f"could not persist hal0 config: {exc}",
+                details={"error": str(exc), "errno": getattr(exc, "errno", None)},
+            ) from exc
 
-    request.app.state.hal0_config = merged
+        request.app.state.hal0_config = merged
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
         # Surface a footer chip when the operator saves the config. The

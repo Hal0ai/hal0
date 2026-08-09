@@ -118,6 +118,27 @@ def render_drop_in(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> str:
     return _DROP_IN_TEMPLATE.format(slot=slot, timeout_s=int(timeout_s))
 
 
+def drop_in_matches(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> bool:
+    """True when the on-disk drop-in already reflects ``(slot, timeout_s)``.
+
+    #1682 review: comparing only against ``hal0.toml`` is not enough to
+    decide propagation is unnecessary. A host hit by the pre-seam write bug
+    (or any other silent failure) can have ``hal0.toml`` already recording
+    this exact slot while the drop-in was never actually written or still
+    names something else — re-requesting the *same* slot would then never
+    reconcile.
+
+    The drop-in is 0644 root:root (world-readable, #1641), so this is a
+    plain, unprivileged read — no seam round trip. Any read failure (missing
+    file on a fresh install or a host that never propagated, a permission
+    oddity) counts as "does not match": propagate.
+    """
+    try:
+        return DROP_IN_PATH.read_text() == render_drop_in(slot, timeout_s)
+    except OSError:
+        return False
+
+
 def apply_extraction_slot(
     slot: str,
     *,
@@ -191,4 +212,4 @@ def apply_extraction_slot(
     return result
 
 
-__all__ = ["DROP_IN_PATH", "apply_extraction_slot", "render_drop_in"]
+__all__ = ["DROP_IN_PATH", "apply_extraction_slot", "drop_in_matches", "render_drop_in"]

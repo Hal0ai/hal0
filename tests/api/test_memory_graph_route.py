@@ -14,6 +14,8 @@ hal0 lifespan or a real memory engine. Pins the contract the
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -169,6 +171,44 @@ def test_put_persists_hal0_toml_before_propagating(
     assert r.json()["propagation"]["written"] is True
 
 
+async def test_propagate_shielded_does_not_resolve_until_worker_finishes() -> None:
+    """#1682 review: cancelling the request that's awaiting propagation must
+    not let this coroutine (and therefore the caller's HAL0_TOML_LOCK
+    critical section) resolve while apply_extraction_slot's worker thread —
+    which asyncio cannot actually stop once it's running — is still live.
+    Otherwise a second PUT can persist + propagate a different slot while
+    the orphaned worker later clobbers the drop-in back to the first one."""
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    order: list[str] = []
+
+    def _slow_apply(slot: str, *, timeout_s: int) -> dict[str, Any]:
+        worker_started.set()
+        assert release_worker.wait(timeout=5), "test bug: never released"
+        order.append("worker_done")
+        return {"slot": slot, "written": True, "error": None}
+
+    with patch("hal0.memory.extraction_env.apply_extraction_slot", side_effect=_slow_apply):
+        task = asyncio.ensure_future(memory_routes._propagate_shielded("agent", 300))
+        await asyncio.get_running_loop().run_in_executor(None, worker_started.wait, 5)
+        task.cancel()
+
+        # Cancellation was requested a while ago, but the worker is still
+        # blocked — a naive `await asyncio.to_thread(...)` would already have
+        # raised CancelledError by now regardless of the worker's state.
+        # The shielded helper must NOT have resolved yet.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
+        assert order == []
+
+        release_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The helper only raised CancelledError AFTER the worker actually
+        # finished — the lock-holding caller never sees an early release.
+        assert order == ["worker_done"]
+
+
 def test_put_enable_with_unknown_slot_rejected(
     client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
@@ -188,14 +228,40 @@ def test_put_enable_without_slot_change_keeps_default(
     client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
     # Flipping enabled with no extraction_slot keeps the default (utility) and
-    # does NOT trigger propagation (slot unchanged).
-    r = client.put("/api/memory/graph", json={"enabled": True})
+    # does NOT trigger propagation when the on-disk drop-in already matches
+    # (nothing to reconcile).
+    with patch("hal0.memory.extraction_env.drop_in_matches", return_value=True):
+        r = client.put("/api/memory/graph", json={"enabled": True})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["enabled"] is True
     assert body["extraction_slot"] == "utility"
     assert "propagation" not in body
     assert stub_wrapper.set_calls == [(True, "utility")]
+
+
+def test_put_reconciles_when_toml_matches_but_drop_in_does_not(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """#1682 review: a host bitten by the pre-seam write bug (or any other
+    silent failure) can already have hal0.toml recording this exact slot
+    while hindsight-api's drop-in was never actually written. Re-requesting
+    the SAME (unchanged) slot must still propagate instead of no-op'ing on
+    config equality."""
+    with (
+        patch("hal0.memory.extraction_env.drop_in_matches", return_value=False),
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+    ):
+        apply_mock.return_value = {"slot": "utility", "written": True, "error": None}
+        # No extraction_slot in the body — merges to the existing default
+        # (utility), so hal0.toml's value does not change.
+        r = client.put("/api/memory/graph", json={"enabled": True})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["extraction_slot"] == "utility"
+    assert body["propagation"]["written"] is True
+    apply_mock.assert_called_once_with("utility", timeout_s=300)
 
 
 def test_put_disable_idempotent(client: TestClient, stub_wrapper: StubWrapper) -> None:
