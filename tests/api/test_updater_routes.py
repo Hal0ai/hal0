@@ -670,6 +670,54 @@ def test_apply_success_restart_failure_is_fail_soft(
     assert final.get("restart_error")
 
 
+def test_apply_restart_sigterm_is_ambiguous_not_failed(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1691: a signal-killed restart call reports restarted=None, not False.
+
+    --no-block (#1540) makes systemctl return as soon as the restart is
+    QUEUED, but that systemctl call is still a child of hal0-api's own
+    process -- still inside hal0-api.service's cgroup -- so systemd tearing
+    the old unit down can SIGTERM it before it exits cleanly. That negative
+    returncode can BE the restart succeeding (it killed its own caller mid
+    flight), so it must land as the same 'terminal, bounce still in flight'
+    None the job level already uses, not a definite restarted=False -- the
+    CLI only warns on False, and a successful update reporting
+    'systemctl exited -15' as a failure is the exact bug this closes.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    async def fake_apply(self: object, version: str | None = None) -> dict:
+        return {"version": "0.0.9"}
+
+    monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
+
+    def signalled_run(cmd: list[str], *a: object, **k: object) -> object:
+        class _R:
+            returncode = -15  # SIGTERM
+            stdout = ""
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(u_mod.subprocess, "run", signalled_run)
+
+    r = isolated_client.post("/api/updates/apply", json={})
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] == "failed" or final.get("restart_error"):
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") == "applied", final
+    assert final.get("restarted") is None
+    assert final.get("restart_error")
+
+
 def test_apply_target_strips_leading_v(
     isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
