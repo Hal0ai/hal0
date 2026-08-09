@@ -129,6 +129,11 @@ class Cell:
     depth: int
     flags: dict = field(default_factory=dict)  # config-variant tuning flags for the seam
     config_label: str = "default"
+    # #1773: the HF repo id GuideLLM's --tokenizer resolves for a "chat" cell
+    # (see _resolve_tokenizer). Empty for every other kind — display/runner
+    # plumbing only, NOT part of cell_key (a tokenizer swap doesn't change
+    # what was measured, just what dataset built the request).
+    tokenizer: str = ""
 
 
 def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list[dict[str, Any]]:
@@ -176,6 +181,27 @@ def _model_caps(m: dict[str, Any]) -> set[str]:
     if (m.get("defaults") or {}).get("mtp") is True:
         caps.add("mtp")
     return caps
+
+
+def _resolve_tokenizer(m: dict[str, Any]) -> str | None:
+    """The HF repo id a ``chat`` cell's GuideLLM run can trust for
+    ``--tokenizer`` (issue #1773), or ``None`` if this registry entry has
+    none.
+
+    Preference order: an explicit/pull-defaulted ``defaults.tokenizer_repo``
+    (registry/model.py's ``ModelDefaults.tokenizer_repo`` — settable by an
+    operator, defaulted from ``hf_repo`` by the pull path when that linkage
+    already exists), falling back to the model's own ``hf_repo`` directly
+    (the same repo the GGUF was pulled from, when no override was needed).
+    A local-only model id/path is never a trustworthy HF repo id on its
+    own — that is exactly the bug this function exists to gate at plan
+    time instead of inside a mid-session GuideLLM crash."""
+    defaults = m.get("defaults") or {}
+    tok = str(defaults.get("tokenizer_repo") or "").strip()
+    if tok:
+        return tok
+    hf_repo = str(m.get("hf_repo") or "").strip()
+    return hf_repo or None
 
 
 def _is_tier_a_incompatible(m: dict[str, Any]) -> str | None:
@@ -443,8 +469,31 @@ def plan(
     known_lanes = set(harness.lane_specs())
 
     configs = _validated_configs(suite.matrix.configs)
+    selected_models = _select_models(suite, registry_models)
+
+    # #1773: a "chat" cell's GuideLLM run needs a resolvable tokenizer (a
+    # local-only model id like "chadrock-35b-ace-saber-rocmfp4-mtp" is not
+    # itself a HF repo — see adapters/guidellm.py's module docstring). Same
+    # plan-time policy as the missing-tool gate above: reject loudly here,
+    # naming the field to set, instead of letting guidellm crash mid-session
+    # trying to resolve the model id against huggingface.co.
+    if "chat" in suite.cells.kinds:
+        no_tokenizer = sorted(
+            str(m.get("id"))
+            for m in selected_models
+            if m.get("id") and _resolve_tokenizer(m) is None
+        )
+        if no_tokenizer:
+            raise ValueError(
+                f"suite {suite.id!r}: 'chat' cell(s) need a resolvable tokenizer — "
+                f"model(s) {no_tokenizer} have no defaults.tokenizer_repo and no "
+                "hf_repo (set Model.defaults.tokenizer_repo to a HF tokenizer repo "
+                "id, e.g. 'Qwen/Qwen3-4B-GGUF')"
+            )
+
     stale: list[Cell] = []
-    for model in _select_models(suite, registry_models):
+    for model in selected_models:
+        tokenizer = _resolve_tokenizer(model) or ""
         for lane_token in suite.matrix.lanes:
             lane = _resolve_lane(model, lane_token)
             for kind in suite.cells.kinds:
@@ -492,6 +541,7 @@ def plan(
                                     depth=depth,
                                     flags=flags,
                                     config_label=cfg["label"],
+                                    tokenizer=tokenizer if kind == "chat" else "",
                                 )
                             )
 
