@@ -1067,19 +1067,24 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
                 quarantine=str(stale),
             )
     # #1723 / Codex follow-up: lock `dest` to owner-only *before* anything is
-    # extracted into it, and do it unconditionally — including the branch
-    # above that reuses an already-existing empty `dest` untouched, and
-    # regardless of the caller's umask. A directory's own children are
-    # unreachable to non-owners as long as the directory itself denies
-    # traversal (x) — so an owner-only top-level `dest` closes the whole
-    # plant-a-file-during-extraction race by construction, without needing
-    # to touch every path underneath or mutate the process-wide umask (which
-    # would race other concurrent `asyncio.to_thread` extractions sharing
-    # the same process). `dest.mkdir()` may itself land group/other-writable
-    # under a permissive umask for the instant before this chmod runs, but
-    # that instant is this function's own uninterrupted execution — no
-    # other code gets scheduled between the two calls.
-    dest.mkdir(parents=True, exist_ok=True)
+    # extracted into it. A directory's own children are unreachable to
+    # non-owners as long as the directory itself denies traversal (x) — so
+    # an owner-only top-level `dest` closes the whole plant-a-file-during-
+    # extraction race by construction, without needing to touch every path
+    # underneath or mutate the process-wide umask (which would race other
+    # concurrent `asyncio.to_thread` extractions sharing the same process).
+    #
+    # ``mode=0o700`` on the ``mkdir`` call itself makes the *fresh-create*
+    # case atomic — the OS never exposes a wider mode than requested, even
+    # for an instant, because umask can only clear bits from ``mode``, never
+    # add them (a separate follow-up ``mkdir()``-then-``chmod()`` pair would
+    # leave a real, schedulable window between the two syscalls under a
+    # permissive caller umask). The explicit ``chmod`` right after still
+    # runs unconditionally to cover the *reuse* case — ``exist_ok=True``
+    # silently keeps an already-existing empty ``dest`` (e.g. left behind by
+    # an interrupted earlier stage attempt) exactly as it was, mode
+    # included, so ``mode=`` on ``mkdir`` never applies to it.
+    dest.mkdir(parents=True, exist_ok=True, mode=0o700)
     dest.chmod(0o700)
 
     log.info("updater.extract_start", job_id=job_id, tarball=str(tarball), dest=str(dest))
