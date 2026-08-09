@@ -28,6 +28,14 @@
 #                                flag so a fresh box never finishes with every
 #                                slot dead ("no container runtime found").
 #                                `preflight_docker` is a back-compat alias.
+#   preflight_git              — git on PATH (needed for Hermes agent
+#                                provisioning's `pip install git+...`). Soft
+#                                by default (warns + returns 1). Set
+#                                HAL0_GIT_REQUIRED=1 to auto-install it via
+#                                the detected package manager, hard-failing
+#                                with the exact one-liner if that's not
+#                                possible; install.sh sets the flag right
+#                                before the Hermes provisioning step (#1726).
 #   preflight_gpu              — GPU/NPU device nodes visible + group wiring
 #                                sane. Soft by default (always returns 0;
 #                                CPU-only is a valid install) but prints the
@@ -87,6 +95,11 @@
 #                        manager) and hard-fails (returns non-zero) when it
 #                        can't. Default empty → soft mode for `hal0 doctor`.
 #                        Legacy HAL0_DOCKER_REQUIRED is still honoured.
+#   HAL0_GIT_REQUIRED  — when "1", preflight_git auto-installs git (via the
+#                        detected package manager) and returns non-zero when
+#                        it can't. Default empty → soft mode for `hal0
+#                        doctor` (warn + return 1). install.sh sets the flag
+#                        immediately before Hermes provisioning (#1726).
 #   HAL0_GPU_GATE      — when "1", preflight_gpu returns a classification code
 #                        (see HAL0_GPU_RC_*) instead of always 0, so install.sh
 #                        can smart-block a broken LXC passthrough. Default 0 →
@@ -608,6 +621,78 @@ preflight_container_runtime() {
 
 # Back-compat alias: older docs / `hal0 doctor` builds call preflight_docker.
 preflight_docker() { preflight_container_runtime "$@"; }
+
+# git — Hermes agent provisioning runs `pip install
+# git+https://github.com/NousResearch/hermes-agent.git@<rev>`, which pip
+# implements by shelling out to `git clone`. A stock minimal distro image
+# (fresh Ubuntu 24.04 LXC/cloud template, no git preinstalled) doesn't ship
+# it, so that pip install dies with "ERROR: Cannot find command 'git'" deep
+# inside the Hermes toolchain step (#1726) unless something checks for it
+# first. Two modes, mirroring preflight_container_runtime/preflight_venv:
+#
+#   HAL0_GIT_REQUIRED=1 (install.sh sets this immediately before the Hermes
+#     provisioning step) — auto-install git via the detected package
+#     manager; return non-zero with the exact remediation one-liner if that
+#     doesn't resolve it. The caller decides what to do with a failure here
+#     (install.sh treats it the same as any other Hermes provisioning
+#     failure — non-fatal to the overall install, per #1584's established
+#     graceful-degradation pattern — but the message is specific to git
+#     instead of being buried in pip's clone-failure noise).
+#
+#   Unset (default, e.g. `hal0 doctor` / preflight_all) — soft: warn +
+#     return 1 so a read-only report finishes without mutating the system.
+#
+# Codex review (#1727): `command -v git` only proves a `git` file resolves
+# on PATH, not that it runs — a non-executable file (permissions drift, a
+# half-finished package install) still resolves via `command -v` and would
+# have reported success right up until pip's own `git clone` failed with
+# the original error. `git --version` is the actual functional probe: it
+# both resolves the binary AND proves the OS will exec it.
+_git_usable() {
+    git --version >/dev/null 2>&1
+}
+
+preflight_git() {
+    if _git_usable; then
+        info "git: $(git --version 2>/dev/null | head -n1 || echo present)"
+        return 0
+    fi
+
+    if [[ "${HAL0_GIT_REQUIRED:-0}" != "1" ]]; then
+        warn "git not found or not runnable — Hermes agent provisioning (pip install git+...) will fail until it's installed"
+        return 1
+    fi
+
+    local pm
+    if pm="$(pkg_mgr)"; then
+        info "installing git (required for Hermes agent provisioning)"
+        local ok=1
+        case "${pm}" in
+            apt-get) DEBIAN_FRONTEND=noninteractive apt-get install -y -q git || ok=0 ;;
+            dnf) dnf install -y git || ok=0 ;;
+            yum) yum install -y git || ok=0 ;;
+            zypper) zypper install -y git || ok=0 ;;
+            pacman) pacman -S --noconfirm git || ok=0 ;;
+            apk) apk add git || ok=0 ;;
+            *) ok=0 ;;
+        esac
+        if [[ "${ok}" -eq 1 ]] && _git_usable; then
+            info "git: $(git --version 2>/dev/null | head -n1 || echo present)"
+            return 0
+        fi
+        err "git install failed — see output above"
+        return 1
+    fi
+
+    err "git not found and no recognised package manager"
+    local git_install
+    if git_install="$(pkg_install_cmd git)"; then
+        warn "  install with: ${git_install}"
+    else
+        warn "  install git via your distro's package manager then re-run install.sh"
+    fi
+    return 1
+}
 
 # Extract the leading major-version integer from a version string, e.g.
 # "podman version 6.0.0" / "netavark 2.1.0" / "6.0.0" → "6". Echoes nothing
@@ -1222,6 +1307,7 @@ preflight_all() {
     preflight_writable || rc=$?
     preflight_network || rc=$?
     preflight_container_runtime || rc=$?
+    preflight_git     || rc=$?
     preflight_podman_network_backend || rc=$?
     preflight_podman_forward || rc=$?
     preflight_gpu     || rc=$?
