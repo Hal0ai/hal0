@@ -241,6 +241,63 @@ function Num({ v, unit }: { v: number | null | undefined; unit?: string }) {
   );
 }
 
+/* ── decode-speed bucket: 3-bar meter + number, never colour alone ──
+ * fast >=60 t/s, mid >=25 t/s, slow <25 t/s — wording/thresholds match the
+ * hal0.dev roster idiom (design handoff bench-app.jsx BucketLegend/Decode). */
+type Bucket = 'fast' | 'mid' | 'slow';
+const BUCKET_COLOR: Record<Bucket, string> = { fast: 'var(--ok)', mid: 'var(--accent)', slow: 'var(--err)' };
+const bucketOf = (v: number): Bucket => (v >= 60 ? 'fast' : v >= 25 ? 'mid' : 'slow');
+
+function DecodeMeter({ v, sd }: { v: number | null | undefined; sd?: number | null }) {
+  if (v == null) return <Dash />;
+  const b = bucketOf(v);
+  const color = BUCKET_COLOR[b];
+  const fill = { fast: 3, mid: 2, slow: 1 }[b];
+  return (
+    <span title={`${b} · ${fmt(v)} t/s`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <span aria-hidden="true" style={{ display: 'inline-flex', gap: 1.5 }}>
+        {[0, 1, 2].map(i => (
+          <i key={i} style={{ display: 'inline-block', width: 3, height: 11, borderRadius: 1, background: i < fill ? color : 'var(--fg-5)' }} />
+        ))}
+      </span>
+      <span style={{ fontFamily: mono, fontSize: 13, fontVariantNumeric: 'tabular-nums' as any, color: b === 'fast' ? color : b === 'slow' ? color : 'var(--fg)', fontWeight: b === 'fast' ? 600 : 400 }}>
+        {fmt(v)}
+      </span>
+      <span style={{ fontSize: 9, color: 'var(--fg-4)' }}>t/s</span>
+      {sd != null && <span style={{ fontSize: 9, color: 'var(--fg-4)' }}>±{fmt(sd)}</span>}
+    </span>
+  );
+}
+
+function BucketLegend() {
+  return (
+    <div style={{
+      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '5px 16px',
+      padding: '6px 2px 12px', fontFamily: mono, fontSize: 10.5, color: 'var(--fg-3)',
+    }}>
+      <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, marginRight: 5, verticalAlign: 'middle', background: BUCKET_COLOR.fast }} />&ge;60 t/s</span>
+      <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, marginRight: 5, verticalAlign: 'middle', background: BUCKET_COLOR.mid }} />25&ndash;60</span>
+      <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, marginRight: 5, verticalAlign: 'middle', background: BUCKET_COLOR.slow }} />&lt;25</span>
+      <span style={{ color: 'var(--fg-5)' }}>&middot;</span>
+      <span><CapIconLegendEntry k="mtp" /></span>
+      <span><CapIconLegendEntry k="tools" /></span>
+      <span><CapIconLegendEntry k="coding" /></span>
+      <span><CapIconLegendEntry k="vision" /></span>
+      <span><CapIconLegendEntry k="chat" /></span>
+    </div>
+  );
+}
+
+const CAP_LABEL: Record<string, string> = { mtp: 'MTP speculative', vision: 'Vision', tools: 'Tool-calling', coding: 'Coding', chat: 'Chat' };
+function CapIconLegendEntry({ k }: { k: string }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <span style={{ display: 'inline-flex', width: '0.9rem', height: '0.9rem', color: CAP_COLOR[k] || 'var(--fg-3)' }}>{CAP_SVG[k]}</span>
+      {CAP_LABEL[k]}
+    </span>
+  );
+}
+
 const CAP_ALIAS: Record<string, string> = { mtp: 'mtp', vision: 'vision', tools: 'tools', 'tool-calling': 'tools', agent: 'tools', coder: 'coding', coding: 'coding', chat: 'chat' };
 const CAP_COLOR: Record<string, string> = { mtp: 'var(--accent)', vision: 'var(--info)', tools: 'var(--ok)', coding: 'var(--ok)', chat: 'var(--fg-2)' };
 const CAP_SVG: Record<string, React.ReactNode> = {
@@ -291,6 +348,12 @@ function Sparkline({ points }: { points: HistoryPoint[] }) {
   const y = (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad);
   const path = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
 
+  // Regression-dip highlighting: a >10% drop against the prior point in the
+  // series turns the line + that point's marker to the warn colour, matching
+  // the design's Spark() dip detection.
+  const dipIdx = pts.findIndex((p, k) => k > 0 && p.v < pts[k - 1].v * 0.9);
+  const dipped = dipIdx > -1;
+
   // Prefill is a separate signal on its own scale — a lighter, thinner path
   // just to show the trend shape alongside decode, not a directly comparable magnitude.
   const pfPts = points.map((p, i) => ({ i, v: p.prefill_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
@@ -305,10 +368,10 @@ function Sparkline({ points }: { points: HistoryPoint[] }) {
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
       {pfPath && <path d={pfPath} fill="none" stroke="var(--fg-4)" strokeWidth={1} opacity={0.6} />}
-      <path d={path} fill="none" stroke="var(--accent)" strokeWidth={1.5} />
-      {pts.map(p => (
-        <circle key={p.i} cx={x(p.i).toFixed(1)} cy={y(p.v).toFixed(1)} r={1.7} fill="var(--accent)">
-          <title>{fmt(p.v)} t/s</title>
+      <path d={path} fill="none" stroke={dipped ? 'var(--warn)' : 'var(--accent)'} strokeWidth={1.5} />
+      {pts.map((p, k) => (
+        <circle key={p.i} cx={x(p.i).toFixed(1)} cy={y(p.v).toFixed(1)} r={k === dipIdx ? 2.4 : 1.7} fill={k === dipIdx ? 'var(--warn)' : 'var(--accent)'}>
+          <title>{fmt(p.v)} t/s{k === dipIdx ? ' — regression dip' : ''}</title>
         </circle>
       ))}
       <text x={pad} y={10} fill="var(--fg-4)" fontSize={8}>{fmt(max)}</text>
@@ -362,7 +425,7 @@ const Benchmarks: React.FC = () => {
   const workerState = queue?.control?.state || 'stopped';
 
   return (
-    <div className="view">
+    <div className="view" data-testid="benchmarks-view">
       <div className="vh">
         <span className="vh-eye mono">Performance</span>
         <h1>Benchmarks</h1>
@@ -452,6 +515,8 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
   }
 
   return (
+    <>
+    <BucketLegend />
     <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
       <colgroup>
         <col />
@@ -486,6 +551,7 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
         ))}
       </tbody>
     </table>
+    </>
   );
 }
 
@@ -505,6 +571,7 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail, flags }: {
     <>
       <tr
         onClick={onToggle}
+        data-testid={`bench-model-row-${m.id}`}
         style={{ cursor: 'pointer', background: expanded ? 'var(--bg-2)' : undefined, opacity: m.measured === false ? 0.55 : 1 }}
       >
         <td style={cellTd}>
@@ -536,7 +603,7 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail, flags }: {
             </span>
           )}
         </td>
-        <td style={numTd}><Num v={m.decode_ts} unit=" t/s" /></td>
+        <td style={numTd}><DecodeMeter v={m.decode_ts} /></td>
         <td style={numTd}><Num v={m.prefill_ts} unit=" t/s" /></td>
         <td style={numTd}>
           {m.accept != null
@@ -683,7 +750,7 @@ function ModelDetail({ model: m, detail }: {
                 {g.config !== 'default' && <span style={{ color: 'var(--accent)' }}>{` · ${g.config}`}</span>}
               </div>
               <div style={{ fontFamily: mono, fontSize: 13, color: 'var(--fg-2)' }}>
-                {g.decode != null ? `${fmt(g.decode)} t/s` : <Dash />}
+                <DecodeMeter v={g.decode} />
               </div>
               {g.prefill != null && (
                 <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--fg-4)' }}>{fmt(g.prefill)} t/s pf</div>
@@ -796,23 +863,26 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
             background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 'var(--rad, 6px)', color: 'var(--fg)',
           }}
         />
-        <span style={{ fontFamily: mono, fontSize: 10, color: 'var(--fg-4)' }}>
+        <div className="mtp-seg" title="filter by outcome">
+          <button
+            key="all"
+            className={'mtp-seg-btn' + (outcomeFilter === null ? ' on' : '')}
+            onClick={() => setOutcomeFilter(null)}
+          >
+            all {filtered.length}
+          </button>
           {Object.entries(tally).map(([o, n]) => (
             <button
               key={o}
+              className={'mtp-seg-btn' + (outcomeFilter === o ? ' on' : '')}
               onClick={() => setOutcomeFilter(cur => cur === o ? null : o)}
-              title={`toggle filter: ${o}`}
-              style={{
-                marginRight: 10, background: 'transparent', border: 'none', cursor: 'pointer',
-                fontFamily: mono, fontSize: 10, padding: 0,
-                color: outcomeFilter === o ? 'var(--fg)' : 'var(--fg-4)',
-                textDecoration: outcomeFilter === o ? 'underline' : 'none',
-              }}
+              title={`filter: outcome = ${o}`}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
             >
-              <span style={{ color: outcomeColor(o) }}>{'●'}</span> {o} {n}
+              <span style={{ color: outcomeFilter === o ? 'inherit' : outcomeColor(o) }}>{'●'}</span> {o} {n}
             </button>
           ))}
-        </span>
+        </div>
       </div>
       <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
         <thead>
@@ -825,7 +895,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
         <tbody>
           {shown.map(r => (
             <React.Fragment key={r.run_id}>
-              <tr onClick={() => toggle(r.run_id)} style={{ cursor: 'pointer', background: expanded === r.run_id ? 'var(--bg-2)' : undefined }}>
+              <tr onClick={() => toggle(r.run_id)} data-testid={`bench-run-row-${r.run_id}`} style={{ cursor: 'pointer', background: expanded === r.run_id ? 'var(--bg-2)' : undefined }}>
                 <td style={{ ...cellTd, whiteSpace: 'nowrap', color: 'var(--fg-3)' }}>
                   <span style={{
                     display: 'inline-block', width: '0.7rem',
@@ -846,7 +916,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
                 <td style={{ ...cellTd, fontSize: 11, color: r.config !== 'default' ? 'var(--accent)' : 'var(--fg-4)' }}>{r.config}</td>
                 <td style={cellTd}><TriggerChip t={r.trigger} /></td>
                 <td style={numTd}>{r.reps}</td>
-                <td style={numTd}><Num v={r.decode_ts_med} unit=" t/s" /></td>
+                <td style={numTd}><DecodeMeter v={r.decode_ts_med} /></td>
                 <td style={{ ...cellTd, textAlign: 'right' }}>
                   <span title={r.outcome} style={{ color: outcomeColor(r.outcome) }}>{'●'}</span>
                 </td>
@@ -856,7 +926,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
                   <td colSpan={11} style={{ padding: 0, borderBottom: '1px solid var(--line)', background: 'var(--bg-1)' }}>
                     <div style={{ padding: '0.9rem 1.1rem 1.1rem' }}>
                       {recordCache[r.run_id]
-                        ? <RunDetail rec={recordCache[r.run_id]} />
+                        ? <RunDetail rec={recordCache[r.run_id]} regressions={regressions} />
                         : <div style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>loading&hellip;</div>}
                     </div>
                   </td>
@@ -871,7 +941,52 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
   );
 }
 
-function RunDetail({ rec }: { rec: any }) {
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="btn ghost sm"
+      style={{ fontSize: 10, padding: '2px 8px' }}
+      onClick={() => {
+        navigator.clipboard?.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1400);
+      }}
+    >
+      {copied ? 'copied' : 'copy'}
+    </button>
+  );
+}
+
+function RunHistory({ cellKey, regressed }: { cellKey: string; regressed: boolean }) {
+  const [points, setPoints] = useState<HistoryPoint[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    apiGet<{ points: HistoryPoint[] }>(`/api/benchmarks/history?cell_key=${encodeURIComponent(cellKey)}`)
+      .then(d => { if (live) setPoints(d.points || []); })
+      .catch(() => { if (live) setPoints([]); });
+    return () => { live = false; };
+  }, [cellKey]);
+
+  if (points == null) return <div style={{ color: 'var(--fg-4)', fontStyle: 'italic', fontFamily: mono, fontSize: 10.5 }}>loading history&hellip;</div>;
+  if (points.length < 2) return null; // no series for this cell — omit rather than render an empty chart
+
+  return (
+    <section>
+      <h4 style={h4Style}>history &middot; decode t/s &middot; {points.length} pts for this cell</h4>
+      <div style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.5rem 0.6rem', background: 'var(--bg-2)' }}>
+        <Sparkline points={points} />
+        {regressed && (
+          <div style={{ marginTop: 6, fontFamily: mono, fontSize: 10.5, color: 'var(--warn)' }}>
+            {'▼'} regression flagged for this cell — see the dip above.
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function RunDetail({ rec, regressions }: { rec: any; regressions?: RegressionFlag[] }) {
   const id = rec.identity || {};
   const model = id.model || {};
   const engine = id.engine || {};
@@ -957,11 +1072,22 @@ function RunDetail({ rec }: { rec: any }) {
           ))}
         </div>
         {Array.isArray(config.argv) && config.argv.length > 0 && (
-          <pre style={{
-            fontFamily: mono, fontSize: 10.5, color: 'var(--fg-3)', background: 'var(--bg-2)',
-            border: '1px solid var(--line)', borderRadius: '0.35rem', padding: '0.45rem 0.6rem',
-            margin: '0.5rem 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all', userSelect: 'all',
-          }}>{config.argv.join(' ')}</pre>
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.6rem' }}>
+              <h4 style={{ ...h4Style, margin: 0 }}>resolved flags</h4>
+              <CopyButton text={config.argv.join(' ')} />
+            </div>
+            <pre style={{
+              fontFamily: mono, fontSize: 10.5, color: 'var(--fg-3)', background: 'var(--bg-2)',
+              border: '1px solid var(--line)', borderRadius: '0.35rem', padding: '0.45rem 0.6rem',
+              margin: '0.4rem 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all', userSelect: 'all',
+            }}>{config.argv.join(' ')}</pre>
+          </>
+        )}
+        {cellKey && (
+          <div style={{ marginTop: '0.8rem' }}>
+            <RunHistory cellKey={cellKey} regressed={!!regressions?.some(f => f.cell_key === cellKey)} />
+          </div>
         )}
       </div>
 
