@@ -118,26 +118,6 @@ re-installing the previous tag (`v1.0.0-rc.1`) from its GitHub release.
 Note the `enabled`-sweep caveat from the R5 set: pre-R5 code reads a
 missing `enabled` as true, so a rollback past R5 needs the config backup
 taken before upgrading.
-=======
-- Memory extraction-slot / LLM-timeout changes now actually reach the
-  hindsight-api daemon (#1641). The propagation wrote
-  `/etc/systemd/system/hindsight-api.service.d/extraction-model.conf`
-  directly and called bare `systemctl`, but hal0-api runs as the
-  unprivileged `hal0` user — the write was `EPERM` and the restart would
-  have hit polkit, so on every standard install the drop-in was never
-  created while `hal0.toml` (and the dashboard) reported the new slot as
-  applied. The write, `daemon-reload` and restart all route through the
-  existing `hal0-systemctl` seam now (new `write-hindsight-dropin` verb —
-  fixed literal path, body on stdin, no sudoers change: the grant is
-  pinned to the wrapper binary). The propagation also runs off the event
-  loop, so a hindsight-api cold start no longer blocks the API for the
-  length of the restart; `hal0.toml` is persisted *before* it, and the
-  whole read-modify-write is serialised, so a disconnect or a concurrent
-  save can no longer leave the recorded slot and the running daemon
-  disagreeing. Upgrading in place refreshes the wrapper only on
-  an `install.sh` re-run; until then the failure is loud
-  (`propagation.error`) instead of silent.
->>>>>>> 038a7541 (fix(memory): route the hindsight extraction drop-in through the systemctl seam)
 
 ## [1.0.0] — 2026-08-07
 
