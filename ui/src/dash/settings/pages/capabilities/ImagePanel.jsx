@@ -75,7 +75,7 @@ export function ImagePanel({ registry }) {
       } />
       <ModelRow items={sel.catalogItems} value={sel.model} onChange={sel.setModel}
         placeholder="model id (e.g. sdxl-turbo-fp16)"
-        emptyHint="no installed image models — install one in the Models view" />
+        emptyHint="no capability-tagged image models installed — ComfyUI workflows pick their own checkpoint, so leaving this unset is normal" />
 
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
         <div className="k">
@@ -108,7 +108,7 @@ export function ImagePanel({ registry }) {
           <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>No img slot configured — create one in the Slots view to edit generation defaults.</span>
         </div>
       )}
-      <PanelFooter dirty={dirty} onReset={resetAll} onSave={doSave}
+      <PanelFooter dirty={dirty} onReset={resetAll} onSave={doSave} probe={sel.capsQuery}
         disabled={!dirty || sel.loading || sel.errored || sel.applyCapability.isPending || editSlot.isPending}
         saving={sel.applyCapability.isPending || editSlot.isPending} label="Save image generation" />
     </div>

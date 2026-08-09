@@ -31,7 +31,7 @@ export function RerankPanel() {
       <SRow k="Memory recall reranker" sub="the memory subsystem's second-pass reranker client is configured separately" v={
         <a href="#settings/memory" className="mono" style={{fontSize: 11, color: "var(--accent)"}}>Memory settings →</a>
       } />
-      <PanelFooter dirty={sel.dirty} onReset={sel.reset} onSave={doSave}
+      <PanelFooter dirty={sel.dirty} onReset={sel.reset} onSave={doSave} probe={sel.capsQuery}
         disabled={!sel.dirty || sel.loading || sel.errored || sel.applyCapability.isPending}
         saving={sel.applyCapability.isPending} label="Save reranking" />
     </div>

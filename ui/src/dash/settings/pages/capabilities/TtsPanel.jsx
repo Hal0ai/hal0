@@ -130,7 +130,7 @@ export function TtsPanel({ registry }) {
             : isQwen3 ? "set by the loaded Qwen3-TTS model at startup — not configurable"
             : "not configurable — determined by the active engine"
         } mono v={<span style={{color: "var(--fg-4)"}}>{isKokoro ? "24 kHz" : "engine-dependent"}</span>} />
-      <PanelFooter dirty={dirty} onReset={resetAll} onSave={doSave}
+      <PanelFooter dirty={dirty} onReset={resetAll} onSave={doSave} probe={sel.capsQuery}
         disabled={!dirty || !speedValid || sel.loading || sel.errored || sel.applyCapability.isPending || editSlot.isPending}
         saving={sel.applyCapability.isPending || editSlot.isPending} label="Save TTS" />
     </div>

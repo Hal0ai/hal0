@@ -35,7 +35,7 @@ export function SttPanel() {
         } mono v={<span style={{color: "var(--fg-4)"}}>{p === "moonshine" ? "English" : "engine-dependent"}</span>} />
       <SRow k="NPU mode" sub="device npu serves whisper from the FLM trio ([npu].asr on the anchor slot) — tune it in the NPU anchor panel below" mono
         v={<span style={{color: "var(--fg-4)"}}>{sel.selection.device === "npu" ? "FLM trio" : "—"}</span>} />
-      <PanelFooter dirty={sel.dirty} onReset={sel.reset} onSave={doSave}
+      <PanelFooter dirty={sel.dirty} onReset={sel.reset} onSave={doSave} probe={sel.capsQuery}
         disabled={!sel.dirty || sel.loading || sel.errored || sel.applyCapability.isPending}
         saving={sel.applyCapability.isPending} label="Save STT" />
     </div>
