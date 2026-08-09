@@ -81,6 +81,10 @@ NPU_SEEDED_SLOTS: tuple[str, ...] = ("flm-stt", "flm-embed")
 #: alias. Only the Hermes-era `agent-hermes` → `agent` redirect remains.
 SLOT_ALIASES: dict[str, str] = {
     "agent-hermes": "agent",
+    # The rerank capability slot was briefly created as ``embed-rerank``
+    # while the dispatcher routed /v1/rerankings to ``rerank`` (split-brain,
+    # fixed 2026-08). Old references resolve to the canonical name.
+    "embed-rerank": "rerank",
     # Route curated NPU model IDs to the FLM trio slot.
     "qwen3:4b": "flm",
     "qwen3-4b": "flm",

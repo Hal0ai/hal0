@@ -106,7 +106,7 @@ _RETIRED_CHILDREN: frozenset[str] = frozenset({"vision"})
 
 _CHILD_TO_SLOT_NAME: dict[str, str] = {
     "embed": "embed",
-    "rerank": "embed-rerank",
+    "rerank": "rerank",
     "stt": "stt",
     "tts": "tts",
     "img": "img",

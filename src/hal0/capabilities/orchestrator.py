@@ -68,7 +68,7 @@ log = logging.getLogger(__name__)
 # children) is deferred — each child currently spawns its own slot.
 _CHILD_TO_SLOT: dict[tuple[str, str], str] = {
     ("embed", "embed"): "embed",
-    ("embed", "rerank"): "embed-rerank",
+    ("embed", "rerank"): "rerank",
     ("voice", "stt"): "stt",
     ("voice", "tts"): "tts",
     ("img", "img"): "img",
@@ -375,7 +375,7 @@ class CapabilityOrchestrator:
         """Return the slot's current state.value, or 'offline' if unknown.
 
         SlotManager.status() raises SlotNotFound for slots that haven't
-        been configured yet (the embed-rerank slot, for instance, is
+        been configured yet (the rerank slot, for instance, is
         only auto-created on first enable). Treat those as 'offline' so
         the dashboard always gets a string.
         """
@@ -709,7 +709,7 @@ class CapabilityOrchestrator:
     async def _ensure_slot_exists(self, slot_name: str, selection: CapabilitySelection) -> None:
         """Auto-create the slot TOML on first use of a non-builtin child.
 
-        ``embed-rerank`` is the canonical example: it isn't a builtin
+        ``rerank`` is the canonical example: it isn't a builtin
         slot, so the SlotManager would raise SlotNotFound on the first
         load. We synthesise a minimal config from the selection and let
         ``SlotManager.create()`` do the persist + state initialisation.

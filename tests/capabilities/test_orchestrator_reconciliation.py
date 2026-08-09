@@ -497,7 +497,7 @@ def test_ensure_slot_exists_omits_type_for_rerank() -> None:
     """Non-trio children (rerank/tts/img) get no ``type`` key."""
     from hal0.capabilities.orchestrator import _CHILD_TO_SLOT_TYPE
 
-    # embed-rerank → child "rerank", not in the trio-type map.
+    # rerank → child "rerank", not in the trio-type map.
     assert "rerank" not in _CHILD_TO_SLOT_TYPE
     assert "tts" not in _CHILD_TO_SLOT_TYPE
 
@@ -986,3 +986,30 @@ async def test_npu_embed_enable_container_anchor_without_external_runtime(
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
         f"NPU embed path must not bounce the slot: {fake.calls}"
     )
+
+
+def test_rerank_child_maps_to_canonical_rerank_slot() -> None:
+    """embed.rerank must create/load the slot the dispatcher routes to.
+
+    /v1/rerankings dispatches to slot ``rerank`` (router._RERANK_DEFAULT);
+    the old ``embed-rerank`` mapping created a slot nothing routed to.
+    """
+    from hal0.capabilities.orchestrator import _CHILD_TO_SLOT, child_to_slot
+
+    assert _CHILD_TO_SLOT[("embed", "rerank")] == "rerank"
+    assert child_to_slot("embed", "rerank") == "rerank"
+
+
+def test_embed_rerank_alias_resolves_to_rerank() -> None:
+    """Back-compat: references to the retired ``embed-rerank`` name resolve."""
+    from hal0.slots.routing import SLOT_ALIASES
+
+    assert SLOT_ALIASES["embed-rerank"] == "rerank"
+
+
+def test_stack_apply_rerank_slot_name_matches_orchestrator() -> None:
+    """stacks/apply.py's KEEP-IN-SYNC copy must not drift from the orchestrator."""
+    from hal0.capabilities.orchestrator import _CHILD_TO_SLOT
+    from hal0.stacks.apply import _CHILD_TO_SLOT_NAME
+
+    assert _CHILD_TO_SLOT_NAME["rerank"] == _CHILD_TO_SLOT[("embed", "rerank")]
