@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import os
 import stat
 import threading
@@ -64,7 +65,44 @@ def _depths() -> dict[str, int]:
     return depths
 
 
-def _open_lock_file(lock_path: Path):  # type: ignore[no-untyped-def]
+#: Mode for a freshly created lock file. Owner+group writable, matching the
+#: ``/etc/hal0 *.lock`` and ``/var/lib/hal0 *.lock`` perms rows: root and the
+#: service account both have to be able to take these locks.
+LOCK_FILE_MODE = 0o664
+
+
+def _adopt_target_ownership(fd: int, target: Path) -> None:
+    """Give a just-created lock file the guarded file's owner, when running as root.
+
+    A root-run writer that creates the lock first (``sudo hal0 config migrate``,
+    the installer, ``hal0 update``) would otherwise leave it ``root:root`` and
+    ``umask``-filtered — install.sh sets ``umask 022``, so ``0644`` — and the
+    ``hal0`` daemon, which opens the lock ``O_RDWR``, then fails EVERY config
+    write with ``PermissionError`` until someone runs ``doctor perms --fix``.
+    The same hazard already bit ``slots.lock`` on halo150 (see the ``*.lock``
+    rows in ``hal0.install.perms``); a standalone privileged CLI run has no
+    later repair step at all, so the fix belongs at creation time.
+
+    The lock inherits the guarded file's uid/gid (falling back to its directory)
+    rather than a hard-coded account, so it tracks whichever side of the
+    service-user ownership flip the box is on. Best-effort: a non-root process
+    cannot chown, and it does not need to — it created the file as itself.
+    """
+    os.fchmod(fd, LOCK_FILE_MODE)  # explicit: os.open's mode is umask-filtered
+    if os.geteuid() != 0:
+        return
+    source = target if target.exists() else target.parent
+    try:
+        st = source.stat()
+    except OSError:
+        return
+    if st.st_uid == 0 and st.st_gid == 0:
+        return  # unflipped, root-owned box — root:root is already correct
+    with contextlib.suppress(OSError):
+        os.fchown(fd, st.st_uid, st.st_gid)
+
+
+def _open_lock_file(lock_path: Path, target: Path):  # type: ignore[no-untyped-def]
     """Open ``lock_path`` for locking, refusing symlinks and non-regular files.
 
     These locks straddle a privilege boundary: ``/etc/hal0`` is writable by the
@@ -76,12 +114,23 @@ def _open_lock_file(lock_path: Path):  # type: ignore[no-untyped-def]
     plus an ``S_ISREG`` check on the descriptor (not the path — no TOCTOU
     window) closes that. No ``O_TRUNC``: the lock file's contents are never
     read or written, only its inode is locked.
+
+    Creation is a separate ``O_EXCL`` attempt so the mode/ownership fix-up in
+    :func:`_adopt_target_ownership` runs on the creating process only, and never
+    re-chmods a lock another process is already holding.
     """
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o664)
+    created = False
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, LOCK_FILE_MODE)
+        created = True
+    except FileExistsError:
+        fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise OSError(f"lock path is not a regular file: {lock_path}")
+        if created:
+            _adopt_target_ownership(fd, target)
     except BaseException:
         os.close(fd)
         raise
@@ -126,7 +175,7 @@ def file_lock(target: Path | str) -> Iterator[None]:
             depths.pop(key, None)
         return
 
-    with _open_lock_file(lock_path) as fh:
+    with _open_lock_file(lock_path, Path(target)) as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         depths[key] = 1
         try:
@@ -158,6 +207,11 @@ def file_lock(target: Path | str) -> Iterator[None]:
 # thread for a target an async writer also locks — it would block the loop, and
 # if a txn on that same loop holds it, forever. Off-loop writers must run in a
 # worker thread (``asyncio.to_thread``) or use this async variant.
+
+#: ``flock(LOCK_NB)`` errnos that mean "held by someone else, try again".
+#: Anything else (ENOSYS/EOPNOTSUPP on a filesystem without advisory locks, EBADF)
+#: is permanent and must surface immediately rather than be polled.
+_CONTENTION_ERRNOS = frozenset({errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK, errno.EINTR})
 
 _async_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
     weakref.WeakKeyDictionary()
@@ -290,13 +344,20 @@ async def async_file_lock(
                 owners.pop(key, None)
             return
 
-        with _open_lock_file(lock_path) as fh:
+        with _open_lock_file(lock_path, Path(target)) as fh:
             deadline = None if timeout is None else time.monotonic() + timeout
             while True:
                 try:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
-                except OSError:
+                except OSError as exc:
+                    # Only genuine contention is worth retrying. A filesystem
+                    # with no advisory-lock support (ENOSYS / EOPNOTSUPP) fails
+                    # identically on every attempt, so polling it would burn the
+                    # whole timeout and then report a misleading "another
+                    # process is writing" — or spin forever when timeout=None.
+                    if exc.errno not in _CONTENTION_ERRNOS:
+                        raise
                     if deadline is not None and time.monotonic() >= deadline:
                         raise TimeoutError(
                             f"timed out after {timeout}s waiting for advisory lock {lock_path}"

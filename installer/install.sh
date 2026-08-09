@@ -705,10 +705,29 @@ new_root = sys.argv[2]
 # /etc/hal0 is service-writable under the ownership flip while this script runs
 # as root, so following a symlink here would be a privilege hole.
 lock_path = pathlib.Path(f"{path}.lock")
-fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o664)
+created = False
+try:
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o664)
+    created = True
+except FileExistsError:
+    fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
 try:
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         raise SystemExit(f"lock path is not a regular file: {lock_path}")
+    if created:
+        # This script runs as root under `umask 022`, so the creation mode
+        # would land 0644 root:root and the hal0 daemon — which opens the lock
+        # O_RDWR — could then never take it, failing EVERY config write until a
+        # doctor perms --fix. Set the mode explicitly and adopt the guarded
+        # file's owner so the lock follows the service-user ownership flip.
+        os.fchmod(fd, 0o664)
+        src = path if path.exists() else path.parent
+        try:
+            st_src = src.stat()
+            if (st_src.st_uid, st_src.st_gid) != (0, 0):
+                os.fchown(fd, st_src.st_uid, st_src.st_gid)
+        except OSError:
+            pass
     fcntl.flock(fd, fcntl.LOCK_EX)
 
     text = path.read_text(encoding="utf-8") if path.exists() else ""

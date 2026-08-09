@@ -20,7 +20,10 @@ These tests pin the fix at three levels:
 from __future__ import annotations
 
 import asyncio
+import errno
+import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -607,6 +610,85 @@ def test_lock_file_open_refuses_a_symlink(tmp_path: Path) -> None:
     with pytest.raises(OSError), file_lock(target):
         pass  # pragma: no cover — the open must fail first
     assert victim.read_text(encoding="utf-8") == "precious"
+
+
+def test_new_lock_file_is_group_writable_regardless_of_umask(tmp_path: Path) -> None:
+    """A privileged writer must not leave a lock the service account can't open.
+
+    ``sudo hal0 config migrate`` / the root-run installer can create
+    ``hal0.toml.lock`` first, under ``umask 022``. Relying on ``os.open``'s
+    creation mode would land 0644 and the daemon — which opens the lock O_RDWR
+    — would then fail EVERY config write with PermissionError until a
+    ``doctor perms --fix``. Same hazard that bit ``slots.lock`` on halo150
+    (#1721 review round 3), so the mode is set explicitly at creation.
+    """
+    target = tmp_path / "hal0.toml"
+    target.write_text("", encoding="utf-8")
+    lock_path = tmp_path / "hal0.toml.lock"
+
+    old_umask = os.umask(0o022)  # exactly what install.sh sets
+    try:
+        with file_lock(target):
+            pass
+    finally:
+        os.umask(old_umask)
+
+    assert lock_path.exists()
+    mode = stat.S_IMODE(lock_path.stat().st_mode)
+    assert mode == 0o664, f"lock created 0o{mode:o}; the service account needs group write"
+
+
+def test_installer_lock_open_sets_mode_explicitly() -> None:
+    """install.sh's inline lock needs the same creation-mode fix.
+
+    It runs as root under ``umask 022`` by construction, so it is the most
+    likely creator of the lock file on a fresh box.
+    """
+    install_sh = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
+    match = re.search(
+        r"python3 - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
+        install_sh.read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert match
+    writer = match.group(1)
+    assert "fchmod" in writer, "the installer must set the lock mode explicitly, not via umask"
+    assert "fchown" in writer, "a root-created lock must adopt the guarded file's owner"
+
+
+async def test_permanent_flock_failure_is_not_polled(tmp_hal0_home: str) -> None:
+    """A filesystem without advisory locks must fail fast, not burn the timeout.
+
+    ``ENOSYS``/``EOPNOTSUPP`` fail identically on every attempt, so retrying
+    them spends the whole timeout and then reports a misleading
+    ``config.lock_busy`` — or spins forever when ``timeout=None``
+    (#1721 review round 3).
+    """
+    target = _toml_path(tmp_hal0_home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    save_hal0_config(Hal0Config(), target)
+
+    import fcntl as fcntl_mod
+
+    from hal0.config import locking as locking_mod
+
+    calls = 0
+
+    def _boom(fd: int, op: int) -> None:
+        nonlocal calls
+        calls += 1
+        raise OSError(errno.ENOSYS, "function not implemented")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(locking_mod.fcntl, "flock", _boom)
+        with pytest.raises(OSError) as caught:
+            async with hal0_config_txn(path=target, timeout=30):
+                pass  # pragma: no cover — the acquire must fail first
+
+    assert caught.value.errno == errno.ENOSYS
+    assert not isinstance(caught.value, ConfigLockBusy)
+    assert calls == 1, f"a permanent error was retried {calls} times"
+    assert fcntl_mod.flock is not _boom  # monkeypatch cleaned up
 
 
 async def test_async_lock_does_not_fake_reentrancy_for_a_sibling_task(
