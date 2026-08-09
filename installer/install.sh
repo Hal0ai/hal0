@@ -2671,6 +2671,29 @@ fi
 
 ui_step "Service start"
 
+# P4-model-layout backstop: the v0.1→v0.2 model-layout migration
+# (src/hal0/cli/migrate_commands.py) reads registry.toml + the on-disk
+# store and plants the canonical <recipe>/<capability>/ symlink farm under
+# /var/lib/hal0/models. Nothing upstream of this point ever calls it, so a
+# fresh install that just pulled the brain/agent chat model (registry pass,
+# #1615) and/or ComfyUI checkpoints (on-disk pass, "comfyui" v0.1.x dir)
+# ends up with those links outstanding — `hal0 doctor migrations` then
+# opens day one with a spurious "N link(s) pending" warning on a box that
+# has never run anything but this installer. Applying here, before the
+# P3-perms fix below, means any symlinks it plants get swept into that
+# recursive re-chown instead of sitting root-owned under the hal0-owned
+# models/ tree. Idempotent (a no-op on re-run) and non-destructive: it only
+# ever creates symlinks or reports a conflict, never overwrites one it
+# doesn't own (no --force) — a genuine conflict just resurfaces via
+# `hal0 doctor migrations` after install instead of aborting it.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    if "${HAL0_BIN}" migrate model-layout --apply >/dev/null 2>&1; then
+        info "model-layout migration applied — canonical symlink tree is current"
+    else
+        warn "'${HAL0_BIN} migrate model-layout --apply' reported issues — run 'hal0 doctor migrations' after install"
+    fi
+fi
+
 # P3-perms migration backstop: hal0-api ships User=hal0 (above), so /etc/hal0
 # + /var/lib/hal0 must already be hal0-owned (2775/setgid) BEFORE the unit's
 # first start, or the daemon can't read/write its own config on boot. The
