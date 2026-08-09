@@ -261,7 +261,7 @@ def _load_persisted_job(job_id: str) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _try_restart_hal0_api() -> tuple[bool, str | None]:
+def _try_restart_hal0_api() -> tuple[bool | None, str | None]:
     """``systemctl try-restart hal0-api.service`` - fail-soft.
 
     Returns ``(restarted, error)``. No-ops cleanly when ``systemctl`` is
@@ -274,6 +274,19 @@ def _try_restart_hal0_api() -> tuple[bool, str | None]:
     (installer/wrappers/hal0-systemctl) instead of a direct
     ``systemctl try-restart`` (dev/tests/a pre-flip install keep the direct
     call, unchanged). See :mod:`hal0.system.seam`.
+
+    #1691, same incident class as #1548: the restart-self wrapper already
+    passes ``--no-block`` so ``systemctl`` itself returns as soon as the
+    restart is QUEUED, without waiting for the old unit to stop. But that
+    ``sudo``/``systemctl`` call is still a CHILD of this process, hence
+    still inside hal0-api.service's own cgroup — systemd can start tearing
+    the old unit down (SIGTERMing the whole cgroup, this child included)
+    before the queued call finishes exiting cleanly. A signal-killed
+    ``returncode`` (negative) here is therefore ambiguous, not a definite
+    failure: it can BE the restart succeeding, reaping its own caller mid
+    flight. Report ``restarted=None`` for it — the same "terminal, bounce
+    still in flight" state #1548 introduced for the job level — rather than
+    ``False``, which the CLI treats as a real failure and warns on.
     """
     systemctl = shutil.which("systemctl")
     if not systemctl:
@@ -297,6 +310,10 @@ def _try_restart_hal0_api() -> tuple[bool, str | None]:
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning("updater.restart_errored", error=str(exc))
         return (False, str(exc))
+    if proc.returncode < 0:
+        err = (proc.stderr or "").strip()[:300] or f"systemctl exited {proc.returncode}"
+        log.info("updater.restart_signalled", returncode=proc.returncode, stderr=err)
+        return (None, err)
     if proc.returncode != 0:
         err = (proc.stderr or "").strip()[:300] or f"systemctl exited {proc.returncode}"
         log.warning("updater.restart_nonzero", returncode=proc.returncode, stderr=err)
