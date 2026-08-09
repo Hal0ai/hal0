@@ -174,6 +174,41 @@ test.describe('Capability catalog pickers (#1454)', () => {
     await expect(panel.locator('select option', { hasText: 'bge-reranker-v2-m3' })).toHaveCount(1)
     await expect(panel.locator('a[href="#settings/memory"]')).toHaveCount(1)
   })
+
+  test('toggling Enabled marks the panel dirty and lights its Save button', async ({ page }) => {
+    await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
+    await page.goto('/#settings/capabilities')
+    const panel = page.locator('.s-panel').filter({ has: page.locator('.k span', { hasText: /^Embeddings$/ }) })
+    const save = panel.getByRole('button', { name: 'Save embeddings' })
+    await expect(save).toBeDisabled()
+    await panel.getByRole('checkbox').click()
+    await expect(save).toBeEnabled()
+    await expect(panel.getByRole('button', { name: 'Reset' })).toBeVisible()
+  })
+
+  test('failed /api/capabilities probe shows the per-panel note with Retry, then recovers', async ({ page }) => {
+    // #1498/#1527 escape hatch: opt /api/capabilities out of forced-mock
+    // substitution so our 500 fulfil below actually reaches react-query —
+    // without this, mockFetch papers any non-ok networkFirst response over
+    // with the baked payload and capsQuery.isError is unreachable (the
+    // test-infra gap flagged in the #1467 note at the bottom of this file).
+    await page.addInitScript(() => {
+      ;(window as unknown as { __hal0MockPassthrough: string[] }).__hal0MockPassthrough = ['/api/capabilities']
+    })
+    let fail = true
+    await page.route('**/api/capabilities', (route) =>
+      fail ? route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"boom"}' }) : json(route, CAPS_MOCK))
+    await page.goto('/#settings/capabilities')
+
+    const panel = page.locator('.s-panel').filter({ has: page.locator('.k span', { hasText: /^Embeddings$/ }) })
+    await expect(panel.getByText('capability probe failed — Save disabled')).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Save embeddings' })).toBeDisabled()
+
+    fail = false
+    await panel.getByRole('button', { name: 'Retry' }).click()
+    await expect(panel.getByText('capability probe failed — Save disabled')).toHaveCount(0)
+    await expect(panel.locator('select option', { hasText: 'nomic-embed-text-v1.5' })).toHaveCount(1)
+  })
 })
 
 // #1467 item 4: neither page had an isError branch for GET /api/capabilities
@@ -184,15 +219,9 @@ test.describe('Capability catalog pickers (#1454)', () => {
 // suppressed via `errored` alongside the existing dirty/loading/pending
 // gates (VoicePage.jsx Save STT / Save TTS, ImageGenPage.jsx Save Image-gen).
 //
-// NOT e2e-covered: `/api/capabilities` is `networkFirst` in
-// src/api/mock.ts's MOCK_ALLOWLIST (needed so THIS spec's page.route
-// fixtures above stay authoritative under the suite's forced-mock build —
-// see the allowlist comment). But `mockFetch`'s FORCED+networkFirst branch
-// substitutes the baked payload for ANY non-ok response, network exception
-// included (`if (FORCED && hit.row.networkFirst && !res.ok) { …fallback… }`)
-// — so a page.route 500/abort on this endpoint is silently papered over
-// with a 200 mock payload before it ever reaches react-query, and
-// capsQuery.isError is unreachable from a Playwright spec against this
-// harness. Verified by direct code inspection instead (matches the
-// AdvancedPage/SecretsPage isError precedent exactly); flagged in the
-// #1467 report as a test-infra gap, not a shortcut in the fix itself.
+// The isError branch WAS untestable here (mockFetch's FORCED+networkFirst
+// branch substituted the baked payload for any non-ok response before it
+// reached react-query). The #1498/#1527 `__hal0MockPassthrough` escape
+// hatch closed that gap — the "failed /api/capabilities probe" spec above
+// opts the endpoint out of substitution and drives the 500 → per-panel
+// note → Retry → recovery path end to end.

@@ -29,7 +29,7 @@ export function EmbedPanel() {
         emptyHint="no installed embedding models — install one in the Models view" />
       <SRow k="Serves" sub="memory (Hindsight) embeds with its own bundled model — this slot serves API/RAG traffic" mono
         v={<span style={{color: "var(--fg-4)"}}>/v1/embeddings</span>} />
-      <PanelFooter dirty={sel.dirty} onReset={sel.reset} onSave={doSave}
+      <PanelFooter dirty={sel.dirty} onReset={sel.reset} onSave={doSave} probe={sel.capsQuery}
         disabled={!sel.dirty || sel.loading || sel.errored || sel.applyCapability.isPending}
         saving={sel.applyCapability.isPending} label="Save embeddings" />
     </div>
