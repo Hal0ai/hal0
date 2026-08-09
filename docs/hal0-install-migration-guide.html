@@ -737,7 +737,28 @@ id -nG hal0</pre>
       <p class="k">Full surface: <a href="https://hal0.dev/docs/reference/cli/">reference/cli</a> · API: <a href="https://hal0.dev/docs/reference/api/">reference/api</a></p>
     </div>
   </div>
+  <h3>Environment variables</h3>
+  <p>The install-time variables are in the <a href="#new">Install section</a>. These are the runtime ones you'll actually reach for — the full table (60+ vars, grouped by subsystem) is at <a href="https://hal0.dev/docs/reference/env-vars/">reference/env-vars</a>.</p>
+  <table>
+    <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>HAL0_PORT</code> / <code>HAL0_BIND_HOST</code></td><td><code>8080</code> / <code>0.0.0.0</code></td><td>API port and bind host (also read by <code>hal0 serve</code>)</td></tr>
+      <tr><td><code>HAL0_API_URL</code></td><td><code>http://127.0.0.1:8080</code></td><td>Base URL the CLI uses to reach <code>hal0-api</code> — set it when driving a remote box</td></tr>
+      <tr><td><code>HAL0_REQUIRE_AUTH</code></td><td>—</td><td>Overrides <code>[security].require_auth</code>; keys live in <code>/etc/hal0/api.env</code> (<code>HAL0_ADMIN_KEY</code>, <code>HAL0_CLIENT_KEY</code> — see <code>hal0 auth</code>)</td></tr>
+      <tr><td><code>HF_TOKEN</code> / <code>HUGGING_FACE_HUB_TOKEN</code></td><td>—</td><td>Hugging Face auth for gated models (first-set wins; used by install, model routes, pull jobs)</td></tr>
+      <tr><td><code>HAL0_MODEL_STORE</code></td><td>—</td><td>Model-store root override (env → <code>[models].store</code> → <code>/var/lib/hal0/models</code>)</td></tr>
+      <tr><td><code>HAL0_FLM_MODELS_DIR</code></td><td>—</td><td>NPU/FLM model-store override</td></tr>
+      <tr><td><code>HAL0_CONTAINER_RUNTIME</code></td><td>auto-detect</td><td>Override the podman/container runtime binary</td></tr>
+      <tr><td><code>HAL0_HINDSIGHT_URL</code></td><td><code>http://127.0.0.1:9177</code></td><td>Hindsight memory engine base URL</td></tr>
+      <tr><td><code>HAL0_RELEASES_URL</code></td><td>official manifest</td><td>Point the updater at a self-hosted release manifest (redirects OK since rc.3)</td></tr>
+      <tr><td><code>HAL0_HOME</code></td><td>— (FHS paths)</td><td>Dev/test-only: relocate <em>all</em> root paths (<code>etc</code>, <code>var_lib</code>, …) under one directory</td></tr>
+      <tr><td><code>NO_COLOR</code> / <code>HAL0_PLAIN</code></td><td>—</td><td>Disable ANSI color / force ASCII-only CLI output</td></tr>
+    </tbody>
+  </table>
+
   <div class="note acc"><span class="tag">Units &amp; ports</span><p><code>hal0-api.service</code> serves the control plane + dashboard on <code>:8080</code>; <code>hal0-openwebui.service</code> serves chat on <code>:3001</code>. Slot units are <code>hal0-slot@&lt;name&gt;</code> (or <code>hal0-slot@&lt;id&gt;</code> after id-keying).</p><p>Agents, Hermes gateway, and Hindsight run as the non-root <code>hal0</code> user. Slot lifecycle detail: <a href="https://hal0.dev/docs/reference/slot-lifecycle/">reference/slot-lifecycle</a>.</p></div>
+
+  <div class="note info"><span class="tag">Full documentation</span><p>This guide is the tour — the complete reference lives at <a href="https://hal0.dev/docs/"><strong>hal0.dev/docs</strong></a>: getting-started walkthroughs (Proxmox, bare metal, WSL), concepts, how-to guides, the CLI/API/config-schema references, and operations runbooks.</p></div>
 </section>
 
 </main>
