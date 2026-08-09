@@ -42,8 +42,17 @@ def test_agent_is_gpu_seeded_not_npu():
 
 
 def test_slot_aliases_map():
-    """ADR-0023: SLOT_ALIASES drops ``primary`` — only agent-hermes → agent."""
-    assert SLOT_ALIASES == {"agent-hermes": "agent", "qwen3-4b": "flm", "qwen3:4b": "flm"}
+    """ADR-0023: SLOT_ALIASES drops ``primary`` — only agent-hermes → agent.
+
+    Also carries the rerank capability slot's retired ``embed-rerank`` name
+    (split-brain fix, 2026-08) and the NPU FLM curated-model routes.
+    """
+    assert SLOT_ALIASES == {
+        "agent-hermes": "agent",
+        "embed-rerank": "rerank",
+        "qwen3-4b": "flm",
+        "qwen3:4b": "flm",
+    }
 
 
 # ── 2. _resolve_alias static method ──────────────────────────────────────────

@@ -24,6 +24,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- Settings: new unified **AI Capabilities** page (TTS, STT, embeddings, reranking, image generation, NPU anchor) replaces the Voice / Image Generation / NPU pages; old `#settings/voice|imagegen|npu` links redirect. First UI for the embed/rerank capability selections.
+
 ### Security
 
 - The privileged `hal0-systemctl` wrapper now allow-lists the *content* of the
@@ -42,6 +46,10 @@ applying. Add those subsections to a version's section to surface them; see
   loud error and nothing is written. The wrapper persists the validated
   reconstruction rather than raw stdin, and a new side-effect-free
   `check-dropin <gateway|hindsight>` verb dry-runs the allow-list.
+
+### Fixed
+
+- Enabling the rerank capability now creates/loads the `rerank` slot the dispatcher actually routes `/v1/rerankings` to (was `embed-rerank`, which nothing routed to); `embed-rerank` resolves as an alias.
 
 ## [1.0.0-rc.3] — 2026-08-09
 
