@@ -2082,8 +2082,14 @@ elif ! command -v apt-get >/dev/null 2>&1; then
     warn "  GPU (Vulkan/ROCm) + CPU paths work normally; NPU/FLM slots stay disabled until you install"
     warn "  FastFlowLM ${FLM_DEB_VERSION} manually (see installer/README.md). 'flm validate' gates the NPU trio."
 else
+    # -o DPkg::Lock::Timeout=120 on every apt-get call in this step (and the
+    # hermes-prereqs.sh toolchain install later): this step and hermes
+    # provisioning both run well after boot, when unattended-upgrades
+    # commonly still holds the dpkg/apt-get lock (#1584) — poll for it up to
+    # 2 minutes instead of dying on the first hit like the earlier
+    # preflight apt phase, which wins the race by running right at start.
     ui_spinner_run "apt-get update (refresh package index)" \
-        apt-get update -qq
+        apt-get -o DPkg::Lock::Timeout=120 update -qq
 
     # FLM host-support gate. Upstream now ships a per-distro .deb (ubuntu24.04 /
     # ubuntu25.10 / ubuntu26.04 / debian13), each pinned against that release's
@@ -2112,9 +2118,9 @@ else
     if [[ "$(distro_id)" == "ubuntu" ]] \
         && ! apt-cache policy libxrt-npu2 2>/dev/null | grep -q lemonade-team; then
         if command -v add-apt-repository >/dev/null 2>&1 \
-            || apt-get install -y software-properties-common >/dev/null 2>&1; then
+            || apt-get -o DPkg::Lock::Timeout=120 install -y software-properties-common >/dev/null 2>&1; then
             if add-apt-repository -y ppa:lemonade-team/stable >/dev/null 2>&1; then
-                apt-get update -qq >/dev/null 2>&1 || true
+                apt-get -o DPkg::Lock::Timeout=120 update -qq >/dev/null 2>&1 || true
                 info "added lemonade-team PPA (libxrt-npu2 / AMDXDNA NPU runtime)"
             else
                 warn "could not add lemonade-team PPA — host NPU libs (libxrt-npu2) may be unavailable"
@@ -2126,7 +2132,7 @@ else
     # (or a pre-existing vendor repo on upgraded boxes). The FLM container image
     # bundles its own runtime, so a miss here only disables the HOST `flm
     # validate` probe, not the npu slot itself.
-    if apt-get install -y libxrt-npu2 >/dev/null 2>&1; then
+    if apt-get -o DPkg::Lock::Timeout=120 install -y libxrt-npu2 >/dev/null 2>&1; then
         info "libxrt-npu2 installed (AMDXDNA NPU runtime for the host flm probe)"
     else
         warn "libxrt-npu2 not available from configured apt sources — host 'flm validate' may fail"
@@ -2189,7 +2195,7 @@ else
         # `apt-get install -y /path/to.deb` pulls transitive deps from
         # apt (cleaner than `dpkg -i` + manual `apt-get -f install`).
         if ui_spinner_run "Installing FastFlowLM ${FLM_DEB_VERSION}" \
-            apt-get install -y "${FLM_DEB_TMP}"; then
+            apt-get -o DPkg::Lock::Timeout=120 install -y "${FLM_DEB_TMP}"; then
             rm -f "${FLM_DEB_TMP}"
             # Smoke-test the binary. `flm validate` returns 0 when the
             # NPU runtime is reachable AND the binary is wired up — it's
