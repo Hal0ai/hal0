@@ -293,7 +293,8 @@ def _select_entries(doc: dict[str, Any], kind: str) -> list[dict[str, Any]]:
     matches = [
         b
         for b in benchmarks
-        if isinstance(b, dict) and ((b.get("config") or {}).get("strategy") or {}).get("type_") == kind
+        if isinstance(b, dict)
+        and ((b.get("config") or {}).get("strategy") or {}).get("type_") == kind
     ]
     if matches:
         return matches
@@ -331,9 +332,7 @@ def _rep_from_request(req: dict[str, Any]) -> Rep | None:
     )
 
 
-def _config_observed(
-    doc: dict[str, Any], entries: list[dict[str, Any]]
-) -> Config | None:
+def _config_observed(doc: dict[str, Any], entries: list[dict[str, Any]]) -> Config | None:
     """DISPLAY-only resolved config (parsers.py convention: ``Parsed.
     config_observed`` is stamped onto the record for viewing, never fed to
     ``cell_key``). Reconstructs a readable ``--backend``/``--profile`` argv

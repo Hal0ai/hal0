@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "version": 2,
+    "guidellm_version": "0.7.3"
+  },
+  "config": {
+    "spec": {
+      "backend": {},
+      "profile": {
+        "kind": "constant"
+      }
+    }
+  },
+  "benchmarks": [
+    {
+      "config": {
+        "strategy": {
+          "type_": "constant",
+          "rate": 4.0
+        }
+      },
+      "requests": {
+        "successful": [],
+        "errored": [],
+        "incomplete": [],
+        "total": 0
+      },
+      "metrics": {}
+    }
+  ]
+}

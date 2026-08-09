@@ -1,0 +1,45 @@
+{
+  "metadata": {
+    "version": 2,
+    "guidellm_version": "0.7.3"
+  },
+  "config": {
+    "spec": {
+      "backend": {
+        "target": "http://127.0.0.1:9",
+        "model": "fixture-model"
+      },
+      "profile": {
+        "kind": "synchronous"
+      }
+    }
+  },
+  "benchmarks": [
+    {
+      "config": {
+        "strategy": {
+          "type_": "synchronous"
+        }
+      },
+      "requests": {
+        "successful": [
+          {
+            "request_latency": 0.5,
+            "time_to_first_token_ms": 100.0,
+            "output_tokens_per_second": 20.0
+          }
+        ],
+        "errored": [],
+        "incomplete": [],
+        "total": 1
+      },
+      "metrics": {
+        "output_tokens_per_second": {
+          "successful": {
+            "mean": 20.0
+          }
+        }
+      }
+    }
+  ]
+}
