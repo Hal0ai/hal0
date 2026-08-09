@@ -205,6 +205,14 @@ def ownership_table(
         # dashboard writer and the key rotation applied). One constant, shared
         # with both of those and with installer/install.sh.
         PermRow(etc / "api.env", etc_owner, etc_group, paths.API_ENV_MODE, role="api.env"),
+        # update.conf is the ROOT-owned releases-URL override (#1750). It is
+        # pinned root:root under the flip too, on purpose: the privileged
+        # hal0-update wrapper reads it as root and lets it name a file:// URL,
+        # which api.env (service-owned once flipped) is not allowed to do —
+        # otherwise a process compromised as hal0 would choose the manifest
+        # root fetches. Optional: only boxes with a custom release source have
+        # one.
+        PermRow(etc / "update.conf", "root", "root", 0o644, role="update.conf"),
         PermRow(etc / "capabilities.toml", etc_owner, etc_group, 0o600, role="capabilities.toml"),
         PermRow(etc / "upstreams.toml", etc_owner, etc_group, 0o644, role="upstreams.toml"),
         PermRow(paths.hardware_json(), etc_owner, etc_group, 0o644, role="hardware.json"),

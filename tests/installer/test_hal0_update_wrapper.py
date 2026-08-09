@@ -151,14 +151,18 @@ def test_stage_reads_releases_url_from_hal0_home_api_env(installed: Path, tmp_pa
     assert _released_url(installed) == "https://mirror.example/preview.json"
 
 
-def test_stage_accepts_a_file_url(installed: Path, tmp_path: Path) -> None:
+def test_stage_refuses_a_file_url_from_api_env(installed: Path, tmp_path: Path) -> None:
+    """#1750: api.env is hal0-owned under the hardened flip, so a ``file://``
+    there is the unprivileged account picking a local path for ROOT to read as
+    a release manifest. Only the root-owned update.conf may name one."""
     hal0_home = tmp_path / "sandbox"
     _write_api_env(hal0_home, "HAL0_RELEASES_URL=file:///srv/hal0-releases/stable.json\n")
 
-    rc, _, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+    rc, argv, stderr = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
 
-    assert rc == 0
-    assert _released_url(installed) == "file:///srv/hal0-releases/stable.json"
+    assert rc != 0
+    assert argv == [], "the interpreter must not be reached at all"
+    assert "update.conf" in stderr
 
 
 def test_stage_strips_matching_quotes_around_releases_url(installed: Path, tmp_path: Path) -> None:
@@ -250,7 +254,7 @@ def test_stage_never_forwards_unrelated_api_env_secrets(installed: Path, tmp_pat
         "javascript:alert(1)",
         "ftp://mirror.example/stable.json",
         "not-a-url",
-        "http://mirror.example/stable.json",  # https:// or file:// only, per #1690
+        "http://mirror.example/stable.json",  # https:// only from api.env (#1690, #1750)
     ],
 )
 def test_stage_refuses_a_releases_url_with_a_disallowed_scheme(
@@ -338,6 +342,73 @@ def test_wrapper_resolves_the_venv_from_its_own_location(tmp_path: Path) -> None
     rc, argv, _ = _run(lib, "check")
     assert rc == 0
     assert argv[-1] == "check"
+
+
+# ── root-owned override file (#1750) ───────────────────────────────────────────
+
+
+def _write_update_conf(hal0_home: Path, body: str) -> None:
+    """Lay out $HAL0_HOME/etc/hal0/update.conf — the root:root override file."""
+    etc = hal0_home / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "update.conf").write_text(body)
+
+
+def test_stage_reads_releases_url_from_root_owned_update_conf(
+    installed: Path, tmp_path: Path
+) -> None:
+    hal0_home = tmp_path / "sandbox"
+    _write_update_conf(hal0_home, "HAL0_RELEASES_URL=https://mirror.example/stable.json\n")
+
+    rc, argv, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert argv == ["-I", "-m", "hal0.updater.privileged", "stage", "stable"]
+    assert _released_url(installed) == "https://mirror.example/stable.json"
+
+
+def test_update_conf_may_name_a_file_url(installed: Path, tmp_path: Path) -> None:
+    """`file://` stays available for the LXC smoke / release-prototype flow —
+    but only from the file the unprivileged account cannot write."""
+    hal0_home = tmp_path / "sandbox"
+    _write_update_conf(hal0_home, "HAL0_RELEASES_URL=file:///srv/hal0-releases/stable.json\n")
+
+    rc, _, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert _released_url(installed) == "file:///srv/hal0-releases/stable.json"
+
+
+def test_update_conf_wins_over_api_env(installed: Path, tmp_path: Path) -> None:
+    """The root-owned file is authoritative; the service-owned one cannot
+    override an operator's explicit root-side choice."""
+    hal0_home = tmp_path / "sandbox"
+    _write_update_conf(hal0_home, "HAL0_RELEASES_URL=https://trusted.example/stable.json\n")
+    _write_api_env(hal0_home, "HAL0_RELEASES_URL=https://attacker.example/stable.json\n")
+
+    rc, _, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert _released_url(installed) == "https://trusted.example/stable.json"
+
+
+def test_api_env_is_still_honoured_for_https(installed: Path, tmp_path: Path) -> None:
+    """#1690's interim mechanism keeps working on boxes with no update.conf."""
+    hal0_home = tmp_path / "sandbox"
+    _write_api_env(hal0_home, "HAL0_RELEASES_URL=https://mirror.example/stable.json\n")
+
+    rc, _, _ = _run(installed, "stage", "stable", env={"HAL0_HOME": str(hal0_home)})
+
+    assert rc == 0
+    assert _released_url(installed) == "https://mirror.example/stable.json"
+
+
+def test_wrapper_does_not_claim_api_env_is_root_owned() -> None:
+    """#1750: the comment asserting api.env is 'root-owned trusted config' was
+    false under the hardened perms flip and must not come back."""
+    text = WRAPPER.read_text()
+    assert "SAME root-owned trusted config" not in text
+    assert "update.conf" in text
 
 
 def test_wrapper_and_python_dir_regexes_agree() -> None:
