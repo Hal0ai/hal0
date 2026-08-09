@@ -1067,7 +1067,58 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
                 original=str(dest),
                 quarantine=str(stale),
             )
-    dest.mkdir(parents=True, exist_ok=True)
+        elif os.geteuid() == 0 and ((_st := dest.stat()).st_uid != 0 or _st.st_mode & 0o022):
+            # Codex follow-up: an *empty* pre-existing dest was previously
+            # reused untouched aside from a later chmod — but chmod cannot
+            # revoke the owning user's own access, and reusing-then-chmod
+            # still leaves a (short) window where a pre-existing writable
+            # inode stays writable. Two ways an inode here can be untrusted:
+            # wrong owner (chmod can't fix that — root reusing it and
+            # chmod-ing to 0700 leaves the ORIGINAL owner's rwx bits
+            # unchanged), or root-owned-but-group/other-writable (e.g. a
+            # directory a failed stage left behind under the old, pre-#1723
+            # permissive-umask behavior — reusing it at all trusts an inode
+            # that was, until this exact chmod call, writable by whoever
+            # could reach it). Only meaningful at euid 0 — the privileged
+            # seam path with a trust boundary to defend; a dev/CI/HAL0_HOME
+            # run has none. Quarantine it exactly like a suspicious
+            # non-empty dir, so the fresh `mkdir(mode=0o700)` below always
+            # creates (and therefore owns, atomically-secured) `dest`
+            # itself rather than trusting whatever created it before.
+            stale = dest.with_name(f"{dest.name}.stale-{int(time.time())}")
+            try:
+                dest.rename(stale)
+            except OSError as exc:
+                raise UpdateExtractError(
+                    f"could not quarantine untrusted empty install dir {dest}: {exc}",
+                    details={"path": str(dest), "quarantine": str(stale), "error": str(exc)},
+                ) from exc
+            log.warning(
+                "updater.extract_quarantined_untrusted_empty",
+                job_id=job_id,
+                original=str(dest),
+                quarantine=str(stale),
+            )
+    # #1723 / Codex follow-up: lock `dest` to owner-only *before* anything is
+    # extracted into it. A directory's own children are unreachable to
+    # non-owners as long as the directory itself denies traversal (x) — so
+    # an owner-only top-level `dest` closes the whole plant-a-file-during-
+    # extraction race by construction, without needing to touch every path
+    # underneath or mutate the process-wide umask (which would race other
+    # concurrent `asyncio.to_thread` extractions sharing the same process).
+    #
+    # ``mode=0o700`` on the ``mkdir`` call itself makes the *fresh-create*
+    # case atomic — the OS never exposes a wider mode than requested, even
+    # for an instant, because umask can only clear bits from ``mode``, never
+    # add them (a separate follow-up ``mkdir()``-then-``chmod()`` pair would
+    # leave a real, schedulable window between the two syscalls under a
+    # permissive caller umask). The explicit ``chmod`` right after still
+    # runs unconditionally to cover the *reuse* case — ``exist_ok=True``
+    # silently keeps an already-existing empty ``dest`` (e.g. left behind by
+    # an interrupted earlier stage attempt) exactly as it was, mode
+    # included, so ``mode=`` on ``mkdir`` never applies to it.
+    dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+    dest.chmod(0o700)
 
     log.info("updater.extract_start", job_id=job_id, tarball=str(tarball), dest=str(dest))
     strip_prefix: str | None = None
@@ -1121,7 +1172,74 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
             with contextlib.suppress(OSError):
                 inner.rmdir()
 
+    # Now that extraction is complete and `dest` is no longer racing anyone,
+    # widen it back to its final, correct mode: normalize the whole tree
+    # (not just the top level) so assert_trusted_release_dir's precondition
+    # holds, and every subdirectory tarfile created — which inherited
+    # whatever mode its tar member or the caller's umask gave it — is
+    # go-w-clean too, not just readable-only-by-owner forever.
+    _normalize_staged_tree(dest, job_id=job_id)
+
     log.info("updater.extract_ok", job_id=job_id, dest=str(dest))
+
+
+def _normalize_staged_tree(dest: Path, *, job_id: str | None = None) -> None:
+    """Set the staged tree's final mode/ownership after extraction.
+
+    Defends the precondition ``assert_trusted_release_dir`` enforces at
+    activate time: the staged tree and its parent must be uid-0-owned and
+    not group/other writable. ``assert_trusted_release_dir`` only inspects
+    the top-level directory today, but this normalizes every entry
+    ``tf.extractall`` wrote — defense in depth so a future recursive gate,
+    or a subdirectory an operator inspects by hand, is never the surprise.
+
+    Directories are explicitly set to ``0755``, not merely masked — the
+    caller locked ``dest`` to ``0700`` for the extraction window (see
+    ``_extract_tarball``), and a mask (``mode & ~0o022``) can only ever
+    remove bits, so it would leave the real, activated install root-only
+    and unreadable by the service account that has to run it. Files keep
+    whatever mode the tarball's own member metadata gave them (tarfile
+    ``chmod``s each member explicitly, independent of umask) with only
+    group/other write bits stripped — there is no equivalent "restore
+    executable bit" ambiguity for files the way there is for the
+    deliberately-locked-down directory.
+
+    Ownership is reset to root:root only when running as euid 0 (the
+    privileged seam path, where root just extracted the tree and files are
+    already root-owned by construction — this chown is belt-and-suspenders,
+    not load-bearing for that path). Mirrors :func:`_restore_service_ownership`
+    just below: best-effort and logged, never raised — a process can be euid
+    0 in a container without CAP_CHOWN (or in a test that stubs ``geteuid``
+    without stubbing the filesystem), and failing loudly there would turn an
+    inert edge case into a hard stage failure. The *mode* normalization
+    below is what actually fixes #1723 and is not best-effort: unlike
+    ownership, a plain-file owner can always chmod their own files, so a
+    failure there is a real, actionable problem worth surfacing.
+    """
+    if os.geteuid() == 0:
+        try:
+            os.chown(dest, 0, 0)
+            for path in dest.rglob("*"):
+                os.chown(path, 0, 0, follow_symlinks=False)
+        except OSError as exc:
+            log.warning(
+                "updater.extract_chown_failed", job_id=job_id, path=str(dest), error=str(exc)
+            )
+
+    try:
+        entries = (dest, *dest.rglob("*"))
+        for path in entries:
+            if path.is_symlink():
+                continue
+            mode = path.stat().st_mode
+            normalized = 0o755 if path.is_dir() else mode & ~0o022
+            if normalized != mode:
+                path.chmod(normalized)
+    except OSError as exc:
+        raise UpdateExtractError(
+            f"failed to normalize staged release tree permissions: {exc}",
+            details={"path": str(dest), "error": str(exc)},
+        ) from exc
 
 
 def _maybe_run_config_migrations(
