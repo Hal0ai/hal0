@@ -9,9 +9,10 @@ command, with ``--json`` for machine consumers.
 It re-uses the tested :class:`hal0.cli.doctor_verify.Check` row type and the
 verify report-card classifiers (API, runners, DNS, capabilities, memory,
 OpenWebUI, Hermes), then adds the broader health rows the retrofit calls for:
-auth posture, model-store integrity, pending migrations, bound slot ports,
-the ``hal0.target`` boot-enable anchor (r5-sync-assessment §6.1), and the
-privileged sudo seams every slot op + self-update runs through (#1465).
+auth posture, model-store integrity, pending migrations, a stale-dashboard
+``HAL0_UI_DIST`` override (#1589), bound slot ports, the ``hal0.target``
+boot-enable anchor (r5-sync-assessment §6.1), and the privileged sudo seams
+every slot op + self-update runs through (#1465).
 
 Strictly read-only — there is no ``--fix`` here; the per-surface subcommands
 own repair. Exit codes:
@@ -224,6 +225,87 @@ def check_migrations(pending: tuple[int, int] | None) -> Check:
         "Migrations",
         _WARN,
         f"model-layout migration pending: {detail} — run `hal0 migrate model-layout --apply`",
+    )
+
+
+def _read_env_value(
+    env_path: Path, key: str, *, read_text: Callable[[Path], str] | None = None
+) -> str | None:
+    """Best-effort ``KEY=value`` read from an ``EnvironmentFile``-style file.
+
+    Mirrors the line convention :mod:`hal0.api._env_store` writes (a plain
+    or double-quoted ``KEY=value``, one per line — see ``_line_targets_key``).
+    A commented-out line (``# KEY=value``) does not count as set. Returns
+    ``None`` when the file, or the key inside it, is absent — never raises.
+    """
+    _read = read_text if read_text is not None else (lambda p: p.read_text(encoding="utf-8"))
+    try:
+        text = _read(env_path)
+    except OSError:
+        return None
+    prefix = f"{key}="
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            value = stripped[len(prefix) :]
+            if len(value) >= 2 and value[0] == value[-1] == '"':
+                value = value[1:-1]
+            return value
+    return None
+
+
+def check_ui_dist(
+    *, api_env_path: Path | None = None, current_ui_dist: Path | None = None
+) -> Check:
+    """Compare the effective dashboard bundle against the current release.
+
+    ``HAL0_UI_DIST`` in ``api.env`` is installer-owned wiring, not operator
+    config — on an FHS box its only correct value is ``<current>/ui/dist``
+    (see :func:`hal0.config.paths.usr_lib`). The installer only *writes* that
+    line when ``api.env`` doesn't exist yet (fresh install); on every
+    subsequent run it preserves whatever sits outside the marker-delimited
+    network block, by design, so an operator edit elsewhere in the file
+    survives. That same preservation means a box that ever had
+    ``HAL0_UI_DIST`` pointed at an older layout (e.g. a pre-FHS git-deploy
+    tree) silently stops receiving UI updates on every future upgrade: the
+    updater stages a fresh bundle under the new release, and the dashboard
+    keeps serving the stale one against the new API (#1589).
+
+    No override at all is the common, healthy case (the FastAPI mount falls
+    through to ``<current>/ui/dist`` on its own — see
+    ``hal0.api._mount_dashboard``) and passes silently.
+    """
+    api_env_path = api_env_path if api_env_path is not None else paths.api_env()
+    expected = current_ui_dist if current_ui_dist is not None else (paths.usr_lib() / "ui" / "dist")
+
+    override = _read_env_value(api_env_path, "HAL0_UI_DIST")
+    if not override:
+        return Check(
+            "ui-dist",
+            "Dashboard bundle",
+            _PASS,
+            "no HAL0_UI_DIST override in api.env — tracks the current release bundle",
+        )
+
+    override_path = Path(override)
+    try:
+        matches = override_path.resolve() == expected.resolve()
+    except OSError:
+        matches = override_path == expected
+    if matches:
+        return Check(
+            "ui-dist",
+            "Dashboard bundle",
+            _PASS,
+            f"HAL0_UI_DIST={override} matches the current release bundle",
+        )
+    return Check(
+        "ui-dist",
+        "Dashboard bundle",
+        _WARN,
+        f"HAL0_UI_DIST={override} in api.env does not resolve inside {expected} (the current "
+        "release bundle) — the dashboard may be serving a stale UI against the new API. Remove "
+        f"the override (or point it at {expected}) in api.env, then restart hal0-api.",
     )
 
 
@@ -647,6 +729,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_auth_posture(auth_payload),
         check_model_store(_get_any("/api/models", base)),
         check_migrations(pending_layout_migration()),
+        check_ui_dist(),
         check_ports(_get_any("/api/slots", base, timeout=SLOTS_PROBE_TIMEOUT_S)),
         check_hal0_target(),
         check_secret_file_modes(),
@@ -745,6 +828,7 @@ __all__ = [
     "check_model_store",
     "check_ports",
     "check_seams",
+    "check_ui_dist",
     "doctor_all_cmd",
     "overall_verdict",
     "probe_builtin_mcp_mounts",
