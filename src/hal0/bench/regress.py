@@ -18,8 +18,14 @@ median by more than ``THRESHOLD_PCT``.
 
 from __future__ import annotations
 
+import asyncio
+import sys
 from dataclasses import dataclass
 from typing import Any
+
+from hal0.activity import AuditStore
+from hal0.board.store import BoardStore
+from hal0.config.paths import activity_db
 
 from .store import Store, _record_ts
 
@@ -115,3 +121,80 @@ def check(store: Store) -> list[Flag]:
             )
         )
     return flags
+
+
+#: Board task fires only when a session's flag count exceeds this — a lone
+#: flag is noise-tolerant (DESIGN §11), a cluster is worth an operator's eye.
+BOARD_TASK_THRESHOLD = 2
+
+
+def journal_flags(flags: list[Flag], suite_id: str) -> None:
+    """Emit ONE durable ``bench.regression`` event for a session's flags, and
+    (when more than :data:`BOARD_TASK_THRESHOLD` flag) an Operator Board task.
+
+    Uses hal0's OWN established durable-journal mechanism —
+    :class:`hal0.activity.AuditStore`, the same SQLite audit trail every other
+    subsystem's structural events land in (``slot.state``, ``pull.*``,
+    ``system.*`` — see that module + ``hal0.events.EventBus``'s ``sink``
+    hook). This module runs CLI-side (``hal0 bench run``/``worker``), off
+    hal0-api's FastAPI event loop, so it cannot reach ``app.state.events``;
+    ``AuditStore``/``BoardStore`` are both plain, dependency-free classes a
+    standalone process can open directly against the SAME on-disk store
+    (``hal0.config.paths.activity_db`` / the default board db — both
+    HAL0_HOME-aware, so tests never touch a real box's state; module-level
+    names, not lazy imports, so the test suite can inject a fake journal the
+    same way ``harness.BENCHCTL`` is monkeypatched elsewhere in this package).
+
+    Journaling is diagnostic, never load-bearing: any failure here is logged
+    to stderr and swallowed, never raised — a broken audit/board write must
+    not turn an otherwise-successful bench session into a failure.
+    """
+    if not flags:
+        return
+
+    detail = [
+        {
+            "cell_key": f.cell_key,
+            "model_id": f.model_id,
+            "delta_pct": f.delta_pct,
+            "trailing_median": f.trailing_median,
+            "run_ids": f.run_ids,
+        }
+        for f in flags
+    ]
+    message = f"{len(flags)} cell(s) regressed in suite {suite_id!r}"
+
+    try:
+        store = AuditStore(activity_db())
+        store.init_schema()
+        asyncio.run(
+            store.record(
+                kind="event",
+                category="bench",
+                action="bench.regression",
+                target=suite_id,
+                actor="system",
+                severity="warn",
+                message=message,
+                after={"suite": suite_id, "flags": detail},
+            )
+        )
+    except Exception as exc:  # journaling must never break the session
+        print(f"[regress] journal write failed: {exc!r}", file=sys.stderr)
+
+    if len(flags) <= BOARD_TASK_THRESHOLD:
+        return
+    try:
+        BoardStore().create_task(
+            {
+                "title": f"bench regression: {len(flags)} cell(s) in {suite_id!r}",
+                "body": "\n".join(
+                    f"- {f.model_id} {f.cell_key[:16]} {f.delta_pct}% vs {f.trailing_median}"
+                    for f in flags
+                ),
+                "status": "triage",
+                "created_by": "bench",
+            }
+        )
+    except Exception as exc:  # a board write must never break the session either
+        print(f"[regress] board task creation failed: {exc!r}", file=sys.stderr)
