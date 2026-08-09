@@ -545,3 +545,42 @@ class TestBogusLaneDefensiveLayer:
         [rec] = list(store.iter_records())
         assert rec["outcome"] == Outcome.FAILED.value
         assert "bogus" in rec["note"]
+
+
+class TestContendedDowngradeScope:
+    """The skipped-contended downgrade is Tier-A-only: serving-tier cells
+    measure THROUGH a live slot, so 'a slot is serving' is their
+    precondition, not contention (CT105 deploy validation, 2026-08-09)."""
+
+    def _outcome_for(self, kind, tmp_path, monkeypatch):
+        from hal0.bench.parsers import Parsed
+        from hal0.bench.schema import Host, Outcome
+
+        monkeypatch.setattr(runner, "_gpu_slot_serving", lambda api: True)
+        import hal0.bench.planner as _planner
+
+        monkeypatch.setattr(_planner.adapters, "resolve_tool", lambda _n: "/usr/bin/true")
+        (cell,) = _cells([kind], Store(tmp_path))
+        rec = runner._assemble(
+            cell,
+            Parsed(),
+            Outcome.OK,
+            Host(exclusive=False),
+            "s",
+            "rid",
+            tmp_path / "artifacts" / "rid",
+            "",
+            "http://x",
+        )
+        return rec.outcome
+
+    def test_tier_a_still_downgrades(self, tmp_path, monkeypatch):
+        from hal0.bench.schema import Outcome
+
+        assert self._outcome_for("tg", tmp_path, monkeypatch) is Outcome.SKIPPED_CONTENDED
+
+    @pytest.mark.parametrize("kind", ["chat", "http_pp", "http_tg", "reuse", "embed", "rerank"])
+    def test_serving_tier_keeps_ok(self, kind, tmp_path, monkeypatch):
+        from hal0.bench.schema import Outcome
+
+        assert self._outcome_for(kind, tmp_path, monkeypatch) is Outcome.OK
