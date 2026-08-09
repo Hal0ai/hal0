@@ -273,7 +273,11 @@ class Model(BaseModel):
         description=(
             "Provider-specific or user-defined extra metadata. "
             "Reserved keys: 'context_length' (int, GGUF arch max), "
-            "'upstream_url' (str, dispatcher route hint)."
+            "'context_length_detected' (bool, set by the pull path when it "
+            "auto-stamped 'context_length' from the GGUF header/curated "
+            "catalogue — absent means an operator set it explicitly, which "
+            "outranks a later re-pull's own detection; see registry/pull.py "
+            "_register_pulled), 'upstream_url' (str, dispatcher route hint)."
         ),
     )
 
