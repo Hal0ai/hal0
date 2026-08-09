@@ -525,23 +525,17 @@ export function NpuOccupancyCard({ slots }) {
             XDNA 2 · npu
           </span>
           <span className="grow" />
-          <button className="btn ghost sm ctl-start" title="Start"
-            onClick={() => handlers.onStart(anchorSlot)} disabled={!anchorSlot}>
-            ▶
-          </button>
-          <button className="btn ghost sm ctl-stop" title="Stop"
-            onClick={() => handlers.onStop(anchorSlot)} disabled={!anchorSlot}>
-            ■
-          </button>
-          <button className="btn ghost sm ctl-restart" title="Restart"
-            onClick={() => handlers.onRestart(anchorSlot)} disabled={!anchorSlot}>
-            ↻
-          </button>
-          <button className="btn ghost sm ctl-logs" title="Logs"
-            onClick={() => handlers.onLogs(anchorSlot)} disabled={!anchorSlot}>
-            📋
-          </button>
-          <button className="btn ghost sm" title="Configure FLM slot" onClick={() => anchorSlot && (window.location.hash = '#slots/' + anchorSlot.name)} disabled={!anchorSlot} style={{fontSize: 13}}>✎ Configure</button>
+          {/* Same .sctrl icon controls the inference slot cards use — the
+              old text/emoji ghost buttons (▶ ■ ↻ 📋 ✎ Configure) are gone. */}
+          <SlotControls
+            phase={anchorSlot ? slotCtrlPhase(anchorSlot) : 'off'}
+            busy={!anchorSlot}
+            onStart={() => anchorSlot && handlers.onStart(anchorSlot)}
+            onStop={() => anchorSlot && handlers.onStop(anchorSlot)}
+            onRestart={() => anchorSlot && handlers.onRestart(anchorSlot)}
+            onLogs={() => anchorSlot && handlers.onLogs(anchorSlot)}
+            onEdit={() => anchorSlot && (window.location.hash = '#slots/' + anchorSlot.name)}
+          />
         </div>
         <div className="wcard-b">
           <div className="combo">

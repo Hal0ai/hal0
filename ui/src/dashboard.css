@@ -38,9 +38,9 @@
   --ok:           #6fcf97;
   --ok-soft:      rgba(111, 207, 151, 0.10);
   --ok-line:      rgba(111, 207, 151, 0.30);
-  --warn:         #f2792b;
-  --warn-soft:    rgba(242, 121, 43, 0.10);
-  --warn-line:    rgba(242, 121, 43, 0.30);
+  --warn:         #e8b94e;
+  --warn-soft:    rgba(232, 185, 78, 0.10);
+  --warn-line:    rgba(232, 185, 78, 0.30);
   --err:          #ef6b6b;
   --err-soft:     rgba(239, 107, 107, 0.10);
   --err-line:     rgba(239, 107, 107, 0.30);
@@ -48,9 +48,10 @@
   --info-soft:    rgba(127, 184, 255, 0.10);
   --info-line:    rgba(127, 184, 255, 0.30);
 
-  /* Device colours */
-  --dev-rocm:     #7fb8ff;
-  --dev-vulkan:   #f9d884;
+  /* Device colours — a lane reads the same hue in a chip, a table cell and
+     a chart legend. Values are the unified-chrome set (design system). */
+  --dev-rocm:     #d76b6b;
+  --dev-vulkan:   #7fb8ff;
   --dev-cpu:      #9c9c95;
   --dev-npu:      #c896ff;
   --dev-img:      #3c6597;  /* ComfyUI image-gen tag (decoupled from --comfy accent) */
@@ -151,8 +152,8 @@ a { color: inherit; text-decoration: none; }
 ::-webkit-scrollbar-thumb:hover { background: var(--line-strong); }
 
 /* ─── focus ─────────────────────────────────────────────────────── */
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
-::selection { background: var(--accent); color: #0a0a0a; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+::selection { background: var(--accent-glow); color: var(--fg); }
 
 /* ─── App shell ─────────────────────────────────────────────────── */
 .app {
@@ -182,10 +183,27 @@ a { color: inherit; text-decoration: none; }
   align-items: center;
   gap: 16px;
   padding: 0 20px 0 18px;
-  border-bottom: 1px solid var(--line);
   background: var(--bg);
   position: relative;
   z-index: 10;
+}
+/* The chrome "filament": a 1px bottom hairline that brightens to sodium
+   amber at centre with a faint under-glow — shared with hal0.dev's header. */
+.topbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--line) 18%,
+    color-mix(in srgb, var(--accent) 70%, var(--line)) 50%,
+    var(--line) 82%,
+    transparent 100%);
+  box-shadow: 0 1px 14px rgba(255, 176, 0, 0.09);
+  pointer-events: none;
 }
 .tb-brand {
   display: flex;
@@ -333,36 +351,28 @@ a { color: inherit; text-decoration: none; }
 
 /* Notification bell — icon-only launcher + anchored dropdown panel. */
 .tb-bell-wrap { position: relative; display: inline-flex; }
+/* Topbar bell — the shared .iconbtn idiom (class kept for testids/selectors).
+   Amber is reserved for the live signals: unread state and the open popover. */
 .tb-bell {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  background: var(--bg-2);
-  color: var(--fg-2);
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--rad-sm);
+  background: transparent;
+  color: var(--fg-3);
   cursor: pointer;
-  transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
-.tb-bell svg {
-  color: #fff;
-  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.55));
-  transition: color .16s ease, filter .16s ease;
-}
-.tb-bell:hover { border-color: var(--accent-line); background: var(--accent-soft); }
-.tb-bell:hover svg,
-.tb-bell.on svg,
-.tb-bell.has svg {
-  color: var(--accent);
-  filter: drop-shadow(0 0 5px var(--accent)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
-}
+.tb-bell:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
+.tb-bell.has svg { color: var(--accent); }
 .tb-bell.on {
+  color: var(--accent);
   border-color: var(--accent-line);
   background: var(--accent-soft);
-  box-shadow: 0 0 0 1px var(--accent-line), 0 0 14px -4px var(--accent);
 }
 .tb-bell-badge {
   position: absolute;
@@ -384,30 +394,22 @@ a { color: inherit; text-decoration: none; }
   box-shadow: 0 0 0 2px var(--bg-1);
 }
 /* Documentation launcher — same icon-button chrome as the notification bell. */
+/* Topbar docs link — shared .iconbtn idiom. */
 .tb-docs {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  background: var(--bg-2);
-  color: var(--fg-2);
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--rad-sm);
+  background: transparent;
+  color: var(--fg-3);
   cursor: pointer;
   text-decoration: none;
-  transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
-.tb-docs svg {
-  color: #fff;
-  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.55));
-  transition: color .16s ease, filter .16s ease;
-}
-.tb-docs:hover { border-color: var(--accent-line); background: var(--accent-soft); }
-.tb-docs:hover svg {
-  color: var(--accent);
-  filter: drop-shadow(0 0 5px var(--accent)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
-}
+.tb-docs:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
 .notif-pop {
   position: absolute;
   top: calc(100% + 8px);
@@ -617,7 +619,7 @@ a { color: inherit; text-decoration: none; }
 .footer {
   grid-area: footer;
   border-top: 1px solid var(--line);
-  background: var(--bg);
+  background: var(--bg-sunken);
   display: grid;
   grid-template-rows: auto auto;
   font-family: var(--jbm);
@@ -1042,6 +1044,7 @@ a { color: inherit; text-decoration: none; }
   height: 30px;
 }
 .btn:hover { filter: brightness(1.06); }
+.btn:active { transform: translateY(0.5px); }
 .btn.ghost { background: transparent; color: var(--fg); border-color: var(--line); }
 .btn.ghost:hover { border-color: var(--fg-3); background: var(--bg-2); }
 .btn.danger { background: transparent; color: var(--err); border-color: var(--err-line); }
@@ -1070,8 +1073,8 @@ a { color: inherit; text-decoration: none; }
 .chip.warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
 .chip.err { background: var(--err-soft); color: var(--err); border-color: var(--err-line); }
 .chip.info { background: var(--info-soft); color: var(--info); border-color: var(--info-line); }
-.chip.dev-rocm { color: var(--dev-rocm); border-color: rgba(127, 184, 255, 0.30); background: rgba(127, 184, 255, 0.08); }
-.chip.dev-vulkan { color: var(--dev-vulkan); border-color: rgba(249, 216, 132, 0.30); background: rgba(249, 216, 132, 0.08); }
+.chip.dev-rocm { color: var(--dev-rocm); border-color: rgba(215, 107, 107, 0.30); background: rgba(215, 107, 107, 0.08); }
+.chip.dev-vulkan { color: var(--dev-vulkan); border-color: rgba(127, 184, 255, 0.30); background: rgba(127, 184, 255, 0.08); }
 .chip.dev-cpu { color: var(--dev-cpu); border-color: var(--line-strong); background: var(--bg-2); }
 .chip.dev-npu { color: var(--dev-npu); border-color: rgba(200, 150, 255, 0.30); background: rgba(200, 150, 255, 0.08); }
 .chip.dev-img { color: var(--dev-img); border-color: rgba(60, 101, 151, 0.30); background: rgba(60, 101, 151, 0.08); }
@@ -1115,6 +1118,122 @@ a { color: inherit; text-decoration: none; }
 @media (prefers-reduced-motion: reduce) {
   .dot.serving, .dot.warming, .dot.loading { animation: none; }
 }
+
+/* ─── Unified-chrome shared primitives ──────────────────────────
+   Same vocabulary as hal0.dev's site chrome (icon buttons, search trigger,
+   filter pills, terminal well, data table). Authored once here; views adopt
+   these instead of growing bespoke equivalents. */
+.iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--rad-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  position: relative;
+  transition: color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+.iconbtn:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
+.iconbtn .pip {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+
+.searchbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-sm);
+  background: var(--bg-1);
+  color: var(--fg-4);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+  cursor: pointer;
+  min-width: 180px;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+.searchbtn:hover { border-color: var(--line-strong); color: var(--fg-3); }
+.searchbtn .k {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-4);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.fbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fpill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px;
+  border-radius: var(--rad-pill);
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease);
+}
+.fpill:hover { border-color: var(--line-strong); color: var(--fg); }
+.fpill.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+.fpill .n { color: var(--fg-4); font-size: 10px; }
+.fgroup { display: flex; align-items: center; gap: 8px; }
+
+/* terminal well — amber only on the token you can act on */
+.well {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+/* data table — mono, uppercase 10px headers, numeric right-aligned */
+.dtable { width: 100%; border-collapse: collapse; font-family: var(--jbm); font-size: 12.5px; }
+.dtable th {
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-3);
+  font-weight: 500;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  background: var(--bg);
+}
+.dtable th.n, .dtable td.n {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "zero" 1, "tnum" 1;
+}
+.dtable th.sorted { color: var(--accent); }
+.dtable td { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); color: var(--fg-2); white-space: nowrap; }
+.dtable tbody tr:hover td { background: var(--bg-2); }
+.dtable td.lead { color: var(--fg); }
+.dtable .hero { color: var(--accent); }
+
+.hairline { height: 1px; background: var(--line); border: 0; margin: 0; }
 
 /* Section title — used inside views */
 .sec {
@@ -2159,15 +2278,22 @@ select.npu-sel {
 }
 .mdl-sort-grp { flex-shrink: 0; flex-wrap: nowrap; }
 .mdl-clear:hover { color: var(--err); border-color: var(--err-line); }
+/* Filter chips — the shared .fpill idiom (kept under the .mdl-chip name
+   because e2e selectors target it). */
 .mdl-chip {
-  padding: 3px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px;
   border: 1px solid var(--line);
-  border-radius: 3px;
-  background: transparent;
+  border-radius: var(--rad-pill);
+  background: var(--bg-1);
   font-family: var(--jbm);
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--fg-3);
   cursor: pointer;
+  transition: all var(--dur-fast) var(--ease);
 }
 .mdl-chip:hover { color: var(--fg); border-color: var(--line-strong); }
 .mdl-chip.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
@@ -2569,16 +2695,16 @@ select.npu-sel {
   display: none;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  color: var(--fg-2);
+  border: 1px solid transparent;
+  border-radius: var(--rad-sm);
+  color: var(--fg-3);
   cursor: pointer;
 }
-.tb-menu:hover { color: var(--fg); border-color: var(--line-strong); }
+.tb-menu:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
 
 .nav-drawer-backdrop {
   position: fixed;

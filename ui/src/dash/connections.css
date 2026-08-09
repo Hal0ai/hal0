@@ -361,7 +361,7 @@
 
 /* per-tool capability badges — the blast-radius manifest */
 .mt-badge { font-family: var(--jbm); font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border-radius: var(--rad-pill); border: 1px solid var(--line); color: var(--fg-4); }
-.mt-badge.gated { color: var(--warn); border-color: rgba(242,121,43,0.4); background: rgba(242,121,43,0.08); }
+.mt-badge.gated { color: var(--warn); border-color: rgba(232,185,78,0.4); background: rgba(232,185,78,0.08); }
 .mt-badge.destructive { color: var(--err); border-color: var(--err-line); background: rgba(255,90,90,0.07); }
 .mt-badge.read { color: var(--ok); border-color: var(--ok-line); background: var(--ok-soft); }
 .mt-badge.world { color: var(--info); border-color: rgba(90,160,255,0.35); background: rgba(90,160,255,0.07); }
