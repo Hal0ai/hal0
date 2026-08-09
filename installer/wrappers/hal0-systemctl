@@ -288,7 +288,13 @@ _QRE_DEVICE='^[A-Za-z0-9_./:=-]{1,255}$'
 _QRE_CAP='^[A-Za-z0-9_]{1,64}$'
 _QRE_VOLUME='^[A-Za-z0-9_./:,+@%=-]{1,512}$'
 _QRE_ENV='^[A-Za-z_][A-Za-z0-9_]*=.{0,1024}$'
-_QRE_PUBLISH='^[0-9A-Fa-f.:]{1,45}:[0-9]{1,5}:[0-9]{1,5}$'
+# host:hostport:ctrport. The host is [slots].publish_host, which its schema
+# validator (_publish_host_sane) already constrains to a bare IPv4 or hostname
+# — no spaces, ':' or '/' — so the host segment here is colon-free; IPv6
+# literals are unsupported at that layer. A bare-IPv4-only charset would
+# false-reject the documented hostname case (e.g. hal0.local) and brick every
+# bridge-mode slot on such a box.
+_QRE_PUBLISH='^[A-Za-z0-9._-]{1,253}:[0-9]{1,5}:[0-9]{1,5}$'
 _QRE_DURATION='^[0-9]{1,9}(ns|us|ms|s|m|h|d|w)?$'
 _QRE_RETRIES='^[0-9]{1,4}$'
 _QRE_RESTART='^(always|on-failure|no)$'

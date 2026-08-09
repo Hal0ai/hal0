@@ -138,6 +138,20 @@ _PLANS: dict[str, tuple[RuntimeLaunchPlan, dict[str, Any]]] = {
         ),
         {"publish_host": "0.0.0.0", "network_mode_default": "bridge"},
     ),
+    "hostname-publish-host": (
+        # #1740 F1 regression: [slots].publish_host permits a bare hostname
+        # (SlotsConfig._publish_host_sane), so a bridge-mode slot renders
+        # PublishPort=<hostname>:port:port. An IPv4-only allow-list charset
+        # false-rejected this documented, default-path config and bricked the
+        # slot load.
+        RuntimeLaunchPlan(
+            image="ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
+            command=["llama-server", "--port", "8095"],
+            port=8095,
+            network_mode="",
+        ),
+        {"publish_host": "hal0.local", "network_mode_default": "bridge"},
+    ),
     "host-net-comfyui": (
         RuntimeLaunchPlan(
             image="ghcr.io/hal0ai/hal0-comfyui:v1",
