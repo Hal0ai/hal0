@@ -61,8 +61,9 @@ export const RELOAD_CLASS_FALLBACK = {
 
   // ── [image] generation defaults — size/steps are per-request fallbacks;
   //    idle_restore_minutes is read once at GpuArbiter construction
-  //    (slots/arbiter.py:249, wired api/__init__.py:1619), so it needs the
-  //    API service bounced. ──────────────────────────────────────────────────
+  //    (slots/arbiter.py:249, wired slots/manager.py:3022 — the lazy
+  //    SlotManager.arbiter property), so it needs the API service bounced.
+  //    ──────────────────────────────────────────────────────────────────────
   'slot.image.default_size': { apply_class: 'immediate' },
   'slot.image.default_steps': { apply_class: 'immediate' },
   'slot.image.idle_restore_minutes': { apply_class: 'service-restart', services: [SERVICE_HAL0_API] },

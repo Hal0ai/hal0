@@ -15,7 +15,7 @@ import { test, expect } from '../fixtures/apiMock'
 
 const SECTIONS = [
   'Overview', 'Security', 'Doctor',
-  'Loaded Models', 'Model Defaults', 'Voice', 'Image Generation', 'NPU',
+  'Loaded Models', 'Model Defaults', 'AI Capabilities',
   'Hardware & Runtimes', 'Storage', 'Memory', 'Updates', 'Advanced',
   'Secrets', 'Agent Chat',
 ]
