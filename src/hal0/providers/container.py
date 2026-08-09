@@ -70,7 +70,7 @@ from hal0.config.schema import (
     resolve_chat_template,
     resolve_profile_flags,
 )
-from hal0.errors import Hal0Error
+from hal0.errors import Hal0Error, UnprocessableEntity
 from hal0.http_client import async_client
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
@@ -935,7 +935,30 @@ def _llama_argv_segments(
         ("model_extra_args", md_extra_tokens),
     ]
     if slot_profile_flags.strip():
-        segments.append(("slot_profile", shlex.split(slot_profile_flags)))
+        try:
+            _profile_tokens = shlex.split(slot_profile_flags)
+        except ValueError as exc:
+            # A profile's flags string is free text (operator-editable on
+            # disk) and the create/edit path has no quoting validator —
+            # unmatched quotes only surface here, where an unhandled
+            # ValueError would otherwise 500 the launch/preview. Fail with a
+            # controlled config error instead.
+            raise UnprocessableEntity(
+                f"divergent slot profile flags are not valid shell text: {exc}",
+                code="slot.profile_flags_malformed",
+                details={"flags": slot_profile_flags},
+            ) from exc
+        # jinja is a runner+model CAPABILITY, resolved once as
+        # ``effective_jinja`` and injected/suppressed through
+        # ``model_defaults.extra_args`` above — never through a raw profile
+        # flag. llama-server has no ``--no-jinja`` negation, so a legacy or
+        # hand-authored profile's own ``--jinja`` token would otherwise
+        # permanently defeat an explicit ``defaults.jinja=false`` once it
+        # rides the (higher-precedence) slot_profile segment. Strip it so
+        # the overlay can never outrank the already-computed capability.
+        _profile_tokens = [t for t in _profile_tokens if t != "--jinja"]
+        if _profile_tokens:
+            segments.append(("slot_profile", _profile_tokens))
     segments += [
         ("slot_hardware", slot_hw_tokens),
         ("chat_template", chat_tokens),
@@ -1351,7 +1374,14 @@ def _resolve_llama_scalars(
     #   * the names differ;
     #   * the resolved profile IS the slot's named one — a missing-profile
     #     fallback to the backend base (``_resolve_profile_or_base``) must not
-    #     inject flags the operator never picked.
+    #     inject flags the operator never picked;
+    #   * the profile actually FITS the slot (``profile_fits_slot`` — same
+    #     supported_slot_types + device_class/backend predicate the drawer's
+    #     cross-device picker and Q1 adoption already gate on). A profile
+    #     assigned out-of-band (API, hand-edited TOML) that names a wrong-type
+    #     profile (e.g. ``embedding``/``kokoro`` on an LLM slot) must not
+    #     inject mode-changing flags (``--embedding``, ``--model_path``) that
+    #     were inert before this overlay existed.
     # No MTP expansion here (``resolve_profile_flags`` with no override): the
     # ``--spec-draft-*`` bundle stays model-driven (see _effective_mtp).
     slot_profile_flags = ""
@@ -1366,7 +1396,10 @@ def _resolve_llama_scalars(
         and _cfg_profile != _provenance
         and (_resolved_name is None or _resolved_name == _cfg_profile)
     ):
-        slot_profile_flags = str(resolve_profile_flags(profile) or "").strip()
+        from hal0.slots.profile_adopt import profile_fits_slot
+
+        if profile_fits_slot(_cfg_profile, slot_cfg):
+            slot_profile_flags = str(resolve_profile_flags(profile) or "").strip()
         if slot_profile_flags and for_launch:
             log.info(
                 "slot.profile_divergence_applied",

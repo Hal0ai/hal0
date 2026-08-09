@@ -623,6 +623,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// guarded a value the launch path ignores, and #1389 was that gate vetoing
 		// unrelated saves from an unmounted subtree — a whole failure mode that
 		// removing the control makes unrepresentable.)
+		// Codex P1 (#1636 fallout): a pending cross-backend profile switch that
+		// would strand the currently-bound model — block Save until the
+		// operator swaps to a compatible model or reverts the profile pick.
+		if (strandsBoundModel) {
+			errs.profile =
+				"This profile switches the slot to a device that can't run the bound model — swap to a compatible model first, or pick a same-backend profile.";
+		}
 		if (Object.keys(errs).length > 0) {
 			setFieldErrs(errs);
 			return;
@@ -753,6 +760,28 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		return target || device;
 	})();
 	const pendingDeviceClass = deviceClassOf(pendingDevice);
+	// A live (uncommitted) cross-backend profile pick, or null — the single
+	// signal both the Save-time strand check and the Model-swap gate below
+	// key off. Split out from `pendingDevice` itself (which returns `device`
+	// as a harmless no-op fallback) so callers don't have to re-derive
+	// "is this actually pending" from an equality check on every read.
+	const pendingCrossDevice =
+		pendingDevice !== device ? pendingDevice : null;
+	// Codex P1: a Save that switches the slot to `pendingCrossDevice` also
+	// re-derives its device server-side (_reconcile_device_profile) — but the
+	// currently BOUND model rides along untouched. If that model doesn't fit
+	// the new backend (e.g. a rocmfp4 model on a ROCm→Vulkan switch), Save
+	// would strand it: a live container restarts onto a runner that can't
+	// load its own bound model. Block Save in that case (see onSaveClick)
+	// rather than let the restart fail after the fact.
+	const boundModelId = slot.model_id || slot.model || "";
+	const strandsBoundModel =
+		!!pendingCrossDevice &&
+		!!boundModelId &&
+		!compatibleModels(modelsQuery.data, {
+			type: slot.type,
+			backend: deviceBackend(pendingCrossDevice),
+		}).some((m) => m.id === boundModelId);
 
 	// Instant-apply pin/unpin for the drawer header toggle (§21.10, #1367).
 	// Fires the PUT, toasts the result, and lets the slots poll re-render from
@@ -974,7 +1003,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// launch (the slot_profile argv segment).
 		const diverges =
 			profileResolves && !!modelProfile && profileSel !== modelProfile;
-		const selCross = crossFit.find((p) => p.name === profileSel) || null;
+		// Only a LIVE selection change counts as "picking" a cross-device
+		// profile — a persisted slot whose profile already sits in crossFit
+		// (backend drift predating this drawer, or edited out-of-band) has
+		// not had anything picked; treating it as `selCross` would suppress
+		// the fit warning and promise a Save-time switch that `changes.profile`
+		// (false — nothing changed) never arms, while `_reconcile_device_profile`
+		// deliberately leaves that drift untouched.
+		const profileIsLiveSelection = profileSel !== (slot.profile || "");
+		const selCross =
+			(profileIsLiveSelection &&
+				crossFit.find((p) => p.name === profileSel)) ||
+			null;
 		const targetDevice = selCross
 			? crossDeviceTarget(selCross, devBackend)
 			: null;
@@ -1017,7 +1057,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						className="input mono"
 						data-testid="slot-profile"
 						value={profileSel}
-						onChange={(e) => setProfileSel(e.target.value)}
+						onChange={(e) => {
+							setProfileSel(e.target.value);
+							setFieldErrs((p) => ({ ...p, profile: undefined }));
+						}}
 					>
 						{/* keep a none/out-of-vocab persisted profile selectable */}
 						{!slot.profile && <option value="">— none —</option>}
@@ -1088,6 +1131,22 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							}}
 						>
 							⚠ {profileFitWarn}
+						</div>
+					)}
+					{fieldErrs.profile && (
+						<div
+							className="hint"
+							data-testid="slot-profile-strands-model"
+							style={{
+								marginTop: 6,
+								padding: "6px 10px",
+								borderRadius: "var(--rad-sm)",
+								color: "var(--warn)",
+								border: "1px solid var(--warn-line)",
+								background: "var(--warn-soft)",
+							}}
+						>
+							⚠ {fieldErrs.profile}
 						</div>
 					)}
 				</div>
@@ -1657,13 +1716,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							// Derive the backend from the SELECTED device (reactive) so the rocmfp4
 							// filter re-evaluates immediately when the operator switches the HW-grid
 							// device — before Save is clicked. (Device is the single owner of the
-							// rocm/vulkan axis now — spec-hw-slot-ownership §2.) A pending
-							// cross-backend profile switch (#1636 Codex fix) also moves this
-							// slot's eventual device, so read pendingDevice rather than the
-							// still-unchanged `device` state — otherwise this list keeps
-							// offering rocmfp4-only models a ROCm→Vulkan switch will no
-							// longer fit.
-							const selBackend = deviceBackend(pendingDevice) || slot.backend;
+							// rocm/vulkan axis now — spec-hw-slot-ownership §2.)
+							//
+							// Codex P1: deliberately `device` here, NOT `pendingDevice`. Swap fires
+							// its own immediate POST /slots/{name}/swap, independent of the batched
+							// Save — a pending cross-backend profile pick hasn't reached the server
+							// yet, so previewing the post-Save backend here would offer a model the
+							// CURRENTLY persisted runner can't load (the live swap has no idea a
+							// device switch is staged). Gate the whole control instead (below) while
+							// a switch is pending, and keep this list honest about the real device.
+							const selBackend = deviceBackend(device) || slot.backend;
 							const compatible = compatibleModels(modelsQuery.data, {
 								type: slot.type,
 								backend: selBackend,
@@ -1687,7 +1749,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												className="input mono"
 												style={{ flex: 1 }}
 												value={cur}
-												disabled={saving}
+												disabled={saving || !!pendingCrossDevice}
+												data-testid="slot-model-swap"
 												aria-label={`Model for ${slot.name}`}
 												onChange={(e) => {
 													const id = e.target.value;
@@ -1739,6 +1802,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											</button>
 										</div>
 										{swapping && <div className="hint">Swapping…</div>}
+										{!swapping && pendingCrossDevice && (
+											<div
+												className="hint"
+												data-testid="slot-model-swap-blocked"
+											>
+												Model swap is unavailable while the profile pick
+												above is staged to switch this slot's device — Save
+												that change (or revert the profile) before swapping.
+											</div>
+										)}
 									</div>
 								</div>
 							);
