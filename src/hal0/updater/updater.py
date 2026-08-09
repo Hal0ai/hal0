@@ -2649,6 +2649,148 @@ def _restore_service_ownership(root: Path, *, job_id: str | None = None) -> None
         log.warning("updater.cache_chown_failed", job_id=job_id, path=str(root), error=str(exc))
 
 
+def refresh_privileged_wrappers(target: Path, *, job_id: str | None = None) -> dict[str, Any]:
+    """Re-install the privileged sudo wrappers from the just-activated release (#1689).
+
+    ``install.sh`` was the ONLY installer of ``${LIB_DIR}/bin/hal0-*`` — self-
+    update never touched them, so a box upgraded through ``hal0 update`` kept
+    running every NEW hal0 release against the OLD wrapper. Any seam verb
+    added after the box's last ``install.sh`` run (``stop-agent``/#453, the
+    ``svc-<verb>`` companion-service family/#1590, ``write-hindsight-
+    dropin``/#1641) was rejected by the stale wrapper with
+    ``hal0-systemctl: bad cmd: <verb>`` / exit 64 on any box that only ever
+    updated, never re-ran the installer.
+
+    Privileged-side ONLY: a no-op unless ``os.geteuid() == 0`` — the same
+    guard :func:`_restore_service_ownership` uses just above. The
+    unprivileged daemon (``hal0-api`` running ``User=hal0``) must never write
+    ``${LIB_DIR}/bin`` or ``/etc/sudoers.d`` itself; it only ever reaches this
+    function by way of the root-side seam
+    (:func:`hal0.updater.privileged.main`'s ``activate`` verb, run under
+    ``sudo -n hal0-update activate``), which is what makes the euid-0 check
+    sufficient rather than a bare "are we routed" flag — an operator's direct
+    ``sudo hal0 update`` and a root dev/CI run reach the SAME euid-0 branch,
+    with no seam in between, and refresh correctly too.
+
+    Trust: by the time :func:`activate_release` calls this, ``target`` has
+    already passed ``assert_trusted_release_dir`` (root-owned) and cosign
+    verification, and ``pip install`` has already executed that tree's build
+    backend as root — copying its ``installer/wrappers/*`` here is strictly
+    LESS privileged than that, so this adds no new trust assumption.
+
+    Best-effort, per seam: :data:`hal0.system.seam_check.SEAMS` is the
+    canonical wrapper inventory (kept in lock-step with ``install.sh``'s
+    per-seam blocks — #1465's lesson). A release tree missing an optional
+    wrapper source is skipped, not fatal: a stale wrapper is a correctness
+    gap the seam already surfaces loudly (#1682's remediation line) or that
+    ``hal0 doctor`` catches, never a reason to fail an otherwise-successful
+    activate.
+
+    The matching ``/etc/sudoers.d/<seam>`` drop-in is reinstalled ONLY when
+    its content actually changed, and ONLY after an independent
+    ``visudo -cf`` pass on the release tree's copy — a malformed drop-in must
+    never reach ``/etc/sudoers.d``, corrupted release tree or not.
+    """
+    if os.geteuid() != 0:
+        return {"refreshed": [], "sudoers_refreshed": [], "errors": {}}
+
+    from hal0.system.seam_check import SEAM_BIN_DIR, SEAMS, SUDOERS_DIR
+
+    refreshed: list[str] = []
+    sudoers_refreshed: list[str] = []
+    errors: dict[str, str] = {}
+
+    for seam in SEAMS:
+        src = target / "installer" / "wrappers" / seam.name
+        if src.is_file():
+            dest = SEAM_BIN_DIR / seam.name
+            try:
+                SEAM_BIN_DIR.mkdir(parents=True, exist_ok=True)
+                subprocess.run(  # nosec B603 — fixed argv, no caller input
+                    ["install", "-m", "0755", "-o", "root", "-g", "root", str(src), str(dest)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                refreshed.append(seam.name)
+            except subprocess.CalledProcessError as exc:
+                msg = (exc.stderr or str(exc)).strip()[:300]
+                errors[seam.name] = msg
+                log.warning(
+                    "updater.wrapper_refresh_failed", job_id=job_id, seam=seam.name, error=msg
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors[seam.name] = str(exc)
+                log.warning(
+                    "updater.wrapper_refresh_failed",
+                    job_id=job_id,
+                    seam=seam.name,
+                    error=str(exc),
+                )
+
+        sudoers_src = target / "packaging" / "sudoers" / seam.name
+        if not sudoers_src.is_file():
+            continue
+        sudoers_dest = SUDOERS_DIR / seam.name
+        try:
+            new_content = sudoers_src.read_text(encoding="utf-8")
+            old_content = (
+                sudoers_dest.read_text(encoding="utf-8") if sudoers_dest.exists() else None
+            )
+            if new_content == old_content:
+                continue
+            check = subprocess.run(  # nosec B603 — fixed argv, no caller input
+                ["visudo", "-cf", str(sudoers_src)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if check.returncode != 0:
+                log.warning(
+                    "updater.sudoers_refresh_rejected",
+                    job_id=job_id,
+                    seam=seam.name,
+                    stderr=(check.stderr or "").strip()[:300],
+                )
+                continue
+            SUDOERS_DIR.mkdir(parents=True, exist_ok=True)
+            subprocess.run(  # nosec B603 — fixed argv, no caller input
+                [
+                    "install",
+                    "-m",
+                    "0440",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    str(sudoers_src),
+                    str(sudoers_dest),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            sudoers_refreshed.append(seam.name)
+        except (OSError, subprocess.SubprocessError) as exc:
+            msg = (
+                (exc.stderr or str(exc)).strip()[:300]
+                if isinstance(exc, subprocess.CalledProcessError)
+                else str(exc)
+            )
+            log.warning("updater.sudoers_refresh_failed", job_id=job_id, seam=seam.name, error=msg)
+
+    log.info(
+        "updater.wrappers_refreshed",
+        job_id=job_id,
+        refreshed=refreshed,
+        sudoers_refreshed=sudoers_refreshed,
+        errors=errors or None,
+    )
+    return {"refreshed": refreshed, "sudoers_refreshed": sudoers_refreshed, "errors": errors}
+
+
 def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, Any]:
     """§9 step 8 + 8b: swap ``current`` to ``<usr_lib>/<dir_name>`` and re-pip it.
 
@@ -2703,13 +2845,23 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
                     _atomic_symlink_swap(prior, link)
             raise
 
+    # #1689: re-install the privileged sudo wrappers from the tree we just
+    # activated — best-effort, never fatal to an otherwise-successful
+    # activate (a wrapper that fails to refresh keeps the OLD one in place,
+    # same class of degradation as before this fix, not a new failure mode).
+    wrappers = refresh_privileged_wrappers(target, job_id=job_id)
+
     log.info(
         "updater.activate_ok",
         job_id=job_id,
         target=str(target),
         previous=str(prior) if prior else None,
     )
-    return {"previous": str(prior) if prior else None, "target": str(target)}
+    return {
+        "previous": str(prior) if prior else None,
+        "target": str(target),
+        "wrappers_refreshed": wrappers["refreshed"],
+    }
 
 
 def discard_release(dir_name: str, *, job_id: str | None = None) -> None:
@@ -3272,6 +3424,7 @@ __all__ = [
     "ensure_seed_profiles",
     "fetch_release_manifest",
     "profile_reset_status",
+    "refresh_privileged_wrappers",
     "release_dir_name",
     "releases_url",
     "reset_profile_catalog",
