@@ -515,7 +515,7 @@ async def _fetch_release_manifest_bytes(channel: str = "stable") -> bytes:
     import httpx
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(url)
     except httpx.HTTPError as exc:
         raise OSError(f"release manifest fetch failed for {url}: {exc}") from exc
