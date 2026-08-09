@@ -95,3 +95,19 @@ def test_read_default_expansion_unchanged() -> None:
 def test_read_string_resolves_via_write_rules() -> None:
     with pytest.raises(MemoryNamespaceError, match="unknown namespace"):
         resolve_read_datasets("junk-bank", private=False, client_id="me")
+
+
+def test_read_private_rejects_missing_or_anonymous_client_id() -> None:
+    """#1669: private=True with no authenticated client_id must ALWAYS
+    raise, regardless of ``requested`` shape (None/list/string) — the
+    None-branch used to only guard with ``if private and client_id``,
+    which fell through to the "not private at all" default (shared) for
+    an unauthenticated private-mode caller instead of refusing the read.
+    Mirrors resolve_write_dataset's same guard (test above)."""
+    for cid in (None, "", "anonymous"):
+        with pytest.raises(MemoryNamespaceError, match="authenticated client_id"):
+            resolve_read_datasets(None, private=True, client_id=cid)
+        with pytest.raises(MemoryNamespaceError, match="authenticated client_id"):
+            resolve_read_datasets("shared", private=True, client_id=cid)
+        with pytest.raises(MemoryNamespaceError, match="authenticated client_id"):
+            resolve_read_datasets(["shared"], private=True, client_id=cid)

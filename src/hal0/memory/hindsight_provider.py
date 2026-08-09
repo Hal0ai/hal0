@@ -909,7 +909,7 @@ class HindsightProvider(MemoryProvider):
 
     async def list_items(
         self,
-        dataset: str = _SHARED,
+        dataset: str | list[str] = _SHARED,
         cursor: str | None = None,
         limit: int = 50,
         client_id: str | None = None,

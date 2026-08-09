@@ -201,7 +201,7 @@ class MemoryProvider(ABC):
     @abstractmethod
     async def list_items(
         self,
-        dataset: str = "shared",
+        dataset: str | list[str] = "shared",
         cursor: str | None = None,
         limit: int = 50,
         client_id: str | None = None,

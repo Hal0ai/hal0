@@ -709,15 +709,30 @@ async def memory_list(
 ) -> dict[str, Any]:
     """Paginated list. Returns ``{items: [...], next_cursor: str | null}``.
 
-    Identity rules mirror ``/search``: ``X-hal0-Private: 1`` with no
-    explicit ``?dataset=`` resolves to the caller's own private bucket
-    so the ``hal0 agent memory list`` CLI subcommand can enumerate
-    per-agent items without the operator passing the namespace by hand.
+    Identity rules mirror ``/search``: this is a READ route, so it resolves
+    through :func:`resolve_read_datasets` like ``/search``/``/recall`` do —
+    ``X-hal0-Private: 1`` with no explicit ``?dataset=`` expands to
+    ``[shared, private:<client_id>]`` (not just the caller's own bucket) so
+    the ``hal0 agent memory list`` CLI subcommand sees the same scope a
+    search would. (#1669 fixed this route using the WRITE resolver instead,
+    which — being write-shaped — also narrowed the no-``?dataset=``
+    private-mode case to the private bucket alone, unlike ``/search``.)
 
     ``?bank=`` is a convenience alias for the dashboard's Hindsight bank
     browser: a bank id (``private__hermes``) is translated to the matching
     dataset namespace (``private:hermes``) when no explicit ``?dataset=`` is
     given. If both are supplied and conflict, the explicit ``dataset`` wins.
+
+    Like every namespace resolution in this module, the alias is still
+    bound by the closed-set rule (module docstring in
+    ``hal0.memory.namespace``): a caller may only ever address their OWN
+    ``private:<client_id>`` bucket. ``bank=private__hermes`` resolves to
+    hermes's bucket only when the caller's own identity IS hermes
+    (``X-hal0-Agent: hermes`` + ``X-hal0-Private: 1``); any other caller's
+    private-mode request still resolves to their OWN bucket, and a
+    non-private caller naming ``private__<anything>`` still 400s — the
+    alias is sugar for spelling your own bank id, never a door into another
+    agent's.
     """
     if bank is not None:
         bank_dataset = bank_to_namespace(bank)
@@ -734,7 +749,7 @@ async def memory_list(
     agent_id = _agent_id(request)
     private = _is_private(request)
     try:
-        resolved = resolve_write_dataset(
+        resolved = resolve_read_datasets(
             dataset,
             private=private,
             client_id=agent_id if agent_id != "anonymous" else None,
