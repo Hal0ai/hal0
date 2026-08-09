@@ -1066,67 +1066,81 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
                 original=str(dest),
                 quarantine=str(stale),
             )
-    dest.mkdir(parents=True, exist_ok=True)
-
-    log.info("updater.extract_start", job_id=job_id, tarball=str(tarball), dest=str(dest))
-    strip_prefix: str | None = None
+    # #1723: everything this function creates — `dest` itself, every
+    # directory `tf.extractall` makes along the way, the flattened entries —
+    # is subject to the invoking process's umask. On a box with UMASK 002
+    # that leaves the staged tree, and every directory in it, transiently
+    # group-writable *during* extraction. A merely-after-the-fact chmod
+    # (below) still closes that gap eventually, but leaves a real window: a
+    # co-resident process that can write into a group-writable staging dir
+    # could plant a file there before the final chmod runs, and flattening's
+    # "skip if target already exists" means that planted file survives.
+    # Force a strict umask for the whole create-and-populate sequence so
+    # nothing is ever created writable to begin with — no window, by
+    # construction — independent of whatever umask the caller runs under.
+    old_umask = os.umask(0o022)
     try:
-        with tarfile.open(tarball, "r:*") as tf:
-            members = tf.getmembers()
-            if not members:
-                raise UpdateExtractError(
-                    "release tarball is empty",
-                    details={"tarball": str(tarball)},
-                )
+        dest.mkdir(parents=True, exist_ok=True)
 
-            # Refuse absolute paths and parent-dir escapes (tar slip).
-            for m in members:
-                p = Path(m.name)
-                if p.is_absolute() or ".." in p.parts:
+        log.info("updater.extract_start", job_id=job_id, tarball=str(tarball), dest=str(dest))
+        strip_prefix: str | None = None
+        try:
+            with tarfile.open(tarball, "r:*") as tf:
+                members = tf.getmembers()
+                if not members:
                     raise UpdateExtractError(
-                        f"unsafe path in tarball: {m.name!r}",
-                        details={"tarball": str(tarball), "member": m.name},
+                        "release tarball is empty",
+                        details={"tarball": str(tarball)},
                     )
 
-            # Determine top-level prefix (first path component shared by all entries).
-            top_levels = {Path(m.name).parts[0] for m in members if m.name and m.name != "."}
-            if len(top_levels) == 1:
-                strip_prefix = next(iter(top_levels))
+                # Refuse absolute paths and parent-dir escapes (tar slip).
+                for m in members:
+                    p = Path(m.name)
+                    if p.is_absolute() or ".." in p.parts:
+                        raise UpdateExtractError(
+                            f"unsafe path in tarball: {m.name!r}",
+                            details={"tarball": str(tarball), "member": m.name},
+                        )
 
-            # Python 3.12+ supports filter='data' which blocks unsafe members.
-            # We already vetted paths above, but pass it through for defence-in-depth.
-            try:
-                tf.extractall(path=dest, filter="data")  # type: ignore[arg-type]
-            except TypeError:
-                # Older Python without the filter kwarg — already vetted.
-                tf.extractall(path=dest)
-    except UpdateExtractError:
-        raise
-    except (tarfile.TarError, OSError) as exc:
-        raise UpdateExtractError(
-            f"failed to extract release tarball: {exc}",
-            details={"tarball": str(tarball), "dest": str(dest), "error": str(exc)},
-        ) from exc
+                # Determine top-level prefix (first path component shared by all entries).
+                top_levels = {Path(m.name).parts[0] for m in members if m.name and m.name != "."}
+                if len(top_levels) == 1:
+                    strip_prefix = next(iter(top_levels))
 
-    # If extractall landed everything under dest/<prefix>/..., flatten it.
-    if strip_prefix:
-        inner = dest / strip_prefix
-        if inner.is_dir():
-            for entry in list(inner.iterdir()):
-                target = dest / entry.name
-                if target.exists():
-                    continue
-                shutil.move(str(entry), str(target))
-            with contextlib.suppress(OSError):
-                inner.rmdir()
+                # Python 3.12+ supports filter='data' which blocks unsafe members.
+                # We already vetted paths above, but pass it through for defence-in-depth.
+                try:
+                    tf.extractall(path=dest, filter="data")  # type: ignore[arg-type]
+                except TypeError:
+                    # Older Python without the filter kwarg — already vetted.
+                    tf.extractall(path=dest)
+        except UpdateExtractError:
+            raise
+        except (tarfile.TarError, OSError) as exc:
+            raise UpdateExtractError(
+                f"failed to extract release tarball: {exc}",
+                details={"tarball": str(tarball), "dest": str(dest), "error": str(exc)},
+            ) from exc
 
-    # #1723: `dest.mkdir()` above is subject to the invoking process's umask.
-    # On a box with UMASK 002 the staged tree lands mode 0775 (group-
-    # writable), which `assert_trusted_release_dir` then correctly refuses at
-    # activate time — stage manufactured the exact condition the gate exists
-    # to reject. Normalize unconditionally so the gate's precondition holds
-    # by construction, independent of whatever umask the caller happens to
-    # run under.
+        # If extractall landed everything under dest/<prefix>/..., flatten it.
+        if strip_prefix:
+            inner = dest / strip_prefix
+            if inner.is_dir():
+                for entry in list(inner.iterdir()):
+                    target = dest / entry.name
+                    if target.exists():
+                        continue
+                    shutil.move(str(entry), str(target))
+                with contextlib.suppress(OSError):
+                    inner.rmdir()
+    finally:
+        os.umask(old_umask)
+
+    # Belt and suspenders on top of the umask 022 forced above: normalize
+    # unconditionally so the gate's precondition holds even for a dest that
+    # already existed with the wrong mode (the stale-quarantine-and-reuse
+    # path above only renames the *old* dir aside; it does not touch modes)
+    # or a tarball with unusual member permissions.
     _normalize_staged_tree(dest, job_id=job_id)
 
     log.info("updater.extract_ok", job_id=job_id, dest=str(dest))
