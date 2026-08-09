@@ -169,6 +169,18 @@ def _is_flag(tok: str) -> bool:
 
 
 def _canon(flag: str) -> str:
+    """Canonicalize a flag token for dedup/denylist matching.
+
+    Handles the GNU ``--long=value`` join form by splitting off the ``=value``
+    suffix before the alias lookup — otherwise ``--model=/etc/passwd`` never
+    equals ``--model`` and sails past every exact-string denylist check
+    (``MANAGED_ARGS_DENYLIST``/``SLOT_HARDWARE_FLAGS``) despite being
+    equivalent to the two-token form. Only ``--long`` flags use this form;
+    short flags (``-b``) don't take an ``=`` join in practice, so they're left
+    alone.
+    """
+    if flag.startswith("--") and "=" in flag:
+        flag = flag.split("=", 1)[0]
     return FLAG_ALIASES.get(flag, flag)
 
 
