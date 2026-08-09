@@ -137,15 +137,21 @@ hal0 bench plan|run|status|worker|results|history|reindex|devices|publish|eval|b
 
 ### Sharing results
 
-Benchmark results never leave the box automatically. To share a run on
-[hal0.dev/benchmarks](https://hal0.dev/benchmarks):
+Benchmark results never leave the box automatically. To share a run, package
+it as a self-contained bundle and attach it wherever you discuss it (forum
+thread, issue, chat):
 
 ```bash
 hal0 bench bundle --list                       # see what's eligible
 hal0 bench bundle --runs <run_id> --title "Strix Halo, ROCm 7" -o run.hal0bench.tar.gz
-HAL0_BENCH_TOKEN=... hal0 bench upload run.hal0bench.tar.gz
 ```
 
 A bundle contains the schema-2 records (resolved flags, engine digests,
 telemetry), the profile/suite TOMLs you pass with `--profile`, and optional
-raw artifacts (`--with-artifacts`). `host.name` is redacted by default.
+raw artifacts (`--with-artifacts`). `host.name` is redacted by default, the
+manifest carries a sha256 for every member, and the whole archive is
+content-addressed — anyone can verify and reproduce what you measured.
+
+`hal0 bench upload` is a maintainer tool for publishing curated results to
+the hal0.dev roster; it requires a publishing token and does nothing without
+one.

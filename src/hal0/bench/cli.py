@@ -846,7 +846,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--out", default="bench-bundle.hal0bench.tar.gz", help="output path")
     p.set_defaults(func=cmd_bundle)
 
-    p = sub.add_parser("upload", help="push a bundle to the public benchmarks API (explicit only)")
+    p = sub.add_parser(
+        "upload", help="maintainer: publish a bundle to the hal0.dev roster (requires token)"
+    )
     p.add_argument("bundle", help="path to a .hal0bench.tar.gz built by `hal0 bench bundle`")
     p.add_argument(
         "--api",
