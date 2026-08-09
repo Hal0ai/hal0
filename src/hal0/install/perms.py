@@ -44,6 +44,15 @@ Design notes:
     distinct from recursed dirs (``child_mode``).
   - Stat/chown/chmod are injected seams so the plan/diff/audit logic is unit
     tested without a real privileged filesystem.
+  - SYMLINKS ARE NEVER FOLLOWED, AND NEVER WRITTEN TO (#1739). ``os.chown`` /
+    ``os.chmod`` dereference by default, so a symlink matched by a row would
+    have rewritten its TARGET's owner+mode — a file that by definition lives
+    OUTSIDE hal0's declared tree. ``hal0 migrate model-layout`` plants exactly
+    such links (``/var/lib/hal0/models/... -> /mnt/ai-models/...``) under the
+    recursive ``models/`` row, so every install/upgrade re-chowned the
+    operator's real model store. A link target's ownership is not hal0's
+    concern; symlinks are therefore dropped during glob expansion, never
+    counted as drift, and hard-refused in :func:`_apply_one`.
 """
 
 from __future__ import annotations
@@ -508,6 +517,10 @@ class PermObservation:
     owner: str | None
     group: str | None
     mode: int | None
+    #: True when the path itself is a symlink. Observations are ``lstat``-based,
+    #: so ``owner``/``group``/``mode`` describe the LINK, never its target
+    #: (#1739). A symlink is never reconciled — see :attr:`PermDiff.changed`.
+    is_symlink: bool = False
 
 
 def _owner_name(uid: int) -> str | None:
@@ -536,6 +549,7 @@ def observe(path: Path) -> PermObservation:
         owner=_owner_name(st.st_uid),
         group=_group_name(st.st_gid),
         mode=stat_mod.S_IMODE(st.st_mode),
+        is_symlink=stat_mod.S_ISLNK(st.st_mode),
     )
 
 
@@ -546,9 +560,12 @@ def observe(path: Path) -> PermObservation:
 class PermDiff:
     """The declared target for one concrete path, plus its current observation.
 
-    ``changed`` is true only when the path EXISTS and at least one of owner /
-    group / mode differs from the declared target. An absent path is never
-    "changed" (nothing to chown); it is surfaced separately as ``absent``.
+    ``changed`` is true only when the path EXISTS, is not a symlink, and at
+    least one of owner / group / mode differs from the declared target. An
+    absent path is never "changed" (nothing to chown); it is surfaced
+    separately as ``absent``. A SYMLINK is never "changed" either (#1739):
+    reconciling it would mean ``chown``/``chmod`` on its target, which lives
+    outside the declared tree; it is surfaced as ``symlink``.
     """
 
     path: Path
@@ -560,7 +577,7 @@ class PermDiff:
 
     @property
     def changed(self) -> bool:
-        if not self.before.exists:
+        if not self.before.exists or self.before.is_symlink:
             return False
         return (
             self.before.owner != self.owner
@@ -600,9 +617,34 @@ def _child_mode_for(row: PermRow, child: Path) -> int:
     rows only ever match files).
     """
     dir_mode = row.child_mode if row.child_mode is not None else row.mode
-    if child.is_dir():
+    if child.is_dir() and not child.is_symlink():
         return dir_mode
     return row.child_file_mode if row.child_file_mode is not None else dir_mode
+
+
+def _is_or_is_under_symlink(child: Path, base: Path) -> bool:
+    """True when ``child`` is a symlink, or sits below one, relative to ``base``.
+
+    Both cases mean "reconciling this path would write outside the declared
+    tree" (#1739): the link itself dereferences on ``chown``/``chmod``, and a
+    path found by walking THROUGH a symlinked directory is a real file in
+    someone else's tree (e.g. ``/mnt/ai-models/...`` reached via the
+    ``models/`` links planted by ``hal0 migrate model-layout``). Checked
+    explicitly rather than relying on ``Path.rglob``'s no-follow behaviour, so
+    the guarantee does not depend on the pathlib version.
+    """
+    if child.is_symlink():
+        return True
+    try:
+        rel = child.relative_to(base)
+    except ValueError:  # pragma: no cover - matches are always under base
+        return False
+    cur = base
+    for part in rel.parts[:-1]:
+        cur = cur / part
+        if cur.is_symlink():
+            return True
+    return False
 
 
 def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
@@ -621,6 +663,10 @@ def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
     out: list[tuple[Path, PermRow]] = [(row.target, row)]
     matches = row.target.rglob(row.glob) if row.recursive else row.target.glob(row.glob)
     for child in sorted(matches):
+        # #1739: a symlink (or anything reached through one) is not hal0's to
+        # own — drop it from the plan entirely so it can never be chowned.
+        if _is_or_is_under_symlink(child, row.target):
+            continue
         out.append(
             (
                 child,
@@ -678,8 +724,18 @@ def _apply_one(
     *,
     chown: Callable[[str, int, int], None],
     chmod: Callable[[str, int], None],
+    islink: Callable[[str], bool] = os.path.islink,
 ) -> None:
-    """Resolve owner/group to ids and apply chown + chmod to one path."""
+    """Resolve owner/group to ids and apply chown + chmod to one path.
+
+    Hard-refuses symlinks (#1739). ``os.chown``/``os.chmod`` follow symlinks
+    (and Linux has no ``lchmod``), so applying to a link would rewrite its
+    TARGET outside the declared tree. Symlinks are already dropped in
+    :func:`_expand_row` and never marked ``changed``; this is the last-line
+    guard that also covers the rollback path and any future caller.
+    """
+    if islink(str(path)):
+        return
     uid = pwd.getpwnam(owner).pw_uid
     gid = grp.getgrnam(group).gr_gid
     chown(str(path), uid, gid)
@@ -736,6 +792,18 @@ def audit_rows(plan_: OwnershipPlan) -> list[dict[str, str]]:
                     "label": d.role,
                     "status": "absent",
                     "detail": "not present",
+                }
+            )
+            continue
+        if d.before.is_symlink:
+            # #1739: never reconciled — reported so the audit stays honest
+            # about what it deliberately left alone.
+            rows.append(
+                {
+                    "path": str(d.path),
+                    "label": d.role,
+                    "status": "symlink",
+                    "detail": "symlink, not followed",
                 }
             )
             continue

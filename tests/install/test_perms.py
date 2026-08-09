@@ -6,7 +6,10 @@ Covers:
     never ``changed``.
   * Glob rows expand to one diff per matching child.
   * ``commit()`` applies drifted diffs and rolls back atomically on failure.
-  * ``audit_rows`` renders the ok / drift / absent vocabulary.
+  * ``audit_rows`` renders the ok / drift / absent / symlink vocabulary.
+  * Symlinks are never dereferenced by ``plan()``/``commit()`` (#1739) — the
+    model-layout links planted under ``models/`` must leave their targets
+    under ``/mnt/ai-models`` byte-for-byte untouched.
   * ``ownership_table()`` builds under HAL0_HOME so it is test-isolated.
 
 The plan/diff/commit logic is exercised through injected ``observe_fn`` /
@@ -586,3 +589,138 @@ def test_flip_honors_custom_service_group(tmp_hal0_home: str) -> None:
     assert rows[paths.var_lib()].group == "svcgrp"
     # pinned-root rows ignore the service group.
     assert rows[paths.agents_config_dir()].group == "root"
+
+
+# ── #1739: symlinks are never dereferenced (P0 model-store regression) ────────
+
+
+def test_commit_never_dereferences_symlink_under_recursive_row(tmp_path: Path) -> None:
+    """The #1739 repro: a symlink under a recursive row must not touch its target.
+
+    ``hal0 migrate model-layout --apply`` plants
+    ``/var/lib/hal0/models/<name> -> /mnt/ai-models/<name>`` links, which the
+    recursive ``models/`` row matched. Because ``os.chown``/``os.chmod``
+    follow symlinks, ``commit()`` rewrote the operator's REAL model file
+    (owner ``hal0:hal0``, mode 0644) on every install/upgrade — outside the
+    declared tree, contradicting migrate's "does not write to /mnt/ai-models
+    at all" invariant. The target must come back byte-for-byte untouched.
+    """
+    owner, group = _me()
+    tree = tmp_path / "models"
+    tree.mkdir()
+    outside = tmp_path / "ai-models"
+    outside.mkdir()
+    real = outside / "weights.gguf"
+    real.write_bytes(b"weights")
+    os.chmod(real, 0o600)
+    (tree / "weights.gguf").symlink_to(real)
+
+    row = perms.PermRow(
+        tree, owner, group, 0o2775, glob="*", recursive=True, child_file_mode=0o644, role="models"
+    )
+    pl = perms.plan([row])
+    applied = perms.commit(pl)
+
+    assert real not in applied
+    assert (tree / "weights.gguf") not in applied
+    assert oct(real.stat().st_mode & 0o7777) == oct(0o600), "symlink target was chmod'd"
+    assert (tree / "weights.gguf").is_symlink(), "the link itself must survive"
+
+
+def test_plan_skips_paths_reached_through_a_symlinked_directory(tmp_path: Path) -> None:
+    """Walking THROUGH a symlinked dir would chown real files directly.
+
+    Same #1739 hazard one level up: ``migrate model-layout`` links whole
+    per-model DIRECTORIES, so a recursive glob that descends into the link
+    yields real paths under ``/mnt/ai-models`` that are not themselves
+    symlinks — ``_apply_one``'s link check would not save them. They must
+    never enter the plan at all.
+    """
+    owner, group = _me()
+    tree = tmp_path / "models"
+    tree.mkdir()
+    outside_dir = tmp_path / "ai-models" / "llama"
+    outside_dir.mkdir(parents=True)
+    real = outside_dir / "weights.gguf"
+    real.write_bytes(b"weights")
+    os.chmod(real, 0o600)
+    (tree / "llama").symlink_to(outside_dir)
+
+    row = perms.PermRow(
+        tree, owner, group, 0o2775, glob="*", recursive=True, child_file_mode=0o644, role="models"
+    )
+    pl = perms.plan([row])
+    planned = {d.path for d in pl.diffs}
+
+    assert tree in planned  # the declared dir itself is still owned
+    assert (tree / "llama") not in planned
+    assert real not in planned
+    perms.commit(pl)
+    assert oct(real.stat().st_mode & 0o7777) == oct(0o600)
+
+
+def test_non_glob_symlink_row_is_never_drift_and_audits_as_symlink(tmp_path: Path) -> None:
+    """A declared row whose own target is a symlink is reported, never fixed."""
+    owner, group = _me()
+    real = tmp_path / "real.env"
+    real.write_text("K=V")
+    os.chmod(real, 0o600)
+    link = tmp_path / "api.env"
+    link.symlink_to(real)
+
+    pl = perms.plan([perms.PermRow(link, owner, group, 0o640, role="api.env")])
+    assert pl.changed is False
+    assert pl.drifted == ()
+    assert pl.diffs[0].before.is_symlink is True
+
+    rows = perms.audit_rows(pl)
+    assert rows[0]["status"] == "symlink"
+    assert perms.commit(pl) == []
+    assert oct(real.stat().st_mode & 0o7777) == oct(0o600)
+
+
+def test_apply_one_hard_refuses_a_symlink_even_when_planned(tmp_path: Path) -> None:
+    """Last-line guard: chown/chmod are not called for a symlink path.
+
+    Defence in depth for the rollback path and any future caller that builds a
+    diff without going through ``_expand_row``.
+    """
+    owner, group = _me()
+    real = tmp_path / "real.bin"
+    real.write_bytes(b"x")
+    link = tmp_path / "link.bin"
+    link.symlink_to(real)
+
+    calls: list[tuple[str, str]] = []
+    perms._apply_one(
+        link,
+        owner,
+        group,
+        0o644,
+        chown=lambda p, u, g: calls.append(("chown", p)),
+        chmod=lambda p, m: calls.append(("chmod", p)),
+    )
+    assert calls == []
+
+
+def test_regular_files_are_still_reconciled_alongside_symlinks(tmp_path: Path) -> None:
+    """The skip is surgical: real files under the same row are still fixed."""
+    owner, group = _me()
+    tree = tmp_path / "models"
+    tree.mkdir()
+    plain = tree / "plain.gguf"
+    plain.write_bytes(b"w")
+    os.chmod(plain, 0o600)
+    outside = tmp_path / "outside.gguf"
+    outside.write_bytes(b"w")
+    os.chmod(outside, 0o600)
+    (tree / "linked.gguf").symlink_to(outside)
+
+    row = perms.PermRow(
+        tree, owner, group, 0o755, glob="*", recursive=True, child_file_mode=0o644, role="models"
+    )
+    applied = perms.commit(perms.plan([row]))
+
+    assert plain in applied
+    assert oct(plain.stat().st_mode & 0o7777) == oct(0o644)
+    assert oct(outside.stat().st_mode & 0o7777) == oct(0o600)
