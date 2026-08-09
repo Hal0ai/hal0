@@ -76,6 +76,10 @@ def _registry(gguf="/mnt/ai-models/dir/Model.gguf"):
             "default_lane": "rocm",
             "gguf": gguf,
             "n_gen": 256,
+            # #1773: a "chat" cell needs a resolvable tokenizer at plan time
+            # — this module's registry fixture is pulled-from-HF-shaped so
+            # every existing GuideLLM dispatch test keeps planning.
+            "hf_repo": "org/Model-GGUF",
         }
     ]
 
@@ -234,6 +238,37 @@ class TestGuideLLMDispatch:
         assert "guidellm run" in lines[0]
         assert "kind=synchronous" in lines[0]
         assert "kind=openai_http" in lines[0]
+
+    def test_describe_worklist_argv_carries_the_planned_tokenizer(self, tmp_path):
+        """#1773: the planner resolves defaults.tokenizer_repo/hf_repo onto
+        ``cell.tokenizer``; the composed argv must carry THAT value, not
+        fall back to the (local-only) model id like it used to."""
+        cells = _cells(["chat"], Store(tmp_path))
+        assert cells[0].tokenizer == "org/Model-GGUF"  # from _registry()'s hf_repo
+        lines = runner.describe_worklist(cells, exclusive=True, api="http://x")
+        assert "kind=huggingface_auto,model=org/Model-GGUF" in lines[0]
+
+    def test_guidellm_record_argv_carries_the_planned_tokenizer(
+        self, sandbox, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(runner, "_traffic_in_flight", lambda *a, **k: False)
+        monkeypatch.setattr(runner, "_get_slot", lambda api, mid: {"name": "slot1", "port": 9999})
+        captured: dict = {}
+
+        def _fake_run_guidellm(request, runner=None, *, timeout_s=None):
+            from hal0.bench.adapters.guidellm import GuidellmResult
+
+            captured["tokenizer"] = request.tokenizer
+            return GuidellmResult(outcome=Outcome.FAILED, doc=None, rc=2, tail="boom", argv=[])
+
+        monkeypatch.setattr(runner.guidellm, "run_guidellm", _fake_run_guidellm)
+
+        store = Store(tmp_path / "state")
+        cells = _cells(["chat"], store)
+        runner.run_session(
+            cells, store, Host(hal0_version="1.0.0", exclusive=True), suite_id="t", api="http://x"
+        )
+        assert captured["tokenizer"] == "org/Model-GGUF"
 
     def test_plan_sets_guidellm_engine_kind(self, tmp_path):
         cells = _cells(["chat"], Store(tmp_path))

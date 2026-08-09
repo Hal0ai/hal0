@@ -166,3 +166,95 @@ def test_selector_excludes_uninstalled(store):
     reg = _registry()
     reg[0]["installed"] = False
     assert plan(_suite(), reg, store) == []
+
+
+# --------------------------------------------------------------------------- #
+# #1773 — "chat" cell tokenizer resolution (plan-time gate)
+# --------------------------------------------------------------------------- #
+
+
+def _chat_suite():
+    return suite_from_dict(
+        {
+            "suite": {"id": "chat-suite", "priority": 50},
+            "selector": {"installed": True},
+            "matrix": {"lanes": ["default"], "depths": [2048], "samplers": ["greedy"], "reps": 1},
+            "cells": {"kinds": ["chat"]},
+            "staleness": {"max_age_days": 30},
+        }
+    )
+
+
+class TestChatTokenizerGate:
+    """A ``chat`` cell drives GuideLLM, which needs a real HF repo id for
+    ``--tokenizer`` — a local-only model id (e.g. a GGUF slot name) always
+    fails that resolution mid-session (issue #1773). The planner must
+    reject such a model at PLAN time, mirroring the missing-adapter-tool
+    gate (test_runner.py's ``test_missing_adapter_tool_is_rejected_at_plan_
+    time``), rather than letting the runner discover the gap per-cell."""
+
+    @pytest.fixture(autouse=True)
+    def _adapter_tool_present(self, monkeypatch):
+        import hal0.bench.planner as planner_mod
+
+        monkeypatch.setattr(planner_mod.adapters, "resolve_tool", lambda _name: "/usr/bin/true")
+
+    def test_local_only_model_rejected_at_plan_time(self, store):
+        # No defaults.tokenizer_repo AND no hf_repo — nothing trustworthy to
+        # resolve --tokenizer from.
+        reg = [
+            {
+                "id": "chadrock-35b-ace-saber-rocmfp4-mtp",
+                "installed": True,
+                "caps": ["chat"],
+                "default_lane": "rocm",
+            }
+        ]
+        with pytest.raises(ValueError, match="tokenizer_repo") as exc_info:
+            plan(_chat_suite(), reg, store)
+        # Actionable: names the offending model id, not just "some model".
+        assert "chadrock-35b-ace-saber-rocmfp4-mtp" in str(exc_info.value)
+
+    def test_hf_repo_alone_is_a_trustworthy_source(self, store):
+        reg = [
+            {
+                "id": "m1",
+                "installed": True,
+                "caps": ["chat"],
+                "default_lane": "rocm",
+                "hf_repo": "Qwen/Qwen3-4B-GGUF",
+            }
+        ]
+        cells = plan(_chat_suite(), reg, store)
+        assert len(cells) == 1
+        assert cells[0].tokenizer == "Qwen/Qwen3-4B-GGUF"
+
+    def test_explicit_tokenizer_repo_wins_over_hf_repo(self, store):
+        reg = [
+            {
+                "id": "m1",
+                "installed": True,
+                "caps": ["chat"],
+                "default_lane": "rocm",
+                "hf_repo": "Qwen/Qwen3-4B-GGUF",
+                "defaults": {"tokenizer_repo": "meta-llama/Llama-3.1-8B"},
+            }
+        ]
+        cells = plan(_chat_suite(), reg, store)
+        assert len(cells) == 1
+        assert cells[0].tokenizer == "meta-llama/Llama-3.1-8B"
+
+    def test_non_chat_cell_never_needs_a_tokenizer(self, store):
+        # A "tg" suite over the same local-only model must plan fine — the
+        # gate is scoped to suites that actually include "chat".
+        reg = [
+            {
+                "id": "chadrock-35b-ace-saber-rocmfp4-mtp",
+                "installed": True,
+                "caps": ["chat"],
+                "default_lane": "rocm",
+            }
+        ]
+        cells = plan(_suite(), reg, store)  # module-level _suite() plans "tg"
+        assert len(cells) == 1
+        assert cells[0].tokenizer == ""

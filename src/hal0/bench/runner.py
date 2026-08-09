@@ -465,6 +465,11 @@ def describe_worklist(cells: list[Cell], exclusive: bool, api: str) -> list[str]
                 output_path="<artifacts>/guidellm-benchmarks.json",
                 profile_options=profile_options,
                 max_requests=max(int(c.reps), 1),
+                # #1773: the planner already resolved+gated this at plan
+                # time (planner._resolve_tokenizer) — never re-derive it
+                # here, and never fall back to c.model_id (a local-only
+                # slot id, not a HF repo).
+                tokenizer=c.tokenizer or None,
             )
             cmd_str = " ".join(guidellm.build_argv(guidellm_req))
         elif c.kind in _LLAMA_BENCHY_KINDS:
@@ -838,6 +843,9 @@ def _guidellm_record(
         output_path=str(out_path),
         profile_options=profile_options,
         max_requests=max(int(cell.reps), 1),
+        # #1773: plan-time resolved/gated tokenizer (planner._resolve_tokenizer)
+        # — never derive it here or fall back to cell.model_id.
+        tokenizer=cell.tokenizer or None,
     )
     result = guidellm.run_guidellm(request, timeout_s=timeout_s)
     parsed = (

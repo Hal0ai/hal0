@@ -1247,6 +1247,16 @@ def _register_pulled(
         cap = (capability or "").strip()
         caps = [cap] if cap else (["image"] if is_comfyui else ["chat"])
         backends = ["comfyui"] if is_comfyui else []
+        # #1773: default defaults.tokenizer_repo from hf_repo when the pull
+        # path already knows the source HF repo (the ONLY linkage a chat
+        # cell's GuideLLM tokenizer resolution can trust without new pull
+        # plumbing) — operator-settable/overridable afterward via the
+        # registry edit surface.
+        new_defaults_kwargs: dict[str, Any] = {}
+        if curated_template:
+            new_defaults_kwargs["chat_template"] = curated_template
+        if hf_repo:
+            new_defaults_kwargs["tokenizer_repo"] = hf_repo
         registry.add(
             Model(
                 id=model_id,
@@ -1259,9 +1269,7 @@ def _register_pulled(
                 backends=backends,
                 mmproj=mmproj,
                 metadata=dict(fresh_meta),
-                defaults=ModelDefaults(chat_template=curated_template)
-                if curated_template
-                else None,
+                defaults=ModelDefaults(**new_defaults_kwargs) if new_defaults_kwargs else None,
                 capability_flags=ModelCapabilities(tool_calling=curated_tool_calling)
                 if curated_tool_calling is not None
                 else ModelCapabilities(),
@@ -1289,11 +1297,20 @@ def _register_pulled(
         merged_meta["context_length"] = existing.metadata["context_length"]
         merged_meta.pop("context_length_detected", None)
     updates["metadata"] = merged_meta
+    # #1773: same "fill only if unset" rule as chat_template — a re-pull
+    # backfills defaults.tokenizer_repo from hf_repo for a row that never
+    # got one (pre-#1773 registration, or a hand-added row), but never
+    # clobbers an operator's own tokenizer_repo override.
+    defaults_delta: dict[str, Any] = {}
     if curated_template and not (existing.defaults is not None and existing.defaults.chat_template):
+        defaults_delta["chat_template"] = curated_template
+    if hf_repo and not (existing.defaults is not None and existing.defaults.tokenizer_repo):
+        defaults_delta["tokenizer_repo"] = hf_repo
+    if defaults_delta:
         merged_defaults = (
-            existing.defaults.model_copy(update={"chat_template": curated_template})
+            existing.defaults.model_copy(update=defaults_delta)
             if existing.defaults is not None
-            else ModelDefaults(chat_template=curated_template)
+            else ModelDefaults(**defaults_delta)
         )
         updates["defaults"] = merged_defaults
     if curated_tool_calling is not None and (
