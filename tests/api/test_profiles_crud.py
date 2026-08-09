@@ -142,6 +142,42 @@ def test_update_profile_rejects_slot_hardware_flag(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
 
 
+# ── #1730: malformed shell quoting must be rejected at save time ───────────
+
+
+def test_create_profile_rejects_unmatched_quoting(client: TestClient) -> None:
+    """#1639 added a launch-time guard for a divergent profile with unmatched
+    quotes (slot.profile_flags_malformed) so it no longer 500s the
+    launch/preview path — but a profile could still be SAVED with bad
+    quoting in the first place, since screen_profile_flags silently returned
+    on a shlex.split failure instead of rejecting it. The create hard-rejects
+    with a 422 and persists nothing."""
+    r = client.post(
+        "/api/profiles",
+        json={"name": "bad-quotes", "flags": '-fa on "unterminated'},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "profiles.flags_malformed"
+    listed = client.get("/api/profiles").json()
+    assert not any(p["name"] == "bad-quotes" for p in listed)
+
+
+def test_update_profile_rejects_unmatched_quoting(client: TestClient) -> None:
+    """PUT screens the same shlex.split validation — a clean profile edited to
+    carry unmatched quotes is rejected and the prior flags survive."""
+    created = client.post(
+        "/api/profiles",
+        json={"name": "edit-quotes", "flags": "-fa on"},
+    )
+    assert created.status_code == 201, created.text
+    r = client.put("/api/profiles/edit-quotes", json={"flags": "-b 2048 'unterminated"})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "profiles.flags_malformed"
+    listed = client.get("/api/profiles").json()
+    edited = next(p for p in listed if p["name"] == "edit-quotes")
+    assert edited["flags"] == "-fa on"
+
+
 def test_create_profile_rejects_managed_flag(client: TestClient) -> None:
     """§21.7: -c/--ctx-size (like --port/--model/--host/--alias) is hal0-managed
     — a profile that persists it only explodes later when stamped onto a model.
