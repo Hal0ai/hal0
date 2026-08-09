@@ -936,9 +936,19 @@ def _assemble(
             identity.config.kv = cfg.kv
         if cfg.ctx:
             identity.config.ctx = cfg.ctx
-    # Non-exclusive cell measured while a GPU slot was serving → not clean enough
-    # to publish (DESIGN §4 smoke): downgrade an otherwise-ok outcome.
-    if outcome is Outcome.OK and not host.exclusive and _gpu_slot_serving(api):
+    # Non-exclusive TIER-A cell measured while a GPU slot was serving → not
+    # clean enough to publish (DESIGN §4 smoke): downgrade an otherwise-ok
+    # outcome. Tier-A only: a serving-tier cell (chat/http_*/reuse/embed/
+    # rerank) measures THROUGH a live serving slot — its target being up is
+    # the measurement precondition, not contention, and the blanket check
+    # downgraded every such cell unconditionally (CT105 deploy validation,
+    # 2026-08-09). Those records keep host.exclusive=False as context.
+    if (
+        outcome is Outcome.OK
+        and cell.kind in _TIER_A_KINDS
+        and not host.exclusive
+        and _gpu_slot_serving(api)
+    ):
         outcome = Outcome.SKIPPED_CONTENDED
     note = (
         ""
