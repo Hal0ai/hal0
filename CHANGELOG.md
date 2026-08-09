@@ -22,7 +22,46 @@ breaking/migrations as callouts — from the cosign-verified tarball, before
 applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
-## [Unreleased]
+## [1.0.0-rc.4] — 2026-08-09
+
+### Highlights
+
+- **Privileged-seam hardening.** The `hal0-systemctl` root wrapper now
+  allow-lists the *content* of everything it writes — systemd drop-ins
+  (#1718), quadlet bodies with the raw `write-unit` verb removed (#1748), and
+  `PodmanArgs=` pinned to the flags providers emit, closing a `--runtime`
+  host-exec path (#1759). The update staging path closes a verify→extract
+  TOCTOU (root-only stage dir + digest pinned to the extraction handle, #1745),
+  reaps orphaned staging/quarantine trees (#1755), never dereferences symlinks
+  when applying ownership (#1743), and only trusts a root-owned config for the
+  releases-URL override (#1750). Slot flag denylisting canonicalizes the
+  `--flag=value` form (#1746) and rejects malformed shell quoting at save time
+  (#1737/#1749).
+- **Fresh-install & update robustness.** The installer waits on the dpkg/apt
+  lock instead of dying (#1733), runs AppArmor remediation before the podman
+  preflight gate (#1728), preflights git for Hermes (#1727), and applies the
+  model-layout migration as its final model step (#1732). An up-to-date
+  `hal0 update` now converges an outstanding v1.0 profile-catalog reset instead
+  of going silent (#1585/#1757); staged trees get their perms normalized after
+  extraction (#1725); every `hal0.toml` write goes through one serialized
+  read-modify-write path (#1724).
+- **Capabilities & settings UI.** A unified **AI Capabilities** page (TTS, STT,
+  embeddings, reranking, image generation, NPU) with a canonical rerank slot
+  (#1747), a memory reranker model picker (#1781), and per-panel probe-failure
+  surfacing instead of a silent grey Save (#1774).
+- **Dashboard redesign.** The main and Benchmarks dashboards now share the
+  hal0.dev design-system chrome (#1764/#1768), with benchmark trigger/config/
+  outcomes/regressions surfaced (#1744) and assorted tile/row polish
+  (#1729/#1779/#1780/#1782).
+- **Benchmark system overhaul.** Adopts GuideLLM, llama-benchy and
+  tool-eval-bench (#1765), adds record telemetry + regression journaling
+  (#1766) and shareable result bundles (#1758), folds the shell harness into
+  Python behind a validate-and-exec `benchctl` shim (#1761), and makes the
+  measurements truthful and the pipeline reliable (#1736 and follow-ups).
+- **Slots.** Per-slot profile-flag divergence overlay with a cross-device
+  picker (#1639), and a live slot now restarts when apply changes config but
+  not the model (#1770).
+- **Docs.** Quick-start and migration guide rewritten for v1.0 (#1731).
 
 ### Added
 
@@ -114,6 +153,59 @@ applying. Add those subsections to a version's section to surface them; see
 
 - Enabling the rerank capability now creates/loads the `rerank` slot the dispatcher actually routes `/v1/rerankings` to (was `embed-rerank`, which nothing routed to); `embed-rerank` resolves as an alias.
 - `hal0 update` on an already-current box now converges an outstanding one-shot v1.0 profile-catalog reset instead of printing "nothing to apply" and hiding it (#1585). The reset rides `commit()`, but a box updated 0.9.8→1.0 ran commit under the *old* daemon, which had no reset — so it landed converged-except-for-this and then went silent. `/api/updates/check` now carries a read-only `profile_reset` snapshot, and a new local `POST /api/updates/converge-profiles` runs the reset with no download or swap. The up-to-date CLI path consults the snapshot: it converges (prompting or honoring `--yes` for the consent-needing case), converges silently when there's nothing to lose, and otherwise reports the reset as outstanding and exits 2 (up to date, convergence outstanding) rather than exiting 0 in silence.
+
+### Audience
+
+Preview-channel operators validating the 1.0 line ahead of GA, and fresh
+installs that want the current build. This is the release-candidate carrying
+the privileged-seam hardening cluster (#1738/#1740/#1750/#1759); it is the
+recommended pre-GA validation target. Boxes on the stable channel are not
+offered this tag.
+
+### Supported upgrades
+
+- `1.0.0-rc.3` → `1.0.0-rc.4` via `hal0 update` (preview channel). The GitHub
+  release asset URL (`https://github.com/Hal0ai/hal0/releases/download/v1.0.0-rc.4/preview.json`)
+  works end-to-end for install and update.
+- `1.0.0-rc.2` / `1.0.0-rc.1` → `1.0.0-rc.4` directly, same mechanism.
+- `0.9.8` → `1.0.0-rc.4` in place — re-run the installer or `hal0 update` on
+  the preview channel; the R5 migration set applies (see the
+  [1.0.0 changelog section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100--2026-08-07)).
+  The profile-catalog reset that used to defer silently on this transition now
+  converges on the first post-update `hal0 update` (#1585).
+- Older than 0.9.8: step through 0.9.8 first.
+
+### Known issues
+
+The 0.9.8 CLI's spurious end-of-update `ConnectError` (the pre-1.0 client dies
+when the apply restarts hal0-api under its status poll, even though the update
+succeeds — verify with `hal0 --version`) and the first-boot
+`unattended-upgrades` dpkg race (#1584) carry forward. A box still on rc.1/rc.2
+whose venv predates #1663 is not *offered* a newer tag by the passive check —
+`hal0 update --target <version>` is the recovery path (#1715). The rc.1
+profile-catalog-defer item is resolved this release (#1585).
+
+### Operator migrations
+
+- **Releases-URL override (#1750):** a `file://` `HAL0_RELEASES_URL` is no
+  longer accepted from the service-owned `/etc/hal0/api.env` — put it in the
+  root-owned `/etc/hal0/update.conf` (`root:root 0644`) instead. `https://`
+  overrides in `api.env` are unchanged, so boxes using the GitHub asset URL
+  need no action; only `file://`-staging boxes move the line.
+- **Deprecated `extra_args` at the seam (#1759):** a slot whose deprecated
+  free-form `extra_args` carries a `podman run` flag outside
+  `--group-add`/`--security-opt`/`--ipc`/`--ulimit` is now refused at the root
+  seam on a hal0-service install. Move those flags to typed Quadlet keys in a
+  `hal0-slot@<token>.container.d/` drop-in. Shipped providers are unaffected.
+- The R5 operator-run migrators (slot-flag fold, id-keying) are unchanged from
+  rc.1.
+
+### Rollback
+
+Release tarballs are immutable and cosign-signed; roll back by re-installing
+the previous tag (`v1.0.0-rc.3`) from its GitHub release. No rc.4 change writes
+a state shape rc.3 cannot read — the profile-catalog reset stamps the same
+`schema_version = 2` rc.3's commit path already used.
 
 ## [1.0.0-rc.3] — 2026-08-09
 
