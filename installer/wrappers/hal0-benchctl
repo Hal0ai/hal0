@@ -4,31 +4,40 @@
 # Background: hal0-api / the Hermes agent run as the unprivileged `hal0` system
 # user, but benchmark containers are ROOTFUL (the container is the sandbox
 # boundary) and need /dev/kfd + the images in root's podman store. The only
-# root operations benchmarking needs are "run the harness" and "aggregate the
-# results", so the agent delegates exactly those here, just like hal0-slotctl
-# delegates slot-unit + systemctl ops and hal0-agentenv delegates env writes.
+# root operation benchmarking needs is "run this one llama-bench container",
+# so the agent delegates exactly that here, just like hal0-systemctl delegates
+# unit ops and hal0-agentenv delegates env writes.
 #
-# This script is the ENTIRE privileged surface. It validates every argument
-# (model path must resolve under /mnt/ai-models, backend whitelist, llama-bench
-# flag whitelist), builds the harness invocation itself, and never evaluates a
-# shell — so the grant in /etc/sudoers.d/hal0-benchctl can never be widened into
-# arbitrary command execution. The harness it execs is root-owned and not
-# writable by the hal0 user.
+# Phase 2 of the bench overhaul (2026-08): the shell harness this seam used to
+# exec (run_benchmarks.sh + config.sh) is absorbed into Python
+# (hal0.bench.harness). This script is now a dumb validate-and-exec shim: the
+# unprivileged runner composes the FULL `podman run … llama-bench -o json`
+# argv itself; this side re-validates every element structurally — model path
+# under the resolved store, device nodes that exist and are character devices,
+# a closed set of podman flags, the image namespace, the llama-bench flag
+# whitelist — and then execs it. No matrix knowledge, no composition, no
+# retries, no shell evaluation, so the grant in /etc/sudoers.d/hal0-benchctl
+# can never be widened into arbitrary command execution. Validation here is
+# deliberately independent of the Python side: the caller's convenience is
+# never a control at this boundary.
 #
-# The telemetry verb (2026-07-09) samples GPU counters for the v2
-# benchmark system (store, planner, runner).
+# The telemetry verb (2026-07-09) samples GPU counters for the v2 benchmark
+# system (store, planner, runner) and is unchanged.
+#
+# Retired verbs (Phase 2): run / run-model / sweep (composed harness sweeps —
+# the runner now composes cells itself), aggregate (generate_results_json.py
+# retired with the v1 index.json/SUMMARY.md surface; results live in the v2
+# store + /api/benchmarks), list (nothing writes runs/ any more).
 
 set -euo pipefail
 
-HARNESS=/usr/lib/hal0/bench
 RESULTS=/var/lib/hal0/benchmarks
-RESULTS_OWNER=hal0:hal0
 
 # The model-store root, from the SAME resolver the pull engine and slot mounts
 # use (hal0.config.paths.model_store_root). The old hardcoded /mnt/ai-models
 # broke every Tier-A cell on a default-config box whose store is
 # /var/lib/hal0/models (#1516). Falls back to the historic path only when the
-# venv is unreachable. Exported as MODEL_DIR so bench/config.sh agrees.
+# venv is unreachable.
 _resolve_model_root() {
   local py
   for py in /usr/lib/hal0/venv/bin/python3 "$(command -v python3 2>/dev/null || true)"; do
@@ -41,9 +50,40 @@ _resolve_model_root() {
   printf '%s' /mnt/ai-models
 }
 MODEL_ROOT="$(_resolve_model_root)"
-export MODEL_DIR="$MODEL_ROOT"
 
 die() { echo "hal0-benchctl: $1" >&2; exit 2; }
+
+# --- exec-verb validators ---------------------------------------------------
+
+# Permitted device roots — kept relocatable in lock-step with the Python
+# resolver (hal0.bench.devices honours the same overrides), so a test or an
+# unusual passthrough layout is still CHECKED rather than waved through.
+_KFD_ROOT="${HAL0_BENCH_KFD_PATH:-/dev/kfd}"
+_DRI_ROOT="${HAL0_BENCH_DRI_DIR:-/dev/dri}"
+
+# Reject anything that is not an allowed device node / numeric group id, and
+# re-confirm S_ISCHR on THIS host (the mirror of hal0.bench.devices'
+# _node_allowed — validation must live on the root side of the boundary).
+validate_device_flag() {
+  local flag="$1" node name
+  [[ "$flag" != *..* ]] || return 1
+  case "$flag" in
+    --group-add=*) [[ "${flag#--group-add=}" =~ ^[0-9]+$ ]]; return $? ;;
+    --device=nvidia.com/gpu=*)
+      [[ "${flag#--device=nvidia.com/gpu=}" =~ ^([0-9]+|all)$ ]]; return $? ;;
+    --device=*) node="${flag#--device=}" ;;
+    *) return 1 ;;
+  esac
+  if [[ "$node" != "$_KFD_ROOT" ]]; then
+    case "$node" in
+      "${_DRI_ROOT}"/*) name="${node#"${_DRI_ROOT}"/}" ;;
+      /dev/accel/*)     name="${node#/dev/accel/}" ;;
+      *) return 1 ;;
+    esac
+    [[ "$name" =~ ^[A-Za-z0-9_.:+-]+$ ]] || return 1
+  fi
+  [[ -c "$node" ]]
+}
 
 validate_model() {   # arg: path relative to MODEL_ROOT
   local rel="$1"
@@ -53,87 +93,119 @@ validate_model() {   # arg: path relative to MODEL_ROOT
   [[ -f "$MODEL_ROOT/$rel" ]]                  || die "model not found under $MODEL_ROOT: $rel"
 }
 
-# Must stay in lock-step with the BACKENDS matrix in bench/config.sh. `cpu` is
-# the fourth v1.0 hardware tier's lane; it takes no GPU passthrough at all, so
-# it is no wider a grant than the GPU lanes.
-validate_backend() {
-  [[ "$1" =~ ^(rocm|vulkan_radv|cpu)$ ]] || die "bad backend: $1"
-}
-
 # Hardware tier vocabulary — the shell mirror of hal0.bench.devices' TIER_*.
 # Empty means "not stated"; the telemetry sampler then falls back to probing.
 validate_tier() {
   [[ -z "$1" || "$1" =~ ^(amd|nvidia|cpu)$ ]] || die "bad tier: $1 (use amd|nvidia|cpu)"
 }
 
-# Only whitelisted llama-bench tuning flags + safe (numeric / comma-list / quant)
-# values are allowed in a sweep. -m/-o and anything else are rejected.
-validate_extra() {
-  local tok expect_val=0
-  for tok in "$@"; do
-    if [[ $expect_val -eq 1 ]]; then
-      [[ "$tok" =~ ^[A-Za-z0-9_,.:+-]+$ ]] || die "bad flag value: $tok"
-      expect_val=0; continue
-    fi
-    case "$tok" in
-      -b|-ub|-ngl|-fa|-ctk|-ctv|-p|-n|-d|-r|-t|-mmp|-pg) expect_val=1 ;;
-      *) die "flag not allowed in sweep: $tok" ;;
-    esac
-  done
-  [[ $expect_val -eq 0 ]] || die "dangling flag without value"
+# The llama-bench binaries the shipped runner images carry. A closed set: the
+# entrypoint decides what runs inside the (rootful) container, so it is the
+# one element that must never be caller-shaped.
+validate_entrypoint() {
+  case "$1" in
+    /opt/rocmfpx/bin/llama-bench|/usr/local/bin/llama-bench) return 0 ;;
+    *) die "entrypoint not allowed: $1" ;;
+  esac
 }
 
-# Hand results back to the agent user after any write.
-post() { chown -R "$RESULTS_OWNER" "$RESULTS" 2>/dev/null || true; }
-
-# Optional leading --exclusive (stop/restart GPU slots for clean numbers).
-take_exclusive() { if [[ "${1:-}" == "--exclusive" ]]; then echo "--exclusive"; fi; }
+# Runner images are pinned to the hal0 GHCR namespace (plus the upstream
+# toolbox namespace the CPU lane's lean image lives in).
+validate_image() {
+  [[ "$1" =~ ^ghcr\.io/hal0ai/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*:[A-Za-z0-9._-]+$ ]] \
+    || die "image not allowed: $1"
+}
 
 cmd="${1:-help}"; shift || true
 
 case "$cmd" in
-  run)                       # full curated sweep, all contexts
-    excl="$(take_exclusive "${1:-}")"
-    rc=0; "$HARNESS/run_benchmarks.sh" --contexts all $excl || rc=$?
-    post; exit $rc ;;
-
-  run-model)                 # one model, both backends, all contexts
-    rel="${1:-}"; shift || true
-    validate_model "$rel"
-    excl="$(take_exclusive "${1:-}")"
-    rc=0; "$HARNESS/run_benchmarks.sh" --models "$rel" --contexts all $excl || rc=$?
-    post; exit $rc ;;
-
-  sweep)                     # tuning: one model+backend, whitelisted extra flags
-    rel="${1:-}"; backend="${2:-}"; shift 2 2>/dev/null || die "usage: sweep <model.gguf> <backend> [--exclusive] [--timeout-s N] <flags...>"
-    validate_model "$rel"
-    validate_backend "$backend"
-    excl=""; if [[ "${1:-}" == "--exclusive" ]]; then excl="--exclusive"; shift; fi
-    # Optional per-attempt wall-clock cap, enforced INSIDE the harness around
-    # the container run. The unprivileged caller cannot kill this root process
-    # tree, so the timeout must live on this side of the privilege boundary.
+  exec)
+    # exec [--timeout-s N] -- podman run --rm <flags> --entrypoint BIN IMAGE \
+    #        -m /abs/model.gguf <llama-bench flags> -o json
+    #
+    # Sequential structural validation, then exec. The optional per-attempt
+    # wall-clock cap is enforced HERE (timeout(1) around the podman client;
+    # podman forwards TERM and --rm reaps the container) because the
+    # unprivileged caller cannot signal this root process tree.
     cell_timeout=""
     if [[ "${1:-}" == "--timeout-s" ]]; then
       [[ "${2:-}" =~ ^[0-9]+$ ]] || die "bad --timeout-s value: ${2:-}"
       cell_timeout="$2"; shift 2
     fi
-    validate_extra "$@"
-    rc=0; "$HARNESS/run_benchmarks.sh" --models "$rel" --backends "$backend" \
-            --tag sweep --extra "$*" ${cell_timeout:+--cell-timeout "$cell_timeout"} $excl || rc=$?
-    post; exit $rc ;;
+    [[ "${1:-}" == "--" ]] || die "usage: exec [--timeout-s N] -- podman run ..."
+    shift
+    cmd_argv=("$@")
+    [[ "${1:-}" == "podman" ]] || die "argv must start with podman"
+    shift
+    [[ "${1:-}" == "run" ]] || die "argv must be a podman run"
+    shift
 
-  aggregate)                 # rebuild index.json + SUMMARY.md
-    rc=0; "$HARNESS/generate_results_json.py" "$RESULTS" || rc=$?
-    post; exit $rc ;;
+    seen_rm=0
+    volume_ok=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --rm) seen_rm=1; shift ;;
+        --device=*|--group-add=*)
+          validate_device_flag "$1" || die "refusing device flag: $1"
+          shift ;;
+        --security-opt)
+          case "${2:-}" in
+            apparmor=unconfined|seccomp=unconfined) ;;
+            *) die "security-opt not allowed: ${2:-}" ;;
+          esac
+          shift 2 ;;
+        --volume=*)
+          # Exactly the read-only model-store self-mount, nothing else.
+          [[ "$1" == "--volume=${MODEL_ROOT}:${MODEL_ROOT}:ro,z" ]] \
+            || die "volume not allowed: $1"
+          volume_ok=1; shift ;;
+        -e)
+          [[ "${2:-}" =~ ^(GGML|HSA)_[A-Z0-9_]+=[A-Za-z0-9._/,:=-]*$ ]] \
+            || die "env not allowed: ${2:-}"
+          shift 2 ;;
+        --entrypoint)
+          validate_entrypoint "${2:-}"
+          shift 2
+          break ;;
+        *) die "podman flag not allowed: $1" ;;
+      esac
+    done
+    [[ $seen_rm -eq 1 ]] || die "--rm is required (the container must reap itself)"
+    [[ $volume_ok -eq 1 ]] || die "missing the model-store volume mount"
 
-  list)
-    ls -1 "$RESULTS/runs" 2>/dev/null || true ;;
+    validate_image "${1:-}"
+    shift
+    [[ "${1:-}" == "-m" ]] || die "expected -m <model> after the image"
+    model_abs="${2:-}"
+    [[ "$model_abs" == "$MODEL_ROOT"/* ]] || die "model not under $MODEL_ROOT: $model_abs"
+    validate_model "${model_abs#"$MODEL_ROOT"/}"
+    shift 2
 
-  # The session-level gpu-quiesce verb was removed: it never had a caller
-  # (exclusivity is the per-sweep --exclusive in run_benchmarks.sh, which
-  # stops/restarts exactly the slots that were active — the quiesce list was
-  # a hardcoded slot roster that drifted). Narrower grant, one exclusivity
-  # mechanism.
+    # Only whitelisted llama-bench tuning flags + safe values. -o must be json
+    # (stdout is the result channel); a second -m or anything unlisted dies.
+    output_json=0
+    while [[ $# -gt 0 ]]; do
+      flag="$1"; val="${2:-}"
+      case "$flag" in
+        -o)
+          [[ "$val" == "json" ]] || die "only -o json is allowed"
+          output_json=1 ;;
+        -dev)
+          [[ "$val" =~ ^[A-Za-z0-9]+$ ]] || die "bad -dev value: $val" ;;
+        -b|-ub|-ngl|-fa|-ctk|-ctv|-p|-n|-d|-r|-t|-mmp|-pg)
+          [[ "$val" =~ ^[A-Za-z0-9_,.:+-]+$ ]] || die "bad flag value: $val" ;;
+        *) die "flag not allowed in bench argv: $flag" ;;
+      esac
+      [[ $# -ge 2 ]] || die "dangling flag without value: $flag"
+      shift 2
+    done
+    [[ $output_json -eq 1 ]] || die "-o json is required"
+
+    if [[ -n "$cell_timeout" ]]; then
+      exec timeout --kill-after=30 "$cell_timeout" "${cmd_argv[@]}"
+    fi
+    exec "${cmd_argv[@]}"
+    ;;
 
   telemetry)                 # 1 Hz GPU sampler → artifacts/<run_id>/telemetry.jsonl
     action="${1:-start}"
@@ -242,13 +314,9 @@ case "$cmd" in
   help|"")
     cat <<EOF
 usage: hal0-benchctl <command>
-  run [--exclusive]                              full curated sweep (all contexts)
-  run-model <rel.gguf> [--exclusive]            one model, both backends
-  sweep <rel.gguf> <backend> [--exclusive] [--timeout-s N] FLAGS  tuning sweep (whitelisted flags)
-  aggregate                                      rebuild index.json + SUMMARY.md
-  list                                           list result files
+  exec [--timeout-s N] -- podman run ...        validate + exec one llama-bench cell
   telemetry start|end <run_id> [tier]           1 Hz GPU sampler (tier: amd|nvidia|cpu)
-backends: rocm | vulkan_radv | cpu ; results: $RESULTS
+results: $RESULTS ; model store: $MODEL_ROOT
 EOF
     ;;
 

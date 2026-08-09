@@ -1462,13 +1462,14 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         fi
     fi
 
-    # Privileged seam #3 (D hardened-perms): hal0-benchctl runs the GPU benchmark
-    # harness. Benchmarking is a rootful container op (needs /dev/kfd + the images
-    # in root's podman store), but the agent runs unprivileged, so it delegates the
-    # run/aggregate ops here. The seam validates every argument (model path under
-    # the model dir, backend + llama-bench flag whitelist) and is the entire
-    # privileged surface — no shell, no arbitrary args. Lands at the absolute
-    # /usr/lib/hal0/bin path the seam's callers hardcode.
+    # Privileged seam #3 (D hardened-perms): hal0-benchctl runs one benchmark
+    # container per call. Benchmarking is a rootful container op (needs /dev/kfd
+    # + the images in root's podman store), but the agent runs unprivileged, so
+    # it delegates exactly that here. Phase 2 of the bench overhaul: the Python
+    # runner (hal0.bench.harness) composes the full `podman run … llama-bench`
+    # argv; the seam re-validates every element structurally and execs it — no
+    # shell, no arbitrary args. Lands at the absolute /usr/lib/hal0/bin path the
+    # seam's callers hardcode.
     BENCHCTL_SRC="${REPO_ROOT}/installer/wrappers/hal0-benchctl"
     if [[ -f "${BENCHCTL_SRC}" ]]; then
         install -d "${LIB_DIR}/bin"
@@ -1478,22 +1479,24 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         warn "${BENCHCTL_SRC} not found — benchmark seam helper not installed"
     fi
 
-    # GPU benchmark harness driven by the seam. Root-owned and off any shared
-    # mount so the unprivileged agent cannot tamper with a script that runs as
-    # root. Results live under VAR_DIR (agent-readable); the seam chowns them back
-    # to hal0 after each run.
+    # Bench support files. The shell harness (config.sh / run_benchmarks.sh /
+    # generate_results_json.py / profile-matrix.sh) retired in Phase 2 of the
+    # bench overhaul — the Python runner (hal0.bench.harness) composes and runs
+    # the containers itself through the hal0-benchctl exec seam. What remains
+    # here is the server-level A/B harness (Tier B: chat/reuse/embed/rerank —
+    # hits hal0-api + slot ports as the hal0 user, no sudo needed).
     BENCH_SRC="${REPO_ROOT}/installer/bench"
     if [[ -d "${BENCH_SRC}" ]]; then
         install -d "${LIB_DIR}/bench"
-        install -m 0644 "${BENCH_SRC}/config.sh"                "${LIB_DIR}/bench/config.sh"
-        install -m 0755 "${BENCH_SRC}/run_benchmarks.sh"        "${LIB_DIR}/bench/run_benchmarks.sh"
-        install -m 0755 "${BENCH_SRC}/generate_results_json.py" "${LIB_DIR}/bench/generate_results_json.py"
-        # Profile-matrix orchestrator (seam-driven Tier A) + server-level A/B
-        # harness (Tier B: MTP/spec, cache-reuse, embed/rerank — hits hal0-api
-        # + slot ports as the hal0 user, no sudo needed).
-        install -m 0755 "${BENCH_SRC}/profile-matrix.sh"        "${LIB_DIR}/bench/profile-matrix.sh"
         install -m 0755 "${BENCH_SRC}/server_ab.py"             "${LIB_DIR}/bench/server_ab.py"
         install -m 0644 "${BENCH_SRC}/README.md"                "${LIB_DIR}/bench/README.md"
+        # Upgrade path: remove the retired shell-harness copies an earlier
+        # install left behind (they are root-owned and would otherwise linger
+        # as a stale, unmaintained privileged surface).
+        rm -f "${LIB_DIR}/bench/config.sh" \
+              "${LIB_DIR}/bench/run_benchmarks.sh" \
+              "${LIB_DIR}/bench/generate_results_json.py" \
+              "${LIB_DIR}/bench/profile-matrix.sh" 2>/dev/null || true
         install -d "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" "${VAR_DIR}/benchmarks/server-ab"
         # P3-perms: benchmarks/ (+ runs/, logs/, server-ab/) is now a declared
         # OwnershipStore row (hal0:hal0 2775) — the `doctor perms --fix`

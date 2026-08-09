@@ -2,10 +2,13 @@
 #
 # The hal0 agent user runs unprivileged, but benchmark containers are rootful
 # and need /dev/kfd + the images in root's podman store. It delegates exactly
-# the benchmark run/aggregate ops to /usr/lib/hal0/bin/hal0-benchctl, which is
-# the entire privileged surface: the helper validates the model path (must
-# resolve under /mnt/ai-models), the backend (rocm|vulkan_radv|cpu), and the
-# llama-bench flag whitelist — no wildcards, no shell, no arbitrary args.
+# one operation to /usr/lib/hal0/bin/hal0-benchctl: "validate and exec this
+# one `podman run … llama-bench -o json` cell". The helper re-validates every
+# argv element on the root side of the boundary — model path under the
+# resolved store, device nodes that exist and are character devices, a closed
+# podman-flag set, the image namespace, the llama-bench flag whitelist — and
+# never evaluates a shell. The telemetry verb samples GPU counters into the
+# result store. No wildcards, no arbitrary args.
 #
 # Install (as root):
 #   install -m 0755 -o root -g root hal0-benchctl /usr/lib/hal0/bin/hal0-benchctl
