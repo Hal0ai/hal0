@@ -210,7 +210,7 @@ def _install_fake_seam(sandbox: Path, monkeypatch, calls: Path) -> None:
     sweep JSON exactly where the real seam would."""
     bin_dir = sandbox / "fakebin"
     bin_dir.mkdir()
-    (bin_dir / "sudo").write_text("#!/bin/bash\nshift\nexec \"$@\"\n")
+    (bin_dir / "sudo").write_text('#!/bin/bash\nshift\nexec "$@"\n')
 
     runs = runner.v1_runs_dir()
     rows = [
@@ -238,10 +238,10 @@ def _install_fake_seam(sandbox: Path, monkeypatch, calls: Path) -> None:
         "#!/bin/bash\n"
         f"echo run >> {calls}\n"
         f"mkdir -p {runs}\n"
-        "rel=\"$2\"\n"
-        "lane=\"$3\"\n"
+        'rel="$2"\n'
+        'lane="$3"\n'
         "stem=\"$(basename \"$rel\" .gguf | tr -c 'A-Za-z0-9._-' '_')\"\n"
-        "stem=\"${stem%_}\"\n"  # tr appends _ for the trailing newline
+        'stem="${stem%_}"\n'  # tr appends _ for the trailing newline
         f"cat > \"{runs}/${{stem}}__${{lane}}__sweep.json\" <<'EOF'\n"
         + json.dumps(rows)
         + "\nEOF\n"
@@ -293,9 +293,7 @@ class TestSessionIntegration:
         assert len(rows) == 2
         assert {r["config"] for r in rows} == {"default"}
 
-    def test_tier_bc_run_appends_a_failed_record_not_a_crash(
-        self, sandbox, monkeypatch, tmp_path
-    ):
+    def test_tier_bc_run_appends_a_failed_record_not_a_crash(self, sandbox, monkeypatch, tmp_path):
         """A server_ab that exits non-zero yields outcome=failed and the
         session continues — never an exception, never a dropped cell."""
         fake_ab = sandbox / "fake_server_ab"

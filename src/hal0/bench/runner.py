@@ -87,6 +87,7 @@ def _model_roots() -> list[str]:
     roots = {model_store_root().rstrip("/"), LEGACY_MODEL_ROOT}
     return sorted(roots, key=len, reverse=True)
 
+
 # Rough per-cell expected wall-clock (seconds) for the watchdog (fires at 3x).
 # Generous on purpose — it catches a hang, it is not an SLA.
 _EXPECTED_S = {
@@ -308,7 +309,11 @@ def _clear_stale_sweep(gguf: str, lane: str) -> None:
     (results are chowned hal0:hal0, so the unprivileged runner can remove them)
     to guarantee the sweep actually runs and writes current numbers."""
     out = _sweep_output_path(gguf, lane)
-    stale = [out, out.with_name(out.name + ".failed"), out.with_name(out.name.replace(".json", ".meta.json"))]
+    stale = [
+        out,
+        out.with_name(out.name + ".failed"),
+        out.with_name(out.name.replace(".json", ".meta.json")),
+    ]
     for path in stale:
         with contextlib.suppress(OSError):
             path.unlink()

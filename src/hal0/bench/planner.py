@@ -374,8 +374,7 @@ def plan(
     unknown = [k for k in suite.cells.kinds if k not in KNOWN_KINDS]
     if unknown:
         raise ValueError(
-            f"suite {suite.id!r}: unknown cell kind(s) {unknown} "
-            f"(known: {sorted(KNOWN_KINDS)})"
+            f"suite {suite.id!r}: unknown cell kind(s) {unknown} (known: {sorted(KNOWN_KINDS)})"
         )
     current = store.newest_ok_by_cell()  # cell_key -> newest ok record
     max_age = timedelta(days=suite.staleness.max_age_days)

@@ -38,9 +38,7 @@ def test_lane_matrix_with_unset_include_selects_nothing(tmp_path, capsys):
 
 def test_roster_plans_over_the_registry(tmp_path):
     suite = load_suites(SEED_DIR)["roster"]
-    registry = [
-        {"id": "m1", "installed": True, "capabilities": ["chat"], "gguf": "/x/m1.gguf"}
-    ]
+    registry = [{"id": "m1", "installed": True, "capabilities": ["chat"], "gguf": "/x/m1.gguf"}]
     cells = plan(suite, registry, Store(tmp_path))
     assert cells, "roster suite should plan cells for an installed chat model"
     assert {c.kind for c in cells} <= KNOWN_KINDS
