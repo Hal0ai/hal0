@@ -22,6 +22,7 @@ import os
 import tempfile
 import tomllib
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -286,12 +287,6 @@ def save_hal0_config(cfg: Hal0Config, path: Path | None = None) -> None:
 #     ``/etc/hal0/*.lock`` already has a perms row, so no new install surface.
 
 
-#: Task holding an open :func:`hal0_config_txn` per hal0.toml path. Only ever
-#: read/written from the loop thread while the locks are held, so a plain dict
-#: is sufficient.
-_TXN_OWNERS: dict[str, Any] = {}
-
-
 class Hal0ConfigTxn:
     """Handle yielded by :func:`hal0_config_txn` — a locked RMW on hal0.toml."""
 
@@ -315,6 +310,20 @@ class Hal0ConfigTxn:
             with contextlib.suppress(AttributeError):
                 request.app.state.hal0_config = new
         return new
+
+
+@dataclass
+class _ActiveTxn:
+    """The open transaction for one hal0.toml path, and the task that owns it."""
+
+    task: Any
+    txn: Hal0ConfigTxn
+    depth: int = 1
+
+
+#: Open :func:`hal0_config_txn` per hal0.toml path. Only ever read/written from
+#: the loop thread while the locks are held, so a plain dict is sufficient.
+_TXN_OWNERS: dict[str, _ActiveTxn] = {}
 
 
 @contextlib.asynccontextmanager
@@ -350,12 +359,24 @@ async def hal0_config_txn(
 
     # Re-entrancy (#1721 review): ``HAL0_TOML_LOCK`` is reached BEFORE the file
     # lock's own owner check, so a writer that opened a txn and then called a
-    # helper which opens another would hang here forever rather than fail. The
-    # holding task passes straight through — it already owns both locks, and
-    # re-reading from disk under them yields the same consistent view.
+    # helper which opens another would hang here forever rather than fail.
+    #
+    # The nested caller gets the SAME handle, not a fresh load (#1721 review
+    # round 2). Re-reading would fork the working state: an outer caller that
+    # mutated ``txn.config`` and then reached a helper would hand that helper a
+    # model without its edits, and the outer ``save()`` would later write its
+    # own stale object back over whatever the inner one committed — a lost
+    # update inside a single request, which is the exact bug class this
+    # accessor exists to remove.
+    key = str(target)
     current_task = asyncio.current_task()
-    if current_task is not None and _TXN_OWNERS.get(str(target)) is current_task:
-        yield Hal0ConfigTxn(load_hal0_config(target), target, request)
+    active = _TXN_OWNERS.get(key)
+    if current_task is not None and active is not None and active.task is current_task:
+        active.depth += 1
+        try:
+            yield active.txn
+        finally:
+            active.depth -= 1
         return
 
     async with HAL0_TOML_LOCK:
@@ -367,13 +388,14 @@ async def hal0_config_txn(
         try:
             async with async_file_lock(target, timeout=timeout):
                 acquired = True
+                txn = Hal0ConfigTxn(load_hal0_config(target), target, request)
                 if current_task is not None:
-                    _TXN_OWNERS[str(target)] = current_task
+                    _TXN_OWNERS[key] = _ActiveTxn(task=current_task, txn=txn)
                 try:
-                    yield Hal0ConfigTxn(load_hal0_config(target), target, request)
+                    yield txn
                 finally:
                     if current_task is not None:
-                        _TXN_OWNERS.pop(str(target), None)
+                        _TXN_OWNERS.pop(key, None)
         except TimeoutError as exc:
             if acquired:
                 raise

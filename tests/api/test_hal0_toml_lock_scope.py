@@ -20,6 +20,9 @@ These tests pin the fix at three levels:
 from __future__ import annotations
 
 import asyncio
+import re
+import subprocess
+import sys
 import threading
 import tomllib
 from collections.abc import Awaitable, Callable
@@ -376,6 +379,113 @@ async def test_nested_txn_in_one_task_does_not_deadlock(tmp_hal0_home: str) -> N
                 return "ok"
 
     assert await asyncio.wait_for(_nested(), timeout=10) == "ok"
+
+
+async def test_nested_txn_shares_the_outer_working_state(tmp_hal0_home: str) -> None:
+    """A nested txn must see the outer's UNSAVED edits and share its handle.
+
+    #1721 review round 2: yielding a freshly loaded model to the nested caller
+    forks the working state — the helper never sees the outer's in-flight
+    changes, and the outer's later ``save()`` writes its own stale object back
+    over whatever the helper committed. That is a lost update inside a single
+    request, the exact bug class this accessor exists to remove.
+    """
+    target = _toml_path(tmp_hal0_home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    save_hal0_config(Hal0Config(), target)
+
+    async def _helper() -> None:
+        async with hal0_config_txn(path=target, timeout=5) as inner:
+            # The outer's unsaved edit is visible here.
+            assert inner.config.telemetry.enabled is True
+            inner.config.telemetry.channel = "preview"
+
+    async with hal0_config_txn(path=target, timeout=5) as outer:
+        outer.config.telemetry.enabled = True  # NOT saved yet
+        await _helper()
+        # The helper's edit landed on the same object, not a forked copy.
+        assert outer.config.telemetry.channel == "preview"
+        outer.save()
+
+    final = load_hal0_config(target)
+    assert final.telemetry.enabled is True
+    assert final.telemetry.channel == "preview"
+
+
+def test_installer_shell_writer_replaces_hal0_toml_atomically(tmp_path: Path) -> None:
+    """Run install.sh's embedded writer for real and prove the swap is atomic.
+
+    The advisory lock binds cooperating writers only — every API read path calls
+    ``load_hal0_config()`` unlocked — so a truncate-then-write is observable by
+    a live daemon as an empty file (silently all-defaults) or as half-written
+    TOML (#1721 review round 2).
+    """
+    install_sh = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
+    text = install_sh.read_text(encoding="utf-8")
+    match = re.search(
+        r"python3 - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
+        text,
+        re.S,
+    )
+    assert match, "could not locate install.sh's [models].store writer"
+    writer = match.group(1)
+    assert "os.replace" in writer and "fsync" in writer, "the installer write must be atomic"
+
+    toml_path = tmp_path / "hal0.toml"
+    toml_path.write_text(
+        '[telemetry]\nenabled = true\n\n[models]\nstore = "/old"\nroots = ["/a"]\n',
+        encoding="utf-8",
+    )
+    script = tmp_path / "writer.py"
+    script.write_text(writer, encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(script), str(toml_path), "/new/models"],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    assert parsed["models"]["store"] == "/new/models"
+    assert parsed["models"]["pull_root"] == "/new/models"
+    assert parsed["models"]["roots"] == ["/a"]  # untouched
+    assert parsed["telemetry"]["enabled"] is True  # other sections survive
+    # No tempfile left behind, and the lock file is a plain sibling.
+    assert not list(tmp_path.glob(".hal0.toml.*.tmp"))
+
+
+def test_installer_shell_writer_seeds_a_config_without_a_models_table(tmp_path: Path) -> None:
+    """The old ``printf >>`` append branch folded into the locked writer.
+
+    That branch is the one a table-less (or absent) hal0.toml took, and it was
+    the least protected of the two: a bare shell append with no lock at all.
+    """
+    install_sh = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
+    match = re.search(
+        r"python3 - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
+        install_sh.read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert match
+    script = tmp_path / "writer.py"
+    script.write_text(match.group(1), encoding="utf-8")
+
+    for label, seed in (("table-less", "[telemetry]\nenabled = true\n"), ("absent", None)):
+        toml_path = tmp_path / f"hal0-{label}.toml"
+        if seed is not None:
+            toml_path.write_text(seed, encoding="utf-8")
+
+        proc = subprocess.run(
+            [sys.executable, str(script), str(toml_path), "/new/models"],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, f"{label}: {proc.stderr}"
+        parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        assert parsed["models"]["store"] == "/new/models", label
+        if seed is not None:
+            assert parsed["telemetry"]["enabled"] is True, label
 
 
 async def test_txn_is_reentrant_within_one_task(tmp_hal0_home: str) -> None:

@@ -697,7 +697,7 @@ if [[ "${MODELS_DIR}" != "/var/lib/hal0/models" ]]; then
         # hal0 (the venv does not exist yet at this point).
         mkdir -p "${ETC_DIR}"
         python3 - "${HAL0_TOML}" "${MODELS_DIR}" <<'PYEOF'
-import fcntl, os, pathlib, re, stat, sys
+import fcntl, os, pathlib, re, stat, sys, tempfile
 path = pathlib.Path(sys.argv[1])
 new_root = sys.argv[2]
 
@@ -733,7 +733,36 @@ try:
     else:
         text = text.rstrip() + f'\n\n[models]\nstore = "{new_root}"\npull_root = "{new_root}"\n'
         text = text.lstrip("\n")
-    path.write_text(text, encoding="utf-8")
+
+    # Same-dir tempfile + fsync + os.replace, exactly like
+    # hal0.config.loader.write_toml_atomic. The advisory lock binds only
+    # COOPERATING writers; every API read path calls load_hal0_config()
+    # unlocked, so a truncate-then-write here is observable by a live daemon as
+    # an empty file (= silently all-defaults) or as half-written TOML that
+    # fails to parse. The rename is atomic, so a reader sees either the old
+    # file or the new one and never a torn one.
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        if path.exists():
+            # Preserve the config's existing mode/ownership across the replace
+            # (0600 root:root, or hal0-owned under the service-user flip).
+            st = path.stat()
+            os.chmod(tmp_name, stat.S_IMODE(st.st_mode))
+            try:
+                os.chown(tmp_name, st.st_uid, st.st_gid)
+            except PermissionError:
+                pass
+        else:
+            os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+        tmp_name = None
+    finally:
+        if tmp_name is not None and os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 finally:
     os.close(fd)
 PYEOF
