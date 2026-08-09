@@ -56,6 +56,7 @@ from hal0.model_meta import canonical_device
 from hal0.profiles import ProfileCatalog, ResolvedProfile
 from hal0.registry.store import ModelRegistry
 from hal0.slot_config import SlotConfigStore, SlotSelection
+from hal0.slots.layout import resolve_slot_stem
 from hal0.slots.manager import SlotManager
 
 log = logging.getLogger(__name__)
@@ -712,9 +713,14 @@ class CapabilityOrchestrator:
         slot, so the SlotManager would raise SlotNotFound on the first
         load. We synthesise a minimal config from the selection and let
         ``SlotManager.create()`` do the persist + state initialisation.
+
+        The "does it already exist?" probe goes through the bilingual layout
+        seam (#1643): a literal ``<name>.toml`` probe missed every slot on an
+        id-keyed box, so this fell through to ``SlotManager.create``, whose
+        own (bilingual) clobber guard then raised ``slot 'tts' already
+        exists`` and turned every enable / model change into a 503.
         """
-        cfg_path = paths.slots_config_dir() / f"{slot_name}.toml"
-        if cfg_path.exists():
+        if resolve_slot_stem(paths.slots_config_dir(), slot_name) is not None:
             return
 
         port = self._next_free_slot_port()
@@ -874,10 +880,11 @@ class CapabilityOrchestrator:
         ``device=npu``, ``provider=flm``, and always stamps the trio
         ``type`` so dispatch gating activates. No-op when the slot TOML
         already exists (its existing fields, including ``type``, survive —
-        ``update_config`` is a shallow top-level merge).
+        ``update_config`` is a shallow top-level merge) — resolved through the
+        bilingual layout seam so an id-keyed ``<id>.toml`` counts as existing
+        (#1643).
         """
-        cfg_path = paths.slots_config_dir() / f"{slot_name}.toml"
-        if cfg_path.exists():
+        if resolve_slot_stem(paths.slots_config_dir(), slot_name) is not None:
             return
         port = self._next_free_slot_port()
         cfg_dict: dict[str, Any] = {
