@@ -1066,17 +1066,23 @@ def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) ->
                 original=str(dest),
                 quarantine=str(stale),
             )
-        elif os.geteuid() == 0 and dest.stat().st_uid != 0:
+        elif os.geteuid() == 0 and ((_st := dest.stat()).st_uid != 0 or _st.st_mode & 0o022):
             # Codex follow-up: an *empty* pre-existing dest was previously
             # reused untouched aside from a later chmod — but chmod cannot
-            # revoke the owning user's own access. If this inode's owner
-            # isn't root, root reusing it and merely chmod-ing to 0700
-            # would still leave the ORIGINAL (untrusted) owner with full
-            # rwx, because 0700's owner bits are unchanged. Only meaningful
-            # at euid 0 — the privileged seam path with a trust boundary to
-            # defend; a dev/CI/HAL0_HOME run has none. Quarantine it exactly
-            # like a suspicious non-empty dir, so the fresh `mkdir(mode=
-            # 0o700)` below always creates (and therefore owns) `dest`
+            # revoke the owning user's own access, and reusing-then-chmod
+            # still leaves a (short) window where a pre-existing writable
+            # inode stays writable. Two ways an inode here can be untrusted:
+            # wrong owner (chmod can't fix that — root reusing it and
+            # chmod-ing to 0700 leaves the ORIGINAL owner's rwx bits
+            # unchanged), or root-owned-but-group/other-writable (e.g. a
+            # directory a failed stage left behind under the old, pre-#1723
+            # permissive-umask behavior — reusing it at all trusts an inode
+            # that was, until this exact chmod call, writable by whoever
+            # could reach it). Only meaningful at euid 0 — the privileged
+            # seam path with a trust boundary to defend; a dev/CI/HAL0_HOME
+            # run has none. Quarantine it exactly like a suspicious
+            # non-empty dir, so the fresh `mkdir(mode=0o700)` below always
+            # creates (and therefore owns, atomically-secured) `dest`
             # itself rather than trusting whatever created it before.
             stale = dest.with_name(f"{dest.name}.stale-{int(time.time())}")
             try:
