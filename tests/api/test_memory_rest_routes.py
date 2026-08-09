@@ -264,19 +264,21 @@ def test_search_default_no_headers_is_shared(client: TestClient, stub_wrapper: S
 # ── /api/memory/list ───────────────────────────────────────────────────────
 
 
-def test_list_private_mode_targets_own_namespace(
+def test_list_private_mode_expands_to_both_namespaces(
     client: TestClient, stub_wrapper: StubWrapper
 ) -> None:
-    """List with ``X-hal0-Private: 1`` resolves to the caller's own
-    private bucket — required for the ``hal0 agent`` CLI ``memory list``
-    subcommand to enumerate per-agent items."""
+    """List with ``X-hal0-Private: 1`` and no ``?dataset=``/``?bank=``
+    expands to ``[shared, private:<agent>]`` — the SAME read-side
+    expansion ``/search`` uses (#1669: ``/list`` used to resolve through
+    the WRITE resolver, which forced the private bucket alone and broke
+    the "Identity rules mirror /search" contract this route documents)."""
     r = client.get(
         "/api/memory/list",
         headers={"X-hal0-Agent": "hermes-agent", "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.list_calls[0]
-    assert call["dataset"] == "private:hermes-agent"
+    assert call["dataset"] == ["shared", "private:hermes-agent"]
 
 
 def test_list_explicit_dataset_query_param(client: TestClient, stub_wrapper: StubWrapper) -> None:
@@ -285,6 +287,55 @@ def test_list_explicit_dataset_query_param(client: TestClient, stub_wrapper: Stu
     assert r.status_code == 200, r.text
     call = stub_wrapper.list_calls[0]
     assert call["dataset"] == "agents"
+
+
+# ── /api/memory/list?bank= (#1669) ───────────────────────────────────────────
+
+
+def test_list_bank_alias_resolves_own_private_bucket(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """``?bank=private__<own-agent>`` — the dashboard bank browser's own
+    worked example — resolves once the caller's identity actually IS that
+    agent (``X-hal0-Agent`` + ``X-hal0-Private: 1``)."""
+    r = client.get(
+        "/api/memory/list?bank=private__hermes-agent",
+        headers={"X-hal0-Agent": "hermes-agent", "X-hal0-Private": "1"},
+    )
+    assert r.status_code == 200, r.text
+    call = stub_wrapper.list_calls[0]
+    assert call["dataset"] == "private:hermes-agent"
+
+
+def test_list_bank_alias_private_prefix_rejected_without_private_header(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """Negative control (#1669, fail-closed): naming a ``private__`` bank
+    without ``X-hal0-Private: 1`` still 400s — the alias is sugar for
+    spelling a namespace, not a bypass of the private-mode toggle that is
+    "the only path in" to the private namespace (namespace.py)."""
+    r = client.get("/api/memory/list?bank=private__hermes-agent")
+    assert r.status_code >= 400
+    assert stub_wrapper.list_calls == []
+
+
+def test_list_bank_alias_cannot_address_another_agents_private_bank(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """Negative control (#1669, fail-closed): a private-mode caller naming
+    a DIFFERENT agent's bank via ``?bank=`` still resolves to THEIR OWN
+    bucket, never the named one — the closed-set namespace rule (module
+    docstring, ``hal0.memory.namespace``) has no escape hatch for naming
+    another agent's private bucket, by alias or otherwise. This is the
+    repro from #1669: alice requesting ``bank=private__hermes-agent``
+    must never see hermes's bucket."""
+    r = client.get(
+        "/api/memory/list?bank=private__hermes-agent",
+        headers={"X-hal0-Agent": "alice", "X-hal0-Private": "1"},
+    )
+    assert r.status_code == 200, r.text
+    call = stub_wrapper.list_calls[0]
+    assert call["dataset"] == "private:alice"
 
 
 # ── /api/memory/delete ─────────────────────────────────────────────────────

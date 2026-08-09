@@ -152,7 +152,17 @@ def resolve_read_datasets(
         :func:`resolve_write_dataset` (same rule applies; e.g. an explicit
         ``shared`` from a private-mode client still gets promoted —
         consistent with the write side).
+      - ``private=True`` with no authenticated ``client_id`` → always
+        ``MemoryNamespaceError``, regardless of ``requested`` shape — same
+        guard :func:`resolve_write_dataset` applies. Without this, an
+        unauthenticated private-mode caller with no explicit ``requested``
+        fell through the empty/``None`` branch's ``private and client_id``
+        check straight to the "not private at all" default (``shared``),
+        silently degrading a claimed-private read into an unscoped shared
+        one instead of refusing it (#1669).
     """
+    if private and (not client_id or client_id == ANONYMOUS_CLIENT_ID):
+        raise MemoryNamespaceError("private namespace requires an authenticated client_id")
     if isinstance(requested, list) and requested:
         names = [str(d) for d in requested]
         kept = [d for d in names if is_known_namespace(d, client_id=client_id)]
@@ -164,7 +174,7 @@ def resolve_read_datasets(
             )
         return kept
     if requested is None or isinstance(requested, list) or not requested.strip():
-        if private and client_id:
+        if private:
             return [DEFAULT_DATASET, f"{PRIVATE_PREFIX}{client_id}"]
         return DEFAULT_DATASET
     return resolve_write_dataset(requested, private=private, client_id=client_id)
