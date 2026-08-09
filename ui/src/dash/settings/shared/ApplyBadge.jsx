@@ -8,7 +8,10 @@
 //
 // Badge legend:
 //   immediate       → green "live"
-//   service-restart → amber "⟳ restart <service>"
+//   service-restart → amber "⟳" icon only — the affected service is in the
+//                     hover title ("Requires restarting <service>…"), not the
+//                     chip text (operator request: the repeated "restart
+//                     hal0-api" label was visual noise on dense pages)
 //   manual-restart  → red "⚠ manual restart"
 //
 // Extracted verbatim from settings.jsx (P3-ui split, phase 1) — no
@@ -34,8 +37,9 @@ export function ApplyBadge({ settingsKey, registry }) {
       className="chip"
       style={{
         fontFamily: "var(--jbm)",
-        fontSize: 10,
-        padding: "2px 8px",
+        fontSize: isServiceRestart ? 13 : 10,
+        lineHeight: isServiceRestart ? 1 : undefined,
+        padding: isServiceRestart ? "2px 6px" : "2px 8px",
         whiteSpace: "nowrap",
         color: isImmediate ? "var(--ok)" : isServiceRestart ? "var(--warn)" : "var(--err)",
         borderColor: isImmediate ? "var(--ok)" : isServiceRestart ? "var(--warn)" : "var(--err)",
@@ -54,7 +58,7 @@ export function ApplyBadge({ settingsKey, registry }) {
       }
     >
       {isImmediate && "live"}
-      {isServiceRestart && (svc ? `⟳ restart ${svc}` : "⟳ restart")}
+      {isServiceRestart && "⟳"}
       {isManualRestart && "⚠ manual restart"}
     </span>
   );
