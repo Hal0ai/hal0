@@ -329,12 +329,33 @@ case "$cmd" in
             fi
             printf 'null'
           }
+          # $1 = a pp_dpm_sclk-style table; prints the current (*-marked)
+          # clock in MHz, or null. The table format is stable amdgpu sysfs:
+          # "N: <mhz>Mhz [*]".
+          _tel_sclk() {
+            local f="$1" line
+            if [[ -n "$f" && -r "$f" ]]; then
+              line="$(grep '\*' "$f" 2>/dev/null | head -n 1)"
+              if [[ "$line" =~ ([0-9]+)[Mm][Hh]z ]]; then
+                printf '%s' "${BASH_REMATCH[1]}"; return 0
+              fi
+            fi
+            printf 'null'
+          }
+          GPU_DEV="${GPU_BUSY_SYSFS:+$(dirname "$GPU_BUSY_SYSFS")/device}"
           while true; do
             TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             GPU_TEMP=$(_tel_num "${GPU_HWMON:+$GPU_HWMON/temp1_input}")
             GPU_POWER=$(_tel_num "${GPU_HWMON:+$GPU_HWMON/power1_average}")
             GPU_BUSY=$(_tel_num "$GPU_BUSY_SYSFS")
-            echo "{\"ts\":\"$TIMESTAMP\",\"temp_c\":$GPU_TEMP,\"power_mw\":$GPU_POWER,\"gpu_busy_pct\":$GPU_BUSY}" >> "$TELEMETRY_FILE"
+            # Memory + current shader clock (Phase 4): schema.Telemetry wants
+            # vram/gtt peaks and a throttle verdict; peaks and the >10% clock
+            # drop are computed by the unprivileged reader from these raw
+            # samples — this sampler stays a dumb 1 Hz recorder.
+            GPU_VRAM=$(_tel_num "${GPU_DEV:+$GPU_DEV/mem_info_vram_used}")
+            GPU_GTT=$(_tel_num "${GPU_DEV:+$GPU_DEV/mem_info_gtt_used}")
+            GPU_SCLK=$(_tel_sclk "${GPU_DEV:+$GPU_DEV/pp_dpm_sclk}")
+            echo "{\"ts\":\"$TIMESTAMP\",\"temp_c\":$GPU_TEMP,\"power_mw\":$GPU_POWER,\"gpu_busy_pct\":$GPU_BUSY,\"vram_b\":$GPU_VRAM,\"gtt_b\":$GPU_GTT,\"sclk_mhz\":$GPU_SCLK}" >> "$TELEMETRY_FILE"
             sleep 1
           done
         ) &
