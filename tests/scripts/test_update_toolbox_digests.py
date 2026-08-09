@@ -160,7 +160,5 @@ def test_missing_tag_still_nulls(tmp_path: Path, offline_path: str) -> None:
 
 
 def test_bash_syntax_check() -> None:
-    proc = subprocess.run(
-        ["bash", "-n", str(_SCRIPT)], capture_output=True, text=True, check=False
-    )
+    proc = subprocess.run(["bash", "-n", str(_SCRIPT)], capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
