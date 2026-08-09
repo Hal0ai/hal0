@@ -43,36 +43,15 @@ def _recorder():
     return calls, _run
 
 
-# ── write_unit ─────────────────────────────────────────────────────────────
+# ── write_unit is gone (#1740) ─────────────────────────────────────────────
 
 
-def test_write_unit_direct_when_not_hal0_user(tmp_path: Path) -> None:
-    calls, run = _recorder()
-    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
-    unit = tmp_path / "hal0-slot@chat.service"
-
-    seam.write_unit(unit, "[Unit]\n")
-
-    assert unit.read_text() == "[Unit]\n"
-    assert calls == []  # never shelled out
-
-
-def test_write_unit_routes_through_seam_when_hal0_user(tmp_path: Path) -> None:
-    calls, run = _recorder()
-    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
-    unit = tmp_path / "hal0-slot@chat.service"
-
-    seam.write_unit(unit, "[Unit]\n")
-
-    assert not unit.exists()  # never written directly
-    assert calls == [["sudo", "-n", SEAM_BIN, "write-unit", "chat"]]
-
-
-def test_write_unit_rejects_non_slot_unit_name(tmp_path: Path) -> None:
-    _, run = _recorder()
-    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
-    with pytest.raises(ValueError, match="not a hal0-slot@ unit"):
-        seam.write_unit(tmp_path / "hal0-api.service", "[Unit]\n")
+def test_write_unit_is_removed() -> None:
+    """``write_unit``/``write-unit`` shipped an unvalidated body to a root-owned
+    ``/etc/systemd/system/*.service``. P3-quadlet left it without a producer —
+    ``_render_quadlet_from_plan`` emits a ``.container`` — so there was no
+    render contract to allow-list against and the verb was deleted outright."""
+    assert not hasattr(SystemCtlSeam, "write_unit")
 
 
 # ── write_quadlet / remove_quadlet (P3-quadlet) ──────────────────────────────

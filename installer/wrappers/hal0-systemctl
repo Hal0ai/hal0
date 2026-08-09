@@ -34,6 +34,37 @@
 # validate_dropin_body below. The unprivileged caller's own templating is a
 # convenience, never a control.
 #
+# QUADLET CONTENT (#1740): the same hole was still open one case arm below.
+# `write-quadlet` installed its whole stdin verbatim as a root-owned
+# /etc/containers/systemd/hal0-slot@<id>.container. A .container file is NOT
+# just a container spec: podman's generator copies its `[Unit]`, `[Service]`
+# and `[Install]` sections through VERBATIM into the generated system unit, so
+# a `[Service]` with `ExecStartPre=/bin/sh -c '…'` plus this wrapper's own
+# `daemon-reload` + `start` verbs was an unconditional root exec — no container
+# involved. `write-unit` (a raw /etc/systemd/system/*.service write) was the
+# same hole with no validation possible at all; it had no producer left after
+# P3-quadlet and is DELETED rather than guessed at. What remains is
+# validate_quadlet_body below: an allow-list of exactly the sections, keys and
+# value shapes _render_quadlet_from_plan (src/hal0/providers/container.py)
+# emits, and — as with the drop-ins — the validated RECONSTRUCTION is what is
+# written, never raw stdin.
+#
+# HONEST BOUNDARY (read this before calling the seam a sandbox): the allow-list
+# removes the DIRECT host-side exec primitive — no host `[Service]`/`[Unit]`
+# directive beyond the five/three fixed ones, no `Exec*=` on the host side, no
+# `User=`/`Group=`, no second section, no `[Install] WantedBy=` other than
+# hal0.target. It does NOT make an hal0-account compromise non-root-equivalent:
+# `[Container]` legitimately carries `Image=`, `Volume=`, `AddDevice=`,
+# `PodmanArgs=` and `Exec=`, whose values are operator/config-derived and cannot
+# be pinned here (the model-store and data roots are runtime config, and a
+# path allow-list would be bypassable via a symlink under a root the hal0 user
+# already owns). Slots run under ROOTFUL podman, so anyone who can author a
+# slot's container spec can mount host paths into a container they control.
+# That is a property of the slot feature itself, not of this wrapper; the
+# containment for it is "run slots rootless / pin mount roots", tracked
+# separately. Claim only what is true: this seam is a *syntactic* boundary on
+# the unit file, and a hard boundary against direct host exec.
+#
 # NOTE: the iptables FORWARD-chain repair the original P3-perms design doc
 # sketched for this seam is NOT needed — that repair already runs as its own
 # independent root oneshot unit (packaging/systemd/hal0-podman-forward.service,
@@ -213,14 +244,193 @@ validate_dropin_body() {  # arg: kind (gateway|hindsight); body on stdin
   DROPIN_BODY="$out"
 }
 
+# ── quadlet content allow-list (#1740) ─────────────────────────────────────
+#
+# Root-side validation for `write-quadlet`. Same design as the drop-in
+# allow-list above — closed key set, pinned value charsets, validated
+# reconstruction written instead of raw stdin — but over the richer grammar
+# `_render_quadlet_from_plan` actually emits:
+#
+#   # comment lines (the two generated-by banners)
+#   [Unit]      Description= StartLimitIntervalSec= StartLimitBurst=
+#   [Container] Image= ContainerName= LogDriver= Network= AddDevice=
+#               AddCapability= PodmanArgs= Volume= Environment= PublishPort=
+#               HealthCmd= HealthStartPeriod= HealthInterval= HealthRetries=
+#               HealthTimeout= Exec=
+#   [Service]   Restart= RestartSec= SyslogIdentifier= StandardOutput=
+#               StandardError=
+#   [Install]   WantedBy=hal0.target        (omitted when autoload = false)
+#
+# Sections may appear at most once and only in that order; [Container] is
+# mandatory. Every other section (`[Unit]`-lookalikes, a second `[Service]`,
+# `[Path]`, `[Timer]`, …) and every key outside its section's list is refused,
+# which is what closes the ExecStartPre/User=root smuggling path. Leading
+# whitespace, `Key = v`, `;` comments, CR/tab/NUL and any other control byte,
+# and a trailing backslash (systemd line continuation, which would hide a
+# second logical directive on a value line) are all refused too.
+#
+# See the HONEST BOUNDARY note in the header for what this deliberately does
+# NOT claim: [Container] values are config-derived and only charset-pinned.
+
+QUADLET_BODY=""
+
+_QUADLET_MAX_LINES=400
+_QUADLET_MAX_LINE=4096
+
+# Value patterns, kept as named variables so the case arms below read as a
+# table and the regexes are not re-quoted per use.
+_QRE_DESCRIPTION='^hal0 container inference slot \([A-Za-z0-9_.-]{1,64}\)$'
+_QRE_UINT='^[0-9]{1,9}$'
+_QRE_IMAGE='^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$'
+_QRE_CTRNAME='^hal0-slot-[A-Za-z0-9_.-]{1,64}$'
+_QRE_NETWORK='^[A-Za-z0-9_.:-]{1,64}$'
+_QRE_DEVICE='^[A-Za-z0-9_./:=-]{1,255}$'
+_QRE_CAP='^[A-Za-z0-9_]{1,64}$'
+_QRE_VOLUME='^[A-Za-z0-9_./:,+@%=-]{1,512}$'
+_QRE_ENV='^[A-Za-z_][A-Za-z0-9_]*=.{0,1024}$'
+# host:hostport:ctrport. The host is [slots].publish_host, which its schema
+# validator (_publish_host_sane) already constrains to a bare IPv4 or hostname
+# — no spaces, ':' or '/' — so the host segment here is colon-free; IPv6
+# literals are unsupported at that layer. A bare-IPv4-only charset would
+# false-reject the documented hostname case (e.g. hal0.local) and brick every
+# bridge-mode slot on such a box.
+_QRE_PUBLISH='^[A-Za-z0-9._-]{1,253}:[0-9]{1,5}:[0-9]{1,5}$'
+_QRE_DURATION='^[0-9]{1,9}(ns|us|ms|s|m|h|d|w)?$'
+_QRE_RETRIES='^[0-9]{1,4}$'
+_QRE_RESTART='^(always|on-failure|no)$'
+_QRE_WANTEDBY='^hal0\.target$'
+
+_quadlet_die() { die "quadlet rejected: $1"; }
+
+validate_quadlet_directive() {  # args: section, "Key=Value" line
+  local section="$1" line="$2" key value
+  [[ "$line" == *=* ]] || _quadlet_die "not a Key=Value directive: $line"
+  key="${line%%=*}"
+  value="${line#*=}"
+  # No spaces, no tabs, no quoting around the key: `Key = v` / ` Key=v` are
+  # refused rather than normalised, so there is one accepted spelling per
+  # directive and no second parse to disagree with systemd's.
+  [[ "$key" =~ ^[A-Za-z][A-Za-z0-9]*$ ]] || _quadlet_die "bad directive key: $key"
+
+  case "${section}|${key}" in
+    # ── [Unit] ──────────────────────────────────────────────────────────
+    # Only the three the renderer emits. Notably absent, and refused:
+    # OnFailure=, Requires=, ConditionPathExists= and every other unit key.
+    'Unit|Description')            [[ "$value" =~ $_QRE_DESCRIPTION ]] || _quadlet_die "bad Description: $value" ;;
+    'Unit|StartLimitIntervalSec')  [[ "$value" =~ $_QRE_UINT ]]        || _quadlet_die "bad StartLimitIntervalSec: $value" ;;
+    'Unit|StartLimitBurst')        [[ "$value" =~ $_QRE_UINT ]]        || _quadlet_die "bad StartLimitBurst: $value" ;;
+
+    # ── [Container] ─────────────────────────────────────────────────────
+    # Charset-pinned, not semantics-pinned — see the HONEST BOUNDARY note.
+    'Container|Image')          [[ "$value" =~ $_QRE_IMAGE ]]    || _quadlet_die "bad Image: $value" ;;
+    'Container|ContainerName')  [[ "$value" =~ $_QRE_CTRNAME ]]  || _quadlet_die "bad ContainerName: $value" ;;
+    'Container|LogDriver')      [[ "$value" == "none" ]]         || _quadlet_die "bad LogDriver: $value" ;;
+    'Container|Network')        [[ "$value" =~ $_QRE_NETWORK ]]  || _quadlet_die "bad Network: $value" ;;
+    'Container|AddDevice')
+      [[ "$value" =~ $_QRE_DEVICE ]] || _quadlet_die "bad AddDevice: $value"
+      [[ "$value" != *".."* ]] || _quadlet_die "AddDevice traversal: $value"
+      ;;
+    'Container|AddCapability')  [[ "$value" =~ $_QRE_CAP ]]      || _quadlet_die "bad AddCapability: $value" ;;
+    'Container|Volume')
+      [[ "$value" =~ $_QRE_VOLUME ]] || _quadlet_die "bad Volume: $value"
+      [[ "$value" != *".."* ]] || _quadlet_die "Volume traversal: $value"
+      ;;
+    'Container|Environment')    [[ "$value" =~ $_QRE_ENV ]]      || _quadlet_die "bad Environment: $value" ;;
+    'Container|PublishPort')    [[ "$value" =~ $_QRE_PUBLISH ]]  || _quadlet_die "bad PublishPort: $value" ;;
+    'Container|HealthCmd')      [[ -n "$value" ]]                || _quadlet_die "empty HealthCmd" ;;
+    'Container|HealthStartPeriod'|'Container|HealthInterval'|'Container|HealthTimeout')
+      [[ "$value" =~ $_QRE_DURATION ]] || _quadlet_die "bad $key: $value" ;;
+    'Container|HealthRetries')  [[ "$value" =~ $_QRE_RETRIES ]]  || _quadlet_die "bad HealthRetries: $value" ;;
+    # PodmanArgs= is podman's own flag passthrough (--group-add/--security-opt,
+    # plus the deprecated extra_args escape hatch) and Exec= is the argv INSIDE
+    # the container. Neither has a fixed shape in the render contract, so both
+    # are bounded (non-empty, control-byte-free, length-capped by the per-line
+    # check) and nothing more. Constraining them further would buy nothing while
+    # Volume=/AddDevice= remain open — see HONEST BOUNDARY.
+    'Container|PodmanArgs')     [[ -n "$value" ]]                || _quadlet_die "empty PodmanArgs" ;;
+    'Container|Exec')           [[ -n "$value" ]]                || _quadlet_die "empty Exec" ;;
+
+    # ── [Service] ───────────────────────────────────────────────────────
+    # Copied VERBATIM into the generated system unit by podman's quadlet
+    # generator — i.e. host-side root. Exactly the five the renderer emits;
+    # every Exec*=, User=, Group=, WorkingDirectory=, … lands in the default
+    # arm below and dies.
+    'Service|Restart')           [[ "$value" =~ $_QRE_RESTART ]] || _quadlet_die "bad Restart: $value" ;;
+    'Service|RestartSec')        [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSec: $value" ;;
+    'Service|SyslogIdentifier')  [[ "$value" =~ $_QRE_CTRNAME ]] || _quadlet_die "bad SyslogIdentifier: $value" ;;
+    'Service|StandardOutput')    [[ "$value" == "journal" ]]     || _quadlet_die "bad StandardOutput: $value" ;;
+    'Service|StandardError')     [[ "$value" == "journal" ]]     || _quadlet_die "bad StandardError: $value" ;;
+
+    # ── [Install] ───────────────────────────────────────────────────────
+    # hal0.target only: a WantedBy= on any other target would let a slot unit
+    # be pulled into an arbitrary boot path.
+    'Install|WantedBy')          [[ "$value" =~ $_QRE_WANTEDBY ]] || _quadlet_die "bad WantedBy: $value" ;;
+
+    *) _quadlet_die "directive not allowed in [$section]: $key" ;;
+  esac
+}
+
+validate_quadlet_body() {  # body on stdin -> QUADLET_BODY
+  local LC_ALL=C
+  local line out="" section="" rank=0 next_rank directives=0 seen_container=0
+  local -a lines=()
+
+  mapfile -t lines
+  (( ${#lines[@]} <= _QUADLET_MAX_LINES )) \
+    || _quadlet_die "too many lines (${#lines[@]} > ${_QUADLET_MAX_LINES})"
+
+  for line in "${lines[@]}"; do
+    (( ${#line} <= _QUADLET_MAX_LINE )) || _quadlet_die "line too long (${#line} bytes)"
+    # One check kills CR, tab, NUL and the rest of C0/DEL, so nothing can
+    # smuggle a second logical line or an invisible directive. High bytes stay
+    # legal (the banner comments and Description= are UTF-8 prose).
+    [[ ! "$line" =~ [[:cntrl:]] ]] || _quadlet_die "control byte in line: $line"
+    [[ "$line" != *\\ ]] || _quadlet_die "line continuation: $line"
+
+    case "$line" in
+      "")   ;;                                          # blank line
+      "#"*) ;;                                          # banner comment
+      "["*)
+        case "$line" in
+          "[Unit]")      next_rank=1 ;;
+          "[Container]") next_rank=2; seen_container=1 ;;
+          "[Service]")   next_rank=3 ;;
+          "[Install]")   next_rank=4 ;;
+          *) _quadlet_die "section not allowed: $line" ;;
+        esac
+        # Strictly increasing: each section at most once, and only in the
+        # order the renderer emits them. A second [Service] (the classic
+        # override-smuggling trick) fails here even though [Service] itself
+        # is a legal section.
+        (( next_rank > rank )) || _quadlet_die "section out of order or duplicated: $line"
+        rank=$next_rank
+        section="${line:1:${#line}-2}"
+        ;;
+      *)
+        [[ -n "$section" ]] || _quadlet_die "directive before any section: $line"
+        validate_quadlet_directive "$section" "$line"
+        directives=$(( directives + 1 ))
+        ;;
+    esac
+    out+="${line}"$'\n'
+  done
+
+  (( seen_container == 1 )) || _quadlet_die "no [Container] section"
+  (( directives > 0 )) || _quadlet_die "no allowed directives in body"
+  QUADLET_BODY="$out"
+}
+
 cmd="${1:-help}"; shift || true
 
 case "$cmd" in
-  write-unit)                 # write-unit <slot-id>   (unit body on stdin)
-    id="${1:-}"; validate_slot_id "$id"
-    path="${UNIT_DIR}/${UNIT_PREFIX}${id}.service"
-    install -m 0644 -o root -g root /dev/stdin "$path"
-    ;;
+  # write-unit was REMOVED in #1740. It installed an unvalidated stdin as a
+  # root-owned /etc/systemd/system/hal0-slot@<id>.service — an unconditional
+  # root exec primitive — and P3-quadlet left it with no producer at all: the
+  # sole renderer of slot-unit text (_render_quadlet_from_plan) emits a
+  # `.container`, written through write-quadlet. There is no render contract
+  # left to derive an allow-list from, so the verb is deleted rather than
+  # guessed at. remove-unit stays: it only ever rm -f's a pinned name, and
+  # legacy pre-quadlet .service files still need cleaning up.
 
   remove-unit)                # remove-unit <slot-id>   (rm -f semantics: ok if absent)
     id="${1:-}"; validate_slot_id "$id"
@@ -228,9 +438,24 @@ case "$cmd" in
     ;;
 
   write-quadlet)              # write-quadlet <slot-id>   (.container body on stdin)
+    # #1740: the body is allow-listed BEFORE anything is created, and what
+    # lands in /etc/containers/systemd is the validated reconstruction
+    # ($QUADLET_BODY), never raw stdin. Atomic (tmp + mv) like the drop-in
+    # arms — `install /dev/stdin` misbehaves overwriting an existing target
+    # when the source is a pipe, and a half-written .container would make the
+    # next daemon-reload drop the slot's generated unit entirely.
     id="${1:-}"; validate_slot_id "$id"
+    validate_quadlet_body
+    quadlet_path="${QUADLET_DIR}/${UNIT_PREFIX}${id}.container"
     install -d -m 0755 -o root -g root "$QUADLET_DIR"
-    install -m 0644 -o root -g root /dev/stdin "${QUADLET_DIR}/${UNIT_PREFIX}${id}.container"
+    umask 022
+    tmp="$(mktemp "${quadlet_path}.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    printf '%s' "$QUADLET_BODY" > "$tmp"
+    chown root:root "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$quadlet_path"
+    trap - EXIT
     ;;
 
   remove-quadlet)             # remove-quadlet <slot-id>   (rm -f semantics: ok if absent)
@@ -287,6 +512,18 @@ case "$cmd" in
     kind="${1:-}"
     validate_dropin_body "$kind"
     printf '%s' "$DROPIN_BODY"
+    ;;
+
+  check-quadlet)              # check-quadlet [<slot-id>]   (.container body on stdin)
+    # Side-effect-free dry run of the #1740 allow-list: validates the optional
+    # slot id and the body, then echoes back exactly what a write would
+    # persist, or dies 64 with the reason. Writes nothing, touches no unit,
+    # reloads nothing — it exists so the allow-list can be exercised (by the
+    # test suite against the SHIPPED bash, and by an operator debugging a
+    # rejected unit) without a privileged write.
+    if (( $# > 0 )); then validate_slot_id "${1:-}"; fi
+    validate_quadlet_body
+    printf '%s' "$QUADLET_BODY"
     ;;
 
   daemon-reload)
@@ -357,13 +594,13 @@ case "$cmd" in
   help|"")
     cat <<EOF
 usage: hal0-systemctl <command> [slot-id|agent-id]
-  write-unit <slot-id>             write ${UNIT_DIR}/${UNIT_PREFIX}<id>.service (body on stdin)
-  remove-unit <slot-id>            rm -f ${UNIT_DIR}/${UNIT_PREFIX}<id>.service
-  write-quadlet <slot-id>          write ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container (body on stdin)
+  remove-unit <slot-id>            rm -f ${UNIT_DIR}/${UNIT_PREFIX}<id>.service (legacy pre-quadlet)
+  write-quadlet <slot-id>          write ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container (allow-listed body on stdin)
   remove-quadlet <slot-id>         rm -f ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container
   write-gateway-dropin             write ${GATEWAY_DROPIN_FILE} (body on stdin)
   write-hindsight-dropin           write ${HINDSIGHT_DROPIN_FILE} (body on stdin)
   check-dropin <gateway|hindsight> validate a drop-in body (stdin) without writing it
+  check-quadlet [<slot-id>]        validate a .container body (stdin) without writing it
   daemon-reload                    systemctl daemon-reload
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
   enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service

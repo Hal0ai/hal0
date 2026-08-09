@@ -75,6 +75,25 @@ applying. Add those subsections to a version's section to surface them; see
   loud error and nothing is written. The wrapper persists the validated
   reconstruction rather than raw stdin, and a new side-effect-free
   `check-dropin <gateway|hindsight>` verb dry-runs the allow-list.
+- The same wrapper's `write-quadlet` verb now allow-lists its body too, and the
+  raw-stdin `write-unit` verb is **removed**. A `.container` file is not just a
+  container spec — podman's quadlet generator copies its `[Unit]`, `[Service]`
+  and `[Install]` sections verbatim into the generated system unit — so an
+  unvalidated body meant a process compromised as the unprivileged `hal0`
+  account could write `[Service] ExecStartPre=/bin/sh -c '…'`, then use the
+  wrapper's own `daemon-reload` + `start` verbs for an unconditional root exec.
+  The root side now accepts only the sections, directive keys and value shapes
+  the one renderer (`_render_quadlet_from_plan`) emits, in that order, each at
+  most once, and writes its own validated reconstruction. `write-unit` had no
+  producer left after the Quadlet migration and no render contract to
+  allow-list against, so it was deleted rather than guessed at. A new
+  side-effect-free `check-quadlet [<slot-id>]` verb dry-runs the allow-list.
+  **Scope, stated honestly:** this closes the direct host-side exec primitive;
+  it does not make an `hal0`-account compromise non-root-equivalent, because
+  slots run under rootful podman and a slot's `[Container]` section
+  legitimately carries config-derived `Image=`/`Volume=`/`AddDevice=`/
+  `PodmanArgs=`/`Exec=` values. Containing *that* means running slots rootless
+  or pinning mount roots.
 
 ### Fixed
 
