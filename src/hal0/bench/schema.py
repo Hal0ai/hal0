@@ -75,11 +75,16 @@ class Engine:
     and ``llamacpp_build`` are identity: a rebuilt runner image measures a
     different thing even with identical argv (DESIGN §3 provenance)."""
 
-    kind: str = "llama-bench"  # "llama-bench" | "llama-server"
+    kind: str = "llama-bench"  # "llama-bench" | "llama-server" | an adapter tool name
     image: str = ""
     image_digest: str = ""
     llamacpp_build: str = ""
     decode_tune: str = ""
+    # Load-gen/eval tool + version for adapter-produced records (Phase 3:
+    # guidellm / llama-benchy / tool-eval-bench). Empty for the in-container
+    # llama-bench path. Display + comparability provenance, not identity —
+    # cell_key stays a function of the measured engine, not the measurer.
+    tool_version: str = ""
 
 
 @dataclass
