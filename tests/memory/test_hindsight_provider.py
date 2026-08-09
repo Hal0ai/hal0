@@ -598,7 +598,7 @@ async def test_list_items_last_page_has_no_cursor():
 # permanently unreachable through pagination.
 
 
-async def _seed_acl_mixed_bank(fake: "FakeHindsightClient", total: int, client_id: str) -> int:
+async def _seed_acl_mixed_bank(fake: FakeHindsightClient, total: int, client_id: str) -> int:
     """Retain ``total`` shared-bank docs; every raw index with ``i % 5 in (0, 1)``
     belongs to another agent under ``visibility:private`` (invisible to
     ``client_id``); the rest are ordinary visible shared docs. Returns the
