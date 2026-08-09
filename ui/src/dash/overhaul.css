@@ -1641,6 +1641,10 @@
 }
 .th-digits.c3 { grid-template-columns: repeat(3, 1fr); }
 .th-digits.c2 { grid-template-columns: repeat(2, 1fr); }
+/* A tall neighbour (the NPU tile's stacked owner tags) must not float the
+   other digits to the top of the stretched row — keep values baseline-low,
+   where they sat when every cell was one line high. */
+.th-digits > .th-digit { align-self: end; }
 .th-digit .v {
   font-family: var(--jbm);
   font-size: 22px;
@@ -1763,9 +1767,14 @@
   text-transform: uppercase;
   color: var(--fg-5);
 }
+/* Owner tags stack vertically so each name ("stt-npu", "embed-npu") gets a
+   full single line instead of wrapping/truncating in the inline row. */
 .th-tags {
   display: flex;
-  gap: 5px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  min-width: 0;
 }
 .th-tag {
   display: inline-flex;
@@ -1777,6 +1786,7 @@
   border-radius: 3px;
   font-family: var(--jbm);
   font-size: 10px;
+  white-space: nowrap;
 }
 .th-tag .sw {
   width: 7px;
