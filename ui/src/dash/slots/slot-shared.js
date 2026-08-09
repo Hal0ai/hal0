@@ -7,6 +7,8 @@
 // create picker (which picks the model first, so it can't pre-filter by type).
 
 import { normalizeApiModel, isUpstreamModel } from '@/lib/normalizeApiModel'
+import { devKind } from '@/lib/deviceMeta'
+import { isNpuShadowSlot } from '../npu-modality.js'
 
 // Local (non-upstream) models a slot can bind — a slot binds a local file path,
 // so upstream-advertised rows (no local path) are excluded. Unlike
@@ -58,6 +60,26 @@ export function slotModelRow(slot, models) {
   const exact = rows.find((m) => m?.id === id);
   if (exact) return exact;
   return rows.find((m) => Array.isArray(m?.aliases) && m.aliases.includes(id)) || null;
+}
+
+// The NPU trio's anchor slot, resolved STRUCTURALLY — the non-shadow NPU
+// llm slot — never by stripping a `-stt`/`-embed` suffix off a display
+// name. #1637 hardened the occupancy card's pills this way ("on a renamed
+// or legacy-named anchor every pill click silently no-op'd"); #1662 gives
+// the shadow drawer's "open anchor" link the same structural resolution so
+// a renamed anchor ('flm' → 'npu') doesn't leave old shadows pointing at a
+// name-derived link to a slot that no longer exists (reconcile_trio_slots
+// names NEW shadows after the anchor but never renames pre-existing ones).
+// Returns null when no anchor is present in the list (e.g. still loading).
+export function npuAnchorSlot(slots) {
+  const npuSlots = (slots ?? []).filter(
+    (s) => s?.device_class === 'npu' || devKind(s?.device) === 'npu',
+  );
+  return (
+    npuSlots.find((s) => !isNpuShadowSlot(s) && s.type === 'llm') ||
+    npuSlots.find((s) => !isNpuShadowSlot(s)) ||
+    null
+  );
 }
 
 // The short device label + hue token for a device string (chip / teach copy).

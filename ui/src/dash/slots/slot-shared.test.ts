@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest'
 
 // slot-shared.js is untyped JS; tsconfig has allowJs with checkJs:false, so the
 // import resolves and the exports come through as `any`.
-import { slotModelId, slotModelRow } from './slot-shared.js'
+import { slotModelId, slotModelRow, npuAnchorSlot } from './slot-shared.js'
 
 const ROWS = [
   { id: 'qwen3.6-27b', name: 'Qwen3.6 27B', type: 'llm' },
@@ -76,5 +76,47 @@ describe('slotModelRow', () => {
   it('tolerates rows with a non-array `aliases`', () => {
     const rows = [{ id: 'x', aliases: 'not-an-array' }]
     expect(slotModelRow({ model_id: 'gone' }, rows)).toBeNull()
+  })
+})
+
+describe('npuAnchorSlot', () => {
+  it('resolves the non-shadow llm slot as the anchor, by canonical name', () => {
+    const slots = [
+      { name: 'flm', type: 'llm', device: 'npu' },
+      { name: 'flm-stt', type: 'transcription', device: 'npu' },
+      { name: 'flm-embed', type: 'embedding', device: 'npu' },
+    ]
+    expect(npuAnchorSlot(slots)?.name).toBe('flm')
+  })
+
+  it('resolves the RENAMED anchor structurally, not by the legacy shadow names (#1662)', () => {
+    // reconcile_trio_slots names NEW shadows after the anchor but never
+    // renames pre-existing ones — the shadows below still carry the OLD
+    // 'flm-*' names even though the anchor itself is now 'npu'.
+    const slots = [
+      { name: 'npu', type: 'llm', device: 'npu' },
+      { name: 'flm-stt', type: 'transcription', device: 'npu' },
+      { name: 'flm-embed', type: 'embedding', device: 'npu' },
+    ]
+    expect(npuAnchorSlot(slots)?.name).toBe('npu')
+  })
+
+  it('ignores non-NPU slots entirely', () => {
+    const slots = [
+      { name: 'chat', type: 'llm', device: 'rocm' },
+      { name: 'flm', type: 'llm', device: 'npu' },
+    ]
+    expect(npuAnchorSlot(slots)?.name).toBe('flm')
+  })
+
+  it('falls back to device_class when `device` is absent', () => {
+    const slots = [{ name: 'npu', type: 'llm', device_class: 'npu' }]
+    expect(npuAnchorSlot(slots)?.name).toBe('npu')
+  })
+
+  it('returns null when no anchor is present (still loading / no trio)', () => {
+    expect(npuAnchorSlot([])).toBeNull()
+    expect(npuAnchorSlot(undefined)).toBeNull()
+    expect(npuAnchorSlot([{ name: 'flm-stt', type: 'transcription', device: 'npu' }])).toBeNull()
   })
 })
