@@ -30,6 +30,29 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Security
 
+- The privileged update stage no longer downloads, verifies and extracts the
+  release tarball out of the service-writable `/var/lib/hal0/cache/<version>/`
+  (#1738). That directory is `hal0:hal0` `0o2775` with no sticky bit, and the
+  post-stage ownership restore hands it back to the service account, so a
+  process compromised as `hal0` could substitute its own tarball in the window
+  between `cosign verify-blob` exiting and root calling `tarfile.open` — and
+  root would extract and `pip install` it. Staging now happens in a root-only
+  `0700` directory created under the install root and destroyed when the stage
+  ends, and the authenticated `digest_sha256` is re-derived from the very file
+  object the archive is read out of, so the bytes cosign accepted are provably
+  the bytes that land on disk. The cache directory now holds only the verified
+  manifest that `commit()` re-reads.
+- An interrupted extraction no longer wedges a version permanently. A killed
+  `extractall` used to leave the destination holding just the un-flattened
+  `hal0-<version>/` prefix, which the "is this a prior hal0 install" check did
+  not recognise, so every retry refused to extract over a non-empty directory —
+  unrecoverable for the unprivileged daemon, since the wedged tree is
+  root-owned. Extraction now drops a `.hal0-staging` sentinel for its duration
+  and the check also recognises an un-flattened prefix directory, so an
+  incomplete tree is quarantined and retried. The `.stale-<ts>` quarantine
+  directories, which accumulated one whole install tree per retry and were
+  never cleaned up, are now reaped: the newest three are kept for recovery and
+  anything older than 30 days goes.
 - The privileged `hal0-systemctl` wrapper now allow-lists the *content* of the
   two systemd drop-ins it writes as root (`write-gateway-dropin`,
   `write-hindsight-dropin`). Both verbs take their whole payload on stdin, and

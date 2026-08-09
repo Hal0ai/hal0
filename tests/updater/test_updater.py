@@ -754,19 +754,24 @@ def test_preview_check_and_prepare_exercise_cosign_subprocess_without_activation
         ]
 
     artifact_call = verification_calls[4]
-    cached_tarball = updater_module._cache_dir(version) / f"hal0-{version}.tar.gz"
-    assert artifact_call["blob"] == str(cached_tarball)
-    assert artifact_call["bundle"] == f"{cached_tarball}.bundle"
+    # #1738: the artifact is verified inside a root-only staging dir under the
+    # install root, never in the service-writable /var/lib/hal0 cache.
+    staged_tarball = Path(artifact_call["blob"])
+    assert staged_tarball.name == f"hal0-{version}.tar.gz"
+    assert staged_tarball.parent.name.startswith(".stage-")
+    assert staged_tarball.parent.parent == updater_module._usr_lib_root()
+    assert updater_module._cache_dir(version) not in staged_tarball.parents
+    assert artifact_call["bundle"] == f"{staged_tarball}.bundle"
     assert artifact_call["blob_sha256"] == _sha256_of(synthetic_preview_release["tarball"])
     assert artifact_call["args"] == [
         "verify-blob",
         "--bundle",
-        str(Path(f"{cached_tarball}.bundle")),
+        str(Path(f"{staged_tarball}.bundle")),
         "--certificate-identity-regexp",
         payload["signer_identity"],
         "--certificate-oidc-issuer",
         payload["signer_issuer"],
-        str(cached_tarball),
+        str(staged_tarball),
     ]
 
 
