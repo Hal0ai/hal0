@@ -338,6 +338,37 @@ async def test_unified_private_list_returns_to_owner_only():
 
 
 @pytest.mark.asyncio
+async def test_unified_private_only_list_excludes_public_shared_docs():
+    """#1654: a read that asks for ``private:<agent>`` ALONE (no ``shared``)
+    must return only that agent's private docs — NOT every public shared
+    doc too. ``_is_visible_to`` only enforces private OWNERSHIP and passes
+    every non-private doc unconditionally, so without this private-only
+    scoping a ``private:<agent>``-only request silently degrades to the
+    same result as a ``shared`` request (this is what the per-agent
+    memory-stats chip hits — codex review on #1654's fix PR)."""
+    p = _unified(client_id="hermes")
+    await p.add("hermes secret", dataset="private:hermes", client_id="hermes")
+    await p.add("public from hermes", dataset="shared", client_id="hermes")
+    await p.add("public from scribe", dataset="shared", client_id="scribe")
+
+    private_only = {
+        i["text"]
+        for i in (await p.list_items(dataset="private:hermes", client_id="hermes"))["items"]
+    }
+    assert private_only == {"hermes secret"}
+
+    # A mixed request (private + shared) is NOT private-only — it still
+    # wants the ordinary union.
+    mixed = {
+        i["text"]
+        for i in (await p.list_items(dataset=["private:hermes", "shared"], client_id="hermes"))[
+            "items"
+        ]
+    }
+    assert mixed == {"hermes secret", "public from hermes", "public from scribe"}
+
+
+@pytest.mark.asyncio
 async def test_legacy_multibank_private_recall_not_over_filtered():
     """Legacy multi-bank mode relies on per-bank ACL, not the tag, so a private
     doc carrying a custom (non-matching) agent tag must still come back to its

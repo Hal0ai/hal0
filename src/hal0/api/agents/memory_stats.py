@@ -170,6 +170,7 @@ async def get_agent_memory_stats(agent_id: str, request: Request) -> dict[str, A
             dataset=namespace,
             cursor=None,
             limit=_LIST_PAGE_LIMIT,
+            client_id=agent_id,
         )
     except Exception as exc:
         # Wrapper failures shouldn't 500 the sidebar chip — surface as

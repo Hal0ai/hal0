@@ -41,8 +41,11 @@ class _FakeWrapper:
         dataset: str = "shared",
         cursor: str | None = None,
         limit: int = 50,
+        client_id: str | None = None,
     ) -> dict[str, Any]:
-        self.calls.append({"dataset": dataset, "cursor": cursor, "limit": limit})
+        self.calls.append(
+            {"dataset": dataset, "cursor": cursor, "limit": limit, "client_id": client_id}
+        )
         if self.exc is not None:
             raise self.exc
         return self.payload
@@ -170,6 +173,22 @@ def test_memory_stats_namespace_is_per_agent_private(client: TestClient) -> None
 
     client.get("/api/agents/hermes/memory/stats")
     assert fake.calls[0]["dataset"] == "private:hermes"
+
+
+def test_memory_stats_passes_client_id_for_unified_bank_scoping(client: TestClient) -> None:
+    """#1654: without ``client_id``, unified-bank mode collapses
+    ``private:<agent>`` to ``shared`` and resolves the caller as
+    "unknown" — every private doc gets filtered OUT (owner mismatch)
+    while every ordinary shared doc passes straight through, so the
+    chip reports the whole shared bank instead of this agent's writes.
+    Every other caller (routes/memory.py, mcp/memory.py) passes
+    ``client_id`` — this endpoint must too.
+    """
+    fake = _FakeWrapper()
+    client.app.state.memory_provider = fake
+
+    client.get("/api/agents/hermes/memory/stats")
+    assert fake.calls[0]["client_id"] == "hermes"
 
 
 def test_memory_stats_handles_malformed_payload_gracefully(client: TestClient) -> None:
