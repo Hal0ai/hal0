@@ -18,7 +18,8 @@ composition, no retries, no shell evaluation — the grant in
 | `/usr/lib/hal0/bin/hal0-benchctl` | `root:root 0755` | the seam — validates the composed argv, execs it |
 | `/etc/sudoers.d/hal0-benchctl` | `root:root 0440` | `hal0 ALL=(root) NOPASSWD: …/hal0-benchctl` |
 | `/usr/lib/hal0/bench/server_ab.py` | `root:root` | the Tier-B server-level A/B harness (only script left under here — everything else is `src/hal0/bench`) |
-| `/var/lib/hal0-bench/` | `hal0:hal0` | the v2 result store — `records.jsonl` (source of truth), `bench.db` (derived index), `artifacts/` (telemetry, logs) |
+| `/var/lib/hal0-bench/` | `hal0:hal0` | the v2 result store — `records.jsonl` (source of truth), `bench.db` (derived index), `artifacts/` (per-run sweep/server-ab logs, meta.json) |
+| `/var/lib/hal0/benchmarks/v2/artifacts/<run_id>/` | `root:root` | where the `telemetry` verb actually writes its 1 Hz GPU sampler JSON — a separate, older tree from the v2 result store above (see the `telemetry` verb note) |
 
 The seam script itself lives on a **local root-owned path** (not the `/mnt` NFS mount)
 precisely so the agent can't tamper with a script that runs as root. There is no
@@ -68,11 +69,15 @@ Lives ONLY in `hal0.bench.harness.lane_specs()` (a pure dict of `LaneSpec`) — 
 shell config file. Images come from `hal0.config.schema` (`DEFAULT_ROCMFPX_IMAGE`,
 `FALLBACK_VULKAN_IMAGE`).
 
-- `rocm` — rocmfpx image, `/opt/rocmfpx/bin/llama-bench`, `-ub 2048`,
+- `rocm` — rocmfpx image, `/opt/rocmfpx/bin/llama-bench`,
   `GGML_HIP_ENABLE_UNIFIED_MEMORY=1`, `-ngl 99 -dev ROCm0`.
-- `vulkan_radv` — same rocmfpx image + binary, `-ub 512`, `-ngl 99 -dev Vulkan0`.
-- `cpu` — the lean Vulkan/CPU toolbox image, `/usr/local/bin/llama-bench`, `-ub 512`,
+- `vulkan_radv` — same rocmfpx image + binary, `-ngl 99 -dev Vulkan0`.
+- `cpu` — the lean Vulkan/CPU toolbox image, `/usr/local/bin/llama-bench`,
   `-ngl 0`, no device flags.
+
+No lane sets `-ub`: every cell runs at llama-bench's own internal ubatch default (a suite's
+`[[matrix.configs]]` can still pass an explicit `-ub` tuning flag through the whitelist above
+if an operator wants one).
 
 `hal0.bench.harness.default_lanes(tier)` picks `cpu` alone when the device resolver
 reports the CPU tier, else both GPU lanes — the tier-scoped default a suite's

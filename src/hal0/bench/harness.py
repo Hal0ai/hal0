@@ -121,13 +121,20 @@ _COMMON_BENCH_FLAGS: tuple[tuple[str, str], ...] = (("-fa", "1"), ("-mmp", "0"))
 @dataclass(frozen=True)
 class LaneSpec:
     """One backend lane's fixed shape (``config.sh`` ``BACKENDS``): which
-    image/binary runs it, its ubatch default, any extra container env, and the
-    llama-bench flags that pin the device (``-ngl``/``-dev``)."""
+    image/binary runs it, any extra container env, and the llama-bench flags
+    that pin the device (``-ngl``/``-dev``).
+
+    No ``ubatch`` field (finding 6): the v1 harness carried a per-lane
+    ``-ub`` default, but Phase 2 never emitted it as an argv flag — every
+    cell has always run at llama-bench's own internal ubatch default. Rather
+    than start passing ``-ub`` now (a measurement-policy change that would
+    move every rocm/vulkan number and break trend comparison against
+    existing records), the unused field is dropped outright; see
+    ``_build_meta`` for the provenance key this leaves behind."""
 
     lane: str
     image: str
     bench_bin: str
-    ubatch: int
     env: tuple[str, ...]
     dev_args: tuple[tuple[str, str], ...]
 
@@ -147,7 +154,6 @@ def lane_specs() -> dict[str, LaneSpec]:
             lane="rocm",
             image=DEFAULT_ROCMFPX_IMAGE,
             bench_bin="/opt/rocmfpx/bin/llama-bench",
-            ubatch=2048,
             env=("GGML_HIP_ENABLE_UNIFIED_MEMORY=1",),
             dev_args=(("-ngl", "99"), ("-dev", "ROCm0")),
         ),
@@ -155,7 +161,6 @@ def lane_specs() -> dict[str, LaneSpec]:
             lane="vulkan_radv",
             image=DEFAULT_ROCMFPX_IMAGE,
             bench_bin="/opt/rocmfpx/bin/llama-bench",
-            ubatch=512,
             env=(),
             dev_args=(("-ngl", "99"), ("-dev", "Vulkan0")),
         ),
@@ -163,7 +168,6 @@ def lane_specs() -> dict[str, LaneSpec]:
             lane="cpu",
             image=FALLBACK_VULKAN_IMAGE,
             bench_bin="/usr/local/bin/llama-bench",
-            ubatch=512,
             env=(),
             # No -dev pin: the CPU tier's device resolver emits no device
             # flags at all, so there is no backend device to select.
@@ -292,7 +296,11 @@ def _build_meta(
         "tag": "",  # v1 free-form result-file label -> not a v2 concept
         "extra": "",  # v1 free-form --extra string -> flags is structured
         "reps": reps,
-        "ubatch": spec.ubatch,
+        # Legacy key-set compat only (finding 6): the harness never emits
+        # -ub, so every cell runs at llama-bench's own internal ubatch
+        # default. Left as an always-None key rather than removed because
+        # older readers of this dict/schema shape expect the key to exist.
+        "ubatch": None,
         "model_rel": model_rel,
         "model_path": model_path,
         "host": os.environ.get("HOST_LABEL", _DEFAULT_HOST_LABEL),
