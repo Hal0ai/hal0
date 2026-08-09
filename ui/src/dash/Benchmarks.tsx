@@ -52,11 +52,20 @@ interface RosterResponse {
 
 interface CellRow {
   lane: string; depth: number; kind: string;
+  cell_key?: string; trigger?: string; config?: string; run_id?: string;
   decode_ts_med?: number | null;
   record?: { summary?: { decode_ts_med?: number | null; prefill_ts_med?: number | null }; config?: string };
 }
 
-interface HistoryPoint { ts: string; decode_ts_med?: number | null; prefill_ts_med?: number | null }
+interface HistoryPoint {
+  ts: string; decode_ts_med?: number | null; prefill_ts_med?: number | null;
+  config?: string; lane?: string; depth?: number; trigger?: string; cell_key?: string;
+}
+
+interface RegressionFlag {
+  cell_key: string; model_id: string; delta_pct: number;
+  newest_ts: string | null; trailing_median: number | null; run_ids: string[];
+}
 
 interface RunSummary {
   run_id: string; suite: string; trigger: string; model: string | null;
@@ -85,9 +94,24 @@ const runTime = (rid: string): string => (rid || '').slice(11, 16);
 const OUTCOME_COLOR: Record<string, string> = {
   ok: 'var(--ok)',
   'skipped-contended': 'var(--warn)',
-  failed: 'var(--err)', oom: 'var(--err)', hang: 'var(--err)',
+  failed: 'var(--err)',
+  oom: 'var(--dev-vulkan, var(--info))',
 };
 const outcomeColor = (o: string): string => OUTCOME_COLOR[o] || 'var(--fg-4)';
+
+const TRIGGER_COLOR: Record<string, string> = {
+  manual: 'var(--fg-3)', scheduled: 'var(--info)', queue: 'var(--accent)',
+};
+const triggerColor = (t: string): string => TRIGGER_COLOR[t] || 'var(--fg-4)';
+
+function TriggerChip({ t }: { t?: string | null }) {
+  if (!t) return <Dash />;
+  return (
+    <span style={{ ...chipStyle, fontSize: 9, padding: '0.08rem 0.4rem', color: triggerColor(t), background: 'transparent' }}>
+      {t}
+    </span>
+  );
+}
 
 const laneColor = (l: string): string =>
   l === 'rocm' ? 'var(--dev-rocm, var(--err))' : l === 'vulkan_radv' ? 'var(--dev-vulkan, var(--info))' : 'var(--fg-3)';
@@ -266,8 +290,21 @@ function Sparkline({ points }: { points: HistoryPoint[] }) {
   const x = (i: number) => pad + (N === 1 ? (W - 2 * pad) / 2 : (i * (W - 2 * pad)) / (N - 1));
   const y = (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad);
   const path = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+
+  // Prefill is a separate signal on its own scale — a lighter, thinner path
+  // just to show the trend shape alongside decode, not a directly comparable magnitude.
+  const pfPts = points.map((p, i) => ({ i, v: p.prefill_ts_med })).filter(p => typeof p.v === 'number') as { i: number; v: number }[];
+  let pfPath = '';
+  if (pfPts.length >= 2) {
+    const pfYs = pfPts.map(p => p.v);
+    const pfMin = Math.min(...pfYs), pfMax = Math.max(...pfYs), pfSpan = pfMax - pfMin || 1;
+    const pfY = (v: number) => H - pad - ((v - pfMin) / pfSpan) * (H - 2 * pad);
+    pfPath = pfPts.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${pfY(p.v).toFixed(1)}`).join(' ');
+  }
+
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
+      {pfPath && <path d={pfPath} fill="none" stroke="var(--fg-4)" strokeWidth={1} opacity={0.6} />}
       <path d={path} fill="none" stroke="var(--accent)" strokeWidth={1.5} />
       {pts.map(p => (
         <circle key={p.i} cx={x(p.i).toFixed(1)} cy={y(p.v).toFixed(1)} r={1.7} fill="var(--accent)">
@@ -289,6 +326,7 @@ const Benchmarks: React.FC = () => {
   const [rosterErr, setRosterErr] = useState<string | null>(null);
   const [rosterLoading, setRosterLoading] = useState(true);
   const [queue, setQueue] = useState<QueueState | null>(null);
+  const [regressions, setRegressions] = useState<RegressionFlag[]>([]);
 
   const loadRoster = useCallback(() => {
     setRosterLoading(true);
@@ -296,6 +334,9 @@ const Benchmarks: React.FC = () => {
       .then(d => { setRoster(d.models || []); setHost(d.host || null); setRosterErr(null); })
       .catch(e => setRosterErr(e.message))
       .finally(() => setRosterLoading(false));
+    apiGet<{ count: number; flags: RegressionFlag[] }>('/api/benchmarks/regressions')
+      .then(d => setRegressions(d.flags || []))
+      .catch(() => setRegressions([]));
   }, []);
 
   const loadQueue = useCallback(() => {
@@ -363,9 +404,9 @@ const Benchmarks: React.FC = () => {
 
       <div style={{ marginTop: 18 }}>
         {tab === 'roster' && (
-          <RosterTab roster={roster} loading={rosterLoading} error={rosterErr} onQueue={enqueueBench} />
+          <RosterTab roster={roster} loading={rosterLoading} error={rosterErr} onQueue={enqueueBench} regressions={regressions} />
         )}
-        {tab === 'runs' && <RunsTab />}
+        {tab === 'runs' && <RunsTab regressions={regressions} />}
         {tab === 'evals' && <EvalsTab />}
         {tab === 'queue' && (
           <QueueTab queue={queue} roster={roster} refresh={loadQueue} onQueueModel={enqueueBench} />
@@ -377,9 +418,10 @@ const Benchmarks: React.FC = () => {
 
 /* ── Roster tab ── */
 
-function RosterTab({ roster, loading, error, onQueue }: {
+function RosterTab({ roster, loading, error, onQueue, regressions }: {
   roster: RosterModel[]; loading: boolean; error: string | null;
   onQueue: (id: string, opt: BenchOption) => void;
+  regressions: RegressionFlag[];
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detailCache, setDetailCache] = useState<Record<string, { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] }>>({});
@@ -402,6 +444,12 @@ function RosterTab({ roster, loading, error, onQueue }: {
 
   if (loading) return <div style={{ color: 'var(--fg-3)' }}>Loading benchmarks&hellip;</div>;
   if (error) return <div style={{ color: 'var(--warn)' }}>Error: {error}</div>;
+
+  const regByModel = new Map<string, RegressionFlag[]>();
+  for (const f of regressions) {
+    if (!regByModel.has(f.model_id)) regByModel.set(f.model_id, []);
+    regByModel.get(f.model_id)!.push(f);
+  }
 
   return (
     <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
@@ -433,6 +481,7 @@ function RosterTab({ roster, loading, error, onQueue }: {
             onToggle={() => toggleExpand(m.id)}
             onQueue={opt => onQueue(m.id, opt)}
             detail={detailCache[m.id]}
+            flags={regByModel.get(m.id)}
           />
         ))}
       </tbody>
@@ -440,14 +489,18 @@ function RosterTab({ roster, loading, error, onQueue }: {
   );
 }
 
-function ModelRow({ model: m, expanded, onToggle, onQueue, detail }: {
+function ModelRow({ model: m, expanded, onToggle, onQueue, detail, flags }: {
   model: RosterModel;
   expanded: boolean;
   onToggle: () => void;
   onQueue: (opt: BenchOption) => void;
   detail?: { cells: CellRow[]; points: HistoryPoint[]; runs: RunSummary[] };
+  flags?: RegressionFlag[];
 }) {
   const specKv = [m.spec, m.kv].filter(Boolean).join(' / ') || '—';
+  const worstFlag = flags && flags.length
+    ? flags.reduce((worst, f) => f.delta_pct < worst.delta_pct ? f : worst, flags[0])
+    : null;
   return (
     <>
       <tr
@@ -473,6 +526,14 @@ function ModelRow({ model: m, expanded, onToggle, onQueue, detail }: {
           )}
           {m.measured === false && (
             <span style={{ ...chipStyle, marginLeft: 8, fontSize: 9, color: 'var(--fg-4)' }}>unmeasured</span>
+          )}
+          {worstFlag && (
+            <span
+              title={`flagged runs: ${[...new Set(flags!.flatMap(f => f.run_ids))].join(', ')}`}
+              style={{ ...chipStyle, marginLeft: 8, fontSize: 9, color: 'var(--err)', borderColor: 'var(--err)' }}
+            >
+              {'▼'} {Math.abs(worstFlag.delta_pct).toFixed(1)}%
+            </span>
           )}
         </td>
         <td style={numTd}><Num v={m.decode_ts} unit=" t/s" /></td>
@@ -512,6 +573,21 @@ function ModelDetail({ model: m, detail }: {
 }) {
   const d = m.detail || {};
   const { cells, points, runs } = detail;
+
+  // The winning record — the one that fed the headline decode/prefill tiles —
+  // so lane/depth/config can be shown next to the number instead of leaving it
+  // ambiguous which variant it came from.
+  const winningCell = d.run_id ? cells.find(c => c.run_id === d.run_id) : undefined;
+  const winningConfig = winningCell?.config || winningCell?.record?.config || 'default';
+  const winningLane = winningCell?.lane ?? d.lane;
+  const winningDepth = winningCell?.depth ?? d.depth;
+
+  // Sparkline history mixes configs into one meaningless line unless filtered
+  // down to a single variant — 'default' when present, else whatever the only
+  // config in the series is.
+  const sparkConfigs = [...new Set(points.map(p => p.config || 'default'))];
+  const sparkConfig = sparkConfigs.includes('default') ? 'default' : sparkConfigs[0];
+  const sparkPoints = points.filter(p => (p.config || 'default') === sparkConfig);
 
   // matrix: one card per (lane, depth, config)
   const matrix = (() => {
@@ -565,6 +641,17 @@ function ModelDetail({ model: m, detail }: {
     <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: '1.1fr 1fr' }}>
       <div>
         <h4 style={h4Style}>current summary</h4>
+        {(winningLane || winningDepth != null) && (
+          <div style={{ display: 'flex', gap: '0.3rem', marginBottom: '0.4rem' }}>
+            {winningLane && (
+              <span style={{ ...chipStyle, fontSize: 9, padding: '0.08rem 0.4rem', color: laneColor(winningLane), background: 'transparent' }}>
+                {laneLabel(winningLane)}
+              </span>
+            )}
+            {winningDepth != null && <span style={{ ...chipStyle, fontSize: 9 }}>d{winningDepth}</span>}
+            {winningConfig !== 'default' && <span style={{ ...chipStyle, fontSize: 9, color: 'var(--accent)' }}>{winningConfig}</span>}
+          </div>
+        )}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
           {tiles.map(([label, val, unit], i) => (
             <div key={label} style={{
@@ -609,9 +696,10 @@ function ModelDetail({ model: m, detail }: {
       <div>
         <h4 style={h4Style}>throughput history</h4>
         <div style={{ border: '1px solid var(--line)', borderRadius: '0.4rem', padding: '0.5rem 0.6rem', background: 'var(--bg-2)' }}>
-          <Sparkline points={points} />
+          <Sparkline points={sparkPoints} />
           <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: '0.25rem' }}>
-            <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode &middot; {points.length} pt{points.length === 1 ? '' : 's'}
+            <span style={{ color: 'var(--accent)' }}>{'■'}</span> decode <span style={{ color: 'var(--fg-4)' }}>{'■'}</span> prefill
+            &middot; {sparkConfig} &middot; {sparkPoints.length} pt{sparkPoints.length === 1 ? '' : 's'}
             {d.image && <span> &middot; {d.image.split('/').pop()}</span>}
           </div>
         </div>
@@ -644,17 +732,17 @@ function ModelDetail({ model: m, detail }: {
 
 /* ── Runs tab ── */
 
-function RunsTab() {
+function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
-  const [outcomes, setOutcomes] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('');
+  const [outcomeFilter, setOutcomeFilter] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [recordCache, setRecordCache] = useState<Record<string, any>>({});
 
   useEffect(() => {
-    apiGet<{ runs: RunSummary[]; outcomes: Record<string, number> }>('/api/benchmarks/runs?limit=200')
-      .then(d => { setRuns(d.runs || []); setOutcomes(d.outcomes || {}); })
+    apiGet<{ runs: RunSummary[] }>('/api/benchmarks/runs?limit=200')
+      .then(d => { setRuns(d.runs || []); })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
@@ -671,15 +759,36 @@ function RunsTab() {
 
   if (loading) return <div style={{ color: 'var(--fg-3)' }}>Loading runs&hellip;</div>;
 
-  const shown = filter
-    ? runs.filter(r => `${r.model} ${r.suite} ${r.lane} ${r.kind} ${r.outcome}`.toLowerCase().includes(filter.toLowerCase()))
+  const filtered = filter
+    ? runs.filter(r => `${r.model} ${r.suite} ${r.lane} ${r.kind} ${r.outcome} ${r.trigger}`.toLowerCase().includes(filter.toLowerCase()))
     : runs;
+  const shown = outcomeFilter ? filtered.filter(r => r.outcome === outcomeFilter) : filtered;
+
+  // Tally over the currently-shown (filtered, pre-outcome-filter) rows so the
+  // chips reflect what the text filter narrowed to, not the raw /runs page.
+  const tally: Record<string, number> = {};
+  for (const r of filtered) {
+    const o = r.outcome || '?';
+    tally[o] = (tally[o] || 0) + 1;
+  }
 
   return (
     <div>
+      {regressions.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '0.5rem 0.7rem',
+          border: '1px solid var(--err)', borderRadius: 'var(--rad, 6px)', background: 'var(--bg-2)',
+          fontFamily: mono, fontSize: 11, color: 'var(--err)',
+        }}>
+          {'▼'} {regressions.length} regression{regressions.length === 1 ? '' : 's'} flagged
+          <span style={{ color: 'var(--fg-4)' }}>
+            &middot; {regressions.map(f => cleanName(f.model_id)).join(', ')}
+          </span>
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
         <input
-          placeholder="filter by model / suite / lane / outcome"
+          placeholder="filter by model / suite / lane / outcome / trigger"
           value={filter}
           onChange={e => setFilter(e.target.value)}
           style={{
@@ -688,17 +797,27 @@ function RunsTab() {
           }}
         />
         <span style={{ fontFamily: mono, fontSize: 10, color: 'var(--fg-4)' }}>
-          {Object.entries(outcomes).map(([o, n]) => (
-            <span key={o} style={{ marginRight: 10 }}>
+          {Object.entries(tally).map(([o, n]) => (
+            <button
+              key={o}
+              onClick={() => setOutcomeFilter(cur => cur === o ? null : o)}
+              title={`toggle filter: ${o}`}
+              style={{
+                marginRight: 10, background: 'transparent', border: 'none', cursor: 'pointer',
+                fontFamily: mono, fontSize: 10, padding: 0,
+                color: outcomeFilter === o ? 'var(--fg)' : 'var(--fg-4)',
+                textDecoration: outcomeFilter === o ? 'underline' : 'none',
+              }}
+            >
               <span style={{ color: outcomeColor(o) }}>{'●'}</span> {o} {n}
-            </span>
+            </button>
           ))}
         </span>
       </div>
       <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
         <thead>
           <tr>
-            {(['run', 'model', 'suite', 'lane', 'kind', 'depth', 'cfg', 'reps', 'decode', ''] as const).map((h, i) => (
+            {(['run', 'model', 'suite', 'lane', 'kind', 'depth', 'cfg', 'trigger', 'reps', 'decode', ''] as const).map((h, i) => (
               <th key={i} style={thStyle(['depth', 'reps', 'decode'].includes(h) ? 'right' : 'left')}>{h}</th>
             ))}
           </tr>
@@ -725,6 +844,7 @@ function RunsTab() {
                 <td style={{ ...cellTd, fontSize: 11 }}>{r.kind}</td>
                 <td style={numTd}>{r.depth != null ? `d${r.depth}` : <Dash />}</td>
                 <td style={{ ...cellTd, fontSize: 11, color: r.config !== 'default' ? 'var(--accent)' : 'var(--fg-4)' }}>{r.config}</td>
+                <td style={cellTd}><TriggerChip t={r.trigger} /></td>
                 <td style={numTd}>{r.reps}</td>
                 <td style={numTd}><Num v={r.decode_ts_med} unit=" t/s" /></td>
                 <td style={{ ...cellTd, textAlign: 'right' }}>
@@ -733,7 +853,7 @@ function RunsTab() {
               </tr>
               {expanded === r.run_id && (
                 <tr>
-                  <td colSpan={10} style={{ padding: 0, borderBottom: '1px solid var(--line)', background: 'var(--bg-1)' }}>
+                  <td colSpan={11} style={{ padding: 0, borderBottom: '1px solid var(--line)', background: 'var(--bg-1)' }}>
                     <div style={{ padding: '0.9rem 1.1rem 1.1rem' }}>
                       {recordCache[r.run_id]
                         ? <RunDetail rec={recordCache[r.run_id]} />
@@ -795,10 +915,35 @@ function RunDetail({ rec }: { rec: any }) {
     ['power avg', telemetry.gpu_power_avg_w, 'W'],
   ];
 
+  const cellKey: string | undefined = rec.cell_key;
+  const cellKeyShort = cellKey ? (cellKey.length > 16 ? `${cellKey.slice(0, 16)}…` : cellKey) : null;
+
   return (
     <div style={{ display: 'grid', gap: '1rem' }}>
       <div>
         <h4 style={h4Style}>identity — {model.id || '?'}</h4>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', marginBottom: '0.4rem' }}>
+          {rec.config && (
+            <span style={{ ...chipStyle, color: rec.config !== 'default' ? 'var(--accent)' : undefined }}>
+              <span style={{ color: 'var(--fg-4)', textTransform: 'uppercase', fontSize: 8.5 }}>config</span> {rec.config}
+            </span>
+          )}
+          {rec.trigger && (
+            <span style={chipStyle}>
+              <span style={{ color: 'var(--fg-4)', textTransform: 'uppercase', fontSize: 8.5 }}>trigger</span> {rec.trigger}
+            </span>
+          )}
+          {rec.outcome && (
+            <span style={{ ...chipStyle, color: outcomeColor(rec.outcome) }}>
+              <span style={{ color: 'var(--fg-4)', textTransform: 'uppercase', fontSize: 8.5 }}>outcome</span> {rec.outcome}
+            </span>
+          )}
+          {cellKeyShort && (
+            <span style={chipStyle} title={cellKey}>
+              <span style={{ color: 'var(--fg-4)', textTransform: 'uppercase', fontSize: 8.5 }}>cell</span> {cellKeyShort}
+            </span>
+          )}
+        </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
           {idChips.filter(([, v]) => v != null && v !== '').map(([k, v]) => (
             <span key={k} style={chipStyle}>
@@ -1123,13 +1268,13 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
               <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 11 }}>
                 <thead>
                   <tr>
-                    {(['model', 'suite', 'lane', 'kind', 'depth', 'reason'] as const).map(h => (
-                      <th key={h} style={thStyle(h === 'depth' ? 'right' : 'left')}>{h}</th>
+                    {(['model', 'suite', 'lane', 'kind', 'depth', 'pri', 'excl', 'reason'] as const).map(h => (
+                      <th key={h} style={thStyle(h === 'depth' || h === 'pri' ? 'right' : 'left')}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {plan.cells.map((c: any, i: number) => (
+                  {[...plan.cells].sort((a: any, b: any) => (b.priority ?? 0) - (a.priority ?? 0)).map((c: any, i: number) => (
                     <tr key={`${c.cell_key}-${i}`}>
                       <td style={{ ...cellTd, padding: '0.35rem 0.7rem' }}>{cleanName(c.model)}</td>
                       <td style={{ ...cellTd, padding: '0.35rem 0.7rem', color: 'var(--fg-4)' }}>{c.suite}</td>
@@ -1138,6 +1283,8 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
                       </td>
                       <td style={{ ...cellTd, padding: '0.35rem 0.7rem' }}>{c.kind}</td>
                       <td style={{ ...numTd, padding: '0.35rem 0.7rem' }}>d{c.depth}</td>
+                      <td style={{ ...numTd, padding: '0.35rem 0.7rem' }}>{c.priority ?? <Dash />}</td>
+                      <td style={{ ...cellTd, padding: '0.35rem 0.7rem' }}>{c.exclusive ? 'yes' : <Dash />}</td>
                       <td style={{ ...cellTd, padding: '0.35rem 0.7rem', color: c.reason === 'never-measured' ? 'var(--info)' : 'var(--warn)', fontSize: 10 }}>
                         {c.reason}
                       </td>
