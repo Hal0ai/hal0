@@ -30,7 +30,7 @@ import { test, expect } from '../fixtures/apiMock'
 
 // Canonical --warn (dashboard.css). Retint contract: change --warn there,
 // then update this one constant. rgb() is how getComputedStyle reports it.
-const WARM_RGB = 'rgb(242, 121, 43)'
+const WARM_RGB = 'rgb(232, 185, 78)'
 
 type Probe = { site: string; ancestor: string; el: string; prop: 'backgroundColor' | 'color' }
 
