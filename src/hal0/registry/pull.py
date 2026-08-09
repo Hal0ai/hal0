@@ -1227,6 +1227,10 @@ def _register_pulled(
         ctx_len = int(curated.context_length)
     if ctx_len:
         fresh_meta["context_length"] = int(ctx_len)
+        # #1657: mark this value as auto-detected (GGUF header or curated
+        # backfill) so a LATER re-pull can tell it apart from an operator's
+        # explicit metadata edit — see the merge below.
+        fresh_meta["context_length_detected"] = True
     updates: dict[str, Any] = {
         "path": path,
         "size_bytes": size_bytes,
@@ -1269,11 +1273,21 @@ def _register_pulled(
     # before kicking off the pull).
     merged_meta = dict(existing.metadata)
     merged_meta.update(fresh_meta)
-    # An operator/scan-provided window outranks this pull's read: only fill
-    # the key when the existing row has none (same absent-only contract as
-    # chat_template below).
-    if existing.metadata.get("context_length") and "context_length" in fresh_meta:
+    # An operator-provided window outranks this pull's read — but a value
+    # THIS SAME PATH auto-stamped on a prior pull (context_length_detected)
+    # must NOT outrank a fresh re-pull's own detection, or an in-place
+    # model update (replaced bytes, different GGUF header) can never pick
+    # up the new window: it stays stuck at whatever the first pull happened
+    # to read (#1657). Only a value with no detected-marker — i.e. one an
+    # operator set explicitly through the metadata edit surface — wins over
+    # the fresh read.
+    if (
+        existing.metadata.get("context_length")
+        and not existing.metadata.get("context_length_detected")
+        and "context_length" in fresh_meta
+    ):
         merged_meta["context_length"] = existing.metadata["context_length"]
+        merged_meta.pop("context_length_detected", None)
     updates["metadata"] = merged_meta
     if curated_template and not (existing.defaults is not None and existing.defaults.chat_template):
         merged_defaults = (

@@ -297,6 +297,71 @@ async def test_run_pull_curated_context_length_backfills_unreadable_gguf(
 
 
 @pytest.mark.asyncio
+async def test_run_pull_refreshes_context_length_on_repull(tmp_hal0_home: str) -> None:
+    """#1657: an in-place update (replaced bytes, different GGUF header)
+    must pick up the fresh context_length, not stay stuck at whatever the
+    first pull happened to read. Repro: run_pull twice on the same
+    model_id with different GGUF context_length headers."""
+    job = make_job("some-random-gguf")
+    registry = ModelRegistry()
+
+    client = httpx.AsyncClient(transport=_ok_handler(_gguf_payload(context_length=4096)))
+    try:
+        await run_pull(
+            job, hf_repo="org/random-GGUF", hf_file="random.gguf", registry=registry, client=client
+        )
+    finally:
+        await client.aclose()
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert registry.get("some-random-gguf").metadata.get("context_length") == 4096
+
+    job2 = make_job("some-random-gguf")
+    client2 = httpx.AsyncClient(transport=_ok_handler(_gguf_payload(context_length=131072)))
+    try:
+        await run_pull(
+            job2,
+            hf_repo="org/random-GGUF",
+            hf_file="random.gguf",
+            registry=registry,
+            client=client2,
+        )
+    finally:
+        await client2.aclose()
+    assert job2.state == "completed", f"got {job2.state}: {job2.error}"
+    assert registry.get("some-random-gguf").metadata.get("context_length") == 131072
+
+
+@pytest.mark.asyncio
+async def test_run_pull_keeps_operator_context_length(tmp_hal0_home: str) -> None:
+    """A context_length the operator set explicitly (no context_length_detected
+    marker — never stamped by this pull path) outranks a re-pull's fresh
+    GGUF read, same absent-only contract as chat_template."""
+    from hal0.registry.model import Model
+
+    registry = ModelRegistry()
+    registry.add(
+        Model(
+            id="some-random-gguf",
+            name="some-random-gguf",
+            path="/nonexistent/model.gguf",
+            size_bytes=1,
+            metadata={"context_length": 99999},
+        )
+    )
+    job = make_job("some-random-gguf")
+    client = httpx.AsyncClient(transport=_ok_handler(_gguf_payload(context_length=131072)))
+    try:
+        await run_pull(
+            job, hf_repo="org/random-GGUF", hf_file="random.gguf", registry=registry, client=client
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert registry.get("some-random-gguf").metadata.get("context_length") == 99999
+
+
+@pytest.mark.asyncio
 async def test_run_pull_stamps_curated_tool_calling(tmp_hal0_home: str) -> None:
     """A curated native tool-caller lands with capability_flags.tool_calling=True."""
     body = _payload(4096)
