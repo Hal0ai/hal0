@@ -98,6 +98,7 @@ __all__ = [
     "default_lanes",
     "lane_specs",
     "run_cell",
+    "telemetry_argv",
 ]
 
 BENCHCTL = "/usr/lib/hal0/bin/hal0-benchctl"
@@ -249,6 +250,21 @@ def benchctl_exec_argv(podman_argv: list[str], timeout_s: int | None) -> list[st
     if timeout_s:
         argv += ["--timeout-s", str(timeout_s)]
     argv += ["--", *podman_argv]
+    return argv
+
+
+def telemetry_argv(action: str, run_id: str, tier: str = "") -> list[str]:
+    """The seam invocation for one telemetry verb call: ``sudo -n
+    hal0-benchctl telemetry <start|end> <run_id> [tier]`` (Phase 4). ``tier``
+    is ``BenchDeviceSpec.tier`` (amd|nvidia|cpu — the shim's own
+    ``validate_tier`` vocabulary); it is only meaningful for ``start`` and
+    omitted when empty (the shim falls back to probing, or ``end`` never
+    takes one at all). Mirrors :func:`benchctl_exec_argv`'s shape — a caller
+    (``runner.py``) supplies its OWN subprocess runner, this function only
+    composes the argv."""
+    argv = ["sudo", "-n", BENCHCTL, "telemetry", action, run_id]
+    if tier:
+        argv.append(tier)
     return argv
 
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+from typing import Any
 
 from .schema import Config, Engine, Rep, Summary, Telemetry
 
@@ -178,6 +179,67 @@ def parse_llama_bench(
 # --------------------------------------------------------------------------- #
 # Tier B — server_ab.py (chat/reuse/embed/rerank) live-server
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# Telemetry — hal0-benchctl's 1 Hz sampler JSONL (Phase 4)
+# --------------------------------------------------------------------------- #
+
+#: ≥3 consecutive samples >10% below the run's own peak sclk trips throttled.
+_THROTTLE_DROP_FRACTION = 0.10
+_THROTTLE_MIN_STREAK = 3
+
+
+def _throttle_flag(sclk_mhz: list[float]) -> bool | None:
+    """None when no sclk samples exist at all (the counter was unreadable —
+    §14.3 nullable, never a guessed False); otherwise the streak rule against
+    the run's OWN peak clock. Fewer than 3 total samples can never reach the
+    streak, so it correctly falls out to False rather than needing a special
+    case."""
+    if not sclk_mhz:
+        return None
+    peak = max(sclk_mhz)
+    if peak <= 0:
+        return None
+    threshold = peak * (1 - _THROTTLE_DROP_FRACTION)
+    streak = 0
+    for v in sclk_mhz:
+        if v < threshold:
+            streak += 1
+            if streak >= _THROTTLE_MIN_STREAK:
+                return True
+        else:
+            streak = 0
+    return False
+
+
+def parse_telemetry_samples(samples: list[dict[str, Any]]) -> Telemetry:
+    """Turn hal0-benchctl's 1 Hz raw sampler rows (``{ts,temp_c,power_mw,
+    gpu_busy_pct,vram_b,gtt_b,sclk_mhz}``, ``null`` for an unreadable counter —
+    installer/wrappers/hal0-benchctl's ``telemetry start`` verb) into the
+    derived :class:`Telemetry` a record carries. Every field is computed
+    independently from whichever samples actually carry it, so one dead
+    counter (e.g. GTT locked down by debugfs perms) never blanks the others.
+    An empty sample list (no telemetry.jsonl, or a run that never reached
+    ``telemetry start``) returns an all-None ``Telemetry`` — never raises,
+    never fabricates a value (DESIGN §3.2 / §14.3)."""
+
+    def nums(key: str) -> list[float]:
+        return [s[key] for s in samples if isinstance(s.get(key), (int, float))]
+
+    vram_b = nums("vram_b")
+    gtt_b = nums("gtt_b")
+    temp_millic = nums("temp_c")  # the sampler's key names the UNIT wrong: it's millidegrees
+    power_mw = nums("power_mw")
+    sclk_mhz = nums("sclk_mhz")
+
+    return Telemetry(
+        vram_peak_mb=round(max(vram_b) / (1024 * 1024)) if vram_b else None,
+        gtt_peak_mb=round(max(gtt_b) / (1024 * 1024)) if gtt_b else None,
+        gpu_edge_temp_max_c=round(max(temp_millic) / 1000) if temp_millic else None,
+        gpu_power_avg_w=round(statistics.mean(power_mw) / 1000) if power_mw else None,
+        throttled=_throttle_flag(sclk_mhz),
+    )
 
 
 def _sa_run_to_rep(run: dict) -> Rep | None:

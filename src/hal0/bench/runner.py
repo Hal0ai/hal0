@@ -54,10 +54,11 @@ import re
 import secrets
 import signal
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,8 +67,8 @@ from typing import TYPE_CHECKING, Any
 from . import harness
 from .adapters import guidellm, llama_benchy
 from .devices import BenchDeviceError, BenchDeviceSpec, resolve_bench_devices
-from .parsers import Parsed, parse_llama_bench, parse_server_ab
-from .schema import Engine, Host, Outcome, Record
+from .parsers import Parsed, parse_llama_bench, parse_server_ab, parse_telemetry_samples
+from .schema import Engine, Host, Outcome, Record, Telemetry
 from .store import Store
 
 if TYPE_CHECKING:
@@ -342,6 +343,91 @@ def _tier_a_per_attempt_s(cell) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Telemetry (Phase 4) — wraps ONE Tier-A group's actual sweep execution.
+#
+# Only Tier-A cells sample: they run inside an ExclusiveSlots window (or at
+# least a dedicated podman container with no other tenant), so every counter
+# unambiguously belongs to the bench. Tier-B/C (embed/rerank/reuse) and the
+# Phase-3 adapters (chat/http_pp/http_tg) drive a LIVE serving slot over
+# HTTP — the GPU is shared with whatever else that slot is doing, so
+# sampling there would attribute the slot's own load to the bench. Those
+# paths leave Telemetry all-None (Parsed's default), deliberately.
+# --------------------------------------------------------------------------- #
+
+_TELEMETRY_DEFAULT_ROOT = "/var/lib/hal0/benchmarks/v2/artifacts"
+
+
+def _telemetry_root() -> Path:
+    """The ROOT-SIDE dir ``hal0-benchctl telemetry start`` writes
+    ``<run_id>/telemetry.jsonl`` under: the V1 results tree
+    (``/var/lib/hal0/benchmarks``), NOT the v2 ``Store``'s own state root
+    (``store.py``'s ``$HAL0_BENCH_STATE`` — a deliberately separate tree, see
+    that module's docstring). Overridable via ``HAL0_BENCH_TELEMETRY_ROOT``
+    for the test suite; a real ``sudo hal0-benchctl`` invocation never sees
+    this override (sudo's ``env_reset`` strips it), so a real box always
+    samples under the hardcoded path regardless of the caller's environment —
+    the same posture as every other ``HAL0_BENCH_*`` test-only knob in this
+    package (see hal0-benchctl's own header)."""
+    return Path(os.environ.get("HAL0_BENCH_TELEMETRY_ROOT") or _TELEMETRY_DEFAULT_ROOT)
+
+
+def _run_telemetry_cmd(argv: list[str]) -> tuple[int, str]:
+    """Bare subprocess call for the telemetry start/end verbs: ``start``
+    backgrounds its own sampler and returns immediately, ``end`` just signals
+    it — both are short, so unlike the cell-execution path (``_tier_a_runner``)
+    no watchdog is warranted here. A module-level function (not inlined into
+    ``_telemetry_session``) so tests can monkeypatch it without a real
+    ``sudo``/``hal0-benchctl`` on PATH."""
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    return proc.returncode, (proc.stderr or proc.stdout or "")
+
+
+@contextlib.contextmanager
+def _telemetry_session(run_id: str, tier: str) -> Iterator[None]:
+    """Wrap ONE Tier-A group's actual sweep execution in the root-side 1 Hz
+    sampler: ``telemetry start`` before, ``telemetry end`` ALWAYS after (in a
+    finally) — an orphaned root sampler that never gets an ``end`` loops
+    forever. Telemetry is diagnostic, not load-bearing for the measurement
+    itself: a failed start/end is a best-effort stderr warning, never an
+    exception that would abort the cell."""
+    rc, err = _run_telemetry_cmd(harness.telemetry_argv("start", run_id, tier))
+    if rc != 0:
+        print(f"[telemetry] start failed for {run_id}: {err.strip() or rc}", file=sys.stderr)
+    try:
+        yield
+    finally:
+        rc, err = _run_telemetry_cmd(harness.telemetry_argv("end", run_id))
+        if rc != 0:
+            print(f"[telemetry] end failed for {run_id}: {err.strip() or rc}", file=sys.stderr)
+
+
+def _load_telemetry(run_id: str) -> tuple[Telemetry, str]:
+    """Read the root-side ``telemetry.jsonl`` this run_id's sampler wrote (if
+    any) and parse it into :class:`Telemetry`. Returns the parsed telemetry
+    plus the RAW file text, so the caller can copy it into the record's own
+    artifacts dir for self-containedness (the root-side V1 results tree is
+    not part of what a bundle/backup ships). A missing file, an empty file, a
+    cell that never reached ``telemetry start``, or a corrupt line all
+    degrade to an all-None ``Telemetry`` and empty text — never raise
+    (telemetry is diagnostic, never load-bearing for the cell's own outcome)."""
+    src = _telemetry_root() / run_id / "telemetry.jsonl"
+    text = ""
+    if src.exists():
+        with contextlib.suppress(OSError):
+            text = src.read_text(encoding="utf-8")
+    samples: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        with contextlib.suppress(json.JSONDecodeError):
+            row = json.loads(line)
+            if isinstance(row, dict):
+                samples.append(row)
+    return parse_telemetry_samples(samples), text
+
+
+# --------------------------------------------------------------------------- #
 # Command builders (shared by the executor and `run --dry-run`)
 # --------------------------------------------------------------------------- #
 
@@ -527,7 +613,7 @@ def run_session(
     budget_s = budget_min * 60 if budget_min else None
     # (pp prompt, tg decode) sizes per (model,lane,depth,config) group.
     sizes = _group_sizes(cells)
-    sweep_cache: dict[tuple, tuple[list[dict], dict, Outcome]] = {}
+    sweep_cache: dict[tuple, tuple[list[dict], dict, Outcome, Telemetry, str]] = {}
 
     try:
         for cell in cells:
@@ -693,7 +779,7 @@ def _tier_a_record(
     matching the shell harness's per-SWEEP (not per-cell) ``--exclusive``."""
     key = _group_key(cell)
     if key in cache:
-        rows, meta, outcome = cache[key]  # sibling already swept this group
+        rows, meta, outcome, telemetry, telemetry_text = cache[key]  # sibling already swept this
         tail = ""
     else:
         pp, tg = sizes.get(key, (_DEFAULT_PP_PROMPT, _DEFAULT_TG_GEN))
@@ -715,11 +801,15 @@ def _tier_a_record(
             # crash the whole session with a bare KeyError.
             spec = harness.lane_specs()[cell.lane]
             devices = resolve_bench_devices()
-            if exclusive:
-                with harness.ExclusiveSlots():
+            # Telemetry (Phase 4) wraps the WHOLE sweep, including the
+            # exclusive stop/restart window — the sampler runs for as long as
+            # this group owns the GPU, not just the container's lifetime.
+            with _telemetry_session(run_id, devices.tier):
+                if exclusive:
+                    with harness.ExclusiveSlots():
+                        result = harness.run_cell(spec, devices, **run_kwargs)
+                else:
                     result = harness.run_cell(spec, devices, **run_kwargs)
-            else:
-                result = harness.run_cell(spec, devices, **run_kwargs)
         except (BenchDeviceError, RuntimeError, KeyError) as exc:
             # Device resolution failed, ExclusiveSlots could not stop a slot,
             # or the cell's lane isn't in harness.lane_specs() — a bad cell
@@ -729,15 +819,19 @@ def _tier_a_record(
         else:
             rows, meta, tail = result.rows, result.meta, result.tail
             outcome = _classify(result.rc, tail) if (result.rc != 0 or not rows) else Outcome.OK
-        cache[key] = (rows, meta, outcome)
+        telemetry, telemetry_text = _load_telemetry(run_id)
+        cache[key] = (rows, meta, outcome, telemetry, telemetry_text)
 
     # Copy the shared engine output into THIS cell's artifacts (self-contained).
     if rows:
         (artifacts / "llama-bench.json").write_text(json.dumps(rows, indent=2))
     if meta:
         (artifacts / "meta.json").write_text(json.dumps(meta, indent=2))
+    if telemetry_text:
+        (artifacts / "telemetry.jsonl").write_text(telemetry_text, encoding="utf-8")
 
     parsed = parse_llama_bench(rows, meta, cell.kind, cell.depth)
+    parsed.telemetry = telemetry
     if outcome is Outcome.OK and not parsed.reps:
         outcome = Outcome.FAILED  # sweep succeeded but this kind's row is missing
     return _assemble(cell, parsed, outcome, host, suite_id, run_id, artifacts, tail, api, trigger)

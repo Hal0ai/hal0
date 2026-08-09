@@ -467,6 +467,13 @@ def _install_fake_seam(sandbox: Path, monkeypatch, calls: Path) -> None:
     monkeypatch.setattr(harness, "BENCHCTL", str(benchctl))
     monkeypatch.setattr(runner, "resolve_bench_devices", lambda: _CPU_DEVICES)
     monkeypatch.setattr(runner, "_traffic_in_flight", lambda *a, **k: False)
+    # Telemetry (Phase 4) is a SEPARATE seam call (`_run_telemetry_cmd`, not
+    # the podman-exec `runner` harness.run_cell threads through) — the fake
+    # benchctl script above unconditionally echoes "run" + the llama-bench
+    # rows for ANY invocation, so without this the telemetry start/end calls
+    # would also hit it and corrupt every test in this module that counts
+    # seam calls. Tests that care about telemetry itself override this.
+    monkeypatch.setattr(runner, "_run_telemetry_cmd", lambda argv: (0, ""))
 
 
 class TestSessionIntegration:
@@ -558,6 +565,174 @@ class TestSessionIntegration:
         [rec] = list(store.iter_records())
         assert rec["outcome"] == Outcome.FAILED.value
         assert "boom" in rec["note"]
+
+
+class TestTelemetrySession:
+    """``_telemetry_session`` (Phase 4): start/end argv shape + the
+    finally-always-ends guarantee (an orphaned root sampler loops forever)."""
+
+    def test_start_then_end_argv_shape(self, monkeypatch):
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            runner, "_run_telemetry_cmd", lambda argv: (calls.append(argv), (0, ""))[1]
+        )
+
+        with runner._telemetry_session("run-1", "amd"):
+            assert calls == [["sudo", "-n", harness.BENCHCTL, "telemetry", "start", "run-1", "amd"]]
+
+        assert calls == [
+            ["sudo", "-n", harness.BENCHCTL, "telemetry", "start", "run-1", "amd"],
+            ["sudo", "-n", harness.BENCHCTL, "telemetry", "end", "run-1"],
+        ]
+
+    def test_end_still_runs_when_the_body_raises(self, monkeypatch):
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            runner, "_run_telemetry_cmd", lambda argv: (calls.append(argv), (0, ""))[1]
+        )
+
+        with pytest.raises(RuntimeError), runner._telemetry_session("run-1", "cpu"):
+            raise RuntimeError("boom")
+
+        actions = [c[4] for c in calls]
+        assert actions == ["start", "end"]  # end still fired despite the raise
+
+    def test_a_failed_start_or_end_never_raises(self, monkeypatch, capsys):
+        monkeypatch.setattr(runner, "_run_telemetry_cmd", lambda argv: (1, "permission denied"))
+
+        with runner._telemetry_session("run-1", "amd"):
+            pass  # must not raise on either side
+
+        assert "permission denied" in capsys.readouterr().err
+
+
+class TestLoadTelemetry:
+    """``_load_telemetry`` (Phase 4): reads the root-side jsonl this run_id's
+    sampler wrote, if any — missing/empty degrades to an all-None Telemetry
+    and empty text, never an exception."""
+
+    def test_missing_file_is_all_none_and_empty_text(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HAL0_BENCH_TELEMETRY_ROOT", str(tmp_path / "nope"))
+
+        telemetry, text = runner._load_telemetry("run-1")
+
+        assert text == ""
+        assert telemetry.vram_peak_mb is None
+        assert telemetry.throttled is None
+
+    def test_reads_and_parses_real_samples(self, tmp_path, monkeypatch):
+        root = tmp_path / "telemetry-root"
+        monkeypatch.setenv("HAL0_BENCH_TELEMETRY_ROOT", str(root))
+        run_dir = root / "run-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "telemetry.jsonl").write_text(
+            '{"ts":"t1","temp_c":45000,"power_mw":100000,"gpu_busy_pct":50,'
+            '"vram_b":1048576,"gtt_b":null,"sclk_mhz":2000}\n'
+            '{"ts":"t2","temp_c":46000,"power_mw":110000,"gpu_busy_pct":90,'
+            '"vram_b":2097152,"gtt_b":null,"sclk_mhz":1900}\n'
+        )
+
+        telemetry, text = runner._load_telemetry("run-1")
+
+        assert "vram_b" in text  # the raw text is returned for the caller to copy verbatim
+        assert telemetry.vram_peak_mb == 2  # 2097152 bytes -> 2 MB
+        assert telemetry.gpu_edge_temp_max_c == 46
+
+    def test_corrupt_line_is_skipped_not_fatal(self, tmp_path, monkeypatch):
+        root = tmp_path / "telemetry-root"
+        monkeypatch.setenv("HAL0_BENCH_TELEMETRY_ROOT", str(root))
+        run_dir = root / "run-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "telemetry.jsonl").write_text(
+            "not json at all\n"
+            '{"ts":"t1","temp_c":40000,"power_mw":null,"gpu_busy_pct":null,'
+            '"vram_b":null,"gtt_b":null,"sclk_mhz":null}\n'
+        )
+
+        telemetry, _text = runner._load_telemetry("run-1")
+
+        assert telemetry.gpu_edge_temp_max_c == 40
+
+
+class TestTierASamplesTelemetry:
+    """Integration: a Tier-A sweep starts/ends the sampler exactly once per
+    memoised group (not per cell), copies the raw jsonl into EACH sibling
+    cell's own artifacts dir, and stamps the parsed Telemetry onto both
+    records."""
+
+    def test_pp_tg_siblings_share_one_start_end_pair_and_both_get_telemetry(
+        self, sandbox, monkeypatch, tmp_path
+    ):
+        calls_path = sandbox / "calls"
+        _install_fake_seam(sandbox, monkeypatch, calls_path)
+        telemetry_root = sandbox / "telemetry-root"
+        monkeypatch.setenv("HAL0_BENCH_TELEMETRY_ROOT", str(telemetry_root))
+
+        telemetry_calls: list[list[str]] = []
+
+        def fake_telemetry_cmd(argv):
+            telemetry_calls.append(argv)
+            if argv[4] == "start":
+                run_id = argv[5]
+                d = telemetry_root / run_id
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "telemetry.jsonl").write_text(
+                    '{"ts":"t","temp_c":50000,"power_mw":100000,"gpu_busy_pct":80,'
+                    '"vram_b":1048576,"gtt_b":null,"sclk_mhz":2000}\n'
+                )
+            return 0, ""
+
+        monkeypatch.setattr(runner, "_run_telemetry_cmd", fake_telemetry_cmd)
+
+        store = Store(tmp_path / "state")
+        host = Host(hal0_version="1.0.0", exclusive=True)
+        suite = _suite(["pp", "tg"])
+        cells = plan(suite, _registry(), store)
+
+        result = runner.run_session(cells, store, host, suite_id="t", api="http://x")
+
+        assert result.cells_ok == 2
+        starts = [c for c in telemetry_calls if c[4] == "start"]
+        ends = [c for c in telemetry_calls if c[4] == "end"]
+        assert len(starts) == 1  # ONE sampler session for the whole memoised group
+        assert len(ends) == 1
+        assert starts[0][6] == "cpu"  # BenchDeviceSpec(tier="cpu") from _CPU_DEVICES
+
+        records = list(store.iter_records())
+        assert len(records) == 2
+        for rec, run_id in zip(records, result.run_ids, strict=True):
+            assert rec["telemetry"]["vram_peak_mb"] == 1
+            assert rec["telemetry"]["gpu_edge_temp_max_c"] == 50
+            # self-contained: each sibling's OWN artifacts dir got the copy,
+            # not just the group's root-side triggering run_id.
+            assert (store.artifacts_dir(run_id) / "telemetry.jsonl").exists()
+
+    def test_missing_telemetry_jsonl_leaves_record_all_none_without_failing_cell(
+        self, sandbox, monkeypatch, tmp_path
+    ):
+        calls_path = sandbox / "calls"
+        _install_fake_seam(sandbox, monkeypatch, calls_path)
+        # No HAL0_BENCH_TELEMETRY_ROOT override and no file ever written —
+        # the sampler "started" but (as on a debugfs-locked-down box) never
+        # produced a readable jsonl.
+        monkeypatch.setenv("HAL0_BENCH_TELEMETRY_ROOT", str(tmp_path / "never-written"))
+
+        store = Store(tmp_path / "state")
+        host = Host(hal0_version="1.0.0", exclusive=True)
+        cells = _cells(["pp"], store)
+
+        result = runner.run_session(cells, store, host, suite_id="t", api="http://x")
+
+        assert result.cells_ok == 1  # telemetry absence never fails the cell
+        [rec] = list(store.iter_records())
+        assert rec["outcome"] == Outcome.OK.value
+        assert rec["telemetry"] == {
+            "vram_peak_mb": None,
+            "gtt_peak_mb": None,
+            "gpu_edge_temp_max_c": None,
+            "gpu_power_avg_w": None,
+            "throttled": None,
+        }
 
 
 class TestBogusLaneDefensiveLayer:
