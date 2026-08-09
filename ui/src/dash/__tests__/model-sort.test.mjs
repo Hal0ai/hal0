@@ -5,8 +5,7 @@
 //
 // These pin the behaviours the UI relies on: unknown sort keys sink to the
 // end (so a "sort by params" doesn't shove registry rows above real values),
-// the sort is stable, tag filtering is AND-narrowing, tag chips are the
-// curated vocab ∩ present tags, and the "added" label stays humane.
+// the sort is stable, and the "added" label stays humane.
 
 import {
   MODEL_SORT_FIELDS,
@@ -14,8 +13,6 @@ import {
   modelSizeBytes,
   modelSortKey,
   sortModels,
-  tagChipsFor,
-  modelMatchesTags,
   fmtAdded,
 } from "../model-sort.js";
 
@@ -94,25 +91,6 @@ eq(modelSizeBytes({}), null, "no size → null");
 eq(modelSortKey({ name: "Foo" }, "name"), "foo", "name key lowercased");
 eq(modelSortKey({ created: 100 }, "added"), 100, "added key = created ts");
 eq(modelSortKey({ created: 0 }, "added"), null, "created 0 → null (unknown)");
-
-// ── tag filtering (AND) ─────────────────────────────────────────────
-ok(modelMatchesTags({ tags: ["coder", "mtp"] }, []), "no selection matches all");
-ok(modelMatchesTags({ tags: ["coder", "mtp"] }, ["coder"]), "single tag match");
-ok(modelMatchesTags({ tags: ["coder", "mtp"] }, ["coder", "mtp"]), "AND match");
-ok(!modelMatchesTags({ tags: ["coder"] }, ["coder", "mtp"]), "AND miss narrows");
-ok(!modelMatchesTags({}, ["coder"]), "no tags → no match when selecting");
-
-// ── tag chips = curated ∩ present, in curated order ─────────────────
-{
-  const rows = [{ tags: ["coder", "user-added"] }, { tags: ["mtp"] }];
-  eq(
-    tagChipsFor(rows, ["mtp", "coder", "vision"]),
-    ["mtp", "coder"],
-    "chips are curated∩present in curated order (vision dropped, no rows)",
-  );
-  eq(tagChipsFor([], ["mtp"]), [], "no rows → no chips");
-  eq(tagChipsFor(rows, []), [], "no curated vocab → no chips");
-}
 
 // ── added label ─────────────────────────────────────────────────────
 {

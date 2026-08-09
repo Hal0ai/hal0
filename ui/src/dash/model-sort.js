@@ -146,38 +146,6 @@ export function sortModels(rows, field, dir = "asc") {
 }
 
 /**
- * Tag chips worth rendering: the curated vocabulary (in its canonical
- * order) intersected with the tags actually present on the given rows, so
- * the toolbar never renders a 35-chip wall of dead filters.
- *
- * @param {any[]} rows
- * @param {string[]} curatedTags meta.curated_model_tags
- * @returns {string[]}
- */
-export function tagChipsFor(rows, curatedTags) {
-  const present = new Set();
-  for (const m of Array.isArray(rows) ? rows : []) {
-    for (const t of Array.isArray(m?.tags) ? m.tags : []) present.add(t);
-  }
-  return (Array.isArray(curatedTags) ? curatedTags : []).filter((t) => present.has(t));
-}
-
-/**
- * True when the model carries EVERY selected tag (AND semantics — chips
- * narrow). No selection matches everything.
- *
- * @param {any} m
- * @param {string[]} selected
- * @returns {boolean}
- */
-export function modelMatchesTags(m, selected) {
-  const sel = Array.isArray(selected) ? selected : [];
-  if (sel.length === 0) return true;
-  const tags = new Set(Array.isArray(m?.tags) ? m.tags : []);
-  return sel.every((t) => tags.has(t));
-}
-
-/**
  * Short human "added" label from a unix-seconds timestamp: relative for
  * the last month ("today", "3d ago"), short date beyond. "—" when unknown.
  *

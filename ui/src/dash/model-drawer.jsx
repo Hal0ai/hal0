@@ -414,7 +414,6 @@ function deriveModelChanges(baseline, form) {
 	};
 	c.any =
 		c.name ||
-		c.tags ||
 		c.caps ||
 		c.backends ||
 		c.mmproj ||
@@ -441,10 +440,6 @@ function ModelDrawer({ open, onClose, model }) {
 
 	// Identity + typed fields (preserve the full RecipeEditor save surface).
 	const [name, setName] = useStateMD("");
-	// (Non-curated tags are not editable here; they live on the frozen baseline
-	// as `otherTags` and are re-merged into the write by deriveModelChanges. A
-	// second mutable copy in component state would be exactly the drift this
-	// seam exists to prevent.)
 	const [caps, setCaps] = useStateMD([]);
 	const [backends, setBackends] = useStateMD([]);
 	const [mmproj, setMmproj] = useStateMD("");
