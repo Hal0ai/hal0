@@ -415,6 +415,50 @@ async def test_nested_txn_shares_the_outer_working_state(tmp_hal0_home: str) -> 
     assert final.telemetry.channel == "preview"
 
 
+def _installer_writer_source() -> str:
+    """The ``[models].store`` writer, extracted straight out of install.sh.
+
+    Tests execute the real script body rather than a copy, so they cannot drift
+    from what an operator actually runs.
+    """
+    install_sh = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
+    match = re.search(
+        r"python3 - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
+        install_sh.read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert match, "could not locate install.sh's [models].store writer"
+    return match.group(1)
+
+
+def test_installer_writer_refuses_a_symlinked_config(tmp_path: Path) -> None:
+    """A symlinked hal0.toml must be refused, not followed.
+
+    install.sh runs as root while ``/etc/hal0`` is service-writable, so
+    following a symlinked target would let the read slurp a root-only file and
+    the atomic replace copy it into ``hal0.toml`` — which the installer's later
+    ``doctor perms --fix`` step then hands to the ``hal0`` account
+    (#1721 review round 4). Hardening only the lock file is not enough.
+    """
+    script = tmp_path / "writer.py"
+    script.write_text(_installer_writer_source(), encoding="utf-8")
+
+    secret = tmp_path / "root-only.txt"
+    secret.write_text("SUPERSECRET", encoding="utf-8")
+    link = tmp_path / "hal0.toml"
+    link.symlink_to(secret)
+
+    proc = subprocess.run(
+        [sys.executable, str(script), str(link), "/new/models"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode != 0, "the writer must refuse a symlinked config"
+    assert secret.read_text(encoding="utf-8") == "SUPERSECRET", "the victim was modified"
+    assert link.is_symlink(), "the symlink was replaced by a real file"
+
+
 def test_installer_shell_writer_replaces_hal0_toml_atomically(tmp_path: Path) -> None:
     """Run install.sh's embedded writer for real and prove the swap is atomic.
 
@@ -514,6 +558,44 @@ def _reenter_file_lock(target: Path) -> Any:
     from hal0.config.locking import async_file_lock
 
     return async_file_lock(target, timeout=2)
+
+
+async def test_installer_store_write_is_shielded_from_cancellation(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling the installer request must not orphan its config write.
+
+    ``asyncio.to_thread`` cancels only the awaiter. If the worker is blocked on
+    ``hal0.toml.lock`` when the request is cancelled (shutdown, request-timeout
+    middleware), the orphan can acquire the lock afterwards and persist the
+    CANCELLED request's storage choice — over a newer setup request, and with
+    no slots provisioned to match (#1721 review round 4).
+    """
+    from hal0.install import orchestrate
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _slow_persist(storage_dir: str) -> None:
+        started.set()
+        release.wait(timeout=10)
+        finished.set()
+
+    monkeypatch.setattr(orchestrate, "_persist_store_dir", _slow_persist)
+
+    task = asyncio.ensure_future(orchestrate._persist_store_dir_shielded(str(tmp_path)))
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+
+    assert not task.done(), "cancellation must not abandon the in-flight worker"
+    assert not finished.is_set()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set(), "the worker must have run to completion before we gave up"
 
 
 # ── the ratchet ───────────────────────────────────────────────────────────────

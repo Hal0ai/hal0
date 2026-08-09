@@ -471,6 +471,30 @@ def _persist_store_dir(storage_dir: str) -> None:
         pass
 
 
+async def _persist_store_dir_shielded(storage_dir: str) -> None:
+    """Run :func:`_persist_store_dir` off-loop, safe against cancellation.
+
+    ``asyncio.to_thread`` cancels only the awaiter, never the worker. If the
+    installer request is cancelled (shutdown, request-timeout middleware) while
+    that worker is blocked on ``hal0.toml.lock``, the orphan can acquire the
+    lock afterwards and persist the CANCELLED request's storage choice — over a
+    newer setup request, and without provisioning the slots that were supposed
+    to accompany it (#1721 review round 4).
+
+    Same shape as ``routes/memory.py``'s ``_propagate_shielded``: shield the
+    wait, and if the caller is cancelled anyway, wait the worker out in a
+    shielded loop so a second cancellation cannot exit early either.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(_persist_store_dir, storage_dir))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
+        raise
+
+
 def install_extension(ext_id: str) -> ExtensionOutcome:
     """Install + wire one extension. Delegates to extensions.install_extension
     (Task 1.2); imported lazily to avoid a cycle."""
@@ -525,7 +549,7 @@ async def apply_setup(
     # ``_persist_store_dir`` takes the BLOCKING hal0.toml advisory lock. Run on
     # the loop it would freeze the whole daemon while any peer holds that lock
     # (and deadlock outright behind a txn on the same loop).
-    await asyncio.to_thread(_persist_store_dir, selections.storage_dir)
+    await _persist_store_dir_shielded(selections.storage_dir)
 
     for s in selections.slots:
         rec = SlotOutcome(slot=s.slot_name, model_id=s.model_id or "")

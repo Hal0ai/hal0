@@ -730,7 +730,29 @@ try:
             pass
     fcntl.flock(fd, fcntl.LOCK_EX)
 
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    # Read the TARGET through O_NOFOLLOW too, not just the lock file. This runs
+    # as root while /etc/hal0 is writable by the hal0 service account, so a
+    # symlinked hal0.toml would otherwise be followed: the read would slurp a
+    # root-only file and the replace below would copy its contents into
+    # /etc/hal0/hal0.toml, which the installer's later `doctor perms --fix`
+    # step then hands to the hal0 account. Refuse the symlink instead.
+    if path.is_symlink():
+        raise SystemExit(f"refusing to write through a symlinked config: {path}")
+    text = ""
+    if path.exists():
+        try:
+            tfd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise SystemExit(f"refusing to read config {path}: {exc}") from None
+        try:
+            if not stat.S_ISREG(os.fstat(tfd).st_mode):
+                raise SystemExit(f"config is not a regular file: {path}")
+            with os.fdopen(tfd, "r", encoding="utf-8") as fh_target:
+                tfd = -1
+                text = fh_target.read()
+        finally:
+            if tfd >= 0:
+                os.close(tfd)
     # Replace existing store/pull_root inside [models], else append before the
     # next [section]. The section body is "every following line that does not
     # START with '['" — NOT `[^\[]*`, which the old patcher used and which
