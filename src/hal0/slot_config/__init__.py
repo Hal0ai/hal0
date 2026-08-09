@@ -140,6 +140,33 @@ def fold_ctx_size_alias(cfg_dict: dict[str, Any]) -> None:
 # ── the shared slot-projection merge primitive (SC-11) ───────────────────────
 
 
+def slot_scalar_table(raw: dict[str, Any]) -> dict[str, Any]:
+    """The table a slot's SCALAR fields actually live in (#1685).
+
+    Two on-disk shapes are supported (:func:`hal0.config.loader._flatten_slot_toml`
+    is the read-side twin of this rule):
+
+      - **flat** — scalars (``device``, ``provider``, ``profile``, ``port``, …)
+        at the root, alongside sibling TABLES (``[model]``, ``[server]``,
+        ``[npu]``, …). What ``SlotManager.create`` / ``write_slot_toml`` write.
+      - **nested** (haloai-compatible) — the same scalars live under
+        ``[slot]``; sibling tables are still root-level siblings of
+        ``[slot]``, never nested inside it. What hand-edited files,
+        ``loader.save_slot_config``, and ``migrate_slot_id_keying`` produce.
+
+    ``_flatten_slot_toml`` treats ``[slot]`` as AUTHORITATIVE whenever it
+    exists on load: only its keys become the loaded ``SlotConfig``'s scalar
+    fields, and every top-level scalar sibling is stashed into ``extra`` and
+    ignored. A writer that always projects onto the root therefore silently
+    no-ops on a nested file — the write "succeeds", lands on a key nobody
+    reads, and the duplicated root scalar even makes the next drift-check
+    look converged. Every scalar read/write in the shared write pipeline
+    goes through this one accessor instead of assuming a shape.
+    """
+    table = raw.get("slot")
+    return table if isinstance(table, dict) else raw
+
+
 def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     """Project ``updates`` onto a slot-config ``base`` dict, copy-safe.
 
@@ -150,12 +177,19 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
     (the store's selection→updates mapping and the manager's device/profile
     coherence stay with their respective callers):
 
-      - shallow-copies ``base`` so the caller's dict is never mutated,
+      - shallow-copies ``base`` (and, when nested, its ``[slot]`` sub-dict —
+        see below) so the caller's dict is never mutated,
       - runs a ONE-level-deep merge: for a key present as a dict on both
         sides the sub-tables are merged key-by-key (``{**existing, **value}``,
         so sibling ``[model]`` keys like ``default``/``context_size``
         survive); every other key (scalars, lists, dict-vs-scalar) replaces
-        wholesale — value wins,
+        wholesale — value wins. A DICT-valued update (a sibling table like
+        ``model``/``server``/``npu``) always lands at the ROOT; a
+        SCALAR-valued update lands in :func:`slot_scalar_table` — ``[slot]``
+        when ``base`` uses the nested shape, else the root itself (#1685:
+        merge_slot_config used to always project onto the root, which is a
+        silent no-op for a scalar update on a nested-shape file — see
+        :func:`slot_scalar_table`'s docstring),
       - treats an explicit ``None`` value in ``updates`` as **delete the key**
         (top level and one level deep). TOML has no null — ``tomli_w`` raises
         ``TypeError`` on a ``None`` value, so "set to null" could never be
@@ -169,23 +203,38 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
 
     Copy-safety is load-bearing: the store diffs ``before`` against ``after``
     and rolls back to ``before`` on a failed commit, so the returned dict must
-    never share the ``[model]`` sub-dict with ``base``. Both the merge path
-    (which builds a fresh ``{**existing, **value}``) and the fold path (which
-    copies the sub-dict before ``pop``) honour that.
+    never share the ``[model]`` sub-dict (or, on a nested-shape base, the
+    ``[slot]`` sub-dict) with ``base``. The merge path (which builds a fresh
+    ``{**existing, **value}``) and the fold path (which copies the sub-dict
+    before ``pop``) both honour that.
     """
     after = dict(base)
+    nested = isinstance(base.get("slot"), dict)
+    if nested:
+        # Copy-safety for the [slot] sub-dict too: it is about to be mutated
+        # (scalar updates land in it), so `base["slot"]` must never be that
+        # same object.
+        after["slot"] = dict(base["slot"])
+    scalars = after["slot"] if nested else after
+
     for key, value in updates.items():
-        existing = after.get(key)
+        # A dict-VALUED update is a sibling TABLE ([model], [server], [npu],
+        # …) — those live at the root in BOTH on-disk shapes, never nested
+        # inside [slot]. Everything else is a slot scalar, which targets
+        # `scalars` ([slot] when nested, else the root — the same object as
+        # `after` in the flat case).
+        target = after if isinstance(value, dict) else scalars
+        existing = target.get(key)
         if value is None:
             # None = delete: remove the key so the TOML writer never sees a
             # null (tomli_w TypeError). Deleting a missing key is a no-op.
-            after.pop(key, None)
+            target.pop(key, None)
         elif isinstance(existing, dict) and isinstance(value, dict):
             sub = {**existing, **value}
             # Same None-deletes rule one level deep ({"server": {"extra_args": null}}).
-            after[key] = {k: v for k, v in sub.items() if v is not None}
+            target[key] = {k: v for k, v in sub.items() if v is not None}
         else:
-            after[key] = value
+            target[key] = value
 
     # #585: fold the legacy [model].ctx_size alias into the canonical
     # context_size via the ONE shared fold (:func:`fold_ctx_size_alias`).
@@ -763,6 +812,7 @@ __all__ = [
     "merge_slot_config",
     "reject_model_owned_slot_keys",
     "reject_removed_slot_keys",
+    "slot_scalar_table",
     "slot_write_lock",
     "unknown_slot_config_keys",
     "write_slot_toml",
