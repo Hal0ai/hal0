@@ -48,8 +48,7 @@ def test_max_rows_null_survives_a_save_load_round_trip(tmp_path: Path) -> None:
     save_hal0_config(Hal0Config(activity={"max_rows": None}), toml_path)
     reloaded = load_hal0_config(toml_path)
     assert reloaded.activity.max_rows is None, (
-        "max_rows=None did not survive a save/load round trip: "
-        f"got {reloaded.activity.max_rows!r}"
+        f"max_rows=None did not survive a save/load round trip: got {reloaded.activity.max_rows!r}"
     )
 
 
