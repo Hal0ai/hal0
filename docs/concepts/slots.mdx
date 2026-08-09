@@ -232,7 +232,7 @@ enabling a second `device=npu` chat slot is rejected.
 podman container — they are never combined on one llama-server instance.
 That's a hard constraint, not a style choice: passing both `--embedding` and
 `--reranking` to the same llama-server yields all-zero scores. Reranking is
-provisioned as its own slot, internally named `embed-rerank`, distinct from
+provisioned as its own slot, internally named `rerank`, distinct from
 the `embed` slot it's paired with in the capability catalogue.
 
 Both lanes are tuned for how pooled scoring actually works: `-ub 8192`
@@ -284,10 +284,11 @@ have a cheap local model to target).
 Each slot carries a **type** (`llm`, `embedding`, `reranking`, `transcription`,
 `tts`, or `image`) and a **device** preference (`gpu-rocm`, `gpu-vulkan`,
 `gpu-cuda`, `cpu`, or `npu` — `gpu-cuda` is the experimental path for
-non-Strix-Halo NVIDIA hosts). hal0 keeps one back-compat **alias** so older
-callers keep working: `agent-hermes` resolves to `agent`. Aliases are never
-written to disk and never appear in slot listings — they're a transparent
-translation at dispatch time.
+non-Strix-Halo NVIDIA hosts). hal0 keeps back-compat **aliases** so older
+callers keep working: `agent-hermes` resolves to `agent`, and `embed-rerank`
+(the rerank capability slot's briefly-used old name) resolves to `rerank`.
+Aliases are never written to disk and never appear in slot listings —
+they're a transparent translation at dispatch time.
 
 Addressing a slot by its name (e.g. `model: "agent"`) is the stable way to pin
 a co-resident model: the name doesn't change when you swap the underlying

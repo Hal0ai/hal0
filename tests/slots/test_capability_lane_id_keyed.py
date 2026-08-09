@@ -260,12 +260,12 @@ async def test_ensure_slot_exists_still_creates_a_genuinely_missing_slot(
     orch = CapabilityOrchestrator(_manager(home), config_path=_etc(home) / "capabilities.toml")
 
     await orch._ensure_slot_exists(
-        "embed-rerank",
+        "rerank",
         CapabilitySelection(
             device="cpu", provider="llama-server", model="bge-rerank:v2", enabled=True
         ),
     )
-    assert (_slots_dir(home) / "embed-rerank.toml").exists()
+    assert (_slots_dir(home) / "rerank.toml").exists()
 
 
 # ── (c) trio reconciler: normalize the id-keyed shadow (#1664) ───────────────

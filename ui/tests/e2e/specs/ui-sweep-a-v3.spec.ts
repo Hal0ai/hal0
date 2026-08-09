@@ -103,7 +103,9 @@ test.describe('GeneralSection — content', () => {
 test.describe('ImageGen section — deferred row hidden', () => {
   test('"deferred" row is not shown in Image-gen section', async ({ page }) => {
     await page.goto('/#settings')
-    await page.locator('.nav-item', { hasText: 'Image Generation' }).click()
+    // Image Generation was absorbed into the unified AI Capabilities page
+    // (its .s-panel with .k span title "Image generation").
+    await page.locator('.nav-item', { hasText: 'AI Capabilities' }).click()
     // Size/Steps/Workflow deferred row must be gone
     await expect(page.locator('body')).not.toContainText('deferred', { timeout: FIVE_S })
   })
@@ -112,7 +114,8 @@ test.describe('ImageGen section — deferred row hidden', () => {
 test.describe('Voice section — Kokoro label', () => {
   test('Sub-text says "bundled voices (Kokoro v1)"', async ({ page }) => {
     await page.goto('/#settings')
-    await page.locator('.nav-item', { hasText: 'Voice' }).click()
+    // Voice was absorbed into the unified AI Capabilities page (TTS panel).
+    await page.locator('.nav-item', { hasText: 'AI Capabilities' }).click()
     const defaultVoiceRow = page.locator('.settings-content .s-row').filter({
       has: page.locator('.k > span', { hasText: /^Default voice$/ }),
     })
@@ -139,7 +142,8 @@ test.describe('Voice section — Kokoro label', () => {
   test('#1683 — popup escapes the overflow:hidden .s-panel via a body-level portal', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 700 })
     await page.goto('/#settings')
-    await page.locator('.nav-item', { hasText: 'Voice' }).click()
+    // Voice was absorbed into the unified AI Capabilities page (TTS panel).
+    await page.locator('.nav-item', { hasText: 'AI Capabilities' }).click()
     const defaultVoiceRow = page.locator('.settings-content .s-row').filter({
       has: page.locator('.k > span', { hasText: /^Default voice$/ }),
     })

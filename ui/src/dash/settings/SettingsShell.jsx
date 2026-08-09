@@ -24,9 +24,7 @@ import { SecurityPage } from './pages/server/SecurityPage.jsx'
 import { DoctorPage } from './pages/diagnostics/DoctorPage.jsx'
 import { LoadedModelsPage } from './pages/models/LoadedModelsPage.jsx'
 import { ModelDefaultsPage } from './pages/models/ModelDefaultsPage.jsx'
-import { VoicePage } from './pages/inference/VoicePage.jsx'
-import { ImageGenPage } from './pages/inference/ImageGenPage.jsx'
-import { NpuPage } from './pages/inference/NpuPage.jsx'
+import { CapabilitiesPage } from './pages/capabilities/CapabilitiesPage.jsx'
 import { HardwareRuntimesPage } from './pages/system/HardwareRuntimesPage.jsx'
 import { StoragePage } from './pages/data/StoragePage.jsx'
 import { MemoryPage } from './pages/data/MemoryPage.jsx'
@@ -50,9 +48,7 @@ export function SettingsShell({ param }) {
       case "doctor": return <DoctorPage />;
       case "slots": return <LoadedModelsPage />;
       case "modeldefaults": return <ModelDefaultsPage />;
-      case "voice": return <VoicePage />;
-      case "imagegen": return <ImageGenPage />;
-      case "npu": return <NpuPage />;
+      case "capabilities": return <CapabilitiesPage />;
       case "hardware": return <HardwareRuntimesPage />;
       case "storage": return <StoragePage />;
       case "memory": return <MemoryPage />;

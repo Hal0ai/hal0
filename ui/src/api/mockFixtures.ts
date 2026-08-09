@@ -197,7 +197,7 @@ function buildCapabilities() {
     selections: {
       embed: {
         embed: capabilityRow('gpu-vulkan', 'llama-server', 'nomic-embed-text-v1.5', 'embed', 'serving'),
-        rerank: capabilityRow('', '', null, 'embed-rerank', 'offline'),
+        rerank: capabilityRow('', '', null, 'rerank', 'offline'),
       },
       voice: {
         stt: capabilityRow('npu', 'flm', 'whisper-large-v3', 'stt', 'serving'),

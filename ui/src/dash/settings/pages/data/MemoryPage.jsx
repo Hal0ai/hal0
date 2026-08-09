@@ -134,6 +134,9 @@ function MemoryRerankerPanel({ registry }) {
     <div className="s-panel" style={{marginBottom: 12}}>
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
         <div className="k"><span>Reranker</span><FieldInfoIcon description="hal0.toml [memory.embedding] · second-pass ranking after recall" /></div>
+        <div className="v">
+          <a href="#settings/capabilities" className="mono" style={{fontSize: 11, color: "var(--accent)"}}>rerank slot →</a>
+        </div>
       </div>
       {RERANK_KEYS.map(k => (
         <AdvRow

@@ -32,8 +32,28 @@ function capabilityRow(device: string, provider: string, model: string | null, s
   return { device, backend: device, provider, model, enabled: !!model, slot, status }
 }
 
+// Scopes a `Model` row (`.s-row` with `.k span` text "Model") to the panel
+// whose own title (`.s-panel`'s `.k span`) matches `title` — the AI
+// Capabilities page renders five Model rows (TTS, STT, Embed, Rerank,
+// Image), so a bare index into a page-wide `.s-row` collection is no longer
+// stable; scope by panel instead. Each test builds its own bound
+// `panelModelRow` from its `page` fixture, mirroring how the neighbouring
+// panel locators (e.g. `ttsPanel` in voice-page-provider-copy-v3) are
+// built fresh per test.
+function makePanelModelRow(page: import('@playwright/test').Page) {
+  return (title: RegExp) =>
+    page.locator('.s-panel')
+      .filter({ has: page.locator('.k span', { hasText: title }) })
+      .locator('.s-row')
+      .filter({ has: page.locator('.k span', { hasText: /^Model$/ }) })
+}
+
 // Mirrors the real /api/capabilities envelope (orchestrator.py get_state /
 // catalogs_by_slot) — same shape mockFixtures.ts documents as ground truth.
+// `embed`/`rerank` catalogs and selections nest under a top-level `embed`
+// key (`catalogs.embed.embed` / `catalogs.embed.rerank`), exactly parallel
+// to `catalogs.voice.stt`/`.tts` and `catalogs.img.img` — see
+// mockFixtures.ts buildCapabilities().
 const CAPS_MOCK = {
   backends: [
     { id: 'npu', label: 'NPU', short: 'NPU', provider: 'flm', multiplex: true },
@@ -41,6 +61,14 @@ const CAPS_MOCK = {
     { id: 'gpu-rocm', label: 'GPU · ROCm', short: 'ROCm', provider: 'llamacpp', multiplex: false },
   ],
   catalogs: {
+    embed: {
+      embed: [
+        { id: 'nomic-embed-text-v1.5', capabilities: ['embed'], size_gb: 0.14, backends: [{ id: 'gpu-rocm', provider: 'llama-server', downloaded: true, pullable: true }] },
+      ],
+      rerank: [
+        { id: 'bge-reranker-v2-m3', capabilities: ['rerank'], size_gb: 0.56, backends: [{ id: 'gpu-rocm', provider: 'llama-server', downloaded: true, pullable: true }] },
+      ],
+    },
     voice: {
       stt: [
         { id: 'Whisper-Large-v3-Turbo', capabilities: ['stt'], size_gb: 1.5, backends: [{ id: 'npu', provider: 'flm', downloaded: true, pullable: true }] },
@@ -58,6 +86,10 @@ const CAPS_MOCK = {
     },
   },
   selections: {
+    embed: {
+      embed: capabilityRow('gpu-rocm', 'llama-server', 'nomic-embed-text-v1.5', 'embed', 'serving'),
+      rerank: capabilityRow('', '', null, 'rerank', 'offline'),
+    },
     voice: {
       stt: capabilityRow('npu', 'flm', 'Whisper-Large-v3-Turbo', 'stt', 'serving'),
       tts: capabilityRow('cpu', 'kokoro', 'kokoro-v1', 'tts', 'serving'),
@@ -72,13 +104,11 @@ test.describe('Capability catalog pickers (#1454)', () => {
   test('Voice page: STT/TTS Model pickers render as <select> populated from the bare-array catalog', async ({ page }) => {
     await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
     await page.goto('/#settings/voice')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Voice')
-
-    const modelRows = page.locator('.s-row').filter({ has: page.locator('.k span', { hasText: /^Model$/ }) })
-    await expect(modelRows).toHaveCount(2)
+    await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
+    const panelModelRow = makePanelModelRow(page)
 
     // STT row
-    const sttRow = modelRows.nth(0)
+    const sttRow = panelModelRow(/^STT$/)
     const sttSelect = sttRow.locator('select')
     await expect(sttSelect).toBeVisible()
     await expect(sttSelect.locator('option', { hasText: 'Whisper-Large-v3-Turbo' })).toHaveCount(1)
@@ -86,7 +116,7 @@ test.describe('Capability catalog pickers (#1454)', () => {
     await expect(sttRow).not.toContainText('no installed STT models')
 
     // TTS row
-    const ttsRow = modelRows.nth(1)
+    const ttsRow = panelModelRow(/^TTS$/)
     const ttsSelect = ttsRow.locator('select')
     await expect(ttsSelect).toBeVisible()
     await expect(ttsSelect.locator('option', { hasText: 'kokoro-v1' })).toHaveCount(1)
@@ -97,9 +127,10 @@ test.describe('Capability catalog pickers (#1454)', () => {
   test('Image-gen page: img Model picker renders as <select> populated from the bare-array catalog', async ({ page }) => {
     await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
     await page.goto('/#settings/imagegen')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Image Generation')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
+    const panelModelRow = makePanelModelRow(page)
 
-    const modelRow = page.locator('.s-row').filter({ has: page.locator('.k span', { hasText: /^Model$/ }) })
+    const modelRow = panelModelRow(/^Image generation$/)
     await expect(modelRow).toHaveCount(1)
     const select = modelRow.locator('select')
     await expect(select).toBeVisible()
@@ -117,13 +148,31 @@ test.describe('Capability catalog pickers (#1454)', () => {
       },
     }))
     await page.goto('/#settings/voice')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Voice')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
+    const panelModelRow = makePanelModelRow(page)
 
-    const modelRows = page.locator('.s-row').filter({ has: page.locator('.k span', { hasText: /^Model$/ }) })
-    await expect(await fieldInfoPopup(modelRows.nth(0))).toContainText('no installed STT models')
-    await expect(await fieldInfoPopup(modelRows.nth(1))).toContainText('no installed TTS models')
+    const sttRow = panelModelRow(/^STT$/)
+    const ttsRow = panelModelRow(/^TTS$/)
+    await expect(await fieldInfoPopup(sttRow)).toContainText('no installed STT models')
+    await expect(await fieldInfoPopup(ttsRow)).toContainText('no installed TTS models')
     // Genuinely-empty catalog falls back to the free-text input, not a <select>.
-    await expect(modelRows.nth(0).locator('select')).toHaveCount(0)
+    await expect(sttRow.locator('select')).toHaveCount(0)
+  })
+
+  test('embed panel lists the embed catalog', async ({ page }) => {
+    await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
+    await page.goto('/#settings/capabilities')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
+    const row = makePanelModelRow(page)(/^Embeddings$/)
+    await expect(row.locator('select option', { hasText: 'nomic-embed-text-v1.5' })).toHaveCount(1)
+  })
+
+  test('rerank panel lists the rerank catalog and links memory settings', async ({ page }) => {
+    await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
+    await page.goto('/#settings/capabilities')
+    const panel = page.locator('.s-panel').filter({ has: page.locator('.k span', { hasText: /^Reranking$/ }) })
+    await expect(panel.locator('select option', { hasText: 'bge-reranker-v2-m3' })).toHaveCount(1)
+    await expect(panel.locator('a[href="#settings/memory"]')).toHaveCount(1)
   })
 })
 

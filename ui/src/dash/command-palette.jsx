@@ -282,14 +282,14 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     { id: "set-security",  label: "Security",             route: "settings/security", sub: "auth enforcement, key rotation, route exposure" },
     { id: "set-doctor",    label: "Doctor",               route: "settings/doctor",   sub: "system diagnostics" },
     { id: "set-defaults",  label: "Loaded Models",        route: "settings/slots",    sub: "per-modality default slot · slot pool · library" },
-    { id: "set-voice",     label: "Voice",                route: "settings/voice",    sub: "STT + TTS models, default voice" },
-    { id: "set-imagegen",  label: "Image Generation",     route: "settings/imagegen", sub: "engine, model, generation defaults" },
-    { id: "set-npu",       label: "NPU",                  route: "settings/npu",      sub: "FLM context size, embed/ASR at boot, occupancy" },
+    { id: "set-capabilities", label: "AI Capabilities",  route: "settings/capabilities", sub: "TTS, STT, embeddings, reranking, image gen · NPU anchor" },
     { id: "set-hardware",  label: "Hardware & Runtimes",  route: "settings/hardware", sub: "detected hardware, backends, runner images" },
     { id: "set-storage",   label: "Storage",              route: "settings/storage",  sub: "[models].store · auto_scan · file extensions" },
+    { id: "set-memory",    label: "Memory",               route: "settings/memory",   sub: "engine, reranker client, graph" },
     { id: "set-updates",   label: "Updates",              route: "settings/updates",  sub: "check / install / roll back · channel · about" },
     { id: "set-advanced",  label: "Advanced",             route: "settings/advanced", sub: "slots runtime, dispatcher, memory, activity · restart hal0-api" },
     { id: "set-secrets",   label: "Secrets",              route: "settings/secrets",  sub: "HF_TOKEN, provider keys, custom env vars" },
+    { id: "set-agents",    label: "Agent Chat",           route: "settings/agents",   sub: "brain chat · slot routing" },
   ].forEach(s => items.push({ ...s, section: "Settings", icon: Icons.settings }));
 
   // Global actions — every one is wired to a real effect.

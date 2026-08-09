@@ -63,7 +63,7 @@ from hal0.slots.config_write import (
 )
 from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
 from hal0.slots.drift import compute_config_drift as _compute_config_drift
-from hal0.slots.layout import is_id_stem
+from hal0.slots.layout import is_id_stem, resolve_slot_stem
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
 from hal0.slots.preload_evict import _DEFAULT_HEADROOM_MB
@@ -580,7 +580,22 @@ class SlotManager:
         returned by :meth:`list` or :meth:`iter_configs`.  Callers that
         want to know whether the name was remapped can compare
         ``_resolve_alias(name) != name``.
+
+        A literal on-disk slot still named like an alias takes precedence
+        over the alias redirect — e.g. a box upgraded from before the
+        ``embed-rerank`` → ``rerank`` rename may still carry an orphaned
+        ``embed-rerank.toml``. Applying the alias unconditionally would make
+        every public method (including ``delete``) silently retarget that
+        name onto ``rerank``, so a caller trying to clean up the orphan would
+        instead delete the canonical slot (see the same policy documented at
+        :func:`hal0.api.hal0_chat_slot_alias_map`). Checked via
+        :func:`hal0.slots.layout.resolve_slot_stem`, the same cheap
+        stem-first existence probe every other bilingual reader uses — it
+        covers both the name-keyed (``<name>.toml``) and id-keyed
+        (``<id>.toml`` with an embedded display name) on-disk layouts.
         """
+        if name in SLOT_ALIASES and resolve_slot_stem(paths.slots_config_dir(), name) is not None:
+            return name
         return SLOT_ALIASES.get(name, name)
 
     def _state_file(self, name: str) -> Path:
