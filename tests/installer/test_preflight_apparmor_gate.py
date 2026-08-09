@@ -54,9 +54,11 @@ def _fake_podman(tmp_path: Path, *, fail_calls: int, fail_stderr: str) -> None:
     sequence.
     """
     counter = tmp_path / "podman-calls"
+    argv_log = tmp_path / "podman-argv.log"
     _write_exec(
         tmp_path / "podman",
         f"""
+echo "$@" >> {argv_log!s}
 if [[ "$1" != "run" ]]; then
     exit 0
 fi
@@ -120,7 +122,24 @@ def test_apparmor_signature_detected_but_remediation_fails_still_hard_dies(
     rc, output = _run_gate(tmp_path, {})
     assert rc != 0, output
     assert "runtime can't actually launch a container" in output
-    assert "automated AppArmor remediation did not resolve it" in output
+    assert "did NOT resolve it" in output
+    # The failed-remediation message must not tell the operator to re-set the
+    # exact host-side flag that's already the documented cause of this branch
+    # (that would be circular and fix nothing).
+    assert "set it in /etc/pve/lxc" not in output
+
+
+def test_apparmor_remediation_resolves_helper_path_without_repo_root(tmp_path: Path) -> None:
+    # `HAL0_CONTAINER_REQUIRED=1 bash installer/lib/preflight.sh` (the
+    # documented standalone mode) never sets REPO_ROOT — install.sh is the
+    # only caller that does. The helper path must still resolve (from
+    # preflight.sh's own location) instead of always reporting itself
+    # missing.
+    _fake_podman(tmp_path, fail_calls=2, fail_stderr=_APPARMOR_STDERR)
+    rc, output = _run_gate(tmp_path, {"REPO_ROOT": ""})
+    assert rc == 0, output
+    assert "can't locate" not in output
+    assert "apparmor remediation applied" in output
 
 
 def test_unrelated_failure_does_not_trigger_apparmor_remediation(tmp_path: Path) -> None:
@@ -129,6 +148,27 @@ def test_unrelated_failure_does_not_trigger_apparmor_remediation(tmp_path: Path)
     assert rc != 0, output
     assert "apparmor" not in output.lower()
     assert not (tmp_path / "containers.conf").exists()
+
+
+def test_remediation_honours_configured_smoke_image(tmp_path: Path) -> None:
+    # HAL0_CONTAINER_SMOKE_IMAGE (air-gapped/mirrored-registry override) must
+    # reach the Python remediation helper's own internal smoke too — if the
+    # helper always probed a hardcoded quay.io image instead, an unreachable
+    # quay.io on this host would make it misclassify the pull failure as
+    # "unrelated" and skip the fix even though the outer gate already proved
+    # this is a genuine apparmor failure. The fake podman shim here doesn't
+    # care which image string it's called with; assert on the recorded argv
+    # log instead to prove the override actually reached the Python helper's
+    # own internal smoke, not just the outer bash smoke.
+    mirror_image = "registry.internal.example/mirror/hello"
+    _fake_podman(tmp_path, fail_calls=2, fail_stderr=_APPARMOR_STDERR)
+    rc, output = _run_gate(tmp_path, {"HAL0_CONTAINER_SMOKE_IMAGE": mirror_image})
+    assert rc == 0, output
+    assert "apparmor remediation applied" in output
+    assert (tmp_path / "containers.conf").exists()
+    argv_log = (tmp_path / "podman-argv.log").read_text()
+    assert mirror_image in argv_log
+    assert "quay.io/podman/hello" not in argv_log
 
 
 @pytest.mark.parametrize(

@@ -513,19 +513,34 @@ _is_apparmor_profile_load_failure() {
 # (the module makes its one third-party import, structlog, optional for
 # exactly this reason).
 #
-# The script's own internal retry smoke uses a `podman run ... true` argv
-# that can false-fail on the distroless `quay.io/podman/hello` image's exec
-# (see `_container_run_smoke_test` above) even once the config fix has
-# landed — so its exit code is informational only; the real verdict is OUR
-# own `_container_run_smoke_test` re-run below.
+# The script's own internal retry smoke honours HAL0_CONTAINER_SMOKE_IMAGE
+# (same var `_container_run_smoke_test` above honours) so an air-gapped/
+# mirrored-registry install probes with an image it can actually reach
+# instead of a hardcoded quay.io one — otherwise the helper would misclassify
+# an unreachable-image pull failure as "unrelated" and skip the fix even on a
+# genuinely apparmor-broken host. Its exit code is still informational only
+# (belt-and-suspenders against any other detection drift between the two
+# layers); the real verdict is OUR own `_container_run_smoke_test` re-run
+# below, against the exact same configured image.
 _apparmor_unconfined_remediate() {
     local rt="$1"
-    local script="${REPO_ROOT:-}/src/hal0/agents/containers_apparmor.py"
+    # install.sh always sets REPO_ROOT before this runs. The public
+    # `HAL0_CONTAINER_REQUIRED=1 bash installer/lib/preflight.sh` standalone
+    # mode does not — fall back to this file's own location
+    # (installer/lib/preflight.sh → repo root is two dirs up) so that path
+    # can remediate too instead of always reporting the helper missing.
+    local repo_root="${REPO_ROOT:-}"
+    if [[ -z "${repo_root}" ]]; then
+        repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    fi
+    local script="${repo_root}/src/hal0/agents/containers_apparmor.py"
     local py="${PY:-python3}"
     if [[ ! -f "${script}" ]] || ! command -v "${py}" >/dev/null 2>&1; then
         warn "  can't locate ${script} (or ${py}) to run the apparmor remediation"
         return 1
     fi
+    # HAL0_CONTAINER_SMOKE_IMAGE, if set in the environment, is inherited by
+    # this subprocess automatically — the script reads the same var name.
     local out
     out="$("${py}" "${script}" 2>&1)" || true
     printf '%s\n' "${out}" | sed 's/^/  /'
@@ -566,10 +581,16 @@ _container_runtime_gate() {
             return 0
         fi
         err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
-        warn "  automated AppArmor remediation did not resolve it — inspect /etc/containers/containers.conf(.d)"
-        warn "  and confirm 'apparmor_parser' can load policy inside this container. Manual workaround: on the"
-        warn "  PROXMOX HOST, in /etc/pve/lxc/<CTID>.conf set 'lxc.apparmor.profile: unconfined', then:"
-        warn "  pct stop <CTID> && pct start <CTID>, then re-run install.sh"
+        # NOTE: this branch only fires on an LXC that ALREADY has
+        # 'lxc.apparmor.profile: unconfined' on the Proxmox host (that's the
+        # detection signature above) — telling the operator to set it again
+        # would be circular and fix nothing. The remaining knobs are inside
+        # THIS container/guest, not the host.
+        warn "  automated AppArmor remediation (wrote apparmor_profile = \"unconfined\" to"
+        warn "  /etc/containers/containers.conf and retried) did NOT resolve it — inspect that file for a syntax"
+        warn "  error or conflicting override, confirm 'apparmor_parser --version' works inside THIS container"
+        warn "  (a missing/broken apparmor_parser here can't load ANY profile, confined or not), and check"
+        warn "  'podman info --debug' for the runtime's own apparmor_profile setting"
         return 1
     fi
     err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"

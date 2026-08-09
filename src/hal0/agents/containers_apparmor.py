@@ -34,6 +34,7 @@ optional below with a stdlib fallback. Everything else is stdlib-only
 from __future__ import annotations
 
 import os
+import re
 import subprocess  # nosec B404 — smoke-tests the local podman
 import tomllib
 from collections.abc import Callable
@@ -63,23 +64,43 @@ except ImportError:  # pragma: no cover - exercised by the early-installer path
 #: Canonical podman config the fix lands in (halo150 R4).
 CONTAINERS_CONF = Path("/etc/containers/containers.conf")
 
-#: A minimal, no-pull smoke: run ``true`` in a scratch container. We don't care
-#: about the image — the apparmor profile load fails BEFORE the image matters —
-#: so the busybox-less ``--rm`` + ``true`` shape keeps it cheap. Overridable.
-_SMOKE_ARGV: tuple[str, ...] = (
-    "podman",
-    "run",
-    "--rm",
-    "quay.io/podman/hello",
-    "true",
-)
+#: Default smoke image. The apparmor profile load fails BEFORE the image is
+#: pulled/run, so any image would do for detection — but on an air-gapped or
+#: mirrored-registry host (installer/lib/preflight.sh's
+#: HAL0_CONTAINER_SMOKE_IMAGE override) quay.io itself may be unreachable, in
+#: which case a hardcoded quay.io image here would fail the PULL, get
+#: misclassified as "unrelated", and skip the fix even on a genuinely
+#: apparmor-broken host. `_default_smoke_argv()` below honours the same
+#: HAL0_CONTAINER_SMOKE_IMAGE env var so the CLI entry (`_main`) always probes
+#: with whatever image the rest of the installer is actually configured to
+#: use. No trailing command override (e.g. `true`) — the default entrypoint
+#: matches installer/lib/preflight.sh's own smoke shape and avoids a false
+#: "unrelated" exec-not-found classification on a distroless image once the
+#: real (apparmor) problem is already fixed.
+_DEFAULT_SMOKE_IMAGE = "quay.io/podman/hello"
+_SMOKE_ARGV: tuple[str, ...] = ("podman", "run", "--rm", _DEFAULT_SMOKE_IMAGE)
 
-#: Substrings in podman's stderr that mark the unconfined-LXC apparmor failure.
-#: Matching BOTH the exit-243 code and this signature avoids reacting to an
-#: unrelated podman failure (missing image, no runtime, etc.).
-_APPARMOR_SIGNATURE: tuple[str, ...] = (
-    "apparmor",
+
+def _default_smoke_argv() -> tuple[str, ...]:
+    """Smoke argv for the CLI entry, honouring HAL0_CONTAINER_SMOKE_IMAGE."""
+    image = os.environ.get("HAL0_CONTAINER_SMOKE_IMAGE", _DEFAULT_SMOKE_IMAGE)
+    return ("podman", "run", "--rm", image)
+
+
+#: Substrings that mark the unconfined-LXC AppArmor profile-load failure in
+#: `<rt> run`'s combined output. Requires "apparmor" AND at least one of the
+#: more specific shapes below — mirrors (and must stay in lockstep with)
+#: installer/lib/preflight.sh's `_is_apparmor_profile_load_failure`, which
+#: runs this same classification a layer earlier (before the venv/this module
+#: exist) on the raw shell smoke-test output. Two independent failure text
+#: shapes are both real-world observed: the OCI-runtime wrapper message
+#: ("install profile containers-default apparmor: exit status 243") and the
+#: raw `apparmor_parser` failure ("apparmor_parser: ... Access denied").
+_APPARMOR_REQUIRED_TOKEN = "apparmor"
+_APPARMOR_SIGNATURE_ANY: tuple[str, ...] = (
     "install profile containers-default",
+    "access denied",
+    "exit status 243",
 )
 
 
@@ -116,7 +137,9 @@ def _is_apparmor_failure(proc: subprocess.CompletedProcess[str]) -> bool:
     if proc.returncode == 0:
         return False
     blob = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
-    return all(sig in blob for sig in _APPARMOR_SIGNATURE)
+    if _APPARMOR_REQUIRED_TOKEN not in blob:
+        return False
+    return any(sig in blob for sig in _APPARMOR_SIGNATURE_ANY)
 
 
 def _apparmor_already_unconfined(conf_path: Path) -> bool:
@@ -129,6 +152,25 @@ def _apparmor_already_unconfined(conf_path: Path) -> bool:
     if not isinstance(containers, dict):
         return False
     return containers.get("apparmor_profile") == "unconfined"
+
+
+#: Matches a TOML table header, tolerating an inline comment after the
+#: closing bracket (e.g. ``[containers] # operator settings``). A naive
+#: ``stripped.endswith("]")`` check misses that shape entirely, fails to
+#: recognize an existing ``[containers]`` section, and appends a SECOND
+#: ``[containers]`` header below — invalid TOML
+#: (``Cannot declare ('containers',) twice``) that corrupts the host's
+#: podman config.
+_SECTION_HEADER_RE = re.compile(r"^\[([^\[\]]+)\]")
+
+
+def _section_header(line: str) -> str | None:
+    """Return the bracketed table name if ``line`` is a section header."""
+    stripped = line.strip()
+    if not stripped.startswith("["):
+        return None
+    m = _SECTION_HEADER_RE.match(stripped)
+    return m.group(1).strip() if m else None
 
 
 def _write_apparmor_unconfined(conf_path: Path) -> None:
@@ -152,16 +194,17 @@ def _write_apparmor_unconfined(conf_path: Path) -> None:
     inserted = False
     replaced = False
     for raw in existing:
-        stripped = raw.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
+        section = _section_header(raw)
+        if section is not None:
             # Leaving a section: if we were in [containers] and never inserted,
             # add the key just before the next section header.
             if in_containers and not inserted and not replaced:
                 out.append(line)
                 inserted = True
-            in_containers = stripped == "[containers]"
+            in_containers = section == "containers"
             out.append(raw)
             continue
+        stripped = raw.strip()
         if in_containers and stripped.startswith("apparmor_profile"):
             out.append(line)
             replaced = True
@@ -251,10 +294,13 @@ def _main() -> int:
 
     ``HAL0_APPARMOR_CONF`` overrides the target config path — used by tests to
     point this at a throwaway file instead of the real
-    ``/etc/containers/containers.conf``.
+    ``/etc/containers/containers.conf``. ``HAL0_CONTAINER_SMOKE_IMAGE`` (the
+    same var installer/lib/preflight.sh's own smoke test honours) overrides
+    the probe image, so an air-gapped/mirrored-registry install probes with
+    an image it can actually reach instead of a hardcoded quay.io one.
     """
     conf_path = Path(os.environ.get("HAL0_APPARMOR_CONF", str(CONTAINERS_CONF)))
-    result = ensure_podman_apparmor_usable(conf_path=conf_path)
+    result = ensure_podman_apparmor_usable(conf_path=conf_path, smoke_argv=_default_smoke_argv())
     print(f"apparmor-preflight: {result.outcome} wrote={result.wrote_config}")
     if result.detail:
         print(f"apparmor-preflight-detail: {result.detail}")

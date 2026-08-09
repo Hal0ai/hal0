@@ -102,3 +102,50 @@ def test_no_podman_reports_cleanly(tmp_path: Path) -> None:
 
     result = ca.ensure_podman_apparmor_usable(run=_run, conf_path=tmp_path / "c.conf")
     assert result.outcome == "no_podman"
+
+
+# ── Codex #1728 P1 follow-ups ────────────────────────────────────────────────
+
+
+def test_apparmor_parser_access_denied_shape_is_also_recognized(tmp_path: Path) -> None:
+    # The raw `apparmor_parser` failure text (no "install profile
+    # containers-default" wrapper) is the OTHER real-world signature shape —
+    # installer/lib/preflight.sh's `_is_apparmor_profile_load_failure`
+    # recognizes it too; this module's own detection must stay in lockstep or
+    # the shell gate remediates while this helper reports "unrelated" and
+    # never writes the fix.
+    conf = tmp_path / "containers.conf"
+    stderr = "apparmor_parser: Warning ... apparmor_parser: profile load failed: Access denied"
+    run, calls = _recorder([_proc(243, stderr), _proc(0)])
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=conf)
+    assert result.outcome == "fixed"
+    assert result.wrote_config
+    assert len(calls) == 2
+
+
+def test_default_smoke_argv_honours_smoke_image_env(monkeypatch) -> None:
+    monkeypatch.delenv("HAL0_CONTAINER_SMOKE_IMAGE", raising=False)
+    assert ca._default_smoke_argv() == ("podman", "run", "--rm", "quay.io/podman/hello")
+    monkeypatch.setenv("HAL0_CONTAINER_SMOKE_IMAGE", "registry.local/mirror/hello")
+    assert ca._default_smoke_argv() == ("podman", "run", "--rm", "registry.local/mirror/hello")
+
+
+def test_write_preserves_commented_section_header(tmp_path: Path) -> None:
+    # A header with a trailing inline comment (`[containers] # ...`) used to
+    # fail the naive `stripped.endswith("]")` check, so the writer never
+    # recognized the existing [containers] table and appended a SECOND one —
+    # invalid TOML ("Cannot declare ('containers',) twice").
+    conf = tmp_path / "containers.conf"
+    conf.write_text('[containers] # operator settings\nlog_driver = "journald"\n')
+    ca._write_apparmor_unconfined(conf)
+    text = conf.read_text()
+    assert text.count("[containers]") == 1  # no duplicate table header appended
+    assert "# operator settings" in text
+    assert 'log_driver = "journald"' in text
+    assert 'apparmor_profile = "unconfined"' in text
+    # Must still be valid, single-table TOML.
+    import tomllib
+
+    parsed = tomllib.loads(text)
+    assert parsed["containers"]["apparmor_profile"] == "unconfined"
+    assert parsed["containers"]["log_driver"] == "journald"
