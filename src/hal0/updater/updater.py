@@ -1177,7 +1177,16 @@ def _maybe_run_config_migrations(
         )
         return (source, source)
 
-    raw = cfg.model_dump(mode="python")
+    # ``exclude_none=True`` matches ``save_hal0_config``: None has no TOML
+    # representation and ``tomli_w`` raises TypeError on it (#1652).
+    # SecurityConfig.require_auth / trust_forwarded_for both default to
+    # None, so every config hit this before exclude_none was added here —
+    # masked only by version arithmetic (the only migration is v2, and the
+    # profile-catalog gate keeps source==target or ceiling==source, so this
+    # writer was never actually reached). Pydantic re-supplies the default
+    # on load, so dropping None on write is safe for any field whose
+    # default is None, same as save_hal0_config.
+    raw = cfg.model_dump(mode="python", exclude_none=True)
     new_raw, new_version = run_migrations(raw, target_version=target)
     write_toml_atomic(toml_path, new_raw)
     log.info(
