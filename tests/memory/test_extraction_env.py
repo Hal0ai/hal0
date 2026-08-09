@@ -177,6 +177,53 @@ def test_apply_surfaces_a_seam_write_failure(monkeypatch, tmp_path: Path):
     assert result["error"] and "sudo" in result["error"]
 
 
+def test_apply_bounds_the_privileged_write(monkeypatch, tmp_path: Path):
+    """A stalled sudo must not park an API worker thread forever."""
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+
+    seen: list[object] = []
+
+    def _run(argv, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    seam = SystemCtlSeam(run=_run, is_hal0_user=lambda: True)
+    apply_extraction_slot("utility", seam=seam)
+
+    # write, daemon-reload, restart — every one bounded.
+    assert seen == [ee._SYSTEMCTL_TIMEOUT_S] * 3
+
+
+def test_apply_names_the_stale_wrapper_as_the_cause(monkeypatch, tmp_path: Path):
+    """`hal0 update` never refreshes ${LIB_DIR}/bin, so new Python can meet an
+    old wrapper. Exit 64 / `bad cmd` is a fixable operator condition — say so."""
+    import hal0.memory.extraction_env as ee
+
+    monkeypatch.setattr(ee, "DROP_IN_PATH", tmp_path / "extraction-model.conf")
+
+    _calls, run = _seam_recorder(rc=64, stderr="hal0-systemctl: bad cmd: write-hindsight-dropin")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_extraction_slot("utility", seam=seam)
+
+    assert result["written"] is False
+    assert "install.sh" in result["error"]
+
+
+def test_apply_does_not_blame_the_wrapper_for_other_failures(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+
+    monkeypatch.setattr(ee, "DROP_IN_PATH", tmp_path / "extraction-model.conf")
+
+    _calls, run = _seam_recorder(rc=1, stderr="sudo: a password is required")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    assert "install.sh" not in (apply_extraction_slot("utility", seam=seam)["error"] or "")
+
+
 def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Path):
     """Root / dev / CI keeps the pre-seam behaviour: a direct atomic write."""
     import hal0.memory.extraction_env as ee

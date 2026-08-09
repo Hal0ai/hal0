@@ -131,7 +131,10 @@ taken before upgrading.
   fixed literal path, body on stdin, no sudoers change: the grant is
   pinned to the wrapper binary). The propagation also runs off the event
   loop, so a hindsight-api cold start no longer blocks the API for the
-  length of the restart. Upgrading in place refreshes the wrapper only on
+  length of the restart; `hal0.toml` is persisted *before* it, and the
+  whole read-modify-write is serialised, so a disconnect or a concurrent
+  save can no longer leave the recorded slot and the running daemon
+  disagreeing. Upgrading in place refreshes the wrapper only on
   an `install.sh` re-run; until then the failure is loud
   (`propagation.error`) instead of silent.
 >>>>>>> 038a7541 (fix(memory): route the hindsight extraction drop-in through the systemctl seam)

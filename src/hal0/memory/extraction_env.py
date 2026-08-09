@@ -89,6 +89,30 @@ def _detail(exc: BaseException) -> str:
     return f"{exc}{(' — ' + stderr) if stderr else ''}"
 
 
+#: The wrapper's own ``die()`` exit code (installer/wrappers/hal0-systemctl).
+_SEAM_USAGE_RC = 64
+
+_STALE_WRAPPER_HINT = (
+    " — the installed /usr/lib/hal0/bin/hal0-systemctl predates this verb; "
+    "re-run the installer (`sudo bash install.sh`) to refresh the seam wrapper"
+)
+
+
+def _stale_wrapper_hint(exc: BaseException) -> str:
+    """Remediation text when the seam rejected the verb outright.
+
+    ``hal0 update`` swaps the release tree and re-pips the venv but does not
+    reinstall ``${LIB_DIR}/bin/*`` — only ``install.sh`` does. So new Python can
+    meet an old wrapper, which answers a verb it doesn't know with
+    ``hal0-systemctl: bad cmd: ...`` and exit 64. That is a fixable operator
+    condition, not a bug report, so say how to fix it.
+    """
+    rc = getattr(exc, "returncode", None)
+    if rc == _SEAM_USAGE_RC or "bad cmd" in _detail(exc):
+        return _STALE_WRAPPER_HINT
+    return ""
+
+
 def render_drop_in(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> str:
     """Return the drop-in contents pinning extraction to ``hal0/<slot>`` + timeout."""
     return _DROP_IN_TEMPLATE.format(slot=slot, timeout_s=int(timeout_s))
@@ -130,10 +154,16 @@ def apply_extraction_slot(
     }
 
     try:
-        seam.write_hindsight_dropin(render_drop_in(slot, timeout_s), path=DROP_IN_PATH)
+        seam.write_hindsight_dropin(
+            render_drop_in(slot, timeout_s),
+            path=DROP_IN_PATH,
+            timeout=_SYSTEMCTL_TIMEOUT_S,
+        )
         result["written"] = True
     except (OSError, subprocess.SubprocessError) as exc:
-        result["error"] = f"could not write {DROP_IN_PATH}: {_detail(exc)}"
+        result["error"] = (
+            f"could not write {DROP_IN_PATH}: {_detail(exc)}{_stale_wrapper_hint(exc)}"
+        )
         log.warning("hal0.memory.extraction_dropin_write_failed", slot=slot, error=str(exc))
         return result
 

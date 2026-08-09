@@ -315,7 +315,13 @@ class SystemCtlSeam:
             raise ValueError(f"not a hal0-slot@ quadlet file: {quadlet_path.name!r}")
         self._run(self._seam_argv("remove-quadlet", token), check=False)
 
-    def write_hindsight_dropin(self, body: str, *, path: Path = HINDSIGHT_DROPIN_PATH) -> None:
+    def write_hindsight_dropin(
+        self,
+        body: str,
+        *,
+        path: Path = HINDSIGHT_DROPIN_PATH,
+        timeout: float | None = None,
+    ) -> None:
         """Write the hindsight-api extraction drop-in (#1641).
 
         Unlike :meth:`write_unit` / :meth:`write_quadlet` there is no id to
@@ -328,6 +334,12 @@ class SystemCtlSeam:
 
         The direct write is atomic (temp + rename) so a crash mid-write can never
         leave a half-written override that would wedge hindsight-api.
+
+        ``timeout`` (seconds, ``None`` = unbounded) bounds the seam child, like
+        :meth:`systemctl`'s. A caller on an API worker thread must pass one: a
+        stalled ``sudo`` (NSS lookup, a wedged root-side filesystem op) would
+        otherwise park that thread forever, and enough retries would drain the
+        pool.
         """
         if not self._is_hal0_user():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -341,6 +353,7 @@ class SystemCtlSeam:
             text=True,
             check=True,
             capture_output=True,
+            timeout=timeout,
         )
 
     def systemctl(

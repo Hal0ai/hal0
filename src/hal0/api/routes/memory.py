@@ -414,6 +414,14 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
 
 # ── PUT /api/memory/graph ──────────────────────────────────────────────────
 
+#: Serializes the graph-config read-modify-write. The propagation awaits a
+#: ~60s hindsight-api restart (#1641), so without this two concurrent PUTs
+#: could interleave — one writing slot A's drop-in, the other overwriting it
+#: with B, and the first still persisting A into ``hal0.toml`` afterwards,
+#: leaving the recorded config and the running daemon on different slots.
+#: hal0-api is the only writer of either, so one in-process lock is enough.
+_GRAPH_CONFIG_LOCK = asyncio.Lock()
+
 
 @router.put("/graph")
 async def update_graph_config(request: Request) -> dict[str, Any]:
@@ -438,71 +446,79 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         raise Hal0Error("request body must be a JSON object")
 
     wrapper = _wrapper(request)
-    cfg = load_hal0_config()
-    current_raw = cfg.memory.graph.model_dump(mode="python")
-    merged_raw = {**current_raw, **body}
 
-    try:
-        new_cfg = MemoryGraphConfig.model_validate(merged_raw)
-    except ValidationError as exc:
-        raise MemoryGraphConfigInvalid(
-            "memory.graph config failed schema validation",
-            details=_validation_error_details(exc),
-        ) from exc
+    async with _GRAPH_CONFIG_LOCK:
+        cfg = load_hal0_config()
+        current_raw = cfg.memory.graph.model_dump(mode="python")
+        merged_raw = {**current_raw, **body}
 
-    # Validate extraction_slot against the live slot set when it is being
-    # changed — reject an unknown / non-llm slot with the valid options so the
-    # gate never flips onto a target that can't serve extraction.
-    slot_changed = new_cfg.extraction_slot != cfg.memory.graph.extraction_slot
-    if slot_changed:
-        available = await _enabled_llm_slots(request)
-        if available and new_cfg.extraction_slot not in available:
-            raise MemoryGraphSlotInvalid(
-                f"extraction_slot {new_cfg.extraction_slot!r} is not an enabled llm slot",
-                details={"available_slots": ", ".join(available)},
+        try:
+            new_cfg = MemoryGraphConfig.model_validate(merged_raw)
+        except ValidationError as exc:
+            raise MemoryGraphConfigInvalid(
+                "memory.graph config failed schema validation",
+                details=_validation_error_details(exc),
+            ) from exc
+
+        # Validate extraction_slot against the live slot set when it is being
+        # changed — reject an unknown / non-llm slot with the valid options so
+        # the gate never flips onto a target that can't serve extraction.
+        slot_changed = new_cfg.extraction_slot != cfg.memory.graph.extraction_slot
+        timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
+        if slot_changed:
+            available = await _enabled_llm_slots(request)
+            if available and new_cfg.extraction_slot not in available:
+                raise MemoryGraphSlotInvalid(
+                    f"extraction_slot {new_cfg.extraction_slot!r} is not an enabled llm slot",
+                    details={"available_slots": ", ".join(available)},
+                )
+
+        # Flip the live wrapper's reported state BEFORE persisting.
+        try:
+            wrapper.set_graph_enabled(new_cfg.enabled, extraction_slot=new_cfg.extraction_slot)
+        except ValueError as exc:
+            raise MemoryGraphConfigInvalid(str(exc)) from exc
+
+        # Persist BEFORE propagating (#1641). The propagation awaits a ~60s
+        # restart, and cancelling that await (client disconnect, shutdown,
+        # request timeout) does NOT stop the worker thread — with the save
+        # afterwards the daemon could end up on the new slot while hal0.toml
+        # still held the old one. Config is the source of truth and the
+        # propagation is documented best-effort in the other direction (a
+        # restart failure is surfaced, never rolled back), so saving first is
+        # the ordering that cannot produce a silent divergence.
+        cfg.memory.graph = new_cfg
+        try:
+            save_hal0_config(cfg)
+        except OSError as exc:
+            raise Hal0Error(
+                f"could not persist hal0 config: {exc}",
+                details={"error": str(exc), "errno": getattr(exc, "errno", None)},
+            ) from exc
+
+        # Propagate the extraction slot + LLM timeout to hindsight-api (drop-in
+        # + restart) so the engine's native extraction LLM follows the choice.
+        propagation: dict[str, Any] | None = None
+        if slot_changed or timeout_changed:
+            from hal0.memory.extraction_env import apply_extraction_slot
+
+            # Thread hop (#1641): the propagation shells out to the privileged
+            # seam and then waits on a hindsight-api restart — a bounded but
+            # multi-second blocking call that would otherwise stall the whole
+            # event loop for the engine's cold start.
+            propagation = await asyncio.to_thread(
+                apply_extraction_slot,
+                new_cfg.extraction_slot,
+                timeout_s=new_cfg.llm_timeout_s,
             )
 
-    # Flip the live wrapper's reported state BEFORE persisting.
-    try:
-        wrapper.set_graph_enabled(new_cfg.enabled, extraction_slot=new_cfg.extraction_slot)
-    except ValueError as exc:
-        raise MemoryGraphConfigInvalid(str(exc)) from exc
-
-    # Propagate the extraction slot + LLM timeout to hindsight-api (drop-in +
-    # restart) so the engine's native extraction LLM follows the choice.
-    # Best-effort: a restart failure is surfaced in the response but does not
-    # roll back the config.
-    timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
-    propagation: dict[str, Any] | None = None
-    if slot_changed or timeout_changed:
-        from hal0.memory.extraction_env import apply_extraction_slot
-
-        # Thread hop (#1641): the propagation shells out to the privileged seam
-        # and then waits on a hindsight-api restart — a ~60s-bounded blocking
-        # call that would otherwise stall the whole event loop for the engine's
-        # cold start.
-        propagation = await asyncio.to_thread(
-            apply_extraction_slot,
-            new_cfg.extraction_slot,
-            timeout_s=new_cfg.llm_timeout_s,
-        )
-
-    cfg.memory.graph = new_cfg
-    try:
-        save_hal0_config(cfg)
-    except OSError as exc:
-        raise Hal0Error(
-            f"could not persist hal0 config: {exc}",
-            details={"error": str(exc), "errno": getattr(exc, "errno", None)},
-        ) from exc
-
-    out = new_cfg.model_dump(mode="json")
-    # Echo the live status so the dashboard's optimistic-update path
-    # gets the counters in the same round trip without a second fetch.
-    out["status"] = wrapper.graph_status()
-    if propagation is not None:
-        out["propagation"] = propagation
-    return out
+        out = new_cfg.model_dump(mode="json")
+        # Echo the live status so the dashboard's optimistic-update path
+        # gets the counters in the same round trip without a second fetch.
+        out["status"] = wrapper.graph_status()
+        if propagation is not None:
+            out["propagation"] = propagation
+        return out
 
 
 # ── REST shims for /api/memory/{add,search,list,delete} (#302) ─────────────
