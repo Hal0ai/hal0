@@ -22,7 +22,73 @@ breaking/migrations as callouts — from the cosign-verified tarball, before
 applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
-## [Unreleased]
+## [1.0.0-rc.5] — 2026-08-10
+
+The validation candidate: every defect the rc.4 fresh-install sweep turned up
+on real hardware, fixed and re-provable. Eleven findings (#1787–#1797) came out
+of that sweep; rc.5 closes all of them, adds the versioned validation kit that
+makes the next sweep compound instead of repeat, and fixes a podman/netavark
+failure mode that could black-hole a slot's published port on any box.
+
+### Highlights
+
+- **The netavark port black hole is detected and repairable.** A slot container
+  that dies without netavark's teardown leaves its DNAT rule behind; nftables is
+  first-match, so that dead rule permanently shadows every later container on
+  that port — the published port answers nothing while the container inside is
+  perfectly healthy, and it survives `podman rm -f`, `systemctl reset-failed`
+  and a fresh `hal0 slot load`. `hal0 doctor all` now carries a `Port DNAT
+  rules` row, `hal0 doctor ports` shows the per-port table, and `hal0 doctor
+  ports --fix` prunes only rules that already route nowhere. The installer also
+  stops the leak at its source by pinning root's runtime dir so container
+  netns survive logout (#1819, refs #1814).
+- **Slot telemetry tells the truth.** llama-server slots launch with
+  `--metrics`, so `/metrics` stops returning 501 and `hal0 slot metrics` shows
+  real request counters and queue depth (#1810). `ctx_max`, `/v1/models`
+  `context_length`/`max_context_window` and the SlotView dashboard now advertise
+  the *effective* context window the runner actually launched with rather than
+  the raw slot-TOML ceiling (#1788).
+- **Fresh installs serve every capability.** Embedding and rerank slots launch
+  with their profile's flags again, so `/v1/embeddings` and `/v1/rerank` stop
+  returning 501 while the slot reports `ready` (#1787) — the single largest
+  fresh-install defect in the rc.4 sweep, and the change that makes seeded
+  profile flags reach the ~93% of registered models that carry no stamped
+  tune.
+- **Profile tuning corrections.** Every seeded profile now requests `-fa auto`
+  instead of forcing `-fa on`, so Flash Attention falls back cleanly when it
+  cannot be scheduled on its layer's device (#1811/#1813). The brain seed moves
+  to `-b 2048 -ub 512` (the small batch cost ~12–14% prefill on CT105 with no
+  decode benefit) and to MiniCPM5's published sampler — `--top-p 0.95`, no
+  `--top-k` (#1815).
+- **Benchmarks can leave the box, deliberately.** `hal0 bench upload <bundle>`
+  and `hal0 bench bundle --upload` publish a result bundle to the bench API
+  behind `HAL0_BENCH_TOKEN`; uploads are content-addressed and idempotent, and
+  records that the publish API would reject are never bundled in the first
+  place (#1816).
+- **The release-candidate validation kit is versioned.** The ad-hoc workflows
+  used to validate rc.4 now live in `tests/release-validation/` as lane briefs,
+  a known-issues list, a regression register seeded with all eleven rc.4
+  findings, box profiles and a report template — so every finding filed in one
+  release becomes a mandatory probe in every release after it (#1817).
+
+### Added
+
+- `hal0 bench upload <bundle>` and `hal0 bench bundle --upload` — publish a
+  benchmark bundle to the bench API that backs
+  [hal0.dev/benchmarks](https://hal0.dev/benchmarks). Admin token from
+  `$HAL0_BENCH_TOKEN` only; deliberately no `--token` flag, since an argv
+  credential is visible in `ps`, shell history and journald (#1816).
+- `hal0 doctor ports` gains a per-port DNAT table and a `--fix` repair path,
+  plus a `Port DNAT rules` row in `hal0 doctor all`. Repair routes through new
+  `prune-dnat`/`check-dnat` verbs on the `hal0-systemctl` seam, which re-derive
+  the chain root-side and refuse any rule whose target IP belongs to a running
+  container (#1819).
+- `tests/release-validation/` — versioned release-candidate validation kit
+  (13 lane briefs, known-issues list, regression register, box profiles, report
+  template) with `.claude/workflows/rc-validate.js` orchestration and the rc.4
+  report backfilled as the comparison baseline (#1817).
+- `hal0 profile list` / `hal0 profile show` — read-only profile inspection from
+  the CLI, previously dashboard- and MCP-only (#1796).
 
 ### Fixed
 
@@ -128,6 +194,95 @@ applying. Add those subsections to a version's section to surface them; see
   having compute access rather than showing the host's, no more empty
   interpolations in the Benchmarks header, correct bank-count
   pluralization, and accessible names on the nav rail (#1797).
+- The brain seed profile no longer ships a Qwen-family sampler on a MiniCPM5
+  model: `-b 512 -ub 256` → `-b 2048 -ub 512` (the small batch cost ~12–14%
+  prefill throughput on ROCm across two independent measurement windows, with
+  no decode benefit), `--top-p 0.9` → `0.95`, and `--top-k 20` dropped —
+  matching MiniCPM5-1B's published no-think recommendation. These are
+  server-level defaults every brain request inherits unless the caller
+  overrides (#1815, refs #1811).
+- The installer's steward copy matches how the brain actually behaves. Since
+  runner `ade07ba` the brain models are native tool-callers, so the interactive
+  lead-in, both skip notices and `SKIP_NOTICE` no longer claim the steward
+  "cannot call tools on its own" or frame the agent model as a hard requirement
+  for tool calling. The post-skip hint is now the command that actually works
+  (`hal0 slot load agent --model <id>` — the bare form bails to OFFLINE on a
+  model-less slot) (#1784).
+- The FastFlowLM skip warning no longer claims an "Ubuntu .deb only" limit that
+  the script's own distro resolution contradicts — upstream ships SHA-pinned
+  per-distro artefacts for ubuntu24.04/25.10/26.04 and debian13. The "no agent
+  model fits this box" notice derives its floor from the curated ladder via a
+  new `--floor` mode on `agent_model.py` instead of hardcoding `~15 GB` in bash
+  (#1785).
+- `installer/README.md` is back in sync with `install.sh`: all 16 `ui_step`
+  banners in the right order, the previously omitted steward/agent model pull,
+  Node.js toolchain, ComfyUI model share, bundle-picker manifests and agent
+  skills, the six first-run/model-pull env knobs plus `HF_TOKEN`, and the
+  corrected claim that `hal0-api` runs as `User=hal0` with privileged
+  operations routed through the `hal0-systemctl`/`hal0-update` sudo seams
+  (#1786).
+
+### Docs
+
+- `docs/getting-started/index.mdx` and `docs/concepts/slots.mdx` carry the
+  presentation hooks hal0.dev needs (`## Sections` + `<DocsSectionCards />`,
+  and an `appliesTo: v1.0` stamp). The website mirrors `docs/<section>/` with
+  `rsync --delete`, so anything added web-side is erased on the next sync;
+  these hooks keep the site's section grid and version stamp alive without
+  pulling web dependencies into this repo (#1812).
+
+### Audience
+
+Preview-channel operators validating the 1.0 line ahead of GA, and fresh
+installs that want the current build. This is the release candidate that clears
+the rc.4 fresh-install findings on real hardware — it is the recommended pre-GA
+validation target, and it supersedes rc.4 for anyone hitting 501s on
+`/v1/embeddings`, `/v1/rerank` or `/metrics`. Boxes on the stable channel are
+not offered this tag.
+
+### Supported upgrades
+
+- `1.0.0-rc.4` → `1.0.0-rc.5` via `hal0 update` (preview channel). The GitHub
+  release asset URL (`https://github.com/Hal0ai/hal0/releases/download/v1.0.0-rc.5/preview.json`)
+  works end-to-end for install and update.
+- `1.0.0-rc.3` / `1.0.0-rc.2` / `1.0.0-rc.1` → `1.0.0-rc.5` directly, same
+  mechanism.
+- `0.9.8` → `1.0.0-rc.5` in place — re-run the installer or `hal0 update` on
+  the preview channel; the R5 migration set applies (see the
+  [1.0.0 changelog section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100--2026-08-07)).
+- Older than 0.9.8: step through 0.9.8 first.
+
+### Known issues
+
+The 0.9.8 CLI's spurious end-of-update `ConnectError` (the pre-1.0 client dies
+when the apply restarts hal0-api under its status poll, even though the update
+succeeds — verify with `hal0 --version`) and the first-boot
+`unattended-upgrades` dpkg race (#1584) carry forward. A box still on rc.1/rc.2
+whose venv predates #1663 is not *offered* a newer tag by the passive check —
+`hal0 update --target <version>` is the recovery path (#1715). Literal memory
+recall still leans on a client-side document fallback; the durable fix needs
+server-side content search in the memory engine and is tracked on #1794.
+
+### Operator migrations
+
+- **Stale DNAT rules (#1819):** a box that has been running slots across a root
+  SSH logout may already carry orphaned netavark DNAT rules. Run `hal0 doctor
+  ports` after updating; if it reports shadowed ports, `hal0 doctor ports --fix`
+  prunes them. New installs get the runtime-dir pin that prevents the leak.
+- **Deprecated `extra_args` at the seam (#1759)** and the **releases-URL
+  override (#1750)** migrations from rc.4 still apply to boxes coming from
+  rc.3 or earlier; see the
+  [1.0.0-rc.4 section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100-rc4--2026-08-09).
+- The R5 operator-run migrators (slot-flag fold, id-keying) are unchanged from
+  rc.1.
+
+### Rollback
+
+Release tarballs are immutable and cosign-signed; roll back by re-installing
+the previous tag (`v1.0.0-rc.4`) from its GitHub release. No rc.5 change writes
+a state shape rc.4 cannot read — the new `SlotConfig.metrics` field defaults to
+`true` and is ignored by an older daemon, and the profile-flag corrections are
+re-derived from the shipped seeds on every launch.
 
 ## [1.0.0-rc.4] — 2026-08-09
 
