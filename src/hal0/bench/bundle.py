@@ -4,10 +4,20 @@ A bundle is a SELECTION + PACKAGING layer over the store: no new measurement,
 no mutation. Only ``ok`` records are eligible (Outcome contract, schema.py) —
 a shared bundle must never carry a contended or failed number. The manifest
 carries a sha256 for every member file and a ``bundle_id`` derived from those
-hashes, so any consumer (a reader on the forums, or a future opt-in ingest
-system) can verify integrity and dedupe re-shares without trusting the
-producer. Bundles land on local disk only; there is no upload path in the
-public release (operator decision 2026-08-09) — sharing one is a manual act.
+hashes, so any consumer (a reader on the forums, or the bench API's ingest)
+can verify integrity and dedupe re-shares without trusting the producer.
+
+Sharing stays a manual act (operator decision 2026-08-09): writing a bundle
+puts it on local disk and nothing more. Nothing is uploaded in the
+background, on a timer, or as a side effect of a benchmark run. The one
+upload path — ``hal0 bench upload`` / ``bundle --upload`` — is an explicit
+verb gated on an admin token that only the hal0.dev leaderboard maintainer
+holds, so for an ordinary install there is still no way for results to
+leave the box.
+
+Records with ``ok`` but no throughput measurement are excluded from the
+selection: they carry nothing to publish, and the publish API rejects an
+entire upload over one of them.
 """
 
 from __future__ import annotations
@@ -49,8 +59,28 @@ def _record_ts(rec: dict[str, Any]) -> str:
     return run_id.split("Z-")[0] + "Z" if "Z-" in run_id else run_id
 
 
+# The publish API rejects a record carrying none of these, and it rejects the
+# WHOLE bundle when it finds one — so a bundle containing such a record is
+# unpublishable in its entirety. Kept in sync with the bench API worker's
+# parseRecordLine ("no summary metrics present").
+_PUBLISHABLE_METRICS = ("decode_ts_med", "prefill_ts_med", "ttft_ms_p50", "ttft_ms_p95")
+
+
+def _has_publishable_metrics(rec: dict[str, Any]) -> bool:
+    summary = rec.get("summary") or {}
+    return any(summary.get(k) is not None for k in _PUBLISHABLE_METRICS)
+
+
 def select_records(store: Store, spec: BundleSpec) -> list[dict[str, Any]]:
-    """Filter records.jsonl down to the bundle's contents, append order kept."""
+    """Filter records.jsonl down to the bundle's contents, append order kept.
+
+    Records with `outcome: ok` but no throughput metrics at all are skipped.
+    In practice these are v1-era server-ab rows for the embed/rerank SLOTS
+    rather than models — `build_roster` already drops them for the same
+    reason (no gguf, so a slot never shows up as a model). Including them cost
+    the entire bundle: the API's validator fails the whole upload on the first
+    such record, so two junk rows made 130 good ones unpublishable.
+    """
     wanted = set(spec.run_ids) if spec.run_ids else None
     out: list[dict[str, Any]] = []
     for rec in store.iter_records():
@@ -61,6 +91,8 @@ def select_records(store: Store, spec: BundleSpec) -> list[dict[str, Any]]:
         if spec.suite and rec.get("suite") != spec.suite:
             continue
         if spec.since and _record_ts(rec) < spec.since:
+            continue
+        if not _has_publishable_metrics(rec):
             continue
         out.append(rec)
     return out
