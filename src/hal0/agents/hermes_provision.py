@@ -70,7 +70,12 @@ _STATE_FILE_NAME = "provision.json"
 class PhaseStatus(StrEnum):
     """Per-step outcome.
 
-    ``ok``   — step completed.
+    ``ok``   — step completed cleanly.
+    ``warn`` — step completed but recorded non-fatal failures the operator
+               should see (e.g. smoke_tests with one or more failed probes).
+               Does NOT fail the overall install (:attr:`InstallReport.ok`
+               only looks at ``fail``) — a warn phase converged, it just has
+               something worth surfacing (#1793).
     ``skip`` — step didn't apply for this env (e.g. voice_wire with no slots).
     ``fail`` — step ran and failed.
 
@@ -78,6 +83,7 @@ class PhaseStatus(StrEnum):
     """
 
     OK = "ok"
+    WARN = "warn"
     SKIP = "skip"
     FAIL = "fail"
 
@@ -4504,9 +4510,19 @@ def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
 # `passed: bool` row into PhaseResult.details["results"]; failures
 # also carry a remediation hint operators can paste at the user.
 #
-# The phase status is OK even with failures — smoke_tests are
-# diagnostic, not gating. self_report surfaces the rollup in the
-# bootstrap-completion memory item.
+# The phase never FAILS the install over a smoke miss — smoke_tests are
+# diagnostic, not gating — but a phase carrying real failures must not
+# report itself ``ok`` either (#1793): the phase status is ``warn`` when
+# any probe fails, so `hal0 agent status` / the API surface it instead of
+# burying it in the Detail column. self_report surfaces the same rollup in
+# the bootstrap-completion memory item.
+#
+# chat_completions and memory_roundtrip both need a routable chat model to
+# mean anything; at install time — before any model has ever been loaded —
+# that's structurally impossible, so a preflight (`_chat_model_ready`)
+# decides ONCE whether the route is live and both probes report
+# `skipped: no chat model loaded` instead of burning their timeout on a
+# doomed request that then gets recorded as an opaque failure.
 
 
 def _wrapper_bin() -> Path:
@@ -4682,9 +4698,55 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
     return (result.returncode == 0, f"rc={result.returncode}")
 
 
+#: Probes that only mean something once a chat-capable model is actually
+#: routable. Gated behind :func:`_chat_model_ready` so an install-time smoke
+#: run (no model has ever been loaded yet) reports `skipped`, not a timeout.
+_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions", "memory_roundtrip"})
+
+
+def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
+    """Cheap preflight: is a chat-capable model actually routable right now?
+
+    Reads ``model.default`` from config.yaml — the exact field
+    :func:`_smoke_chat_completions` targets — and cross-checks it against the
+    live gateway model list via ``io.fetch_model_contexts`` (the same
+    ``/v1/models`` seam ``model_automap`` already uses), instead of paying a
+    full chat-completion round trip just to find out nothing is loaded. This
+    is what lets smoke_tests tell "the route is genuinely broken" (a real
+    failure) apart from "no chat model exists yet" (#1793) — never raises;
+    any config/parse/network problem reports not-ready with the reason.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    config_path = Path(state.hermes_home) / "config.yaml"
+    if not config_path.exists():
+        return False, "config.yaml missing"
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return False, f"config parse: {exc}"
+    model_name = (cfg.get("model") or {}).get("default", "")
+    if not model_name:
+        return False, "model.default unset in config.yaml"
+    try:
+        contexts = io.fetch_model_contexts()
+    except Exception as exc:  # preflight must never raise
+        return False, f"gateway probe failed: {exc}"
+    if model_name not in contexts:
+        return False, f"'{model_name}' not loaded on the gateway"
+    return True, "ready"
+
+
 def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
-    """Run six diagnostic probes; collect results into the checkpoint."""
+    """Run six diagnostic probes; collect results into the checkpoint.
+
+    ``status`` is ``warn`` (not ``ok``) when any probe genuinely fails — a
+    phase that recorded failures must say so, not report a clean ``ok`` with
+    the failures buried in ``details`` (#1793). It never becomes ``fail``:
+    smoke_tests stays diagnostic, so the overall install still succeeds.
+    """
     state = ctx.state
+    chat_ready, chat_reason = _chat_model_ready(state, ctx.io)
     probes = [
         ("wrapper_ready", _smoke_wrapper_ready),
         ("hermes_doctor", _smoke_hermes_doctor),
@@ -4695,7 +4757,13 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     ]
     results: dict[str, dict[str, Any]] = {}
     failures: list[str] = []
+    skipped: list[str] = []
     for name, fn in probes:
+        if name in _MODEL_DEPENDENT_PROBES and not chat_ready:
+            detail = f"skipped: no chat model loaded ({chat_reason})"
+            results[name] = {"passed": None, "skipped": True, "detail": detail}
+            skipped.append(f"{name}: {detail}")
+            continue
         try:
             passed, detail = fn(state, ctx.io)
         except Exception as exc:
@@ -4703,9 +4771,10 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
         results[name] = {"passed": passed, "detail": detail}
         if not passed:
             failures.append(f"{name}: {detail}")
+    status = PhaseStatus.WARN if failures else PhaseStatus.OK
     return PhaseResult(
-        status=PhaseStatus.OK,
-        details={"results": results, "failures": failures},
+        status=status,
+        details={"results": results, "failures": failures, "skipped": skipped},
     )
 
 
@@ -5335,21 +5404,36 @@ def _write_run_report(report: InstallReport, state_root: Path | None) -> None:
     root = state_root if state_root is not None else _DEFAULT_STATE_ROOT
     root.mkdir(parents=True, exist_ok=True)
     now = _utcnow()
+
+    def _phase_entry(s: InstallStep) -> dict[str, Any]:
+        # `failure_count` is derived generically from `details["failures"]`
+        # (a list[str]) so any phase — not just smoke_tests — that records
+        # non-fatal failures surfaces a count `hal0 agent status` can render
+        # as its own column instead of forcing operators to parse the
+        # (possibly truncated) Detail JSON blob (#1793).
+        failures = s.details.get("failures") if isinstance(s.details, dict) else None
+        skipped = s.details.get("skipped") if isinstance(s.details, dict) else None
+        entry: dict[str, Any] = {
+            "status": s.status,
+            "at": now,
+            "changed": s.changed,
+        }
+        if isinstance(failures, list) and failures:
+            entry["failure_count"] = len(failures)
+        if isinstance(skipped, list) and skipped:
+            entry["skipped_count"] = len(skipped)
+        if s.reason:
+            entry["reason"] = s.reason
+        if s.details:
+            entry["details"] = s.details
+        return entry
+
     data = {
         "hal0_version": _hal0_version_string(),
         "hermes_version": _hermes_version_pin(),
         "completed_at": now if report.ok else None,
         "repair": report.repair,
-        "phases": {
-            s.name: {
-                "status": s.status,
-                "at": now,
-                "changed": s.changed,
-                **({"reason": s.reason} if s.reason else {}),
-                **({"details": s.details} if s.details else {}),
-            }
-            for s in report.steps
-        },
+        "phases": {s.name: _phase_entry(s) for s in report.steps},
     }
     target = root / _STATE_FILE_NAME
     tmp = target.with_suffix(".json.tmp")

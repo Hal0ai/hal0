@@ -59,7 +59,14 @@ def test_install_hermes_marks_every_step_ok_or_skip(
     )
     assert report.ok, report.failed
     for step in report.steps:
-        assert step.status in {"ok", "skip"}, f"{step.name}: {step.status}"
+        # smoke_tests may legitimately land on "warn" (#1793): it's
+        # diagnostic-only and never fails the install, but a phase that
+        # recorded a real probe failure must say so rather than reporting a
+        # silent "ok" — see
+        # test_smoke_tests_phase_records_failures_as_warn_without_blocking
+        # for the behavior this permits.
+        allowed = {"ok", "skip", "warn"} if step.name == "smoke_tests" else {"ok", "skip"}
+        assert step.status in allowed, f"{step.name}: {step.status}"
 
 
 def test_install_hermes_writes_last_run_report(
@@ -1940,10 +1947,21 @@ def test_voice_wire_does_not_provision_stt_when_npu_anchor_is_not_ready(
 # ── #246 phase impls — smoke_tests + self_report ────────────────────────────
 
 
+def _write_ready_chat_config(hermes_home: Path, model_name: str = "m1") -> None:
+    """Drop a config.yaml + matching gateway model so :func:`hp._chat_model_ready`
+    reports ready — the precondition the model-dependent probes need to
+    actually run instead of self-skipping (#1793)."""
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    (hermes_home / "config.yaml").write_text(f"model:\n  default: {model_name}\n")
+
+
 def test_smoke_tests_phase_runs_each_probe_collecting_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    hh = tmp_path / "hh"
+    _write_ready_chat_config(hh)
+    state = hp.BootstrapState(hermes_home=str(hh))
+    io = hp.InstallIO(fetch_model_contexts=lambda: {"m1": 8192})
     # All six probes return (True, "...") so we exercise the rollup
     # without depending on a real Hermes binary or HTTP listener.
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (True, "ok"))
@@ -1952,9 +1970,10 @@ def test_smoke_tests_phase_runs_each_probe_collecting_results(
     monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s, io: (True, "1 item"))
     monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
     monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
-    out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+    out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["failures"] == []
+    assert out.details["skipped"] == []
     assert set(out.details["results"].keys()) == {
         "wrapper_ready",
         "hermes_doctor",
@@ -1965,20 +1984,139 @@ def test_smoke_tests_phase_runs_each_probe_collecting_results(
     }
 
 
-def test_smoke_tests_phase_records_failures_without_blocking(
+def test_smoke_tests_phase_records_failures_as_warn_without_blocking(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    """A genuinely failing probe flips the phase to ``warn`` (#1793) — visible,
+    but still non-gating: the overall install must not fail over a smoke miss."""
+    hh = tmp_path / "hh"
+    _write_ready_chat_config(hh)
+    state = hp.BootstrapState(hermes_home=str(hh))
+    io = hp.InstallIO(fetch_model_contexts=lambda: {"m1": 8192})
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (False, "wrapper missing"))
     monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s, io: (True, "ok"))
     monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s, io: (False, "503"))
     monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s, io: (True, "1 item"))
     monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
     monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
-    out = hp._phase_smoke_tests(hp._StepCtx(state=state))
-    assert out.status == hp.PhaseStatus.OK  # diagnostic — not a blocker
+    out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.WARN  # visible, but not a blocker
     assert len(out.details["failures"]) == 2
     assert any("wrapper_ready" in f for f in out.details["failures"])
+    assert any("chat_completions" in f for f in out.details["failures"])
+
+
+def test_smoke_tests_phase_skips_model_dependent_probes_without_chat_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No routable chat model at smoke time (e.g. install-time run, before any
+    model has ever been loaded) → chat_completions/memory_roundtrip report
+    ``skipped``, not a timeout recorded as an opaque failure (#1793)."""
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))  # no config.yaml at all
+    calls: list[str] = []
+
+    def _boom(_s: hp.BootstrapState, _io: hp.InstallIO) -> tuple[bool, str]:
+        calls.append("called")
+        return (False, "should not have run")
+
+    monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (True, "ok"))
+    monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s, io: (True, "ok"))
+    monkeypatch.setattr(hp, "_smoke_chat_completions", _boom)
+    monkeypatch.setattr(hp, "_smoke_memory_roundtrip", _boom)
+    monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
+    monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
+    out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+    assert calls == []  # gated probes never ran
+    assert out.status == hp.PhaseStatus.OK  # skips aren't failures
+    assert out.details["failures"] == []
+    assert len(out.details["skipped"]) == 2
+    assert out.details["results"]["chat_completions"]["skipped"] is True
+    assert "no chat model loaded" in out.details["results"]["chat_completions"]["detail"]
+    assert out.details["results"]["memory_roundtrip"]["skipped"] is True
+
+
+class TestChatModelReady:
+    """Direct coverage of the :func:`hp._chat_model_ready` preflight (#1793)."""
+
+    def test_missing_config_not_ready(self, tmp_path: Path) -> None:
+        state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+        ready, reason = hp._chat_model_ready(state, hp.InstallIO())
+        assert ready is False
+        assert "config.yaml missing" in reason
+
+    def test_unset_model_default_not_ready(self, tmp_path: Path) -> None:
+        hh = tmp_path / "hh"
+        hh.mkdir()
+        (hh / "config.yaml").write_text("{}\n")
+        state = hp.BootstrapState(hermes_home=str(hh))
+        ready, reason = hp._chat_model_ready(state, hp.InstallIO())
+        assert ready is False
+        assert "model.default unset" in reason
+
+    def test_model_not_on_gateway_not_ready(self, tmp_path: Path) -> None:
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "m1")
+        state = hp.BootstrapState(hermes_home=str(hh))
+        io = hp.InstallIO(fetch_model_contexts=lambda: {"other": 4096})
+        ready, reason = hp._chat_model_ready(state, io)
+        assert ready is False
+        assert "not loaded on the gateway" in reason
+
+    def test_model_on_gateway_ready(self, tmp_path: Path) -> None:
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "m1")
+        state = hp.BootstrapState(hermes_home=str(hh))
+        io = hp.InstallIO(fetch_model_contexts=lambda: {"m1": 8192})
+        ready, reason = hp._chat_model_ready(state, io)
+        assert ready is True
+        assert reason == "ready"
+
+    def test_gateway_probe_exception_not_ready(self, tmp_path: Path) -> None:
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "m1")
+        state = hp.BootstrapState(hermes_home=str(hh))
+
+        def _boom() -> dict[str, int]:
+            raise RuntimeError("gateway unreachable")
+
+        io = hp.InstallIO(fetch_model_contexts=_boom)
+        ready, reason = hp._chat_model_ready(state, io)
+        assert ready is False
+        assert "gateway probe failed" in reason
+
+
+def test_write_run_report_surfaces_failure_and_skipped_counts(tmp_path: Path) -> None:
+    """`hal0 agent status` reads `failure_count`/`skipped_count` off the
+    persisted phase entry — this pins the aggregation `_write_run_report`
+    derives from `details["failures"]`/`details["skipped"]` (#1793), for any
+    phase, not just smoke_tests."""
+    report = hp.InstallReport(
+        hermes_home=str(tmp_path / "hh"),
+        venv=str(tmp_path / "venv"),
+        agent_id="hermes-agent",
+        steps=[
+            hp.InstallStep(
+                name="smoke_tests",
+                status=hp.PhaseStatus.WARN,
+                details={
+                    "results": {},
+                    "failures": ["wrapper_ready: wrapper missing"],
+                    "skipped": ["chat_completions: skipped: no chat model loaded (...)"],
+                },
+            ),
+            hp.InstallStep(name="env_probe", status=hp.PhaseStatus.OK, details={}),
+        ],
+    )
+    state_root = tmp_path / "state"
+    hp._write_run_report(report, state_root)
+    data = json.loads((state_root / "provision.json").read_text())
+    smoke = data["phases"]["smoke_tests"]
+    assert smoke["status"] == "warn"
+    assert smoke["failure_count"] == 1
+    assert smoke["skipped_count"] == 1
+    env_probe = data["phases"]["env_probe"]
+    assert "failure_count" not in env_probe
+    assert "skipped_count" not in env_probe
 
 
 def test_self_report_writes_summary_memory_and_handles_failure(

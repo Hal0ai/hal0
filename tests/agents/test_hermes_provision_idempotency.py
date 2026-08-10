@@ -99,9 +99,13 @@ def test_two_consecutive_runs_converge(target: tuple[Path, Path]) -> None:
     assert (persona_root / "active.txt").read_text(encoding="utf-8") == active_1
     # The retired coder seed must not reappear.
     assert not (persona_root / "coder.toml").exists()
-    # Every step ends ok or skip on both runs.
+    # Every step ends ok or skip on both runs — except smoke_tests, which may
+    # legitimately land on "warn" (#1793): it's diagnostic-only and never
+    # fails the install, but a phase that recorded a real probe failure must
+    # say so rather than reporting a silent "ok".
     for step in r2.steps:
-        assert step.status in {"ok", "skip"}, f"{step.name}: {step.status}"
+        allowed = {"ok", "skip", "warn"} if step.name == "smoke_tests" else {"ok", "skip"}
+        assert step.status in allowed, f"{step.name}: {step.status}"
 
 
 def test_report_written_for_agent_status(target: tuple[Path, Path], tmp_path: Path) -> None:
