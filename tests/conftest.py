@@ -131,13 +131,21 @@ def _reject_privileged_systemctl(argv: object) -> None:
         # non-systemctl file verbs (write-quadlet, remove-unit, ...) mutate
         # /etc as root, which a test must never do either.
         #
-        # `help`, `check-dropin` and `check-quadlet` are the exceptions: all
-        # three are pure — they read stdin/argv, write nothing, and never touch
-        # systemd. Running the real script IS the point for those
-        # (tests/installer's #1716 + #1740 suites exercise the root-side
-        # allow-lists against the shipped bash), and none needs sudo or root.
+        # `help`, `check-dropin`, `check-quadlet` and `check-dnat` are the
+        # exceptions: all four are pure — they read stdin/argv (and, for
+        # check-dnat, LIST the nft ruleset and running containers), write
+        # nothing, and never touch systemd or the firewall. Running the real
+        # script IS the point for those (tests/installer's #1716 + #1740 +
+        # #1814 suites exercise the root-side allow-lists against the shipped
+        # bash), and none needs sudo or root.
         seam_verb = next((p for p in inner[1:] if not p.startswith("-")), "")
-        if seam_verb and seam_verb not in {"help", "", "check-dropin", "check-quadlet"}:
+        if seam_verb and seam_verb not in {
+            "help",
+            "",
+            "check-dropin",
+            "check-quadlet",
+            "check-dnat",
+        }:
             raise AssertionError(
                 f"test tried to run the hal0-systemctl privilege seam for real: {parts!r}. "
                 "Inject a fake runner (or patch hal0.system.seam.agent_unit_argv) instead — "

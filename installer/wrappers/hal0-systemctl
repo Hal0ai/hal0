@@ -73,6 +73,21 @@
 # sketched for this seam is NOT needed — that repair already runs as its own
 # independent root oneshot unit (packaging/systemd/hal0-podman-forward.service,
 # no User= — always root), entirely unaffected by hal0-api's User=hal0 flip.
+#
+# STALE-DNAT REPAIR (#1814): `prune-dnat` is the one verb here that touches the
+# firewall. It exists because a container that dies without netavark's teardown
+# running leaves its DNAT rule behind in inet netavark / nv_<netid>_dnat, and
+# nftables is first-match — so that dead rule permanently black-holes the port
+# for every later container. Deleting the handle is root-only, so it cannot be
+# a raw `nft` subprocess from the unprivileged API/CLI. It is NOT a general
+# "run nft" primitive: see validate_prunable_dnat below. The caller supplies a
+# port and a handle (both numeric), and the ROOT side re-derives everything
+# that matters — which chain the handle lives in, that the rule at that handle
+# really is a DNAT rule for that port, and that its target IP belongs to NO
+# running container. A handle naming a live container's rule, a rule in any
+# chain outside nv_*_dnat, or anything that is not a dport/dnat rule is
+# refused. The reachable effect is therefore bounded to "delete a netavark
+# DNAT rule that already routes nowhere".
 
 set -euo pipefail
 
@@ -478,6 +493,111 @@ validate_quadlet_body() {  # body on stdin -> QUADLET_BODY
   QUADLET_BODY="$out"
 }
 
+# ── stale-DNAT repair guard (#1814) ────────────────────────────────────────
+#
+# Sets PRUNE_CHAIN + PRUNE_TARGET_IP when (port, handle) names a rule this verb
+# is allowed to delete; dies otherwise. Fail-closed at every step.
+#
+# The unprivileged caller is trusted for NOTHING beyond two integers. In
+# particular it does not name the chain, does not hand over a rule expression,
+# and cannot make this reach a chain outside nv_*_dnat: the chain is discovered
+# HERE by walking `nft -a list table inet netavark` and tracking which chain
+# each line belongs to. The rule text at the requested handle must then match
+# the exact netavark DNAT shape for the requested port, and its target must be
+# an IP that no running container holds.
+#
+# Worst case if the hal0 account is compromised: it can delete netavark DNAT
+# rules that are already black holes — i.e. it can do nothing an unrepaired box
+# is not already doing to itself. It cannot ADD a rule, cannot REDIRECT a port
+# at an attacker-chosen address, cannot touch the filter/masquerade chains, and
+# cannot break a working published port (the live-target check refuses that
+# case explicitly). Claim only that: this is a *destructive-but-bounded* verb,
+# not a firewall-editing primitive.
+
+PRUNE_CHAIN=""
+PRUNE_TARGET_IP=""
+
+_PRUNE_DNAT_CHAIN_RE='^nv_[A-Za-z0-9_]+_dnat$'
+
+validate_port() {   # arg: a TCP/UDP port number
+  local p="$1"
+  [[ -n "$p" ]] || die "missing port"
+  [[ "$p" =~ ^[0-9]{1,5}$ ]] || die "bad port: $p"
+  (( p >= 1 && p <= 65535 )) || die "port out of range: $p"
+}
+
+validate_handle() { # arg: an nftables rule handle
+  local h="$1"
+  [[ -n "$h" ]] || die "missing handle"
+  [[ "$h" =~ ^[0-9]{1,10}$ ]] || die "bad handle: $h"
+  (( h >= 1 )) || die "handle out of range: $h"
+}
+
+# Echo one IPv4 per line for every RUNNING container. Empty output (no
+# containers) is legitimate and simply means every rule target is dead.
+_running_container_ips() {
+  local ids
+  ids="$(podman ps -q 2>/dev/null)" || die "prune-dnat: podman ps failed"
+  [[ -n "$ids" ]] || return 0
+  # shellcheck disable=SC2086 — ids is a newline list of hex ids from podman
+  podman inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}
+{{end}}' $ids 2>/dev/null || die "prune-dnat: podman inspect failed"
+}
+
+validate_prunable_dnat() {  # args: port, handle
+  local port="$1" handle="$2"
+  local LC_ALL=C
+  local line chain="" rule_re ip
+
+  command -v nft >/dev/null 2>&1 || die "prune-dnat: nft not found"
+  command -v podman >/dev/null 2>&1 || die "prune-dnat: podman not found"
+
+  # Both interpolations are already pinned to digits by the validators above.
+  rule_re="^[[:space:]]*(ip[[:space:]]+daddr[[:space:]]+[0-9.]+[[:space:]]+)?"
+  rule_re+="(tcp|udp)[[:space:]]+dport[[:space:]]+${port}[[:space:]]+"
+  rule_re+="dnat[[:space:]]+ip[[:space:]]+to[[:space:]]+([0-9]{1,3}(\.[0-9]{1,3}){3}):[0-9]{1,5}"
+  rule_re+="[[:space:]]*#[[:space:]]*handle[[:space:]]+${handle}[[:space:]]*$"
+
+  local candidate
+  while IFS= read -r line; do
+    # A chain header switches context. Anything that is not an nv_*_dnat chain
+    # sets chain="" so its rules can never be reached by this verb, whatever
+    # handle the caller asked for.
+    if [[ "$line" =~ ^[[:space:]]*chain[[:space:]]+([^[:space:]]+)[[:space:]]*\{ ]]; then
+      candidate="${BASH_REMATCH[1]}"   # save: the next =~ clobbers BASH_REMATCH
+      chain=""
+      if [[ "$candidate" =~ $_PRUNE_DNAT_CHAIN_RE ]]; then
+        chain="$candidate"
+      fi
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*\}[[:space:]]*$ ]]; then
+      chain=""
+      continue
+    fi
+    if [[ -n "$chain" ]] && [[ "$line" =~ $rule_re ]]; then
+      PRUNE_CHAIN="$chain"
+      PRUNE_TARGET_IP="${BASH_REMATCH[3]}"
+      break
+    fi
+  done < <(nft -a list table inet netavark 2>/dev/null || true)
+
+  [[ -n "$PRUNE_CHAIN" ]] \
+    || die "prune-dnat refused: no dport-${port} dnat rule at handle ${handle} in any nv_*_dnat chain"
+
+  # The whole point of the verb is that the target is already unreachable.
+  # Refuse to cut a live container's traffic, whatever the caller believes.
+  # Word-split, not line-read: podman's range template emits a trailing space
+  # per address, and a whitespace-padded token would silently never compare
+  # equal — i.e. the guard would pass for a LIVE container. Addresses are
+  # digits and dots, so splitting is exact.
+  for ip in $(_running_container_ips); do
+    if [[ "$ip" == "$PRUNE_TARGET_IP" ]]; then
+      die "prune-dnat refused: ${PRUNE_TARGET_IP} belongs to a running container"
+    fi
+  done
+}
+
 cmd="${1:-help}"; shift || true
 
 case "$cmd" in
@@ -584,6 +704,32 @@ case "$cmd" in
     printf '%s' "$QUADLET_BODY"
     ;;
 
+  prune-dnat)                 # prune-dnat <port> <handle>   (#1814)
+    # Delete ONE stale netavark DNAT rule. Everything that decides whether the
+    # delete is legal is re-derived root-side by validate_prunable_dnat: the
+    # chain, the rule shape, and that the target IP is dead. The nft argv below
+    # is built from that validated result, never from caller strings.
+    port="${1:-}"; handle="${2:-}"
+    validate_port "$port"
+    validate_handle "$handle"
+    validate_prunable_dnat "$port" "$handle"
+    nft delete rule inet netavark "$PRUNE_CHAIN" handle "$handle" \
+      || die "prune-dnat: nft delete failed for handle ${handle} in ${PRUNE_CHAIN}"
+    echo "pruned ${PRUNE_CHAIN} handle ${handle} (dport ${port} -> ${PRUNE_TARGET_IP}, dead)"
+    ;;
+
+  check-dnat)                 # check-dnat <port> <handle>   (#1814, side-effect-free)
+    # Dry run of the prune-dnat guard: says what a prune WOULD delete, or dies
+    # 64 with the refusal reason. Deletes nothing. Exists so the guard can be
+    # exercised by the test suite and by an operator debugging a refusal
+    # without touching the firewall — the check-quadlet / check-dropin posture.
+    port="${1:-}"; handle="${2:-}"
+    validate_port "$port"
+    validate_handle "$handle"
+    validate_prunable_dnat "$port" "$handle"
+    echo "prunable ${PRUNE_CHAIN} handle ${handle} (dport ${port} -> ${PRUNE_TARGET_IP}, dead)"
+    ;;
+
   daemon-reload)
     exec systemctl daemon-reload
     ;;
@@ -679,6 +825,8 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   write-hindsight-dropin           write ${HINDSIGHT_DROPIN_FILE} (body on stdin)
   check-dropin <gateway|hindsight> validate a drop-in body (stdin) without writing it
   check-quadlet [<slot-id>]        validate a .container body (stdin) without writing it
+  prune-dnat <port> <handle>       delete ONE stale (dead-target) netavark DNAT rule
+  check-dnat <port> <handle>       say whether that rule is prunable, without deleting it
   daemon-reload                    systemctl daemon-reload
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
   enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service

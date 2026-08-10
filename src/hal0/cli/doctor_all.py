@@ -469,6 +469,93 @@ def check_ports(slots: Any) -> Check:
     return Check("ports", "Slot ports", _PASS, f"{len(bound)} bound: {', '.join(map(str, bound))}")
 
 
+def check_port_dnat(slots: Any, audit: Callable[..., Any] | None = None) -> Check:
+    """Stale netavark DNAT rules on published slot ports (#1814).
+
+    A container that dies without netavark's teardown running leaves its DNAT
+    rule behind in ``inet netavark``. nftables is first-match, so that dead rule
+    permanently shadows the live one and the port black-holes even though the
+    container is healthy. Two heuristic-free signals — more than one DNAT rule
+    for a port, or a first match pointing at an IP no running container holds.
+
+    ``warn``, not ``fail``, when the audit can't run at all (no netavark table,
+    no ``nft``, no ``podman``, or the slots payload never arrived): the absence
+    of evidence is not evidence of corruption. Real corruption is a ``fail``
+    and names ``hal0 doctor ports --fix``.
+    """
+    label = "Port DNAT rules"
+    if not isinstance(slots, list):
+        return Check("port_dnat", label, _WARN, "no slots payload — run `hal0 doctor ports`")
+    ports = sorted({int(s["port"]) for s in slots if isinstance(s, dict) and s.get("port")})
+    if not ports:
+        return Check("port_dnat", label, _PASS, "no slot ports bound yet")
+
+    from hal0.system import netavark
+
+    try:
+        rules = netavark.read_dnat_rules()
+        live = netavark.read_live_container_ips()
+    except (netavark.NetavarkUnavailable, OSError, subprocess.SubprocessError) as exc:
+        return Check("port_dnat", label, _WARN, f"audit unavailable: {exc}")
+
+    verdicts = (audit or netavark.audit_ports)(ports, rules, live)
+    corrupt = [v for v in verdicts if v.corrupt]
+    if not corrupt:
+        return Check("port_dnat", label, _PASS, f"{len(ports)} port(s) clean in the netavark table")
+    stale = sum(len(v.stale) for v in corrupt)
+    names = ", ".join(str(v.port) for v in corrupt)
+    return Check(
+        "port_dnat",
+        label,
+        _FAIL,
+        f"{stale} stale DNAT rule(s) black-holing port(s) {names} "
+        "— repair with `hal0 doctor ports --fix`",
+    )
+
+
+def check_netns_durability(probe: Callable[[], Any] | None = None) -> Check:
+    """Can container network namespaces survive a root login/logout cycle? (#1814)
+
+    This is the *source* of the stale-DNAT leak the row above detects. podman
+    keeps each container's netns as a bind mount under ``/run/user/0/netns``,
+    which logind unmounts when root's last session ends unless root lingers.
+    Every container running at that moment is then unrepairable: its teardown
+    fails and leaks a DNAT rule that black-holes the port.
+
+    ``fail`` when a netns is ALREADY dangling (the leak is guaranteed on the
+    next stop), ``warn`` when linger is merely off but nothing is stranded yet,
+    ``pass`` otherwise.
+    """
+    label = "Container netns"
+    from hal0.system import netavark
+
+    try:
+        state = (probe or netavark.read_netns_durability)()
+    except (netavark.NetavarkUnavailable, OSError, subprocess.SubprocessError) as exc:
+        return Check("netns", label, _WARN, f"probe unavailable: {exc}")
+
+    if not state.sandbox_keys:
+        return Check("netns", label, _PASS, "no running containers to check")
+    dangling = state.dangling
+    if dangling:
+        return Check(
+            "netns",
+            label,
+            _FAIL,
+            f"{len(dangling)} running container(s) have a stranded netns — their next stop "
+            "WILL leak a DNAT rule. Fix: `loginctl enable-linger root`, then restart the slots",
+        )
+    if state.volatile:
+        return Check(
+            "netns",
+            label,
+            _WARN,
+            "netns live under /run/user/0 and root linger is off — a root logout will "
+            "strand them. Fix: `loginctl enable-linger root`",
+        )
+    return Check("netns", label, _PASS, f"{len(state.sandbox_keys)} netns durable")
+
+
 def _default_mcp_probe_targets() -> tuple[tuple[str, str], ...]:
     """(name, mount-root URL) pairs for hal0's two bundled MCP servers."""
     return (
@@ -725,12 +812,17 @@ def build_all_checks(base: str | None = None) -> list[Check]:
     from hal0.cli.doctor_commands import pending_layout_migration
 
     auth_payload = _get_any("/api/auth/status", base)
+    # One fetch, two rows: /api/slots container-probes every slot, so paying for
+    # it twice would double the roll-up's slowest leg.
+    slots_payload = _get_any("/api/slots", base, timeout=SLOTS_PROBE_TIMEOUT_S)
     extra_rows = [
         check_auth_posture(auth_payload),
         check_model_store(_get_any("/api/models", base)),
         check_migrations(pending_layout_migration()),
         check_ui_dist(),
-        check_ports(_get_any("/api/slots", base, timeout=SLOTS_PROBE_TIMEOUT_S)),
+        check_ports(slots_payload),
+        check_port_dnat(slots_payload),
+        check_netns_durability(),
         check_hal0_target(),
         check_secret_file_modes(),
         check_voice_stt_weights(),

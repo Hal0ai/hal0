@@ -564,15 +564,28 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         lambda **_kw: Check("hindsight_llm_auth", "Memory engine LLM auth", "pass", "stubbed"),
     )
 
+    # Stale-DNAT + netns rows (#1814) shell out to nft/podman otherwise;
+    # neutralise both so this composition test asserts the row list.
+    monkeypatch.setattr(
+        da, "check_port_dnat", lambda _s: Check("port_dnat", "Port DNAT rules", "pass", "stubbed")
+    )
+    monkeypatch.setattr(
+        da,
+        "check_netns_durability",
+        lambda *_a, **_k: Check("netns", "Container netns", "pass", "stubbed"),
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 12 extras.
-    assert keys[-12:] == [
+    # 7 verify rows + 14 extras.
+    assert keys[-14:] == [
         "auth",
         "models",
         "migrations",
         "ui-dist",
         "ports",
+        "port_dnat",
+        "netns",
         "hal0_target",
         "secret-modes",
         "stt-weights",

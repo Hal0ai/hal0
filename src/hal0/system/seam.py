@@ -358,6 +358,59 @@ class SystemCtlSeam:
             timeout=timeout,
         )
 
+    def prune_dnat(
+        self,
+        port: int,
+        handle: int,
+        *,
+        dry_run: bool = False,
+        timeout: float | None = 30.0,
+    ) -> subprocess.CompletedProcess[str]:
+        """Delete one **stale** netavark DNAT rule (#1814).
+
+        A container that dies without netavark's teardown running leaves its
+        DNAT rule behind in ``inet netavark`` / ``nv_<netid>_dnat``. nftables is
+        first-match, so that dead rule black-holes the port for every later
+        container. Removing it needs root, so it routes through the wrapper's
+        ``prune-dnat`` verb rather than an ``nft`` subprocess here.
+
+        Only two integers cross the boundary. The root side re-derives the chain
+        by walking the live ruleset, requires the rule at ``handle`` to be a DNAT
+        rule for ``port``, and refuses outright when the target IP belongs to a
+        running container — so this cannot cut a working port, and cannot reach a
+        chain outside ``nv_*_dnat``. See the wrapper's STALE-DNAT REPAIR note.
+
+        ``dry_run`` uses the side-effect-free ``check-dnat`` verb instead: same
+        guard, no delete. The direct (root / dev / CI) branch is deliberately
+        absent — there is no unprivileged fallback for editing nftables, and a
+        non-root process without the seam must fail loudly rather than silently
+        skip the repair. Raises :class:`subprocess.CalledProcessError` (exit 64
+        from the wrapper) with the refusal reason on stderr.
+        """
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            raise ValueError(f"bad port: {port!r}")
+        if not isinstance(handle, int) or isinstance(handle, bool) or handle < 1:
+            raise ValueError(f"bad handle: {handle!r}")
+        verb = "check-dnat" if dry_run else "prune-dnat"
+        if not self._is_hal0_user() and os.geteuid() == 0:
+            # Already root (the CLI run by an admin, the installer): call the
+            # wrapper directly. Same validation, one less sudo hop — and no
+            # sudoers grant is needed for `hal0 doctor ports --fix` as root.
+            return self._run(
+                [self._seam_bin, verb, str(port), str(handle)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=timeout,
+            )
+        return self._run(
+            self._seam_argv(verb, str(port), str(handle)),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout,
+        )
+
     def systemctl(
         self,
         *args: str,

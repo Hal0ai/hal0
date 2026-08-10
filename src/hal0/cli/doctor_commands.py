@@ -1972,9 +1972,76 @@ def doctor_profiles(
 # ── hal0 doctor ports — the drill-down the roll-up's Slot ports row names ─────
 
 
+def _render_dnat(verdicts: list[Any]) -> None:
+    """Print the per-port netavark DNAT table (#1814)."""
+    table = Table(title="Netavark DNAT rules (published slot ports)", box=None, pad_edge=False)
+    table.add_column("port", justify="right")
+    table.add_column("rules", justify="right")
+    table.add_column("first match")
+    table.add_column("verdict")
+
+    for v in verdicts:
+        first = v.first_match
+        target = f"{first.target_ip}:{first.target_port}" if first else "—"
+        if not v.rules:
+            verdict = "[dim]no rule (slot not running)[/dim]"
+        elif v.corrupt:
+            verdict = f"[red]{v.reason()}[/red]"
+        else:
+            verdict = "[green]ok[/green]"
+        table.add_row(
+            f"[red]{v.port}[/red]" if v.corrupt else str(v.port),
+            str(len(v.rules)),
+            target,
+            verdict,
+        )
+    console.print(table)
+
+
+def _repair_dnat(verdicts: list[Any]) -> tuple[int, int]:
+    """Delete every stale DNAT handle behind a corrupt port. Returns (ok, failed).
+
+    Deletes highest-handle-first *within* a port so an earlier delete can never
+    renumber a handle we are about to use — nft handles are stable, but the
+    ordering costs nothing and removes the question. Live-targeted rules are
+    never candidates (see :attr:`PortVerdict.stale`), so a working slot cannot
+    be cut by a repair run.
+    """
+    from hal0.system.seam import SystemCtlSeam
+
+    seam = SystemCtlSeam()
+    ok = failed = 0
+    for verdict in verdicts:
+        if not verdict.corrupt:
+            continue
+        for rule in sorted(verdict.stale, key=lambda r: r.handle, reverse=True):
+            try:
+                seam.prune_dnat(verdict.port, rule.handle)
+            except Exception as exc:
+                failed += 1
+                detail = getattr(exc, "stderr", None) or str(exc)
+                console.print(
+                    f"[red]✗[/red]  port {verdict.port}: could not prune handle "
+                    f"{rule.handle}: {str(detail).strip()}"
+                )
+            else:
+                ok += 1
+                console.print(f"[green]✓[/green]  port {verdict.port}: pruned {rule.render()}")
+    return ok, failed
+
+
 @app.command("ports")
-def doctor_ports() -> None:
-    """Show which port each slot has bound, and flag collisions.
+def doctor_ports(
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help=(
+            "Delete the stale netavark DNAT rules found by the audit "
+            "(privileged, routed through the hal0-systemctl seam)."
+        ),
+    ),
+) -> None:
+    """Show which port each slot has bound, flag collisions and DNAT corruption.
 
     The drill-down for the ``Slot ports`` row in ``hal0 doctor all`` (#1501).
     Every other failing row in that table names a follow-up command; this one
@@ -1985,6 +2052,23 @@ def doctor_ports() -> None:
     legitimately takes longer than a normal API call. A timeout is reported as
     a timeout here, naming the budget it exceeded, rather than as the endpoint
     being down.
+
+    It then audits the nftables DNAT rules netavark publishes those ports with
+    (#1814). A container that dies without netavark's teardown running leaves
+    its DNAT rule behind, and because nftables is first-match, that dead rule
+    permanently shadows the correct one — the port answers nothing while the
+    container inside is perfectly healthy. Two signals, both unambiguous and
+    heuristic-free: more than one DNAT rule for a port, or a first-match rule
+    targeting an IP no running container holds.
+
+    ``--fix`` is the explicit repair. It is never a side effect of the audit:
+    deleting nftables rules is privileged and destructive, so it happens only
+    when an operator asks. Only rules whose target is already dead are deleted,
+    so a healthy port cannot be cut.
+
+    Exit codes:
+      0 — no collisions and no DNAT corruption (or every finding was repaired).
+      1 — a port collision, or DNAT corruption still present.
     """
     from hal0.cli._shared import CliApiError, api_get
     from hal0.cli.doctor_all import SLOTS_PROBE_TIMEOUT_S
@@ -2032,15 +2116,57 @@ def doctor_ports() -> None:
     console.print(table)
 
     collisions = {p: names for p, names in by_port.items() if len(names) > 1}
-    if collisions:
-        for port, names in sorted(collisions.items()):
-            console.print(
-                f"\n[red]✗[/red]  port {port} claimed by {len(names)}: {', '.join(names)}"
-            )
+    for port, names in sorted(collisions.items()):
+        console.print(f"\n[red]✗[/red]  port {port} claimed by {len(names)}: {', '.join(names)}")
+    if not collisions:
+        console.print(f"\n[green]✓[/green]  {len(bound)} port(s) bound, no collisions.")
+
+    # ── netavark DNAT audit (#1814) ──────────────────────────────────────────
+    from hal0.system.netavark import (
+        NetavarkUnavailable,
+        audit_ports,
+        read_dnat_rules,
+        read_live_container_ips,
+    )
+
+    try:
+        rules = read_dnat_rules()
+        live_ips = read_live_container_ips()
+    except (NetavarkUnavailable, OSError, subprocess.SubprocessError) as exc:
+        # No netavark table / no podman / no nft is not a finding — a box that
+        # publishes nothing through netavark has nothing to audit. Say so and
+        # keep the collision verdict as the exit code.
+        console.print(f"\n[dim]·[/dim]  netavark DNAT audit skipped: {exc}")
+        raise typer.Exit(1 if collisions else 0) from None
+
+    verdicts = audit_ports(sorted(by_port), rules, live_ips)
+    console.print()
+    _render_dnat(verdicts)
+
+    corrupt = [v for v in verdicts if v.corrupt]
+    if not corrupt:
+        console.print("\n[green]✓[/green]  netavark DNAT rules are clean on every bound port.")
+        raise typer.Exit(1 if collisions else 0)
+
+    stale_total = sum(len(v.stale) for v in corrupt)
+    console.print(
+        f"\n[red]✗[/red]  {len(corrupt)} port(s) have stale netavark DNAT rules "
+        f"({stale_total} dead rule(s)). nftables is first-match, so a leaked rule "
+        "black-holes the port even when the container is healthy."
+    )
+    if not fix:
+        console.print(
+            "    Repair with `hal0 doctor ports --fix` (privileged: routed through "
+            "the hal0-systemctl seam)."
+        )
         raise typer.Exit(1)
 
-    console.print(f"\n[green]✓[/green]  {len(bound)} port(s) bound, no collisions.")
-    raise typer.Exit(0)
+    console.print()
+    ok, failed = _repair_dnat(corrupt)
+    console.print(f"\n[bold]pruned {ok} stale rule(s), {failed} failure(s).[/bold]")
+    if failed or not ok:
+        raise typer.Exit(1)
+    raise typer.Exit(1 if collisions else 0)
 
 
 # ── hal0 doctor all — read-only evidence roll-up (§21.4) ──────────────────────
