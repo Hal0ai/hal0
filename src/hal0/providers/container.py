@@ -831,6 +831,37 @@ def _render_quadlet_from_plan(
     return "\n".join(lines)
 
 
+def _profile_flag_tokens(flags: str) -> list[str]:
+    """Tokenize a slot profile's flag text for the argv chain (shared screen).
+
+    Used by BOTH profile-sourced segments — the divergence overlay
+    (``slot_profile``, #1636) and the unstamped-model template
+    (``slot_profile_template``, #1787) — so they can never drift on quoting or
+    on the jinja rule.
+
+    ``--jinja`` is dropped: jinja is a runner+model CAPABILITY resolved once as
+    ``effective_jinja`` and injected/suppressed through
+    ``model_defaults.extra_args``. llama-server has no ``--no-jinja`` negation,
+    so a legacy or hand-authored profile's own ``--jinja`` token would otherwise
+    permanently defeat an explicit ``defaults.jinja=false``.
+    """
+    if not flags or not flags.strip():
+        return []
+    try:
+        tokens = shlex.split(flags)
+    except ValueError as exc:
+        # A profile's flags string is free text (operator-editable on disk) and
+        # the create/edit path has no quoting validator — unmatched quotes only
+        # surface here, where an unhandled ValueError would otherwise 500 the
+        # launch/preview. Fail with a controlled config error instead.
+        raise UnprocessableEntity(
+            f"slot profile flags are not valid shell text: {exc}",
+            code="slot.profile_flags_malformed",
+            details={"flags": flags},
+        ) from exc
+    return [t for t in tokens if t != "--jinja"]
+
+
 def _llama_argv_segments(
     *,
     port: int,
@@ -846,6 +877,7 @@ def _llama_argv_segments(
     slot_parallel: int | None = None,
     extra_args: str | None = None,
     slot_profile_flags: str = "",
+    slot_profile_template_flags: str = "",
 ) -> list[tuple[str, list[str]]]:
     """Build the ordered, labelled llama-server argv segments (SINGLE SOURCE).
 
@@ -871,13 +903,28 @@ def _llama_argv_segments(
     over the model tune — the per-slot flag-divergence path that replaced the
     retired duplicate-for-device model flow (PR #1635). The caller
     (:func:`_resolve_llama_scalars`) computes it divergence-gated; aligned and
-    provenance-less slots pass ``""`` and launch byte-identical to the stamped
+    already-stamped slots pass ``""`` and launch byte-identical to the stamped
     tune.
+
+    Unstamped-model template (#1787): copy-on-stamp only works once something
+    stamps. Auto-scan / pull / capability-apply register models with NO
+    ``defaults`` at all, so on a fresh box the model carries neither a
+    provenance nor a materialized tune, and BOTH the retired ``profile``
+    segment and the divergence overlay stay silent — an ``embedding``/``rerank``
+    slot then launches without ``--embedding`` / ``--reranking`` and serves 501s
+    for its only purpose. ``slot_profile_template_flags`` carries the slot
+    profile's flags for exactly that case: the model has no tune of its own, so
+    the profile template IS the tune until a stamp materializes it. It rides its
+    own UNTRUSTED ``slot_profile_template`` segment BELOW ``model_extra_args``
+    (a template is a floor, never an override) and the caller emits it only when
+    the model's ``defaults`` carry no ``extra_args`` — a hand-authored tune keeps
+    launching with no live profile read (golden #5).
 
     Precedence (lowest → highest; ``resolve_argv``/``normalize_argv`` keeps the
     LAST occurrence of each canonical flag)::
 
-        base < model_extra_args < slot_profile < slot_hardware < chat_template < mmproj
+        base < slot_profile_template < model_extra_args < slot_profile
+              < slot_hardware < chat_template < mmproj
 
     The slot hardware segment sits AFTER ``model_extra_args`` and
     ``slot_profile`` so the slot's typed ``-ngl``/``--threads`` win over any
@@ -941,35 +988,16 @@ def _llama_argv_segments(
     # (typed slot fields stay authoritative). The segment appears ONLY when a
     # divergence produced flags — the aligned case keeps the exact golden #5
     # segment shape (tests/golden_paths/test_gp05_stamped_launch_layering.py).
-    segments: list[tuple[str, list[str]]] = [
-        ("base", base),
-        ("model_extra_args", md_extra_tokens),
-    ]
-    if slot_profile_flags.strip():
-        try:
-            _profile_tokens = shlex.split(slot_profile_flags)
-        except ValueError as exc:
-            # A profile's flags string is free text (operator-editable on
-            # disk) and the create/edit path has no quoting validator —
-            # unmatched quotes only surface here, where an unhandled
-            # ValueError would otherwise 500 the launch/preview. Fail with a
-            # controlled config error instead.
-            raise UnprocessableEntity(
-                f"divergent slot profile flags are not valid shell text: {exc}",
-                code="slot.profile_flags_malformed",
-                details={"flags": slot_profile_flags},
-            ) from exc
-        # jinja is a runner+model CAPABILITY, resolved once as
-        # ``effective_jinja`` and injected/suppressed through
-        # ``model_defaults.extra_args`` above — never through a raw profile
-        # flag. llama-server has no ``--no-jinja`` negation, so a legacy or
-        # hand-authored profile's own ``--jinja`` token would otherwise
-        # permanently defeat an explicit ``defaults.jinja=false`` once it
-        # rides the (higher-precedence) slot_profile segment. Strip it so
-        # the overlay can never outrank the already-computed capability.
-        _profile_tokens = [t for t in _profile_tokens if t != "--jinja"]
-        if _profile_tokens:
-            segments.append(("slot_profile", _profile_tokens))
+    segments: list[tuple[str, list[str]]] = [("base", base)]
+    # Unstamped-model profile template (#1787), BELOW the model tune: a template
+    # is the floor a model's own defaults refine, never an override.
+    _template_tokens = _profile_flag_tokens(slot_profile_template_flags)
+    if _template_tokens:
+        segments.append(("slot_profile_template", _template_tokens))
+    segments.append(("model_extra_args", md_extra_tokens))
+    _profile_tokens = _profile_flag_tokens(slot_profile_flags)
+    if _profile_tokens:
+        segments.append(("slot_profile", _profile_tokens))
     segments += [
         ("slot_hardware", slot_hw_tokens),
         ("chat_template", chat_tokens),
@@ -997,6 +1025,7 @@ def _llama_launch_plan(
     slot_parallel: int | None = None,
     env: dict[str, str] | None = None,
     slot_profile_flags: str = "",
+    slot_profile_template_flags: str = "",
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -1022,6 +1051,7 @@ def _llama_launch_plan(
         slot_parallel=slot_parallel,
         extra_args=extra_args,
         slot_profile_flags=slot_profile_flags,
+        slot_profile_template_flags=slot_profile_template_flags,
     )
     # resolve_argv over the labelled segments is argv-equivalent to
     # normalize_argv over the flat concatenation (pinned by tests/slots/
@@ -1531,6 +1561,20 @@ def _resolve_llama_scalars(
     #     were inert before this overlay existed.
     # No MTP expansion here (``resolve_profile_flags`` with no override): the
     # ``--spec-draft-*`` bundle stays model-driven (see _effective_mtp).
+    def _profile_flags_text(prof: Any) -> str:
+        """``resolve_profile_flags`` for a profile that may be a plain Mapping.
+
+        ``_resolve_profile_or_base`` normally hands back a validated
+        ``ProfileConfig``, but the seam also accepts a raw profile Mapping (a
+        registry row read straight off disk, and the shape callers construct in
+        tests). ``resolve_profile_flags`` reaches for ``profile.flags`` and would
+        ``AttributeError`` on the Mapping — mirroring the ``getattr(profile,
+        "name", None)`` tolerance already used for the resolved-name check.
+        """
+        if isinstance(prof, Mapping):
+            return str(prof.get("flags") or "").strip()
+        return str(resolve_profile_flags(prof) or "").strip()
+
     slot_profile_flags = ""
     _cfg_profile = str(slot_cfg.get("profile") or "")
     _mi_defaults = model_info.get("defaults")
@@ -1546,7 +1590,7 @@ def _resolve_llama_scalars(
         from hal0.slots.profile_adopt import profile_fits_slot
 
         if profile_fits_slot(_cfg_profile, slot_cfg):
-            slot_profile_flags = str(resolve_profile_flags(profile) or "").strip()
+            slot_profile_flags = _profile_flags_text(profile)
         if slot_profile_flags and for_launch:
             log.info(
                 "slot.profile_divergence_applied",
@@ -1554,6 +1598,55 @@ def _resolve_llama_scalars(
                     "slot": str(slot_cfg.get("name") or ""),
                     "profile": _cfg_profile,
                     "model_profile": _provenance,
+                },
+            )
+
+    # Unstamped-model profile template (#1787). Copy-on-stamp presumes SOMETHING
+    # stamped: the model's materialized ``defaults`` is the whole tune, and the
+    # profile is only read in the drawer. But auto-scan, pull and
+    # capability-apply all register models with no ``defaults`` at all, so on a
+    # fresh box neither the (retired) profile segment nor the divergence overlay
+    # above contributes anything — an ``embedding``/``rerank`` slot launches
+    # without ``--embedding``/``--reranking`` and every /v1/embeddings and
+    # /v1/rerank call 501s while the slot reports ready.
+    #
+    # For exactly that case the slot's profile supplies the tune as a template
+    # (``slot_profile_template``, layered BELOW the model tune). Gated so a
+    # stamped or hand-tuned model is untouched:
+    #   * the model records NO tune text (``defaults.extra_args`` empty/absent)
+    #     — a hand-authored tune is the operator's word and still launches with
+    #     no live profile read (golden #5 §8);
+    #   * the model records NO profile provenance — a stamped model is already
+    #     materialized, and its divergence case is the overlay above;
+    #   * the slot NAMES a profile and it is the one that resolved — a
+    #     missing-profile fallback to the backend base must not inject flags the
+    #     operator never picked (same rule as the overlay);
+    #   * the profile FITS the slot (``profile_fits_slot``) — a wrong-type
+    #     profile must not inject mode-changing flags.
+    slot_profile_template_flags = ""
+    _md_extra = _mi_defaults.get("extra_args") if isinstance(_mi_defaults, Mapping) else None
+    _has_model_tune = bool(_md_extra and str(_md_extra).strip())
+    if (
+        _cfg_profile
+        and not _has_model_tune
+        and not (isinstance(_provenance, str) and _provenance)
+        and (_resolved_name is None or _resolved_name == _cfg_profile)
+    ):
+        from hal0.slots.profile_adopt import profile_fits_slot
+
+        if profile_fits_slot(_cfg_profile, slot_cfg):
+            slot_profile_template_flags = _profile_flags_text(profile)
+        if slot_profile_template_flags and for_launch:
+            log.info(
+                "slot.profile_template_applied",
+                extra={
+                    "slot": str(slot_cfg.get("name") or ""),
+                    "profile": _cfg_profile,
+                    "model": str(model_info.get("_model_key") or ""),
+                    "hint": (
+                        "model carries no stamped tune; launching with the slot "
+                        "profile's flags as the template (#1787)"
+                    ),
                 },
             )
 
@@ -1701,6 +1794,7 @@ def _resolve_llama_scalars(
         "image": str(image),
         "flags_str": str(flags_str),
         "slot_profile_flags": str(slot_profile_flags),
+        "slot_profile_template_flags": str(slot_profile_template_flags),
         "context_size": context_size,
         "extra_args": extra_args,
         "server_env": server_env,
@@ -1850,6 +1944,7 @@ class ContainerProvider(Provider):
             slot_parallel=scalars["slot_parallel"],
             env=merged_env or None,
             slot_profile_flags=scalars["slot_profile_flags"],
+            slot_profile_template_flags=scalars["slot_profile_template_flags"],
         )
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
@@ -2575,6 +2670,7 @@ def _resolve_slot_argv(
         slot_parallel=scalars["slot_parallel"],
         extra_args=scalars["extra_args"],
         slot_profile_flags=scalars["slot_profile_flags"],
+        slot_profile_template_flags=scalars["slot_profile_template_flags"],
     )
     return str(scalars["image"]), resolve_argv(segments)
 

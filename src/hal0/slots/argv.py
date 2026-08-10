@@ -135,11 +135,23 @@ SLOT_HARDWARE_FLAGS: frozenset[str] = frozenset(
 #     provenance (``defaults.profile``). Profile saves already screen these
 #     flags, but the profile file is operator-editable on disk, so the launch
 #     merge re-screens them like any other free-form source.
+#   * ``slot_profile_template`` — the slot profile's flag text used as the tune
+#     TEMPLATE for a model that carries no stamped tune at all (#1787: auto-scan
+#     / pull / capability-apply never stamp ``defaults``). Same free-form source
+#     as ``slot_profile``, one tier LOWER (below ``model_extra_args``), so it
+#     rides the same managed-arg screen and the same hardware-flag strip.
 # A future request-level ``llamacpp_args`` segment (§7.1a 5-tier precedence
 # rewrite) adds its own label here so it rides the same guard.
 UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset(
-    {"extra_args", "model_extra_args", "slot_profile"}
+    {"extra_args", "model_extra_args", "slot_profile", "slot_profile_template"}
 )
+
+# Profile-sourced segment labels: free-form flag text copied off a profile
+# (divergence overlay + unstamped-model template). On top of the managed-arg
+# screen every untrusted label gets, these additionally have their SLOT-owned
+# hardware flags silently STRIPPED rather than hard-rejected — see
+# :func:`resolve_argv`.
+PROFILE_SEGMENT_LABELS: frozenset[str] = frozenset({"slot_profile", "slot_profile_template"})
 
 
 @dataclass(frozen=True)
@@ -397,7 +409,8 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
     Raises:
         hal0.errors.BadRequest: an untrusted segment sets a managed flag.
 
-    ``slot_profile`` (#1636) additionally gets its hardware flags
+    The profile-sourced segments (``slot_profile`` #1636, ``slot_profile_template``
+    #1787) first get their hardware flags
     (``SLOT_HARDWARE_FLAGS``) silently stripped rather than hard-rejected: the
     profile save path only started enforcing the §5 partition guard after
     grandfathered/hand-edited profiles could already carry ``-dev``/
@@ -412,10 +425,14 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
     tokens: list[str] = []
     sources: list[str] = []
     for label, seg in segments:
+        # Strip BEFORE the deny: ``-ngl`` sits in both denylists, and for a
+        # profile-sourced segment the partition rule is "silently ignored",
+        # not "fail the launch". Denying first would hard-reject every
+        # grandfathered profile that still carries ``-ngl 999``.
+        if label in PROFILE_SEGMENT_LABELS:
+            seg, _stripped = strip_managed_flags(seg, denylist=SLOT_HARDWARE_FLAGS)
         if label in UNTRUSTED_SEGMENT_LABELS:
             _deny_managed_flags(seg, segment=label)
-        if label == "slot_profile":
-            seg, _stripped = strip_managed_flags(seg, denylist=SLOT_HARDWARE_FLAGS)
         for tok in seg:
             tokens.append(tok)
             sources.append(label)
@@ -502,6 +519,7 @@ __all__ = [
     "APPEND_FLAGS",
     "FLAG_ALIASES",
     "MANAGED_ARGS_DENYLIST",
+    "PROFILE_SEGMENT_LABELS",
     "SLOT_HARDWARE_FLAGS",
     "UNTRUSTED_SEGMENT_LABELS",
     "FlagProvenance",

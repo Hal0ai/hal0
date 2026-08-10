@@ -279,13 +279,17 @@ def test_container_slot_has_runtime_profile_image_fields(
     )
 
 
-def test_container_slot_resolved_command_excludes_profile_flags(
+def test_container_slot_resolved_command_uses_profile_as_template_when_unstamped(
     client_with_container_slot: TestClient,
 ) -> None:
-    """FLAGS-own (spec-flags-ownership §2): a profile is a copy-on-stamp template
-    read only in the drawer — its flags NEVER reach the launch/preview command.
-    resolved_command reflects the model's materialized tune + structural base
-    flags, so the profile's --flash-attn/-ngl must NOT appear."""
+    """FLAGS-own (spec-flags-ownership §2) makes a profile a copy-on-stamp
+    template — but ``llama-3b`` here is UNSTAMPED (no registry row, so no
+    materialized ``defaults`` tune at all). #1787: for that case the slot
+    profile supplies the tune as the ``slot_profile_template`` segment, so its
+    ``--flash-attn`` DOES reach the preview — otherwise an embedding/rerank slot
+    launches without ``--embedding``/``--reranking``. The slot-owned hardware
+    flags stay partitioned off: the profile's ``-ngl 999`` is still stripped.
+    """
     from hal0.config.schema import ProfileConfig
 
     fake_profile = ProfileConfig(
@@ -320,9 +324,10 @@ def test_container_slot_resolved_command_excludes_profile_flags(
     joined = " ".join(rc)
     # Structural base flags are always present (resolved, not profile-sourced).
     assert "--model" in joined and "--port" in joined
-    # Profile flags are inert at launch/preview — the model owns the tune now.
-    assert "--flash-attn" not in joined, "profile flags must NOT reach resolved_command"
-    assert "-ngl" not in joined, "profile flags must NOT reach resolved_command"
+    # #1787: the unstamped model takes the profile's tune as its template.
+    assert "--flash-attn" in joined, "an unstamped model must take the profile template"
+    # ...but the slot owns the hardware grid — the profile's -ngl never rides along.
+    assert "-ngl" not in joined, "profile hardware flags must NOT reach resolved_command"
 
 
 def test_profileless_slot_has_null_image_and_command(
