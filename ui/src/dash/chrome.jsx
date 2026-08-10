@@ -550,7 +550,18 @@ function NavList({ route, param, onGo, testPrefix }) {
             <div
               className={"sb-row" + (_navActive(route, param, it.id) ? " active" : "") + (it.children ? " has-children" : "")}
               data-testid={tid(it.id)}
+              role="button"
+              tabIndex={0}
+              aria-label={it.label}
+              aria-current={_navActive(route, param, it.id) ? "page" : undefined}
               onClick={() => { if (it.children) setOpen(o => ({ ...o, [it.id]: true })); onGo(it.id); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  if (it.children) setOpen(o => ({ ...o, [it.id]: true }));
+                  onGo(it.id);
+                }
+              }}
             >
               {it.icon}
               <span className="lbl">{it.label}</span>
@@ -572,7 +583,12 @@ function NavList({ route, param, onGo, testPrefix }) {
                 key={ch.id}
                 className={"sb-row sb-sub" + (_navActive(route, param, ch.id) ? " active" : "")}
                 data-testid={tid(ch.id)}
+                role="button"
+                tabIndex={0}
+                aria-label={ch.label}
+                aria-current={_navActive(route, param, ch.id) ? "page" : undefined}
                 onClick={() => onGo(ch.id)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onGo(ch.id); } }}
               >
                 <span className="lbl">{ch.label}</span>
               </div>

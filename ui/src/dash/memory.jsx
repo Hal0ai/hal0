@@ -187,7 +187,7 @@ function MemHindsightCard({
     <>
       <span>{e.version ? `v${e.version}` : 'version unknown'}</span>
       <span className="pf-sep">·</span>
-      <span>{e.banks_total != null ? `${e.banks_total} banks` : '— banks'}</span>
+      <span>{e.banks_total != null ? `${e.banks_total} bank${e.banks_total === 1 ? '' : 's'}` : '— banks'}</span>
     </>
   );
   const stats = [

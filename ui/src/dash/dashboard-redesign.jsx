@@ -253,6 +253,13 @@ function HeroStrip({ slots, heroTps, layout, swapMode, onToggleSwapMode, onToggl
 // ─── band 0 · health strip ───────────────────────────────────────────────────
 
 function HealthStrip({ slots, heroTps, attentionItems }) {
+  // #1797(3): /api/hardware sees the DRM node whether or not THIS box can
+  // actually drive it (LXC shares the host's /sys/class/drm read-only) — a
+  // CPU-only container reports the host iGPU's util/temp as if it were its
+  // own. `computeCapable` is the one probe field backed by a real capability
+  // check (rocm-smi presence, hardware/probe.py), so it's the honest gate.
+  const hw = useHardware()
+  const hasGpu = !!hw.data?.computeCapable
   const attentionCount = attentionItems.length
   // Compact summary across the broadened set: approvals vs everything else
   // (error slots, failed downloads, update, drift, messages) as "alerts".
@@ -299,8 +306,8 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
       </div>
       <div className="rd-health-cell">
         <div className="rd-health-k mono">igpu</div>
-        <div className="rd-health-v mono num">
-          {gpuPct != null ? <>{gpuPct}%{gpuTemp != null && <span className="sub"> · {gpuTemp}°C</span>}</> : '—'}
+        <div className="rd-health-v mono num" title={hasGpu ? undefined : 'No GPU compute access on this box'}>
+          {hasGpu && gpuPct != null ? <>{gpuPct}%{gpuTemp != null && <span className="sub"> · {gpuTemp}°C</span>}</> : '—'}
         </div>
       </div>
       <div className="rd-health-cell">
@@ -572,10 +579,18 @@ function RDUtilizationCard({ swap }) {
   const slotsQuery = useSlots()
   const slots = slotsQuery.data ?? []
 
+  // #1797(3): the DRM/XDNA nodes are visible from any LXC sharing the host
+  // kernel, so gpu_util/npu_status leak the HOST's accelerator state on a
+  // container with no actual compute access. `computeCapable` is the only
+  // probe field backed by a real capability test (rocm-smi presence) —
+  // gate both the iGPU and NPU rows on it so a CPU-only box shows its own
+  // truth (dash, "no GPU/NPU access") instead of the host's numbers.
+  const hasGpu = !!hw.data?.computeCapable
+
   const gpuGhz = st?.gpu_clock_mhz != null ? (st.gpu_clock_mhz / 1000).toFixed(1) : null
   const gpuTemp = st?.gpu_temp_c != null ? Math.round(st.gpu_temp_c) : null
   const gpuW = power.data?.gpu_power_w != null ? Math.round(power.data.gpu_power_w) : null
-  const gpuCaption = [
+  const gpuCaption = !hasGpu ? 'no GPU access' : [
     gpuGhz != null ? `${gpuGhz} GHz` : null,
     gpuTemp != null ? `${gpuTemp}°C` : null,
     gpuW != null ? `${gpuW} W` : null,
@@ -583,11 +598,11 @@ function RDUtilizationCard({ swap }) {
 
   const cores = hw.data?.cores
   const npuStatus = st?.npu_status ?? null
-  const npuActive = npuStatus?.ok ?? null
-  const npuUtil = st?.npu_util ?? null
-  const npuGb = npuStatus?.model_mb ? mbToGb(npuStatus.model_mb) : null
+  const npuActive = hasGpu ? (npuStatus?.ok ?? null) : null
+  const npuUtil = hasGpu ? (st?.npu_util ?? null) : null
+  const npuGb = hasGpu && npuStatus?.model_mb ? mbToGb(npuStatus.model_mb) : null
   const npuSlots = slots.filter((s) => (s.device || '') === 'npu' && s.coresident).map((s) => s.name)
-  const npuCaption = [
+  const npuCaption = !hasGpu ? 'no NPU access' : [
     npuSlots.length > 1 ? `${npuSlots.join(' + ')} coresident` : (npuSlots[0] || null),
     npuGb != null ? `${npuGb.toFixed(1)} GB` : null,
   ].filter(Boolean).join(' · ') || (npuActive == null ? 'pending driver' : null)
@@ -598,8 +613,8 @@ function RDUtilizationCard({ swap }) {
         <UtilRow
           dotColor="var(--dev-vulkan)"
           name="igpu"
-          sub={hw.data?.gpu || null}
-          pct={st?.gpu_util ?? null}
+          sub={hasGpu ? (hw.data?.gpu || null) : 'no gpu'}
+          pct={hasGpu ? (st?.gpu_util ?? null) : null}
           caption={gpuCaption}
         />
         <UtilRow
