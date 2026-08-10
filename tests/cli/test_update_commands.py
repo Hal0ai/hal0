@@ -552,3 +552,42 @@ def test_poll_job_gives_up_once_the_unreachable_budget_is_spent(
     with pytest.raises(SystemExit) as excinfo:
         uc._poll_job("c1", terminal=("applied", "failed"))
     assert excinfo.value.code == 1
+
+
+# ── _print_check placeholder-manifest rendering (#1796) ──────────────────────
+
+
+def test_print_check_placeholder_manifest_says_no_release(capsys: pytest.CaptureFixture) -> None:
+    """A channel with nothing published serves version '0.0.0' + an
+    all-zero digest — rendering that as a real "-> 0.0.0 up to date" target
+    misleads the operator into thinking there IS a release on this channel."""
+    uc._print_check(
+        {
+            "current": "1.0.0rc4",
+            "latest": "0.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "manifest": {
+                "digest_sha256": "0" * 64,
+                "released_at": "2026-05-15",
+            },
+        }
+    )
+    out = capsys.readouterr().out
+    assert "no release published on this channel" in out
+    assert "up to date" not in out
+
+
+def test_print_check_real_manifest_renders_normally(capsys: pytest.CaptureFixture) -> None:
+    uc._print_check(
+        {
+            "current": "1.0.0rc4",
+            "latest": "1.0.0",
+            "channel": "stable",
+            "update_available": True,
+            "manifest": {"digest_sha256": "a" * 64, "released_at": "2026-08-01"},
+        }
+    )
+    out = capsys.readouterr().out
+    assert "no release published" not in out
+    assert "1.0.0" in out

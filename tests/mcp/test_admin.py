@@ -1335,3 +1335,30 @@ async def test_rest_failure_with_unparseable_body_still_gets_a_code(
     assert result["http_status"] == 502
     assert isinstance(result["error"]["code"], str)
     assert "502 Bad Gateway" in str(result["error"])
+
+
+# ── #1796: tool-argument errors must surface as isError:true ────────────────
+#
+# ``dispatch()``'s ``{"status": "error", ...}`` return is a normal value, not
+# an exception — nothing told FastMCP the call failed, so every registered
+# tool answered isError:false even for a hard argument-validation failure.
+# ``model_show`` with no ``model_id`` hits ``_split_args``'s KeyError path
+# (``mcp.missing_arg``) deterministically, no REST mocking required.
+
+
+@pytest.mark.asyncio
+async def test_registered_tool_raises_toolerror_on_missing_arg(queue: ApprovalQueue) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    server = admin.build_server(approval_queue=queue, base_url="http://t")
+    with pytest.raises(ToolError):
+        await server.call_tool("model_show", {"args": {}})
+
+
+def test_server_stamps_hal0_version_not_sdk_version(queue: ApprovalQueue) -> None:
+    """serverInfo.version must be hal0's own version, not the ``mcp`` SDK
+    package version FastMCP falls back to when nothing sets it explicitly."""
+    import hal0
+
+    server = admin.build_server(approval_queue=queue, base_url="http://t")
+    assert server._mcp_server.version == hal0.__version__

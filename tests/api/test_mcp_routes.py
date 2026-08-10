@@ -146,8 +146,11 @@ def test_servers_returns_introspected_counts(client: TestClient) -> None:
     assert by_id["hal0-admin"]["bundled"] is True
     assert by_id["hal0-admin"]["state"] == "running"
     assert by_id["hal0-admin"]["transport"] == "streamable-http"
-    assert by_id["hal0-admin"]["connect_url"].endswith("/mcp/admin")
-    assert by_id["hal0-memory"]["connect_url"].endswith("/mcp/memory")
+    # #1796: the FastMCP Streamable HTTP transport is mounted one level
+    # deeper than the mount id — /mcp/admin/mcp, not /mcp/admin (the bare
+    # mount root 405s).
+    assert by_id["hal0-admin"]["connect_url"].endswith("/mcp/admin/mcp")
+    assert by_id["hal0-memory"]["connect_url"].endswith("/mcp/memory/mcp")
     assert by_id["hal0-memory"]["tools"] == 4
 
 

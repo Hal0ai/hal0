@@ -9,6 +9,7 @@ duplicate id without overwrite, and bad body.
 
 from __future__ import annotations
 
+import struct
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
+from hal0.registry.gguf_header import _GGUF_TYPE_STRING, _GGUF_TYPE_UINT32
+from tests.registry.test_gguf_header import _build_gguf, _enc_str
 
 
 @pytest.fixture
@@ -248,6 +251,30 @@ def test_add_from_path_accepts_gguf_symlink_into_extensionless_blob(
     assert "qwen3" in body["id"].lower()
     assert link.resolve().name not in body["id"]
     assert link.resolve().name not in body["name"]
+
+
+def test_add_from_path_id_from_filename_not_gguf_arch_header(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """#1796: the registered id must come from the filename, not the GGUF
+    header's ``general.name``/``general.basename`` — the live repro was a
+    "jina-reranker-v2-base.gguf" file registering as id
+    "jina-bert-implementation" (the upstream architecture label baked into
+    the header, not a filesystem identity)."""
+    client, drop = add_path_client
+    kvs = [
+        ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+        ("general.name", _GGUF_TYPE_STRING, _enc_str("jina-bert-implementation")),
+        ("bert.context_length", _GGUF_TYPE_UINT32, struct.pack("<I", 512)),
+    ]
+    target = drop / "jina-reranker-v2-base.gguf"
+    target.write_bytes(_build_gguf(3, kvs))
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target)})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["id"] == "jina-reranker-v2-base"
+    assert "jina-bert-implementation" not in body["id"]
 
 
 def test_add_from_path_symlink_to_disallowed_extension_still_rejected(

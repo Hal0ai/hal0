@@ -318,6 +318,16 @@ disambiguation.
 | `registry export` | — | `--out` (default: canonical registry path) |
 | `registry import-sqlite` | — | `--registry-file` (default: canonical registry path) |
 
+## `hal0 profile` — inspect launch-flag profiles
+
+Read-only: full CRUD (create/update/delete/generate/import/export) is
+dashboard/API-only (`/api/profiles`).
+
+| Command | Args | Flags |
+|---|---|---|
+| `profile list` | — | `--json` |
+| `profile show <name>` | `name` | `--json` |
+
 ## `hal0 mcp` — manage MCP servers
 
 | Command | Args | Flags |

@@ -24,6 +24,8 @@ half is covered by the halo143 acceptance runbook (slot-teardown step).
 
 from __future__ import annotations
 
+from hal0.config import paths
+
 from .conftest import FakeContainerProvider, make_create_body
 
 
@@ -66,6 +68,11 @@ def test_delete_cleans_up_unit_state_and_port(
         assert client.get("/api/slots/gp10/config").status_code == 404
         # And the stable-id lookup no longer resolves the deleted identity.
         assert client.get(f"/api/slots/by-id/{slot_id}").status_code == 404
+
+        # #1796: the now-empty per-slot working directory
+        # (/var/lib/hal0/slots/gp10/) must not survive the delete either —
+        # only state.json lived there, and that was already unlinked above.
+        assert not paths.slot_data_dir("gp10").exists()
 
 
 def test_delete_is_idempotent(

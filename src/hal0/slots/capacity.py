@@ -344,9 +344,25 @@ async def build_per_slot(
         cgroup_mb = round(cgroup_bytes / (1024.0 * 1024.0), 1)
         resident_mb = max(cgroup_mb, estimate_mb)
 
+        # ── VRAM vs. RAM attribution (#1796) ────────────────────────────
+        # ``backend`` here is the normalized effective-backend token from
+        # ``_cfg_effective_backend`` ("rocm" | "vulkan" | "cuda" | "cpu" |
+        # "flm"), NOT the raw slot.backend passed straight through — it is
+        # the single source the dashboard's own backend chip trusts. A
+        # ``cpu`` slot has no discrete VRAM pool to charge: its weights are
+        # resident in system RAM, so booking them under vram_mb reads as
+        # phantom GPU usage on a GPU-less box (RAM MB 0.0 alongside a
+        # nonzero VRAM MB). Attribute to ram_mb instead; every GPU backend
+        # (and the flm/NPU fallback above, which shares this UMA-style
+        # accounting) keeps the historical vram_mb attribution.
+        if backend == "cpu":
+            vram_mb, ram_mb = 0.0, resident_mb
+        else:
+            vram_mb, ram_mb = resident_mb, 0.0
+
         out[s.name] = {
-            "vram_mb": resident_mb,
-            "ram_mb": 0.0,
+            "vram_mb": vram_mb,
+            "ram_mb": ram_mb,
             "mem_mb": resident_mb,
             "state": state,
             "model_id": model_id,

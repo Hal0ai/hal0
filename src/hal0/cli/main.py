@@ -7,10 +7,12 @@ Entry point declared in pyproject.toml:
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
 
+import structlog
 import typer
 import uvicorn
 from rich.console import Console
@@ -41,6 +43,7 @@ from hal0.cli.memory_commands import app as memory_app
 from hal0.cli.migrate_commands import app as migrate_app
 from hal0.cli.model_commands import app as model_app
 from hal0.cli.ports_command import ports_cmd
+from hal0.cli.profile_commands import app as profile_app
 from hal0.cli.registry_commands import app as registry_app
 from hal0.cli.setup_command import app as setup_app
 from hal0.cli.slot_commands import app as slot_app
@@ -81,6 +84,9 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(app_ext_app, name="app")
 app.add_typer(migrate_app, name="migrate")
 app.add_typer(registry_app, name="registry")
+# Issue #1796 — ``hal0 profile {list,show}``, the read half of /api/profiles
+# every slot TOML references but which had no CLI surface at all.
+app.add_typer(profile_app, name="profile")
 # Issue #504 — ``hal0 mcp {list,status,install,uninstall,restart,catalog}``
 # CLI over /api/mcp/*. Mounted after registry before setup.
 app.add_typer(mcp_app, name="mcp")
@@ -126,6 +132,39 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _configure_cli_logging() -> None:
+    """Filter structlog output for one-shot CLI commands.
+
+    Nothing in the CLI process ever calls ``structlog.configure``, so it runs
+    with structlog's own default — a bare print logger with NO level filter.
+    Any ``log.debug(...)`` on a code path a command happens to exercise (e.g.
+    the hardware probe's nvidia-smi fallback) prints straight to stdout,
+    above the command's own table (#1796). Default to WARNING so debug/info
+    telemetry stays silent for humans; ``HAL0_LOG_LEVEL`` still overrides for
+    anyone who wants it back (mirrors the server-side log level env var).
+
+    ``structlog.configure`` is process-global, not per-invocation — fine for
+    a real CLI process (one command, one process, exits). But
+    ``typer.testing.CliRunner`` invokes this callback IN-PROCESS, so under
+    pytest this would leak a WARNING-level filter into the rest of the same
+    test session and silently swallow ``log.info``/``log.debug`` calls other
+    tests assert on (e.g. tests/dispatcher/test_router.py's
+    ``dispatch.decision`` log-capture test). Skip under pytest — the leak
+    this function fixes is a real-process phenomenon; a live pytest run
+    reveals it fine on its own by watching stdout.
+    """
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    level_name = os.environ.get("HAL0_LOG_LEVEL", "WARNING").strip().upper()
+    level = logging.getLevelName(level_name)
+    if not isinstance(level, int):
+        level = logging.WARNING
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+
+
 @app.callback()
 def main_callback(
     version: bool | None = typer.Option(
@@ -142,6 +181,7 @@ def main_callback(
     # hal0-bench-worker.service process) and every one-shot CLI call are
     # both covered by one hook. Unhandled CLI exceptions are then picked up
     # by the SDK's own excepthook integration. Inert without a DSN.
+    _configure_cli_logging()
     sentry.init_sentry("cli")
 
 

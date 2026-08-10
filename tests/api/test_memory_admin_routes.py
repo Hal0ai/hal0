@@ -134,6 +134,30 @@ def test_leading_colon_bank_id_still_400(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "memory.invalid_bank"
 
 
+# ── #1796: unknown-bank stats must 404, not 200 with zeroed counters ───────────
+
+
+def test_stats_for_unknown_bank_404s(client: TestClient, recorder: _Recorder) -> None:
+    """Hindsight's own /stats answers 200 all-zero for a bank that was never
+    created — the exact shape reported live. The route must double-check
+    against the bank listing and 404 rather than forward that verbatim."""
+    recorder.respond("GET", "/v1/default/banks/ghost-bank/stats", 200, {"bank_id": "ghost-bank"})
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": [{"bank_id": "shared"}]})
+    r = client.get("/api/memory/banks/ghost-bank/stats")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "memory.bank_not_found"
+
+
+def test_stats_for_real_but_empty_bank_still_200s(client: TestClient, recorder: _Recorder) -> None:
+    """A real bank with genuinely zero items must NOT 404 — only an id
+    missing from the bank listing does."""
+    recorder.respond("GET", "/v1/default/banks/fresh-bank/stats", 200, {"bank_id": "fresh-bank"})
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": [{"bank_id": "fresh-bank"}]})
+    r = client.get("/api/memory/banks/fresh-bank/stats")
+    assert r.status_code == 200
+    assert r.json()["bank_id"] == "fresh-bank"
+
+
 # ── forwarding: reads ──────────────────────────────────────────────────────────
 
 

@@ -534,3 +534,37 @@ async def test_bulk_delete_gate_matches_admin_classification() -> None:
 
     assert is_gated("memory_delete", {"ids": ["a", "b"]}) is True
     assert is_gated("memory_delete", {"ids": ["a"]}) is False
+
+
+# ── #1796: tool-argument errors must surface as isError:true ────────────────
+#
+# make_dispatcher()'s error envelope (``{"status": "error", ...}``) is a
+# normal return value, not an exception — FastMCP has no way to know it
+# means "this call failed" unless something raises. Before this fix every
+# one of this mount's ~20 tools returned isError:false even on a hard
+# validation failure (a wrong field name, an unknown tool, ...).
+
+
+@pytest.mark.asyncio
+async def test_standalone_server_raises_toolerror_on_dispatcher_failure(
+    wrapper: _FakeWrapper,
+) -> None:
+    """Calling ``memory_add`` with no ``text`` — a dispatcher-level
+    validation failure — must raise, not just return an error dict, so the
+    FastMCP lowlevel handler flips isError to true instead of embedding the
+    error envelope as if it were a successful payload."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    server = memory.build_server(wrapper=wrapper)
+    with pytest.raises(ToolError):
+        await server.call_tool("memory_add", {"args": {}})
+
+
+def test_server_stamps_hal0_version_not_sdk_version() -> None:
+    """serverInfo.version must be hal0's own version, not the ``mcp`` SDK
+    package version FastMCP falls back to when nothing sets it explicitly
+    (FastMCP's constructor has no ``version`` kwarg)."""
+    import hal0
+
+    server = memory.build_server(wrapper=_FakeWrapper())
+    assert server._mcp_server.version == hal0.__version__

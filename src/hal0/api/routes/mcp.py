@@ -447,8 +447,13 @@ def _connect_url(request: Request, mount: str) -> str:
     Uses the request's own host so a user browsing the page sees the URL
     their own client should hit (not the canonical hal0 hostname, which
     they may not be able to resolve from where they are sitting).
+
+    The trailing ``/mcp`` matches the FastMCP Streamable HTTP transport path
+    each server is actually mounted under (see
+    ``hal0.api.mcp_mount.mount_mcp_servers``); the bare ``/mcp/<mount>``
+    root 405s (#1796) — clients must POST to ``/mcp/<mount>/mcp``.
     """
-    return f"{request.url.scheme}://{request.url.netloc}/mcp/{mount}"
+    return f"{request.url.scheme}://{request.url.netloc}/mcp/{mount}/mcp"
 
 
 # ── Routes ──────────────────────────────────────────────────────────────────

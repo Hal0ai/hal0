@@ -349,17 +349,34 @@ def detect(path: str | Path) -> DetectionResult:
         ctx_len_int: int | None = ctx_len if isinstance(ctx_len, int) else None
 
         pooling = header.get("pooling_type")
-        # llama.cpp uses pooling_type=0 (NONE) for causal chat models and
-        # >0 (MEAN=1, CLS=2, LAST=3, RANK=4) for embedding / rerank.
-        # Treat any positive int as a strong embed signal.
-        is_embed = isinstance(pooling, int) and pooling > 0
+        # llama.cpp uses pooling_type=0 (NONE) for causal chat models,
+        # MEAN=1/CLS=2/LAST=3 for embedding, and RANK=4 for cross-encoder
+        # rerankers. RANK used to be folded into the generic "positive int
+        # => embed" bucket below, which collapsed rerankers to "embed" (and,
+        # once the filename fallback also missed — see next comment — all
+        # the way down to the "chat" default, #1796: a reranker gguf with no
+        # pooling_type in its header registered as capabilities: chat).
+        is_rerank = pooling == 4
+        is_embed = not is_rerank and isinstance(pooling, int) and pooling > 0
 
-        # Filename embed-token fallback in case pooling_type is missing
-        # but the file is clearly an embed model (some converters drop it).
-        if not is_embed and _filename_capability(p.name) == "embed":
-            is_embed = True
+        # Filename token fallback in case pooling_type is missing but the
+        # file is clearly embed/rerank (some converters drop it). Uses the
+        # full shared token table, NOT the narrower ``_filename_capability``
+        # helper above — that one deliberately collapses "rerank" to None
+        # for detect()'s *older* embed/asr/tts-only contract, which is
+        # exactly the gap that let a rerank filename fall through to "chat"
+        # here. ``discover.scan_and_register`` (the install-time auto-scan)
+        # reads the same full table via ``_guess_capability`` and gets
+        # rerank right for the identical file — reuse its source of truth
+        # instead of re-diverging.
+        if not is_rerank and not is_embed:
+            filename_cap = capability_from_filename(p.name)
+            if filename_cap == "rerank":
+                is_rerank = True
+            elif filename_cap == "embed":
+                is_embed = True
 
-        caps = ["embed"] if is_embed else ["chat"]
+        caps = ["rerank"] if is_rerank else (["embed"] if is_embed else ["chat"])
 
         name_candidate = header.get("general.name") or header.get("general.basename")
         suggested_name = (

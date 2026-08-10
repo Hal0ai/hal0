@@ -628,7 +628,11 @@ async def memory_add(request: Request) -> dict[str, Any]:
     body = await _read_json_body(request)
     text = body.get("text")
     if not isinstance(text, str) or not text:
-        raise Hal0Error(
+        # BadRequest (400), not the bare Hal0Error base (which defaults to
+        # code="system.internal", status=500) — a caller sending a wrong
+        # field name landed here and got told the *server* was broken
+        # (#1796) when the request body was the problem.
+        raise BadRequest(
             "memory_add requires 'text' (non-empty string)",
             details={"path": "/api/memory/add"},
         )
@@ -636,7 +640,7 @@ async def memory_add(request: Request) -> dict[str, Any]:
         # Source is server-injected from the X-hal0-Agent
         # header so callers cannot impersonate another agent in the
         # audit log.
-        raise Hal0Error(
+        raise BadRequest(
             "memory_add 'source' is server-injected from X-hal0-Agent and cannot be supplied",
             details={"path": "/api/memory/add"},
         )

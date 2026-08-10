@@ -1054,13 +1054,18 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     if isinstance(raw_id, str) and raw_id.strip():
         model_id = raw_id.strip()
     else:
-        # Prefer the detector's suggested_name (post-GGUF arch+param sniff)
-        # falling back to the slug of the stem so two paths to the same
-        # file land on the same id as the auto-scan would. The stem comes
-        # from the operator's path, not the resolved target — a hub-cache
-        # symlink resolves to a sha-named blob whose stem is 64 hex chars
-        # (#1415).
-        model_id = _normalise_id(detection.suggested_name or path.stem)
+        # Slug of the filename stem — same source discover.scan_and_register
+        # uses (``CandidateModel.suggested_id = _normalise_id(naming_source.stem)``,
+        # registry/discover.py), so a file registered by hand and the same
+        # file picked up by the install-time auto-scan land on the same id.
+        # Previously this preferred the GGUF header's ``general.name`` /
+        # ``general.basename`` (via ``detection.suggested_name``), which is
+        # the model's upstream architecture label, not a filesystem identity
+        # — e.g. a "jina-reranker-v2" file registering as id
+        # "jina-bert-implementation" (#1796). The stem comes from the
+        # operator's path, not the resolved target — a hub-cache symlink
+        # resolves to a sha-named blob whose stem is 64 hex chars (#1415).
+        model_id = _normalise_id(path.stem)
 
     raw_name = body.get("name")
     if isinstance(raw_name, str) and raw_name.strip():
