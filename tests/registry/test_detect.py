@@ -65,6 +65,34 @@ class TestGgufEmbed:
         assert r.confidence == "high"
 
 
+class TestGgufRerank:
+    """#1796: a reranker gguf must classify as rerank, not chat/embed —
+    the bug that let a reranker register with ``capabilities: chat``."""
+
+    def test_pooling_type_rank_means_rerank(self, tmp_path: Path) -> None:
+        # llama.cpp pooling_type=4 (RANK) is the cross-encoder rerank signal.
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+            ("bert.context_length", _GGUF_TYPE_UINT32, struct.pack("<I", 512)),
+            ("bert.pooling_type", _GGUF_TYPE_UINT32, struct.pack("<I", 4)),
+        ]
+        p = _write_fixture(tmp_path, "jina-bert-implementation.gguf", _build_gguf(3, kvs))
+        r = detect(p)
+        assert r.suggested_capabilities == ["rerank"]
+        assert r.confidence == "high"
+
+    def test_filename_fallback_for_rerank_without_pooling(self, tmp_path: Path) -> None:
+        # No pooling_type in the header at all — the exact live repro: the
+        # header only carries the arch name, so the old code fell all the
+        # way through to the "chat" default. The filename token must win.
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+        ]
+        p = _write_fixture(tmp_path, "jina-reranker-v2-base.gguf", _build_gguf(3, kvs))
+        r = detect(p)
+        assert r.suggested_capabilities == ["rerank"]
+
+
 class TestGgufUnreadable:
     def test_bad_gguf_degrades_to_filename_heuristic(self, tmp_path: Path) -> None:
         p = tmp_path / "qwen3-4b.gguf"
