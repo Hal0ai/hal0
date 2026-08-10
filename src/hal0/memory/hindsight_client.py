@@ -272,6 +272,35 @@ class HindsightRestClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def list_documents(
+        self, *, bank_id, q=None, tags=None, tags_match=None, limit=100, offset=0
+    ):
+        """GET ``/documents`` — raw retained documents (#1794 fallback leg).
+
+        Hindsight's ``q`` here filters on **document id**, not body text —
+        there is no engine-side full-text search over raw content, so the
+        literal-recall fallback in ``HindsightProvider`` uses this only to
+        enumerate a bounded page of documents and then fetches each one's
+        ``original_text`` via :meth:`get_document` to substring-match.
+        """
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if q is not None:
+            params["q"] = q
+        if tags:
+            params["tags"] = list(tags)
+        if tags_match is not None:
+            params["tags_match"] = tags_match
+        resp = await self._http.get(
+            f"/v1/default/banks/{bank_id}/documents", headers=self._headers(), params=params
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_document(self, *, bank_id, document_id):
+        """GET one document's full ``original_text`` (#1794 fallback leg)."""
+        doc = quote(str(document_id), safe="")
+        return await self.request_json("GET", f"/v1/default/banks/{bank_id}/documents/{doc}")
+
     async def delete_document(self, *, bank_id, document_id):
         # document_id is the only user-influenced value that lands in a URL path
         # segment (e.g. the deterministic ``<agent>:<session_id>`` id). Percent-

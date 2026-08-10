@@ -15,6 +15,10 @@ class FakeHindsightClient:
         self.recalled: list[dict] = []
         self.deleted: list[str] = []
         self._facts_by_bank: dict[str, list[dict]] = {}
+        #: raw documents keyed by bank_id, seeded directly by a test (or via
+        #: ``retain``, which also files the raw text here — #1794).
+        self._documents_by_bank: dict[str, dict[str, dict]] = {}
+        self.list_documents_calls: list[str] = []
         #: keyed by bank_id — response-level recall enrichment a test can seed.
         self._entities_by_bank: dict[str, dict] = {}
         self._chunks_by_bank: dict[str, dict] = {}
@@ -56,6 +60,13 @@ class FakeHindsightClient:
                 "mentioned_at": "2026-06-06T00:00:00+00:00",
             }
         )
+        self._documents_by_bank.setdefault(bank_id, {})[document_id] = {
+            "id": document_id,
+            "bank_id": bank_id,
+            "original_text": content,
+            "tags": list(tags or []),
+            "created_at": "2026-06-06T00:00:00+00:00",
+        }
         return {
             "success": True,
             "bank_id": bank_id,
@@ -199,6 +210,23 @@ class FakeHindsightClient:
             for f in raw
         ]
         return {"items": items, "total": len(all_facts), "limit": limit, "offset": offset}
+
+    # ── raw documents (#1794 fallback leg) ────────────────────────────────
+
+    async def list_documents(
+        self, *, bank_id, q=None, tags=None, tags_match=None, limit=100, offset=0
+    ):
+        self.list_documents_calls.append(bank_id)
+        docs = list(self._documents_by_bank.get(bank_id, {}).values())
+        page = docs[offset : offset + limit]
+        items = [{"id": d["id"], "text_length": len(d.get("original_text") or "")} for d in page]
+        return {"items": items, "total": len(docs), "limit": limit, "offset": offset}
+
+    async def get_document(self, *, bank_id, document_id):
+        doc = self._documents_by_bank.get(bank_id, {}).get(document_id)
+        if doc is None:
+            raise Fake404HindsightClient.NotFound()
+        return dict(doc)
 
 
 def test_namespace_to_bank_mapping():
@@ -740,6 +768,7 @@ async def test_recall_returns_list_compatible_results_with_entities_chunks_attrs
             "type": "world",
             "entities": None,
             "source_fact_ids": None,
+            "kind": "fact",
         }
     ]
     assert out.entities == {"Alice": {"entity_id": "e1", "canonical_name": "Alice"}}
@@ -1084,3 +1113,122 @@ async def test_consolidate_real_implementation_hits_engine():
     out = await p.consolidate(dataset="shared", client_id="hermes")
     assert out == {"operation_id": "op-consolidate", "deduplicated": False}
     assert fake.consolidated == ["shared"]
+
+
+# ── raw-document recall fallback (#1794) ──────────────────────────────────
+#
+# Fact extraction can rewrite a retained fact as a meta-observation and drop
+# a literal value (marker/ID/key) entirely, even though the raw document
+# text — filed alongside the fact — still holds it verbatim. These tests
+# exercise HindsightProvider.recall()'s fallback: when the query names a
+# literal-looking token no extracted fact's text contains, it scans a
+# bounded page of the bank's raw documents and augments (never replaces)
+# the fact results with any hit, carrying ``kind: "document"`` provenance.
+
+
+def _seed_extraction_gap(fake: FakeHindsightClient, *, bank_id: str, marker: str) -> None:
+    """Model the #1794 shape directly: the extracted fact is a meta-
+    observation with NO literal value, but the raw document still has it —
+    exactly what a real 0.8B-model extraction produces."""
+    fake._facts_by_bank.setdefault(bank_id, []).append(
+        {
+            "document_id": "d-meta",
+            "text": "User asks about the CT151 validation marker",
+            "tags": [],
+            "mentioned_at": "2026-08-09T00:00:00+00:00",
+        }
+    )
+    fake._documents_by_bank.setdefault(bank_id, {})["d-raw"] = {
+        "id": "d-raw",
+        "bank_id": bank_id,
+        "original_text": f"the CT151 validation marker is {marker}",
+        "tags": [],
+        "created_at": "2026-08-09T00:00:00+00:00",
+    }
+
+
+@pytest.mark.asyncio
+async def test_recall_falls_back_to_raw_document_for_dropped_literal():
+    fake = FakeHindsightClient()
+    _seed_extraction_gap(fake, bank_id="shared", marker="MARKER-7734")
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.recall(
+        "what is the validation marker MARKER-7734", dataset="shared", client_id="hermes"
+    )
+
+    kinds = {item["text"]: item.get("kind") for item in out}
+    # The meta-fact is still present — augment, not displace.
+    assert kinds["User asks about the CT151 validation marker"] == "fact"
+    # The raw document carrying the literal is appended with document provenance.
+    doc_hits = [item for item in out if item.get("kind") == "document"]
+    assert len(doc_hits) == 1
+    assert "MARKER-7734" in doc_hits[0]["text"]
+    assert doc_hits[0]["source"] == "raw_document"
+    assert doc_hits[0]["metadata"]["document_id"] == "d-raw"
+
+
+@pytest.mark.asyncio
+async def test_recall_skips_fallback_when_fact_already_has_the_literal():
+    fake = FakeHindsightClient()
+    fake._facts_by_bank.setdefault("shared", []).append(
+        {
+            "document_id": "d1",
+            "text": "the validation marker is MARKER-7734",
+            "tags": [],
+            "mentioned_at": "2026-08-09T00:00:00+00:00",
+        }
+    )
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.recall("MARKER-7734", dataset="shared", client_id="hermes")
+
+    assert all(item.get("kind") == "fact" for item in out)
+    assert fake.list_documents_calls == []  # no wasted scan — the fact already covers it
+
+
+@pytest.mark.asyncio
+async def test_recall_never_scans_documents_for_a_plain_query():
+    fake = FakeHindsightClient()
+    fake._facts_by_bank.setdefault("shared", []).append(
+        {
+            "document_id": "d1",
+            "text": "Alice likes coffee",
+            "tags": [],
+            "mentioned_at": "2026-08-09T00:00:00+00:00",
+        }
+    )
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    out = await p.recall("what does Alice like", dataset="shared", client_id="hermes")
+
+    assert [item.get("kind") for item in out] == ["fact"]
+    assert fake.list_documents_calls == []
+
+
+@pytest.mark.asyncio
+async def test_document_fallback_withholds_foreign_private_doc_in_unified_mode():
+    """Unified-bank ACL applies to the fallback too: a doc tagged private to
+    another agent must not leak into the caller's recall just because it
+    happens to contain the queried literal."""
+    fake = FakeHindsightClient()
+    fake._facts_by_bank.setdefault("shared", []).append(
+        {
+            "document_id": "d-meta",
+            "text": "someone asked about a marker",
+            "tags": [],
+            "mentioned_at": "2026-08-09T00:00:00+00:00",
+        }
+    )
+    fake._documents_by_bank.setdefault("shared", {})["d-raw"] = {
+        "id": "d-raw",
+        "bank_id": "shared",
+        "original_text": "the secret marker is MARKER-9999",
+        "tags": ["visibility:private", "agent:other-agent"],
+        "created_at": "2026-08-09T00:00:00+00:00",
+    }
+    p = HindsightProvider(client=fake, client_id="hermes", unified_bank=True)
+
+    out = await p.recall("MARKER-9999", dataset="shared", client_id="hermes")
+
+    assert all(item.get("kind") != "document" for item in out)

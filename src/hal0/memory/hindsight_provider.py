@@ -29,6 +29,7 @@ Maps hal0's engine-neutral MemoryProvider contract onto the shared
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -242,6 +243,34 @@ def _http_status(exc: Exception) -> int | None:
 # tier (deduplicated, evidence-grounded beliefs). hal0's default includes it;
 # callers can still narrow with an explicit ``types``.
 _DEFAULT_RECALL_TYPES = ("world", "experience", "observation")
+
+# ── raw-document recall fallback (#1794) ──────────────────────────────────
+#
+# Fact extraction rewrites facts as meta-observations and can drop the
+# literal value entirely (worst on small extraction models) — a marker,
+# ID, or key stored in good faith becomes unrecallable even though the raw
+# document text still holds it. Hindsight has no engine-side full-text
+# search over raw document bodies (``GET .../documents?q=`` matches the
+# document ID, not its content — confirmed against the live daemon's
+# OpenAPI schema), so this is the best hal0-side approximation: detect
+# literal-looking tokens in the query, and if none of the extracted facts
+# already contain them, scan a bounded page of the bank's most recent raw
+# documents and substring-match. The real fix is an engine-side raw-content
+# search endpoint (documented in issue #1794); this is a client-side
+# stopgap that AUGMENTS fact results with provenance, never replaces them.
+
+#: A "literal-looking" token: an alnum run (with ``-``/``_``) at least 4
+#: chars long that mixes letters and digits — catches markers (MARKER-7734),
+#: host/box ids (CT151), version-ish codes, etc. Plain words never match
+#: (no digit), so ordinary queries never trigger the fallback scan.
+_LITERAL_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}")
+
+#: Bounded per-bank document scan — the engine has no content search, so
+#: this is a page-and-fetch-each walk; keep it cheap enough to run inline
+#: on every recall that has an uncovered literal token.
+_DOC_FALLBACK_MAX_DOCS_PER_BANK = 25
+#: Cap on how many raw-document results the fallback ever appends.
+_DOC_FALLBACK_MAX_RESULTS = 5
 
 # ── retain-pipeline health (#1420) ────────────────────────────────────────
 #
@@ -1274,6 +1303,25 @@ class HindsightProvider(MemoryProvider):
             union = await self._rerank_union(query, union)
         union.sort(key=self._precedence_key)  # stable: precedence wins ties
         budgeted = self._apply_token_budget(union, max_tokens)
+
+        # #1794 fallback: if the query names a literal-looking token (marker,
+        # ID, key) that no extracted fact's text actually contains, extraction
+        # may have dropped it — augment (never replace) with raw-document
+        # hits carrying it verbatim.
+        literal_tokens = self._literal_tokens(query)
+        if literal_tokens:
+            covered = " ".join((it.get("text") or "") for it in budgeted).lower()
+            uncovered = [t for t in literal_tokens if t.lower() not in covered]
+            if uncovered:
+                try:
+                    doc_items = await self._document_fallback(
+                        banks, uncovered, client_id=client_id, dataset=dataset
+                    )
+                except Exception:
+                    doc_items = []
+                if doc_items:
+                    budgeted = list(budgeted) + doc_items
+
         return RecallResults(
             budgeted,
             entities=entities_merged or None,
@@ -1765,4 +1813,105 @@ class HindsightProvider(MemoryProvider):
             "type": fact.get("type"),
             "entities": list(fact.get("entities") or []) or None,
             "source_fact_ids": list(fact.get("source_fact_ids") or []) or None,
+            # Provenance (#1794): every ordinary recall result is an
+            # extracted fact, as opposed to the raw-document fallback items
+            # ``_document_fallback`` appends.
+            "kind": "fact",
         }
+
+    # ── raw-document recall fallback (#1794) ─────────────────────────────
+
+    @staticmethod
+    def _literal_tokens(query: str) -> list[str]:
+        """Literal-looking tokens in ``query`` — see module-level comment."""
+        out: list[str] = []
+        for tok in _LITERAL_TOKEN_RE.findall(query or ""):
+            has_digit = any(c.isdigit() for c in tok)
+            has_alpha = any(c.isalpha() for c in tok)
+            if has_digit and has_alpha:
+                out.append(tok)
+        return out
+
+    async def _document_fallback(
+        self,
+        banks: list[str],
+        tokens: list[str],
+        *,
+        client_id: str | None,
+        dataset: str | list[str] | None,
+    ) -> list[dict[str, Any]]:
+        """Bounded raw-document scan for literal tokens fact-extraction lost.
+
+        Enumerates up to :data:`_DOC_FALLBACK_MAX_DOCS_PER_BANK` documents
+        per bank, fetches each one's full text, and keeps any whose text
+        contains a still-uncovered token. Fail-soft throughout: an engine
+        that can't answer ``list_documents``/``get_document`` (older build,
+        outage) yields no fallback items rather than erroring the recall.
+        """
+        import asyncio
+
+        async def _bank_docs(bank: str) -> list[tuple[str, dict[str, Any]]]:
+            try:
+                resp = await self._call(
+                    "list_documents", bank_id=bank, limit=_DOC_FALLBACK_MAX_DOCS_PER_BANK, offset=0
+                )
+            except Exception:
+                return []
+            items = resp.get("items") if isinstance(resp, dict) else None
+            return [(bank, it) for it in (items or []) if isinstance(it, dict) and it.get("id")]
+
+        per_bank = await asyncio.gather(*[_bank_docs(b) for b in banks])
+        candidates = [pair for group in per_bank for pair in group]
+        if not candidates:
+            return []
+
+        async def _fetch(bank: str, meta: dict[str, Any]) -> tuple[str, Any] | None:
+            try:
+                doc = await self._call("get_document", bank_id=bank, document_id=meta["id"])
+            except Exception:
+                return None
+            return (bank, doc)
+
+        fetched = await asyncio.gather(*[_fetch(b, m) for b, m in candidates])
+
+        caller = self._caller_agent(client_id)
+        projects, wants_unscoped = self._requested_scope(dataset)
+        remaining = {t.lower() for t in tokens}
+        out: list[dict[str, Any]] = []
+        for pair in fetched:
+            if pair is None or not remaining:
+                continue
+            bank, doc = pair
+            if not isinstance(doc, dict):
+                continue
+            text = doc.get("original_text") or ""
+            if not text:
+                continue
+            lower_text = text.lower()
+            hits = [t for t in remaining if t in lower_text]
+            if not hits:
+                continue
+            if self._unified_bank and not (
+                self._is_visible_to(doc, caller)
+                and self._is_in_scope(doc, projects, wants_unscoped)
+            ):
+                continue
+            out.append(
+                {
+                    "id": doc.get("id"),
+                    "text": text,
+                    "timestamp": doc.get("created_at") or _now(),
+                    "dataset": bank.replace("__", ":"),
+                    "tags": list(doc.get("tags") or []),
+                    "source": "raw_document",
+                    "metadata": {"kind": "document", "document_id": doc.get("id")},
+                    "score": None,
+                    "type": "document",
+                    "kind": "document",
+                }
+            )
+            for hit in hits:
+                remaining.discard(hit)
+            if len(out) >= _DOC_FALLBACK_MAX_RESULTS:
+                break
+        return out
