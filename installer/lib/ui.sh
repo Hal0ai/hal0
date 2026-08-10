@@ -106,9 +106,16 @@ _ui_repeat() {
 }
 
 # ── Log helpers (preserve signatures) ───────────────────────────────────────
+# UI_WARN_COUNT / UI_ERR_COUNT: bumped by every warn()/err() call so a caller
+# (preflight_all's summary line, #1796) can tell "printed warnings along the
+# way" from "clean run" even on a soft check whose own return code stays 0 by
+# design — counting return codes alone silently drops those warnings from the
+# final verdict.
+UI_WARN_COUNT=${UI_WARN_COUNT:-0}
+UI_ERR_COUNT=${UI_ERR_COUNT:-0}
 info()  { printf '%s%s%s  %s\n' "${GRN}" "${UI_GLYPH_OK}"   "${RST}" "$*"; }
-warn()  { printf '%s%s%s  %s\n' "${YEL}" "${UI_GLYPH_WARN}" "${RST}" "$*" >&2; }
-err()   { printf '%s%s%s  %s\n' "${RED}" "${UI_GLYPH_ERR}"  "${RST}" "$*" >&2; }
+warn()  { UI_WARN_COUNT=$((UI_WARN_COUNT + 1)); printf '%s%s%s  %s\n' "${YEL}" "${UI_GLYPH_WARN}" "${RST}" "$*" >&2; }
+err()   { UI_ERR_COUNT=$((UI_ERR_COUNT + 1)); printf '%s%s%s  %s\n' "${RED}" "${UI_GLYPH_ERR}"  "${RST}" "$*" >&2; }
 die()   { err "$*"; exit 1; }
 
 # ── ui_banner ───────────────────────────────────────────────────────────────

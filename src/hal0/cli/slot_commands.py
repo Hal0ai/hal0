@@ -749,11 +749,12 @@ def slot_metrics(
             continue
         tps = m.get("tokens_per_sec")
         kv = m.get("kv_cache_usage")
+        mem = m.get("mem_rss_mb")
         table.add_row(
             slot_name,
             f"{tps:.1f}" if isinstance(tps, (int, float)) else "—",
             f"{kv * 100:.0f}" if isinstance(kv, (int, float)) else "—",
-            str(m.get("mem_rss_mb", "—")),
+            f"{mem:.1f}" if isinstance(mem, (int, float)) else "—",
             str(m.get("uptime_seconds", "—")),
             str(m.get("requests_processing", "—")),
         )

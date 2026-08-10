@@ -1402,7 +1402,17 @@ preflight_all() {
     preflight_disk    || rc=$?
     preflight_ports   || rc=$?
     if (( rc == 0 )); then
-        info "all pre-flight checks passed"
+        # A soft check (e.g. no GPU, git missing, node too old) can warn()
+        # without ever flipping ``rc`` — that's by design (a warning must not
+        # fail a valid CPU-only / no-git install). But an unconditional "all
+        # passed" while warnings sit right above it reads as a contradiction
+        # (#1796). Reflect the warning count in the summary instead of
+        # hiding it.
+        if (( ${UI_WARN_COUNT:-0} > 0 )); then
+            warn "pre-flight checks passed with ${UI_WARN_COUNT} warning(s) — see above"
+        else
+            info "all pre-flight checks passed"
+        fi
     else
         err "one or more pre-flight checks failed (see above)"
     fi

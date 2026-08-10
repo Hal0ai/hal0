@@ -526,6 +526,10 @@ def cmd_results(args: argparse.Namespace) -> int:
     rows = store.results(model=args.model, since=args.since, limit=args.limit)
     if args.json:
         print(json.dumps(rows, indent=2))
+    elif not rows:
+        # An empty table and "nothing has ever run" look identical with no
+        # output at all (#1796) — say so instead of printing nothing.
+        print("no records")
     else:
         for r in rows:
             print(

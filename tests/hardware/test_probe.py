@@ -56,8 +56,14 @@ def test_parse_cpuinfo(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(probe_mod, "_read_text", fake_read_text)
     model, cores, threads = probe_mod._parse_cpuinfo()
     assert model.startswith("AMD Ryzen AI Max+")
-    assert cores == 16
+    # This sample is deliberately the impossible-topology shape from #1796:
+    # only 3 "processor" stanzas (a container's cgroup-limited view) paired
+    # with "cpu cores: 16" (the host-wide, non-namespaced hardware constant).
+    # Physical cores can never exceed logical threads, so the clamp in
+    # _parse_cpuinfo caps the reported cores at the trustworthy threads count
+    # instead of surfacing "16 cores / 3 threads".
     assert threads == 3
+    assert cores == 3
 
 
 _MEMINFO_SAMPLE = """\

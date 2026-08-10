@@ -58,13 +58,43 @@ class UpdateChannel(StrEnum):
     nightly = "nightly"
 
 
+#: A manifest whose version is exactly "0.0.0" (optionally paired with an
+#: all-zero digest) is the placeholder the release service serves for a
+#: channel with nothing published yet — not a real, installable target.
+#: Rendering it as "→ 0.0.0 up to date" tells the operator there is nothing
+#: to install when the truth is nobody has published anything here.
+_PLACEHOLDER_VERSION = "0.0.0"
+_PLACEHOLDER_DIGEST = "0" * 64
+
+
+def _is_placeholder_manifest(latest: str, manifest: dict) -> bool:
+    if latest.strip() == _PLACEHOLDER_VERSION:
+        return True
+    digest = manifest.get("digest_sha256")
+    return isinstance(digest, str) and digest == _PLACEHOLDER_DIGEST
+
+
 def _print_check(body: dict) -> None:
     """Render the /api/updates/check response as a rich panel + table."""
     current = body.get("current", "?")
-    latest = body.get("latest") or "—"
+    latest_raw = str(body.get("latest") or "")
     channel = body.get("channel", "stable")
     available = body.get("update_available", False)
+    manifest = body.get("manifest") or {}
+    if not isinstance(manifest, dict):
+        manifest = {}
 
+    if _is_placeholder_manifest(latest_raw, manifest):
+        console.print(
+            Panel(
+                f"[bold]hal0[/bold] {current}  ({channel})  "
+                "[yellow]no release published on this channel[/yellow]",
+                border_style="cyan",
+            )
+        )
+        return
+
+    latest = latest_raw or "—"
     status = "[green]update available[/green]" if available else "[dim]up to date[/dim]"
     console.print(
         Panel(
@@ -72,9 +102,6 @@ def _print_check(body: dict) -> None:
             border_style="cyan",
         )
     )
-    manifest = body.get("manifest") or {}
-    if not isinstance(manifest, dict):
-        manifest = {}
     if manifest:
         table = Table(show_header=False, box=None, padding=(0, 2))
         for key in ("released_at", "notes_url", "digest_sha256", "signer_identity"):

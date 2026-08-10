@@ -304,6 +304,41 @@ class TestBuildPerSlotContainerPath:
         assert result["npu-chat"]["mem_mb"] == round(4.5 * 1024, 1)
 
     @pytest.mark.asyncio
+    async def test_cpu_backend_books_under_ram_not_vram(self):
+        """#1796: a GPU-less (backend='cpu') slot has no discrete VRAM pool —
+        its resident footprint belongs under ram_mb, not vram_mb (which used
+        to book CPU-resident model memory as phantom GPU usage)."""
+        slot = self._make_slot("cpu-primary", backend="cpu")
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=4 * 1024 * 1024 * 1024,  # 4 GiB
+        ):
+            result = await build_per_slot([slot])
+
+        row = result["cpu-primary"]
+        assert row["vram_mb"] == 0.0
+        assert row["ram_mb"] == row["mem_mb"] > 0.0
+
+    @pytest.mark.asyncio
+    async def test_gpu_backend_still_books_under_vram(self):
+        """Sibling check: a real GPU backend keeps the pre-#1796 vram_mb
+        attribution — only 'cpu' moves to ram_mb."""
+        slot = self._make_slot("gpu-primary", backend="vulkan")
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=4 * 1024 * 1024 * 1024,
+        ):
+            result = await build_per_slot([slot])
+
+        row = result["gpu-primary"]
+        assert row["ram_mb"] == 0.0
+        assert row["vram_mb"] == row["mem_mb"] > 0.0
+
+    @pytest.mark.asyncio
     async def test_offline_slot_omitted(self):
         """Slots in non-resident states produce no row."""
         slot = self._make_slot("primary", state="offline")

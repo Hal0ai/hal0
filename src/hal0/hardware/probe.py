@@ -169,6 +169,14 @@ def _parse_cpuinfo() -> tuple[str, int, int]:
         threads = os.cpu_count() or 0
     sockets = max(1, len(physical_ids))
     cores = cores_per_socket * sockets if cores_per_socket > 0 else threads
+    # In a container, "processor" stanzas (threads) are cgroup/affinity-limited
+    # to what the container actually gets, but "cpu cores" is a per-die
+    # hardware constant carried over from the host and NOT namespaced — so an
+    # 8-vCPU LXC on a 16-core host reports the impossible "16 cores / 8
+    # threads" (#1796). Physical cores can never exceed logical threads, so
+    # clamp to the value we can actually trust.
+    if threads and cores > threads:
+        cores = threads
     return model, cores, threads
 
 

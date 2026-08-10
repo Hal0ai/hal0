@@ -2423,6 +2423,19 @@ class SlotManager:
         ):
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
+        # The per-slot working directory (/var/lib/hal0/slots/<name>/, and
+        # its id-keyed sibling once migrated) holds nothing but state.json —
+        # unlinked above — so it is always empty at this point. rmdir()
+        # rather than leaving it behind as litter (#1796); best-effort and
+        # non-fatal (a stray extra file some other component dropped there
+        # must not turn a slot delete into an error, it just leaves that one
+        # dir behind for a human to look at).
+        dirs_to_prune = [paths.slot_data_dir(slot_name)]
+        if ident is not None:
+            dirs_to_prune.append(paths.slot_data_dir(str(ident.id)))
+        for slot_dir in dirs_to_prune:
+            with contextlib.suppress(FileNotFoundError, OSError):
+                slot_dir.rmdir()
         # Drop in-memory bookkeeping last. Resolve the handle BEFORE forgetting
         # the binding (and note the identity row was just deleted, so peek the
         # cached handle rather than re-resolving through the store).

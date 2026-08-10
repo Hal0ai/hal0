@@ -60,6 +60,7 @@ def model_list(
         return
     models = data.get("models", []) if isinstance(data, dict) else data
     table = Table(title=f"Models ({len(models)})")
+    table.add_column("")  # default-model marker (#1796); unlabeled like `git branch`'s `*`
     table.add_column("ID", style="bold")
     table.add_column("Name")
     table.add_column("Upstream")
@@ -69,6 +70,7 @@ def model_list(
         return
     for m in models:
         table.add_row(
+            "[green]*[/green]" if m.get("default") else "",
             m.get("id", "—"),
             m.get("name") or m.get("id", "—"),
             m.get("upstream") or m.get("owned_by") or "—",
@@ -366,7 +368,12 @@ def model_scan() -> None:
         die(str(exc))
         return
     added = result.get("added", []) or []
-    skipped = result.get("skipped", 0)
+    # scan_and_register() (and the /api/models/scan route wrapping it) returns
+    # "skipped" as a *list* of skipped entries, matching "added" — not a
+    # count. Printing it raw rendered "4 added, [] skipped" (#1796); take the
+    # length like the boot-time auto-scan log line already does.
+    skipped_raw = result.get("skipped", []) or []
+    skipped = len(skipped_raw) if isinstance(skipped_raw, list) else skipped_raw
     roots = result.get("scanned_roots", []) or []
     console.print(f"Scanned: {', '.join(roots) or '—'}")
     for mid in added:
