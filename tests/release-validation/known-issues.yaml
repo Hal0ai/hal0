@@ -1,0 +1,104 @@
+# Do-not-re-report list.
+#
+# Every lane agent reads this file and is told: if you observe one of these, record it as a
+# `known` result and move on. Re-reporting known behaviour is how a validation run drowns in
+# noise and buries the real finding.
+#
+# Two kinds of entry:
+#   status: open      — a real defect with an open issue. Still broken, already tracked.
+#   status: by-design — adjudicated, usually by a previous adversarial verification pass.
+#                       Includes WHY, so a later agent does not relitigate it from scratch.
+#
+# Entries carry `review_at`: the release by which someone must recheck whether this is still
+# true. Kit curation (phase 8) flags entries past their review point.
+
+schema: 1
+updated: 2026-08-10
+updated_for: v1.0.0-rc.5
+
+known_issues:
+  - id: slot-logs-empty
+    status: open
+    issue: 1429
+    summary: >-
+      `hal0 slot logs <name>` returns "no logs" for healthy container slots — the quadlet sets
+      LogDriver=none.
+    review_at: v1.0.0
+
+  - id: load-restart-error-surfacing
+    status: open
+    issue: 1424
+    summary: >-
+      Slot load/restart failures surface as CLI timeouts or generic errors rather than the
+      underlying runner error.
+    review_at: v1.0.0
+
+  - id: hindsight-doctor-status-mismatch
+    status: open
+    issue: 1543
+    summary: >-
+      `hal0 doctor` and `hal0 memory status` disagree about hindsight health.
+    review_at: v1.0.0
+
+  - id: changelog-hunk-conflicts
+    status: open
+    issue: 1545
+    summary: >-
+      Per-PR CHANGELOG hunks re-conflict every open branch on each merge. Process issue, not a
+      product defect — matters only during a fix wave.
+    review_at: v1.0.0
+
+  - id: dispatcher-unknown-model-passthrough
+    status: by-design
+    adjudicated: v1.0.0-rc.4
+    summary: >-
+      A request naming a registered-but-unloaded model is answered by the `agent` anchor slot
+      rather than 404ing.
+    why: >-
+      ADR-0023 Rule 9. The substitution is disclosed in the response `model` field and in the
+      dispatch journal (`resolution_path=legacy_slot:agent`). No strict-404 knob exists; that
+      would be an enhancement request, not a bug report.
+    still_report_if: >-
+      The substitution is NOT disclosed in the response model field, or the journal shows a
+      resolution_path with no corresponding loaded slot.
+    review_at: v1.1.0
+
+  - id: mcp-lan-421-invalid-host
+    status: by-design
+    adjudicated: v1.0.0-rc.4
+    summary: >-
+      `POST http://<box>:8080/mcp/admin/mcp` from the LAN returns 421 "Invalid Host header".
+    why: >-
+      Deliberate localhost-only DNS-rebinding floor on /mcp/*, independent of whether the REST
+      API is anonymous-open. Configurable via HAL0_MCP_ALLOWED_HOSTS in api.env.
+    still_report_if: >-
+      HAL0_MCP_ALLOWED_HOSTS is set correctly and the 421 persists, or the documented connect
+      URL still omits the /mcp suffix (that part was real — folded into #1796).
+    review_at: v1.1.0
+
+  - id: hermes-memory-turn-slow-on-cpu
+    status: by-design
+    adjudicated: v1.0.0-rc.4
+    summary: >-
+      Hermes memory-tool turns take minutes on the CPU-only box.
+    why: >-
+      Unreproduced as a hang under controlled retest — store 53 s, recall 15 s with a 0.8 B
+      model on 8 CPU cores. Consistent with model slowness, not a deadlock.
+    still_report_if: >-
+      A turn exceeds ~120 s on a box with GPU acceleration, or the retain op and the chat turn
+      are provably contending for the same slot (that would hit single-GPU boxes too).
+    review_at: v1.0.0
+
+  - id: brain-model-file-vanished-post-pull
+    status: by-design
+    adjudicated: v1.0.0-rc.4
+    summary: >-
+      During rc.4 setup a pulled 1.14 GB brain gguf disappeared from the store minutes after a
+      verified pull.
+    why: >-
+      Never filed — cause unproven, and an operator UI action in the same window is the likely
+      explanation. Recorded so the next occurrence is recognised as the second, not the first.
+    still_report_if: >-
+      It happens again with no concurrent UI session. Then it is real and urgent — capture the
+      pull job record, the store listing timestamps, and the hal0-api journal for the window.
+    review_at: v1.0.0

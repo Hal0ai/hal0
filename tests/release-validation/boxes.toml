@@ -1,0 +1,86 @@
+# The validation fleet. Update this file when a box is rebuilt, re-IP'd, or retired.
+#
+# `role` is what the lane registry in kit.toml keys off ("fresh", "update", "prod").
+# Everything else is context handed to the preflight agent, which verifies it before the run
+# starts. If a fact here is stale, preflight fails the run — that is the point.
+
+hypervisor = "10.0.1.110"      # Proxmox; `pct` runs here. SSH direct to the guests, not via this.
+ssh_key = "~/.ssh/thin-mint"
+ssh_user = "root"
+
+[boxes.ct151-cpu-fresh]
+role = "fresh"
+ctid = 151
+hostname = "hal0-rc2-fresh-2604"
+ip = "10.0.1.151"
+os = "ubuntu 26.04"
+privileged = false
+gpu = false
+cores = 8
+ram_gb = 16
+snapshot = "pristine"
+api = "http://10.0.1.151:8080"
+auth_required = false
+notes = """
+Fresh-install lane. Reset: `pct rollback 151 pristine` on the hypervisor.
+GOTCHAS, in order:
+  1. The pristine snapshot has broken DNS — /etc/resolv.conf points at an unreachable
+     Tailscale 100.100.100.100. Fix it before anything else or the install fails opaquely.
+  2. No GPU passthrough: the install needs HAL0_ALLOW_CPU_ONLY=1.
+  3. No NFS mount. Test models must be rsynced to /mnt/ai-models; workstation ggufs are often
+     symlinks into huggingface/hub, so use `rsync -L`.
+  4. An unprivileged LXC sees the host's sysfs with no /dev/dri — hardware probes that key on
+     AMD DRM sysfs alone will misreport (root cause of #1790).
+"""
+
+[boxes.ct150-update]
+role = "update"
+ctid = 150
+hostname = "halo"
+ip = "10.0.1.150"
+os = "ubuntu"
+gpu = false
+api = "http://10.0.1.150:8080"
+auth_required = false
+notes = """
+In-place upgrade lane. Left on the PREVIOUS release; the run upgrades it to the RC under test.
+HAL0_RELEASES_URL is a file:// stage at /var/lib/hal0/rc2/preview.json (directory name is
+historical, not a version claim) — restage the new manifest + bundle there, or point it at the
+GitHub asset URL (works end-to-end since rc.3). No snapshot reset: its value is accumulated
+upgrade history, so record the exact from-version in CONTEXT.md before upgrading.
+"""
+
+[boxes.ct163-cpu-fresh]
+role = "fresh-alt"
+ctid = 163
+hostname = "hal0-rc2-fresh-2404"
+ip = "10.0.1.163"
+os = "ubuntu 24.04"
+privileged = true
+gpu = false
+snapshot = "pristine"
+notes = """
+Second fresh-install box: privileged, older Ubuntu. Not in the default matrix — enable it when
+a finding smells privilege- or distro-specific. AppArmor blocks podman until remediated
+(#1563 ordering bug; workaround: containers.conf.d apparmor_profile="unconfined").
+"""
+
+[boxes.ct105-prod]
+role = "prod"
+ctid = 105
+hostname = "hal0"
+ip = "10.0.1.142"
+gpu = true
+api = "http://10.0.1.142:8080"
+auth_required = true
+notes = """
+PRODUCTION. READ-ONLY, always — no slot loads, no config writes, no service restarts. Its job
+in a validation run is to answer "is this finding an artifact of the CPU-only test box?" on
+real GPU hardware. Anonymous /api/* returns 401; run `hal0 ...` on the box instead of curl
+from the workstation. Not part of the default matrix; opt in per run.
+"""
+
+# No GPU fresh-install box exists today. Every fresh-install finding that touches backend
+# selection, profile flags, hardware probing, or native tool-calling therefore carries an
+# explicit "would a GPU box hit this?" judgement (read-only cross-check on ct105-prod) rather
+# than a measurement. Standing gap — worth closing before GA.
