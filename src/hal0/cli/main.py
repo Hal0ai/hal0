@@ -142,7 +142,19 @@ def _configure_cli_logging() -> None:
     above the command's own table (#1796). Default to WARNING so debug/info
     telemetry stays silent for humans; ``HAL0_LOG_LEVEL`` still overrides for
     anyone who wants it back (mirrors the server-side log level env var).
+
+    ``structlog.configure`` is process-global, not per-invocation — fine for
+    a real CLI process (one command, one process, exits). But
+    ``typer.testing.CliRunner`` invokes this callback IN-PROCESS, so under
+    pytest this would leak a WARNING-level filter into the rest of the same
+    test session and silently swallow ``log.info``/``log.debug`` calls other
+    tests assert on (e.g. tests/dispatcher/test_router.py's
+    ``dispatch.decision`` log-capture test). Skip under pytest — the leak
+    this function fixes is a real-process phenomenon; a live pytest run
+    reveals it fine on its own by watching stdout.
     """
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
     level_name = os.environ.get("HAL0_LOG_LEVEL", "WARNING").strip().upper()
     level = logging.getLevelName(level_name)
     if not isinstance(level, int):
