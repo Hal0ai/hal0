@@ -127,3 +127,39 @@ def test_hal0_chat_not_advertised(client, monkeypatch):
 
     ids = [r["id"] for r in client.get("/v1/models").json()["data"]]
     assert "hal0/chat" not in ids
+
+
+def test_get_model_resolves_virtual_name(client, monkeypatch):
+    """#1795 item 4: GET /v1/models/hal0/agent resolves instead of 404ing.
+
+    hal0/agent isn't listed in /v1/models (by design — see module docstring),
+    but hermes probes exactly this route via ``GET /v1/models/{model.default}``
+    on every session start. Before the fix this logged a dispatch.no_route
+    error every session even though the very next chat turn resolved the
+    same virtual name fine via the identical LiveSlotResolver path.
+    """
+    sm = _FakeSlotManager()
+    mr = _FakeModelRegistry()
+    client.app.state.slot_manager = sm
+    client.app.state.model_registry = mr
+    monkeypatch.setattr("hal0.api.hal0_chat_slot_model_ids", lambda sm: {"big"})
+
+    response = client.get("/v1/models/hal0/agent")
+    assert response.status_code == 200, response.text
+    row = response.json()
+    # The requested virtual name round-trips as the id even though the
+    # resolved catalog row underneath is the physical "agent" slot alias.
+    assert row["id"] == "hal0/agent"
+    assert row["owned_by"] == "hal0"
+
+
+def test_get_model_unresolvable_virtual_name_still_404s(client, monkeypatch):
+    """A virtual name with no matching slot still 404s (no false positives)."""
+    sm = _FakeSlotManager()
+    mr = _FakeModelRegistry()
+    client.app.state.slot_manager = sm
+    client.app.state.model_registry = mr
+    monkeypatch.setattr("hal0.api.hal0_chat_slot_model_ids", lambda sm: {"big"})
+
+    response = client.get("/v1/models/hal0/does-not-exist")
+    assert response.status_code == 404

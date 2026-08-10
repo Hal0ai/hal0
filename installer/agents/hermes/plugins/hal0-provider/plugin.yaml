@@ -5,6 +5,6 @@
 # role aliases. Registers under `name: hal0` at plugins/model-providers/hal0/.
 
 name: hal0
-kind: provider
+kind: model-provider
 version: 1.0.0
 description: hal0 ProviderProfile — pins chat + aux slots to the local hal0-api (chat_completions, live discovery).

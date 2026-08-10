@@ -209,6 +209,27 @@ class TestHermesArgv:
         host_idx = argv.index("--host")
         assert argv[host_idx + 1] == "127.0.0.1"
 
+
+class TestDashboardReadyStatus:
+    """#1795 item 1: the sd_notify STATUS= string must not claim the
+    dashboard is reachable when the wheel shipped no built frontend."""
+
+    @staticmethod
+    def _mk_web_dist(venv: Path, pyver: str = "python3.12") -> Path:
+        dist = venv / "lib" / pyver / "site-packages" / "hermes_cli" / "web_dist"
+        dist.mkdir(parents=True)
+        return dist
+
+    def test_reachable_when_web_dist_present(self, tmp_path: Path) -> None:
+        self._mk_web_dist(tmp_path)
+        status = agent_shim._dashboard_ready_status(_cfg(venv=tmp_path))
+        assert status == "hermes dashboard reachable"
+
+    def test_not_built_when_web_dist_missing(self, tmp_path: Path) -> None:
+        status = agent_shim._dashboard_ready_status(_cfg(venv=tmp_path))
+        assert status == "hermes agent up; dashboard UI not built (no web_dist bundled)"
+        assert "reachable" not in status
+
     def test_no_open_browser(self) -> None:
         argv = agent_shim._build_hermes_argv(_cfg())
         assert "--no-open" in argv
