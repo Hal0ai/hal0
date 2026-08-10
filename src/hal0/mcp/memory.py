@@ -67,6 +67,7 @@ mounts at ``/mcp/memory`` via ``app.mount()``.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -81,6 +82,7 @@ from hal0.memory.namespace import (
 
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
+    from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[import-not-found]
     from mcp.types import ToolAnnotations  # type: ignore[import-not-found]
 except ImportError as _import_exc:  # pragma: no cover — exercised at install time
     raise ImportError(
@@ -1399,12 +1401,35 @@ def build_server(
     surface's bulk-delete gate (#1302).
     """
     server = FastMCP(name)
-    dispatcher = make_dispatcher(
+    # See hal0.mcp.admin's build_admin_mcp_server for why this is stamped
+    # post-construction (#1796): FastMCP has no ``version`` kwarg, so
+    # ``serverInfo.version`` otherwise defaults to the ``mcp`` SDK version.
+    from hal0 import __version__ as _hal0_version
+
+    server._mcp_server.version = _hal0_version
+    _raw_dispatcher = make_dispatcher(
         wrapper,
         client_id_resolver=client_id_resolver,
         private_resolver=private_resolver,
         approval_queue=approval_queue,
     )
+
+    async def dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Every ``@server.tool`` function below calls this, unchanged.
+
+        ``_raw_dispatcher`` signals failure (bad args, memory-schema error,
+        engine exception, ...) as a normal ``{"status": "error", ...}``
+        return, same convention as ``hal0.mcp.admin.dispatch`` — so every
+        one of this mount's tool calls came back ``isError: false`` even on
+        a hard validation failure (#1796; ``POST /api/memory/add`` with a
+        wrong field name is the concrete repro). Raise here, once, instead
+        of touching all ~20 ``@server.tool`` bodies below — FastMCP's
+        lowlevel handler catches the exception and flips ``isError: true``.
+        """
+        result = await _raw_dispatcher(tool, args)
+        if isinstance(result, dict) and result.get("status") == "error":
+            raise ToolError(json.dumps(result.get("error", result)))
+        return result
 
     # Typed signatures so FastMCP publishes real parameter schemas —
     # the old single ``args: dict`` param advertised an opaque object

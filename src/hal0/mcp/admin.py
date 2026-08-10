@@ -271,6 +271,7 @@ def _redact_logs_payload(payload: Any) -> Any:
 # server module itself (the orchestrator decides whether to mount).
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
+    from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[import-not-found]
     from mcp.types import ToolAnnotations  # type: ignore[import-not-found]
 except ImportError as _import_exc:  # pragma: no cover — exercised at install time
     raise ImportError(
@@ -3041,6 +3042,14 @@ def build_server(
     tool the agent picked.
     """
     server = FastMCP(name)
+    # FastMCP's constructor has no ``version`` kwarg, so the underlying
+    # ``mcp.server.lowlevel.Server`` defaults ``initialize``'s
+    # ``serverInfo.version`` to the ``mcp`` SDK package version (e.g.
+    # "1.28.1") — a client sees the FastMCP library version, not hal0's own
+    # (#1796). Stamp it post-construction on the wrapped server object.
+    from hal0 import __version__ as _hal0_version
+
+    server._mcp_server.version = _hal0_version
 
     def _resolve() -> tuple[str | None, str]:
         if bearer_resolver is None:
@@ -3054,7 +3063,7 @@ def build_server(
     def _register(tool_name: str, description: str) -> None:
         async def _tool(args: dict[str, Any] | None = None) -> dict[str, Any]:
             bearer, client_id = _resolve()
-            return await dispatch(
+            result = await dispatch(
                 tool=tool_name,
                 args=args or {},
                 client_id=client_id,
@@ -3063,6 +3072,18 @@ def build_server(
                 approval_queue=approval_queue,
                 memory_dispatcher=memory_dispatcher,
             )
+            # dispatch()/_execute_tool() signal failure (bad/missing args,
+            # unknown tool, denied/refused policy, REST 4xx/5xx, ...) by
+            # returning ``{"status": "error", "error": {...}}`` rather than
+            # raising — a normal return, so FastMCP's CallToolResult came
+            # back ``isError: false`` with the error dict just sitting in
+            # the content as if it were a successful payload (#1796). Raise
+            # here so the lowlevel handler's ``except Exception`` path sets
+            # ``isError: true`` the way every MCP client expects to detect
+            # a failed call without string-sniffing the content.
+            if isinstance(result, dict) and result.get("status") == "error":
+                raise ToolError(json.dumps(result.get("error", result)))
+            return result
 
         _tool.__name__ = tool_name
         _tool.__doc__ = description
