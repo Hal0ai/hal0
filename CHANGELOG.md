@@ -37,25 +37,6 @@ applying. Add those subsections to a version's section to surface them; see
   their timeout on a doomed request — install-time smoke runs before any
   model has ever been loaded, so those two probes were guaranteed to "fail"
   for a reason that was never a real regression. (#1793)
-- Embedding and rerank slots launch with their profile's flags again, so
-  `/v1/embeddings` and `/v1/rerank` stop returning 501 on a fresh install
-  (#1787). The v1.0 flags-ownership redesign made a model's materialized
-  `defaults` the whole launch tune and a profile a copy-on-stamp template read
-  only in the drawer — but nothing on the fresh-install path stamps: `hal0
-  model scan`, `hal0 model pull` and the capability apply all register models
-  with `defaults = null`. Such a model contributed no tune, and the #1636
-  divergence overlay (gated on a *stamped* `defaults.profile`) stayed silent
-  too, so the `embed`/`rerank` slots launched llama-server without
-  `--embedding` / `--reranking` and served 501s while reporting `ready`. The
-  launch argv now carries a new `slot_profile_template` segment for exactly
-  that case — the slot profile's flags as the tune template, layered *below*
-  the model's own `extra_args`, screened against the §21.7 managed-arg denylist
-  and the slot hardware-flag partition like every other free-form source, and
-  gated on the same profile-fit predicate as the divergence overlay. A model
-  that carries tune text (stamped or hand-authored) is untouched: no live
-  profile read, and a stamped divergent tune still wins over the slot profile.
-  Preview (`GET /api/slots/.../resolved`) and launch share the segment builder,
-  so the previewed command still matches what launches.
 
 ## [1.0.0-rc.4] — 2026-08-09
 
