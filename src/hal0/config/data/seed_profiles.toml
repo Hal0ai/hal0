@@ -14,6 +14,17 @@
 # `mtp` remains informational for 1.0 (per spec-hw-slot-ownership.md §10)
 # — launch reads MTP from model capability plus the selected slot runner.
 #
+# Flash Attention is `-fa auto`, never `-fa on`. Seeds are generic templates
+# that land on every model/backend/KV-type combination on the box, so they
+# must not force a kernel the backend may not have. In llama.cpp (b10297+)
+# `auto` runs a startup support probe (`resolve_fused_ops`) and falls back to
+# non-FA attention when the FA node cannot be scheduled on the layer's own
+# device; `on` skips that probe entirely and silently leaves FA scheduled
+# off-device. Where FA is genuinely required (quantized V cache, tensor
+# split) llama.cpp promotes `auto` to enabled by itself, so `auto` never
+# costs FA where `on` would have had it. A model that has measured a win
+# from forcing it can still set `-fa on` in `defaults.extra_args`.
+#
 # Each profile is a complete recipe for a (workload × model-family) cell.
 # Slot picks ONE profile; per-slot [model].defaults.extra_args overrides.
 # Family-specific quirks (kv-cache type, mmproj behavior, sampler) live in
@@ -22,14 +33,14 @@
 
 [profile.chat]
 # Minimal generic chat — fallback for unknown models.
-flags = "-fa on --jinja -b 2048 -ub 512"
+flags = "-fa auto --jinja -b 2048 -ub 512"
 mtp = false
 intent = "Generic chat (fallback for unknown models)"
 quant = ""
 
 [profile.chat-long-context]
 # Long-context chat variant (model-family defaults may override KV policy).
-flags = "-fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift"
+flags = "-fa auto -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift"
 mtp = false
 intent = "Long-context chat · tuned for 128K ctx"
 quant = ""
@@ -37,7 +48,7 @@ quant = ""
 [profile.dense]
 # Generic dense workload — model-agnostic. Family-specific kv-cache / sampler
 # overrides go in profile.<family>-dense (e.g. profile.chadrock-dense).
-flags = "--jinja -fa on -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = false
 intent = "Generic dense workload · tuned for 128K ctx"
 quant = ""
@@ -45,19 +56,19 @@ quant = ""
 [profile.moe]
 # Generic MoE workload — model-agnostic. Family-specific overrides in
 # profile.<family>-moe (e.g. profile.chadrock-moe).
-flags = "--jinja -fa on -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = false
 intent = "Generic MoE workload · tuned for 32K ctx"
 quant = ""
 
 [profile.embedding]
-flags = "--embedding -fa on -b 8192 -ub 8192"
+flags = "--embedding -fa auto -b 8192 -ub 8192"
 mtp = false
 intent = "Pooled embeddings"
 quant = ""
 
 [profile.reranking]
-flags = "--reranking -fa on -b 8192 -ub 8192"
+flags = "--reranking -fa auto -b 8192 -ub 8192"
 mtp = false
 intent = "Reranking"
 quant = ""
@@ -115,7 +126,7 @@ quant = ""
 # it at launch. On runner ade07ba the model emits NATIVE tool calls on
 # this slot; artefact rounds still reroute per turn to `[brain_chat]
 # tool_model` (ADR-0023 fallback).
-flags = "--jinja -fa on -b 512 -ub 256 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.9 --top-k 20 --no-mmproj"
+flags = "--jinja -fa auto -b 512 -ub 256 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.9 --top-k 20 --no-mmproj"
 mtp = false
 intent = "Brain steward (1B MiniCPM5 + persona + tool-call routing) · 64K ctx"
 quant = ""
@@ -125,7 +136,7 @@ quant = ""
 # jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp model card — the chadrock
 # launch card that the legacy profile.dense was distilled from). 27B
 # dense + ROCmFP4 + MTP-capable + mmproj (vision).
-flags = "--jinja -fa on -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = true
 intent = "Chadrock 27B dense coder (ROCmFP4 + MTP + mmproj) · 128K ctx"
 quant = "ROCmFP4"
@@ -135,7 +146,7 @@ quant = "ROCmFP4"
 # jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp model card — the Saber launch
 # card that the legacy profile.moe was distilled from). 35B MoE A3B +
 # ROCmFPX MoEQuality + MTP draft heads.
-flags = "--jinja -fa on -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = true
 intent = "Chadrock 35B MoE Saber (ROCmFPX MoEQuality + MTP) · 32K ctx"
 quant = "ROCmFP4"
@@ -145,7 +156,7 @@ quant = "ROCmFP4"
 # (qwen3-5-9b-deepseek, qwen3-6-35b-a3b-halostrix-dyn-mtp, chadrock-
 # uncensored-thinking). Family-specific reasoning-format / MTP bits fold
 # into the materialized model text at edit time.
-flags = "--jinja -fa on -b 2048 -ub 512 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --no-mmproj"
 mtp = false
 intent = "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking) · 32K ctx"
 quant = ""
@@ -154,7 +165,7 @@ quant = ""
 # Workload-level code-gen tuned profile. Use for the coder slot (port
 # 8082), qwen3-coder, qwopus-coder, Qwen3-Coder-30B-A3B. Higher temp
 # for code-gen creativity; no reasoning (coders are non-reasoning).
-flags = "--jinja -fa on -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj"
 mtp = false
 intent = "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx"
 quant = ""

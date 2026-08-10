@@ -1520,7 +1520,10 @@ class TestFamilyDefaults:
         """
         vseed = SEED_PROFILES["chat"]
         assert "-ctk" not in vseed["flags"] and "q8_0" not in vseed["flags"]
-        assert "-fa on" in vseed["flags"]
+        # Seeds request Flash Attention as `auto`, never forcing `on` (#1811):
+        # a generic template must let llama.cpp's support probe fall back where
+        # the backend lacks the kernel.
+        assert "-fa auto" in vseed["flags"]
 
         profile = ProfileConfig(flags=vseed["flags"], mtp=False)
         cfg = {"profile": "chat", "port": 8096, "model": {"default": "qwen3-27b"}}
