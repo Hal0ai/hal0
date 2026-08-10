@@ -43,6 +43,11 @@ class FakeContainerProvider:
         ``discard()`` an entry to simulate the unit stopping out-of-band.
       * ``load_calls`` / ``unload_calls`` — recorded dispatches.
       * ``fail_load`` — when set, ``load_sync`` raises it (spawn failure).
+      * ``unit_failure_by_slot`` — systemd's verdict per slot (#1791). A
+        non-empty string is the manager's PROOF that systemd gave up on the
+        unit (crash loop / ``start-limit-hit`` / unit gone); the default empty
+        string is the "unit is fine or the probe was inconclusive" answer that
+        every pre-#1791 test implicitly relied on.
     """
 
     def __init__(self) -> None:
@@ -56,6 +61,11 @@ class FakeContainerProvider:
         # Set False to simulate a still-loading / wedged model server (unit
         # active but the inference server isn't answering /health yet).
         self.healthy: bool = True
+        # #1791 — systemd's terminal verdict per slot, and the reset-failed
+        # calls the manager/provider made. Empty by default so every existing
+        # test keeps the old "nothing is wrong with the unit" behaviour.
+        self.unit_failure_by_slot: dict[str, str] = {}
+        self.reset_failed_calls: list[str] = []
 
     # — SlotManager._spawn_locked / terminate (sync, executor-run) —
 
@@ -76,6 +86,14 @@ class FakeContainerProvider:
 
     async def wait_ready(self, port: int, timeout_s: float | None = None) -> None:
         return None
+
+    def unit_failure_reason(self, slot: Any) -> str:
+        """Mirror ``ContainerProvider.unit_failure_reason`` (#1791)."""
+        return self.unit_failure_by_slot.get(probe_slot_name(slot), "")
+
+    def reset_failed(self, slot: Any) -> None:
+        """Mirror ``ContainerProvider.reset_failed`` (#1424/#1791)."""
+        self.reset_failed_calls.append(probe_slot_name(slot))
 
     async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         # Mirrors ContainerProvider.health's (port, slot_cfg) signature —

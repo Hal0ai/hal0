@@ -588,7 +588,27 @@ case "$cmd" in
     exec systemctl daemon-reload
     ;;
 
-  start|stop|restart|enable|disable|reset-failed)
+  start|restart)
+    # START-LIMIT RECOVERY (#1424/#1791): a slot unit that crash-looped past
+    # StartLimitBurst is parked in `failed` with result `start-limit-hit`, and
+    # systemd then refuses EVERY start/restart for the rest of
+    # StartLimitIntervalSec ("Start request repeated too quickly"). The slot is
+    # unloadable via the API until an operator runs `reset-failed` by hand.
+    # Clear it here — on the root side of the seam, so it holds for every
+    # caller of this verb, not just the one Python path that remembers to ask.
+    # Deliberately conditional and best-effort: `is-failed` is true ONLY for a
+    # unit systemd has given up on (a healthy or merely-stopped unit reports
+    # inactive/active and is left untouched), and a reset-failed that itself
+    # fails must not block the start it precedes.
+    id="${1:-}"; validate_slot_id "$id"
+    unit="${UNIT_PREFIX}${id}.service"
+    if systemctl is-failed --quiet "$unit"; then
+      systemctl reset-failed "$unit" || true
+    fi
+    exec systemctl "$cmd" "$unit"
+    ;;
+
+  stop|enable|disable|reset-failed)
     id="${1:-}"; validate_slot_id "$id"
     exec systemctl "$cmd" "${UNIT_PREFIX}${id}.service"
     ;;

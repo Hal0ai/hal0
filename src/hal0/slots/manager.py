@@ -104,6 +104,7 @@ from hal0.slots.state import (
     SlotCrashLooping,
     SlotNotFound,
     SlotPinned,
+    SlotSpawnFailed,
     SlotState,
     SlotStateRecord,
     SlotTerminateTimeout,
@@ -1414,6 +1415,46 @@ class SlotManager:
         """See :meth:`hal0.slots.watchdog.SlotWatchdog.readiness_check`."""
         return await self._watchdog.readiness_check(slot_name)
 
+    async def unit_failure_reason(self, slot_name: str) -> str:
+        """Why systemd has given up on this slot's unit, or ``""`` (#1791).
+
+        Thin async wrapper over
+        :meth:`hal0.providers.container.ContainerProvider.unit_failure_reason`
+        (a blocking ``systemctl show``, so it runs in the executor). Everything
+        inconclusive — no config, an NPU trio shadow (no unit of its own), a
+        provider double without the probe, a probe that raises — returns ``""``:
+        the callers use a non-empty string as *proof* the slot is dead, so
+        absence of evidence must never manufacture an ERROR.
+
+        CONTRACT (see the provider docstring): ask only about a slot whose
+        recorded state claims the unit should be running. A never-loaded slot
+        reads ``LoadState=not-found`` too.
+        """
+        cfg = await self._maybe_load_config(slot_name)
+        if cfg is None or is_npu_trio_shadow(cfg):
+            return ""
+
+        from hal0.providers.container import container_provider
+
+        probe = getattr(container_provider(), "unit_failure_reason", None)
+        if probe is None:
+            return ""
+        try:
+            reason = await asyncio.get_event_loop().run_in_executor(None, probe, _cfg_to_dict(cfg))
+        except Exception as exc:
+            log.warning(
+                "slot.unit_failure_probe_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+            return ""
+        # Deliberately NOT ``str(reason)``: a provider double (or a future
+        # provider) that doesn't really implement the probe hands back some
+        # truthy non-string — a bare ``MagicMock`` auto-creates the attribute —
+        # and stringifying it would forge a systemd verdict out of nothing,
+        # stamping a healthy slot ERROR with "<MagicMock ...>" as the operator-
+        # facing message. Only a real ``str`` is evidence.
+        return reason if isinstance(reason, str) else ""
+
     # ── crash-loop breaker (issue i4) ────────────────────────────────────────
 
     def _check_crash_loop_gate(self, slot_name: str) -> None:
@@ -1532,6 +1573,29 @@ class SlotManager:
                 with contextlib.suppress(Exception):
                     await self.terminate(slot_name)
                 await self._transition(slot_name, SlotState.OFFLINE, force=True)
+            elif current in (SlotState.PULLING, SlotState.STARTING, SlotState.WARMING):
+                # STALE mid-lifecycle state (#1791). We hold the slot lock and
+                # every load/restart/unload holds it for its whole run, so no
+                # load is actually in flight: this is the residue of a PREVIOUS
+                # load that ended without converging — most often ``_await_ready``
+                # timing out, which parks the slot in WARMING and returns
+                # "success". Falling through to the STARTING transition below
+                # raised ``IllegalSlotTransition: warming → starting`` and left
+                # the slot lying in WARMING forever while its unit crash-looped.
+                # Treat it exactly like the ERROR branch: tear the unit down and
+                # re-enter the lifecycle from OFFLINE.
+                log.info(
+                    "slot.load_from_stale_inflight_state",
+                    extra={"slot": slot_name, "from": current.value},
+                )
+                # A slot parked in WARMING by a failed load carries the same
+                # crash-loop bookkeeping an ERROR one does, so it gets the same
+                # breaker — otherwise a wedged slot respawns at request cadence
+                # simply because its last load timed out instead of raising.
+                self._check_crash_loop_gate(slot_name)
+                with contextlib.suppress(Exception):
+                    await self.terminate(slot_name)
+                await self._transition(slot_name, SlotState.OFFLINE, force=True)
 
             # Configuration check: a slot with no resolvable model is
             # NOT an ERROR (which would render red and flag for operator
@@ -1633,6 +1697,22 @@ class SlotManager:
                     # for routing and IDLE slots for "ready to accept a
                     # model" UX.
                     resolved_state = await self._await_ready(slot_name, _cfg_port(cfg))
+                    if resolved_state is SlotState.WARMING:
+                        # The readiness wait gave up. That is ambiguous on its
+                        # own — a huge model can legitimately still be loading —
+                        # so ask systemd which it is (#1791). A unit parked in
+                        # ``failed`` (crash loop / start-limit-hit) or gone
+                        # entirely is NOT "still warming": raising here routes
+                        # it through the except branch below, which stamps ERROR
+                        # with the systemd reason and counts a load failure,
+                        # instead of returning a lying "loaded, warming" that
+                        # nothing ever reconciles.
+                        reason = await self.unit_failure_reason(slot_name)
+                        if reason:
+                            raise SlotSpawnFailed(
+                                reason,
+                                details={"slot": slot_name, "model_id": resolved_model},
+                            )
                     await self._transition(
                         slot_name,
                         resolved_state,
@@ -1807,7 +1887,65 @@ class SlotManager:
                 "slot.mtp_defuse_swap_failed",
                 extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
             )
-        await self.unload(slot_name)
+        # SWAP ATOMICITY (#1791): make the requested model DURABLE before any
+        # teardown, instead of only after a successful load.
+        #
+        # ``swap`` is unload-then-load, and the two take the slot lock
+        # separately — there is a real gap between them. On a healthy slot that
+        # gap is empty and nothing notices. On a CRASH-LOOPING slot it is not:
+        # the fail watcher, the reconciler and per-request lazy-load are all
+        # firing at the failure cadence, so one of them wins the lock in the gap
+        # and runs a full load of its own. It has no idea a swap is in flight,
+        # so it renders the quadlet from ``model.default`` — the OLD, crashing
+        # model — and restarts the unit. By the time swap's own ``load`` gets
+        # the lock the slot is parked in WARMING again, and (before the stale-
+        # state branch in ``load``) that raised ``IllegalSlotTransition:
+        # warming → starting``, so swap ERRORed without ever writing the new
+        # model. Net effect as filed: the swap "ran" (stop → remove-quadlet →
+        # write-quadlet → restart) yet the quadlet still pointed at the old
+        # model and the loop continued.
+        #
+        # Writing the default up-front closes the gap by construction rather
+        # than by timing: whoever renders the quadlet next — swap's own load or
+        # an interloper — reads the REQUESTED model. Combined with the stale-
+        # state branch in ``load``, the quadlet can no longer be written with
+        # the old model regardless of unit health or who wins the race.
+        #
+        # Soft-fail, like the other pre-swap hooks: an unwritable TOML must not
+        # block the swap, which still passes ``model_id`` explicitly and so
+        # loads the right model — it just loses the race protection.
+        try:
+            await self._persist_model_default(slot_name, new_model_id)
+        except Exception as exc:
+            log.warning(
+                "slot.persist_model_default_swap_failed",
+                extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
+            )
+        # ...and do not funnel a WEDGED slot through the graceful ``unload()``
+        # drain — the second, simpler way the filed swap kept the old model.
+        # ``unload`` re-raises when ``terminate`` fails (a ``failed`` unit's stop
+        # can time out, SlotTerminateTimeout), stamping ERROR on the way out, so
+        # ``swap`` aborted BEFORE its ``load`` ever ran: the quadlet was never
+        # rewritten and the crash loop continued with the old model. That is
+        # exactly the trap ``restart()`` learned in #1224; swap takes the same
+        # escape. A slot that is not cleanly live gets a best-effort terminate +
+        # forced OFFLINE instead, which is also what clears systemd's failed
+        # sub-state so the reload isn't refused by the start limit.
+        current = self._current_state(slot_name)
+        if current in (
+            SlotState.ERROR,
+            SlotState.PULLING,
+            SlotState.STARTING,
+            SlotState.WARMING,
+        ):
+            # Operator intent: never refuse this reload as SlotCrashLooping.
+            self.reset_load_failures(slot_name)
+            async with self._lock(slot_name):
+                with contextlib.suppress(Exception):
+                    await self.terminate(slot_name)
+                await self._transition(slot_name, SlotState.OFFLINE, force=True)
+        else:
+            await self.unload(slot_name)
         slot = await self.load(slot_name, model_id=new_model_id)
         # Refresh Hermes's live-context files so a model swap is visible to
         # the agent on its next session (detached; never blocks the swap).
@@ -1876,13 +2014,41 @@ class SlotManager:
             # dispatcher lazy-loads on the next request. Surface as
             # OFFLINE so the card chip shows the neutral "not loaded"
             # state rather than red ERROR.
-            await self._transition(
-                slot_name,
-                SlotState.OFFLINE,
-                message="container stopped (auto-reloads on next request)",
-                force=True,
-            )
-            observed = SlotState.OFFLINE
+            # ...but "inactive" covers two very different things, and #1791
+            # facet 2 is the one this branch used to mislabel. A slot whose
+            # unit systemd GAVE UP on — crash-looped past StartLimitBurst, or
+            # whose generated unit is gone entirely — is not "stopped, reloads
+            # on next request": nothing reloads it, the next request just fails
+            # again, and the operator saw a bare ``offline`` with no hint that a
+            # previously-loaded slot had been lost. Ask systemd which case this
+            # is; a non-empty reason is proof of the terminal one and earns a
+            # red ERROR carrying the systemd result and the recovery command.
+            # Everything else — a legitimate stop (GPU arbiter handoff, idle
+            # policy, `systemctl stop`), an inconclusive probe — keeps the
+            # neutral OFFLINE exactly as before.
+            failure_reason = await self.unit_failure_reason(slot_name)
+            if failure_reason:
+                await self._transition(
+                    slot_name,
+                    SlotState.ERROR,
+                    message=failure_reason,
+                    force=True,
+                )
+                observed = SlotState.ERROR
+            else:
+                await self._transition(
+                    slot_name,
+                    SlotState.OFFLINE,
+                    message="container stopped (auto-reloads on next request)",
+                    force=True,
+                )
+                observed = SlotState.OFFLINE
+            # ``rec`` was read BEFORE that transition, and ``meta["message"]``
+            # below is built from ``rec.message`` — so the reason we just
+            # stamped was dropped on the floor and every caller saw an empty
+            # message (#1791). Re-read the record so ``hal0 status`` and
+            # ``/api/slots`` actually carry it.
+            rec = self._states.get(self._key(slot_name)) or rec
         elif observed in (SlotState.OFFLINE, SlotState.ERROR) and active:
             # Inverse drift — state.json says we're not running, but
             # the unit is active. Adoption picks the slot up.
