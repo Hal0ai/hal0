@@ -312,6 +312,24 @@ def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
     return argv
 
 
+def _dashboard_ready_status(cfg: AgentConfig) -> str:
+    """The sd_notify ``STATUS=`` string once the hermes process is reachable.
+
+    #1795 item 1: hermes-cli's wheel does not ship a built ``web_dist`` (the
+    dashboard frontend is an upstream external dependency's build artifact,
+    out of hal0's control) and a fresh-install box has no node/npm toolchain
+    to build one at provision time. When that's the case every dashboard
+    route 404s with "Frontend not built. Run: cd web && npm run build" even
+    though the hermes process itself IS up and serving (``/api/events``,
+    ``/api/pty`` — everything except the static UI). Unconditionally
+    claiming "dashboard reachable" in that state is misleading, so the
+    status string reflects whichever case actually held at launch.
+    """
+    if _resolve_web_dist(cfg) is not None:
+        return "hermes dashboard reachable"
+    return "hermes agent up; dashboard UI not built (no web_dist bundled)"
+
+
 _RUNAS_USER = "hal0"
 
 
@@ -409,7 +427,7 @@ def cmd_serve(cfg: AgentConfig) -> int:
             )
         argv = _build_hermes_argv(cfg)
         env = _build_hermes_env(cfg)
-        ready_status = "hermes dashboard reachable"
+        ready_status = _dashboard_ready_status(cfg)
     else:
         _die(f"agent type '{cfg.agent_type}' not supported by this shim yet")
 
