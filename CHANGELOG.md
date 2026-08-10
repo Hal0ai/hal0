@@ -37,31 +37,6 @@ applying. Add those subsections to a version's section to surface them; see
   their timeout on a doomed request — install-time smoke runs before any
   model has ever been loaded, so those two probes were guaranteed to "fail"
   for a reason that was never a real regression. (#1793)
-- The brain steward's native-tools preflight asks whether the resolved runner
-  can *parse* tool calls instead of whether its image is byte-equal to the
-  current ROCmFPX default (#1789). The #1655 gate was
-  `image == DEFAULT_ROCMFPX_IMAGE`, so on any box whose slot runs a different
-  runner — every CPU-only install and every CUDA box, which resolve to the
-  plain upstream llama.cpp toolboxes, plus any deliberate `image_pin` — it
-  answered "no native tools" and `tools` were silently stripped from every
-  brain round. Those runners parse OpenAI `tools` perfectly well, so the
-  steward lost its live view of the box for no reason and answered "what slots
-  are loaded?" with invented slot names, with the `[brain_chat] read_only`
-  refusal path unreachable behind the same strip. The gate now denies only the
-  runners measured to reject a tools-attached request (the pre-ade07ba ROCmFPX
-  lineage, `NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS` — the #1626 "peg-native
-  format" 500) and assumes everything else capable; if that assumption is ever
-  wrong the first tool-format rejection is learned for the rest of the process
-  and that round is retried tools-less, so an unknown-bad runner degrades
-  instead of failing the turn. Behaviour on the default rocmfpx runner is
-  unchanged.
-- When tools genuinely cannot ride a brain turn — an incapable runner *and* no
-  `[brain_chat] tool_model` to reroute the round to — the steward now says so
-  instead of improvising: the turn carries an explicit "no live view of this
-  box" system notice, and the stream carries a `notice` frame with
-  `code: tools_unavailable` (rendered as a dim in-thread banner in the UI and a
-  `note:` line in `hal0 chat`). A fabricated answer about live state is worse
-  than an admitted gap.
 
 ## [1.0.0-rc.4] — 2026-08-09
 
