@@ -989,12 +989,71 @@ async def get_model(
     for entry in data:
         if isinstance(entry, dict) and entry.get("id") == model_id:
             return entry
+
+    virtual_entry = await _resolve_virtual_model_entry(request, model_id, data)
+    if virtual_entry is not None:
+        return virtual_entry
+
     from hal0.dispatcher.router import NoRouteFound
 
     raise NoRouteFound(
         f"model {model_id!r} is not advertised by any configured upstream",
         details={"model": model_id},
     )
+
+
+async def _resolve_virtual_model_entry(
+    request: Request, model_id: str, data: list[dict[str, Any]]
+) -> dict[str, object] | None:
+    """Resolve a hal0 virtual model name (``hal0/agent`` et al.) the same way
+    the chat-completions path does (:func:`_normalize_chat_body`), so a
+    client that ``GET``s ``/v1/models/{id}`` to validate a virtual name
+    before chatting doesn't 404 (#1795 item 4).
+
+    Hermes probes ``model.default`` (``hal0/agent`` under live-resolve) via
+    this route on every session start; the aggregated catalog deliberately
+    never lists the canonical virtuals (see the comment in
+    ``_aggregate_models`` — they'd double-list each slot), so the plain
+    id-match loop above always missed and logged a ``dispatch.no_route``
+    before the very next chat turn resolved the same name fine. Returns a
+    catalog row for the resolved physical model with ``id`` rewritten back
+    to the requested virtual name so the caller's own handle round-trips.
+    ``None`` when ``model_id`` isn't a virtual name or doesn't resolve to
+    any advertised row.
+    """
+    if not model_id.startswith("hal0/"):
+        return None
+    from hal0.normalize.resolver import LiveSlotResolver
+
+    views = await _normalize_slot_views(request)
+    resolver = LiveSlotResolver(
+        slot_views_provider=lambda: views,
+        loaded_models_provider=lambda: _normalize_loaded_models(request),
+    )
+    try:
+        res = await resolver.resolve(model_id)
+    except Exception:
+        return None
+    if res is None or not res.model_id:
+        return None
+    # The aggregated catalog lists a co-resident chat slot under its ALIAS
+    # (e.g. "agent"), not its physical model id (e.g. "big") — see
+    # ``hal0_slot_alias_models`` / the test_virtual_models module docstring.
+    # ``res.matched_name`` is that alias when the resolver matched a LIVE
+    # slot in the chain. On the ``fallback=True`` path (nothing in the chain
+    # currently loaded — the common case right after a fresh boot, which is
+    # exactly when hermes probes this route) the resolver deliberately
+    # returns ``matched_name=None``, so fall back to scanning the same slot
+    # views for whichever slot owns ``res.model_id`` and use ITS alias.
+    candidate_ids: list[str] = []
+    if res.matched_name:
+        candidate_ids.append(res.matched_name)
+    candidate_ids.extend(v.name for v in views if v.model_id == res.model_id)
+    candidate_ids.append(res.model_id)
+    for entry in data:
+        if isinstance(entry, dict) and entry.get("id") in candidate_ids:
+            return {**entry, "id": model_id}
+    return None
 
 
 @router.post("/chat/completions")
