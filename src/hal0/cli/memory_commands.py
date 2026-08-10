@@ -138,7 +138,17 @@ def _add_write_rows(t: Table, s: dict) -> None:
         # No retain pipeline to report on (volatile fallback / other provider).
         return
     reason = (health or {}).get("reason")
-    if write_degraded is True:
+    if (health or {}).get("waiting_on") == "chat_model":
+        # #1792: a fresh install ships every llm slot model-less, so every
+        # retain's extraction call 404s until the operator loads one — that
+        # is expected, self-healing (auto-retry kicks in once a model is
+        # bound), and not "memory is broken".
+        t.add_row(
+            "Writes",
+            "[yellow]waiting[/yellow] — no chat model loaded: retains will "
+            "process once one is available",
+        )
+    elif write_degraded is True:
         detail = (health or {}).get("last_error") or reason or "unknown"
         t.add_row("Writes", f"[red]FAILING[/red] — {reason}: {detail}")
     elif reason == "unknown":

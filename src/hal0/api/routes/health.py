@@ -16,6 +16,7 @@ a follow-up (scrape each container's own ``/metrics``).
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,36 @@ def _memory_degraded(request: Request) -> bool | None:
     return bool(getattr(provider, "degraded", False))
 
 
+async def _extraction_target_resolves(request: Request, provider: Any) -> bool | None:
+    """Does the memory engine's configured extraction slot resolve to a
+    model-bound llm slot right now? (#1792)
+
+    Hindsight's native fact-extraction calls back into hal0's own
+    OpenAI-compat dispatcher (``HINDSIGHT_API_LLM_MODEL=hal0/<slot>``); on a
+    fresh install every llm slot ships model-less (WS-E #1107), so that call
+    404s ``dispatch.no_route`` until the operator loads a model — a
+    deterministic, hal0-side fact, not something that needs to be inferred
+    from Hindsight's own error text.
+
+    Returns ``None`` when this can't be determined (no slot manager wired —
+    e.g. a test app that bypasses the normal lifespan, or a provider with no
+    ``extraction_slot`` of its own): callers must treat that as "unknown",
+    never as evidence either way.
+    """
+    if getattr(request.app.state, "slot_manager", None) is None:
+        return None
+    extraction_slot = getattr(provider, "extraction_slot", None)
+    if not extraction_slot:
+        return None
+    from hal0.api.routes.memory import _enabled_llm_slots
+
+    try:
+        available = await _enabled_llm_slots(request)
+    except Exception:  # pragma: no cover — defensive, matches _enabled_llm_slots' own fail-soft
+        return None
+    return extraction_slot in available
+
+
 async def _memory_write_health(request: Request) -> dict[str, Any] | None:
     """Retain-pipeline health for /api/status, or None when unavailable.
 
@@ -88,6 +119,15 @@ async def _memory_write_health(request: Request) -> dict[str, Any] | None:
     Fail-soft: the probe behind this is TTL-cached inside the provider and
     swallows engine errors, and any unexpected raise degrades to None rather
     than 500ing the dashboard's poll.
+
+    #1792: when the engine's operation counters show writes degraded AND the
+    configured extraction slot has no model bound yet, that is the ENTIRE
+    explanation — every failure in that window is the same dispatch.no_route
+    404, not an operator-actionable outage — so this downgrades the verdict
+    to a "waiting" state instead of FAILING. Conversely, once the slot
+    resolves, this opportunistically kicks a bounded auto-retry sweep so
+    whatever dead-lettered during the window recovers without a manual
+    ``hal0 memory ops retry``.
     """
     provider = getattr(request.app.state, "memory_provider", None)
     if provider is None:
@@ -100,7 +140,29 @@ async def _memory_write_health(request: Request) -> dict[str, Any] | None:
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("hal0.memory.write_health_failed", error=str(exc))
         return None
-    return health if isinstance(health, dict) else None
+    if not isinstance(health, dict):
+        return None
+
+    resolves = await _extraction_target_resolves(request, provider)
+    if resolves is False and health.get("degraded"):
+        health = dict(health)
+        health["degraded"] = False
+        health["reason"] = "no_chat_model"
+        health["waiting_on"] = "chat_model"
+    elif resolves is True:
+        retry = getattr(provider, "maybe_auto_retry_dead_letters", None)
+        if retry is not None:
+            try:
+                retried = await retry()
+            except Exception as exc:  # pragma: no cover — defensive, never blocks /api/status
+                log.warning("hal0.memory.auto_retry_dead_letters_failed", error=str(exc))
+                retried = None
+            if retried:
+                with contextlib.suppress(Exception):
+                    fresh = await probe(max_age_s=0)
+                    if isinstance(fresh, dict):
+                        health = fresh
+    return health
 
 
 @router.get("/status")
@@ -187,7 +249,9 @@ async def get_status(request: Request) -> dict[str, Any]:
         # — reads keep working while every write is silently dropped.
         # True  → writes were recently observed to fail (raised retain, or the
         #         engine's failed-operation counter climbing).
-        # False → the retain pipeline looks healthy.
+        # False → the retain pipeline looks healthy — OR (#1792) it's in the
+        #         expected no-chat-model window on a fresh install, in which
+        #         case ``memory_write_health.waiting_on == "chat_model"``.
         # None  → memory disabled, or the provider has no retain pipeline.
         "memory_write_degraded": (
             None if memory_write_health is None else bool(memory_write_health.get("degraded"))

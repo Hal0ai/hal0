@@ -42,6 +42,20 @@ _FAILING = {
     },
 }
 
+_WAITING = {
+    "memory_enabled": True,
+    "memory_degraded": False,
+    "memory_write_degraded": False,
+    "memory_write_health": {
+        "degraded": False,
+        "reason": "no_chat_model",
+        "last_error": None,
+        "operations": {"failed": 2, "pending": 0, "processing": 0},
+        "bank": "shared",
+        "waiting_on": "chat_model",
+    },
+}
+
 _HEALTHY = {
     "memory_enabled": True,
     "memory_degraded": False,
@@ -65,6 +79,20 @@ def test_failing_retains_are_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "retain_operations_failing" in out
     assert "failed=173" in out
     assert "pending=5" in out
+
+
+def test_no_chat_model_window_reads_as_waiting_not_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1792: a fresh install before any chat slot serves a model must not
+    read as "memory is broken" — it self-heals once a model loads."""
+    _stub(monkeypatch, _WAITING)
+    result = runner.invoke(_test_app, [])
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "FAILING" not in out
+    assert "waiting" in out
+    assert "no chat model loaded" in out
 
 
 def test_healthy_box_reads_differently(monkeypatch: pytest.MonkeyPatch) -> None:

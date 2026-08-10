@@ -290,6 +290,28 @@ _WRITE_HEALTH_TTL_S = 30.0
 #: Operation statuses sampled from the engine's operations endpoint.
 _WRITE_OP_STATUSES = ("failed", "pending", "processing")
 
+# ── auto-retry of no-chat-model dead letters (#1792) ──────────────────────
+#
+# A fresh install ships every llm slot model-less (WS-E #1107); until the
+# operator loads one, every retain's extraction call 404s against hal0's own
+# dispatcher (dispatch.no_route). Hindsight's poller exhausts its own retry
+# ladder (~28 minutes) and dead-letters the op — nothing then re-queues it
+# once a model finally loads. ``maybe_auto_retry_dead_letters`` closes that
+# gap; these bounds keep it from ever becoming an unattended retry storm for
+# a *different*, genuinely broken pipeline.
+
+#: Minimum gap between two auto-retry sweeps.
+_AUTO_RETRY_COOLDOWN_S = 60.0
+
+#: Hard cap on sweeps for this provider's lifetime. A model-availability
+#: window closes once, so a handful of sweeps is plenty; capping means a
+#: pipeline that is failing for some OTHER reason surfaces as genuinely
+#: FAILING again after this budget instead of retrying forever.
+_AUTO_RETRY_MAX_SWEEPS = 5
+
+#: Cap on ops requeued per sweep — a backstop against a runaway ledger.
+_AUTO_RETRY_MAX_OPS = 200
+
 
 class RecallResults(list):
     """``recall()``'s return value: a ``list[dict]`` of MemoryItem-shaped
@@ -366,11 +388,25 @@ class HindsightProvider(MemoryProvider):
         self._ops_sample: dict[str, int] | None = None
         self._write_health: dict[str, Any] | None = None
         self._write_health_at: float | None = None
+        # Auto-retry bookkeeping (#1792) — see the constants above.
+        self._auto_retry_last_at: float | None = None
+        self._auto_retry_sweeps_done = 0
 
     @property
     def hindsight_client(self) -> Any:
         """REST client handle for the engine admin surface (memory_admin routes)."""
         return self._client
+
+    @property
+    def extraction_slot(self) -> str:
+        """The local llm slot Hindsight's native extraction is pointed at.
+
+        Read by ``/api/status`` (#1792) to tell "writes are failing because
+        this slot has no model bound yet" apart from a genuine pipeline
+        failure — the route layer owns the slot-manager lookup (this
+        provider has no slot-manager handle), so it only needs the name.
+        """
+        return self._extraction_slot
 
     # ── Live engine health (#1301) ─────────────────────────────────────
 
@@ -539,6 +575,91 @@ class HindsightProvider(MemoryProvider):
         self._write_health = out
         self._write_health_at = now
         return dict(out)
+
+    async def maybe_auto_retry_dead_letters(self) -> dict[str, Any] | None:
+        """Best-effort auto-retry of failed retain ops once a model is bound (#1792).
+
+        The caller (``hal0.api.routes.health._memory_write_health``) only
+        invokes this after confirming the extraction slot now resolves to a
+        model-bound llm slot — that is the signal a retry is worth
+        attempting, since a stalled no-route window is the one failure mode
+        this whole issue is about. Returns ``None`` when there is nothing to
+        do (no failed ops, cooldown still running, or the sweep budget is
+        spent) or a ``{bank, queued, skipped, sweep}`` tally when a sweep
+        actually ran.
+
+        Bounded by :data:`_AUTO_RETRY_COOLDOWN_S` and
+        :data:`_AUTO_RETRY_MAX_SWEEPS` so a pipeline that keeps failing for
+        some OTHER reason after a model loads stops being auto-retried and
+        goes back to reading as genuinely FAILING, rather than retrying
+        forever on every ``/api/status`` poll.
+        """
+        health = await self.write_health()
+        ops = health.get("operations") if isinstance(health, dict) else None
+        failed = int((ops or {}).get("failed") or 0)
+        if failed <= 0:
+            return None
+        if self._auto_retry_sweeps_done >= _AUTO_RETRY_MAX_SWEEPS:
+            return None
+        now = time.monotonic()
+        if (
+            self._auto_retry_last_at is not None
+            and (now - self._auto_retry_last_at) < _AUTO_RETRY_COOLDOWN_S
+        ):
+            return None
+        self._auto_retry_last_at = now
+        self._auto_retry_sweeps_done += 1
+
+        bank = health.get("bank")
+        if not bank:
+            return None
+        try:
+            resp = await self._client.request_json(
+                "GET",
+                f"/v1/default/banks/{bank}/operations",
+                params={"status": "failed", "limit": _AUTO_RETRY_MAX_OPS},
+            )
+        except Exception as exc:
+            log.debug("hal0.memory.auto_retry_list_failed", bank=bank, error=str(exc))
+            return None
+        ops_list = resp.get("operations") if isinstance(resp, dict) else None
+        op_ids = [
+            entry.get("id")
+            for entry in (ops_list or [])
+            if isinstance(entry, dict) and entry.get("id")
+        ]
+
+        queued = skipped = 0
+        for op_id in op_ids:
+            try:
+                res = await self._client.request_json(
+                    "POST", f"/v1/default/banks/{bank}/operations/{op_id}/retry"
+                )
+            except Exception:
+                skipped += 1
+                continue
+            if not isinstance(res, dict) or bool(res.get("success", True)):
+                queued += 1
+            else:
+                skipped += 1
+
+        log.info(
+            "hal0.memory.auto_retry_dead_letters",
+            bank=bank,
+            queued=queued,
+            skipped=skipped,
+            sweep=self._auto_retry_sweeps_done,
+        )
+        # Force a fresh sample on the next read so status reflects the retry
+        # immediately instead of the stale cached verdict.
+        self._write_health = None
+        self._write_health_at = None
+        return {
+            "bank": bank,
+            "queued": queued,
+            "skipped": skipped,
+            "sweep": self._auto_retry_sweeps_done,
+        }
 
     async def _call(self, method: str, /, **kwargs: Any) -> Any:
         """Invoke a client method, updating the live ``degraded`` flag.
