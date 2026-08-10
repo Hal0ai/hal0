@@ -18,6 +18,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../api/client';
+import { useUpdateState } from '../api/hooks/useUpdates';
 
 /* ── types ── */
 
@@ -460,7 +461,36 @@ const Benchmarks: React.FC = () => {
   }, [loadQueue]);
 
   const measured = roster.filter(m => m.measured !== false).length;
+  // #1797(1): `control.state` is the operator-armed intent ("running" only
+  // after Start is pressed — SAFE BY DEFAULT, bench/control.py) — it says
+  // nothing about whether the `hal0-bench-worker` systemd poller is even
+  // alive. The badge collapsed both into one word, so an armed-off-but-alive
+  // worker rendered "worker: stopped" indistinguishably from a dead unit,
+  // which is what the validator read as contradicting `systemctl
+  // is-active`. GET /queue already returns `updated` — the worker's own
+  // heartbeat (bench/cli.py cmd_worker writes it every poll tick, alive or
+  // idle) — so use its recency as the real liveness signal instead of
+  // inferring it from the armed state.
   const workerState = queue?.control?.state || 'stopped';
+  const workerHeartbeatAgeMs = queue?.updated ? Date.now() - Date.parse(queue.updated) : null;
+  const workerAlive = workerHeartbeatAgeMs != null && workerHeartbeatAgeMs >= 0 && workerHeartbeatAgeMs < 30_000;
+  const workerLabel = workerAlive
+    ? (workerState === 'running' ? 'running' : workerState === 'paused' ? 'paused (worker alive)' : 'idle (worker alive)')
+    : 'not reporting';
+  // #1797(4): `host` is derived from a records.jsonl scan (publish.py
+  // _default_host) — on a fresh install with no runs yet it's
+  // {gpu: null, mem_gb: null, hal0: null}, which rendered the literal
+  // "· GB · hal0 v" with both figures empty. Render only the segments that
+  // have a value, and fall back to the live running version (same
+  // hal0.__version__ GET /api/health serves) when the store hasn't
+  // recorded one yet.
+  const { data: updateState } = useUpdateState();
+  const hal0Version = host?.hal0 || updateState?.hal0?.current || null;
+  const headerBits = [
+    host?.gpu || null,
+    host?.mem_gb != null ? `${host.mem_gb} GB` : null,
+    hal0Version ? `hal0 v${hal0Version}` : null,
+  ].filter(Boolean);
 
   return (
     <div className="view" data-testid="benchmarks-view">
@@ -468,9 +498,9 @@ const Benchmarks: React.FC = () => {
         <span className="vh-eye mono">Performance</span>
         <h1>Benchmarks</h1>
         <span className="vh-spacer" />
-        {host && (
+        {headerBits.length > 0 && (
           <span style={{ fontFamily: mono, fontSize: 11, color: 'var(--fg-4)' }}>
-            {host.gpu} &middot; {host.mem_gb} GB &middot; hal0 v{host.hal0}
+            {headerBits.join(' · ')}
           </span>
         )}
         <button className="btn ghost sm" onClick={loadRoster}>Refresh</button>
@@ -494,9 +524,11 @@ const Benchmarks: React.FC = () => {
             <span>{label}</span>
             {ct != null && <span className="slot-tab-ct num">{ct}</span>}
             {id === 'queue' && (
-              <span title={`worker: ${workerState}`} style={{
+              <span title={`worker: ${workerLabel}`} style={{
                 width: 7, height: 7, borderRadius: '50%',
-                background: workerState === 'running' ? 'var(--ok)' : workerState === 'paused' ? 'var(--warn)' : 'var(--fg-5)',
+                background: workerState === 'running' ? 'var(--ok)'
+                  : workerState === 'paused' ? 'var(--warn)'
+                  : workerAlive ? 'var(--fg-4)' : 'var(--fg-5)',
               }} />
             )}
           </button>
@@ -1704,6 +1736,11 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
   const exclusive = queue?.control?.exclusive ?? true;
   const items = queue?.items || [];
   const active = queue?.active;
+  // #1797(1): distinguish "armed off, daemon alive" (state=stopped but the
+  // worker's own heartbeat in `updated` is fresh) from "daemon not
+  // reporting" — see the queue-tab badge above for the full rationale.
+  const workerHeartbeatAgeMs = queue?.updated ? Date.now() - Date.parse(queue.updated) : null;
+  const workerAlive = workerHeartbeatAgeMs != null && workerHeartbeatAgeMs >= 0 && workerHeartbeatAgeMs < 30_000;
   const suites: string[] = plan?.suites_considered?.length ? plan.suites_considered : ['roster', 'smoke', 'lane-matrix'];
   const staleBySuite: Record<string, number> = {};
   for (const c of plan?.cells || []) staleBySuite[c.suite] = (staleBySuite[c.suite] || 0) + 1;
@@ -1723,6 +1760,11 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
             {state === 'running' && !active && (
               <span style={{ fontFamily: mono, fontSize: 10, color: 'var(--fg-4)' }}>
                 nothing running; queued items start immediately
+              </span>
+            )}
+            {state === 'stopped' && (
+              <span style={{ fontFamily: mono, fontSize: 10, color: 'var(--fg-4)' }}>
+                {workerAlive ? 'hal0-bench-worker is running, idle until Start' : 'hal0-bench-worker not reporting'}
               </span>
             )}
             <span className="vh-spacer" style={{ flex: 1 }} />
