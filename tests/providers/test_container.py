@@ -1644,3 +1644,81 @@ class TestSlotHardwareSegment:
         labels = [lbl for lbl, _toks in _llama_argv_segments(port=8081, model_path="/m.gguf")]
         assert "slot_hardware" in labels
         assert "model_defaults" not in labels
+
+
+class TestFPXQuantRunnerGuard:
+    """hal0#1790 defense-in-depth: a ROCmFPX-family quant (custom GGML tensor
+    type ids 100/103 — see ``hal0.registry.detect.quant_from_rocmfpx_filename``)
+    must never reach a launch on a runner that isn't ``rocmfpx``/``vulkanfpx``.
+    The probe fix (``hal0.hardware.probe._amd_gpu_info``) stops the installer
+    from picking this pairing going forward; this guard is the backstop for a
+    stale slot TOML, a manual ``HAL0_BRAIN_MODEL`` override, or a hand-swapped
+    model — refuse the launch with a clear error instead of a SIGSEGV crash
+    loop (exit 139).
+    """
+
+    _GPU_NODES: ClassVar[list[str]] = ["/dev/kfd", "/dev/dri/renderD128"]
+
+    def _spec(self, cfg: dict[str, Any], model_info: dict[str, Any], profile: ProfileConfig):
+        provider = ContainerProvider()
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=list(self._GPU_NODES),
+            ),
+            patch("hal0.providers.container.os.path.exists", return_value=True),
+            patch("hal0.providers.container.resolve_gpu_group_ids", return_value=[993, 44]),
+        ):
+            return provider.container_spec(cfg, model_info)
+
+    def test_rocmfpx_quant_on_cpu_slot_is_refused(self) -> None:
+        """The exact hal0#1790 shape: hal0-brain-sft-q8-rocmfpx on a device='cpu'
+        slot. The old wrong pairing must now raise instead of spawning."""
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cfg = _slot_cfg(device="cpu", profile="cpu-chat", name="brain")
+        model_info = _model_info(quant="ROCmFP8", _model_key="hal0-brain-sft-q8-rocmfpx")
+        with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
+            self._spec(cfg, model_info, cpu_chat)
+        err = exc_info.value
+        assert err.code == "slot.unsupported_quant_for_runner"
+        assert err.details["quant"] == "ROCmFP8"
+        assert err.details["runner"] == "cpu"
+        assert err.details["model"] == "hal0-brain-sft-q8-rocmfpx"
+
+    @pytest.mark.parametrize("quant", ["ROCmFP3", "ROCmFP4", "ROCmFP6", "ROCmFP8", "ROCmFPX"])
+    def test_every_fpx_family_label_is_refused_on_cpu(self, quant: str) -> None:
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cfg = _slot_cfg(device="cpu", profile="cpu-chat")
+        model_info = _model_info(quant=quant)
+        with pytest.raises(_container_mod.UnprocessableEntity):
+            self._spec(cfg, model_info, cpu_chat)
+
+    def test_rocmfpx_quant_on_gpu_rocm_slot_is_allowed(self) -> None:
+        rocm = SEED_PROFILES["chat"]
+        cfg = _slot_cfg(device="gpu-rocm", profile="chat")
+        model_info = _model_info(quant="ROCmFP8", _model_key="hal0-brain-sft-q8-rocmfpx")
+        spec = self._spec(cfg, model_info, rocm)
+        assert spec is not None  # no raise — rocmfpx runner accepts its own family
+
+    def test_rocmfpx_quant_on_gpu_vulkan_slot_is_allowed(self) -> None:
+        vulkan = ProfileConfig(flags="-fa on", backend="vulkan")
+        cfg = _slot_cfg(device="gpu-vulkan", profile="vulkan-chat", binary="vulkanfpx")
+        model_info = _model_info(quant="ROCmFP4")
+        spec = self._spec(cfg, model_info, vulkan)
+        assert spec is not None
+
+    def test_plain_quant_on_cpu_slot_is_unaffected(self) -> None:
+        """A normal quant (no ROCmFP* marker) must never trip the guard."""
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cfg = _slot_cfg(device="cpu", profile="cpu-chat")
+        model_info = _model_info(quant="Q4_K_M")
+        spec = self._spec(cfg, model_info, cpu_chat)
+        assert spec is not None
+
+    def test_no_quant_on_cpu_slot_is_unaffected(self) -> None:
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cfg = _slot_cfg(device="cpu", profile="cpu-chat")
+        model_info = _model_info()  # no "quant" key at all
+        spec = self._spec(cfg, model_info, cpu_chat)
+        assert spec is not None

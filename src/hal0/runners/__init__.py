@@ -295,6 +295,16 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
     return get_runner("rocmfpx")
 
 
+#: The only two runner keys whose image is :data:`DEFAULT_ROCMFPX_IMAGE` — the
+#: single fork build that understands the custom GGML tensor type ids (100 /
+#: 103) a ROCmFPX-family GGUF (``hal0-brain-sft-q8-rocmfpx`` and friends) is
+#: packed with. Every other runner (``cpu``, ``cuda``, …) runs stock
+#: llama.cpp, which SIGSEGVs on those tensor types instead of rejecting them
+#: cleanly (hal0#1790). Used by the launch-time quant/runner compatibility
+#: guard in :func:`hal0.providers.container._resolve_llama_scalars`.
+FPX_RUNNER_KEYS = frozenset({"rocmfpx", "vulkanfpx"})
+
+
 def runner_matches(runner: Runner, *, device_class: str | None, backend: str | None) -> bool:
     """True when ``runner`` is a valid choice for a given device/backend lane.
 
@@ -311,6 +321,7 @@ def runner_matches(runner: Runner, *, device_class: str | None, backend: str | N
 
 
 __all__ = [
+    "FPX_RUNNER_KEYS",
     "RUNNER_IMAGES",
     "STALE_RUNNER_IMAGE_REFS",
     "Runner",
