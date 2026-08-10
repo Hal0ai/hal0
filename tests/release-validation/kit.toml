@@ -1,0 +1,129 @@
+# hal0 release-candidate validation kit — registry.
+#
+# The workflow (.claude/workflows/rc-validate.js) mirrors this file's lane list. Workflow
+# scripts cannot read the filesystem, so when you add a lane here you must also add it to the
+# LANES table in the script. The brief itself is only ever read by the agent that runs it.
+
+kit_version = 1
+
+[defaults]
+# Model tier per phase. Rationale in README "Phases".
+preflight = "sonnet"
+readonly = "sonnet"
+stateful = "sonnet"
+update = "sonnet"
+regression_mechanical = "fable"
+regression_judgment = "sonnet"
+triage = "opus"
+verify = "opus"
+synthesis = "opus"
+curation = "sonnet"
+
+# Reasoning effort overrides (omitted = inherit session effort).
+stateful_effort = "high"
+verify_effort = "high"
+
+# Per-agent soft time budget, minutes. Agents are told to stop and report at this point
+# rather than run long; an unfinished check is reported as "skipped", never as "pass".
+readonly_budget_min = 10
+stateful_budget_min = 12
+update_budget_min = 20
+
+# Scratch root for run artifacts (CONTEXT.md, raw lane output). Not in the repo — only the
+# final report is committed.
+run_root = "/mnt/mintdev/artifacts/hal0-release-validation"
+
+# ── Read-only lanes ──────────────────────────────────────────────────────────
+# Safe to run fully in parallel. No mutations of any kind.
+
+[[lane]]
+key = "api"
+kind = "readonly"
+brief = "lanes/readonly/api.md"
+boxes = ["fresh", "prod"]
+
+[[lane]]
+key = "cli"
+kind = "readonly"
+brief = "lanes/readonly/cli.md"
+boxes = ["fresh", "prod"]
+
+[[lane]]
+key = "mcp"
+kind = "readonly"
+brief = "lanes/readonly/mcp.md"
+boxes = ["fresh"]
+
+[[lane]]
+key = "hermes"
+kind = "readonly"
+brief = "lanes/readonly/hermes.md"
+boxes = ["fresh"]
+
+[[lane]]
+key = "ui"
+kind = "readonly"
+brief = "lanes/readonly/ui.md"
+boxes = ["fresh"]
+
+# ── Stateful lanes ───────────────────────────────────────────────────────────
+# Serialised in this order on a single box. Each hands the next its box state.
+
+[[lane]]
+key = "slots"
+kind = "stateful"
+order = 1
+brief = "lanes/stateful/slots.md"
+boxes = ["fresh"]
+
+[[lane]]
+key = "routing"
+kind = "stateful"
+order = 2
+brief = "lanes/stateful/routing.md"
+boxes = ["fresh"]
+
+[[lane]]
+key = "brain"
+kind = "stateful"
+order = 3
+brief = "lanes/stateful/brain.md"
+boxes = ["fresh"]
+
+[[lane]]
+key = "memory"
+kind = "stateful"
+order = 4
+brief = "lanes/stateful/memory.md"
+boxes = ["fresh"]
+
+[[lane]]
+key = "capabilities"
+kind = "stateful"
+order = 5
+brief = "lanes/stateful/capabilities.md"
+boxes = ["fresh"]
+
+[[lane]]
+key = "hermes-e2e"
+kind = "stateful"
+order = 6
+brief = "lanes/stateful/hermes-e2e.md"
+boxes = ["fresh"]
+
+# ── Update lane ──────────────────────────────────────────────────────────────
+# Runs on the update box concurrently with the fresh box's stateful lanes.
+
+[[lane]]
+key = "upgrade"
+kind = "update"
+order = 1
+brief = "lanes/update/upgrade.md"
+boxes = ["update"]
+
+[[lane]]
+key = "post-upgrade"
+kind = "update"
+order = 2
+brief = "lanes/update/post-upgrade.md"
+boxes = ["update"]

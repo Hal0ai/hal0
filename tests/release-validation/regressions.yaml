@@ -1,0 +1,242 @@
+# Regression register.
+#
+# Every finding filed in a previous release lands here and is re-probed on every subsequent
+# release, forever, until it is promoted into pytest or scripts/release-test.sh (set
+# `promoted_to:` and drop it in the same PR).
+#
+# This is the mechanism that makes the kit compound. rc.4 found eleven issues; rc.5 must prove
+# all eleven are actually gone on a real box, because they were fixed against unit tests and CI,
+# not against a fresh end-to-end install.
+#
+# tier: mechanical -> run the repro, compare to `expect`, no judgement needed (fable)
+#       judgment   -> requires reading source, weighing intent, or interpreting output (sonnet)
+#
+# result vocabulary the probe agent must use:
+#   fixed      — repro runs, `expect` holds
+#   regressed  — repro reproduces the original defect
+#   partial    — some of `expect` holds, some does not (say exactly which)
+#   blocked    — could not run the repro (say why; NEVER report this as fixed)
+
+schema: 1
+updated: 2026-08-10
+
+regressions:
+  - id: profile-flags-argv
+    issue: 1787
+    from: v1.0.0-rc.4
+    severity: ga-blocker
+    tier: judgment
+    lane: routing
+    summary: >-
+      Profile flags never reached llama-server argv for models with no `defaults.profile` stamp
+      (auto-scan / pull / capability-apply never stamp it, and the #1636 overlay is gated on the
+      stamp). /v1/embeddings and /v1/rerank returned 501 "start with --embeddings" while the
+      capability slots reported ready.
+    fix: >-
+      A `slot_profile_template` argv segment, applied BELOW `model_extra_args`.
+    repro: |
+      Assign the embedding model to the embed slot on the CPU backend and load it, then:
+        curl -s $API/v1/embeddings -d '{"model":"embed","input":["hello"]}'
+        systemctl cat hal0-slot@embed | grep -o -- '--embedding'
+      Repeat for rerank with the jina reranker and POST /v1/rerank.
+      Then do it with a model that has NEVER been stamped: register a fresh gguf via
+      `hal0 model add` and assign it, so the unstamped path is what is exercised.
+    expect: >-
+      Embeddings return a vector of sane dimensionality; rerank returns scores; the resolved
+      argv contains --embedding / --reranking; model_extra_args still win over the profile
+      template where they overlap.
+
+  - id: ctx-advertised-vs-resolved
+    issue: 1788
+    from: v1.0.0-rc.4
+    severity: major
+    tier: mechanical
+    lane: api
+    summary: >-
+      Slot `ctx_max` and `/v1/models` `context_length` advertised the raw slot-TOML context
+      (65536) while the effective resolved window was 32768.
+    repro: |
+      curl -s $API/api/slots/brain | jq '.ctx_max, .config.context_size'
+      curl -s $API/v1/models | jq '.data[] | {id, context_length}'
+      systemctl cat hal0-slot@brain | grep -o -- '--ctx-size [0-9]*'
+    expect: >-
+      The advertised value equals the value actually passed to the runner. If a clamp applies,
+      the API reports the clamped number (and ideally discloses the clamp).
+
+  - id: brain-tools-image-gate
+    issue: 1789
+    from: v1.0.0-rc.4
+    severity: major
+    tier: judgment
+    lane: brain
+    summary: >-
+      Brain native-tools were gated on `image == DEFAULT_ROCMFPX_IMAGE`, so any other runner
+      silently stripped tools and the steward fabricated live platform state with no signal.
+    repro: |
+      With the brain slot on a runner image that is NOT the default, ask the steward a
+      platform-state question that requires tools ("what slots are loaded right now?").
+      Watch for tool frames in the SSE stream and tool dispatch in the hal0-api journal.
+    expect: >-
+      Either tool rounds engage, or the steward states plainly that tools are unavailable on
+      this runner. Confident invented slot names with zero tool frames is the regression.
+
+  - id: cpu-install-fpx-brain-default
+    issue: 1790
+    from: v1.0.0-rc.4
+    severity: major
+    tier: judgment
+    lane: preflight
+    summary: >-
+      A CPU-only fresh install defaulted the brain slot to an FPX quant whose runner exits 139
+      (SIGSEGV) ~5 s into load, crash-looping to the systemd start limit. Root cause was
+      `hardware.probe._amd_gpu_info` hardcoding `vulkan_capable=True` on any AMD DRM sysfs
+      sighting — and an unprivileged LXC sees the host's sysfs with no /dev/dri.
+    fix: >-
+      Probe gated on a real render node, plus a 422 guard refusing ROCmFPX quants on non-FPX
+      runners.
+    repro: |
+      On the fresh CPU-only box immediately after install:
+        hal0 system-info          # what does it claim about GPU / vulkan capability?
+        hal0 slot show brain      # which model did the install choose?
+        journalctl -u hal0-slot@brain --since -1h | grep -iE 'segv|139|start-limit'
+      Then try to force it: assign an FPX quant to a slot on a non-FPX runner.
+    expect: >-
+      Hardware probe reports no GPU / not vulkan-capable with no /dev/dri present; the install
+      picks a CPU-viable brain model; assigning an FPX quant to a non-FPX runner is refused
+      with a 422 rather than accepted into a crash loop.
+
+  - id: crash-loop-lifecycle
+    issue: 1791
+    from: v1.0.0-rc.4
+    severity: major
+    tier: judgment
+    lane: slots
+    summary: >-
+      A crash-looping slot reported `warming` indefinitely, died silently at the systemd start
+      limit with nothing surfacing it, and `hal0 slot swap` on it rewrote the quadlet with the
+      OLD model.
+    repro: |
+      Deliberately induce a crash loop on a throwaway slot (assign a model the runner cannot
+      load), then:
+        hal0 slot list / GET /api/slots      # state after the start limit is hit?
+        hal0 status                          # is the failure surfaced anywhere?
+        hal0 slot swap <throwaway> --model <a good model>
+        systemctl cat hal0-slot@<throwaway> | grep -o -- '--model [^ ]*'
+      Clean up the throwaway slot afterwards.
+    expect: >-
+      State reflects reality (failed/crashed, not warming); the start-limit death is surfaced
+      in status/doctor; swap writes the NEW model to the quadlet even on an unhealthy slot.
+
+  - id: memory-retain-dead-letter
+    issue: 1792
+    from: v1.0.0-rc.4
+    severity: minor
+    tier: judgment
+    lane: memory
+    summary: >-
+      On a fresh install, HINDSIGHT_API_LLM_MODEL=hal0/utility targets a model-less clean-seed
+      slot, so every retain's fact extraction 404s (dispatch.no_route) through its retries and
+      dead-letters permanently, with no auto-retry once a model does appear.
+    repro: |
+      On the fresh box BEFORE loading any model into the utility slot, trigger a retain, then
+      confirm it fails. Then give utility a model, load it, and wait.
+        hal0 memory status
+        hal0 memory ops list      # dead letters from the no-model window?
+    expect: >-
+      Either retains queue rather than dead-letter while no model is available, or dead-letters
+      are retried automatically once routing recovers. A permanent silent loss of the user's
+      first memories is the regression.
+
+  - id: hermes-smoke-ok-over-failures
+    issue: 1793
+    from: v1.0.0-rc.4
+    severity: major
+    tier: mechanical
+    lane: hermes
+    summary: >-
+      Hermes provisioning recorded 2/6 smoke-test failures (chat timeout, memory roundtrip
+      no-marker) and still reported phase `status=ok`. Reporting-integrity defect — it hid a
+      real smoke failure for an entire release.
+    repro: |
+      Read the provisioning record on the fresh box and compare the phase status against its
+      own recorded sub-results.
+    expect: >-
+      A phase with recorded failures reports warn/fail, never ok.
+
+  - id: fact-extraction-strips-literals
+    issue: 1794
+    from: v1.0.0-rc.4
+    severity: minor
+    tier: judgment
+    partial_fix: true
+    summary: >-
+      Fact extraction strips literal values, so stored markers and IDs were unrecoverable via
+      recall even though the raw documents held them. Fixed hal0-side with a document fallback;
+      a durable fix needs server-side content search in the Hindsight engine (no such endpoint
+      exists yet).
+    lane: memory
+    repro: |
+      Retain "the CT151 validation marker is MARKER-7734", wait for the op to complete, then
+      recall "what is the CT151 validation marker?" and also search for the literal MARKER-7734.
+    expect: >-
+      The literal comes back via the document fallback. Note explicitly whether it came from
+      extracted facts or the fallback — the fallback is the workaround, not the fix.
+
+  - id: hermes-polish-rollup
+    issue: 1795
+    from: v1.0.0-rc.4
+    severity: rollup
+    tier: mechanical
+    lane: hermes
+    summary: >-
+      Four hermes rough edges: dashboard frontend not built while status claimed "dashboard
+      reachable" (status string corrected; the frontend itself is an upstream build artifact
+      not shipped in the wheel — permanently out of scope hal0-side), installer-wired session
+      hook skipped as not-allowlisted, plugin kind `provider` unknown and downgraded to
+      `standalone`, per-session dispatch.no_route for hal0/agent before fallback.
+    repro: |
+      Check the hermes unit status string, the session-hook allowlist, the plugin kind
+      resolution, and grep the hermes journal for dispatch.no_route on a fresh session.
+    expect: >-
+      Status strings are truthful; hook is allowlisted; plugin kind resolves; no per-session
+      no_route noise. The unbuilt frontend itself is expected — only a dishonest status string
+      about it is a regression.
+
+  - id: cli-api-polish-rollup
+    issue: 1796
+    from: v1.0.0-rc.4
+    severity: rollup
+    tier: mechanical
+    lane: cli
+    summary: >-
+      Fourteen CLI/API rough edges from the rc.4 sweep.
+    repro: |
+      Re-run each, comparing against the rc.4 symptom:
+        hal0 update --check        # not a placeholder "X -> 0.0.0 (stable)" with a zeroed digest
+        hal0 system-info           # cores/threads must not be impossible (host cores leaking in)
+        hal0 doctor                # must not print warnings then claim "all checks passed"
+        hal0 slot metrics          # formatted numbers, not raw 1223.69921875
+        hal0 bench results         # prints something
+        hal0 system-info           # no debug log line leaking above the table
+        curl $API/api/memory/banks/doesnotexist/stats   # 404, not 200 with zeroed stats
+        curl $API/health $API/openapi.json $API/docs    # SPA catch-all must not shadow these
+        hal0 mcp status hal0-admin # advertised connect URL must be POSTable (needs /mcp suffix)
+    expect: All fourteen corrected. Report per-item, not as one verdict.
+
+  - id: ui-polish-rollup
+    issue: 1797
+    from: v1.0.0-rc.4
+    severity: rollup
+    tier: mechanical
+    lane: ui
+    summary: >-
+      Six dashboard rough edges from the rc.4 Playwright sweep.
+    repro: |
+      Drive the dashboard with Playwright and check:
+        - bench worker badge agrees with `systemctl is-active hal0-bench-worker`
+        - Settings shows a hal0 version, not "—"
+        - telemetry does not present HOST GPU stats as local capacity on a GPU-less box
+        - benchmarks header has no empty interpolations ("· GB · hal0 v")
+        - pluralisation ("1 banks")
+        - nav rail icons have accessible names
+    expect: All six corrected.
