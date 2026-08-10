@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from hal0.bench.planner import plan
+from hal0.bench.planner import _model_caps, plan
 from hal0.bench.schema import Host, Outcome, Record
 from hal0.bench.store import Store
 from hal0.bench.suites import suite_from_dict
@@ -258,3 +258,74 @@ class TestChatTokenizerGate:
         cells = plan(_suite(), reg, store)  # module-level _suite() plans "tg"
         assert len(cells) == 1
         assert cells[0].tokenizer == ""
+
+
+class TestModelCapsTypedFields:
+    """`_model_caps` folds the TYPED registry fields in alongside the freeform
+    lists (#1823).
+
+    The freeform `capabilities`/`tags` are unmaintained in practice, while the
+    typed fields are what `PATCH /api/models` actually edits — and this set is
+    what stamps `identity.model.caps` onto every benchmark record, so it drives
+    the public leaderboard's capability pills.
+
+    Every typed flag is tri-state: None means "unset / decided elsewhere",
+    never "lacks the capability".
+    """
+
+    def test_freeform_lists_still_win_on_their_own(self):
+        assert _model_caps({"capabilities": ["chat"], "tags": ["coder"]}) == {"chat", "coder"}
+
+    def test_mmproj_presence_is_the_vision_signal(self):
+        # registry/model.py: defaults.vision=None is AUTO — the projector loads
+        # whenever the model carries one — and True is an explicit no-op.
+        assert "vision" in _model_caps({"mmproj": "/models/x/mmproj.gguf"})
+        assert "vision" in _model_caps(
+            {"mmproj": "/models/x/mmproj.gguf", "defaults": {"vision": True}}
+        )
+
+    def test_explicit_vision_false_suppresses_a_present_projector(self):
+        caps = _model_caps({"mmproj": "/models/x/mmproj.gguf", "defaults": {"vision": False}})
+        assert "vision" not in caps
+
+    def test_no_projector_means_no_vision_however_the_flag_reads(self):
+        assert "vision" not in _model_caps({"defaults": {"vision": True}})
+
+    def test_tool_calling_flag_folds_in(self):
+        assert "tool-calling" in _model_caps({"capability_flags": {"tool_calling": True}})
+
+    def test_enable_thinking_true_implies_reasoning(self):
+        assert "reasoning" in _model_caps({"defaults": {"enable_thinking": True}})
+
+    @pytest.mark.parametrize("value", [None, False])
+    def test_tri_state_none_and_false_assert_nothing(self, value):
+        caps = _model_caps(
+            {
+                "capability_flags": {"tool_calling": value},
+                "defaults": {"enable_thinking": value, "mtp": value},
+            }
+        )
+        assert caps == set()
+
+    def test_missing_tables_do_not_explode(self):
+        assert _model_caps({}) == set()
+        assert _model_caps({"defaults": None, "capability_flags": None}) == set()
+
+    def test_typed_and_freeform_union_rather_than_replace(self):
+        caps = _model_caps(
+            {
+                "capabilities": ["chat"],
+                "tags": ["coder"],
+                "mmproj": "/m/mmproj.gguf",
+                "capability_flags": {"tool_calling": True},
+                "defaults": {"mtp": True, "enable_thinking": True},
+            }
+        )
+        assert caps == {"chat", "coder", "vision", "tool-calling", "mtp", "reasoning"}
+
+    def test_widening_can_only_add_caps_any_matches(self):
+        """Suites match with caps_any, so a wider set never de-selects a model
+        that already matched — the property that makes this safe to land."""
+        narrow = _model_caps({"capabilities": ["chat"]})
+        wide = _model_caps({"capabilities": ["chat"], "capability_flags": {"tool_calling": True}})
+        assert narrow <= wide

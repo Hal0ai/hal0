@@ -169,17 +169,51 @@ def _model_caps(m: dict[str, Any]) -> set[str]:
     "coder","tool-calling","mtp"). The roster selector wants the chat+coder
     roster, and "coder" lives in ``tags`` — so we match against the UNION of
     ``capabilities`` + ``tags`` (+ ``type``). ``caps`` is also accepted for the
-    synthetic registry entries the unit tests inject."""
+    synthetic registry entries the unit tests inject.
+
+    The freeform lists are unmaintained in practice: on a 49-model box only a
+    handful carry a semantic label, and this set is what stamps
+    ``identity.model.caps`` onto every benchmark record — which is where the
+    public leaderboard's capability pills come from (#1823). So the TYPED
+    fields are folded in too, following the ``defaults.mtp`` precedent below:
+    they are the surface an operator actually edits (``PATCH /api/models``),
+    so a typed edit should reach the roster without also hand-editing a
+    string list.
+
+    Only unambiguous positives are folded. Every typed flag here is
+    tri-state, and ``None`` means "unset / decided elsewhere", never "this
+    model lacks the capability" — so ``None`` and ``False`` both add nothing
+    rather than asserting an absence.
+
+    Widening this set is safe for selection: suites match with ``caps_any``,
+    so extra labels can only make a model match more selectors, never fewer.
+    """
     caps: set[str] = set()
     for field_name in ("caps", "capabilities", "tags"):
         caps.update(m.get(field_name) or [])
     if m.get("type"):
         caps.add(m["type"])
+    defaults = m.get("defaults") or {}
     # The type-tag retirement folds the pre-1.0 "mtp" tag into the typed
     # defaults.mtp field — surface it back into the match set so rosters
     # keyed on "mtp" keep selecting migrated rows.
-    if (m.get("defaults") or {}).get("mtp") is True:
+    if defaults.get("mtp") is True:
         caps.add("mtp")
+    # Vision is the projector, not the flag: registry/model.py documents
+    # defaults.vision=None as AUTO ("the mmproj sidecar loads whenever the
+    # model carries one") and True as "an explicit no-op affirmation". So the
+    # real signal is carrying an mmproj, and the only thing that revokes it is
+    # an explicit False (force-suppress).
+    if m.get("mmproj") and defaults.get("vision") is not False:
+        caps.add("vision")
+    # ModelCapabilities.tool_calling — the one typed-bool surface for the
+    # omni-router's tool-call gate.
+    if (m.get("capability_flags") or {}).get("tool_calling") is True:
+        caps.add("tool-calling")
+    # defaults.enable_thinking True = this model defaults to thinking ON, so
+    # it demonstrably supports it. None is global suppression, not incapacity.
+    if defaults.get("enable_thinking") is True:
+        caps.add("reasoning")
     return caps
 
 
