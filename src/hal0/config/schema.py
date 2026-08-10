@@ -1049,6 +1049,40 @@ STALE_ROCMFPX_IMAGE_REFS = frozenset(
 FALLBACK_VULKAN_IMAGE = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
 FALLBACK_CUDA_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda"
 
+#: Runner images KNOWN to reject a ``tools``-attached completion outright — the
+#: pre-ade07ba ROCmFPX lineage, where llama-server strips the MiniCPM5 vocab's
+#: tool-syntax control tokens before its template-derived parser sees them and
+#: 500s the WHOLE request with "The model produced output that does not match
+#: the expected peg-native format" (#1626).
+#:
+#: This is a DENY list, deliberately, and it is the inverse of the #1655 gate it
+#: replaces. That gate asked "is this image exactly ``DEFAULT_ROCMFPX_IMAGE``?"
+#: and therefore answered "no native tools" for every runner that simply is not
+#: the current default — including plain upstream llama.cpp toolboxes that parse
+#: OpenAI ``tools`` perfectly well. On a CPU-only or CUDA box (whose HW-gated
+#: default is :data:`FALLBACK_VULKAN_IMAGE` / :data:`FALLBACK_CUDA_IMAGE`) that
+#: false negative silently stripped ``tools`` from every brain round, so the
+#: steward answered platform questions from imagination (#1789).
+#:
+#: A ref that is not listed here is assumed CAPABLE; if it turns out not to be,
+#: :func:`hal0.brain.chat._image_native_tools` learns that at runtime from the
+#: first tool-format failure (see ``_TOOL_FORMAT_FAILURE_MARKERS``) and the
+#: round is retried tools-less, so an unknown-bad runner degrades exactly like a
+#: listed one instead of 500ing the turn.
+#:
+#: Note this is a SUBSET of :data:`STALE_ROCMFPX_IMAGE_REFS`: that set also
+#: carries the two former basic-lane toolbox defaults, which are ordinary
+#: llama.cpp builds with no MiniCPM5 parser and no peg-format failure mode.
+NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS = frozenset(
+    {
+        "ghcr.io/hal0ai/hal0-rocmfpx:c077206",
+        "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5",
+        "localhost/hal0-rocmfpx:vulkan-minicpm5",
+        "ghcr.io/hal0ai/hal0-rocmfpx:server",
+        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-7aa484a",
+    }
+)
+
 
 def resolve_default_image(backend: str | None, device_class: str | None = None) -> str:
     """Default container image for a slot lane with no explicit image pin.

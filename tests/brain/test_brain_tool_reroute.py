@@ -28,7 +28,12 @@ What this file locks down:
   * the reroute target having NO model bound — the default fresh-box state —
     produces a clear, actionable steward message: no crash, no empty reply;
   * ``hal0.toolloop.engine.run_tool_loop`` is untouched, so OmniRouter's use of
-    it is unchanged.
+    it is unchanged;
+  * the native-tools preflight is a CAPABILITY question about the resolved
+    runner image, not ``image == DEFAULT_ROCMFPX_IMAGE`` (#1789) — a non-Strix
+    box's fallback toolbox keeps real tool rounds, a runner caught rejecting
+    tools is learned at runtime, and a turn with no tool surface at all admits
+    it instead of fabricating live state.
 
 Scripted stub LLM, no network.
 
@@ -49,6 +54,10 @@ from hal0.config.schema import (
     BRAIN_TOOL_MODEL_DEFAULT,
     BRAIN_TOOL_MODEL_DISABLED,
     DEFAULT_ROCMFPX_IMAGE,
+    FALLBACK_CUDA_IMAGE,
+    FALLBACK_VULKAN_IMAGE,
+    NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS,
+    STALE_ROCMFPX_IMAGE_REFS,
     BrainChatConfig,
     Hal0Config,
 )
@@ -740,3 +749,238 @@ def test_default_image_pin_keeps_tools_on_the_chat_round() -> None:
 
     assert stub.models == ["hal0/brain", "hal0/agent"]
     assert stub.calls[0].get("tools"), "chat round on the default image lost native tools"
+
+
+# ── #1789: the gate asks about CAPABILITY, not image identity ───────────────
+#
+# The #1655 preflight above shipped as `image == DEFAULT_ROCMFPX_IMAGE`. That
+# is not the question it meant to ask: a CPU-only or CUDA box resolves its
+# runner to FALLBACK_VULKAN_IMAGE / FALLBACK_CUDA_IMAGE — ordinary upstream
+# llama.cpp builds with no MiniCPM5 parser and no peg-format failure mode, so
+# they parse OpenAI `tools` fine — and got `False`, which stripped `tools` from
+# EVERY brain round. Measured on CT151 during rc.4 validation: zero tool
+# frames, zero dispatch, and a confident answer naming slots that do not
+# exist. These tests pin the capability gate and the honesty fallback.
+
+
+def _clear_learned() -> None:
+    bc._LEARNED_TOOL_INCAPABLE_IMAGES.clear()
+
+
+_PEG_FORMAT_ERROR = (
+    "upstream 500 from slot brain: The model produced output that does not match "
+    "the expected peg-native format"
+)
+
+
+def test_image_native_tools_denies_only_the_known_bad_lineage() -> None:
+    """The gate's core table: deny the pre-ade07ba ROCmFPX refs, allow the rest.
+
+    Every ref in NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS is a runner measured to
+    500 the whole request on a tools-attached completion (#1626). Everything
+    else — today's default, the two HW-gated fallbacks a non-Strix box lands
+    on, an operator's own build — is assumed capable, which is the entire
+    #1789 fix.
+    """
+    _clear_learned()
+    for bad in NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS:
+        assert bc._image_native_tools(bad) is False, bad
+    for good in (
+        DEFAULT_ROCMFPX_IMAGE,
+        FALLBACK_VULKAN_IMAGE,  # CPU-only / non-Strix AMD box — the #1789 report
+        FALLBACK_CUDA_IMAGE,
+        "ghcr.io/example/my-own-llama-server:v9",
+    ):
+        assert bc._image_native_tools(good) is True, good
+    # An unresolvable image is not a verdict — best-effort default (True).
+    assert bc._image_native_tools(None) is True
+    assert bc._image_native_tools("   ") is True
+    # The former basic-lane toolbox defaults are STALE, not tool-incompatible:
+    # the updater retags them, but they parse `tools` perfectly meanwhile.
+    assert "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server" in (
+        STALE_ROCMFPX_IMAGE_REFS
+    )
+    assert NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS < STALE_ROCMFPX_IMAGE_REFS
+
+
+def test_resolved_slot_native_tools_true_on_a_non_default_capable_image() -> None:
+    """The #1789 regression, at the preflight: a CPU-only box's runner is
+    NOT the rocmfpx default and must still be treated as tools-capable."""
+    _clear_learned()
+    request = _fake_request_with_slot(
+        _StubLLM([]),
+        _brain_slot_cfg(image_pin=FALLBACK_VULKAN_IMAGE, device="cpu"),
+        model="hal0/brain",
+    )
+    assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is True
+
+
+def test_capable_non_default_image_runs_real_tool_rounds() -> None:
+    """End to end on a CPU-only box's runner: the chat round CARRIES `tools`,
+    the brain's native tool_call is dispatched, and the turn reads live state
+    instead of inventing it."""
+    _clear_learned()
+    stub = _StubLLM([_tool_call("list_slots", {}, "c1"), _final("Three slots are loaded.")])
+    request = _fake_request_with_slot(
+        stub,
+        _brain_slot_cfg(image_pin=FALLBACK_VULKAN_IMAGE, device="cpu"),
+        model="hal0/brain",
+        tool_model="hal0/agent",
+    )
+
+    events = _run(_collect(request))
+
+    assert stub.calls[0].get("tools"), "#1789: a capable non-default runner lost native tools"
+    assert [e["name"] for e in events if e["type"] == "tool_call"] == ["list_slots"]
+    assert not [e for e in events if e["type"] == "notice"], "tools worked — no notice is due"
+    assert _tokens(events) == "Three slots are loaded."
+
+
+def test_read_only_refusal_is_reachable_on_a_capable_non_default_image() -> None:
+    """#1789's second symptom: with tools stripped, `read_only=true` never got
+    a tool call to refuse, so a mutation request drew a hallucinated refusal
+    instead of the documented one. With the gate fixed the guard fires."""
+    _clear_learned()
+    stub = _StubLLM(
+        [
+            _tool_call("config_write", {"path": "brain_chat.read_only", "value": False}, "c1"),
+            _final("I can't do that in read-only mode."),
+        ]
+    )
+    request = _fake_request_with_slot(
+        stub,
+        _brain_slot_cfg(image_pin=FALLBACK_VULKAN_IMAGE, device="cpu"),
+        model="hal0/brain",
+        tool_model="hal0/agent",
+    )
+    request.app.state.hal0_config = Hal0Config(
+        brain_chat=BrainChatConfig(read_only=True, model="hal0/brain", tool_model="hal0/agent")
+    )
+
+    events = _run(_collect(request))
+
+    results = [e for e in events if e["type"] == "tool_result"]
+    assert results, "no tool was dispatched — the read-only guard is still unreachable"
+    assert "read-only mode" in json.dumps(results[0]["result"])
+
+
+def test_a_tool_format_reject_is_learned_and_the_round_is_salvaged() -> None:
+    """The runtime half of the gate. "Assume capable" is only safe because a
+    runner that turns out NOT to be teaches the gate on its first failure:
+    THIS round retries tools-less (no 500 reaches the operator) and every
+    later turn on that image goes out tools-less from the start."""
+    _clear_learned()
+    try:
+        stub = _StubLLM([{"error": _PEG_FORMAT_ERROR}, _final("Plain answer.")])
+        request = _fake_request_with_slot(
+            stub,
+            _brain_slot_cfg(image_pin="ghcr.io/example/surprise-runner:v1"),
+            model="hal0/brain",
+        )
+
+        events = _run(_collect(request))
+
+        assert stub.calls[0].get("tools"), "first attempt should try the native fast path"
+        assert not stub.calls[1].get("tools"), "the retry must drop tools"
+        assert _tokens(events) == "Plain answer."  # no 500 surfaced
+        assert bc._image_native_tools("ghcr.io/example/surprise-runner:v1") is False
+        # ...and the NEXT turn skips the doomed attempt entirely.
+        assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is False, (
+            "the learned verdict must survive into later turns"
+        )
+    finally:
+        _clear_learned()
+
+
+def test_an_ordinary_dispatch_error_does_not_teach_the_gate() -> None:
+    """Fail-safe: a timeout / no_route / plain 500 must NOT mute tools for the
+    rest of the process, and must keep the documented error contract."""
+    _clear_learned()
+    try:
+        stub = _StubLLM([{"error": "dispatch.no_route: nothing loaded for hal0/brain"}])
+        request = _fake_request_with_slot(
+            stub, _brain_slot_cfg(image_pin=FALLBACK_CUDA_IMAGE), model="hal0/brain"
+        )
+
+        events = _run(_collect(request))
+
+        assert len(stub.calls) == 1, "a non-tool-format error must not trigger a retry"
+        assert any(e["type"] == "error" for e in events)
+        assert bc._image_native_tools(FALLBACK_CUDA_IMAGE) is True
+    finally:
+        _clear_learned()
+
+
+# ── #1789: honesty when tools cannot ride the turn at all ───────────────────
+
+
+def test_incapable_runner_with_no_reroute_says_so() -> None:
+    """No tool surface AND no reroute -> the turn is told, in the system seed,
+    that it has no live view, and the client gets a `tools_unavailable` frame.
+
+    This is the actual bug the operator hit: not an error, a fabrication. An
+    admitted gap is the required behaviour.
+    """
+    _clear_learned()
+    stub = _StubLLM([_final("I can't check live state right now.")])
+    request = _fake_request_with_slot(
+        stub,
+        _brain_slot_cfg(image_pin=_STALE_IMAGE),
+        model="hal0/brain",
+        tool_model="off",  # in BRAIN_TOOL_MODEL_DISABLED -> normalised to "" (no reroute)
+    )
+
+    events = _run(_collect(request))
+
+    notice = next(e for e in events if e["type"] == "notice")
+    assert notice["code"] == "tools_unavailable"
+    assert "context only" in notice["message"]
+    # The MODEL is constrained too — the notice rides the system seed, never a
+    # trailing system turn (template-safety, see _frame_messages / O18).
+    seed = stub.calls[0]["messages"][0]
+    assert seed["role"] == "system"
+    assert "LIVE PLATFORM TOOLS ARE UNAVAILABLE" in seed["content"]
+    assert all(m["role"] == "system" for m in stub.calls[0]["messages"][:1])
+    assert stub.calls[0]["messages"][-1]["role"] != "system"
+    assert not stub.calls[0].get("tools")
+
+
+def test_no_notice_when_a_reroute_can_still_run_tools() -> None:
+    """An incapable chat runner is NOT a lost tool surface while `tool_model`
+    is there to run the round — that path already works, so claiming tools are
+    unavailable would be its own lie."""
+    _clear_learned()
+    stub = _StubLLM(
+        [
+            _leaked(JINJA_LEAK),
+            _tool_call("list_slots", {}, "c1"),
+            _final("Three slots."),
+        ]
+    )
+    request = _fake_request_with_slot(
+        stub, _brain_slot_cfg(image_pin=_STALE_IMAGE), model="hal0/brain", tool_model="hal0/agent"
+    )
+
+    events = _run(_collect(request))
+
+    assert not [e for e in events if e["type"] == "notice"]
+    assert "LIVE PLATFORM TOOLS ARE UNAVAILABLE" not in json.dumps(stub.calls[0]["messages"])
+    assert _tokens(events) == "Three slots."
+
+
+def test_prepend_system_notice_folds_into_the_existing_seed() -> None:
+    """Never a trailing system turn: the chat templates this module already
+    fights expect the conversation to END on user/assistant/tool."""
+    messages = [
+        {"role": "system", "content": "You are the steward."},
+        {"role": "user", "content": "what slots are loaded?"},
+    ]
+    bc._prepend_system_notice(messages, "NOTICE")
+    assert messages[0]["content"] == "You are the steward.\n\nNOTICE"
+    assert len(messages) == 2
+
+    # No system seed at all -> the notice becomes one, at the FRONT.
+    bare = [{"role": "user", "content": "hi"}]
+    bc._prepend_system_notice(bare, "NOTICE")
+    assert bare[0] == {"role": "system", "content": "NOTICE"}
+    assert bare[-1]["role"] == "user"

@@ -1189,12 +1189,25 @@ def _unrouteable_model_error(tried_model: str) -> str:
 # GA default, but `_chat_stream` permits overrides (custom `model`/`image`,
 # or an intentional rollback via `image_pin`), and `retag_stale_slot_images`
 # only re-pins a stale image on `hal0 update run` — not preemptively, not on
-# every chat call. A brain round whose resolved slot is STILL on c077206 (or
-# any image other than DEFAULT_ROCMFPX_IMAGE) 500s on a `tools`-attached
-# completion exactly as before. `_resolved_slot_native_tools` checks the
-# CHAT model's resolved slot before every turn and `_tool_routing_llm` pops
-# `tools` off just that round when the check comes back negative — see
-# `_call_chat_model` below.
+# every chat call. A brain round whose resolved slot is STILL on c077206 500s
+# on a `tools`-attached completion exactly as before.
+# `_resolved_slot_native_tools` checks the CHAT model's resolved slot before
+# every turn and `_tool_routing_llm` pops `tools` off just that round when the
+# check comes back negative — see `_call_chat_model` below.
+#
+# THE CHECK IS A CAPABILITY QUESTION, NOT AN IMAGE-IDENTITY ONE (#1789). Until
+# rc.4 that preflight was literally `image == DEFAULT_ROCMFPX_IMAGE`, so it
+# answered "no native tools" for every runner that simply is not the current
+# GPU default — including the plain upstream llama.cpp toolboxes a CPU-only or
+# CUDA box resolves to, which parse OpenAI `tools` fine. On those boxes tools
+# were stripped from every brain round and the steward answered "what slots are
+# loaded?" with invented slot names. So the gate now DENIES the known-bad
+# lineage (`NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS`) plus anything a live round has
+# been caught rejecting (`_LEARNED_TOOL_INCAPABLE_IMAGES`), and assumes every
+# other runner capable. And when tools genuinely cannot ride the turn at all —
+# incapable runner AND no `tool_model` to reroute to — the turn carries an
+# explicit "no live view" system notice plus a `tools_unavailable` SSE frame,
+# because a fabricated answer is worse than an admitted gap.
 #
 # ROUTING SEMANTICS — per ROUND, not per conversation.
 #
@@ -1359,6 +1372,146 @@ def _tool_reroute_unavailable_message(tool_model: str, error: str) -> str:
     )
 
 
+#: Substrings that identify a runner rejecting the REQUEST because it could not
+#: reconcile the model's output with the tool-format parser it built from the
+#: chat template — the #1626 failure mode, verbatim from llama-server's error
+#: body, plus the other spellings llama.cpp / an OpenAI-shaped upstream use to
+#: refuse a ``tools`` payload outright. Lowercase; matched case-insensitively
+#: against the dispatch error text.
+#:
+#: This is the RUNTIME half of the capability gate: an image nobody has listed
+#: as incompatible is assumed capable, and if that assumption is wrong the
+#: first tools-attached round teaches
+#: :func:`_image_native_tools` otherwise instead of 500ing the turn.
+_TOOL_FORMAT_FAILURE_MARKERS: tuple[str, ...] = (
+    "peg-native format",
+    "does not match the expected",
+    "failed to parse tool call",
+    "unsupported tool",
+    "tools param requires",
+)
+
+#: Image refs learned at RUNTIME to reject tools-attached completions, keyed by
+#: effective image ref. Process-local and deliberately unbounded-but-tiny (one
+#: entry per distinct runner image a box has actually failed on); never
+#: persisted, so a runner upgrade clears it with the service restart that
+#: performs it.
+_LEARNED_TOOL_INCAPABLE_IMAGES: set[str] = set()
+
+
+def _is_tool_format_failure(response: Any) -> bool:
+    """Whether ``response`` is a dispatch error that reads as a tool-format reject.
+
+    Deliberately narrow: an ordinary 5xx, a timeout, or ``dispatch.no_route``
+    must NOT teach the gate that the runner is tool-incapable (that would
+    disable tools for the rest of the process over one blip). Only the
+    template-derived-parser rejections in
+    :data:`_TOOL_FORMAT_FAILURE_MARKERS` count.
+    """
+    if not isinstance(response, dict):
+        return False
+    err = response.get("error")
+    if not err:
+        return False
+    text = str(err).lower()
+    return any(marker in text for marker in _TOOL_FORMAT_FAILURE_MARKERS)
+
+
+def _image_native_tools(image: str | None) -> bool:
+    """Whether a runner ``image`` is expected to parse native OpenAI ``tools``.
+
+    CAPABILITY, not identity (#1789). The #1655 gate this replaces asked "is
+    the effective image exactly :data:`~hal0.config.schema.
+    DEFAULT_ROCMFPX_IMAGE`?", which answers "no native tools" for every runner
+    that merely is not the current GPU default — including the plain upstream
+    llama.cpp toolboxes a CPU-only or CUDA box resolves to
+    (:data:`~hal0.config.schema.FALLBACK_VULKAN_IMAGE` /
+    :data:`~hal0.config.schema.FALLBACK_CUDA_IMAGE`), which parse ``tools``
+    perfectly well. On those boxes the false negative stripped ``tools`` from
+    every brain round, so the steward answered platform questions from
+    imagination.
+
+    Two layers, in order:
+
+    1. the :data:`~hal0.config.schema.NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS` DENY
+       list — the pre-ade07ba ROCmFPX lineage that 500s the whole request;
+    2. :data:`_LEARNED_TOOL_INCAPABLE_IMAGES` — anything an actual round has
+       been observed to reject with a tool-format error this process.
+
+    Anything else is assumed CAPABLE. That default is safe precisely because of
+    layer 2: an unknown-bad runner degrades on its first tools-attached round
+    (retried tools-less in the same round, see ``_call_chat_model``) and is
+    remembered for every later turn, instead of the whole class of runners
+    being silently muted forever.
+    """
+    from hal0.config.schema import NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS
+
+    ref = (image or "").strip()
+    if not ref:
+        return True  # unknown image — best-effort default, same as the rest of the preflight
+    if ref in NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS:
+        return False
+    return ref not in _LEARNED_TOOL_INCAPABLE_IMAGES
+
+
+def _remember_tool_incapable_image(image: str | None) -> None:
+    """Record that ``image`` rejected a tools-attached completion."""
+    ref = (image or "").strip()
+    if not ref or ref in _LEARNED_TOOL_INCAPABLE_IMAGES:
+        return
+    _LEARNED_TOOL_INCAPABLE_IMAGES.add(ref)
+    log.warning(
+        "hal0.brain_chat.native_tools_unsupported",
+        image=ref,
+        detail="runner rejected a tools-attached completion; brain rounds go tools-less",
+    )
+
+
+def _tools_unavailable_notice(chat_model: str, tool_model: str) -> str:
+    """The system-level honesty line for a turn that has no tool surface.
+
+    #1789: the failure the operator actually hit was not an error — it was a
+    confident fabrication. When neither the chat model's runner nor a
+    ``tool_model`` reroute can carry ``tools``, the steward has NO live view of
+    the box, and must say so rather than describe slots it imagined. Injected
+    as a system message so it constrains the answer itself, and mirrored to the
+    stream as a ``notice`` frame for non-model consumers.
+    """
+    reroute = (
+        " The `[brain_chat] tool_model` reroute is off, so there is no second model to run "
+        "them either."
+        if not tool_model
+        else ""
+    )
+    return (
+        "LIVE PLATFORM TOOLS ARE UNAVAILABLE FOR THIS TURN. The runner backing the chat model "
+        f"({chat_model!r}) does not accept tool calls, so you have NO ability to read the live "
+        f"state of this box right now.{reroute}\n\n"
+        "Therefore: do NOT describe slots, models, jobs, boards, or any other live state as if "
+        "you had looked it up, and never invent names or values. Say plainly that you cannot "
+        "check live state on this turn, answer only from what is in this conversation and your "
+        "system prompt, and point the operator at the Slots/Models pages or the `hal0` CLI for "
+        "the real numbers. Mentioning that tools are unavailable is REQUIRED, not optional."
+    )
+
+
+def _prepend_system_notice(messages: list[dict[str, Any]], notice: str) -> None:
+    """Fold ``notice`` into the leading system message, in place.
+
+    Appending a system turn to the TAIL would be the obvious move and is not
+    template-safe — the chat templates this module already fights (qwen3.5's
+    ``multi_step_tool`` guard, see :func:`_frame_messages` / O18) expect the
+    conversation to end on a user/assistant/tool turn. Folding into the
+    existing system seed keeps the wire shape identical to a plain turn.
+    """
+    if messages and messages[0].get("role") == "system":
+        seed = messages[0].get("content")
+        if isinstance(seed, str):
+            messages[0] = {**messages[0], "content": f"{seed}\n\n{notice}" if seed else notice}
+            return
+    messages.insert(0, {"role": "system", "content": notice})
+
+
 def _synthetic_reply(text: str) -> dict[str, Any]:
     """An OpenAI-shaped completion carrying ``text`` as the assistant reply.
 
@@ -1378,6 +1531,7 @@ def _tool_routing_llm(
     tool_model: str,
     known_tool_names: frozenset[str],
     chat_model_native_tools: bool = True,
+    chat_model_image: str | None = None,
 ) -> LlmFn:
     """Wrap ``llm`` so TOOL rounds run on ``tool_model`` and chat stays on the brain.
 
@@ -1394,31 +1548,47 @@ def _tool_routing_llm(
 
     ``chat_model_native_tools`` (see :func:`_resolved_slot_native_tools`,
     computed by the caller against the CHAT model's resolved slot) gates
-    whether native ``tools`` ride a ``chat_model`` round at all. Only the
-    ade07ba-lineage runner (:data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE`)
-    parses the brain's tool dialect without 500ing — on any other resolved
-    image (a stale or deliberate ``image_pin`` to e.g. ``c077206``), sending
-    ``tools`` 500s the WHOLE completion ("peg-native format", #1626) before
-    ``_tool_intent_artefact`` ever sees a reply. When ``False`` this wrapper
-    pops ``tools`` off the ``chat_model`` round only — detection is
-    unaffected (it reads the reply text, not the request) and the reroute
-    below still fires normally. TOOL-model rounds always keep ``tools``.
+    whether native ``tools`` ride a ``chat_model`` round at all. A runner in
+    the known-incompatible set (the pre-ade07ba ROCmFPX lineage, see
+    :data:`~hal0.config.schema.NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS`) 500s the
+    WHOLE completion on a tools-attached request ("peg-native format", #1626)
+    before ``_tool_intent_artefact`` ever sees a reply. When ``False`` this
+    wrapper pops ``tools`` off the ``chat_model`` round only — detection is
+    unaffected (it reads the reply text, not the request) and the reroute below
+    still fires normally. TOOL-model rounds always keep ``tools``.
+
+    ``chat_model_image`` is the effective runner image behind ``chat_model``,
+    carried purely so a round that DOES hit a tool-format reject on a
+    presumed-capable runner can (a) retry itself tools-less instead of failing
+    the turn and (b) remember the image for every later turn (#1789 — the gate
+    is capability-based now, so "assume capable" needs a runtime correction
+    path). ``None`` keeps the old behaviour: no learning, no retry.
 
     See the module comment above this function for the full routing semantics
     and why the tool-capable model — not the 1B — finishes a tool chain.
     """
 
-    async def _call_chat_model(body: dict[str, Any]) -> dict[str, Any]:
-        """Run one completion on ``chat_model``, stripping ``tools`` when the
-        resolved slot's runner can't parse them without 500ing."""
-        if chat_model_native_tools:
-            return await llm(body)
+    async def _without_tools(body: dict[str, Any]) -> dict[str, Any]:
+        """One completion with ``tools`` popped off, then restored on the body."""
         native_tools = body.pop("tools", None)
         try:
             return await llm(body)
         finally:
             if native_tools is not None:
                 body["tools"] = native_tools
+
+    async def _call_chat_model(body: dict[str, Any]) -> dict[str, Any]:
+        """Run one completion on ``chat_model``, stripping ``tools`` when the
+        resolved slot's runner can't parse them without 500ing."""
+        if not chat_model_native_tools or not _image_native_tools(chat_model_image):
+            return await _without_tools(body)
+        response = await llm(body)
+        # Presumed-capable runner that turned out not to be: learn it, and
+        # salvage THIS round tools-less rather than handing the operator a 500.
+        if body.get("tools") and _is_tool_format_failure(response):
+            _remember_tool_incapable_image(chat_model_image)
+            return await _without_tools(body)
+        return response
 
     # Nothing to reroute TO, or nowhere to reroute FROM. Note this branch is
     # also what "no reroute" costs: a plain pass-through, not a wrapper that
@@ -1465,9 +1635,9 @@ def _tool_routing_llm(
         # brain slot always 500'd, which is why #1626 briefly stripped tools
         # from this round; the reroute below is now the fallback it was
         # designed to be, not the only path. `_call_chat_model` re-applies
-        # that strip whenever `chat_model_native_tools` says this box's
-        # resolved slot is NOT actually on ade07ba (#1655) — a stale or
-        # deliberate `image_pin` must degrade to the fallback, not 500.
+        # that strip whenever the resolved slot's runner is known — or has
+        # been caught — rejecting tools (#1655/#1789): a rollback to c077206
+        # must degrade to the fallback, not 500.
         response = await _call_chat_model(body)
         if not isinstance(response, dict) or response.get("error"):
             # A BRAIN-side failure keeps its documented contract exactly — the
@@ -1563,35 +1733,29 @@ async def _resolved_context_length(request: Request, model: Any) -> int | None:
     return int(res.context_length)
 
 
-async def _resolved_slot_native_tools(request: Request, model: Any) -> bool:
-    """Whether the container image backing the slot ``model`` resolves to is
-    known to parse native OpenAI ``tools`` on completions without 500ing.
+async def _resolved_slot_image(request: Request, model: Any) -> str | None:
+    """Effective runner image behind the slot ``model`` resolves to, or None.
 
-    Best-effort, mirroring :func:`_resolved_context_length`'s contract:
-    defaults to ``True`` (assume supported) whenever the slot, its config, or
-    its profile can't be resolved — so this never blocks a chat the guard
-    can't reason about, and never touches a non-container backend (FLM/NPU,
-    or a remote upstream with no local slot at all) that was never exposed to
-    the llama.cpp peg-format 500 in the first place.
+    Best-effort, mirroring :func:`_resolved_context_length`'s contract: returns
+    ``None`` whenever the slot, its config, or its profile can't be resolved —
+    so a caller can never draw a conclusion from a lookup that did not happen —
+    and also ``None`` for a non-container backend (FLM/NPU, or a remote
+    upstream with no local slot at all), which never routes through the
+    llama.cpp runner whose tool-format behaviour is what any of this is about.
 
-    Only returns ``False`` for a local container llm slot whose EFFECTIVE
-    image (``slot.image_pin`` escape hatch, or the runner-derived default —
-    see :func:`hal0.providers.container._resolve_image_ref`) resolves to
-    something other than the current :data:`~hal0.config.schema.
-    DEFAULT_ROCMFPX_IMAGE`. That covers both a deliberate rollback (e.g. to
-    ``c077206``) and an unretagged stale pin — :func:`hal0.updater.updater.
-    retag_stale_slot_images` only fixes those on ``hal0 update run``, not
-    preemptively or on every chat call (#1655).
+    Otherwise the EFFECTIVE image for a local container llm slot:
+    ``slot.image_pin`` (the escape hatch) or the runner-derived HW-gated
+    default — exactly :func:`hal0.providers.container._resolve_image_ref`, so
+    the ref checked here is the ref that actually launched.
     """
     if not isinstance(model, str) or not model:
-        return True
+        return None
     try:
         sm = getattr(request.app.state, "slot_manager", None)
         if sm is None:
-            return True
+            return None
 
         from hal0.api.routes.v1 import _normalize_loaded_models, _normalize_slot_views
-        from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
         from hal0.normalize.resolver import LiveSlotResolver, _configured_primary
         from hal0.profiles import ProfileCatalog
         from hal0.providers.container import _resolve_image_ref
@@ -1603,7 +1767,7 @@ async def _resolved_slot_native_tools(request: Request, model: Any) -> bool:
         )
         res = await resolver.resolve(model)
         if res is None:
-            return True
+            return None
 
         # A chain match names the slot directly; a fallback (nothing in the
         # chain loaded) still resolves to a real slot via the same
@@ -1613,7 +1777,7 @@ async def _resolved_slot_native_tools(request: Request, model: Any) -> bool:
             primary = _configured_primary(views)
             slot_name = primary.name if primary is not None else None
         if not slot_name:
-            return True
+            return None
 
         cfg = None
         for raw in await sm.iter_configs():
@@ -1621,11 +1785,11 @@ async def _resolved_slot_native_tools(request: Request, model: Any) -> bool:
                 cfg = raw
                 break
         if cfg is None or (cfg.get("type") or "").lower() != "llm":
-            return True
-        # FLM/NPU-backed slots never route through the ROCmFPX llama.cpp
-        # runner this check exists for — leave them alone.
+            return None
+        # FLM/NPU-backed slots never route through the llama.cpp container
+        # runner this lookup exists for — they have no image ref to speak of.
         if (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm":
-            return True
+            return None
 
         # `_resolve_image_ref`'s tier-1 `image_pin` escape hatch is checked
         # BEFORE it ever touches `profile` — resolve the profile on a
@@ -1641,8 +1805,24 @@ async def _resolved_slot_native_tools(request: Request, model: Any) -> bool:
                 profile = None
         image = _resolve_image_ref(cfg, profile)
     except Exception:
-        return True
-    return image == DEFAULT_ROCMFPX_IMAGE
+        return None
+    return image or None
+
+
+async def _resolved_slot_native_tools(request: Request, model: Any) -> bool:
+    """Whether the runner behind the slot ``model`` resolves to is expected to
+    parse native OpenAI ``tools`` on completions without 500ing.
+
+    Composition of the two halves, and the whole of the #1789 fix: resolve the
+    EFFECTIVE image (:func:`_resolved_slot_image`), then ask the capability
+    question about it (:func:`_image_native_tools`) instead of comparing it to
+    one image constant. Defaults to ``True`` whenever the image can't be
+    resolved — the same best-effort contract :func:`_resolved_context_length`
+    has, so the preflight never mutes a chat it cannot reason about, and never
+    touches a non-container backend (FLM/NPU, remote upstream) that was never
+    exposed to the llama.cpp peg-format 500 in the first place.
+    """
+    return _image_native_tools(await _resolved_slot_image(request, model))
 
 
 def _context_exceeded_error(prompt_tokens: int, context_length: int, model: Any) -> str:
@@ -1746,18 +1926,41 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     # which _tool_routing_llm treats as no reroute. See the routing-semantics
     # comment above _tool_intent_artefact.
     tool_model = (cfg.tool_model or "").strip()
-    # Preflight: does the CHAT model's resolved slot actually run a runner
-    # that parses native `tools` without 500ing? (#1655 — the reroute below
-    # assumed ade07ba unconditionally, with no check of the slot a stale or
-    # deliberate `image_pin` might still be pointed at.)
-    chat_model_native_tools = await _resolved_slot_native_tools(request, model)
+    # Preflight: does the CHAT model's resolved slot actually run a runner that
+    # parses native `tools` without 500ing? (#1655 — the reroute below assumed
+    # ade07ba unconditionally, with no check of the slot a stale or deliberate
+    # `image_pin` might still be pointed at. #1789 — asked as a CAPABILITY
+    # question about the resolved image, not "is it the GPU default", which
+    # answered False for every CPU-only/CUDA box and muted tools there.)
+    chat_model_image = await _resolved_slot_image(request, model)
+    chat_model_native_tools = _image_native_tools(chat_model_image)
     llm = _tool_routing_llm(
         llm,
         chat_model=model,
         tool_model=tool_model,
         known_tool_names=known_tool_names,
         chat_model_native_tools=chat_model_native_tools,
+        chat_model_image=chat_model_image,
     )
+
+    # HONESTY (#1789). Tools surfaced in the prompt but no round can actually
+    # carry them — the chat runner rejects them AND there is no reroute target
+    # to run them instead. Left alone the steward answers "what slots are
+    # loaded?" from imagination, which is worse than an error. Tell the MODEL
+    # (system message, so it constrains the reply) and tell the CLIENT (a
+    # `notice` frame carrying `tools_unavailable`).
+    # Same condition `_tool_routing_llm` uses to decide it has nothing to
+    # reroute to (an "off"/empty tool_model, or one that IS the chat model).
+    reroute_possible = bool(tool_model) and tool_model != model
+    tools_unavailable = bool(tools) and not chat_model_native_tools and not reroute_possible
+    if tools_unavailable:
+        _prepend_system_notice(messages, _tools_unavailable_notice(model, tool_model))
+        log.warning(
+            "hal0.brain_chat.tools_unavailable",
+            chat_model=model,
+            chat_model_image=chat_model_image or "(unresolved)",
+            tool_model=tool_model or "(off)",
+        )
 
     body: dict[str, Any] = {
         "model": model,
@@ -1778,6 +1981,23 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
             )
             yield _sse({"type": "done"})
             return
+
+    # The client-facing half of the #1789 honesty layer. A `notice` frame is
+    # additive to the documented SSE contract (token/thinking/tool_call/
+    # tool_result/approval_required/error/done): every existing consumer
+    # ignores an unknown `type`, and the UI/CLI render it as a dim banner.
+    if tools_unavailable:
+        yield _sse(
+            {
+                "type": "notice",
+                "code": "tools_unavailable",
+                "message": (
+                    "Live platform tools are unavailable on this turn — the runner backing "
+                    f"{model!r} does not accept tool calls and `[brain_chat] tool_model` is off, "
+                    "so answers about live box state come from context only."
+                ),
+            }
+        )
 
     dispatch_fn = functools.partial(_dispatch_round, request, client, board)
     try:
