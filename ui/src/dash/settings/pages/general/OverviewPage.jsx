@@ -14,8 +14,10 @@
 //   - useRequestsRollup() → GET /api/stats/requests  (dispatcher /v1 rollup)
 import { useState, useEffect } from 'react'
 import { useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
+import { useHardware } from '@/api/hooks/useHardware'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useStatsPower } from '@/api/hooks/useStatsPower'
+import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useRequestsRollup } from '@/api/hooks/useRequestsRollup'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { useSettingsClient } from '../../data/settingsClient.js'
@@ -96,7 +98,15 @@ function ServicesPanel() {
 
 function HardwarePanel() {
   const stats = useStatsHardware()
+  const hw = useHardware()
   const H = stats.data
+  // #1797(3): /api/stats/hardware sees the host's DRM/XDNA nodes whether or
+  // not this box (an LXC sharing the host kernel) actually has GPU compute
+  // access — a CPU-only container was rendering the host's GPU/NPU numbers
+  // as its own capacity. `computeCapable` is the one probe field backed by
+  // a real capability check (rocm-smi presence); gate the GPU/NPU rows on
+  // it and keep RAM/CPU, which are genuinely this box's own.
+  const hasGpu = !!hw.data?.computeCapable
 
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>
@@ -108,10 +118,16 @@ function HardwarePanel() {
       {H && (
         <>
           <SRow k="RAM" sub="Host memory in use" mono v={<span style={{ color: 'var(--fg-2)' }}>{_mb(H.ram_used_mb)} / {_mb(H.ram_total_mb)}</span>} />
-          <SRow k="GPU utilization" sub="Compute load on the primary accelerator" mono v={_pct(H.gpu_util)} />
-          <SRow k="GPU VRAM" sub="Dedicated/GTT memory in use" mono v={<span style={{ color: 'var(--fg-3)' }}>{_mb(H.gpu_vram_used_mb ?? H.gtt_used_mb)} / {_mb(H.gpu_vram_total_mb)}</span>} />
           <SRow k="CPU utilization" sub="Host CPU load" mono v={_pct(H.cpu_util)} />
-          {H.npu_status && <SRow k="NPU" sub="XDNA/FastFlowLM model residency" v={_statusChip(H.npu_status.ok, `${H.npu_status.ok ? 'ok' : 'not ok'} · ${_mb(H.npu_status.model_mb)}`)} />}
+          {hasGpu ? (
+            <>
+              <SRow k="GPU utilization" sub="Compute load on the primary accelerator" mono v={_pct(H.gpu_util)} />
+              <SRow k="GPU VRAM" sub="Dedicated/GTT memory in use" mono v={<span style={{ color: 'var(--fg-3)' }}>{_mb(H.gpu_vram_used_mb ?? H.gtt_used_mb)} / {_mb(H.gpu_vram_total_mb)}</span>} />
+              {H.npu_status && <SRow k="NPU" sub="XDNA/FastFlowLM model residency" v={_statusChip(H.npu_status.ok, `${H.npu_status.ok ? 'ok' : 'not ok'} · ${_mb(H.npu_status.model_mb)}`)} />}
+            </>
+          ) : (
+            <SRow k="GPU" sub="No GPU compute access on this box" mono v={<span style={{ color: 'var(--fg-4)' }}>—</span>} />
+          )}
         </>
       )}
     </div>
@@ -120,7 +136,9 @@ function HardwarePanel() {
 
 function PowerPanel() {
   const power = useStatsPower()
+  const hw = useHardware()
   const P = power.data
+  const hasGpu = !!hw.data?.computeCapable
 
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>
@@ -130,9 +148,15 @@ function PowerPanel() {
       {power.isPending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>source pending — no hwmon sensor exposed on this host</div>}
       {!power.isPending && P && (
         <>
-          <SRow k="GPU power draw" mono v={P.gpu_power_w != null ? `${Math.round(P.gpu_power_w)} W` : '—'} />
-          <SRow k="GPU clock" mono v={P.gpu_sclk_mhz != null ? `${P.gpu_sclk_mhz} MHz` : '—'} />
-          <SRow k="GPU temperature" mono v={P.gpu_temp_c != null ? `${Math.round(P.gpu_temp_c)}°C` : '—'} />
+          {hasGpu ? (
+            <>
+              <SRow k="GPU power draw" mono v={P.gpu_power_w != null ? `${Math.round(P.gpu_power_w)} W` : '—'} />
+              <SRow k="GPU clock" mono v={P.gpu_sclk_mhz != null ? `${P.gpu_sclk_mhz} MHz` : '—'} />
+              <SRow k="GPU temperature" mono v={P.gpu_temp_c != null ? `${Math.round(P.gpu_temp_c)}°C` : '—'} />
+            </>
+          ) : (
+            <SRow k="GPU" sub="No GPU compute access on this box" mono v={<span style={{ color: 'var(--fg-4)' }}>—</span>} />
+          )}
           <SRow k="CPU temperature" mono v={P.cpu_temp_c != null ? `${Math.round(P.cpu_temp_c)}°C` : '—'} />
         </>
       )}
@@ -189,8 +213,16 @@ function PrivacyVersionPanel() {
     }
   };
 
+  // #1797(2): the config's `meta` block only ever carries `schema_version`
+  // (hal0.toml [meta], config/schema.py MetaConfig) — `meta.hal0_version`
+  // was never populated by any backend route, so this always rendered "—".
+  // The running API version lives at GET /api/updates/state → hal0.current
+  // (same `hal0.__version__` GET /api/health serves; main.jsx's tab-title
+  // sync already reads it from here), so wire the field to that instead of
+  // a config key that doesn't exist.
+  const { data: updateState } = useUpdateState();
   const meta = settings.data?.meta || {};
-  const version = meta.hal0_version || "—";
+  const version = updateState?.hal0?.current || "—";
   const schemaVer = meta.schema_version != null ? String(meta.schema_version) : "—";
 
   return (
