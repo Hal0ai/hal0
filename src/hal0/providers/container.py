@@ -606,6 +606,17 @@ _HEALTH_REQUEST_TIMEOUT_S = 3.0
 #: budget so the worker unwinds first.
 _UNIT_STOP_TIMEOUT_S = 20.0
 
+#: Unit properties :meth:`ContainerProvider.unit_status` reads (#1791). All
+#: read-only — ``systemctl show`` needs no privilege and is never routed
+#: through the hal0-systemctl seam (which only forwards the mutating verbs).
+_UNIT_SHOW_PROPS: tuple[str, ...] = (
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "Result",
+    "NRestarts",
+)
+
 
 def _resolve_model_path(model_info: dict[str, Any]) -> str:
     """Return the absolute GGUF path for this model.
@@ -2001,6 +2012,14 @@ class ContainerProvider(Provider):
         _SYSTEMCTL_SEAM.write_quadlet(unit_path, unit_text)
         # daemon-reload runs the Quadlet generator, materialising the .service.
         self._run("systemctl", "daemon-reload")
+        # #1424/#1791: a unit parked in ``failed`` after StartLimitBurst
+        # refuses every ``restart`` for the whole StartLimitIntervalSec window
+        # ("Start request repeated too quickly"), so a slot that crash-looped
+        # was unloadable via the API until the window expired — the operator
+        # had to `systemctl reset-failed` by hand. Clear it here, on the ONE
+        # path every load/restart/swap goes through, before the start. No-op
+        # for a healthy unit.
+        self.reset_failed(slot_name)
         self._run("systemctl", "restart", self._unit_name(slot_name))
         log.info(
             "container.unit_started",
@@ -2191,6 +2210,88 @@ class ContainerProvider(Provider):
             "systemctl", "is-active", self._unit_name(_artefact_token(slot)), check=False
         )
         return result.returncode == 0
+
+    def unit_status(self, slot: Mapping[str, Any] | str) -> dict[str, str]:
+        """Return the slot unit's systemd properties (``systemctl show``).
+
+        Keys are :data:`_UNIT_SHOW_PROPS`; a property systemd doesn't report is
+        simply absent. Read-only and unprivileged — ``show`` is not one of the
+        seam's forwarded verbs, so it passes straight through on a
+        hal0-service-user box exactly like ``is-active``.
+
+        ``is-active`` alone cannot tell "not started yet" from "systemd gave up
+        on it": both read inactive. This is the probe that distinguishes them —
+        ``ActiveState=failed`` with ``Result=start-limit-hit`` is the crash-loop
+        signature (#1791), and ``LoadState=not-found`` means the generated unit
+        is gone entirely (the Quadlet source was removed underneath it).
+        """
+        unit = self._unit_name(_artefact_token(slot))
+        args = [f"--property={prop}" for prop in _UNIT_SHOW_PROPS]
+        result = self._run("systemctl", "show", unit, *args, check=False)
+        props: dict[str, str] = {}
+        for line in (result.stdout or "").splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                props[key.strip()] = value.strip()
+        return props
+
+    def unit_failure_reason(self, slot: Mapping[str, Any] | str) -> str:
+        """Human-readable reason when the slot's unit is dead-and-not-coming-back.
+
+        Returns ``""`` when the unit is fine (active, activating, or merely
+        stopped) — only a systemd-side *terminal* condition produces a string:
+
+          * ``ActiveState=failed`` — the container exited non-zero, or systemd
+            hit ``StartLimitBurst`` and stopped retrying (``start-limit-hit``);
+          * ``LoadState=not-found`` — the generated ``.service`` no longer
+            exists at all.
+
+        CONTRACT: callers ask this only about a slot whose recorded state
+        claims the unit *should* be running (STARTING/WARMING/READY…). A
+        never-loaded slot also reads ``not-found``, which is not a failure —
+        the caller's state record is what makes it one.
+
+        The string is written for an operator reading ``hal0 status`` or the
+        dashboard card, so it names the unit, the systemd result, and the
+        manual recovery step.
+        """
+        token = _artefact_token(slot)
+        unit = self._unit_name(token)
+        try:
+            props = self.unit_status(slot)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("container.unit_status_failed", extra={"slot": token, "error": str(exc)})
+            return ""
+        load_state = props.get("LoadState", "")
+        active_state = props.get("ActiveState", "")
+        result = props.get("Result", "") or "failure"
+        restarts = props.get("NRestarts", "") or "0"
+        if active_state == "failed":
+            if result == "start-limit-hit":
+                return (
+                    f"{unit} is crash-looping: systemd stopped retrying after "
+                    f"{restarts} restarts (start-limit-hit). Fix the cause, then "
+                    f"`hal0 slot load {token}`"
+                )
+            return (
+                f"{unit} failed (result={result}, restarts={restarts}) — see `journalctl -u {unit}`"
+            )
+        if load_state == "not-found":
+            return (
+                f"{unit} no longer exists — the slot's unit was removed while it "
+                f"was loading. `hal0 slot load {token}` recreates it"
+            )
+        return ""
+
+    def reset_failed(self, slot: Mapping[str, Any] | str) -> None:
+        """Clear a unit's ``failed`` sub-state and its start-limit counter.
+
+        Best-effort (``check=False``): ``reset-failed`` on a healthy or absent
+        unit is a harmless no-op, and a failure here must never block the
+        start it precedes. Routed through the seam's ``reset-failed`` verb on
+        a hal0-service-user box (#1424).
+        """
+        self._run("systemctl", "reset-failed", self._unit_name(_artefact_token(slot)), check=False)
 
     def image_present(self, image: str) -> bool:
         """Return True if ``image`` is in the local container image store.
