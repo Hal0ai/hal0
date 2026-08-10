@@ -234,6 +234,10 @@ def _run_brain_turn(session: ChatSession, client: httpx.Client, url: str, user_t
                 f"[yellow]waiting on operator approval for {event.get('name')} "
                 f"(approval_id={event.get('approval_id')})[/yellow]"
             )
+        elif etype == "notice":
+            # Degradation the operator must see but which is not an error —
+            # e.g. `tools_unavailable` (#1789), where the reply is context-only.
+            console.print(f"[yellow]note:[/yellow] {event.get('message')}")
         elif etype == "error":
             console.print(f"[red]error:[/red] {event.get('message')}")
         elif etype == "done":

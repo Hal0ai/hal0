@@ -1213,7 +1213,7 @@ export function useBoardChat(board?: string): UseBoardChatResult {
 
     // Open SSE stream via fetch POST. Contract (see board_chat.py): the body
     // carries `messages` (OpenAI format) and optional `board`; the response
-    // is SSE frames `{type: token|tool_call|tool_result|done|error}`.
+    // is SSE frames `{type: token|tool_call|tool_result|notice|done|error}`.
     // `model` is deliberately OMITTED: board_chat.py resolves
     // `payload.get("model") or cfg.model or default_model`, so an explicit
     // client-sent model always wins and permanently defeats the
@@ -1446,6 +1446,23 @@ export function useBoardChat(board?: string): UseBoardChatResult {
                 }
                 break
               }
+              case 'notice':
+                // Degradation, not failure: the turn still answers, but with a
+                // caveat the operator must see (`tools_unavailable` — the
+                // runner can't carry tool calls, so there is no live view of
+                // the box this turn). Rendered as its own dim bubble so it
+                // can't be mistaken for the steward's own claim.
+                if (frame.message) {
+                  setMessages((prev) => [
+                    ...prev,
+                    {
+                      role: 'assistant',
+                      body: `ⓘ ${frame.message}`,
+                      at: new Date().toISOString(),
+                    },
+                  ])
+                }
+                break
               case 'error':
                 setMessages((prev) => [
                   ...prev,
