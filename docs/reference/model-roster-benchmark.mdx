@@ -125,7 +125,7 @@ curated per-*profile*, not per-model, and is distinct from the JSONL pipeline ab
 ### CLI
 
 ```sh
-hal0 bench plan|run|status|worker|results|history|reindex|devices|publish|eval|bundle
+hal0 bench plan|run|status|worker|results|history|reindex|devices|publish|eval|bundle|upload
 ```
 
 `hal0 bench` is a raw argparse passthrough (not a Typer sub-app) — run
@@ -137,9 +137,10 @@ hal0 bench plan|run|status|worker|results|history|reindex|devices|publish|eval|b
 
 ### Sharing results
 
-Benchmark results never leave the box — there is no upload path. To share a
-run, package it as a self-contained bundle and attach it wherever you discuss
-it (forum thread, issue, chat):
+Benchmark results never leave the box on their own — nothing is uploaded in
+the background, and no verb here runs unattended. Sharing is always an
+explicit command you type. To share a run, package it as a self-contained
+bundle and attach it wherever you discuss it (forum thread, issue, chat):
 
 ```bash
 hal0 bench bundle --list                       # see what's eligible
@@ -151,3 +152,28 @@ telemetry), the profile/suite TOMLs you pass with `--profile`, and optional
 raw artifacts (`--with-artifacts`). `host.name` is redacted by default, the
 manifest carries a sha256 for every member, and the whole archive is
 content-addressed — anyone can verify and reproduce what you measured.
+
+Records with `outcome: ok` but no throughput measurement at all are left out
+of bundles: they carry nothing to publish, and the publish API rejects a whole
+upload over a single one.
+
+### Publishing to the public leaderboard
+
+Maintainers of the hal0.dev leaderboard publish a bundle to the bench API,
+which is what backs [hal0.dev/benchmarks](https://hal0.dev/benchmarks). This
+requires an admin token and is not something a normal install needs:
+
+```bash
+export HAL0_BENCH_TOKEN=…                      # admin token; never a CLI flag
+hal0 bench upload run.hal0bench.tar.gz
+hal0 bench bundle --runs <run_id> --upload     # or bundle + publish in one step
+```
+
+The token is read from the environment only — passing a credential as an argv
+value would expose it in `ps`, in shell history, and in any journald unit that
+logs the command line.
+
+Uploads are idempotent. The API is content-addressed, so re-sending a bundle
+that is already published is a no-op that reports the existing record count,
+and re-sending one that was unpublished restores it. A retry after a network
+failure cannot duplicate records.

@@ -4,10 +4,20 @@ A bundle is a SELECTION + PACKAGING layer over the store: no new measurement,
 no mutation. Only ``ok`` records are eligible (Outcome contract, schema.py) —
 a shared bundle must never carry a contended or failed number. The manifest
 carries a sha256 for every member file and a ``bundle_id`` derived from those
-hashes, so any consumer (a reader on the forums, or a future opt-in ingest
-system) can verify integrity and dedupe re-shares without trusting the
-producer. Bundles land on local disk only; there is no upload path in the
-public release (operator decision 2026-08-09) — sharing one is a manual act.
+hashes, so any consumer (a reader on the forums, or the bench API's ingest)
+can verify integrity and dedupe re-shares without trusting the producer.
+
+Sharing stays a manual act (operator decision 2026-08-09): writing a bundle
+puts it on local disk and nothing more. Nothing is uploaded in the
+background, on a timer, or as a side effect of a benchmark run. The one
+upload path — ``hal0 bench upload`` / ``bundle --upload`` — is an explicit
+verb gated on an admin token that only the hal0.dev leaderboard maintainer
+holds, so for an ordinary install there is still no way for results to
+leave the box.
+
+Records with ``ok`` but no throughput measurement are excluded from the
+selection: they carry nothing to publish, and the publish API rejects an
+entire upload over one of them.
 """
 
 from __future__ import annotations
