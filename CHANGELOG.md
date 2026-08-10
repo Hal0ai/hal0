@@ -43,6 +43,65 @@ applying. Add those subsections to a version's section to surface them; see
   potentially larger number under the v1.0 model-owns-context-size split.
   Clients that sized requests off the advertised ceiling could overrun the
   real window and get truncated/rejected completions (#1788).
+- Embedding and rerank slots launch with their profile's flags again, so
+  `/v1/embeddings` and `/v1/rerank` stop returning 501 on a fresh install
+  while the slot reports `ready`. The v1.0 flags-ownership redesign made a
+  model's materialized `defaults` the whole launch tune, but nothing on the
+  fresh-install path stamps them — `hal0 model scan`, `hal0 model pull` and
+  the capability apply all register models with `defaults = null`, so both
+  the retired profile segment and the #1636 divergence overlay stayed
+  silent. The launch argv now carries a `slot_profile_template` segment for
+  exactly that case, layered *below* the model's own `extra_args` (a
+  template is a floor, never an override) and screened like every other
+  free-form source. A model that carries tune text — stamped or
+  hand-authored — is untouched (#1787).
+- The hal0-brain steward gates native tool calls on what the runner can
+  actually do instead of on the runner image's identity, so a slot on any
+  other image stops silently dropping `tools` and answering live-state
+  questions from invention. When tools genuinely aren't available the
+  steward now says so rather than improvising (#1789).
+- A GPU-less box no longer installs a brain model it cannot load. The AMD
+  probe was deriving `vulkan_capable` from host sysfs that an unprivileged
+  LXC can see without any passed-through render node, so a CPU-only install
+  picked a ROCmFPX quant whose custom GGML tensor types SIGSEGV stock
+  llama.cpp. `vulkan_capable` now requires a real render node, and the
+  launch path refuses a ROCmFPX build on a non-ROCmFPX runner with a 422
+  instead of letting the container crash-loop (#1790).
+- A crash-looping slot stops lying about its own lifecycle: it reports
+  `error` with the systemd result and recovery command instead of an
+  eternal `warming`, a start-limit-hit unit is cleared before `start`/
+  `restart` so `hal0 slot load` recovers first try, and `hal0 slot swap`
+  persists the requested model before teardown so a wedged slot can no
+  longer relaunch the old one (#1791, refs #1424).
+- Memory retains that arrive before any chat model is loaded no longer
+  dead-letter for good. `hal0 memory status` reports `waiting — no chat
+  model loaded` instead of `FAILING`, and once an extraction-capable slot
+  resolves, previously failed ops are retried automatically under a bounded
+  sweep (#1792).
+- Memory recall falls back to the raw retained documents when fact
+  extraction has dropped a literal value, so a stored marker or ID stays
+  recallable instead of surfacing only meta-facts. Document hits are tagged
+  with their provenance and augment — never displace — extracted facts. A
+  durable fix also needs server-side content search in the memory engine;
+  that gap is tracked on the issue (#1794).
+- Hermes integration polish: the unit only claims the dashboard is reachable
+  when its frontend actually shipped, the provisioner accepts the session
+  hook it installs, the bundled plugin declares a valid kind, and
+  `GET /v1/models/{id}` resolves `hal0/*` virtuals so every session stops
+  logging a `dispatch.no_route` before falling back (#1795).
+- CLI and API polish sweep — `hal0 doctor` summary reflects its own
+  warnings, `hal0 update --check` stops rendering a placeholder manifest as
+  a real target, `system-info` no longer reports host CPU topology inside a
+  container, `model add` derives ids from the filename and classifies
+  rerankers correctly, `hal0 profile list/show` lands, the MCP connect URL
+  carries its transport suffix and reports the hal0 version, and the bare
+  `/health`, `/openapi.json`, `/docs` and `/redoc` paths redirect to their
+  `/api` equivalents instead of returning the dashboard HTML (#1796).
+- Dashboard polish sweep — honest bench-worker liveness, a populated
+  version field in Settings, GPU and NPU telemetry gated on the box actually
+  having compute access rather than showing the host's, no more empty
+  interpolations in the Benchmarks header, correct bank-count
+  pluralization, and accessible names on the nav rail (#1797).
 
 ## [1.0.0-rc.4] — 2026-08-09
 
