@@ -37,19 +37,6 @@ applying. Add those subsections to a version's section to surface them; see
   their timeout on a doomed request — install-time smoke runs before any
   model has ever been loaded, so those two probes were guaranteed to "fail"
   for a reason that was never a real regression. (#1793)
-- **Memory: no-chat-model window no longer dead-letters retains forever.**
-  On a fresh install, before any chat slot serves a model, every retain's
-  fact-extraction call 404s `dispatch.no_route` against hal0's own
-  dispatcher — expected, since every llm slot ships model-less (WS-E
-  #1107). Hindsight's poller exhausted its retry ladder and dead-lettered
-  the op with nothing to re-queue it once a model finally loaded, and
-  `hal0 memory status` printed `Writes FAILING` for what was really just
-  a startup window (#1792). `/api/status` (and `hal0 memory status`) now
-  report a `waiting — no chat model loaded` state instead of `FAILING`
-  when the configured extraction slot has no model bound, and once a
-  routable chat model appears, a bounded auto-retry sweep (cooldown +
-  sweep-count capped, so a genuinely broken pipeline still surfaces as
-  FAILING) re-queues whatever dead-lettered during the window.
 
 ## [1.0.0-rc.4] — 2026-08-09
 
