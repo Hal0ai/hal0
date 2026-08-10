@@ -26,6 +26,17 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- Every seeded profile now requests `-fa auto` instead of forcing `-fa on`
+  (#1811). Seeds are generic templates, and since #1787 they reach ~93% of
+  registered models (the unstamped ones), so a forced Flash Attention kernel
+  is now load-bearing fleet-wide. In llama.cpp b10297+ `auto` runs a startup
+  support probe and falls back to non-FA attention when the FA node cannot be
+  scheduled on its layer's device, while `on` skips the probe entirely and
+  silently leaves FA scheduled off-device. `auto` is promoted to enabled by
+  llama.cpp wherever FA is genuinely required (quantized V cache, tensor
+  split), so no profile loses Flash Attention where it previously had it. A
+  model with a measured win from forcing it can still set `-fa on` in its
+  `defaults.extra_args`.
 - Hermes provision's `smoke_tests` phase now reports `warn` (not a silent
   `ok`) when any probe records a real failure — `hal0 agent status` and its
   `--json` surface a dedicated failure/skipped count instead of burying it
