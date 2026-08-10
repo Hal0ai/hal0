@@ -1502,6 +1502,20 @@ def _resolve_llama_scalars(
     #     were inert before this overlay existed.
     # No MTP expansion here (``resolve_profile_flags`` with no override): the
     # ``--spec-draft-*`` bundle stays model-driven (see _effective_mtp).
+    def _profile_flags_text(prof: Any) -> str:
+        """``resolve_profile_flags`` for a profile that may be a plain Mapping.
+
+        ``_resolve_profile_or_base`` normally hands back a validated
+        ``ProfileConfig``, but the seam also accepts a raw profile Mapping (a
+        registry row read straight off disk, and the shape callers construct in
+        tests). ``resolve_profile_flags`` reaches for ``profile.flags`` and would
+        ``AttributeError`` on the Mapping — mirroring the ``getattr(profile,
+        "name", None)`` tolerance already used for the resolved-name check.
+        """
+        if isinstance(prof, Mapping):
+            return str(prof.get("flags") or "").strip()
+        return str(resolve_profile_flags(prof) or "").strip()
+
     slot_profile_flags = ""
     _cfg_profile = str(slot_cfg.get("profile") or "")
     _mi_defaults = model_info.get("defaults")
@@ -1517,7 +1531,7 @@ def _resolve_llama_scalars(
         from hal0.slots.profile_adopt import profile_fits_slot
 
         if profile_fits_slot(_cfg_profile, slot_cfg):
-            slot_profile_flags = str(resolve_profile_flags(profile) or "").strip()
+            slot_profile_flags = _profile_flags_text(profile)
         if slot_profile_flags and for_launch:
             log.info(
                 "slot.profile_divergence_applied",
@@ -1562,7 +1576,7 @@ def _resolve_llama_scalars(
         from hal0.slots.profile_adopt import profile_fits_slot
 
         if profile_fits_slot(_cfg_profile, slot_cfg):
-            slot_profile_template_flags = str(resolve_profile_flags(profile) or "").strip()
+            slot_profile_template_flags = _profile_flags_text(profile)
         if slot_profile_template_flags and for_launch:
             log.info(
                 "slot.profile_template_applied",
