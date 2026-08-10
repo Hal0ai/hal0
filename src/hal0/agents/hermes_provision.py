@@ -1442,6 +1442,16 @@ def _build_config_overlay(
     base_url = "http://127.0.0.1:8080/v1" if live_resolve_enabled else primary["backend_url"]
     pairs: list[tuple[str, Any]] = []
 
+    # hooks_auto_accept — the provisioner is also the thing that installs
+    # ``hooks.on_session_start`` (SESSION_START_HOOK, below via
+    # HAL0_CONFIG_LIST_KEYS): a headless box has no TTY to answer the
+    # first-run "approve this hook?" prompt, so without this the hook is
+    # silently skipped every session (agent.shell_hooks: "not allowlisted")
+    # and system-state injection never happens (#1795 item 2). Same
+    # mechanism hermes itself documents as the non-interactive path
+    # (--accept-hooks / HERMES_ACCEPT_HOOKS=1 / hooks_auto_accept: true).
+    pairs.append(("hooks_auto_accept", True))
+
     # model.* — the OpenAI-compatible-LAN wiring. ``provider: custom`` is
     # hermes's built-in bucket for Ollama/vLLM/llama.cpp endpoints; hal0 is
     # that endpoint. max_tokens guards the thinking-model silent-TUI (#635).
