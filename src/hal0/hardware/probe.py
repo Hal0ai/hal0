@@ -410,6 +410,18 @@ def _amd_gpu_info(drm: Path, index: int, compute_capable: bool) -> GPUInfo:
     On Strix Halo (UMA) the vram_total counter reports the small carve-out;
     the real model-loading pool is GTT. We pick the larger of vram_total and
     gtt_total so the slot-form's "will it fit" check uses the right number.
+
+    ``vulkan_capable`` used to be hardcoded True on the theory that "amdgpu
+    ships Mesa Vulkan" — true on bare metal, but WRONG in an unprivileged
+    container: ``/sys/class/drm/card*/device`` can still expose the host's
+    sysfs (VRAM counters, PCI uevent) even when the container was never
+    given the matching ``/dev/dri/renderD*`` node, because sysfs and devtmpfs
+    are gated independently by the container runtime. Without a passed-through
+    render node there is no usable Vulkan ICD path, so Vulkan capability must
+    be gated on the render node actually existing (see hal0#1790: a GPU-less
+    LXC's sysfs-only view of the host's Strix Halo iGPU made
+    ``rocmfpx_capable()`` return True and installed the FPX brain quant onto a
+    box that could never load it, SIGSEGV-ing the runner).
     """
     vram_total = _read_sysfs_mb(drm / "mem_info_vram_total") or 0.0
     gtt_total = _read_sysfs_mb(drm / "mem_info_gtt_total") or 0.0
@@ -440,7 +452,9 @@ def _amd_gpu_info(drm: Path, index: int, compute_capable: bool) -> GPUInfo:
         driver="amdgpu",
         drm_path=str(drm),
         compute_capable=compute_capable,
-        vulkan_capable=True,  # amdgpu ships Mesa Vulkan
+        # amdgpu ships Mesa Vulkan, but only usable when the render node was
+        # actually passed through — see the docstring above.
+        vulkan_capable=bool(_first_render_node()),
     )
 
 

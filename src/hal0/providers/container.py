@@ -1341,6 +1341,69 @@ def _resolve_context_size(
     return resolved
 
 
+#: ROCmFPX-family quant labels (:func:`hal0.registry.detect.quant_from_rocmfpx_filename`)
+#: all share this prefix — ``ROCmFP3``/``ROCmFP4``/``ROCmFP6``/``ROCmFP8``/``ROCmFPX``.
+#: Exact marker, not a heuristic: these are custom GGML tensor type ids (100 /
+#: 103) that a stock llama.cpp header parse can't map to a known quant, so the
+#: filename token is the only source and it is unambiguous — a false positive
+#: here would need a model file to literally carry one of these tokens without
+#: actually being a ROCmFPX repack.
+_FPX_QUANT_PREFIX = "ROCmFP"
+
+
+def _guard_fpx_quant_runner(
+    slot_cfg: dict[str, Any] | Mapping[str, Any] | None,
+    model_info: dict[str, Any],
+    runner: Any,
+) -> None:
+    """Refuse to launch a ROCmFPX-family quant on a non-ROCmFPX runner.
+
+    hal0#1790: a GPU-less LXC (CT151, ``HAL0_ALLOW_CPU_ONLY=1``) had its
+    ``vulkan_capable`` probe fact mis-derived True from host sysfs visible
+    without a passed-through render node, so ``rocmfpx_capable()`` picked
+    ``hal0-brain-sft-q8-rocmfpx`` for a box that could never load it — the
+    ``cpu`` runner's stock llama.cpp SIGSEGVs (exit 139) on the custom GGML
+    tensor type ids (100 / 103) those quants carry. The probe fix
+    (``hal0.hardware.probe._amd_gpu_info``) stops the installer from making
+    this pick going forward; this is the belt-and-suspenders backstop for
+    every OTHER way a bad pairing could still reach a launch — a stale slot
+    TOML from before the probe fix, a manual ``HAL0_BRAIN_MODEL`` override,
+    or an operator hand-swapping a model onto a ``cpu`` slot. Checked at the
+    single point (:func:`_resolve_llama_scalars`) both the real launch and
+    the preview path share, right after the runner is resolved, so it can
+    never be bypassed by a route that skips some other layer.
+
+    Raises :class:`UnprocessableEntity` (422) with the exact quant/runner
+    facts in ``details`` rather than letting the container crash-loop.
+    """
+    quant = str((model_info or {}).get("quant") or "")
+    if not quant.startswith(_FPX_QUANT_PREFIX):
+        return
+    from hal0.runners import FPX_RUNNER_KEYS
+
+    if getattr(runner, "key", None) in FPX_RUNNER_KEYS:
+        return
+    slot_name = ""
+    if isinstance(slot_cfg, Mapping):
+        raw_name = slot_cfg.get("name")
+        slot_name = raw_name if isinstance(raw_name, str) else ""
+    model_key = str((model_info or {}).get("_model_key") or (model_info or {}).get("id") or "?")
+    raise UnprocessableEntity(
+        f"model {model_key!r} is a {quant} build (custom GGML tensor types 100/103) that "
+        f"only the ROCmFPX runner can load; the resolved runner here is "
+        f"{getattr(runner, 'key', '?')!r} — loading it would SIGSEGV the container. "
+        "Pick a non-ROCmFPX build (e.g. hal0-brain-sft-f16) or move this slot to a "
+        "gpu-rocm/gpu-vulkan device.",
+        code="slot.unsupported_quant_for_runner",
+        details={
+            "slot": slot_name,
+            "model": model_key,
+            "quant": quant,
+            "runner": getattr(runner, "key", None),
+        },
+    )
+
+
 def _resolve_llama_scalars(
     slot_cfg: dict[str, Any],
     model_info: dict[str, Any],
@@ -1374,6 +1437,8 @@ def _resolve_llama_scalars(
     effective_backend, effective_device_class = _effective_backend_and_device_class(
         slot_cfg, profile
     )
+    if for_launch:
+        _guard_fpx_quant_runner(slot_cfg, model_info, runner)
     effective_mtp = _effective_mtp(model_info, runner, log_ineligible=for_launch)
     # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
     # resolving the profile's flags — the profile flag resolver

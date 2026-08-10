@@ -87,6 +87,45 @@ def test_override_selects_a_known_variant() -> None:
     )
 
 
+class TestHardwareDecisionMatrix:
+    """The full selection matrix hal0#1790 asked for: gpu-rocm / gpu-vulkan /
+    cpu-only, each driven through :func:`brain_model_for_hardware` exactly as
+    ``hal0.install.brain_model.main`` calls it (hardware first, no override).
+    """
+
+    def test_gpu_rocm_box_selects_rocmfpx(self) -> None:
+        hw = _hw(gpus=[GPUInfo(vendor="amd", compute_capable=True, vulkan_capable=False)])
+        assert rocmfpx_capable(hw) is True
+        assert brain_model_for_hardware(hw) == BRAIN_MODEL_ROCMFPX
+
+    def test_gpu_vulkan_box_selects_rocmfpx(self) -> None:
+        hw = _hw(gpus=[GPUInfo(vendor="amd", compute_capable=False, vulkan_capable=True)])
+        assert rocmfpx_capable(hw) is True
+        assert brain_model_for_hardware(hw) == BRAIN_MODEL_ROCMFPX
+
+    def test_cpu_only_box_selects_portable_f16(self) -> None:
+        """No compute, no Vulkan, no strix-halo platform — the F16 build."""
+        hw = _hw(gpus=[])
+        assert rocmfpx_capable(hw) is False
+        assert brain_model_for_hardware(hw) == BRAIN_MODEL_PORTABLE
+
+    def test_gpu_present_but_neither_compute_nor_vulkan_capable_selects_f16(self) -> None:
+        """hal0#1790's exact shape one layer up: an AMD GPU row IS present in
+        ``hw.gpus`` (sysfs saw it) but both capability flags are False — this
+        is what ``hal0.hardware.probe._amd_gpu_info`` now produces for a
+        GPU-less LXC once its render-node gate is in place. Before that fix
+        this GPUInfo would have carried ``vulkan_capable=True`` unconditionally
+        and this test would have asserted BRAIN_MODEL_ROCMFPX instead — the
+        regression this matrix exists to pin.
+        """
+        hw = _hw(
+            platform="lxc",
+            gpus=[GPUInfo(vendor="amd", compute_capable=False, vulkan_capable=False)],
+        )
+        assert rocmfpx_capable(hw) is False
+        assert brain_model_for_hardware(hw) == BRAIN_MODEL_PORTABLE
+
+
 def test_unknown_override_falls_back_instead_of_404ing() -> None:
     """An off-catalogue HAL0_BRAIN_MODEL must not become a doomed pull.
 

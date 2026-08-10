@@ -192,6 +192,11 @@ def test_detect_amd_via_drm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
     # _detect_amd now enumerates every card via _amd_drm_devices (plural).
     monkeypatch.setattr(probe_mod, "_amd_drm_devices", lambda: [drm])
+    # A real /dev/dri/renderD* node passed through — bare metal / a
+    # privileged container. Explicit (not incidental host state) so this
+    # test is deterministic regardless of what /dev/dri looks like on the
+    # box running the suite.
+    monkeypatch.setattr(probe_mod, "_first_render_node", lambda dri_dir=None: "/dev/dri/renderD128")
     monkeypatch.setattr(
         probe_mod,
         "_run",
@@ -214,6 +219,43 @@ def test_detect_amd_via_drm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert info.compute_capable is True
     assert info.vulkan_capable is True
     assert info.drm_path == str(drm)
+
+
+def test_detect_amd_via_drm_no_render_node_is_not_vulkan_capable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """hal0#1790 — the CT151 shape: an unprivileged LXC whose sysfs still
+    exposes the host's AMD DRM device (VRAM counters, PCI uevent all present,
+    just like bare metal) but was never given the matching
+    ``/dev/dri/renderD*`` node. There is no usable Vulkan ICD path here, so
+    ``vulkan_capable`` must be False even though every OTHER sysfs signal
+    looks identical to a real GPU box — this is exactly what made
+    ``rocmfpx_capable()`` (hal0.install.brain_model) mis-select the FPX brain
+    quant for a box that can only SIGSEGV on it.
+    """
+    drm = tmp_path / "drm" / "card1" / "device"
+    drm.mkdir(parents=True)
+    (drm / "mem_info_vram_total").write_text(str(1024 * 1024 * 1024))
+    (drm / "uevent").write_text("PCI_SLOT_NAME=0000:bf:00.0\n")
+
+    monkeypatch.setattr(probe_mod, "_amd_drm_devices", lambda: [drm])
+    monkeypatch.setattr(probe_mod, "_first_render_node", lambda dri_dir=None: "")
+    monkeypatch.setattr(
+        probe_mod,
+        "_run",
+        _mk_run(
+            {
+                "lspci": (0, "bf:00.0 VGA controller: AMD Strix Halo [Radeon 8060S]", ""),
+                # No rocm-smi in the container either (matches CT151).
+                "rocm-smi": (-1, "", "not found"),
+                "nvidia-smi": (-1, "", "not found"),
+            }
+        ),
+    )
+    info = probe_mod._detect_amd()
+    assert info is not None
+    assert info.vulkan_capable is False
+    assert info.compute_capable is False
 
 
 def test_detect_amd_no_drm(monkeypatch: pytest.MonkeyPatch) -> None:
