@@ -422,6 +422,36 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return out
 
 
+def _resolve_ctx_max(
+    raw_ctx_max: int | None,
+    model_registry: Any,
+    model_id: str,
+    slot_name: str,
+) -> int | None:
+    """Best-effort EFFECTIVE context resolution for the dashboard's ``ctx_max``.
+
+    #1788: ``config_enrichment`` lifts ``ctx_max`` straight off the slot
+    TOML — the raw hardware ceiling, not what llama-server actually runs
+    with now that the MODEL owns context size (v1.0 ownership split; see
+    :func:`hal0.providers.container._resolve_context_size`). The aggregator
+    calls this after merging ``config_enrichment``'s output so the
+    "ctx used / max" pane reports the same number the launch path resolved,
+    using the model registry the aggregator already carries.
+
+    Imported lazily (heavy neighbour, see module docstring) and never
+    raises: a resolution failure degrades to the raw TOML ceiling — the
+    pre-fix behavior — rather than breaking the slots list.
+    """
+    try:
+        from hal0.providers.container import resolve_effective_context_size
+
+        return resolve_effective_context_size(
+            raw_ctx_max, model_registry, model_id, slot_name=slot_name
+        )
+    except Exception:
+        return raw_ctx_max
+
+
 # ── concern 3: container probe ───────────────────────────────────────────────
 
 
@@ -917,6 +947,19 @@ class SlotViewAggregator:
             if c_extra:
                 for k, v in c_extra.items():
                     payload.setdefault(k, v)
+
+            # #1788: re-resolve ctx_max to the EFFECTIVE window (only when
+            # there's a model bound, or an explicit raw ceiling was lifted —
+            # a model-less slot with neither has nothing to resolve).
+            raw_ctx_max = payload.get("ctx_max")
+            model_id = str(payload.get("model_default") or "")
+            if model_id or isinstance(raw_ctx_max, int):
+                payload["ctx_max"] = _resolve_ctx_max(
+                    raw_ctx_max if isinstance(raw_ctx_max, int) else None,
+                    self._registry,
+                    model_id,
+                    slot_name,
+                )
 
         # Per-slot resident memory (model weights + KV-cache estimate) so the
         # dashboard memory map (W4) attributes a real footprint per slot. Only

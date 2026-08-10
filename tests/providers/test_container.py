@@ -48,6 +48,7 @@ from hal0.providers.container import (
     _render_quadlet_from_plan,
     _resolve_context_size,
     _resolve_model_path,
+    resolve_effective_context_size,
     resolved_command_for_slot,
 )
 from hal0.slots.argv import resolve_argv
@@ -1367,6 +1368,72 @@ class TestContextSizeOwnership:
         cfg = _slot_cfg()
         mi = _model_info(defaults={"context_size": -1})
         assert self._ctx(self._spec(cfg, mi).command) == str(_CTX_SAFE_FALLBACK)
+
+
+class _FakeCtxDefaults:
+    def __init__(self, context_size: int | None) -> None:
+        self.context_size = context_size
+
+
+class _FakeCtxModel:
+    """Duck-typed registry entry — mirrors the real pydantic ``Model``."""
+
+    def __init__(self, context_size: int | None) -> None:
+        self.defaults = _FakeCtxDefaults(context_size)
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+
+
+class _FakeCtxRegistry:
+    def __init__(self, models: dict[str, Any]) -> None:
+        self._models = models
+
+    def get(self, model_id: str) -> Any:
+        if model_id not in self._models:
+            raise KeyError(model_id)
+        return self._models[model_id]
+
+
+class TestResolveEffectiveContextSize:
+    """#1788 — the read-only-surface wrapper read-only views (ctx_max,
+    /v1/models context_length/max_context_window) call instead of
+    re-implementing the model/slot precedence themselves."""
+
+    def test_matches_resolve_context_size_for_a_registered_model(self) -> None:
+        registry = _FakeCtxRegistry({"m": _FakeCtxModel(8000)})
+        assert resolve_effective_context_size(65536, registry, "m") == 8000
+
+    def test_slot_ceiling_still_clamps_down(self) -> None:
+        registry = _FakeCtxRegistry({"m": _FakeCtxModel(65536)})
+        assert resolve_effective_context_size(16384, registry, "m") == 16384
+
+    def test_none_registry_degrades_to_safe_floor(self) -> None:
+        assert resolve_effective_context_size(65536, None, "m") == _CTX_SAFE_FALLBACK
+
+    def test_empty_model_id_degrades_to_safe_floor(self) -> None:
+        registry = _FakeCtxRegistry({"m": _FakeCtxModel(8000)})
+        assert resolve_effective_context_size(65536, registry, "") == _CTX_SAFE_FALLBACK
+
+    def test_registry_miss_degrades_to_safe_floor(self) -> None:
+        registry = _FakeCtxRegistry({})
+        assert resolve_effective_context_size(65536, registry, "unregistered") == _CTX_SAFE_FALLBACK
+
+    def test_registry_get_raising_is_swallowed(self) -> None:
+        class _BoomRegistry:
+            def get(self, model_id: str) -> Any:
+                raise RuntimeError("registry exploded")
+
+        assert resolve_effective_context_size(65536, _BoomRegistry(), "m") == _CTX_SAFE_FALLBACK
+
+    def test_model_less_slot_with_no_ceiling_reports_the_safe_floor(self) -> None:
+        """A model-less slot (no id at all, no TOML ceiling) has no model fact
+        to be authoritative — the safe floor is reported rather than
+        inventing a number."""
+        assert resolve_effective_context_size(None, None, "") == _CTX_SAFE_FALLBACK
+
+    def test_always_returns_a_positive_int(self) -> None:
+        assert isinstance(resolve_effective_context_size(None, None, ""), int)
 
 
 class TestFamilyDefaults:

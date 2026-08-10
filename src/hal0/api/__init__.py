@@ -269,21 +269,16 @@ def _coerce_ctx(raw: Any) -> int | None:
     return ctx if ctx > 0 else None
 
 
-def _slot_ctx_size(
-    cfg: dict[str, Any],
-    model_registry: ModelRegistry | None = None,
-    model_id: str = "",
-) -> int | None:
-    """Resolve a slot's context length.
+def _raw_slot_ctx_ceiling(cfg: dict[str, Any]) -> int | None:
+    """Read the slot TOML's on-disk context-size ceiling, verbatim.
 
     The on-disk slot TOMLs are inconsistent about the key name:
     ``agent.toml`` uses ``[model] ctx_size`` while ``utility.toml``
     uses ``[model] context_size`` and ``chat.toml`` pins neither. Read
     BOTH keys (plus a couple of flat shapes seen in live /api/slots
-    payloads), then fall back to the model registry entry's
-    ``defaults.context_size`` so a slot that doesn't pin a ctx still
-    advertises the model's native window. Returns ``None`` only when no
-    source yields a positive value.
+    payloads). Returns ``None`` only when no source yields a positive
+    value — this is a hardware CEILING, not the effective window (see
+    :func:`_slot_ctx_size`).
     """
     model_section = cfg.get("model") or {}
     defaults = cfg.get("defaults") or {}
@@ -301,19 +296,34 @@ def _slot_ctx_size(
             ctx = _coerce_ctx(source.get(key))
             if ctx is not None:
                 return ctx
-
-    # Registry fallback — the model's declared default context window.
-    if model_registry is not None and model_id:
-        try:
-            entry = model_registry.get(model_id)
-        except Exception:
-            entry = None
-        if entry is not None:
-            entry_defaults = getattr(entry, "defaults", None)
-            ctx = _coerce_ctx(getattr(entry_defaults, "context_size", None))
-            if ctx is not None:
-                return ctx
     return None
+
+
+def _slot_ctx_size(
+    cfg: dict[str, Any],
+    model_registry: ModelRegistry | None = None,
+    model_id: str = "",
+) -> int | None:
+    """Resolve a slot's EFFECTIVE context length — what llama-server actually
+    runs with, not the raw slot-TOML ceiling (#1788).
+
+    The on-disk ``[model] ctx_size``/``context_size`` (:func:`_raw_slot_ctx_ceiling`)
+    is a hardware CEILING under the v1.0 ownership split: the MODEL owns
+    context size, and the slot value can only clamp it down, never raise it
+    above what the model declares. Delegates the actual precedence to
+    :func:`hal0.providers.container.resolve_effective_context_size` — the
+    SAME resolver the launch path uses — so this serializer can never drift
+    from the number llama-server was actually started with. Always returns a
+    positive int (the resolver's safe floor applies even when there is no
+    slot ceiling and no model info at all).
+    """
+    from hal0.providers.container import resolve_effective_context_size
+
+    slot_ceiling = _raw_slot_ctx_ceiling(cfg)
+    slot_name = str(cfg.get("name") or "")
+    return resolve_effective_context_size(
+        slot_ceiling, model_registry, model_id, slot_name=slot_name
+    )
 
 
 def _model_recipe(entry: Any) -> str | None:
@@ -390,12 +400,17 @@ async def hal0_slot_alias_models(
     * ``name`` — ``"<slot> · <model display name>"``; the display name is
       pulled from the model registry when the slot's model id is
       registered, falling back to the bare model id otherwise.
-    * ``context_length`` / ``max_context_window`` — the slot's configured
-      context window (reading either ``ctx_size`` or ``context_size`` from
-      the slot TOML), falling back to the model registry entry's
-      ``defaults.context_size``. Both keys carry the same value — some
-      OpenAI-compat clients probe ``max_context_window`` instead of the
-      canonical ``context_length``.
+    * ``context_length`` / ``max_context_window`` — the slot's EFFECTIVE
+      context window: what llama-server actually runs with, not the raw
+      slot-TOML ceiling (``ctx_size``/``context_size``). The MODEL owns
+      context size (v1.0 ownership split); the slot value only clamps it
+      down. See :func:`_slot_ctx_size` /
+      :func:`hal0.providers.container.resolve_effective_context_size`
+      (#1788 — this used to advertise the raw ceiling, which could be
+      larger than what the model was actually launched with, so clients
+      sizing requests off it could overrun the real window). Both keys
+      carry the same value — some OpenAI-compat clients probe
+      ``max_context_window`` instead of the canonical ``context_length``.
     * ``owned_by`` — ``"hal0"``.
     * ``downloaded`` — always ``True``: a bound llm slot's configured
       model is, by construction, a real file already resident on this

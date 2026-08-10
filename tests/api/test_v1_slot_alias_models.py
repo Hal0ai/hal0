@@ -37,6 +37,15 @@ class _FakeModel:
         self.name = name
         self.defaults = _FakeDefaults(context_size) if context_size is not None else None
 
+    def model_dump(self) -> dict[str, Any]:
+        # #1788: resolve_effective_context_size converts a registry entry via
+        # model_dump() (mirrors the real pydantic Model), so the fake needs
+        # to produce the same {"defaults": {"context_size": ...}} shape.
+        return {
+            "defaults": {"context_size": self.defaults.context_size} if self.defaults else {},
+            "metadata": {},
+        }
+
 
 class _FakeModelRegistry:
     def __init__(self, models: dict[str, tuple[str, int | None]]):
@@ -120,11 +129,15 @@ async def test_all_model_bound_llm_slots_emit_alias_entries() -> None:
     # utility's model isn't in the registry → falls back to the model id.
     assert by_id["utility"]["name"] == "utility · qwen3-zero-coder-v2-0.8b-f16"
 
-    # context_length surfaces for all three: agent-hermes via ``ctx_size``,
-    # utility via ``context_size``, primary via the registry fallback
-    # (defaults.context_size) since its TOML pins no ctx key.
-    assert by_id["agent-hermes"]["context_length"] == 65536
-    assert by_id["utility"]["context_length"] == 32768
+    # context_length is the EFFECTIVE window (#1788), not the raw slot-TOML
+    # ceiling: primary's model declares 65536 with no slot ceiling, so it
+    # passes through unchanged. agent-hermes and utility both pin a slot
+    # ceiling (``ctx_size`` / ``context_size``) but their models declare no
+    # context_size of their own, so resolution falls to the safe 8192 floor
+    # (well below either TOML ceiling) rather than echoing the stale,
+    # larger slot number.
+    assert by_id["agent-hermes"]["context_length"] == 8192
+    assert by_id["utility"]["context_length"] == 8192
     assert by_id["primary"]["context_length"] == 65536
 
     # §21.5: max_context_window aliases context_length (same value, for
