@@ -37,33 +37,6 @@ applying. Add those subsections to a version's section to surface them; see
   their timeout on a doomed request — install-time smoke runs before any
   model has ever been loaded, so those two probes were guaranteed to "fail"
   for a reason that was never a real regression. (#1793)
-- **Crash-looping slot lifecycle** (#1791, refs #1424). A slot whose runner
-  crash-looped used to lie about it in three ways, all now closed:
-  - **No more eternal `warming`.** When the readiness wait gives up, hal0 asks
-    systemd what actually happened. A unit parked in `failed`
-    (`start-limit-hit`) or whose generated `.service` is gone is no longer
-    reported as "still warming" — the slot goes to `error` carrying the systemd
-    result, restart count, and the recovery command, surfaced in `hal0 status`
-    and `/api/slots`. A stale mid-lifecycle state (`pulling`/`starting`/
-    `warming`) left behind by a previous non-converging load is now torn down
-    and re-entered from `offline` instead of raising
-    `IllegalSlotTransition: warming → starting`.
-  - **Start-limit exhaustion recovers by itself.** Once systemd hits
-    `StartLimitBurst` it refuses every `start`/`restart` for the rest of
-    `StartLimitIntervalSec`, which made a crash-looped slot unloadable via the
-    API until an operator ran `systemctl reset-failed` by hand. The
-    `hal0-systemctl` seam now clears a `failed` unit before `start`/`restart`,
-    so `hal0 slot load` works first try. A previously-loaded slot whose unit
-    was lost is reported as `error` with the reason instead of a silent
-    `offline`.
-  - **Swap applies the requested model.** Two things kept the old, crashing
-    model in the quadlet. `hal0 slot swap` now persists the requested model to
-    the slot's TOML *before* the teardown, so a concurrent
-    reconciler/fail-watcher load that wins the lock in the unload→load gap
-    renders the quadlet with the requested model rather than the old one; and a
-    wedged slot no longer goes through the graceful `unload()` drain, which
-    re-raised when the `failed` unit's stop timed out and aborted the swap
-    before its load ever ran (the same trap `restart()` escaped in #1224).
 
 ## [1.0.0-rc.4] — 2026-08-09
 
