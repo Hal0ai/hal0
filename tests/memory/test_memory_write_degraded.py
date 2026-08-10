@@ -43,6 +43,9 @@ class _FakeClient:
         self.operations: dict[str, dict[str, int]] = {}
         self.operation_calls: list[tuple[str, str | None]] = []
         self.request_error: Exception | None = None
+        #: bank -> [op_id, ...] failed ids the auto-retry sweep should see/retry.
+        self.failed_ids: dict[str, list[str]] = {}
+        self.retried: list[str] = []
 
     async def retain(self, **_kwargs: Any) -> dict[str, str]:
         if self.retain_error is not None:
@@ -57,8 +60,19 @@ class _FakeClient:
     ) -> Any:
         if self.request_error is not None:
             raise self.request_error
+        params = params or {}
+        if method == "GET" and path.endswith("/operations") and params.get("limit") != 1:
+            bank = path.split("/banks/", 1)[1].split("/", 1)[0]
+            return {"operations": [{"id": op_id} for op_id in self.failed_ids.get(bank, [])]}
+        if method == "POST" and path.endswith("/retry"):
+            op_id = path.rsplit("/", 2)[1]
+            self.retried.append(op_id)
+            for ids in self.failed_ids.values():
+                if op_id in ids:
+                    ids.remove(op_id)
+            return {"success": True}
         bank = path.split("/banks/", 1)[1].split("/", 1)[0]
-        status = (params or {}).get("status")
+        status = params.get("status")
         self.operation_calls.append((bank, status))
         return {"total": self.operations.get(bank, {}).get(str(status), 0)}
 
@@ -201,3 +215,84 @@ async def test_a_raised_retain_wins_over_a_clean_probe() -> None:
     assert out["degraded"] is True
     assert out["reason"] == "retain_failed"
     assert "refused" in (out["last_error"] or "")
+
+
+# ── auto-retry of no-chat-model dead letters (#1792) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_auto_retry_noop_when_nothing_failed() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    client.operations["shared"] = {"failed": 0, "pending": 0, "processing": 0}
+
+    assert await p.maybe_auto_retry_dead_letters() is None
+    assert client.retried == []
+
+
+@pytest.mark.asyncio
+async def test_auto_retry_requeues_every_failed_op_on_the_tracked_bank() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    client.failed_ids["shared"] = ["op-1", "op-2"]
+    client.operations["shared"] = {"failed": 2, "pending": 0, "processing": 0}
+
+    result = await p.maybe_auto_retry_dead_letters()
+
+    assert result is not None
+    assert result["bank"] == "shared"
+    assert result["queued"] == 2
+    assert result["skipped"] == 0
+    assert sorted(client.retried) == ["op-1", "op-2"]
+
+
+@pytest.mark.asyncio
+async def test_auto_retry_respects_the_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hal0.memory.hindsight_provider as hp
+
+    fake_now = [1000.0]
+    monkeypatch.setattr(hp.time, "monotonic", lambda: fake_now[0])
+
+    client = _FakeClient()
+    p = _provider(client)
+    client.failed_ids["shared"] = ["op-1"]
+    client.operations["shared"] = {"failed": 1, "pending": 0, "processing": 0}
+
+    first = await p.maybe_auto_retry_dead_letters()
+    assert first is not None
+
+    client.failed_ids["shared"] = ["op-2"]
+    client.operations["shared"] = {"failed": 1, "pending": 0, "processing": 0}
+    fake_now[0] += hp._AUTO_RETRY_COOLDOWN_S - 1
+    assert await p.maybe_auto_retry_dead_letters() is None
+    assert "op-2" not in client.retried
+
+    fake_now[0] += 2  # past the cooldown now
+    second = await p.maybe_auto_retry_dead_letters()
+    assert second is not None
+    assert "op-2" in client.retried
+
+
+@pytest.mark.asyncio
+async def test_auto_retry_stops_after_the_sweep_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pipeline that keeps failing for a DIFFERENT reason after a model
+    loads must stop being auto-retried and go back to reading as FAILING —
+    this budget is what makes that happen."""
+    import hal0.memory.hindsight_provider as hp
+
+    fake_now = [1000.0]
+    monkeypatch.setattr(hp.time, "monotonic", lambda: fake_now[0])
+
+    client = _FakeClient()
+    p = _provider(client)
+
+    for i in range(hp._AUTO_RETRY_MAX_SWEEPS):
+        client.failed_ids["shared"] = [f"op-{i}"]
+        client.operations["shared"] = {"failed": 1, "pending": 0, "processing": 0}
+        assert await p.maybe_auto_retry_dead_letters() is not None
+        fake_now[0] += hp._AUTO_RETRY_COOLDOWN_S + 1
+
+    client.failed_ids["shared"] = ["op-final"]
+    client.operations["shared"] = {"failed": 1, "pending": 0, "processing": 0}
+    assert await p.maybe_auto_retry_dead_letters() is None
+    assert "op-final" not in client.retried
