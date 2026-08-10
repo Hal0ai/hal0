@@ -49,8 +49,28 @@ def _record_ts(rec: dict[str, Any]) -> str:
     return run_id.split("Z-")[0] + "Z" if "Z-" in run_id else run_id
 
 
+# The publish API rejects a record carrying none of these, and it rejects the
+# WHOLE bundle when it finds one — so a bundle containing such a record is
+# unpublishable in its entirety. Kept in sync with the bench API worker's
+# parseRecordLine ("no summary metrics present").
+_PUBLISHABLE_METRICS = ("decode_ts_med", "prefill_ts_med", "ttft_ms_p50", "ttft_ms_p95")
+
+
+def _has_publishable_metrics(rec: dict[str, Any]) -> bool:
+    summary = rec.get("summary") or {}
+    return any(summary.get(k) is not None for k in _PUBLISHABLE_METRICS)
+
+
 def select_records(store: Store, spec: BundleSpec) -> list[dict[str, Any]]:
-    """Filter records.jsonl down to the bundle's contents, append order kept."""
+    """Filter records.jsonl down to the bundle's contents, append order kept.
+
+    Records with `outcome: ok` but no throughput metrics at all are skipped.
+    In practice these are v1-era server-ab rows for the embed/rerank SLOTS
+    rather than models — `build_roster` already drops them for the same
+    reason (no gguf, so a slot never shows up as a model). Including them cost
+    the entire bundle: the API's validator fails the whole upload on the first
+    such record, so two junk rows made 130 good ones unpublishable.
+    """
     wanted = set(spec.run_ids) if spec.run_ids else None
     out: list[dict[str, Any]] = []
     for rec in store.iter_records():
@@ -61,6 +81,8 @@ def select_records(store: Store, spec: BundleSpec) -> list[dict[str, Any]]:
         if spec.suite and rec.get("suite") != spec.suite:
             continue
         if spec.since and _record_ts(rec) < spec.since:
+            continue
+        if not _has_publishable_metrics(rec):
             continue
         out.append(rec)
     return out

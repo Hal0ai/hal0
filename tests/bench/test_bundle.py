@@ -55,6 +55,35 @@ def test_select_only_ok_records(tmp_path, monkeypatch):
     assert [r["run_id"] for r in got] == ["2026-08-01T00:00:00Z-aaa111"]
 
 
+def test_select_skips_ok_records_with_no_throughput_metrics(tmp_path, monkeypatch):
+    """v1-era embed/rerank SLOT rows are outcome=ok but carry no metrics. The
+    publish API rejects the whole bundle over one of them, so they must never
+    be selected — observed against real CT105 data, where two such rows made
+    130 good records unpublishable."""
+    empty = _rec("2026-08-01T00:00:01Z-bbb222", model="rerank")
+    empty["summary"] = {"decode_ts_med": None, "prefill_ts_med": None, "ttft_ms_p50": None}
+    missing = _rec("2026-08-01T00:00:02Z-ccc333", model="embed")
+    del missing["summary"]
+
+    store = _store(tmp_path, monkeypatch, [_rec("2026-08-01T00:00:00Z-aaa111"), empty, missing])
+
+    got = select_records(store, BundleSpec())
+    assert [r["run_id"] for r in got] == ["2026-08-01T00:00:00Z-aaa111"]
+
+
+def test_select_keeps_a_record_with_only_a_non_decode_metric(tmp_path, monkeypatch):
+    """Any one of the four throughput metrics is enough — a pp-only record has
+    no decode_ts_med but is still perfectly publishable."""
+    pp_only = _rec("2026-08-01T00:00:01Z-bbb222")
+    pp_only["summary"] = {"decode_ts_med": None, "prefill_ts_med": 900.5}
+
+    store = _store(tmp_path, monkeypatch, [pp_only])
+
+    assert [r["run_id"] for r in select_records(store, BundleSpec())] == [
+        "2026-08-01T00:00:01Z-bbb222"
+    ]
+
+
 def test_select_by_run_ids(tmp_path, monkeypatch):
     store = _store(
         tmp_path,
