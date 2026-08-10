@@ -2922,6 +2922,38 @@ else
         fi
     fi
 
+    # Keep root's runtime directory pinned (#1814). podman stores every
+    # container's network namespace as a bind mount under /run/user/0/netns.
+    # That tmpfs belongs to user-runtime-dir@0.service, which logind STOPS —
+    # unmounting the tmpfs — as soon as root's last login session ends. One root
+    # SSH login/logout cycle therefore strands the netns of every container that
+    # was running at the time, and the next stop/restart of any of them fails
+    # teardown with "netavark: open container netns: ... No such file or
+    # directory" (exit 125). netavark then leaves that container's DNAT rule
+    # behind, and because nftables is first-match, the dead rule permanently
+    # shadows the live one: the slot's published port black-holes while the
+    # container inside is perfectly healthy, and neither `podman rm -f` nor
+    # `podman network reload` clears it.
+    #
+    # `loginctl enable-linger root` keeps user-runtime-dir@0 up for the life of
+    # the boot, independent of sessions, so the netns survives. Measured on a
+    # live box (podman 5.7.0): before linger, a container's SandboxKey is valid
+    # in the session that created it and dangling in the next one, and removing
+    # it leaks the rule; after linger, the SandboxKey survives the session cycle
+    # and removal is clean. Idempotent, reversible with `disable-linger`, and a
+    # no-op on boxes that already lingered. Repair for boxes that already
+    # accumulated leaks: `hal0 doctor ports --fix`.
+    if command -v loginctl >/dev/null 2>&1; then
+        if [[ -e /var/lib/systemd/linger/root ]]; then
+            info "root linger already enabled (container netns survive login cycles)"
+        elif loginctl enable-linger root >/dev/null 2>&1; then
+            info "root linger enabled — keeps /run/user/0/netns alive for podman (#1814)"
+        else
+            warn "could not enable root linger; container netns may be destroyed on root logout"
+            warn "  run: loginctl enable-linger root   (see 'hal0 doctor ports')"
+        fi
+    fi
+
     # hal0-agent@hermes — provision Hermes end-to-end on a FRESH install so the
     # box comes up with a fully-configured agent (config.yaml + MCP wiring +
     # personas + skills + install artifacts) WITHOUT a manual bootstrap step.
