@@ -1248,6 +1248,62 @@ async def test_scrape_llama_metrics_clamps_overrun(
     assert out["kv_cache_usage"] == pytest.approx(1.0)
 
 
+@pytest.mark.asyncio
+async def test_scrape_llama_metrics_501_returns_empty_and_warns_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1810: a slot launched without ``--metrics`` gets llama-server's canned
+    501. The scrape still degrades to {} (callers merge unconditionally), but
+    logs a one-shot debug notice per port instead of staying fully silent —
+    a second scrape on the same port must NOT log again."""
+    from hal0.slots import metrics_collect
+    from hal0.slots.metrics_collect import llama_metrics
+
+    metrics_collect._metrics_501_warned.clear()
+    resp_501 = _StubResponse(
+        status_code=501,
+        text='{"error":{"code":501,"message":"This server does not support metrics '
+        'endpoint. Start it with `--metrics`"}}',
+    )
+    slots_json = [{"id": 0, "n_ctx": 4096, "is_processing": False}]
+    _patch_httpx(monkeypatch, resp_501, _StubResponse(json_data=slots_json))
+
+    caplog_records: list[str] = []
+
+    class _Recorder:
+        def debug(self, msg: str, *_a: Any, **_kw: Any) -> None:
+            caplog_records.append(msg)
+
+    monkeypatch.setattr(metrics_collect, "log", _Recorder())
+
+    out1 = await llama_metrics(8087)
+    out2 = await llama_metrics(8087)
+
+    assert out1 == {}
+    assert out2 == {}
+    assert caplog_records.count("slot.metrics_endpoint_disabled") == 1
+
+
+@pytest.mark.asyncio
+async def test_scrape_llama_metrics_200_resets_501_warned_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slot that later reloads WITH ``--metrics`` clears the warned-port
+    memo, so a future regression on the same port logs again instead of
+    staying muted forever."""
+    from hal0.slots import metrics_collect
+
+    metrics_collect._metrics_501_warned.clear()
+    metrics_collect._metrics_501_warned.add(8087)
+
+    metrics_text = "llamacpp:requests_processing 0\nllamacpp:requests_deferred 0\n"
+    _patch_httpx(monkeypatch, _StubResponse(text=metrics_text), _StubResponse(json_data=[]))
+
+    await metrics_collect.llama_metrics(8087)
+
+    assert 8087 not in metrics_collect._metrics_501_warned
+
+
 # ── synthetic composite slot: truthful "serving" status ─────────────────────
 
 

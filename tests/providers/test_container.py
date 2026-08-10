@@ -1715,6 +1715,28 @@ class TestSlotHardwareSegment:
         assert "slot_hardware" in labels
         assert "model_defaults" not in labels
 
+    def test_metrics_defaults_on(self) -> None:
+        # #1810: no slot_metrics kwarg → the safe default (loopback-only,
+        # negligible overhead) is ON, so --metrics reaches every slot unless
+        # an operator explicitly opts out.
+        argv = self._argv()
+        assert "--metrics" in argv
+
+    def test_metrics_explicit_true_emits_flag(self) -> None:
+        argv = self._argv(slot_metrics=True)
+        assert "--metrics" in argv
+
+    def test_metrics_explicit_false_omits_flag(self) -> None:
+        argv = self._argv(slot_metrics=False)
+        assert "--metrics" not in argv
+
+    def test_metrics_rides_the_trusted_slot_hardware_segment(self) -> None:
+        # --metrics must come from the SAME trusted, hal0-computed segment as
+        # -ngl/--threads — not a free-form/untrusted one — so it can never be
+        # smuggled or stripped by a model/profile flag save.
+        segs = dict(_llama_argv_segments(port=8081, model_path="/m.gguf", slot_metrics=True))
+        assert "--metrics" in segs["slot_hardware"]
+
 
 class TestFPXQuantRunnerGuard:
     """hal0#1790 defense-in-depth: a ROCmFPX-family quant (custom GGML tensor

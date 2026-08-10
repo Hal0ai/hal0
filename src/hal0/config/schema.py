@@ -395,6 +395,20 @@ class SlotConfig(BaseModel):
             "``--threads`` and lets the runtime pick its own default."
         ),
     )
+    metrics: bool = Field(
+        default=True,
+        description=(
+            "METRICS — emits ``--metrics``, enabling llama-server's "
+            "``/metrics`` endpoint (Prometheus counters: tok/s, request "
+            "counts, …). Authoritative on the slot (spec-hw-slot-ownership "
+            "§2/§4 — an operational flag, never a profile concern). Default "
+            "True: the endpoint is loopback-only (127.0.0.1, never proxied "
+            "by the gateway) and the per-request counter overhead is "
+            "negligible. Without it, ``/metrics`` 501s and "
+            "``hal0.slots.metrics_collect`` can never populate tok/s or "
+            "request counts (#1810)."
+        ),
+    )
     binary: str = Field(
         default="",
         description=(
