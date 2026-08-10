@@ -339,6 +339,13 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         binary_val = cfg.get("binary")
         entry["binary"] = binary_val if isinstance(binary_val, str) else None
         entry["image_pin"] = cfg.get("image_pin")
+        # METRICS (#1810) — completes the HW-grid lift: SlotConfig.metrics
+        # controls whether --metrics reaches llama-server's argv. Surface it
+        # so the edit-drawer can show/toggle it instead of it being
+        # write-only via the raw /config endpoint. Absent → True (schema
+        # default), same fallback the argv-emission side uses.
+        metrics_val = cfg.get("metrics")
+        entry["metrics"] = True if metrics_val is None else bool(metrics_val)
         # Issue #548: expose rope_freq_base so the Edit drawer can dirty-track
         # it and avoid clobbering the on-disk value on unrelated saves.
         # Absent (None) is surfaced as-is — frontend treats null as "use

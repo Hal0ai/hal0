@@ -134,6 +134,17 @@ class TestSlotConfig:
         assert s.threads == 0  # unset → launcher omits --threads
         assert s.binary == ""  # unset → HW-gated default via runner_for_backend
         assert s.image_pin is None  # no escape-hatch pin
+        # #1810: METRICS defaults ON — loopback-only endpoint, negligible
+        # overhead — so tok/s + request counts populate out of the box
+        # instead of requiring an operator to discover the flag exists.
+        assert s.metrics is True
+
+    def test_metrics_can_be_disabled(self) -> None:
+        s = SlotConfig(name="primary", port=8081, metrics=False)
+        assert s.metrics is False
+        dumped = s.model_dump()
+        assert dumped["metrics"] is False
+        assert SlotConfig(**dumped).metrics is False
 
     def test_hardware_grid_roundtrip(self) -> None:
         """Every new HW-grid field round-trips through construction + dump."""

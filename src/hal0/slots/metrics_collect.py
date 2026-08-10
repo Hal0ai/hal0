@@ -38,7 +38,19 @@ resolve (``hal0.metrics.sampler`` imports ``_scrape_llama_metrics`` from there).
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
+
+log = logging.getLogger(__name__)
+
+# One-shot-per-port 501 notice (#1810): llama_metrics() is polled every few
+# seconds by collect_local(), and its contract is "empty dict on any
+# failure" so callers can merge unconditionally — that same fail-soft
+# design let a slot launched without ``--metrics`` degrade completely
+# silently forever (the root cause of #1810). Warn once per port per
+# process instead of every poll, so a slot missing the flag is visible in
+# the log without spamming it.
+_metrics_501_warned: set[int] = set()
 
 
 def tps_from_events(events: Any, window_s: float = 5.0) -> float:
@@ -201,10 +213,19 @@ async def llama_metrics(port: int) -> dict[str, Any]:
     # Duck-typed: any object with a status_code + text attr (real httpx
     # Response or a test stub) passes; exceptions returned by gather()
     # fall through to the synthesis branch below.
-    if (
-        not isinstance(metrics_resp, BaseException)
-        and getattr(metrics_resp, "status_code", 0) == 200
-    ):
+    metrics_status = (
+        0 if isinstance(metrics_resp, BaseException) else getattr(metrics_resp, "status_code", 0)
+    )
+    if metrics_status == 501 and port not in _metrics_501_warned:
+        # llama-server's canned reply when started without --metrics
+        # (#1810 root cause). Warn once per port so the gap is visible
+        # instead of silently degrading to tok/s '—' forever.
+        _metrics_501_warned.add(port)
+        log.debug("slot.metrics_endpoint_disabled", extra={"port": port})
+    elif metrics_status == 200:
+        _metrics_501_warned.discard(port)
+
+    if metrics_status == 200:
         for line in metrics_resp.text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):

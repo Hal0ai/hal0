@@ -26,6 +26,21 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- Slots now launch llama-server with `--metrics`, so `/metrics` stops
+  returning 501 on every slot. `--metrics` was classified as a slot-owned
+  operational flag (`seed_profiles.toml` header comment) but the slot side
+  was never implemented — no typed `SlotConfig` field and nothing emitted
+  it — so `hal0.slots.metrics_collect.llama_metrics()` scraped a 501 on
+  every poll and swallowed it by design, leaving `hal0 slot metrics`
+  showing `Reqs 0` forever (`KV%` worked because it's synthesized from
+  `/slots`, which is on by default). New `SlotConfig.metrics` (default
+  `true`) rides the same trusted `slot_hardware` argv segment as
+  `-ngl`/`--threads`; the endpoint is loopback-only and never proxied by
+  the gateway. `metrics_collect.llama_metrics()` now also logs once at
+  debug per port on a 501 instead of degrading fully silently. Live tok/s
+  is a separate, already-working code path (the dispatcher's streaming
+  instrumentation) and is unaffected either way — this fixes the request
+  counters and queue-depth gauges (#1810).
 - Every seeded profile now requests `-fa auto` instead of forcing `-fa on`
   (#1811). Seeds are generic templates, and since #1787 they reach ~93% of
   registered models (the unstamped ones), so a forced Flash Attention kernel

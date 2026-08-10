@@ -192,6 +192,9 @@ def test_render_llama_shim_matches_equivalent_plan(monkeypatch) -> None:
             "--ctx-size",
             "131072",
             *shlex.split(flags),
+            # #1810: _llama_launch_plan's slot_metrics defaults True, so the
+            # shim (which doesn't pass it) emits --metrics unconditionally.
+            "--metrics",
         ],
         mounts=[Mount(_MODEL_STORE_MOUNT, _MODEL_STORE_MOUNT, read_only=True, selinux="z")],
         devices=["/dev/kfd", "/dev/dri/renderD128"],

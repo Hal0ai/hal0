@@ -346,6 +346,7 @@ GOLDEN_MAXIMAL_ARGV: list[str] = [
     # slot_hardware (the slot's typed physical grid — wins the collision)
     "-ngl", "99",
     "--threads", "16",
+    "--metrics",
     # chat_template
     "--chat-template-file", "/etc/hal0/templates/qwen3.jinja",
     # mmproj
@@ -409,6 +410,7 @@ def test_golden_provenance_pins_which_segment_won_each_flag() -> None:
         ("--jinja", None, "model_extra_args"),
         ("-ngl", "99", "slot_hardware"),
         ("--threads", "16", "slot_hardware"),
+        ("--metrics", None, "slot_hardware"),
         ("--chat-template-file", "/etc/hal0/templates/qwen3.jinja", "chat_template"),
         ("--mmproj", "/var/lib/hal0/models/qwen3-4b/mmproj.gguf", "mmproj"),
     ]
@@ -443,9 +445,21 @@ def test_golden_launch_plan_command_equals_the_golden_argv() -> None:
 
 def test_golden_minimal_argv() -> None:
     """The floor: nothing but a port and a model path. Pins that no segment
-    leaks a default token in when its input is absent."""
-    argv = resolve_argv(_llama_argv_segments(port=8081, model_path="/m.gguf")).argv
+    leaks a default token in when its input is absent. ``slot_metrics``
+    defaults True (#1810 — metrics-on is the safe default), so it is
+    explicitly disabled here to keep this the true zero-hardware-grid floor;
+    see ``test_golden_minimal_argv_defaults_metrics_on`` for the real default."""
+    argv = resolve_argv(
+        _llama_argv_segments(port=8081, model_path="/m.gguf", slot_metrics=False)
+    ).argv
     assert argv == ["--host", "0.0.0.0", "--port", "8081", "--model", "/m.gguf"]
+
+
+def test_golden_minimal_argv_defaults_metrics_on() -> None:
+    """#1810: with no explicit ``slot_metrics``, the slot_hardware segment
+    still emits ``--metrics`` — the default is ON, not "absent"."""
+    argv = resolve_argv(_llama_argv_segments(port=8081, model_path="/m.gguf")).argv
+    assert argv == ["--host", "0.0.0.0", "--port", "8081", "--model", "/m.gguf", "--metrics"]
 
 
 def test_golden_later_segments_beat_a_model_tune_claiming_their_flags() -> None:
@@ -477,6 +491,7 @@ def test_golden_later_segments_beat_a_model_tune_claiming_their_flags() -> None:
         "--ctx-size", "4096",
         "-ngl", "0",
         "--threads", "16",
+        "--metrics",
         "--chat-template-file", "/etc/hal0/templates/real.jinja",
         "--mmproj", "/models/real-mmproj.gguf",
     ]  # fmt: skip

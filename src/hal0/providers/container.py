@@ -875,6 +875,7 @@ def _llama_argv_segments(
     slot_n_gpu_layers: int | None = None,
     slot_threads: int | None = None,
     slot_parallel: int | None = None,
+    slot_metrics: bool = True,
     extra_args: str | None = None,
     slot_profile_flags: str = "",
     slot_profile_template_flags: str = "",
@@ -888,8 +889,9 @@ def _llama_argv_segments(
 
     Ownership split (spec-hw-slot-ownership §2, reversing spec-flags-ownership
     §5): the SLOT owns the physical hardware grid (NGL → ``-ngl``, THREADS →
-    ``--threads``; ``-dev`` rides the GPU-visibility path, not here) as typed
-    fields, emitted in a TRUSTED ``slot_hardware`` segment. The MODEL still owns
+    ``--threads``, METRICS → ``--metrics``; ``-dev`` rides the
+    GPU-visibility path, not here) as typed fields, emitted in a TRUSTED
+    ``slot_hardware`` segment. The MODEL still owns
     the logical, device-agnostic tune — free-form ``defaults.extra_args``
     (``model_extra_args`` segment, still screened against the §21.7 managed-arg
     denylist by :func:`~hal0.slots.argv.resolve_argv`). The old ``profile``
@@ -978,6 +980,12 @@ def _llama_argv_segments(
         slot_hw_tokens += ["-ngl", str(int(slot_n_gpu_layers))]
     if slot_threads is not None and int(slot_threads) > 0:
         slot_hw_tokens += ["--threads", str(int(slot_threads))]
+    # METRICS (#1810): enables llama-server's ``/metrics`` endpoint, which
+    # hal0.slots.metrics_collect.llama_metrics() scrapes for tok/s + request
+    # counts. Loopback-only and never proxied by the gateway, so on-by-default
+    # is safe; SlotConfig.metrics lets an operator turn it off.
+    if slot_metrics:
+        slot_hw_tokens += ["--metrics"]
 
     chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
     mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
@@ -1023,6 +1031,7 @@ def _llama_launch_plan(
     slot_n_gpu_layers: int | None = None,
     slot_threads: int | None = None,
     slot_parallel: int | None = None,
+    slot_metrics: bool = True,
     env: dict[str, str] | None = None,
     slot_profile_flags: str = "",
     slot_profile_template_flags: str = "",
@@ -1049,6 +1058,7 @@ def _llama_launch_plan(
         slot_n_gpu_layers=slot_n_gpu_layers,
         slot_threads=slot_threads,
         slot_parallel=slot_parallel,
+        slot_metrics=slot_metrics,
         extra_args=extra_args,
         slot_profile_flags=slot_profile_flags,
         slot_profile_template_flags=slot_profile_template_flags,
@@ -1779,6 +1789,11 @@ def _resolve_llama_scalars(
     # (_llama_argv_segments' slot_hardware segment) renders -ngl / --threads.
     slot_n_gpu_layers = slot_cfg.get("n_gpu_layers")
     slot_threads = slot_cfg.get("threads")
+    # METRICS (#1810, spec-hw-slot-ownership §2/§4): typed slot field, default
+    # on. ``slot_cfg`` may be a hand-built dict/pre-migration TOML predating
+    # the field, so default to True (not to a falsy .get() miss) when absent.
+    slot_metrics_raw = slot_cfg.get("metrics")
+    slot_metrics = True if slot_metrics_raw is None else bool(slot_metrics_raw)
 
     # Multi-GPU pinning (SlotConfig.gpu_index): affects env/devices only —
     # never argv — so launch/preview argv parity is untouched.
@@ -1806,6 +1821,7 @@ def _resolve_llama_scalars(
         # reach the argv chain via _llama_argv_segments' slot_hardware segment.
         "slot_n_gpu_layers": slot_n_gpu_layers,
         "slot_threads": slot_threads,
+        "slot_metrics": slot_metrics,
         # slot_parallel stays inert (spec-flags-ownership §2 — sunset).
         "slot_parallel": None,
         # HARDWARE CLASS + GPU-vendor discriminator (spec-hw-slot-ownership §2):
@@ -1942,6 +1958,7 @@ class ContainerProvider(Provider):
             slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
             slot_threads=scalars["slot_threads"],
             slot_parallel=scalars["slot_parallel"],
+            slot_metrics=scalars["slot_metrics"],
             env=merged_env or None,
             slot_profile_flags=scalars["slot_profile_flags"],
             slot_profile_template_flags=scalars["slot_profile_template_flags"],
@@ -2668,6 +2685,7 @@ def _resolve_slot_argv(
         slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
         slot_threads=scalars["slot_threads"],
         slot_parallel=scalars["slot_parallel"],
+        slot_metrics=scalars["slot_metrics"],
         extra_args=scalars["extra_args"],
         slot_profile_flags=scalars["slot_profile_flags"],
         slot_profile_template_flags=scalars["slot_profile_template_flags"],
