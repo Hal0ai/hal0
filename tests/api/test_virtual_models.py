@@ -44,6 +44,11 @@ class _FakeModelEntry:
         self.name = model_id
         self.defaults = type("_", (), {"context_size": 65536})()
 
+    def model_dump(self):
+        # #1788: resolve_effective_context_size converts a registry entry via
+        # model_dump() (mirrors the real pydantic Model).
+        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+
 
 @pytest.fixture
 def configured_client(isolated_client, monkeypatch):

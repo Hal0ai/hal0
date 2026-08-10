@@ -37,6 +37,12 @@ applying. Add those subsections to a version's section to surface them; see
   their timeout on a doomed request — install-time smoke runs before any
   model has ever been loaded, so those two probes were guaranteed to "fail"
   for a reason that was never a real regression. (#1793)
+- Slot `ctx_max`, `/v1/models` `context_length`/`max_context_window`, and the
+  SlotView dashboard now advertise the EFFECTIVE context window llama-server
+  actually launched with, instead of the raw slot-TOML ceiling — a stale,
+  potentially larger number under the v1.0 model-owns-context-size split.
+  Clients that sized requests off the advertised ceiling could overrun the
+  real window and get truncated/rejected completions (#1788).
 
 ## [1.0.0-rc.4] — 2026-08-09
 

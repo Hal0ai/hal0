@@ -1404,6 +1404,54 @@ def _guard_fpx_quant_runner(
     )
 
 
+def resolve_effective_context_size(
+    slot_ceiling: int | None,
+    model_registry: Any = None,
+    model_id: str = "",
+    *,
+    slot_name: str = "",
+) -> int:
+    """Public read-only-surface wrapper around :func:`_resolve_context_size`.
+
+    #1788: ``ctx_max``/``context_length``/``max_context_window`` on the slots
+    dashboard, ``/v1/models`` and the SlotView aggregator used to echo the
+    raw slot-TOML ceiling verbatim — the number llama-server was launched
+    with under the pre-1.0 "slot overrides model" rule, not the number it
+    actually runs with now that the MODEL owns context size (see
+    :func:`_resolve_context_size`'s docstring for the full precedence).
+    Clients that sized requests off the advertised (stale, larger) number
+    could overrun the real window and get truncated/rejected completions.
+
+    This wrapper is the ONE place read-only surfaces look up the model
+    registry entry and hand off to the shared resolver, so the ``min()``
+    clamp itself is never re-implemented in a view/serializer — any future
+    change to the precedence rule only has to happen in
+    :func:`_resolve_context_size`.
+
+    ``model_registry`` / ``model_id`` are best-effort: a ``None`` registry,
+    an empty ``model_id``, or a registry miss (hand-staged model, not-yet
+    -imported row) all degrade to an empty ``model_info``, which resolves
+    the same way an unregistered model does at launch time — dense-capped
+    native window if metadata happens to be present, else the safe 8192
+    floor, still clamped by ``slot_ceiling`` if that is smaller. A
+    model-less slot (no ``model_id`` at all) resolves the same way: there is
+    no model fact to be authoritative, so the safe floor (or the slot
+    ceiling, if lower) is reported rather than inventing a number.
+    """
+    model_info: dict[str, Any] = {}
+    if model_registry is not None and model_id:
+        try:
+            entry = model_registry.get(model_id)
+        except Exception:
+            entry = None
+        if entry is not None:
+            try:
+                model_info = entry.model_dump() if hasattr(entry, "model_dump") else dict(entry)
+            except Exception:
+                model_info = {}
+    return _resolve_context_size(slot_ceiling, model_info, slot_name=slot_name)
+
+
 def _resolve_llama_scalars(
     slot_cfg: dict[str, Any],
     model_info: dict[str, Any],

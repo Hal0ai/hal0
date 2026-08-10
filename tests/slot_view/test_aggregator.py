@@ -891,6 +891,76 @@ class TestMemoryAttribution:
         assert seen["registry"] is marker
 
 
+# ── concern 4.5: ctx_max EFFECTIVE-window re-resolution (#1788) ─────────────
+
+
+class _FakeCtxDefaults:
+    def __init__(self, context_size: int | None) -> None:
+        self.context_size = context_size
+
+
+class _FakeCtxModel:
+    def __init__(self, context_size: int | None) -> None:
+        self.defaults = _FakeCtxDefaults(context_size)
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+
+
+class _FakeCtxRegistry:
+    def __init__(self, models: dict[str, Any]) -> None:
+        self._models = models
+
+    def get(self, model_id: str) -> Any:
+        if model_id not in self._models:
+            raise KeyError(model_id)
+        return self._models[model_id]
+
+
+class TestCtxMaxEffectiveResolution:
+    async def test_ctx_max_downgraded_to_model_window(self, no_mem: None) -> None:
+        # #1788: the slot TOML ceiling (65536) is stale/larger than what the
+        # model actually declares (8000) — the dashboard must surface the
+        # EFFECTIVE window, not the raw ceiling.
+        cfg = _llm_cfg(model={"default": "qwen3-4b", "context_size": 65536})
+        registry = _FakeCtxRegistry({"qwen3-4b": _FakeCtxModel(8000)})
+        agg = _agg(
+            FakeSlotManager(slots=[_slot(model_id="qwen3-4b")], configs=[cfg]),
+            registry=registry,
+        )
+        views = await agg.snapshot()
+        assert views[0].to_dict()["ctx_max"] == 8000
+
+    async def test_ctx_max_kept_at_hardware_ceiling_when_smaller(self, no_mem: None) -> None:
+        # A genuinely smaller slot ceiling (VRAM clamp) still wins over a
+        # larger model-declared window.
+        cfg = _llm_cfg(model={"default": "qwen3-4b", "context_size": 16384})
+        registry = _FakeCtxRegistry({"qwen3-4b": _FakeCtxModel(65536)})
+        agg = _agg(
+            FakeSlotManager(slots=[_slot(model_id="qwen3-4b")], configs=[cfg]),
+            registry=registry,
+        )
+        views = await agg.snapshot()
+        assert views[0].to_dict()["ctx_max"] == 16384
+
+    async def test_ctx_max_resolution_failure_degrades_to_raw_ceiling(
+        self, no_mem: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A broken resolver must never take down the whole slots list — fall
+        # back to the pre-fix (raw ceiling) value instead of raising.
+        def boom(*_a: Any, **_kw: Any) -> int:
+            raise RuntimeError("resolver exploded")
+
+        monkeypatch.setattr("hal0.providers.container.resolve_effective_context_size", boom)
+        cfg = _llm_cfg(model={"default": "qwen3-4b", "context_size": 65536})
+        agg = _agg(
+            FakeSlotManager(slots=[_slot(model_id="qwen3-4b")], configs=[cfg]),
+            registry=_FakeCtxRegistry({}),
+        )
+        views = await agg.snapshot()
+        assert views[0].to_dict()["ctx_max"] == 65536
+
+
 # ── concern 5: metric injection ─────────────────────────────────────────────
 
 
