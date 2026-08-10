@@ -12,6 +12,8 @@ modules — the CLI holds no logic of its own beyond wiring + output formatting:
     reindex    rebuild bench.db from records.jsonl (store.reindex)
     devices    GPU device nodes benchmark containers use (devices.resolve_bench_devices)
     publish    regenerate roster.json (+ --check diff) (publish.*)
+    bundle     package ok records into a shareable archive (bundle.write_bundle)
+    upload     publish a bundle archive to the bench API (api.hal0.dev/v1/bundles)
 
 Runs unprivileged; Tier A cells go through the seam inside ``run``. (The
 one-time ``import-v1`` migration verb was removed after every box migrated —
@@ -22,8 +24,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -626,7 +630,88 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         print(f"bundle: {exc}", file=sys.stderr)
         return 1
     print(f"wrote {path} ({len(manifest['records'])} record(s), {manifest['bundle_id']})")
+    if getattr(args, "upload", False):
+        return _upload_bundle(Path(path), args.api_url, _upload_token(args))
     return 0
+
+
+DEFAULT_BENCH_API = "https://api.hal0.dev"
+_TOKEN_ENV = "HAL0_BENCH_TOKEN"  # the env var's NAME, not a credential
+
+
+def _upload_token(args: argparse.Namespace) -> str | None:
+    """Admin token from the environment only.
+
+    Deliberately NOT a --token flag: a credential passed as an argv value is
+    visible in `ps`, the shell history file, and any journald/systemd unit that
+    logs the command line. The env var keeps it out of all three.
+    """
+    token = os.environ.get(_TOKEN_ENV)
+    return token.strip() or None if token else None
+
+
+def _upload_bundle(path: Path, api: str, token: str | None) -> int:
+    """POST a bundle tar.gz to the bench API's admin ingest endpoint.
+
+    The API is content-addressed: re-uploading a bundle whose bundle_id is
+    already published is a no-op that reports the existing record count, and
+    re-uploading one that was soft-deleted republishes it. So this verb is
+    safe to re-run — a retry after a network failure cannot duplicate rows.
+    """
+    if not token:
+        print(
+            f"upload: ${_TOKEN_ENV} is not set (admin token required)",
+            file=sys.stderr,
+        )
+        return 1
+    if not path.is_file():
+        print(f"upload: no such bundle: {path}", file=sys.stderr)
+        return 1
+
+    body = path.read_bytes()
+    url = f"{api.rstrip('/')}/v1/bundles"
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "authorization": f"Bearer {token}",
+            "content-type": "application/gzip",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as res:
+            payload = json.loads(res.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            # The worker answers errors as {"errors": [...]}; surface those
+            # verbatim rather than a bare status, since validation rejections
+            # name the offending record line.
+            body_json = json.loads(exc.read().decode() or "{}")
+            detail = "; ".join(body_json.get("errors") or []) or str(body_json)
+        except (ValueError, OSError):
+            detail = exc.reason or ""
+        hint = f" (is ${_TOKEN_ENV} current?)" if exc.code == 401 else ""
+        print(f"upload: HTTP {exc.code}{hint}: {detail}", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"upload: could not reach {url}: {exc}", file=sys.stderr)
+        return 1
+
+    bundle_id = payload.get("bundle_id", "?")
+    records = payload.get("records", "?")
+    if payload.get("republished"):
+        print(f"republished {bundle_id} ({records} record(s) restored)")
+    else:
+        print(f"uploaded {bundle_id} ({records} record(s))")
+    if payload.get("url"):
+        print(payload["url"])
+    return 0
+
+
+def cmd_upload(args: argparse.Namespace) -> int:
+    return _upload_bundle(Path(args.path), args.api_url, _upload_token(args))
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
@@ -857,7 +942,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--profile", action="append", help="profile/suite TOML to include; repeatable")
     p.add_argument("-o", "--out", default="bench-bundle.hal0bench.tar.gz", help="output path")
+    p.add_argument(
+        "--upload", action="store_true", help=f"POST the bundle to the bench API (${_TOKEN_ENV})"
+    )
+    p.add_argument(
+        "--api-url",
+        default=DEFAULT_BENCH_API,
+        help=f"bench API base for --upload (default {DEFAULT_BENCH_API})",
+    )
     p.set_defaults(func=cmd_bundle)
+
+    p = sub.add_parser("upload", help="publish an existing bundle archive to the bench API")
+    p.add_argument("path", help="path to a .hal0bench.tar.gz written by `hal0 bench bundle`")
+    p.add_argument(
+        "--api-url",
+        default=DEFAULT_BENCH_API,
+        help=f"bench API base (default {DEFAULT_BENCH_API})",
+    )
+    p.set_defaults(func=cmd_upload)
 
     p = sub.add_parser(
         "eval", help="agentic task eval (quality tier): score a model as a real agent"
