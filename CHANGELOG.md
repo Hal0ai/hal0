@@ -22,6 +22,22 @@ breaking/migrations as callouts — from the cosign-verified tarball, before
 applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
+## [Unreleased]
+
+### Fixed
+
+- Hermes provision's `smoke_tests` phase now reports `warn` (not a silent
+  `ok`) when any probe records a real failure — `hal0 agent status` and its
+  `--json` surface a dedicated failure/skipped count instead of burying it
+  in the Detail JSON blob. It still never fails the overall install: smoke
+  stays diagnostic. The `chat_completions` and `memory_roundtrip` probes now
+  preflight whether a chat-capable model is actually routable
+  (`model.default` in `config.yaml` cross-checked against the live gateway
+  model list) and report `skipped: no chat model loaded` instead of burning
+  their timeout on a doomed request — install-time smoke runs before any
+  model has ever been loaded, so those two probes were guaranteed to "fail"
+  for a reason that was never a real regression. (#1793)
+
 ## [1.0.0-rc.4] — 2026-08-09
 
 ### Highlights

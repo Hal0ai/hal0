@@ -1325,12 +1325,46 @@ def agent_status(
     table = Table(title=f"{name} bootstrap status")
     table.add_column("Phase", style="bold")
     table.add_column("Status")
+    table.add_column("Failures")
     table.add_column("At")
     table.add_column("Detail")
+    # #1793: a phase can carry recorded failures (smoke_tests) without
+    # failing the install — those must not read as a silent "ok". Color +
+    # a dedicated Failures column surface the count instead of leaving it
+    # buried inside the (possibly truncated) Detail JSON blob.
+    status_style = {"ok": "green", "warn": "yellow", "fail": "red bold", "skip": "dim"}
+    warn_phases: list[str] = []
     for phase, entry in (data.get("phases") or {}).items():
-        detail = entry.get("reason") or _json.dumps(entry.get("details") or {})[:60]
-        table.add_row(phase, entry.get("status", "—"), entry.get("at", "—"), detail)
+        status = entry.get("status", "—")
+        style = status_style.get(status)
+        status_cell = f"[{style}]{status}[/{style}]" if style else status
+        failure_count = entry.get("failure_count")
+        skipped_count = entry.get("skipped_count")
+        failure_bits = []
+        if failure_count:
+            failure_bits.append(f"[red]{failure_count} failed[/red]")
+        if skipped_count:
+            failure_bits.append(f"[dim]{skipped_count} skipped[/dim]")
+        failures_cell = " ".join(failure_bits) or "—"
+        details_blob = entry.get("details") or {}
+        phase_failures = details_blob.get("failures") if isinstance(details_blob, dict) else None
+        if entry.get("reason"):
+            detail = entry["reason"]
+        elif phase_failures:
+            shown = "; ".join(phase_failures[:2])
+            more = len(phase_failures) - 2
+            detail = f"{shown} (+{more} more)" if more > 0 else shown
+        else:
+            detail = _json.dumps(details_blob)[:60]
+        table.add_row(phase, status_cell, failures_cell, entry.get("at", "—"), detail)
+        if status == "warn":
+            warn_phases.append(phase)
     console.print(table)
+    if warn_phases:
+        console.print(
+            f"[yellow]warn: {', '.join(warn_phases)} recorded failures — "
+            f"see Detail or `--json` for the full list.[/yellow]"
+        )
     console.print(
         f"[dim]hal0={data.get('hal0_version', '?')} "
         f"hermes={data.get('hermes_version', '?')} "
