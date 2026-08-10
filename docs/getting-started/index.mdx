@@ -6,6 +6,14 @@ sidebar:
 ---
 
 import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
+// Rendered by the website only: the "Sections" card grid on
+// hal0.dev/docs/getting-started/. The component lives in hal0-web
+// (src/components/DocsSectionCards.astro) and derives its page counts
+// from the docs collection, so nothing here needs maintaining when
+// pages are added. This file is mirrored verbatim into hal0-web by
+// .github/workflows/mirror-docs.yml, which is why the import resolves
+// there and not in this repo.
+import DocsSectionCards from '../../../../components/DocsSectionCards.astro';
 
 **hal0** turns a Linux box into a polished, OpenAI-compatible inference
 appliance. It is built for the AMD Ryzen AI Max+ 395 ("Strix Halo") —
@@ -104,3 +112,7 @@ by network reachability — the right posture for a trusted LAN appliance.
 If hal0 is reachable from anywhere you do not control, front it with a
 reverse proxy that owns auth and TLS.
 </Aside>
+
+## Sections
+
+<DocsSectionCards />
