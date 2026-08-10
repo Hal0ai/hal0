@@ -127,26 +127,34 @@ export function useMemoryMapModel() {
   // against it. Prefer the live GTT cap; fall back to the static unified/ram
   // probe when the live value is unavailable (keeps non-UMA + test mocks sane).
   const rawHw = hw.data || {}
+  // #1797(3): the GTT/unified-memory pool is a HOST resource — /api/hardware
+  // sees the host's DRM node (LXC shares the kernel's /sys/class/drm) even
+  // when this container has no real GPU compute access, so an unqualified
+  // "unified" memoryKind on a CPU-only box reported the host's ~116GB GTT
+  // ceiling as this box's own pool. `computeCapable` is the one probe field
+  // backed by an actual capability check (rocm-smi presence) — gate the
+  // GPU-pool framing on it and fall back to plain system RAM otherwise.
+  const hasGpu = !!rawHw.computeCapable
   const ramTotalGb = rawHw.ram?.total ?? 0
-  const gttCapGb = mbToGb(stats.data?.gpu_vram_total_mb || stats.data?.gtt_total_mb || 0)
-  const unifiedFromProbe = mbToGb(rawHw.unified_memory_mb || 0)
+  const gttCapGb = hasGpu ? mbToGb(stats.data?.gpu_vram_total_mb || stats.data?.gtt_total_mb || 0) : 0
+  const unifiedFromProbe = hasGpu ? mbToGb(rawHw.unified_memory_mb || 0) : 0
   const unifiedGb =
     gttCapGb ||
     unifiedFromProbe ||
     ramTotalGb ||
     mbToGb(stats.data?.ram_total_mb || 0)
   const platformLabel = rawHw.platform_label || rawHw.platform || ''
-  const memoryKind = rawHw.memoryKind === 'unified' ? 'unified' : 'system'
+  const memoryKind = hasGpu && rawHw.memoryKind === 'unified' ? 'unified' : 'system'
   // On UMA the pool ceiling is the GTT cap, not the whole unified RAM
   // (see unifiedGb above). Don't render the raw 'unified' kind — it reads
   // as "unified 80GB" and misleads. Label it as the GPU/GTT pool instead.
   const poolLabel = memoryKind === 'unified' ? 'GPU pool (GTT)' : 'system'
 
   const ramUsedGb = mbToGb(stats.data?.ram_used_mb || 0)
-  const gttUsedGb = mbToGb(
-    stats.data?.gtt_used_mb ?? stats.data?.vram_used_mb ?? 0,
-  )
-  const npuModelGb = mbToGb(stats.data?.npu_status?.model_mb || 0)
+  const gttUsedGb = hasGpu
+    ? mbToGb(stats.data?.gtt_used_mb ?? stats.data?.vram_used_mb ?? 0)
+    : 0
+  const npuModelGb = hasGpu ? mbToGb(stats.data?.npu_status?.model_mb || 0) : 0
 
   // N1 (slot-status unifier): isSlotLive() handles both enriched (container)
   // and container (container_status + container_health) runtimes. Replaces
