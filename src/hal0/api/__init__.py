@@ -2465,7 +2465,7 @@ def _mount_dashboard(app: FastAPI) -> None:
     import os
     from pathlib import Path
 
-    from fastapi.responses import FileResponse, Response
+    from fastapi.responses import FileResponse, RedirectResponse, Response
     from fastapi.staticfiles import StaticFiles
 
     candidates: list[Path] = []
@@ -2497,11 +2497,27 @@ def _mount_dashboard(app: FastAPI) -> None:
     async def _favicon() -> Response:
         return FileResponse(dist / "favicon.svg")
 
+    # Bare top-level paths that collide with a real ``/api/...`` endpoint —
+    # an uptime probe or client hitting the un-prefixed name by habit (or by
+    # following a generic FastAPI tutorial) got 200 HTML from the SPA catch-
+    # all instead of ever reaching the real route (#1796): a probe pointed at
+    # ``/health`` reports "healthy" forever, static HTML has no failure mode.
+    # 307 preserves the method (a probe may HEAD it) unlike a 302/303.
+    _SPA_API_REDIRECTS = {
+        "health": "/api/health",
+        "openapi.json": "/api/openapi.json",
+        "docs": "/api/docs",
+        "redoc": "/api/redoc",
+    }
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def _spa(full_path: str) -> Response:
         # Don't shadow API routes — those return 404 normally if missing.
         if full_path.startswith("api/") or full_path.startswith("v1/"):
             return Response(status_code=404)
+        redirect_target = _SPA_API_REDIRECTS.get(full_path)
+        if redirect_target is not None:
+            return RedirectResponse(redirect_target, status_code=307)
         # no-cache so browsers always revalidate index.html and pick up a new
         # build's hashed assets immediately (hashed /assets stay cacheable).
         # Without this the dashboard serves stale after a deploy until a hard

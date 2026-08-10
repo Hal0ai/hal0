@@ -215,6 +215,51 @@ async def engine_status(request: Request) -> dict[str, Any]:
 _GRAPH_CACHE = _sg.GraphCache()
 
 
+#: Every one of these being zero/absent on an otherwise-200 stats response is
+#: the shape Hindsight returns for a bank id that was never created (#1796) —
+#: it never itself 404s the way its sibling routes (``/profile``, ``/config``,
+#: ...) do. A genuinely empty-but-real bank looks identical over this same
+#: key set, so this is only a trigger to go double-check existence, never a
+#: verdict on its own.
+_ZERO_STATS_KEYS = ("total_nodes", "total_documents", "total_observations")
+
+
+def _looks_like_placeholder_stats(stats: Any) -> bool:
+    if not isinstance(stats, dict):
+        return False
+    return all(not stats.get(k) for k in _ZERO_STATS_KEYS)
+
+
+@router.get("/banks/{bank_id}/stats")
+async def bank_stats(request: Request, bank_id: str) -> Any:
+    """Per-bank stats — 404 for an unknown bank instead of a zeroed 200.
+
+    Hindsight's own ``GET /v1/default/banks/{bank}/stats`` answers 200 with
+    every counter at zero for a bank id that was never created (#1796),
+    indistinguishable from a real, merely-empty bank — unlike an upstream
+    4xx/5xx on this same route, which still passes through unchanged (a
+    real Hindsight-side error is not this route's business to reinterpret).
+    Only when the 2xx body itself looks like the all-zero placeholder do we
+    pay for a second call — confirming against the authoritative
+    ``GET /v1/default/banks`` listing — rather than on every request.
+    """
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    stats = await _forward(client, "GET", f"/v1/default/banks/{bank_id}/stats")
+    if not _looks_like_placeholder_stats(stats):
+        return stats
+    banks_resp = await _forward(client, "GET", "/v1/default/banks")
+    banks = banks_resp.get("banks") if isinstance(banks_resp, dict) else banks_resp
+    known_ids = (
+        {(b.get("bank_id") if isinstance(b, dict) else b) for b in banks}
+        if isinstance(banks, list)
+        else set()
+    )
+    if bank_id not in known_ids:
+        raise NotFound(f"bank {bank_id!r} does not exist", code="memory.bank_not_found")
+    return stats
+
+
 @router.get("/banks/{bank_id}/graph/subgraph")
 async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
     client = _client(request)
@@ -503,7 +548,9 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
     ("PATCH", "/banks/{bank_id}", "/v1/default/banks/{bank_id}"),
     # DELETE /banks/{bank_id} is NOT here — it is special-cased into the guarded
     # ``delete_bank`` handler above (irreversible; requires ?confirm=<bank_id>).
-    ("GET", "/banks/{bank_id}/stats", "/v1/default/banks/{bank_id}/stats"),
+    # GET /banks/{bank_id}/stats is NOT here either — see ``bank_stats`` below
+    # (#1796: the plain passthrough returned 200 with all-zero counts for an
+    # unknown bank id instead of 404).
     (
         "GET",
         "/banks/{bank_id}/stats/timeseries",

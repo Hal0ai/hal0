@@ -221,6 +221,33 @@ def test_add_caller_supplied_source_rejected(client: TestClient, stub_wrapper: S
     assert stub_wrapper.add_calls == []
 
 
+def test_add_missing_text_is_400_not_500(client: TestClient, stub_wrapper: StubWrapper) -> None:
+    """#1796: a client typo'd/wrong field name (no ``text`` key) is the
+    CLIENT's mistake — it must come back as a 400-class validation error,
+    not ``code: "system.internal"`` (the bare Hal0Error default, which
+    reads as "hal0 itself is broken")."""
+    r = client.post(
+        "/api/memory/add",
+        json={"body": "wrong field name"},
+        headers={"X-hal0-Agent": "hermes-agent"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] != "system.internal"
+    assert stub_wrapper.add_calls == []
+
+
+def test_add_caller_supplied_source_is_400_not_500(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "x", "source": "fake-agent"},
+        headers={"X-hal0-Agent": "hermes-agent"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] != "system.internal"
+
+
 # ── /api/memory/search ─────────────────────────────────────────────────────
 
 
