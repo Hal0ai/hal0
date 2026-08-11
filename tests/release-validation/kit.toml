@@ -4,7 +4,7 @@
 # scripts cannot read the filesystem, so when you add a lane here you must also add it to the
 # LANES table in the script. The brief itself is only ever read by the agent that runs it.
 
-kit_version = 1
+kit_version = 2
 
 [defaults]
 # Model tier per phase. Rationale in README "Phases".
@@ -28,6 +28,9 @@ verify_effort = "high"
 readonly_budget_min = 10
 stateful_budget_min = 12
 update_budget_min = 20
+
+# A lane may override the budget for its kind with `budget_min` on its [[lane]] entry. The
+# preflight agent reads these and writes them into CONTEXT.md, which is what lane agents obey.
 
 # Scratch root for run artifacts (CONTEXT.md, raw lane output). Not in the repo — only the
 # final report is committed.
@@ -89,6 +92,10 @@ kind = "stateful"
 order = 3
 brief = "lanes/stateful/brain.md"
 boxes = ["fresh"]
+# One brain tool turn on a CPU box can exceed the 12-minute stateful default on its own; checks
+# 6-8 (including the never-yet-validated read_only guard) went untested in rc.4 and rc.5 for
+# exactly that reason.
+budget_min = 20
 
 [[lane]]
 key = "memory"
@@ -96,6 +103,9 @@ kind = "stateful"
 order = 4
 brief = "lanes/stateful/memory.md"
 boxes = ["fresh"]
+# ORDERING CONSTRAINT: the memory lane's first check needs the `utility` slot in its as-shipped,
+# model-less state (regression memory-retain-dead-letter / #1792). Lanes 1-3 must NOT bind a
+# model to `utility`; in rc.5 one did, and #1792 could not be probed at all that release.
 
 [[lane]]
 key = "capabilities"

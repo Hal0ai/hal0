@@ -21,7 +21,11 @@ did not ask for?**
 2. **Seed reconciliation.** New seeds shipped by the release (profiles, slots, curated models)
    must be *added* without clobbering user modifications. Find a seed the user had modified and
    confirm the modification survived. Tombstoned/retired seeds must actually disappear rather
-   than resurrect.
+   than resurrect. **The seed loop does not back-fill existing files**, which makes an upgraded
+   box MORE exposed than a fresh one to two rc.5 defects — check both here: capability slots the
+   operator created historically carry no `profile` key and 501 their own endpoint (#1830), and
+   slot TOMLs carrying larger ceilings written by earlier releases widen the advertised-vs-served
+   context gap (#1835).
 3. **Functional smoke on the upgraded box.** A short version of the fresh-box lanes: chat
    completion, embeddings, a memory retain and recall, a brain steward question, the dashboard
    loading with real data. Anything broken here that works on the freshly installed box is an

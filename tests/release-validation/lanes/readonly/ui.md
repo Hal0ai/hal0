@@ -25,15 +25,30 @@ Load the Playwright MCP tools via ToolSearch: `browser_navigate`, `browser_snaps
 4. **Version and interpolation.** The version string must be shown and correct (rc.4 Settings
    showed "hal0 version —"). Look for empty template interpolations — rc.4's benchmarks header
    rendered "· GB · hal0 v". Check pluralisation ("1 banks").
-5. **Telemetry honesty.** On a box with no GPU, the dashboard must not present *host* GPU
-   statistics as local capacity (rc.4 showed igpu 100% / 83 °C / 116 GB GTT on a GPU-less
-   16 GB container). This is the highest-value check in the lane: it is the class of defect
-   where the UI is confidently wrong rather than visibly broken.
-6. **Badge agreement.** Every status badge must agree with the system: bench worker badge vs
-   `systemctl is-active hal0-bench-worker`, slot badges vs slot state, memory/agent health.
-7. **Accessibility floor.** Nav rail icons and icon-only buttons have accessible names; the
-   snapshot is navigable.
-8. Screenshot each section for the report.
+5. **Telemetry honesty, per page.** On a box with no GPU, the dashboard must not present *host*
+   GPU or NPU statistics as local capacity. Assert it on **every page that draws an accelerator
+   tile**, against `/api/hardware` `compute_capable` — not once for "the dashboard". rc.4's fix
+   covered Overview and Settings and missed the Slots page telemetry header, and a
+   single-surface check scored that as fixed (#1841 item 1). This is the highest-value check in
+   the lane: the UI is confidently wrong rather than visibly broken.
+6. **Widget vs section agreement.** A summary widget must not contradict the full section or the
+   API behind it. Concretely: the Overview "Services" widget must be non-empty whenever
+   `/api/services` returns at least one entry (rc.5's was unconditionally dead, #1836), and the
+   Slots page counts must be internally consistent — rendered rows == card header count ==
+   footer "slots N" == tab badge.
+7. **Badge agreement.** Every status badge must agree with the system: bench worker badge vs
+   `systemctl is-active hal0-bench-worker`, slot badges vs slot state, and the agent card health
+   badge vs BOTH `/api/agents` `unit_active` and the footer service chips — three sources that
+   have disagreed before. Note that an amber "READY" dot on the Hermes card is by design
+   (`known-issues.yaml: ui-agents-card-amber-ready-dot`).
+8. **Accessibility floor, asserted not eyeballed.** Every interactive element in the persistent
+   top bar and nav rail must have a non-empty accessible name, and the name must not be an
+   internal CSS class. Check at a **rail-width viewport (721–1080 px)** as well as full width:
+   the rail hides `.lbl` spans, which is where rc.5's unnamed service links were only visible.
+9. Screenshot each section for the report.
+
+If another lane is mutating the box during your window, say so. Every "does the UI show real
+data" comparison is only valid if the baseline is re-read at the same instant.
 
 Close the browser when done.
 
