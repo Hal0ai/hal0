@@ -35,6 +35,7 @@ const RUN = `/mnt/mintdev/artifacts/hal0-release-validation/${VERSION}`
 // Box id -> role. Mirrors tests/release-validation/boxes.toml.
 const BOX_ROLES = {
   'ct151-cpu-fresh': 'fresh',
+  'ct152-cpu-fresh': 'fresh',
   'ct163-cpu-fresh': 'fresh-alt',
   'ct150-update': 'update',
   'ct105-prod': 'prod',
@@ -245,6 +246,20 @@ phase('Sweep')
 
 const freshBox = BOX_IDS.find((b) => BOX_ROLES[b] === 'fresh' || BOX_ROLES[b] === 'fresh-alt')
 const updateBox = BOX_IDS.find((b) => BOX_ROLES[b] === 'update')
+
+// A box id that is missing from BOX_ROLES resolves to no role, which used to make the whole
+// Sweep phase spawn zero agents in silence — triage then "succeeded" off the preflight
+// CONTEXT.md alone and the run looked complete. Abort instead: an unknown box is a kit bug.
+const unroled = BOX_IDS.filter((b) => !BOX_ROLES[b])
+if (unroled.length) {
+  throw new Error(
+    `unknown box id(s): ${unroled.join(', ')} — add them to BOX_ROLES in this script AND to ` +
+    `tests/release-validation/boxes.toml. Known ids: ${Object.keys(BOX_ROLES).join(', ')}`,
+  )
+}
+if (!freshBox && !updateBox) {
+  throw new Error(`no box with role fresh/fresh-alt/update in ${BOX_IDS.join(', ')} — nothing to sweep`)
+}
 
 function laneAgent(kind, key, box, extra, opts) {
   return agent(`${BASE}
