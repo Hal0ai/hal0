@@ -97,7 +97,15 @@ A full two-box run is roughly 25–30 agents. Restrict `lanes` for smaller passe
 * **The idle reaper (300 s, `idle_timeout_s`) evicts slots between stages.** A stage that finds
   a slot offline should reload it and say so, not report it as a regression.
 * **`/mnt/ai-models` ggufs on the workstation are often symlinks into `huggingface/hub`** —
-  staging them to a box needs `rsync -L`.
+  staging them to a box needs `rsync -L`. And `/mnt/ai-models` is not in hal0's model roots, so
+  a staged gguf is invisible until `hal0 model add` runs.
+* **A fix that names one surface usually fixed one surface.** rc.5's three half-fixes (#1802
+  fixed two of four ctx surfaces, #1807 fixed the seeded profile path but not `slot create`,
+  #1797's telemetry gate covered two of three pages) all passed a narrow re-probe. When a
+  regression entry names a surface, probe the whole class.
+* **`promote_ready: true` in `regressions.yaml` is a to-do list.** An entry that is mechanical
+  and stable belongs in `pytest` or `scripts/release-test.sh`, and should be deleted from the kit
+  in the PR that writes the test.
 
 ## Versioning policy
 
@@ -107,6 +115,24 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **2** (2026-08-11) — curation after the `v1.0.0-rc.5` run. `regressions.yaml` grows from 11 to
+  26 entries: the 15 findings filed as #1827–#1841, plus an `rc5_note` and `last_result` on every
+  rc.4 entry recording what actually held on a real box. Two rc.4 repros were rewritten because
+  they were unrunnable as written — `brain-tools-image-gate` no longer asks a probe agent to
+  repin the shared brain slot, and `fact-extraction-strips-literals` is now explicitly gated on a
+  retain reaching a terminal state. `known-issues.yaml` grows from 8 to 29: eighteen candidates
+  the adversarial pass refuted or ruled by-design are banked with their rationale and a
+  `still_report_if` clause, so the next run does not spend budget re-deriving them; six entries
+  are flagged `review_due` against v1.0.0. Lane briefs absorbed the checks agents invented this
+  run — the ones that paid were **generalisations of a previous release's narrow check**: sweep
+  every bank sub-resource rather than `/stats`; compare context windows on all four surfaces
+  rather than two; assert provisioning honesty on every phase and on warnings and skips, not just
+  recorded failures; gate GPU telemetry per page rather than per dashboard. Also: the brain lane
+  gets `budget_min = 20` (a single CPU tool turn exceeds the 12-minute default, which is why its
+  last three checks went untested twice running), the memory lane's dependency on an untouched
+  `utility` slot is recorded as an ordering constraint in `kit.toml`, and `boxes.toml` records
+  that ct151 is wedged, that ct152 has no snapshot and carries residue, and precisely why
+  ct105-prod cannot cross-check the two hermes fresh-install defects.
 * **1** (2026-08-10) — initial extraction from the rc.4 validation workflows. Five read-only
   lanes, six stateful lanes, one update lane, 11 regression entries seeded from rc.4 issues
   #1787–#1797, four adjudicated by-design entries in known-issues.
