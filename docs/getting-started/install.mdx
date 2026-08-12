@@ -34,6 +34,10 @@ Accepted values: `stable` (default), `preview`, `nightly`.
 
 ## Requirements
 
+- **curl** and **ca-certificates** — the bootstrap one-liner needs them to
+  fetch and verify the release manifest. Minimal cloud/LXC images often
+  ship without either: `apt-get install -y curl ca-certificates` (or the
+  equivalent for your distro).
 - **Linux, x86_64** — hal0 ships amd64-only binaries (the FastFlowLM
   `.deb` and the toolbox container images). ARM and macOS/Windows are not
   supported.
