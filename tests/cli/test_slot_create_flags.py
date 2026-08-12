@@ -270,3 +270,48 @@ def test_bare_create_on_strix_halo_resolves_to_vulkan(
     # auto-resolves to vulkan from the Strix Halo fixture.
     assert captured["body"]["provider"] == "llama-server"
     assert captured["body"]["device"] == "gpu-vulkan"
+
+
+# ── --profile (#1830) ────────────────────────────────────────────────────────
+
+
+def test_profile_flag_is_forwarded(captured_post: dict[str, Any]) -> None:
+    """``slot create --profile`` pins the profile instead of inferring one."""
+    result = runner.invoke(
+        slot_commands.app,
+        ["create", "rr", "--type", "reranking", "--model", "demo", "--profile", "reranking"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured_post["body"]["profile"] == "reranking"
+
+
+def test_profile_omitted_leaves_the_key_absent(captured_post: dict[str, Any]) -> None:
+    """No ``--profile`` → no ``profile`` key at all.
+
+    An empty-string placeholder would look like an explicit operator choice at
+    the create chokepoint and defeat the type-implied inference (#1830).
+    """
+    result = runner.invoke(
+        slot_commands.app,
+        ["create", "rr", "--type", "reranking", "--model", "demo"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "profile" not in captured_post["body"]
+
+
+def test_edit_profile_flag_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``slot edit --profile`` PUTs it — the repair path for an existing slot."""
+    captured: dict[str, Any] = {}
+
+    def fake_put(path: str, *, json: dict[str, Any] | None = None, **_kw: Any) -> dict[str, Any]:
+        captured["path"] = path
+        captured["payload"] = json or {}
+        return {"state": "stopped"}
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(slot_commands, "api_put", fake_put)
+
+    result = runner.invoke(slot_commands.app, ["edit", "rr", "--profile", "reranking"])
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/api/slots/rr/config"
+    assert captured["payload"] == {"profile": "reranking"}
