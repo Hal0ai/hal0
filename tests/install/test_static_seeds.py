@@ -8,9 +8,14 @@ copy-if-absent contract independently of the lifespan wiring.
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
+import pytest
+
+from hal0.install.brain_model import BRAIN_MODEL_PORTABLE
 from hal0.install.static_seeds import STATIC_SEED_SLOTS, seed_static_slots
+from hal0.providers.container import _resolve_context_size
 
 
 def _fake_installer_root(tmp_path: Path, names: tuple[str, ...] = STATIC_SEED_SLOTS) -> Path:
@@ -116,3 +121,48 @@ def test_seed_static_slots_default_args_seed_real_tree(tmp_path: Path) -> None:
     dest = tmp_path / "slots"
     seeded = seed_static_slots(slots_dir=dest)
     assert set(seeded) == set(STATIC_SEED_SLOTS)
+
+
+# ── #1827: the shipped seeds must actually deliver what they ask for ──────────
+#
+# The seeds are only half the contract; providers.container._resolve_context_size
+# decides what a slot LAUNCHES with. rc.5 shipped three seeds asking for 65536
+# that all launched at 32768, because the derived-window path applied a blanket
+# dense cap underneath the seeded ceiling. 32768 is below Hermes' hard 64,000
+# floor, so the bundled agent could not start on a fresh install at all.
+#
+# This walks the real shipped TOMLs through the real resolver with the model
+# shape a fresh install actually produces (installer-pulled brain: a 131072
+# native window, no explicit defaults.context_size), so either half drifting
+# back down fails here rather than on a box.
+
+#: ``agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH`` in the bundled Hermes.
+_HERMES_MIN_CONTEXT = 64_000
+
+#: Seeds the bundled Hermes agent can be pointed at — ``hal0/agent`` resolves to
+#: the ``agent`` slot and falls back to ``brain``; ``hal0/utility`` is the third
+#: chat surface an operator is told to try.
+_HERMES_REACHABLE_SEEDS = ("agent", "brain", "utility")
+
+
+def _seed_ceiling(name: str) -> int | None:
+    repo_root = Path(__file__).resolve().parents[2]
+    raw = (repo_root / "installer" / "etc-hal0" / "slots" / f"{name}.toml").read_bytes()
+    return tomllib.loads(raw.decode("utf-8")).get("model", {}).get("context_size")
+
+
+@pytest.mark.parametrize("slot_name", _HERMES_REACHABLE_SEEDS)
+def test_shipped_seed_resolves_above_the_hermes_floor(slot_name: str) -> None:
+    ceiling = _seed_ceiling(slot_name)
+    assert ceiling is not None, f"{slot_name}.toml lost its [model].context_size"
+    assert ceiling >= _HERMES_MIN_CONTEXT, (
+        f"{slot_name}.toml asks for {ceiling}, below Hermes' {_HERMES_MIN_CONTEXT} floor"
+    )
+    model_info = {
+        "_model_key": BRAIN_MODEL_PORTABLE,
+        "metadata": {"context_length": 131072},
+        "defaults": {"context_size": None},
+    }
+    effective = _resolve_context_size(ceiling, model_info, slot_name=slot_name)
+    assert effective == ceiling
+    assert effective >= _HERMES_MIN_CONTEXT

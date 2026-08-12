@@ -1370,6 +1370,105 @@ class TestContextSizeOwnership:
         assert self._ctx(self._spec(cfg, mi).command) == str(_CTX_SAFE_FALLBACK)
 
 
+#: Hermes' hard gate (`agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH`). The
+#: bundled agent refuses to start — it does not degrade — when the window it
+#: resolves is below this, so a shipped seed that lands under it is a
+#: cannot-chat fresh install (#1827).
+_HERMES_MIN_CONTEXT = 64_000
+
+
+class TestDenseCapDoesNotUndercutAConfiguredSlot:
+    """#1827 — the dense cap is an UNCONFIGURED-slot guard, not a hardware fact.
+
+    A fresh 1.0.0-rc.5 install could not run the bundled Hermes agent at all:
+    the installer-pulled brain model carries no ``defaults.context_size``, so
+    its window came from the derived native path, where the blanket 32768 dense
+    cap was applied *underneath* the shipped seed's ``context_size = 65536``.
+    Result: every seeded slot launched (and, post-#1802, honestly advertised)
+    32768 — below Hermes' hard 64,000 floor — no matter what the seed said and
+    no matter how much memory the box had.
+    """
+
+    def _spec(self, cfg: dict[str, Any], model_info: dict[str, Any]):
+        provider = ContainerProvider()
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            return provider.container_spec(cfg, model_info)
+
+    @staticmethod
+    def _ctx(command: list[str]) -> str | None:
+        return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
+
+    def test_fresh_install_brain_slot_clears_the_hermes_floor(self) -> None:
+        """THE REGRESSION. Shipped seed ceiling 65536 + an installer-pulled
+        model with a 131072 native window and no explicit context size."""
+        mi = _model_info(
+            _model_key="hal0-brain-sft-f16",
+            metadata={"context_length": 131072},
+            defaults={"context_size": None},
+        )
+        resolved = _resolve_context_size(65536, mi, slot_name="brain")
+        assert resolved == 65536
+        assert resolved >= _HERMES_MIN_CONTEXT
+
+    def test_configured_ceiling_reaches_the_launch_command(self) -> None:
+        """End-to-end through ``container_spec`` — ``--ctx-size 65536``, which
+        is what llama-server actually serves and therefore what #1802's honest
+        advertising will report."""
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 65536})
+        mi = _model_info(metadata={"context_length": 131072})
+        assert self._ctx(self._spec(cfg, mi).command) == "65536"
+
+    def test_unpinned_slot_is_still_dense_capped(self) -> None:
+        """No ceiling on disk means nothing is configured, so the blanket cap
+        still applies — this is the invariant ``slots.capacity._DEFAULT_CTX_TOKENS``
+        budgets against."""
+        mi = _model_info(metadata={"context_length": 131072})
+        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
+
+    def test_ceiling_below_the_dense_cap_is_unchanged(self) -> None:
+        """The installer's VRAM-budget clamp (#1108) is untouched: a small
+        ceiling still wins outright."""
+        mi = _model_info(metadata={"context_length": 131072})
+        assert _resolve_context_size(4096, mi) == 4096
+        assert _resolve_context_size(16384, mi) == 16384
+
+    def test_never_exceeds_the_models_native_window(self) -> None:
+        """A generous ceiling cannot conjure context the model does not have —
+        the derived value is bounded by the native window first."""
+        mi = _model_info(metadata={"context_length": 40960})
+        assert _resolve_context_size(131072, mi) == 40960
+
+    def test_never_exceeds_the_configured_ceiling(self) -> None:
+        """Property: for a derived window, effective <= ceiling always, so a
+        slot can only reach a window the box was explicitly configured for."""
+        mi = _model_info(metadata={"context_length": 262144})
+        for ceiling in (128, 4096, 32768, 65536, 131072, 262144):
+            assert _resolve_context_size(ceiling, mi) <= ceiling
+
+    def test_curated_backfill_path_also_honors_the_ceiling(self) -> None:
+        """The #1617 self-heal path (registry row with empty ``metadata``, window
+        recovered from the curated catalogue) is the shape a fresh install
+        actually has, so it must clear the floor too."""
+        mi = _model_info(_model_key="hal0-brain-sft-q8-rocmfpx", metadata={})
+        assert _resolve_context_size(65536, mi, slot_name="brain") >= _HERMES_MIN_CONTEXT
+
+    def test_explicit_model_window_still_outranks_the_ceiling(self) -> None:
+        """Unchanged: the ceiling only replaces the dense cap on the DERIVED
+        path. An explicit model window is authoritative and is still only
+        clamped down, never raised."""
+        mi = _model_info(metadata={"context_length": 131072}, defaults={"context_size": 16384})
+        assert _resolve_context_size(65536, mi) == 16384
+
+    def test_no_model_window_at_all_still_uses_the_safe_floor(self) -> None:
+        """A slot ceiling is not evidence about the model, so it cannot inflate
+        the 8192 safe fallback either."""
+        mi = _model_info(_model_key="some-operator-pulled-custom-model", metadata={})
+        assert _resolve_context_size(65536, mi) == _CTX_SAFE_FALLBACK
+
+
 class _FakeCtxDefaults:
     def __init__(self, context_size: int | None) -> None:
         self.context_size = context_size
