@@ -115,6 +115,15 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **3** (2026-08-12) — `smoke-preflight-skips-chat-probes` (#1831) rewritten. As filed it probed
+  only hermes' default live-resolve config — the half of the defect rc.5 fixed — so it would have
+  reported `fixed` while the `HAL0_HERMES_LIVE_RESOLVE=0` mode the issue actually named stayed
+  broken. It now probes both resolution modes, names the pinned mode as the one to look for, and
+  requires any recorded skip reason to be checked against the endpoint in `model.base_url` rather
+  than the gateway catalog. Retiered `judgment`, `promote_ready: false`: the unit-level half moved
+  into `tests/agents/test_hermes_provision.py`, and what remains needs a live box. The lesson
+  generalises — **a register entry that cannot fail is worse than none**, and an entry probing
+  only the configuration a fix was written against is exactly that.
 * **2** (2026-08-11) — curation after the `v1.0.0-rc.5` run. `regressions.yaml` grows from 11 to
   26 entries: the 15 findings filed as #1827–#1841, plus an `rc5_note` and `last_result` on every
   rc.4 entry recording what actually held on a real box. Two rc.4 repros were rewritten because

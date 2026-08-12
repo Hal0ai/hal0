@@ -2376,7 +2376,24 @@ class TestFetchModelRouteReady:
         route that lists a different alias proves nothing, so this must not
         harden into a skip."""
         _fake_http(monkeypatch, {"http://127.0.0.1:8081/v1/models": {"data": [{"id": "brain"}]}})
-        assert hp._fetch_model_route_ready("hal0/weird-id", "http://127.0.0.1:8081/v1") is None
+        assert hp._fetch_model_route_ready("hal0/agent", "http://127.0.0.1:8081/v1") is None
+
+    def test_non_canonical_hal0_prefixed_id_is_inconclusive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A physical registry id may legitimately start with ``hal0/`` (the
+        id constraint is only non-emptiness), and the catalog suppresses raw
+        chat ids in favour of their alias row — while chat dispatch still
+        resolves the exact physical id to its owning slot. Only the resolver's
+        CANONICAL virtual names earn a conclusive negative."""
+        gw = f"{hp.HAL0_API_URL}/v1"
+        _fake_http(monkeypatch, {f"{gw}/models": {"data": [{"id": "brain"}]}})
+        assert hp._fetch_model_route_ready("hal0/some-physical-gguf", gw) is None
+        # ...but the advertised virtuals still are conclusive.
+        from hal0.normalize.resolver import DEFAULT_CHAINS
+
+        for virtual in DEFAULT_CHAINS:
+            assert hp._fetch_model_route_ready(virtual, gw) is False, virtual
 
     def test_empty_catalog_is_conclusive_but_malformed_one_is_not(
         self, monkeypatch: pytest.MonkeyPatch

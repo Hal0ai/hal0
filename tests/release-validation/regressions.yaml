@@ -455,15 +455,26 @@ regressions:
       # Mode B — the pinned single-backend mode the issue named. This is the one that hid.
       # `model.default` becomes a chat slot's RAW physical model id and `model.base_url` its own
       # llama-server, neither of which the gateway catalog will confirm.
-      HAL0_HERMES_LIVE_RESOLVE=0 hal0 agent bootstrap hermes --repair
-      CFG=/var/lib/hal0/.hermes/config.yaml
-      grep -A3 '^model:' $CFG                                  # note default + base_url
-      MID=$(awk '/^model:/{f=1} f&&/^  default:/{print $2; exit}' $CFG)
-      BURL=$(awk '/^model:/{f=1} f&&/^  base_url:/{print $2; exit}' $CFG)
-      curl -s "$BURL/models" | jq -r '.data[].id'              # the id IS here...
-      curl -s -o /dev/null -w '%{http_code}\n' "$API/v1/models/$MID"   # ...and 404s here
-      hal0 agent status hermes --json | jq '.phases.smoke_tests'
-      # Restore the default afterwards: hal0 agent bootstrap hermes --repair
+      #
+      # Do NOT re-bootstrap hermes to get there: that rewrites the shared config.yaml while the
+      # other lanes probe the same box concurrently, and restoring it afterwards cannot undo what
+      # they observed in the meantime. Drive the installed preflight against a throwaway hermes
+      # home instead — same code, same live endpoints, nothing shared mutated.
+      # Needs a loaded chat slot; note its port and configured model id first.
+      hal0 slot list                                           # pick a loaded llm slot
+      grep -E '^(port|default)' /etc/hal0/slots/<slot>.toml     # -> PORT, PHYS_ID
+      curl -s http://127.0.0.1:<PORT>/v1/models                 # the backend knows the model...
+      curl -s -o /dev/null -w '%{http_code}\n' "$API/v1/models/<PHYS_ID>"   # ...gateway 404s it
+      /usr/lib/hal0/venv/bin/python - <<'PY'
+      import pathlib, tempfile
+      from hal0.agents import hermes_provision as hp
+      d = pathlib.Path(tempfile.mkdtemp())
+      (d / "config.yaml").write_text(
+          "model:\n  default: <PHYS_ID>\n  base_url: http://127.0.0.1:<PORT>/v1\n"
+      )
+      print(hp._chat_model_ready(hp.BootstrapState(hermes_home=str(d)), hp.InstallIO()))
+      PY
+      # (True, ...) = the probe would run. (False, ...) = the defect, still live.
     expect: >-
       In BOTH modes, with a chat slot loaded, `chat_completions` runs (passes or fails on its
       own merits) and `memory_roundtrip` runs unconditionally. A skip in mode B is the
