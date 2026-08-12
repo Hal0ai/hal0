@@ -1828,6 +1828,68 @@ def test_get_slot_includes_config_enrichment(
     assert body["model_default"] == "gemma3-1b"
 
 
+class _FakeCtxDefaults:
+    def __init__(self, context_size: int | None) -> None:
+        self.context_size = context_size
+
+
+class _FakeCtxModel:
+    def __init__(self, context_size: int | None) -> None:
+        self.defaults = _FakeCtxDefaults(context_size)
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+
+
+class _FakeCtxRegistry:
+    def __init__(self, models: dict[str, Any]) -> None:
+        self._models = models
+
+    def get(self, model_id: str) -> Any:
+        if model_id not in self._models:
+            raise KeyError(model_id)
+        return self._models[model_id]
+
+
+def test_get_slot_resolves_ctx_max_to_effective_window(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """#1835: GET /api/slots/{name} must re-resolve ``ctx_max`` to the
+    EFFECTIVE window (#1788/#1802's fix), not echo the raw slot-TOML
+    ceiling verbatim. #1802 fixed ``GET /api/slots`` (list) only; this is
+    the detail route regression that survived it.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "chat",
+        [
+            'name = "chat"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            'profile = "vulkan-radv"',
+            "[model]",
+            'default = "qwen3-4b"',
+            "context_size = 65536",
+        ],
+    )
+    # The registered model's declared window (8000) is smaller than the
+    # slot's raw TOML ceiling (65536) — the EFFECTIVE window must win.
+    isolated_app.state.model_registry = _FakeCtxRegistry({"qwen3-4b": _FakeCtxModel(8000)})
+
+    r = isolated_client.get("/api/slots/chat")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ctx_max"] == 8000, (
+        f"detail route must report the effective window, not the raw TOML "
+        f"ceiling; got {body['ctx_max']!r}"
+    )
+
+
 def test_get_slot_includes_config_drift_when_requested(
     slot_root: Path,
     container_stub: dict[str, Any],
