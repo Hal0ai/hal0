@@ -38,7 +38,7 @@ from typing import Any
 from fastapi import APIRouter, Request, Response, WebSocket
 
 from hal0.api._audit import record_action
-from hal0.board.store import BoardStore
+from hal0.board.store import BoardStore, resolve_store
 from hal0.errors import BadRequest
 
 router = APIRouter()
@@ -82,19 +82,11 @@ def _if_match(request: Request) -> int | None:
 async def _store(request: Request) -> BoardStore:
     """Resolve (and lazily construct) the app-state board store.
 
-    The store is created once per process and cached on ``app.state``; the
-    first access runs the idempotent first-boot import against the optional
-    Hermes kanban client (``app.state.hermes_kanban``), so a fresh box imports a
-    live Hermes board when present and seeds a clean empty board otherwise.
+    Delegates to :func:`hal0.board.store.resolve_store` — the one resolver the
+    brain steward's board tools use too, so both surfaces answer from the same
+    store by construction (#1829).
     """
-    store = getattr(request.app.state, "board_store", None)
-    if store is None:
-        store = BoardStore()
-        request.app.state.board_store = store
-    if not store.initialized:
-        client = getattr(request.app.state, "hermes_kanban", None)
-        await store.ensure_initialized(client)
-    return store
+    return await resolve_store(request.app)
 
 
 def _board(request: Request) -> str | None:

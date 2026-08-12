@@ -309,6 +309,6 @@ async def test_gated_call_fails_closed_without_queue() -> None:
         hal0_config=Hal0Config(brain_chat=BrainChatConfig(read_only=False)),
     )
     request = SimpleNamespace(app=SimpleNamespace(state=state), headers={})
-    result = await bc._dispatch_tool(request, None, "model_pull", {"model_id": "m"}, board=None)
+    result = await bc._dispatch_tool(request, "model_pull", {"model_id": "m"}, board=None)
     assert "unavailable" in result["error"]
     assert "no approval queue" in result["error"]
