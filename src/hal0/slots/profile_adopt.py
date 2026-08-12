@@ -101,7 +101,7 @@ _SLOT_TYPE_TO_CAPABILITY: dict[str, str] = {
     "image": "image",
 }
 
-#: The CLI's legacy ``--provider`` default (``hal0 slot create`` always sends
+#: The CLI's historical ``--provider`` default (``hal0 slot create`` always sends
 #: it, even for a capability type that has nothing to do with llama-server).
 #: Treated as "unspecified" by the inference below so the CLI and the dashboard
 #: modal — which sends no provider at all — infer the SAME profile.

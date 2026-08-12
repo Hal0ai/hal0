@@ -145,9 +145,7 @@ def test_type_implied_profile_ignores_the_cli_legacy_provider_default(
     """
     assert type_implied_profile({"type": "transcription", "device": "cpu"}) == "moonshine"
     assert (
-        type_implied_profile(
-            {"type": "transcription", "device": "cpu", "provider": "llama-server"}
-        )
+        type_implied_profile({"type": "transcription", "device": "cpu", "provider": "llama-server"})
         == "moonshine"
     )
     # A named engine hal0 has no runtime for is still rejected.

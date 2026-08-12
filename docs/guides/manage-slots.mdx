@@ -84,8 +84,14 @@ hal0 slot create embed \
 7. **`--profile`** — the runtime profile (flag bundle + engine). Omit it
    and hal0 infers the profile the slot's `--type` implies: `embedding` →
    `embedding` (`--embedding`), `reranking` → `reranking`
-   (`--reranking`), `tts`/`transcription` → the engine for the chosen
-   device, `image` → `comfyui`. That inference is what makes a capability
+   (`--reranking`), `tts`/`transcription` → the engine hal0 ships for the
+   chosen device (Kokoro on CPU, Qwen3-TTS on ROCm, Moonshine for CPU
+   speech-to-text). Nothing is inferred where hal0 has no engine for that
+   pairing — a `tts` slot on a Vulkan device, for instance, keeps the CPU
+   Kokoro runtime rather than being pinned to the ROCm-only Qwen3 image.
+   An `image` slot also infers nothing: pass `--profile comfyui`
+   explicitly (the shipped `img` slot already carries it). That inference
+   is what makes a capability
    slot actually serve its endpoint — an `embedding` slot with no
    `--embedding` flag loads to `ready` and returns HTTP 501 from
    `/v1/embeddings`. An `llm` slot infers nothing: no mode flag is at

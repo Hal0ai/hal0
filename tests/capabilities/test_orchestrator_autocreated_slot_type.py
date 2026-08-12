@@ -24,11 +24,11 @@ from typing import Any
 
 import pytest
 
-from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.capabilities.config import CapabilitySelection
-from hal0.slots.manager import SlotManager
+from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.ports.authority import PortAuthority
 from hal0.slots.identity import SlotIdentityStore
+from hal0.slots.manager import SlotManager
 
 
 def _manager(home: Path) -> SlotManager:

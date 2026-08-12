@@ -80,6 +80,25 @@ def test_refs_flag_a_profileless_capability_slot() -> None:
     assert "hal0 slot edit rerank --profile reranking" in rows[1]["detail"]
 
 
+def test_refs_repair_command_is_device_aware(tmp_hal0_home: str) -> None:
+    """The repair must name the profile create-time inference would choose.
+
+    Keying the repair on the slot TYPE alone told an NPU embedding slot to
+    run ``hal0 slot edit <name> --profile embedding`` — llama-server flags
+    (``--embedding -fa auto -b 8192 -ub 8192``) onto the FLM runtime. The
+    create-time rule in the same release answers ``flm`` for that pair, so
+    doctor now reuses it rather than keeping a second, disagreeing rule.
+    """
+    rows = check_slot_profile_refs(
+        [("npu-embed", None), ("cpu-embed", None)],
+        {"embedding", "flm"},
+        slot_types={"npu-embed": "embedding", "cpu-embed": "embedding"},
+        slot_devices={"npu-embed": "npu", "cpu-embed": "cpu"},
+    )
+    assert "hal0 slot edit npu-embed --profile flm" in rows[0]["detail"]
+    assert "hal0 slot edit cpu-embed --profile embedding" in rows[1]["detail"]
+
+
 def test_refs_still_skip_a_profileless_llm_slot() -> None:
     """An llm slot has no mode flag at stake — profile-less is legal there."""
     assert check_slot_profile_refs([("agent", None)], {"chat"}, slot_types={"agent": "llm"}) == []

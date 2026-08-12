@@ -464,7 +464,8 @@ def slot_create(
             "Runtime profile (flag bundle + engine). Default: inferred from "
             "--type/--hardware — embedding → embedding (--embedding), "
             "reranking → reranking (--reranking), tts/transcription → the "
-            "engine for the device, image → comfyui. An llm slot infers none."
+            "engine hal0 ships for that device (none is inferred where it "
+            "ships none). llm and image slots infer none."
         ),
     ),
 ) -> None:
