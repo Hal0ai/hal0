@@ -123,6 +123,32 @@ def test_model_add_shows_medium_confidence_for_filename_guess(
     assert "medium" in result.output.lower()
 
 
+def test_model_add_medium_confidence_message_not_filename_specific(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1838 (codex review): a medium result can come from a header signal
+    (attention.causal=False contradicting the chat default) rather than a
+    filename guess — the printed explanation must not claim it's always
+    the filename."""
+
+    def fake_post(path: str, *, json: Any = None, **_kw: Any) -> dict[str, Any]:
+        return {
+            "id": "zzscratchrr",
+            "path": "/mnt/ai-models/zzscratchrr.gguf",
+            "capabilities": ["chat"],
+            "metadata": {"detection_confidence": "medium"},
+        }
+
+    monkeypatch.setattr(shared, "api_post", fake_post)
+    result = runner.invoke(
+        model_commands.app,
+        ["add", "/mnt/ai-models/zzscratchrr.gguf"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "medium" in result.output.lower()
+    assert "filename" not in result.output.lower()
+
+
 def test_model_add_with_license_follows_up_with_put(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI consolidation: `add` folded in `register`'s explicit-metadata
     flags — `--license` isn't accepted by add-from-path, so it's applied

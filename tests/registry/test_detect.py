@@ -168,6 +168,40 @@ class TestGgufRerank:
         assert r.confidence == "medium"
         assert r.raw_hints["capability_source"] == "causal_conflict"
 
+    def test_conflicting_header_tags_fall_through_to_filename(self, tmp_path: Path) -> None:
+        """#1838 (codex review): general.tags is free text — a converter
+        can legally carry BOTH a rerank token and an embed token (e.g.
+        "reranker" + "feature-extraction" for the underlying encoder).
+        That's ambiguous, not a tie-breaker; the header_tags branch must
+        not silently pick one, it must fall through to the filename
+        table."""
+        tags_bytes = (
+            struct.pack("<I", _GGUF_TYPE_STRING)
+            + struct.pack("<Q", 2)
+            + _enc_str("reranker")
+            + _enc_str("feature-extraction")
+        )
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("jina-bert-v2")),
+            ("general.tags", _GGUF_TYPE_ARRAY, tags_bytes),
+        ]
+        payload = _build_gguf(3, kvs)
+
+        # No filename signal either → bare chat default, not a silent
+        # "first branch wins" rerank guess.
+        p = _write_fixture(tmp_path, "ambiguous-tags.gguf", payload)
+        r = detect(p)
+        assert r.suggested_capabilities == ["chat"]
+        assert r.raw_hints["capability_source"] == "default"
+
+        # Filename DOES carry a token → that token decides, not the
+        # ambiguous tags.
+        p_embed_name = _write_fixture(tmp_path, "ambiguous-tags-bge-embed.gguf", payload)
+        r_embed_name = detect(p_embed_name)
+        assert r_embed_name.suggested_capabilities == ["embed"]
+        assert r_embed_name.confidence == "medium"
+        assert r_embed_name.raw_hints["capability_source"] == "filename"
+
     def test_filename_hint_used_for_symlink_capability_fallback(self, tmp_path: Path) -> None:
         """#1838 (codex review): the resolved path passed to detect() may be
         a HF hub-cache sha-named blob with no filename signal — the caller

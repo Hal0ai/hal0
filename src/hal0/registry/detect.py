@@ -432,10 +432,21 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
         if not pooling_present:
             tags = header.get("general.tags")
             tag_set = {str(t).lower() for t in tags} if isinstance(tags, list) else set()
-            if tag_set & {"reranker", "cross-encoder", "rerank"}:
+            rerank_tag_hit = bool(tag_set & {"reranker", "cross-encoder", "rerank"})
+            embed_tag_hit = bool(
+                tag_set & {"embed", "embedding", "sentence-similarity", "feature-extraction"}
+            )
+            # #1838 (codex review): general.tags is free text — a converter
+            # can legally carry BOTH a rerank token and an embed token
+            # (e.g. a reranker also tagged "feature-extraction" for its
+            # underlying encoder). That's genuinely ambiguous, not a tie-
+            # breaker; fall through to the filename table rather than
+            # silently picking whichever group happened to be checked
+            # first.
+            if rerank_tag_hit and not embed_tag_hit:
                 is_rerank = True
                 cap_source = "header_tags"
-            elif tag_set & {"embed", "embedding", "sentence-similarity", "feature-extraction"}:
+            elif embed_tag_hit and not rerank_tag_hit:
                 is_embed = True
                 cap_source = "header_tags"
 

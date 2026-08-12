@@ -445,9 +445,13 @@ def model_add(
     if warning:
         console.print(f"  [yellow]warning:[/yellow] {warning}")
     elif confidence and confidence != "high":
+        # #1838 (codex review): a medium result can come from a filename
+        # guess OR from a header signal (attention.causal=False) that
+        # contradicts the "chat" default — don't claim it's always the
+        # filename, just that it's not a confident header read.
         console.print(
             f"  [yellow]confidence: {confidence}[/yellow] "
-            "(capabilities/backends guessed from the filename, not the file header)"
+            "(capabilities/backends could not be reliably read from the file header)"
         )
     console.print(
         f"[dim]Next: hal0 model run {mid}   (or: hal0 slot edit <slot> --model {mid})[/dim]"
