@@ -107,7 +107,7 @@ async def test_dispatch_tool_routes_admin_names_through_mcp_core(
 
     monkeypatch.setattr(admin, "dispatch", _fake_dispatch)
     request = _fake_request(approval_queue=ApprovalQueue())
-    result = await bc._dispatch_tool(request, client=None, name="profile_list", args={}, board=None)
+    result = await bc._dispatch_tool(request, name="profile_list", args={}, board=None)
     assert result == {"ok": True}
     assert seen["tool"] == "profile_list"
     assert seen["client_id"] == bc.BRAIN_PERSONA_ID
@@ -117,7 +117,7 @@ async def test_dispatch_tool_routes_admin_names_through_mcp_core(
 @pytest.mark.asyncio
 async def test_unknown_tool_still_errors() -> None:
     request = _fake_request(approval_queue=ApprovalQueue())
-    result = await bc._dispatch_tool(request, client=None, name="not_a_tool", args={}, board=None)
+    result = await bc._dispatch_tool(request, name="not_a_tool", args={}, board=None)
     assert result == {"error": "unknown tool: not_a_tool"}
 
 
@@ -180,7 +180,7 @@ def test_surfaced_schemas_filtered_by_tools_allowed(tmp_path: Path) -> None:
 async def test_dispatch_tool_refuses_disallowed_local_tool(tmp_path: Path) -> None:
     root = _brain_persona_root(tmp_path, tools_allowed=("get_board",))
     request = _fake_request(brain_persona_root=root, approval_queue=ApprovalQueue())
-    result = await bc._dispatch_tool(request, client=None, name="slot_load", args={}, board=None)
+    result = await bc._dispatch_tool(request, name="slot_load", args={}, board=None)
     assert "tools_allowed" in result["error"]
 
 

@@ -152,7 +152,7 @@ async def test_brain_gated_platform_tool_queues_and_resumes_on_approve(
     # falls through to _dispatch_admin_tool for a non-local, non-excluded
     # admin-catalog name).
     result = await bc._dispatch_tool(
-        request, None, "npu_backend_load", {"model_id": "lfm2:1.2b"}, board=None
+        request, "npu_backend_load", {"model_id": "lfm2:1.2b"}, board=None
     )
     assert result["status"] == "pending_approval"
     assert isinstance(result["approval_id"], str)
@@ -181,7 +181,7 @@ async def test_brain_read_only_still_refuses_new_gated_platform_tool() -> None:
     queue = ApprovalQueue()
     request = _fake_request(read_only=True, queue=queue)
     result = await bc._dispatch_tool(
-        request, None, "npu_backend_load", {"model_id": "lfm2:1.2b"}, board=None
+        request, "npu_backend_load", {"model_id": "lfm2:1.2b"}, board=None
     )
     assert "read-only mode" in result["error"]
     assert queue.list_pending() == []

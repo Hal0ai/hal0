@@ -36,15 +36,45 @@ _READ_ONLY_MARKER = "read-only mode"
 _READ_ONLY_CONFIG_HINT = "[brain_chat] read_only=true"
 
 
-class _RecordingClient:
-    """A hermes_kanban stand-in: records every request_json call, returns {}."""
+class _RecordingStore:
+    """A BoardStore stand-in: records every board call, returns empty shapes.
+
+    Board tools run against the hal0-owned store (#1829), so "did the board get
+    touched?" is a store question now, not an upstream-HTTP one. Pre-flagged
+    ``initialized`` so ``resolve_store`` hands it straight back.
+    """
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, Any]] = []
+        self.initialized = True
 
-    async def request_json(self, method: str, path: str, **kw: Any) -> Any:
-        self.calls.append((method, path))
-        return {"columns": []} if path == "/board" else {"ok": True}
+    def get_board(self, *, board: str | None = None, **kw: Any) -> Any:
+        self.calls.append(("get_board", board))
+        return {"lanes": {}}
+
+    def get_task(self, task_id: str, **kw: Any) -> Any:
+        self.calls.append(("get_task", task_id))
+        return {"id": task_id}
+
+    def list_assignees(self, *, board: str | None = None, **kw: Any) -> Any:
+        self.calls.append(("list_assignees", board))
+        return []
+
+    def get_orchestration(self) -> Any:
+        self.calls.append(("get_orchestration", None))
+        return {}
+
+    def update_task(self, task_id: str, patch: dict[str, Any], **kw: Any) -> Any:
+        self.calls.append(("update_task", task_id))
+        return {"ok": True, "id": task_id}
+
+    def create_task(self, body: dict[str, Any], **kw: Any) -> Any:
+        self.calls.append(("create_task", body))
+        return {"task": {"id": "t_new"}}
+
+    def update_orchestration(self, body: dict[str, Any]) -> Any:
+        self.calls.append(("update_orchestration", body))
+        return {}
 
 
 def _fake_request(
@@ -53,6 +83,7 @@ def _fake_request(
     persona_root: Path | None = None,
     queue: ApprovalQueue | None = None,
     platform_http: Any = None,
+    store: _RecordingStore | None = None,
 ) -> Any:
     """A Request stand-in carrying exactly what ``_dispatch_tool`` reads."""
     state = SimpleNamespace(
@@ -62,6 +93,8 @@ def _fake_request(
         self_api_base_url="http://testserver",
         brain_persona_root=persona_root or Path("/nonexistent-personas-root"),
         platform_http=platform_http,
+        board_store=store if store is not None else _RecordingStore(),
+        hermes_kanban=None,
     )
     return SimpleNamespace(app=SimpleNamespace(state=state), headers={})
 
@@ -83,10 +116,10 @@ def test_schema_default_documented_and_enforceable() -> None:
 
 @pytest.mark.asyncio
 async def test_read_only_allows_board_read() -> None:
-    client = _RecordingClient()
-    request = _fake_request(read_only=True)
-    result = await bc._dispatch_tool(request, client, "get_board", {}, board=None)
-    assert client.calls == [("GET", "/board")]
+    store = _RecordingStore()
+    request = _fake_request(read_only=True, store=store)
+    result = await bc._dispatch_tool(request, "get_board", {}, board=None)
+    assert store.calls == [("get_board", None)]
     assert _READ_ONLY_MARKER not in str(result)
 
 
@@ -114,14 +147,14 @@ def test_read_only_allows_admin_autonomous_read() -> None:
     ],
 )
 async def test_read_only_refuses_every_mutation(name: str, args: dict[str, Any]) -> None:
-    client = _RecordingClient()
-    request = _fake_request(read_only=True)
-    result = await bc._dispatch_tool(request, client, name, args, board=None)
+    store = _RecordingStore()
+    request = _fake_request(read_only=True, store=store)
+    result = await bc._dispatch_tool(request, name, args, board=None)
     assert _READ_ONLY_MARKER in result["error"]
     assert _READ_ONLY_CONFIG_HINT in result["error"]
     assert repr(name) in result["error"]
-    # Nothing reached the board backend.
-    assert client.calls == []
+    # Nothing reached the board store.
+    assert store.calls == []
 
 
 @pytest.mark.asyncio
@@ -130,7 +163,7 @@ async def test_read_only_refuses_gated_before_enqueue() -> None:
     approval queue stays empty, proving read-only wins over the gate."""
     queue = ApprovalQueue()
     request = _fake_request(read_only=True, queue=queue)
-    result = await bc._dispatch_tool(request, None, "model_delete", {"model_id": "m"}, board=None)
+    result = await bc._dispatch_tool(request, "model_delete", {"model_id": "m"}, board=None)
     assert _READ_ONLY_MARKER in result["error"]
     assert queue.list_pending() == []
 
@@ -148,7 +181,7 @@ async def test_read_only_overrides_persona_auto_approve(tmp_path: Path) -> None:
     )
     save_persona(persona, root=tmp_path)
     request = _fake_request(read_only=True, persona_root=tmp_path, queue=ApprovalQueue())
-    result = await bc._dispatch_tool(request, None, "model_pull", {"model_id": "m"}, board=None)
+    result = await bc._dispatch_tool(request, "model_pull", {"model_id": "m"}, board=None)
     assert _READ_ONLY_MARKER in result["error"]
 
 
@@ -205,10 +238,10 @@ def test_is_read_tool_fails_closed_on_unknown() -> None:
 
 @pytest.mark.asyncio
 async def test_read_only_false_allows_board_mutation() -> None:
-    client = _RecordingClient()
-    request = _fake_request(read_only=False)
+    store = _RecordingStore()
+    request = _fake_request(read_only=False, store=store)
     result = await bc._dispatch_tool(
-        request, client, "move_task", {"task_id": "t1", "status": "done"}, board=None
+        request, "move_task", {"task_id": "t1", "status": "done"}, board=None
     )
     assert "error" not in result or _READ_ONLY_MARKER not in str(result)
-    assert ("PATCH", "/tasks/t1") in client.calls
+    assert ("update_task", "t1") in store.calls
