@@ -74,8 +74,11 @@ def slot_lifecycle_timeout_s(*, loads: int = 1, unloads: int = 1, slots: int = 1
     """
     per_slot = loads * (HEALTH_TIMEOUT_S + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S)
     per_slot += unloads * TERMINATE_TIMEOUT_S
-    # The lock allowance is per slot, not per request: a fan-out sweep takes
-    # each slot's lock separately, so every target can independently queue
-    # behind something already converging that slot.
-    total = (per_slot + LOCK_WAIT_ALLOWANCE_S) * max(int(slots), 1)
+    # The lock allowance is charged per lock-acquiring phase, per slot. A
+    # compound verb does NOT hold one lock: ``SlotManager.restart`` releases
+    # after ``unload`` and reacquires inside ``load``, so another queued op can
+    # win the gap and be waited on twice. A fan-out sweep likewise takes each
+    # slot's lock separately.
+    lock_waits = max(loads + unloads, 1) * LOCK_WAIT_ALLOWANCE_S
+    total = (per_slot + lock_waits) * max(int(slots), 1)
     return round(total * OVERHEAD_FACTOR, 1)

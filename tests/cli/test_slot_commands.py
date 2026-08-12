@@ -168,3 +168,23 @@ def test_sweep_budget_scales_the_lock_wait_per_slot() -> None:
     one = slot_lifecycle_timeout_s(loads=1, unloads=1, slots=1)
     three = slot_lifecycle_timeout_s(loads=1, unloads=1, slots=3)
     assert three >= 3 * one
+
+
+def test_restart_budget_charges_both_lock_acquisitions() -> None:
+    """restart is unload-then-load and takes the slot lock TWICE (#1832).
+
+    ``SlotManager.restart`` releases the lock after ``unload`` and reacquires
+    it inside ``load``, so another queued lifecycle op can win the gap and be
+    waited on a second time. Charging one lock allowance for the compound verb
+    under-budgets exactly the contended case the widening exists for.
+    """
+    from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
+
+    from hal0.providers.container import _HEALTH_TIMEOUT_S  # isort: skip
+    from hal0.slots.manager import SlotManager  # isort: skip
+
+    terminate = float(SlotManager._terminate_timeout_s)
+    load_phase = float(_HEALTH_TIMEOUT_S) + _MIN_EVICTION_UNLOADS * terminate
+    # Two lock waits (each capped by a full load) plus the verb's own work.
+    floor = 2 * load_phase + terminate + load_phase
+    assert slot_lifecycle_timeout_s(loads=1, unloads=1) >= floor
