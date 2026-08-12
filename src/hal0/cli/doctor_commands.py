@@ -1704,22 +1704,60 @@ def doctor_migrations(
 # check 2 (image-present) is advisory.
 
 
+#: Slot types where a MISSING profile is a proven silent failure, and the
+#: profile that repairs one (#1830). Both are device-agnostic llama-server
+#: seeds, so the repair command is the same on every box. ``tts`` /
+#: ``transcription`` / ``image`` are deliberately absent: their providers carry
+#: their own profile-less defaults, so an empty profile there is not (yet) a
+#: demonstrated 501.
+_PROFILELESS_CAPABILITY_REPAIR: dict[str, str] = {
+    "embedding": "embedding",
+    "reranking": "reranking",
+}
+
+
 def check_slot_profile_refs(
     slot_profiles: list[tuple[str, str | None]],
     valid_names: set[str],
+    slot_types: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
     """Flag slots whose ``profile = "..."`` names a profile not in the catalog.
 
     ``resolve_slot_profile`` raises ``KeyError`` for a missing name only when the
     slot starts — so a renamed/deleted profile is a latent slot-start failure.
-    A slot with ``profile = None`` (base-image resolution) is legal and skipped.
     Returns one row per slot: ``ok`` when the reference resolves, ``drift`` when
     it dangles.
+
+    A profile-less slot is legal for ``llm`` (base-image resolution) and skipped.
+    For a CAPABILITY slot it is drift (#1830): the profile carries the mode flag
+    (``--embedding`` / ``--reranking``) or selects the engine, so without one the
+    slot loads to ``state=ready`` and returns 501 from its own endpoint —
+    silent, and nothing else in hal0 warns about it. New slots infer the profile
+    at create time, but no seed loop back-fills an existing TOML, so an upgraded
+    box keeps whatever profile-less slots its operator created historically.
+    ``slot_types`` maps slot name → slot type; callers that cannot supply it get
+    the old skip-everything-profile-less behaviour.
     """
+    types = slot_types or {}
     rows: list[dict[str, str]] = []
     for slot, profile in slot_profiles:
         if not profile:
-            continue  # base-image slot — no profile to resolve
+            implied = _PROFILELESS_CAPABILITY_REPAIR.get(str(types.get(slot) or ""))
+            if implied is None:
+                continue  # llm / unknown type — no profile to resolve
+            rows.append(
+                {
+                    "label": slot,
+                    "status": "drift",
+                    "detail": (
+                        f"{types[slot]} slot with NO profile — it will load "
+                        f"'ready' and answer 501 on its own endpoint (the profile "
+                        f"carries the mode flag). Repair: hal0 slot edit {slot} "
+                        f"--profile {implied} && hal0 slot restart {slot}."
+                    ),
+                },
+            )
+            continue
         if profile in valid_names:
             rows.append(
                 {"label": slot, "status": "ok", "detail": f"→ {profile}"},
@@ -1937,6 +1975,7 @@ def doctor_profiles(
     # always cfg.name — the real display name a bilingual TOML embeds
     # regardless of which stem it lives under.
     slot_profiles: list[tuple[str, str | None]] = []
+    slot_types: dict[str, str] = {}
     for slot_name in list_slots():
         try:
             cfg = load_slot_config(slot_name)
@@ -1946,8 +1985,10 @@ def doctor_profiles(
             )
             continue
         slot_profiles.append((cfg.name, cfg.profile))
+        # Type feeds the profile-less capability check (#1830).
+        slot_types[cfg.name] = str(getattr(cfg, "type", "") or "")
 
-    ref_rows = check_slot_profile_refs(slot_profiles, valid_names)
+    ref_rows = check_slot_profile_refs(slot_profiles, valid_names, slot_types)
     img_rows = check_profile_images_present(profiles, _local_image_repos())
 
     broken = [r for r in ref_rows if r["status"] == "drift"]

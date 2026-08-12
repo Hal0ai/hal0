@@ -59,6 +59,32 @@ def test_refs_skip_base_image_slots() -> None:
     assert check_slot_profile_refs([("primary", None), ("x", "")], {"rocm"}) == []
 
 
+def test_refs_flag_a_profileless_capability_slot() -> None:
+    """#1830: a profile-less embedding/reranking slot is a silent 501.
+
+    Nothing warned about this shape. The slot loads to ``state=ready`` and
+    returns HTTP 501 from the one endpoint it exists to serve, because the
+    profile is what carries llama-server's ``--embedding``/``--reranking``.
+    New slots infer it at create time; an upgraded box carries whatever
+    profile-less slots its operator created historically, and no seed loop
+    back-fills an existing TOML — so doctor has to name it.
+    """
+    rows = check_slot_profile_refs(
+        [("embed", None), ("rerank", "")],
+        {"embedding", "reranking"},
+        slot_types={"embed": "embedding", "rerank": "reranking"},
+    )
+    assert [r["status"] for r in rows] == ["drift", "drift"]
+    assert "501" in rows[0]["detail"]
+    assert "hal0 slot edit embed --profile embedding" in rows[0]["detail"]
+    assert "hal0 slot edit rerank --profile reranking" in rows[1]["detail"]
+
+
+def test_refs_still_skip_a_profileless_llm_slot() -> None:
+    """An llm slot has no mode flag at stake — profile-less is legal there."""
+    assert check_slot_profile_refs([("agent", None)], {"chat"}, slot_types={"agent": "llm"}) == []
+
+
 # ── check_profile_images_present ──────────────────────────────────────────────
 
 

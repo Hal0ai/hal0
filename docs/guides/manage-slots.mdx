@@ -81,6 +81,18 @@ hal0 slot create embed \
 
 6. **`--ctx-size`** — context window in tokens (default `4096`).
 
+7. **`--profile`** — the runtime profile (flag bundle + engine). Omit it
+   and hal0 infers the profile the slot's `--type` implies: `embedding` →
+   `embedding` (`--embedding`), `reranking` → `reranking`
+   (`--reranking`), `tts`/`transcription` → the engine for the chosen
+   device, `image` → `comfyui`. That inference is what makes a capability
+   slot actually serve its endpoint — an `embedding` slot with no
+   `--embedding` flag loads to `ready` and returns HTTP 501 from
+   `/v1/embeddings`. An `llm` slot infers nothing: no mode flag is at
+   stake, so its tune stays the model's (or yours). Change a slot's
+   profile later with `hal0 slot edit <name> --profile <profile>` or the
+   slot drawer.
+
 </Steps>
 
 Creating a slot writes its config and systemd drop-in but does **not**
@@ -180,11 +192,22 @@ setting one) is how you take a slot out of rotation without deleting it.
 ```sh
 hal0 slot edit agent --ctx-size 32768
 hal0 slot edit embed --hardware rocm
+hal0 slot edit rerank --profile reranking
 ```
 
 Pass any subset of `--model`, `--port`, `--ctx-size`, `--provider`,
-`--hardware`. At least one is required. Changes the container baked in
-(port, hardware grid) take effect on the next `restart`.
+`--hardware`, `--profile`. At least one is required. Changes the container
+baked in (port, hardware grid) take effect on the next `restart`.
+
+<Aside type="tip" title="Repairing a profile-less capability slot">
+Capability slots created before v1.0 could land on disk with no `profile`
+key — they load to `ready` but return HTTP 501 from their own endpoint,
+because the profile is what carries llama-server's `--embedding` /
+`--reranking` mode flag. Check with
+`grep profile /etc/hal0/slots/<name>.toml`; repair with
+`hal0 slot edit <name> --profile embedding` (or `reranking`) followed by
+`hal0 slot restart <name>`. Newly created slots infer it automatically.
+</Aside>
 
 ## Dashboard: the inline model-edit pencil
 
