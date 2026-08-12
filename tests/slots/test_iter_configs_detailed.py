@@ -51,6 +51,32 @@ async def test_detailed_reports_a_slot_whose_toml_does_not_parse(
 
 
 @pytest.mark.asyncio
+async def test_detailed_reports_an_id_keyed_toml_dropped_before_the_parse(
+    tmp_hal0_home: str,
+) -> None:
+    """An id-keyed ``143.toml`` whose name can't be recovered is dropped by
+    the bilingual enumerator itself — it never reaches the parse loop.
+
+    That omission is invisible to a caller unless it's reported too:
+    ``skipped`` would come back empty, the read would look COMPLETE, and
+    the composite catalogue would be replaced without that slot's model.
+    """
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    _write(
+        root,
+        "healthy",
+        'name = "healthy"\nport = 8191\nprovider = "llama-server"\n[model]\ndefault = "m-a"\n',
+    )
+    _write(root, "143", "port = = 9000\nname = =\n")
+
+    sm = SlotManager()
+    cfgs, skipped = await sm.iter_configs_detailed()
+
+    assert "healthy" in {c.get("name") for c in cfgs}
+    assert "143" in skipped, f"pre-enumeration drop not reported: {skipped!r}"
+
+
+@pytest.mark.asyncio
 async def test_detailed_reports_nothing_skipped_for_a_clean_catalogue(
     tmp_hal0_home: str,
 ) -> None:

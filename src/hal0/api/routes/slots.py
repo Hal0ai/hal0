@@ -1082,6 +1082,28 @@ async def _safe_config(sm: Any, name: str) -> dict[str, Any] | None:
         return None
 
 
+async def _refresh_composite_catalogue(
+    request: Request, before: dict[str, Any] | None = None
+) -> None:
+    """Re-derive ``model_cache["hal0"]`` after a catalogue-changing write.
+
+    #1837: deleting a slot, or rebinding its ``model.default``, changes
+    which model ids ``/v1/models`` (and the dashboard's synthetic ``hal0``
+    tile) should advertise — but emits no ``slot.state`` ``ready`` event,
+    which is the only thing the runtime re-prime listens to. So the old id
+    stayed advertised, hard-404ing on dispatch, until an unrelated slot
+    went ready or hal0-api restarted.
+
+    ``before`` is the pre-write config: its model id is passed as a known
+    eviction so the id disappears even if the fresh slot-config read comes
+    back degraded (one unrelated malformed TOML must not keep it alive).
+    """
+    from hal0.api import _slot_model_id, hal0_refresh_composite_models
+
+    stale = _slot_model_id(before or {})
+    await hal0_refresh_composite_models(request.app, evict=[stale] if stale else [])
+
+
 @router.delete("/{name}")
 @_invalidates_snapshot
 async def delete_slot(name: str, request: Request, force: bool = False) -> dict[str, object]:
@@ -1092,9 +1114,10 @@ async def delete_slot(name: str, request: Request, force: bool = False) -> dict[
     surfaces as 4xx. Pass ``?force=true`` to delete a seeded slot anyway (an
     install/update reconcile may re-seed it later).
     """
-    from hal0.api import hal0_refresh_composite_models
-
     sm = _get_slot_manager(request)
+    # Snapshot before the delete so the composite refresh below knows which
+    # id just went away even if the post-delete read comes back degraded.
+    before = await _safe_config(sm, name)
     async with record_action(request, category="slot", action="slot.delete", target=name):
         await sm.delete(name, force=force)
     # #1837: deleting a slot unloads it (ready -> offline) and emits no
@@ -1102,7 +1125,7 @@ async def delete_slot(name: str, request: Request, force: bool = False) -> dict[
     # slot-ready never fires — the dead slot's model id kept being
     # advertised by /v1/models (hard-404ing on dispatch) until an
     # unrelated slot went ready or hal0-api restarted. Evict here.
-    await hal0_refresh_composite_models(request.app)
+    await _refresh_composite_catalogue(request, before)
     return {"name": name, "deleted": True, "forced": force}
 
 
@@ -1155,8 +1178,6 @@ async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
 @_invalidates_snapshot
 async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     """Update a slot's config. Body: partial SlotConfig (shallow merge)."""
-    from hal0.api import hal0_refresh_composite_models
-
     sm = _get_slot_manager(request)
     try:
         body = await request.json()
@@ -1207,7 +1228,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     # type), which changes the composite catalogue without producing a
     # ``ready`` event. Re-derive it now rather than advertising the old id
     # until some unrelated slot happens to go ready.
-    await hal0_refresh_composite_models(request.app)
+    await _refresh_composite_catalogue(request, before)
     # NOTE (#1369): this route is a PURE config write — no lifecycle side
     # effect. It used to unload a running slot on an ``enabled: false`` body
     # (so the faded card matched reality); with the field gone, config edits
@@ -1267,6 +1288,9 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
     ) as _rec:
         snap = await sm.update_config(name, {"model": body})
         _rec.after = {"model": body}
+    # ``default`` is a ModelConfig field, so this route can rebind the slot's
+    # model id just like PUT /config — same #1837 eviction applies.
+    await _refresh_composite_catalogue(request, before)
     return _slot_to_dict(snap, request)
 
 

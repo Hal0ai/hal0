@@ -686,8 +686,16 @@ class SlotManager:
             return str(name)
         return None
 
-    def _iter_configured_slots(self) -> list[tuple[int | None, str, Path]]:
+    def _iter_configured_slots(
+        self, *, dropped: list[str] | None = None
+    ) -> list[tuple[int | None, str, Path]]:
         """Enumerate configured slots as ``(slot_id | None, name, toml_path)``.
+
+        Pass ``dropped`` to collect the stems of files this enumeration
+        threw away before the caller ever saw them (an id-keyed TOML whose
+        name can't be recovered). Callers that REPLACE derived state need
+        that: an omission here is indistinguishable from a deletion, and
+        :meth:`iter_configs_detailed` folds it into its skip report.
 
         THE single bilingual chokepoint that replaced the three glob-stem-as-
         name sites (``list_slots`` / ``_all_configured_slot_names`` /
@@ -714,6 +722,8 @@ class SlotManager:
                 name = self._slot_name_from_id_toml(p, sid)
                 if name is None:
                     log.warning("slot.id_toml_no_name", extra={"path": str(p), "id": sid})
+                    if dropped is not None:
+                        dropped.append(stem)
                     continue
                 assert not name.isdigit(), f"enumerator leaked a digit name for {p}"
                 out.append((sid, name, p))
@@ -2198,13 +2208,20 @@ class SlotManager:
         read, or one unparseable TOML silently un-advertises a healthy
         slot's model until the next refresh.
 
+        Both omission points are reported: a config that fails to parse
+        here, AND a file the bilingual enumerator itself dropped (an
+        id-keyed ``143.toml`` whose name can't be recovered never reaches
+        this loop at all).
+
         Returns:
-            ``(configs, skipped_names)`` — the config dicts in stable
-            order, and the names of the slots that failed to parse.
+            ``(configs, skipped)`` — the config dicts in stable order, and
+            the names (or bare file stems, for a pre-enumeration drop) of
+            the slots this read did not see.
         """
         out: list[dict[str, Any]] = []
         skipped: list[str] = []
-        for name in self._all_configured_slot_names():
+        entries = self._iter_configured_slots(dropped=skipped)
+        for _sid, name, _path in entries:
             try:
                 cfg = await self._load_slot_config(name)
             except SlotConfigError as exc:

@@ -11,7 +11,7 @@ import contextlib
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -653,6 +653,8 @@ async def _prime_hal0_composite_cache(
     upstreams: UpstreamRegistry,
     slot_manager: SlotManager,
     model_cache: dict[str, list[str]],
+    *,
+    evict: Iterable[str] = (),
 ) -> None:
     """Warm the ``model_cache["hal0"]`` bucket via a direct slot-config read.
 
@@ -682,6 +684,12 @@ async def _prime_hal0_composite_cache(
     healthy slot's model permanently. Deletion still evicts — a deleted
     slot is simply absent from a complete enumeration.
 
+    ``evict`` is for callers that KNOW an id just went away (the delete /
+    config-rebind routes). Those ids are dropped from the bucket even on
+    the degraded path, unless the partial read shows another slot still
+    binding them — otherwise one unrelated malformed slot TOML would keep
+    a genuinely deleted model id advertised.
+
     Skipped if an explicit ``upstreams.toml`` entry already claims the
     name ``hal0`` — operator overrides win, and their entry's model cache
     is populated the same way as any other remote upstream (dispatch
@@ -698,11 +706,37 @@ async def _prime_hal0_composite_cache(
             reason="degraded_enumeration",
             kept=len(model_cache.get("hal0", []) or []),
         )
+        _evict_from_composite_bucket(model_cache, evict, still_bound=set(models))
         return
     model_cache["hal0"] = list(models)
 
 
-async def hal0_refresh_composite_models(app: Any) -> None:
+def _evict_from_composite_bucket(
+    model_cache: dict[str, list[str]],
+    evict: Iterable[str],
+    *,
+    still_bound: set[str],
+) -> None:
+    """Drop caller-KNOWN-dead ids from the bucket without a full replace.
+
+    Only used on the degraded path: the enumeration was partial, so the
+    bucket has to be kept, but a caller that just deleted a slot (or
+    rebound its model) knows for certain that id is gone and shouldn't
+    have to wait for a healthy read. ``still_bound`` is the partial read's
+    own catalogue — if the id is in there, another slot still serves it
+    and it must survive.
+    """
+    doomed = {mid for mid in evict if mid and mid not in still_bound}
+    if not doomed:
+        return
+    bucket = model_cache.get("hal0")
+    if not bucket:
+        return
+    model_cache["hal0"] = [mid for mid in bucket if mid not in doomed]
+    log.info("slots.hal0_composite_partial_evict", evicted=sorted(doomed))
+
+
+async def hal0_refresh_composite_models(app: Any, *, evict: Iterable[str] = ()) -> None:
     """Re-derive ``model_cache["hal0"]`` right now, from live slot config.
 
     Slot mutations that change the composite catalogue — DELETE
@@ -713,6 +747,12 @@ async def hal0_refresh_composite_models(app: Any) -> None:
     advertised by ``/v1/models`` (and the dashboard's synthetic ``hal0``
     tile) until some UNRELATED slot happened to go ready, or ``hal0-api``
     restarted — #1837, reproduced on ct152.
+
+    ``evict`` carries the ids the caller KNOWS it just removed (a deleted
+    slot's model id, the pre-write id of a rebind). They're dropped even
+    when the fresh read comes back degraded — see
+    :func:`_prime_hal0_composite_cache` — so one unrelated malformed slot
+    TOML can't keep a deleted id advertised.
 
     Best-effort and never raises: the catalogue is a discovery surface,
     and failing a successful delete because the cache refresh hiccupped
@@ -726,7 +766,7 @@ async def hal0_refresh_composite_models(app: Any) -> None:
         return
     try:
         _hal0_model_cache_clear()
-        await _prime_hal0_composite_cache(upstreams, slot_manager, model_cache)
+        await _prime_hal0_composite_cache(upstreams, slot_manager, model_cache, evict=evict)
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("model_cache.hal0_composite_refresh_failed", error=str(exc))
 

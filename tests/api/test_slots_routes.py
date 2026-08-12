@@ -681,6 +681,49 @@ def test_config_write_rebinding_the_model_default_evicts_the_old_id(
     assert "qwen3-8b-q4_k_m" in bucket
 
 
+def test_patch_defaults_rebinding_the_model_default_evicts_the_old_id(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """PATCH /defaults writes through ``update_config(name, {"model": …})``
+    and ``default`` is a ModelConfig field, so it can rebind the model id
+    exactly like PUT /config — and must evict the old id the same way."""
+    app, client = isolated_app_client
+    assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+    r = client.patch("/api/slots/chat/defaults", json={"default": "qwen3-8b-q4_k_m"})
+    assert r.status_code == 200, r.text
+
+    bucket = app.state.upstream_models.get("hal0", [])
+    assert "qwen3-4b-q4_k_m" not in bucket
+    assert "qwen3-8b-q4_k_m" in bucket
+
+
+def test_delete_evicts_even_when_an_unrelated_slot_toml_is_malformed(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """A degraded enumeration keeps the bucket — but not the id the caller
+    just deleted.
+
+    The partial-read guard must not resurrect the #1837 ghost: with one
+    unrelated malformed slot TOML on disk, the post-delete read comes back
+    degraded, so the bucket is preserved wholesale — yet the deleted
+    slot's model id is KNOWN dead and has to go.
+    """
+    app, client = isolated_app_client
+    assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+    (slot_root / "wrecked.toml").write_text("name = = broken\n[model\n", encoding="utf-8")
+
+    r = client.delete("/api/slots/chat")
+    assert r.status_code == 200, r.text
+
+    assert "qwen3-4b-q4_k_m" not in app.state.upstream_models.get("hal0", [])
+
+
 # ── §21.10 operator pin: route guards + payload exposure (#1367) ────────────
 
 

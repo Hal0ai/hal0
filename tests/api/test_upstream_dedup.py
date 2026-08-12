@@ -420,6 +420,53 @@ async def test_partial_enumeration_is_not_cached_under_the_ttl() -> None:
 
 
 @pytest.mark.asyncio
+async def test_degraded_read_still_evicts_an_id_the_caller_knows_is_dead() -> None:
+    """The delete path passes the id it just removed. Keeping the whole
+    bucket on a degraded read must not keep THAT id — otherwise one
+    unrelated malformed slot TOML resurrects the #1837 ghost."""
+    registry = UpstreamRegistry()
+    model_cache: dict[str, list[str]] = {}
+
+    await _prime_hal0_composite_cache(
+        registry, _FakeSlotManager(_two_named_chat_slots()), model_cache
+    )
+    assert model_cache["hal0"] == ["m-a", "m-b"]
+
+    _hal0_model_cache_clear()
+    # slot-b was deleted; slot-c's TOML happens to be unparseable, so the
+    # read is degraded and slot-a is all that comes back.
+    degraded = _PartialSlotManager(
+        [{"name": "slot-a", "type": "llm", "model_default": "m-a"}],
+        skipped=["slot-c"],
+    )
+    await _prime_hal0_composite_cache(registry, degraded, model_cache, evict=["m-b"])
+    assert model_cache["hal0"] == ["m-a"]
+
+
+@pytest.mark.asyncio
+async def test_degraded_evict_spares_an_id_another_slot_still_binds() -> None:
+    """Two slots can share a model id. Deleting one must not un-advertise
+    the id while the other still serves it."""
+    registry = UpstreamRegistry()
+    model_cache: dict[str, list[str]] = {}
+    shared = [
+        {"name": "slot-a", "type": "llm", "model_default": "m-shared"},
+        {"name": "slot-b", "type": "llm", "model_default": "m-shared"},
+    ]
+
+    await _prime_hal0_composite_cache(registry, _FakeSlotManager(shared), model_cache)
+    assert model_cache["hal0"] == ["m-shared"]
+
+    _hal0_model_cache_clear()
+    degraded = _PartialSlotManager(
+        [{"name": "slot-a", "type": "llm", "model_default": "m-shared"}],
+        skipped=["slot-c"],
+    )
+    await _prime_hal0_composite_cache(registry, degraded, model_cache, evict=["m-shared"])
+    assert model_cache["hal0"] == ["m-shared"]
+
+
+@pytest.mark.asyncio
 async def test_a_complete_enumeration_still_evicts_a_deleted_slot() -> None:
     """The degraded guard must not resurrect the #1837 merge-forward: a
     COMPLETE read that no longer lists ``slot-b`` still evicts ``m-b``."""
