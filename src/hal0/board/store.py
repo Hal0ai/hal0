@@ -1048,10 +1048,34 @@ def _coerce_card_list(raw: Any) -> list[dict[str, Any]]:
     return []
 
 
+async def resolve_store(app: Any) -> BoardStore:
+    """Return THE per-process board store, building + initialising it once.
+
+    The single entry point every board consumer goes through — the
+    ``/api/board/*`` routes (:mod:`hal0.api.routes.board`) AND the brain
+    steward's board tools (:mod:`hal0.brain.chat`). Both must answer from the
+    SAME store; resolving through one function is what makes that structural
+    rather than a convention two call sites can drift apart on (#1829).
+
+    The store is cached on ``app.state.board_store``; the first access runs the
+    idempotent first-boot import against the OPTIONAL Hermes kanban client
+    (``app.state.hermes_kanban``), so a fresh box imports a live Hermes board
+    when one is present and seeds a clean empty board otherwise.
+    """
+    store = getattr(app.state, "board_store", None)
+    if store is None:
+        store = BoardStore()
+        app.state.board_store = store
+    if not store.initialized:
+        await store.ensure_initialized(getattr(app.state, "hermes_kanban", None))
+    return store
+
+
 __all__ = [
     "ARCHIVED_STATUS",
     "DEFAULT_BOARD_SLUG",
     "VALID_STATUSES",
     "VISIBLE_STATUSES",
     "BoardStore",
+    "resolve_store",
 ]
