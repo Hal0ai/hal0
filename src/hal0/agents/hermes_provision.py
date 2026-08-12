@@ -50,7 +50,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import structlog
 
@@ -2352,17 +2352,35 @@ def _relink_managed(target: Path, link: Path) -> bool:
     return True
 
 
-def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> tuple[list[str], list[str]]:
+class SkillMirror(NamedTuple):
+    """What one ``_mirror_bundled_skills`` pass did.
+
+    ``failed`` is the subset of ``warnings`` that are real per-skill link
+    FAILURES (#1828) — a bundled skill that exists on disk and could not be
+    mirrored, so the agent comes up without it. The absent-source warning is
+    deliberately NOT in here: a dev install ships no /usr/share/hal0/skills at
+    all, and "nothing to mirror" is not a partial failure. Only ``failed``
+    drives the phase status.
+    """
+
+    linked: list[str]
+    warnings: list[str]
+    failed: list[str]
+
+
+def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> SkillMirror:
     """Symlink every immediate child of ``src_root`` into ``dst_root``.
 
-    Returns ``(linked, warnings)``. Missing src is a warning, not a
-    failure — bundled skills are optional in a dev install.
+    Missing src is a warning, not a failure — bundled skills are optional in a
+    dev install. A skill that IS present and fails to link is a failure and is
+    reported as one (see :class:`SkillMirror`).
     """
     linked: list[str] = []
     warnings: list[str] = []
+    failed: list[str] = []
     if not src_root.exists():
         warnings.append(f"hal0-bundled skills source {src_root} not present; nothing to mirror")
-        return linked, warnings
+        return SkillMirror(linked, warnings, failed)
     dst_root.mkdir(parents=True, exist_ok=True)
     for entry in sorted(src_root.iterdir()):
         link = dst_root / entry.name
@@ -2370,8 +2388,10 @@ def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> tuple[list[str], l
             if _safe_symlink(entry, link):
                 linked.append(entry.name)
         except OSError as exc:
-            warnings.append(f"symlink {entry.name}: {exc}")
-    return linked, warnings
+            msg = f"symlink {entry.name}: {exc}"
+            warnings.append(msg)
+            failed.append(msg)
+    return SkillMirror(linked, warnings, failed)
 
 
 def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
@@ -2557,13 +2577,29 @@ def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
             warnings.append(f"MCP-CLIENTS.md write to /etc/hal0: {exc}")
 
     # Mirror bundled skills last so a failure here doesn't block context files.
-    linked, skill_warnings = _mirror_bundled_skills(HAL0_BUNDLED_SKILLS, ETC_HAL0_AGENT_SKILLS)
+    mirror = _mirror_bundled_skills(HAL0_BUNDLED_SKILLS, ETC_HAL0_AGENT_SKILLS)
+    linked = mirror.linked
     details["bundled_skills_linked"] = linked
-    warnings.extend(skill_warnings)
+    warnings.extend(mirror.warnings)
     details["warnings"] = warnings
     details["changed"] = changed or bool(details["links"]) or bool(linked)
 
-    return PhaseResult(status=PhaseStatus.OK, details=details)
+    # #1828: a phase whose skill mirror failed must not report ``ok``. Each
+    # failed link means the agent comes up without that skill — the five EACCES
+    # symlinks (root-owned mirror + the §7.4 privilege drop) read as a clean
+    # install in both `hal0 agent status` and provision.json, and the only
+    # signal was a warnings list nobody reads on a green phase.
+    #
+    # This is the partial-failure precedent for provisioning phases: a step
+    # that converged but could not do part of its declared job reports WARN,
+    # which is non-fatal by construction (``InstallReport.ok`` only looks at
+    # ``fail``, and #1793 already set this shape for smoke_tests). Only real
+    # link failures are status-bearing: an absent bundled-skill source (dev
+    # install) stays a plain warning, and the render/HERMES.md warnings above
+    # keep their existing status because those paths have declared fallbacks
+    # (#244) — the skill mirror has none.
+    status = PhaseStatus.WARN if mirror.failed else PhaseStatus.OK
+    return PhaseResult(status=status, details=details)
 
 
 # ── Phase H: namespace_register ─────────────────────────────────────────────

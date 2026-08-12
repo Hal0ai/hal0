@@ -253,6 +253,28 @@ def test_flip_keeps_agents_and_secrets_root_owned(tmp_hal0_home: str) -> None:
     assert (secrets.owner, secrets.group) == ("root", "root")
 
 
+def test_agent_skills_mirror_is_service_writable(tmp_hal0_home: str) -> None:
+    """#1828: /etc/hal0/agent-skills must be writable by the service account.
+
+    install.sh births it root:root 0755 and the §7.4 privilege drop then runs
+    `hal0 agent bootstrap hermes` as hal0, so context_link's five
+    ``os.symlink`` calls all hit EACCES and the agent comes up with an empty
+    skill manifest. The row is dir-only (its contents are symlinks, which the
+    store never writes) and mirrors the /etc/hal0 config-root row: setgid 2775
+    so links the hal0 group plants inherit the shared group.
+    """
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    mirror = rows[paths.etc() / "agent-skills"]
+    assert (mirror.owner, mirror.group, mirror.mode) == ("hal0", "hal0", 0o2775)
+    # Narrow on purpose: no glob/recursion into the mirrored skill symlinks.
+    assert mirror.glob is None
+    assert mirror.recursive is False
+    # The root-era table keeps its byte-identical root:root 0755.
+    root_rows = _by_target(perms.ownership_table(service_user="root"))
+    root_mirror = root_rows[paths.etc() / "agent-skills"]
+    assert (root_mirror.owner, root_mirror.group, root_mirror.mode) == ("root", "root", 0o755)
+
+
 def test_flip_makes_state_root_service_owned(tmp_hal0_home: str) -> None:
     """/var/lib/hal0 + HERMES_HOME flip to the service user under the flip."""
     rows = _by_target(perms.ownership_table(service_user="hal0"))

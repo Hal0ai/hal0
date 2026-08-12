@@ -1723,9 +1723,67 @@ def test_relink_managed_migrates_real_file_to_symlink(tmp_path: Path) -> None:
 
 
 def test_context_link_skill_mirror_warns_when_src_missing(tmp_path: Path) -> None:
-    linked, warnings = hp._mirror_bundled_skills(tmp_path / "no-src", tmp_path / "dst")
-    assert linked == []
-    assert any("not present" in w for w in warnings)
+    mirror = hp._mirror_bundled_skills(tmp_path / "no-src", tmp_path / "dst")
+    assert mirror.linked == []
+    assert any("not present" in w for w in mirror.warnings)
+    # A dev install ships no bundled skills at all — "nothing to mirror" is not
+    # a partial failure, so it must not colour the phase status (#1828).
+    assert mirror.failed == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory write permissions")
+def test_context_link_warns_when_bundled_skill_symlinks_are_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1828: a phase that produced five EACCES symlink errors must not say ``ok``.
+
+    Reproduces the fresh-install shape exactly: the bundled-skill SOURCE exists
+    (``/usr/share/hal0/skills`` with real skill dirs) but the MIRROR dir is not
+    writable by the (privilege-dropped) user running bootstrap, so every
+    ``os.symlink`` raises EACCES. The two pre-existing context_link tests point
+    ``HAL0_BUNDLED_SKILLS`` at a nonexistent dir, so neither can ever exercise a
+    real symlink denial — which is why this shipped.
+    """
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    etc = tmp_path / "etc" / "hal0"
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
+
+    # A REAL bundled-skill source, as install.sh ships it.
+    src = tmp_path / "usr" / "share" / "hal0" / "skills"
+    for name in ("hal0-bench", "hal0-tune"):
+        (src / name).mkdir(parents=True)
+        (src / name / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+    monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", src)
+
+    # …and a mirror dir the running user cannot write (the on-box shape is
+    # root:root 0755 with bootstrap re-exec'd as hal0; 0o555 is the same denial
+    # without needing a second uid).
+    mirror = etc / "agent-skills"
+    mirror.mkdir(parents=True)
+    os.chmod(mirror, 0o555)
+
+    io = hp.InstallIO(
+        fetch_slots=lambda: [],
+        fetch_model_contexts=lambda: {},
+        http_get=lambda *_a, **_kw: 0,
+    )
+    try:
+        monkeypatch.setattr(hp, "ETC_HAL0_AGENT_SKILLS", mirror)
+        out = hp._phase_context_link(hp._StepCtx(state=state, io=io))
+    finally:
+        os.chmod(mirror, 0o755)  # let tmp_path teardown clean up
+
+    # The mirror really did fail — no links, one warning per skill.
+    assert out.details["bundled_skills_linked"] == []
+    assert not list(mirror.iterdir())
+    denied = [w for w in out.details["warnings"] if w.startswith("symlink ")]
+    assert len(denied) == 2, out.details["warnings"]
+    assert all("Permission denied" in w for w in denied), denied
+    # …and the phase says so instead of reporting a clean install.
+    assert out.status == hp.PhaseStatus.WARN
 
 
 def test_context_link_falls_back_when_soul_render_fails(
