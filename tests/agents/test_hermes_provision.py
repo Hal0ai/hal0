@@ -1955,13 +1955,21 @@ def _write_ready_chat_config(hermes_home: Path, model_name: str = "m1") -> None:
     (hermes_home / "config.yaml").write_text(f"model:\n  default: {model_name}\n")
 
 
+def _ready_io(**overrides: Any) -> hp.InstallIO:
+    """InstallIO stub whose by-id route reports every model routable —
+    the ``GET /v1/models/{id}`` seam :func:`hp._chat_model_ready` now uses
+    (#1831), replacing the old list-membership check."""
+    overrides.setdefault("fetch_model_route_ready", lambda _model_id: True)
+    return hp.InstallIO(**overrides)
+
+
 def test_smoke_tests_phase_runs_each_probe_collecting_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hh = tmp_path / "hh"
     _write_ready_chat_config(hh)
     state = hp.BootstrapState(hermes_home=str(hh))
-    io = hp.InstallIO(fetch_model_contexts=lambda: {"m1": 8192})
+    io = _ready_io()
     # All six probes return (True, "...") so we exercise the rollup
     # without depending on a real Hermes binary or HTTP listener.
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (True, "ok"))
@@ -1992,7 +2000,7 @@ def test_smoke_tests_phase_records_failures_as_warn_without_blocking(
     hh = tmp_path / "hh"
     _write_ready_chat_config(hh)
     state = hp.BootstrapState(hermes_home=str(hh))
-    io = hp.InstallIO(fetch_model_contexts=lambda: {"m1": 8192})
+    io = _ready_io()
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (False, "wrapper missing"))
     monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s, io: (True, "ok"))
     monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s, io: (False, "503"))
@@ -2010,8 +2018,10 @@ def test_smoke_tests_phase_skips_model_dependent_probes_without_chat_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No routable chat model at smoke time (e.g. install-time run, before any
-    model has ever been loaded) → chat_completions/memory_roundtrip report
-    ``skipped``, not a timeout recorded as an opaque failure (#1793)."""
+    model has ever been loaded) → chat_completions reports ``skipped``, not a
+    timeout recorded as an opaque failure (#1793). memory_roundtrip has no
+    chat dependency and is NOT gated by the chat preflight — it still runs
+    (#1831)."""
     state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))  # no config.yaml at all
     calls: list[str] = []
 
@@ -2022,17 +2032,18 @@ def test_smoke_tests_phase_skips_model_dependent_probes_without_chat_model(
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (True, "ok"))
     monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s, io: (True, "ok"))
     monkeypatch.setattr(hp, "_smoke_chat_completions", _boom)
-    monkeypatch.setattr(hp, "_smoke_memory_roundtrip", _boom)
+    monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s, io: (True, "1 item"))
     monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
     monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
     out = hp._phase_smoke_tests(hp._StepCtx(state=state))
-    assert calls == []  # gated probes never ran
+    assert calls == []  # only the still-gated chat_completions probe skipped its call
     assert out.status == hp.PhaseStatus.OK  # skips aren't failures
     assert out.details["failures"] == []
-    assert len(out.details["skipped"]) == 2
+    assert len(out.details["skipped"]) == 1
     assert out.details["results"]["chat_completions"]["skipped"] is True
     assert "no chat model loaded" in out.details["results"]["chat_completions"]["detail"]
-    assert out.details["results"]["memory_roundtrip"]["skipped"] is True
+    # memory_roundtrip ran (not skipped) despite no chat model being ready.
+    assert out.details["results"]["memory_roundtrip"] == {"passed": True, "detail": "1 item"}
 
 
 class TestChatModelReady:
@@ -2057,7 +2068,7 @@ class TestChatModelReady:
         hh = tmp_path / "hh"
         _write_ready_chat_config(hh, "m1")
         state = hp.BootstrapState(hermes_home=str(hh))
-        io = hp.InstallIO(fetch_model_contexts=lambda: {"other": 4096})
+        io = hp.InstallIO(fetch_model_route_ready=lambda _model_id: False)
         ready, reason = hp._chat_model_ready(state, io)
         assert ready is False
         assert "not loaded on the gateway" in reason
@@ -2066,7 +2077,7 @@ class TestChatModelReady:
         hh = tmp_path / "hh"
         _write_ready_chat_config(hh, "m1")
         state = hp.BootstrapState(hermes_home=str(hh))
-        io = hp.InstallIO(fetch_model_contexts=lambda: {"m1": 8192})
+        io = _ready_io()
         ready, reason = hp._chat_model_ready(state, io)
         assert ready is True
         assert reason == "ready"
@@ -2076,13 +2087,40 @@ class TestChatModelReady:
         _write_ready_chat_config(hh, "m1")
         state = hp.BootstrapState(hermes_home=str(hh))
 
-        def _boom() -> dict[str, int]:
+        def _boom(_model_id: str) -> bool:
             raise RuntimeError("gateway unreachable")
 
-        io = hp.InstallIO(fetch_model_contexts=_boom)
+        io = hp.InstallIO(fetch_model_route_ready=_boom)
         ready, reason = hp._chat_model_ready(state, io)
         assert ready is False
         assert "gateway probe failed" in reason
+
+    def test_shipped_default_hal0_agent_resolves_via_by_id_route_not_list(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1831: the real shipped anchor is ``hal0/agent``
+        (ADR-0023, live-resolve), which the LIST route (``GET /v1/models``)
+        never advertises (#1153) — checking list membership against it can
+        never succeed. The BY-ID route (``GET /v1/models/{id}``) resolves
+        virtuals via the LiveSlotResolver and returns it fine; the preflight
+        must use that route, not list membership."""
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "hal0/agent")
+        state = hp.BootstrapState(hermes_home=str(hh))
+
+        requested: list[str] = []
+
+        def _by_id_route(model_id: str) -> bool:
+            requested.append(model_id)
+            # A realistic /v1/models list payload never contains the
+            # virtual name — only per-slot aliases like "brain".
+            return model_id == "hal0/agent"  # resolves via by-id, not list
+
+        io = hp.InstallIO(fetch_model_route_ready=_by_id_route)
+        ready, reason = hp._chat_model_ready(state, io)
+        assert ready is True
+        assert reason == "ready"
+        assert requested == ["hal0/agent"]
 
 
 def test_write_run_report_surfaces_failure_and_skipped_counts(tmp_path: Path) -> None:
