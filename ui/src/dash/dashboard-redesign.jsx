@@ -25,6 +25,7 @@ import { useStatsPower } from '@/api/hooks/useStatsPower'
 import { useThroughputHistory } from '@/api/hooks/useThroughputHistory'
 import { useRequestsRollup } from '@/api/hooks/useRequestsRollup'
 import { useServices } from '@/api/hooks/useServices'
+import { servicesForWidget } from './services-widget-pure.js'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useActivityRecent } from '@/api/hooks/useActivity'
 import { useApprovalList } from '@/api/hooks/useAgents'
@@ -847,11 +848,7 @@ const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'n8n']
 
 function RDServicesCard({ swap, onGo }) {
   const svc = useServices()
-  const services = svc.data?.services ?? []
-  const ordered = [
-    ...SERVICE_ORDER.map((id) => services.find((s) => s.id === id)).filter(Boolean),
-    ...services.filter((s) => !SERVICE_ORDER.includes(s.id)),
-  ].slice(0, 4)
+  const ordered = servicesForWidget(svc, SERVICE_ORDER)
 
   return (
     <RDCard title="Services" swap={swap} className="rd-fill" flush>
