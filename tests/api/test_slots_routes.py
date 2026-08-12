@@ -724,6 +724,52 @@ def test_delete_evicts_even_when_an_unrelated_slot_toml_is_malformed(
     assert "qwen3-4b-q4_k_m" not in app.state.upstream_models.get("hal0", [])
 
 
+def test_delete_of_an_flm_slot_evicts_its_multiplex_tags_on_a_degraded_read(
+    tmp_hal0_home: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+) -> None:
+    """An FLM slot serves its multiplex tags from the same process, so
+    deleting it takes ``embed-gemma:300m`` / ``whisper-v3:turbo`` with it.
+
+    On a degraded read the bucket is preserved wholesale, so those tags
+    have to be named as known evictions alongside the slot's own model id
+    — otherwise they keep being advertised and hard-fail on dispatch.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "flmx",
+        [
+            'name = "flmx"',
+            "port = 8199",
+            'type = "llm"',
+            'device = "npu"',
+            'backend = "flm"',
+            "[npu]",
+            "embed = true",
+            "asr = true",
+            "[model]",
+            'default = "gemma3-1b"',
+        ],
+    )
+    app: FastAPI = create_app()
+    with TestClient(app) as client:
+        bucket = app.state.upstream_models.get("hal0", [])
+        assert "embed-gemma:300m" in bucket and "whisper-v3:turbo" in bucket
+
+        (slot_root / "wrecked.toml").write_text("name = = broken\n[model\n", encoding="utf-8")
+
+        r = client.delete("/api/slots/flmx")
+        assert r.status_code == 200, r.text
+
+        after = app.state.upstream_models.get("hal0", [])
+        assert "gemma3-1b" not in after
+        assert "embed-gemma:300m" not in after
+        assert "whisper-v3:turbo" not in after
+        # The unrelated healthy slot's model survives the degraded read.
+        assert "qwen3-4b-q4_k_m" in after
+
+
 # ── §21.10 operator pin: route guards + payload exposure (#1367) ────────────
 
 

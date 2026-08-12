@@ -1094,14 +1094,20 @@ async def _refresh_composite_catalogue(
     stayed advertised, hard-404ing on dispatch, until an unrelated slot
     went ready or hal0-api restarted.
 
-    ``before`` is the pre-write config: its model id is passed as a known
-    eviction so the id disappears even if the fresh slot-config read comes
-    back degraded (one unrelated malformed TOML must not keep it alive).
+    ``before`` is the pre-write config: everything it used to contribute to
+    the catalogue is passed as a known eviction so those ids disappear even
+    if the fresh slot-config read comes back degraded (one unrelated
+    malformed TOML must not keep them alive). That is the slot's own model
+    id AND any FLM multiplex tag it opted into — an FLM slot serves
+    ``embed-gemma:300m`` / ``whisper-v3:turbo`` from the same process, and
+    deleting it takes those with it. Ids another slot still binds are
+    spared by the refresh itself.
     """
-    from hal0.api import _slot_model_id, hal0_refresh_composite_models
+    from hal0.api import _flm_multiplex_tags, _slot_model_id, hal0_refresh_composite_models
 
-    stale = _slot_model_id(before or {})
-    await hal0_refresh_composite_models(request.app, evict=[stale] if stale else [])
+    cfg = before or {}
+    stale = [mid for mid in (_slot_model_id(cfg), *_flm_multiplex_tags(cfg)) if mid]
+    await hal0_refresh_composite_models(request.app, evict=stale)
 
 
 @router.delete("/{name}")
