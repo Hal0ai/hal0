@@ -686,8 +686,16 @@ class SlotManager:
             return str(name)
         return None
 
-    def _iter_configured_slots(self) -> list[tuple[int | None, str, Path]]:
+    def _iter_configured_slots(
+        self, *, dropped: list[str] | None = None
+    ) -> list[tuple[int | None, str, Path]]:
         """Enumerate configured slots as ``(slot_id | None, name, toml_path)``.
+
+        Pass ``dropped`` to collect the stems of files this enumeration
+        threw away before the caller ever saw them (an id-keyed TOML whose
+        name can't be recovered). Callers that REPLACE derived state need
+        that: an omission here is indistinguishable from a deletion, and
+        :meth:`iter_configs_detailed` folds it into its skip report.
 
         THE single bilingual chokepoint that replaced the three glob-stem-as-
         name sites (``list_slots`` / ``_all_configured_slot_names`` /
@@ -714,6 +722,8 @@ class SlotManager:
                 name = self._slot_name_from_id_toml(p, sid)
                 if name is None:
                     log.warning("slot.id_toml_no_name", extra={"path": str(p), "id": sid})
+                    if dropped is not None:
+                        dropped.append(stem)
                     continue
                 assert not name.isdigit(), f"enumerator leaked a digit name for {p}"
                 out.append((sid, name, p))
@@ -2183,8 +2193,35 @@ class SlotManager:
             least ``name`` and ``port``; the rest of the SlotConfig
             shape (``backend``, ``provider``, …) round-trips verbatim.
         """
+        cfgs, _skipped = await self.iter_configs_detailed()
+        return cfgs
+
+    async def iter_configs_detailed(self) -> tuple[list[dict[str, Any]], list[str]]:
+        """Like :meth:`iter_configs`, but also report the slots it skipped.
+
+        A slot whose TOML is momentarily unreadable or unparseable is
+        skipped with a warning and omitted from the returned list — so a
+        bare ``iter_configs()`` result is indistinguishable from "that
+        slot no longer exists". Callers that REPLACE derived state from
+        this enumeration (the ``/v1/models`` composite catalogue, #1837)
+        must be able to tell a genuinely shorter catalogue from a partial
+        read, or one unparseable TOML silently un-advertises a healthy
+        slot's model until the next refresh.
+
+        Both omission points are reported: a config that fails to parse
+        here, AND a file the bilingual enumerator itself dropped (an
+        id-keyed ``143.toml`` whose name can't be recovered never reaches
+        this loop at all).
+
+        Returns:
+            ``(configs, skipped)`` — the config dicts in stable order, and
+            the names (or bare file stems, for a pre-enumeration drop) of
+            the slots this read did not see.
+        """
         out: list[dict[str, Any]] = []
-        for name in self._all_configured_slot_names():
+        skipped: list[str] = []
+        entries = self._iter_configured_slots(dropped=skipped)
+        for _sid, name, _path in entries:
             try:
                 cfg = await self._load_slot_config(name)
             except SlotConfigError as exc:
@@ -2192,9 +2229,10 @@ class SlotManager:
                     "slot.config_skipped",
                     extra={"slot": name, "error": str(exc)},
                 )
+                skipped.append(name)
                 continue
             out.append(cfg)
-        return out
+        return out, skipped
 
     # ── PR-10: seeded slot catalogue + routing helpers ──────────────────────
     #
