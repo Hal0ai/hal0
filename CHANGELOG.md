@@ -22,6 +22,182 @@ breaking/migrations as callouts — from the cosign-verified tarball, before
 applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
+## [1.0.0-rc.6] — 2026-08-12
+
+The rc.5 validation sweep ran the whole fleet — fresh installs, in-place
+updates, CPU-only and GPU boxes — and filed seventeen findings. rc.6 closes the
+GA blocker that stopped a fresh install from chatting at all (#1827), plus nine
+more defects that each made hal0 report something untrue: a capability slot that
+said `ready` and then 501'd, a slot command that printed a timeout error on an
+operation that had succeeded, context windows and memory figures that did not
+match reality, and model ids that stayed advertised after their slot was
+deleted.
+
+### Highlights
+
+- **A fresh install can chat again.** The installer-pulled brain model was being
+  capped to a 32,768-token context regardless of what its own slot asked for,
+  which sits below Hermes' hard 64,000-token floor — so the agent refused to
+  answer on a box that had just finished installing successfully. The brain,
+  agent and utility slots now get the 65,536-token window their shipped
+  configuration asks for (#1827).
+- **Capability slots serve their own endpoint on the first try.** A slot created
+  for embedding or reranking — from the CLI, the New-slot modal, a stack apply
+  or the capability wizard — inherits the profile its type implies when nothing
+  else supplies one, so `/v1/embeddings` and `/v1/rerank` stop returning 501
+  while the slot cheerfully reports `ready`. This also repairs the CPU-only
+  install path, where the guided installer's own embed and rerank slots were
+  affected the same way. Slots already on disk are repairable with
+  `hal0 slot edit <name> --profile <profile>`, and `hal0 doctor profiles` now
+  names them (#1830).
+- **Slot commands stop failing on success.** `hal0 slot load`, `unload`,
+  `restart` and `swap` gave up after 10 seconds against a server that budgets up
+  to 180, so any real model load printed a `ReadTimeout` and exited non-zero on
+  an operation that had actually worked. Scripts and CI that checked the exit
+  code were being told the wrong thing (#1832).
+- **Reported numbers match reality.** Slot detail returns the effective context
+  window instead of the raw hardware ceiling (#1835), `GET /v1/models` stops
+  advertising model ids whose slot has been deleted (#1837), `hal0 slot
+  capacity` books a GPU-declared slot's memory as RAM on a box with no usable
+  GPU and reads real container memory instead of silently under-reporting it by
+  roughly a third (#1839), and `hal0 model add` no longer claims high confidence
+  for a capability it guessed from the filename (#1838).
+
+### Added
+
+- `hal0 slot create --profile <profile>` and `hal0 slot edit --profile
+  <profile>` — pin a slot's runtime profile explicitly instead of relying on
+  inference, and repair a profile-less slot that already exists (#1830).
+- `hal0 doctor profiles` gains a drift row that names any embedding or reranking
+  slot running without a profile and prints the exact `hal0 slot edit` command
+  that fixes it (#1830).
+
+### Fixed
+
+- A fresh install's brain, agent and utility slots resolve to the 65,536-token
+  context window their shipped configuration asks for, instead of being capped
+  at 32,768 by a blanket dense-model limit. Below Hermes' hard 64,000-token
+  floor the agent refuses to chat, so a brand-new box that installed cleanly
+  could not hold a conversation. A slot's own configured ceiling now wins over
+  the blanket cap, and a hand-edited ceiling that is not a number degrades
+  gracefully instead of aborting the launch (#1827).
+- Embedding and reranking slots created without an explicit profile no longer
+  load `ready` and then return 501 from their own endpoint. Slot creation falls
+  back to the profile the slot's type implies whenever neither the operator nor
+  the model's stamped defaults supply one — covering every creation path (CLI,
+  dashboard, API, stack apply, capability wizard). The same defect broke the
+  guided installer's embed and rerank slots on CPU-only boxes, because the
+  profile rule required a GPU; it no longer does (#1830).
+- The installer's post-install smoke test actually exercises chat. Its preflight
+  looked for the shipped default model `hal0/agent` in the `GET /v1/models`
+  list, which never advertises virtual ids, so the `chat_completions` and
+  `memory_roundtrip` probes were skipped on every install and a genuinely broken
+  chat path went unreported. The preflight now resolves the model through the
+  by-id route that serves the request, and the memory probe — which has no chat
+  dependency — always runs (#1831).
+- `hal0 slot load`, `hal0 slot unload`, `hal0 slot restart` and `hal0 slot swap`
+  wait for the server's full lifecycle budget instead of timing out after 10
+  seconds. Any model load slower than that printed a `ReadTimeout` and exited 1
+  on an operation the server had completed successfully. `slot create` and
+  `slot rename`, which never block on a health poll, keep the short client
+  timeout (#1832).
+- `GET /api/slots/{name}` returns the effective context window in `ctx_max`
+  rather than the raw ceiling from the slot's config file. The slot list and
+  `/v1/models` were corrected in rc.5; the single-slot detail route — what the
+  dashboard slot page and `hal0 slot show` read — was still reporting a
+  potentially larger number that llama-server never launched with (#1835).
+- `GET /v1/models` stops advertising a deleted slot's model id. The cached
+  listing merged each refresh into the previous one instead of replacing it, so
+  any id ever bound to an LLM slot stayed listed for the life of the API process
+  — clients discovered it, routed to it, and got a hard 404. Deleting a slot now
+  removes its model from the listing on the next refresh (#1837).
+- `hal0 model add` and the add-from-path API tell the truth about how a model's
+  capability was determined. When a GGUF header carried no pooling type, the
+  capability was guessed from the filename but still reported as high
+  confidence — two byte-identical files could be classified differently purely
+  by name, both claiming certainty. The header is now consulted for further
+  evidence before any filename fallback, a genuine filename-only guess is
+  reported as medium confidence, and a `.gguf` file with no valid GGUF magic
+  still registers (recoverable with `hal0 model rm`) but now surfaces a warning
+  instead of a silent, confident-looking success (#1838).
+- `hal0 slot capacity` reports real memory. A slot configured for a GPU on a box
+  with no usable GPU booked its memory as VRAM that does not exist; it is now
+  booked as RAM, decided by the host's actual GPU capability rather than the
+  slot's declared device. The per-slot memory probe also falls back to the
+  slot's systemd unit when the container runtime probe is unavailable — which it
+  always was from the API process — so figures no longer under-report real usage
+  by roughly 28%. NPU slots keep their existing unified-memory accounting
+  (#1839).
+- The dashboard Overview's Services widget lists the companion services that are
+  actually running instead of always claiming there are none (#1836).
+
+### Docs
+
+- The installation guide's Requirements section now lists `curl` and
+  `ca-certificates`, with the `apt-get` command to install them. The documented
+  bootstrap one-liner pipes `curl` into `sudo bash`, so on a minimal image the
+  documented first step died with a bare `curl: command not found` (#1843).
+
+### Audience
+
+Preview-channel operators validating the 1.0 line ahead of GA, and fresh
+installs that want the current build. rc.6 supersedes rc.5 for everyone: rc.5
+cannot chat out of the box on a fresh install (#1827), and its capability slots
+501 their own endpoints unless a profile was supplied by hand (#1830). Boxes on
+the stable channel are not offered this tag.
+
+### Supported upgrades
+
+- `1.0.0-rc.5` → `1.0.0-rc.6` via `hal0 update` (preview channel). The GitHub
+  release asset URL (`https://github.com/Hal0ai/hal0/releases/download/v1.0.0-rc.6/preview.json`)
+  works end-to-end for install and update.
+- `1.0.0-rc.4` / `1.0.0-rc.3` / `1.0.0-rc.2` / `1.0.0-rc.1` → `1.0.0-rc.6`
+  directly, same mechanism.
+- `0.9.8` → `1.0.0-rc.6` in place — re-run the installer or `hal0 update` on the
+  preview channel; the R5 migration set applies (see the
+  [1.0.0 changelog section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100--2026-08-07)).
+- Older than 0.9.8: step through 0.9.8 first.
+
+### Known issues
+
+`hal0 update` does not refresh the `hal0` launcher on `PATH`, so after an
+in-place upgrade a shell that resolves `/usr/local/bin/hal0` can keep running
+the previous release — check with `hal0 --version` and re-run the installer if
+it disagrees with the installed tag (#1844). The remaining rc.5 sweep polish
+items are tracked on #1840 (CLI/API) and #1841 (dashboard). The 0.9.8 CLI's
+spurious end-of-update `ConnectError` and the first-boot `unattended-upgrades`
+dpkg race (#1584) carry forward, as does the rc.1/rc.2 venv case where the
+passive check does not offer a newer tag and `hal0 update --target <version>`
+is the recovery path (#1715). Literal memory recall still leans on a
+client-side document fallback; the durable fix needs server-side content search
+in the memory engine (#1794).
+
+### Operator migrations
+
+- **Profile-less capability slots (#1830):** a slot created under rc.5 or
+  earlier may have been written without a profile and will keep 501ing after
+  the update, because the fix applies at creation time. Run `hal0 doctor
+  profiles` — it names each affected slot — then
+  `hal0 slot edit <name> --profile embedding` (or `reranking`) followed by
+  `hal0 slot restart <name>`.
+- **Context windows widen on update (#1827):** brain, agent and utility slots
+  relaunch with a 65,536-token window instead of 32,768 and therefore reserve
+  more memory. On a tightly provisioned box, check `hal0 slot capacity` after
+  updating.
+- **Stale DNAT rules (#1819)** from rc.5, and the **deprecated `extra_args` at
+  the seam (#1759)** / **releases-URL override (#1750)** migrations from rc.4,
+  still apply to boxes coming from an older tag; see the
+  [1.0.0-rc.5 section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100-rc5--2026-08-10).
+
+### Rollback
+
+Release tarballs are immutable and cosign-signed; roll back by re-installing the
+previous tag (`v1.0.0-rc.5`) from its GitHub release. No rc.6 change writes a
+state shape rc.5 cannot read — the new `profile` key on a slot config is one
+rc.5 already understands, and every other fix is re-derived at launch or read
+time. A slot repaired with `hal0 slot edit --profile` keeps working after a
+rollback.
+
 ## [1.0.0-rc.5] — 2026-08-10
 
 The validation candidate: every defect the rc.4 fresh-install sweep turned up
