@@ -191,6 +191,16 @@ async def _fetch_hal0_composite_models(
     place without an operator having to wire a matching upstreams.toml
     entry per slot.
 
+    Also folds in the FLM multiplex tags (``embed-gemma:300m`` /
+    ``whisper-v3:turbo``, see :func:`_seed_multiplex_models`) for any FLM
+    slot whose config opts into them — those tags never appear in an FLM
+    slot's own ``model.default`` (they ride along on the same process) so
+    they have to be derived here, freshly, on every fetch. Doing it inside
+    this fetch (rather than as a separate merge step downstream) is what
+    lets callers safely REPLACE their cache with this return value instead
+    of merging it forward (#1837 — a merge-forward is how a deleted slot's
+    model id kept getting advertised after the slot was gone).
+
     The returned list is sorted + deduplicated and cached for
     ``ttl_seconds`` to keep the cold-start fan-out cheap while still
     picking up new slots within a handful of seconds.
@@ -231,6 +241,25 @@ async def _fetch_hal0_composite_models(
             continue
         seen.add(model_id)
         models.append(model_id)
+
+    for cfg in cfgs:
+        name = cfg.get("name", "")
+        is_flm = "flm" in (cfg.get("provider", ""), cfg.get("backend", ""))
+        if not is_flm or not name:
+            continue
+        # Container-era schema is the [npu] table (what FLMProvider builds
+        # the --asr/--embed argv from); [defaults] load_* is the pre-#733
+        # legacy shape, kept so older tomls keep seeding.
+        npu_table = cfg.get("npu") or {}
+        defaults = cfg.get("defaults") or {}
+        load_embed = npu_table.get("embed") or defaults.get("load_embed")
+        load_asr = npu_table.get("asr") or defaults.get("load_asr")
+        if load_embed and _FLM_EMBED_TAG not in seen:
+            seen.add(_FLM_EMBED_TAG)
+            models.append(_FLM_EMBED_TAG)
+        if load_asr and _FLM_ASR_TAG not in seen:
+            seen.add(_FLM_ASR_TAG)
+            models.append(_FLM_ASR_TAG)
 
     models.sort()
     _HAL0_MODEL_CACHE[_HAL0_COMPOSITE_CACHE_KEY] = (monotonic_now + ttl_seconds, list(models))
@@ -604,10 +633,17 @@ async def _prime_hal0_composite_cache(
     means the first request after startup doesn't have to pay the
     slot-iteration cost.
 
-    Merges rather than replaces: any tag already in the bucket that the
-    fresh catalogue read doesn't reproduce (e.g. FLM multiplex tags seeded
-    by :func:`_seed_multiplex_models`) is preserved, mirroring
-    ``_fetch_and_cache``'s merge behaviour for ordinary upstreams.
+    REPLACES ``model_cache["hal0"]`` wholesale on every call — it must NOT
+    merge the fresh catalogue read with whatever was there before. A slot
+    that's since been deleted (or rebound to a different model) must have
+    its old id fall out of the bucket, not accumulate forever (#1837: a
+    merge-forward left deleted slots' model ids advertised via
+    ``/v1/models`` for the life of the ``hal0-api`` process — ids that hard
+    404 on dispatch since neither a slot nor a registry entry backs them
+    anymore). FLM multiplex tags (``embed-gemma:300m`` / ``whisper-v3:turbo``)
+    are freshly re-derived on every call too — see
+    :func:`_fetch_hal0_composite_models` — so replacing here doesn't drop
+    them.
 
     Skipped if an explicit ``upstreams.toml`` entry already claims the
     name ``hal0`` — operator overrides win, and their entry's model cache
@@ -619,12 +655,7 @@ async def _prime_hal0_composite_cache(
         log.info("slots.hal0_composite_skipped", reason="explicit_upstream_registered")
         return
     models = await _fetch_hal0_composite_models(slot_manager)
-    existing = model_cache.get("hal0", [])
-    merged = list(models)
-    for tag in existing:
-        if tag not in merged:
-            merged.append(tag)
-    model_cache["hal0"] = merged
+    model_cache["hal0"] = list(models)
 
 
 # ── FLM multiplex model seeding ────────────────────────────────────────────
@@ -700,10 +731,15 @@ async def _seed_multiplex_models(
     """Add FLM multiplex tags (embed-gemma, whisper-v3:turbo) to the model
     cache for slots whose config opts into the matching multiplex.
 
-    Idempotent — appends only when missing. Runs after
-    ``_prime_hal0_composite_cache``. The multiplex tags are merged into the
-    ``hal0`` cache bucket (the direct-read composite catalogue) so the
-    dispatcher's passthrough match still picks them up.
+    Idempotent — appends only when missing. Historically ran after
+    ``_prime_hal0_composite_cache`` to backfill tags a merge-based prime
+    wouldn't otherwise produce; :func:`_fetch_hal0_composite_models` (and
+    therefore ``_prime_hal0_composite_cache``, which now REPLACES rather
+    than merges — #1837) derives the same tags itself on every call, so
+    this is a no-op belt-and-braces call on the startup path. Kept as a
+    standalone helper for direct unit coverage and for any caller that
+    populates ``model_cache["hal0"]`` some other way (e.g. an explicit
+    ``upstreams.toml`` override, where priming is skipped entirely).
     """
     try:
         cfgs = await slot_manager.iter_configs()
