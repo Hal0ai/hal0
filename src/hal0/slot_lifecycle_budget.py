@@ -40,6 +40,20 @@ TERMINATE_TIMEOUT_S = 30.0
 #: bounded only by the number of resident slots, so a client budget has to pick
 #: an allowance; three covers every fleet box we ship (chat + code + embedding
 #: resident at once) with the margin factor on top.
+#:
+#: CAVEAT — this is the one constant in this module with no server-side source.
+#: ``HEALTH_TIMEOUT_S`` and ``TERMINATE_TIMEOUT_S`` are the values the server
+#: itself imports from here, so retuning either propagates to every client and
+#: the parity test in ``tests/cli/test_slot_commands.py`` fails if someone
+#: re-declares a literal. ``preload_evict`` has no equivalent bound to import:
+#: nothing caps how many candidates ``admit`` evicts, so this number is a policy
+#: choice and a server change could invalidate it silently. The slack is
+#: currently large — ten resident slots evicting in series cost
+#: ``HEALTH_TIMEOUT_S + 10 * TERMINATE_TIMEOUT_S`` = 480s against a 621s load
+#: budget, because the per-phase lock allowance and ``OVERHEAD_FACTOR`` sit on
+#: top of the three charged here. Deriving it per call would mean a
+#: ``GET /api/slots`` before every lifecycle verb for a bound that is still an
+#: estimate; bounding it server-side is the real fix (#1869).
 EVICTION_UNLOAD_ALLOWANCE = 3
 
 #: Every lifecycle verb takes the per-slot lock (``SlotManager._lock``), so a
