@@ -113,6 +113,35 @@ async def test_no_pseudo_upstream_is_registered_in_the_routing_table() -> None:
 
 
 @pytest.mark.asyncio
+async def test_priming_evicts_a_model_id_whose_slot_was_deleted() -> None:
+    """#1837: a chat slot bound to ``ghost-model`` gets deleted. The next
+    prime (e.g. triggered by a DIFFERENT slot's ready event) must drop
+    ``ghost-model`` from ``model_cache["hal0"]`` — not merge it forward
+    forever. A merged-forward id hard-404s: it's absent from both the
+    registry and every live slot, so dispatch has nowhere to route it."""
+    registry = UpstreamRegistry()
+    slot_mgr = _FakeSlotManager(
+        [
+            {"name": "primary", "type": "llm", "model_default": "ghost-model"},
+        ]
+    )
+    model_cache: dict[str, list[str]] = {}
+
+    # First prime — the now-deleted slot is still alive and advertised.
+    await _prime_hal0_composite_cache(registry, slot_mgr, model_cache)
+    assert model_cache["hal0"] == ["ghost-model"]
+
+    # The operator deletes the "primary" slot. A later re-prime (any slot
+    # transitioning to ready re-primes the whole composite bucket) must
+    # replace the bucket, not merge the stale id forward.
+    _hal0_model_cache_clear()
+    slot_mgr._configs = []
+    await _prime_hal0_composite_cache(registry, slot_mgr, model_cache)
+
+    assert model_cache["hal0"] == []
+
+
+@pytest.mark.asyncio
 async def test_priming_is_a_noop_when_operator_defines_a_real_hal0_upstream() -> None:
     """If ``hal0`` is already registered (operator override via
     upstreams.toml) priming the direct-read cache is skipped so the
