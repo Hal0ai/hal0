@@ -131,3 +131,40 @@ def test_slot_swap_passes_lifecycle_timeout(captured: dict[str, Any]) -> None:
     assert result.exit_code == 0, result.output
     assert captured["path"] == "/api/slots/primary/swap"
     _timeout_ge_server_budget(captured["kwargs"])
+
+
+def test_slot_delete_passes_the_unload_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DELETE /api/slots/{name} unloads a running slot before removing it.
+
+    ``SlotManager.delete`` awaits ``unload`` for a live slot, so the delete
+    blocks on the state machine too and cannot ride api_delete's 10s default
+    (#1832) — the CLI would report a failed delete while the server finishes
+    stopping and removing the slot.
+    """
+    seen: dict[str, Any] = {}
+
+    def fake_delete(path: str, **kw: Any) -> dict[str, Any]:
+        seen["path"] = path
+        seen["kwargs"] = kw
+        return {}
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(slot_commands, "api_delete", fake_delete)
+    result = runner.invoke(slot_commands.app, ["delete", "primary", "--force"])
+    assert result.exit_code == 0, result.output
+    assert seen["path"] == "/api/slots/primary"
+    _timeout_ge_server_budget(seen["kwargs"], loads=0, unloads=1)
+
+
+def test_sweep_budget_scales_the_lock_wait_per_slot() -> None:
+    """A fan-out sweep takes each slot's lock separately (#1832).
+
+    ``/api/updates/restart-slots`` calls ``sm.restart`` per target, so every
+    target can independently queue behind an in-flight op on that slot —
+    charging one lock-wait for the whole request under-budgets the sweep.
+    """
+    from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
+
+    one = slot_lifecycle_timeout_s(loads=1, unloads=1, slots=1)
+    three = slot_lifecycle_timeout_s(loads=1, unloads=1, slots=3)
+    assert three >= 3 * one

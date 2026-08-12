@@ -637,7 +637,13 @@ def slot_delete(
         )
     try:
         # ``force`` also bypasses the server-side seeded-slot guard.
-        api_delete(f"/api/slots/{name}", params={"force": "true"} if force else None)
+        # SlotManager.delete unloads a running slot first, so this blocks on
+        # the state machine like the other lifecycle verbs (#1832).
+        api_delete(
+            f"/api/slots/{name}",
+            params={"force": "true"} if force else None,
+            timeout=SLOT_UNLOAD_TIMEOUT_S,
+        )
     except CliApiError as exc:
         die(str(exc))
         return

@@ -74,5 +74,8 @@ def slot_lifecycle_timeout_s(*, loads: int = 1, unloads: int = 1, slots: int = 1
     """
     per_slot = loads * (HEALTH_TIMEOUT_S + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S)
     per_slot += unloads * TERMINATE_TIMEOUT_S
-    total = per_slot * max(int(slots), 1) + LOCK_WAIT_ALLOWANCE_S
+    # The lock allowance is per slot, not per request: a fan-out sweep takes
+    # each slot's lock separately, so every target can independently queue
+    # behind something already converging that slot.
+    total = (per_slot + LOCK_WAIT_ALLOWANCE_S) * max(int(slots), 1)
     return round(total * OVERHEAD_FACTOR, 1)

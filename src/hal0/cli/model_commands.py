@@ -594,8 +594,10 @@ def model_run(
     # default the CLI died with a misleading "check compatibility" hint on a
     # load that had in fact succeeded, and control never reached the readiness
     # poll below that --timeout advertises. --timeout is the operator's whole
-    # wait budget, so it caps this POST too: `--timeout 30` must give up at
-    # ~30s, not sit in the request for minutes first.
+    # wait budget, so the deadline starts HERE, before the POST, and both
+    # phases draw on it: `--timeout 30` must give up ~30s from now, not spend
+    # 30s in the POST and then a fresh 30s in the poll.
+    deadline = time.monotonic() + max(timeout_s, 1)
     load_budget = min(slot_lifecycle_timeout_s(loads=1, unloads=0), float(max(timeout_s, 1)))
     try:
         api_post(
@@ -607,8 +609,8 @@ def model_run(
         die(f"{exc}\nCheck compatibility with: hal0 slot show {target}")
         return
 
-    # 4. Poll until ready (or failed/timeout).
-    deadline = time.monotonic() + max(timeout_s, 1)
+    # 4. Poll until ready (or failed/timeout) — on the deadline opened above,
+    # whose remaining budget the load has already been drawing down.
     state = "unknown"
     while time.monotonic() < deadline:
         try:

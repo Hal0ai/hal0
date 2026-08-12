@@ -1566,6 +1566,8 @@ _SLOT_LIFECYCLE_TIMEOUT_S: dict[str, float] = {
     "slot_unload": slot_lifecycle_timeout_s(loads=0, unloads=1),
     "slot_restart": slot_lifecycle_timeout_s(loads=1, unloads=1),
     "model_swap": slot_lifecycle_timeout_s(loads=1, unloads=1),
+    # SlotManager.delete unloads a running slot before removing it.
+    "slot_delete": slot_lifecycle_timeout_s(loads=0, unloads=1),
     # POST /api/backends/npu/{load,unload} awaits SlotManager.load/unload on
     # the dynamic NPU slot in the request handler, same budget as the rest.
     "npu_backend_load": slot_lifecycle_timeout_s(loads=1, unloads=0),

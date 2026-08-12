@@ -1403,6 +1403,23 @@ async def test_slot_lifecycle_tools_forward_with_the_lifecycle_budget(
     assert mock_transport["timeout"] is not None, "npu_backend_load never reached REST"
     assert mock_transport["timeout"] >= floor
 
+    # slot_delete unloads a running slot before removing it, so it blocks too.
+    mock_transport["timeout"] = None
+    pending = await admin.dispatch(
+        tool="slot_delete",
+        args={"name": "scratch"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    await queue.approve(pending["approval_id"])
+    assert mock_transport["timeout"] is not None, "slot_delete never reached REST"
+    # It can queue behind an in-flight load on that slot and then terminate,
+    # so the generic 30s forward timeout — exactly the terminate bound, with
+    # nothing left for the lock wait — is not enough.
+    assert mock_transport["timeout"] >= float(_HEALTH_TIMEOUT_S) + terminate
+
     # A non-blocking read keeps the short generic default — the override is
     # scoped to the lifecycle tools, not a blanket widening.
     await admin.dispatch(
