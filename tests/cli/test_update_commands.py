@@ -156,6 +156,54 @@ def test_restart_slots_bounces_only_drifted_and_skips_apply(
     assert "/api/updates/commit" not in calls["post"]
 
 
+def test_restart_slots_scales_timeout_with_drifted_slot_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restart-slots POST must out-wait the whole server-side sweep (#1832).
+
+    ``restart_drifted_slots`` loops ``await sm.restart(name)`` over every
+    drifted slot in ONE request, and each restart is unload-then-load. At
+    ``api_post``'s generic 10s default the CLI reports failure while the sweep
+    goes on bouncing every slot unattended. The floor here is read from the
+    server modules, so a server-side retune breaks this test rather than
+    silently under-budgeting the client.
+    """
+    from hal0.providers.container import _HEALTH_TIMEOUT_S
+    from hal0.slots.manager import SlotManager
+
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    drifted = ["chat", "code", "embed"]
+    posted: dict = {}
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/slot-drift":
+            return {
+                "count": len(drifted),
+                "slots": [{"slot": name, "diffs": []} for name in drifted],
+            }
+        return {}
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        posted[path] = kwargs
+        return {"restarted": drifted, "failed": [], "count": len(drifted)}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    result = runner.invoke(app, ["update", "--restart-slots"])
+    assert result.exit_code == 0, result.output
+
+    kwargs = posted["/api/updates/restart-slots"]
+    terminate = float(SlotManager._terminate_timeout_s)
+    # Per slot: the unload (one terminate) plus the load (health poll + two
+    # sequential pre-load evictions), times every drifted slot in the sweep.
+    floor = len(drifted) * (terminate + float(_HEALTH_TIMEOUT_S) + 2 * terminate)
+    assert "timeout" in kwargs, "restart-slots POST passed no explicit timeout kwarg"
+    assert kwargs["timeout"] >= floor, (
+        f"timeout={kwargs['timeout']} is under the {floor}s worst case for "
+        f"{len(drifted)} drifted slots"
+    )
+
+
 def test_restart_slots_clean_message_when_nothing_drifted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

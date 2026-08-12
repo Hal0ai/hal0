@@ -18,6 +18,23 @@ from hal0.cli import model_commands
 runner = CliRunner()
 
 
+def _assert_clears_load_budget(kwargs: dict[str, Any]) -> None:
+    """A blocking slot-load POST must out-wait the server's own worst case.
+
+    Floor is computed from the server modules (the health poll plus the two
+    sequential pre-load evictions ``preload_evict.admit`` may run inside the
+    load path), never from the client constant under test.
+    """
+    from hal0.providers.container import _HEALTH_TIMEOUT_S
+    from hal0.slots.manager import SlotManager
+
+    floor = float(_HEALTH_TIMEOUT_S) + 2 * float(SlotManager._terminate_timeout_s)
+    assert "timeout" in kwargs, "blocking load POST passed no explicit timeout kwarg"
+    assert kwargs["timeout"] >= floor, (
+        f"timeout={kwargs['timeout']} is under the server's {floor}s load worst case"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _api_reachable(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(model_commands, "_api_unreachable", lambda _url: False)
@@ -331,10 +348,13 @@ def test_model_run_loads_and_waits_ready(monkeypatch: pytest.MonkeyPatch) -> Non
             return {"name": "chat", "status": "ready", "port": 8081}
         raise AssertionError(path)
 
-    def fake_post(path: str, *, json: Any = None, **_kw: Any) -> Any:
+    posted: dict[str, Any] = {}
+
+    def fake_post(path: str, *, json: Any = None, **kw: Any) -> Any:
         calls.append(f"POST {path}")
         assert path == "/api/slots/chat/load"
         assert json == {"model_id": "qwen3-4b"}
+        posted["kwargs"] = kw
         return {"state": "loading"}
 
     monkeypatch.setattr(model_commands, "api_get", fake_get)
@@ -342,6 +362,11 @@ def test_model_run_loads_and_waits_ready(monkeypatch: pytest.MonkeyPatch) -> Non
     result = runner.invoke(model_commands.app, ["run", "qwen3-4b"])
     assert result.exit_code == 0, result.output
     assert "POST /api/slots/chat/load" in calls
+    # /api/slots/{name}/load blocks until the slot converges — the POST must
+    # carry the lifecycle budget, not api_post's generic 10s default (#1832).
+    # Without it the command reports failure on a load that succeeded, and
+    # never reaches the readiness poll its own --timeout advertises.
+    _assert_clears_load_budget(posted["kwargs"])
     assert "Ready" in result.output
     assert "curl" in result.output  # prints a copy-paste smoke test
 
