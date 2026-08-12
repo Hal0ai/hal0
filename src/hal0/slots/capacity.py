@@ -118,6 +118,11 @@ _DEFAULT_CTX_TOKENS = _CTX_DENSE_CAP
 # without claiming false precision. The model file size dominates the total.
 _KV_MIB_PER_1K_TOKENS = 0.5
 
+# systemd renders an unset/absent numeric property as UINT64_MAX on some
+# versions. Treat anything at or above 2^63 as "not a measurement" — no real
+# cgroup on a machine that exists reports 8 EiB resident.
+_MEM_SENTINEL_FLOOR = 1 << 63
+
 
 def _kv_estimate_mb(ctx_tokens: int) -> float:
     """Best-effort KV-cache size in MiB for a given context window."""
@@ -285,6 +290,12 @@ async def _systemd_unit_mem_bytes(slot_name: str) -> int:
     Returns 0 when the unit isn't loaded, accounting is disabled
     (``MemoryCurrent=[not set]``), or ``systemctl`` itself is unavailable —
     same fail-soft contract as :func:`_runtime_inspect_mem_bytes`.
+
+    Sentinel guard: some systemd versions render an unset / no-cgroup
+    ``MemoryCurrent`` as ``18446744073709551615`` (UINT64_MAX) instead of
+    ``[not set]``. That parses cleanly, and because the caller takes
+    ``max(cgroup_mb, estimate_mb)`` it would render ~16 EiB of resident
+    memory. Anything at or above 2^63 is a sentinel, not a measurement.
     """
     unit = slot_unit_name(slot_name)
     props = await systemd_props(unit, "MemoryCurrent")
@@ -292,7 +303,54 @@ async def _systemd_unit_mem_bytes(slot_name: str) -> int:
         mem = int(props.get("MemoryCurrent", "") or 0)
     except (TypeError, ValueError):
         return 0
+    if mem >= _MEM_SENTINEL_FLOOR:
+        return 0
     return mem if mem > 0 else 0
+
+
+def _artefact_token(slot: Any) -> str:
+    """The token a slot's on-disk artefacts are actually named after.
+
+    ``hal0-slot-<token>`` (container) / ``hal0-slot@<token>.service`` (unit)
+    are named after the slot's *display name* on every install, and after the
+    durable ``slot_id`` only on a box the operator has explicitly migrated
+    with ``hal0 slot migrate-id-keying``.
+
+    ``slot.slot_id`` alone is NOT that signal (#1839 follow-up):
+    :meth:`hal0.slots.manager.SlotManager.fold_identity` runs on every boot
+    and stamps an identity row — hence a ``slot_id`` — on every slot WITHOUT
+    renaming a single artefact or unit, and ``_stamp_id`` then copies it onto
+    every ``Slot`` returned by ``list()``/``status()``. Keying the cgroup
+    probe off ``slot_id`` alone therefore probes ``hal0-slot-1`` /
+    ``hal0-slot@1.service`` on a standard install where the real artefacts are
+    ``hal0-slot-brain`` / ``hal0-slot@brain.service``: both probes miss, the
+    cgroup read collapses to 0, and the resident figure silently degrades to
+    the coarse file-size estimate.
+
+    The authoritative predicate is the physical marker used by
+    :meth:`SlotManager._slot_id_if_id_keyed` — an ``<id>.toml`` in the slot
+    config dir, which only the migration writes. Mirrored here (as a plain
+    filesystem check) because capacity has no manager handle. Any error
+    reading the config dir degrades to the name, which is the pre-migration
+    shape and the overwhelmingly common one.
+    """
+    name = str(getattr(slot, "name", "") or "")
+    raw_id = getattr(slot, "slot_id", None)
+    try:
+        slot_id = int(raw_id) if raw_id is not None else 0
+    except (TypeError, ValueError):
+        return name
+    # Slot ids are SQLite AUTOINCREMENT (start at 1); <1 is a surrogate.
+    if slot_id < 1:
+        return name
+    try:
+        from hal0.config import paths
+
+        if (paths.slots_config_dir() / f"{slot_id}.toml").exists():
+            return str(slot_id)
+    except Exception:  # pragma: no cover - defensive
+        return name
+    return name
 
 
 def _host_has_capable_gpu() -> bool:
@@ -443,13 +501,13 @@ async def build_per_slot(
         #   • cgroup accurately includes weights → cgroup ≥ estimate → wins.
         #   • GTT not charged (cgroup too low)   → estimate wins → no under-report.
         #
-        # Artefact token, not display name (#1839 review): on an id-keyed box
-        # (post ``hal0 slot migrate-id-keying``) the container/unit is named
-        # off the durable ``slot_id``, not the mutable display ``name`` — the
-        # two diverge the moment a slot is renamed. Mirrors
-        # :func:`hal0.slots.naming.slot_instance_token`'s id-over-name
-        # preference without needing a full config mapping.
-        artefact_token = str(getattr(s, "slot_id", None) or s.name)
+        # Probe by the token the artefacts are ACTUALLY named after — the
+        # display name on every standard install, the durable id only on a
+        # box migrated with ``hal0 slot migrate-id-keying``. See
+        # :func:`_artefact_token`: a set ``slot_id`` is not that signal,
+        # because ``fold_identity()`` stamps one on every boot without
+        # renaming anything.
+        artefact_token = _artefact_token(s)
         cgroup_bytes = await _container_cgroup_mem_bytes(artefact_token)
         cgroup_mb = round(cgroup_bytes / (1024.0 * 1024.0), 1)
         resident_mb = max(cgroup_mb, estimate_mb)
