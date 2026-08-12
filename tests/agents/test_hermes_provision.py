@@ -1961,7 +1961,7 @@ def test_smoke_tests_phase_runs_each_probe_collecting_results(
     hh = tmp_path / "hh"
     _write_ready_chat_config(hh)
     state = hp.BootstrapState(hermes_home=str(hh))
-    io = hp.InstallIO(fetch_model_contexts=lambda: {"m1": 8192})
+    io = hp.InstallIO(fetch_model_route_ready=lambda model_id: model_id == "m1")
     # All six probes return (True, "...") so we exercise the rollup
     # without depending on a real Hermes binary or HTTP listener.
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (True, "ok"))
@@ -1992,7 +1992,7 @@ def test_smoke_tests_phase_records_failures_as_warn_without_blocking(
     hh = tmp_path / "hh"
     _write_ready_chat_config(hh)
     state = hp.BootstrapState(hermes_home=str(hh))
-    io = hp.InstallIO(fetch_model_contexts=lambda: {"m1": 8192})
+    io = hp.InstallIO(fetch_model_route_ready=lambda model_id: model_id == "m1")
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (False, "wrapper missing"))
     monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s, io: (True, "ok"))
     monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s, io: (False, "503"))
@@ -2010,8 +2010,9 @@ def test_smoke_tests_phase_skips_model_dependent_probes_without_chat_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No routable chat model at smoke time (e.g. install-time run, before any
-    model has ever been loaded) → chat_completions/memory_roundtrip report
-    ``skipped``, not a timeout recorded as an opaque failure (#1793)."""
+    model has ever been loaded) → chat_completions reports ``skipped``, not a
+    timeout recorded as an opaque failure (#1793). memory_roundtrip has no
+    chat dependency and must still run (#1831)."""
     state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))  # no config.yaml at all
     calls: list[str] = []
 
@@ -2022,17 +2023,17 @@ def test_smoke_tests_phase_skips_model_dependent_probes_without_chat_model(
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (True, "ok"))
     monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s, io: (True, "ok"))
     monkeypatch.setattr(hp, "_smoke_chat_completions", _boom)
-    monkeypatch.setattr(hp, "_smoke_memory_roundtrip", _boom)
+    monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s, io: (True, "1 item"))
     monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
     monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
     out = hp._phase_smoke_tests(hp._StepCtx(state=state))
-    assert calls == []  # gated probes never ran
+    assert calls == []  # the chat-gated probe never ran
     assert out.status == hp.PhaseStatus.OK  # skips aren't failures
     assert out.details["failures"] == []
-    assert len(out.details["skipped"]) == 2
+    assert len(out.details["skipped"]) == 1
     assert out.details["results"]["chat_completions"]["skipped"] is True
     assert "no chat model loaded" in out.details["results"]["chat_completions"]["detail"]
-    assert out.details["results"]["memory_roundtrip"]["skipped"] is True
+    assert out.details["results"]["memory_roundtrip"] == {"passed": True, "detail": "1 item"}
 
 
 class TestChatModelReady:
@@ -2057,7 +2058,7 @@ class TestChatModelReady:
         hh = tmp_path / "hh"
         _write_ready_chat_config(hh, "m1")
         state = hp.BootstrapState(hermes_home=str(hh))
-        io = hp.InstallIO(fetch_model_contexts=lambda: {"other": 4096})
+        io = hp.InstallIO(fetch_model_route_ready=lambda model_id: False)
         ready, reason = hp._chat_model_ready(state, io)
         assert ready is False
         assert "not loaded on the gateway" in reason
@@ -2066,7 +2067,7 @@ class TestChatModelReady:
         hh = tmp_path / "hh"
         _write_ready_chat_config(hh, "m1")
         state = hp.BootstrapState(hermes_home=str(hh))
-        io = hp.InstallIO(fetch_model_contexts=lambda: {"m1": 8192})
+        io = hp.InstallIO(fetch_model_route_ready=lambda model_id: model_id == "m1")
         ready, reason = hp._chat_model_ready(state, io)
         assert ready is True
         assert reason == "ready"
@@ -2076,13 +2077,43 @@ class TestChatModelReady:
         _write_ready_chat_config(hh, "m1")
         state = hp.BootstrapState(hermes_home=str(hh))
 
-        def _boom() -> dict[str, int]:
+        def _boom(_model_id: str) -> bool:
             raise RuntimeError("gateway unreachable")
 
-        io = hp.InstallIO(fetch_model_contexts=_boom)
+        io = hp.InstallIO(fetch_model_route_ready=_boom)
         ready, reason = hp._chat_model_ready(state, io)
         assert ready is False
         assert "gateway probe failed" in reason
+
+    def test_shipped_virtual_default_ready_via_by_id_route_not_list(self, tmp_path: Path) -> None:
+        """Regression (#1831): the shipped ``model.default: hal0/agent`` is
+        NEVER a member of ``GET /v1/models``' list payload — that route
+        deliberately never advertises hal0's canonical virtuals (#1153) — so
+        the preflight must resolve the anchor through the **by-id** route
+        (``GET /v1/models/{id}``, which the gateway resolves through the
+        LiveSlotResolver) instead of checking list membership. A regression
+        here reintroduces "chat_completions and memory_roundtrip are skipped
+        on every install"."""
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "hal0/agent")
+        state = hp.BootstrapState(hermes_home=str(hh))
+
+        # A realistic /v1/models list payload: never contains "hal0/agent",
+        # by design — only the underlying slot alias is listed.
+        realistic_list_contexts = {"brain": 32768, "utility": 8192}
+
+        def fetch_model_route_ready(model_id: str) -> bool:
+            # The by-id route resolves virtuals; list membership is
+            # irrelevant to it.
+            return model_id == "hal0/agent"
+
+        io = hp.InstallIO(
+            fetch_model_contexts=lambda: realistic_list_contexts,
+            fetch_model_route_ready=fetch_model_route_ready,
+        )
+        ready, reason = hp._chat_model_ready(state, io)
+        assert ready is True
+        assert reason == "ready"
 
 
 def test_write_run_report_surfaces_failure_and_skipped_counts(tmp_path: Path) -> None:

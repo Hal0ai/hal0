@@ -3256,6 +3256,37 @@ def _fetch_model_contexts() -> dict[str, int]:
     return out
 
 
+def _fetch_model_route_ready(model_id: str) -> bool:
+    """Ask ``GET /v1/models/{id}`` whether ``model_id`` actually routes.
+
+    Unlike :func:`_fetch_model_contexts` (backed by the **list** route,
+    ``GET /v1/models``), this hits the **by-id** route, which resolves hal0's
+    canonical virtual names (``hal0/agent``, ``hal0/utility``, ``hal0/npu``)
+    via the LiveSlotResolver (see ``_resolve_virtual_model_entry`` in
+    ``hal0.api.routes.v1``). The list route deliberately never advertises
+    those virtuals (#1153) and also folds a chat slot's raw model id into
+    its alias entry, so checking list *membership* against the shipped
+    ``model.default: hal0/agent`` can never succeed even when the model is
+    fully routable (#1831). 404/other client errors and network failures
+    both mean "not ready"; only a clean response counts.
+    """
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import quote
+    from urllib.request import Request, urlopen
+
+    req = Request(
+        f"{HAL0_API_URL}/v1/models/{quote(model_id, safe='/')}",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urlopen(req, timeout=3.0) as resp:
+            return 200 <= resp.status < 300
+    except HTTPError:
+        return False
+    except (URLError, OSError, TimeoutError):
+        return False
+
+
 def _slot_kind(slot: dict[str, Any]) -> str:
     """Best-effort capability classifier — handles a few schema variants.
 
@@ -4527,12 +4558,14 @@ def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
 # burying it in the Detail column. self_report surfaces the same rollup in
 # the bootstrap-completion memory item.
 #
-# chat_completions and memory_roundtrip both need a routable chat model to
-# mean anything; at install time — before any model has ever been loaded —
-# that's structurally impossible, so a preflight (`_chat_model_ready`)
-# decides ONCE whether the route is live and both probes report
-# `skipped: no chat model loaded` instead of burning their timeout on a
-# doomed request that then gets recorded as an opaque failure.
+# chat_completions needs a routable chat model to mean anything; at install
+# time — before any model has ever been loaded — that's structurally
+# impossible, so a preflight (`_chat_model_ready`) decides ONCE whether the
+# route is live and the probe reports `skipped: no chat model loaded`
+# instead of burning its timeout on a doomed request that then gets
+# recorded as an opaque failure. memory_roundtrip has no chat dependency
+# whatsoever (it drives the MCP memory_add/memory_search tools directly) and
+# always runs (#1831).
 
 
 def _wrapper_bin() -> Path:
@@ -4711,7 +4744,11 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
 #: Probes that only mean something once a chat-capable model is actually
 #: routable. Gated behind :func:`_chat_model_ready` so an install-time smoke
 #: run (no model has ever been loaded yet) reports `skipped`, not a timeout.
-_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions", "memory_roundtrip"})
+#: memory_roundtrip does NOT belong here — it exercises the MCP
+#: memory_add/memory_search tools directly and has no chat dependency
+#: whatsoever (#1831); gating it behind the chat anchor over-skipped it even
+#: when memory itself was fully working.
+_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions"})
 
 
 def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
@@ -4719,12 +4756,25 @@ def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
 
     Reads ``model.default`` from config.yaml — the exact field
     :func:`_smoke_chat_completions` targets — and cross-checks it against the
-    live gateway model list via ``io.fetch_model_contexts`` (the same
-    ``/v1/models`` seam ``model_automap`` already uses), instead of paying a
-    full chat-completion round trip just to find out nothing is loaded. This
-    is what lets smoke_tests tell "the route is genuinely broken" (a real
-    failure) apart from "no chat model exists yet" (#1793) — never raises;
-    any config/parse/network problem reports not-ready with the reason.
+    live gateway via ``io.fetch_model_route_ready`` (``GET
+    /v1/models/{id}``), instead of paying a full chat-completion round trip
+    just to find out nothing is loaded.
+
+    This resolves the anchor through the **by-id** route rather than
+    checking membership in the **list** route's payload (``GET
+    /v1/models``): the list route deliberately never advertises hal0's
+    canonical virtual names (``hal0/agent`` et al. — see
+    ``_aggregate_models`` in ``hal0.api.routes.v1``, #1153) and also folds a
+    chat slot's raw model id into its alias entry, so list membership can
+    never hold for the shipped ``model.default: hal0/agent`` even when the
+    model is fully routable. The by-id route resolves virtuals via the
+    LiveSlotResolver (``_resolve_virtual_model_entry``), matching exactly
+    what :func:`_smoke_chat_completions` itself dispatches against (#1831).
+
+    This is what lets smoke_tests tell "the route is genuinely broken" (a
+    real failure) apart from "no chat model exists yet" (#1793) — never
+    raises; any config/parse/network problem reports not-ready with the
+    reason.
     """
     import yaml  # type: ignore[import-untyped]
 
@@ -4739,10 +4789,10 @@ def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     if not model_name:
         return False, "model.default unset in config.yaml"
     try:
-        contexts = io.fetch_model_contexts()
+        routable = io.fetch_model_route_ready(model_name)
     except Exception as exc:  # preflight must never raise
         return False, f"gateway probe failed: {exc}"
-    if model_name not in contexts:
+    if not routable:
         return False, f"'{model_name}' not loaded on the gateway"
     return True, "ready"
 
@@ -5196,6 +5246,7 @@ class InstallIO:
     http_get: Callable[..., int] = _http_get
     fetch_slots: Callable[[], list[dict[str, Any]]] = _fetch_slots
     fetch_model_contexts: Callable[[], dict[str, int]] = _fetch_model_contexts
+    fetch_model_route_ready: Callable[[str], bool] = _fetch_model_route_ready
     probe_mcp_server: Callable[..., dict[str, Any]] = _probe_mcp_server
     mcp_memory_call: Callable[..., dict[str, Any]] = _mcp_memory_call
     install_venv: Callable[..., None] = _install_venv
