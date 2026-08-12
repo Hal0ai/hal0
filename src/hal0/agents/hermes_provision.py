@@ -3301,11 +3301,13 @@ def _fetch_model_route_ready(model_id: str, base_url: str = "") -> bool | None:
     listed_status, payload = _http_status_json(f"{base}/models")
     if listed_status is None or not (200 <= listed_status < 300):
         return None
-    ids = {
-        str(entry.get("id"))
-        for entry in ((payload or {}).get("data") or [])
-        if isinstance(entry, dict) and entry.get("id")
-    }
+    entries = (payload or {}).get("data")
+    if not isinstance(entries, list):
+        # 2xx with a body we could not parse into a catalog is not evidence of
+        # an EMPTY catalog — it is no evidence at all. An empty ``data`` list
+        # is a real answer; a missing or malformed one is not.
+        return None
+    ids = {str(entry.get("id")) for entry in entries if isinstance(entry, dict) and entry.get("id")}
     if model_id in ids:
         return True
     if model_id.startswith("hal0/"):

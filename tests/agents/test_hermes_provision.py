@@ -2367,6 +2367,18 @@ class TestFetchModelRouteReady:
         _fake_http(monkeypatch, {"http://gw/v1/models": {"data": [{"id": "brain"}]}})
         assert hp._fetch_model_route_ready("hal0/agent", "http://gw/v1") is False
 
+    def test_empty_catalog_is_conclusive_but_malformed_one_is_not(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 2xx list response with no usable ``data`` is not evidence of an
+        EMPTY catalog — it is no evidence at all, so it must not produce a
+        skip. A genuinely empty ``data`` list is a real answer."""
+        _fake_http(monkeypatch, {"http://gw/v1/models": {"data": []}})
+        assert hp._fetch_model_route_ready("hal0/agent", "http://gw/v1") is False
+        for junk in ({"error": "nope"}, {"data": "not-a-list"}, {}):
+            _fake_http(monkeypatch, {"http://gw/v1/models": junk})
+            assert hp._fetch_model_route_ready("hal0/agent", "http://gw/v1") is None, junk
+
     def test_unreachable_endpoint_is_inconclusive(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _fake_http(monkeypatch, {}, unreachable={"http://be/"})
         assert hp._fetch_model_route_ready("m1", "http://be/v1") is None
