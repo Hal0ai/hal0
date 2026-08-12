@@ -290,11 +290,23 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
                             f"{arch}.pooling_type",
                             f"{arch}.attention.causal",
                         )
-                    if not want and arch is None and key.endswith(".context_length"):
-                        # Capture arch-prefixed context_length even if we
-                        # haven't seen general.architecture yet (rare but
-                        # legal).  We stash both the value and the prefix
-                        # so we can promote later if it matches.
+                    if (
+                        not want
+                        and arch is None
+                        and (
+                            key.endswith(".context_length")
+                            or key.endswith(".pooling_type")
+                            or key.endswith(".attention.causal")
+                        )
+                    ):
+                        # Capture arch-prefixed context_length/pooling_type/
+                        # attention.causal even if we haven't seen
+                        # general.architecture yet (rare but legal — the
+                        # spec doesn't promise ordering, #1838 codex
+                        # review). We stash the value under its own
+                        # <prefix>.<key> and promote it below once/if the
+                        # matching arch turns up (or, absent that, take
+                        # the first one we saw).
                         want = True
 
                     if want:
@@ -323,12 +335,20 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
                 if causal_key in out:
                     out["attention_causal"] = out[causal_key]
             else:
-                # No arch but we may have captured a *.context_length on
-                # the speculative branch above.  Promote the first one.
-                for k, v in out.items():
-                    if k.endswith(".context_length") and k != "context_length":
-                        out["context_length"] = v
-                        break
+                # No arch but we may have captured a *.context_length /
+                # *.pooling_type / *.attention.causal on the speculative
+                # branch above. Promote the first one of each.
+                for suffix, alias in (
+                    (".context_length", "context_length"),
+                    (".pooling_type", "pooling_type"),
+                    (".attention.causal", "attention_causal"),
+                ):
+                    if alias in out:
+                        continue
+                    for k, v in out.items():
+                        if k.endswith(suffix) and k != alias:
+                            out[alias] = v
+                            break
 
             return out
         finally:

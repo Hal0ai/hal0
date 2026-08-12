@@ -284,6 +284,13 @@ def test_add_from_path_accepts_gguf_symlink_into_extensionless_blob(
     assert "qwen3" in body["id"].lower()
     assert link.resolve().name not in body["id"]
     assert link.resolve().name not in body["name"]
+    # #1838 (codex review): this fixture's bytes have no valid GGUF magic,
+    # and the resolved blob is extensionless — before the fix, detect()
+    # only recognised "claims .gguf" off the resolved path's suffix, so
+    # this exact HF hub-cache shape silently fell through to "unknown, no
+    # backends, no warning" instead of the deliberate failed-header path.
+    assert set(body["backends"]) == {"vulkan", "rocm", "cuda", "cpu"}
+    assert "no valid GGUF header" in body["metadata"]["detection_warning"]
 
 
 def test_add_from_path_symlink_capability_uses_operators_filename(

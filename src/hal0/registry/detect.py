@@ -280,10 +280,16 @@ def _filename_capability(name: str) -> str | None:
     return cap if cap in ("embed", "asr", "tts") else None
 
 
-def _heuristic_only(path: Path) -> DetectionResult:
-    """Fallback detection: filename heuristic, no header read."""
-    name = path.name.lower()
-    cap = _filename_capability(name)
+def _heuristic_only(path: Path, *, filename_hint: str | None = None) -> DetectionResult:
+    """Fallback detection: filename heuristic, no header read.
+
+    ``filename_hint`` — see :func:`detect`'s docstring (#1838). Used for
+    capability-token matching and the ``.gguf`` backend-seed check only;
+    identity fields (``suggested_name``, ``quant``, ``raw_hints["stem"/
+    "suffix"]``) stay derived from ``path`` itself.
+    """
+    hint_name = (filename_hint or path.name).lower()
+    cap = _filename_capability(hint_name)
 
     # A file under the ComfyUI models tree is an image-gen asset — tag it
     # image/comfyui so add-by-path / scan-preview file it on the dashboard's
@@ -305,11 +311,11 @@ def _heuristic_only(path: Path) -> DetectionResult:
     backends: list[str] = []
     caps: list[str] = []
     kind: Kind = "unknown"
-    if "moonshine" in name:
+    if "moonshine" in hint_name:
         backends = ["moonshine"]
         caps = ["asr"]
         kind = "moonshine"
-    elif "kokoro" in name:
+    elif "kokoro" in hint_name:
         backends = ["kokoro"]
         caps = ["tts"]
         kind = "kokoro"
@@ -326,7 +332,11 @@ def _heuristic_only(path: Path) -> DetectionResult:
         # embed-ish filename but extension says it's not GGUF — leave
         # backends empty; user picks. Treat as unknown until format is clear.
         caps = ["embed"]
-    elif path.suffix.lower() == ".gguf":
+    elif path.suffix.lower() == ".gguf" or Path(hint_name).suffix == ".gguf":
+        # #1838: the resolved path may be an extensionless HF hub-cache
+        # blob even though the operator's own filename (the hint) is
+        # unmistakably "*.gguf" — either one claiming .gguf is enough to
+        # seed the GGUF backends instead of leaving the row unclassified.
         backends = list(_GGUF_BACKENDS)
         caps = ["chat"]
         kind = "llama"
@@ -353,28 +363,36 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
     Never raises for an unreadable / missing / non-GGUF file: we fall
     back to the filename heuristic and lower the confidence.
 
-    ``filename_hint`` — the operator-typed name to use for the capability
-    filename-token fallback, when it differs from ``path`` (#1838: a
-    HuggingFace hub-cache symlink's real, human-readable name lives at
-    ``snapshots/<rev>/<name>.gguf``; ``path`` here is usually the
-    *resolved* sha-named blob it points at, which carries no filename
-    signal at all). Extension/header-validity checks still use ``path``
-    unchanged — that's the #1415 contract (an extensionless literal must
-    still consult the resolved target's suffix). Defaults to ``path``'s
-    own name when omitted.
+    ``filename_hint`` — the operator-typed name to use for capability
+    filename-token matching AND the ".gguf claimed" check below, when it
+    differs from ``path`` (#1838: a HuggingFace hub-cache symlink's real,
+    human-readable name lives at ``snapshots/<rev>/<name>.gguf``; ``path``
+    here is usually the *resolved* sha-named blob it points at, which
+    carries no filename signal — and no ``.gguf`` suffix — at all).
+    Identity fields (``suggested_name``, quant-from-filename, ``stem``)
+    stay derived from ``path`` unchanged; only the two things that decide
+    "did the operator ask for a GGUF file" use the hint when given.
+    Defaults to ``path``'s own name when omitted.
     """
     p = Path(path)
     suffix = p.suffix.lower()
     name_for_capability = filename_hint if filename_hint is not None else p.name
+    # #1838: a resolved HF hub-cache blob is extensionless even when the
+    # symlink the operator pointed at is unmistakably "*.gguf" — without
+    # also checking the hint's suffix, a bad-magic blob silently fell all
+    # the way to the generic "unknown, no backends, no warning" path
+    # instead of the deliberate "claims .gguf but magic failed" one.
+    hint_suffix = Path(name_for_capability).suffix.lower()
+    claims_gguf = suffix == ".gguf" or hint_suffix == ".gguf"
 
     # Try GGUF magic bytes regardless of extension — HF blob cache stores
     # GGUF data under content-hash filenames with no suffix.
     header = read_gguf_header(p)
-    if header is not None or suffix == ".gguf":
+    if header is not None or claims_gguf:
         if header is None:
-            # Suffix claimed .gguf but magic failed: degrade to heuristic
-            # with the GGUF backend seed.
-            r = _heuristic_only(p)
+            # Suffix (or the operator-typed hint) claimed .gguf but magic
+            # failed: degrade to heuristic with the GGUF backend seed.
+            r = _heuristic_only(p, filename_hint=filename_hint)
             r.raw_hints["gguf_header_read"] = "failed"
             return r
 
@@ -524,7 +542,7 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
         )
 
     # Non-GGUF file: filename heuristic only.
-    return _heuristic_only(p)
+    return _heuristic_only(p, filename_hint=filename_hint)
 
 
 __all__ = [
