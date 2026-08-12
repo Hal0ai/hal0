@@ -115,20 +115,27 @@ def derive_profile(capability: str, device: str) -> str:
     gpu-vulkan→vulkan, cpu→cpu-llm, npu→flm) and layers the install path's
     capability specialisations on top:
 
-    * ``embed`` → the backend-coherent embed lane: ``gpu-rocm``→``embed``,
-      ``gpu-vulkan``→``vulkan-embed`` (llama-server ``--embedding``). The base
-      chat profile never emits ``--embedding`` and would silently serve
-      ``/v1/completions``, so embed always takes a dedicated encoder profile.
-    * ``rerank`` → the backend-coherent rerank lane: ``gpu-rocm``→``rerank``,
-      ``gpu-vulkan``→``vulkan-rerank`` (llama-server ``--reranking`` →
+    * ``embed`` → the ``embedding`` profile (llama-server ``--embedding``) on
+      every llama-server device. The base chat profile never emits
+      ``--embedding`` and would silently serve ``/v1/completions``, so embed
+      always takes the dedicated encoder profile.
+    * ``rerank`` → the ``reranking`` profile (llama-server ``--reranking`` →
       ``/v1/rerank``); MUST stay a separate instance from embed.
+    * ``npu`` → ``flm`` for every capability, embed included: the NPU runs its
+      own runtime family, not llama-server.
     * ``cpu`` + ``tts`` → the kokoro ``tts`` profile.
 
     Chat/coder take the plain base profile — MTP is never auto-forced (the legacy
     MTP ``rocm-dnse`` profile was removed 2026-07-05; slots opt into the ROCmFPX
-    MTP profiles explicitly). NOTE: CPU has no dedicated embed/rerank seed yet, so
-    a CPU-only box's embed/rerank slot falls back to ``cpu-llm`` (a chat profile)
-    — that lane is still latent until a cpu-embed/cpu-rerank seed exists.
+    MTP profiles explicitly).
+
+    The embed/rerank lanes are deliberately NOT device-gated (#1830). The old
+    ``gpu-rocm``/``gpu-vulkan`` gate dated from the retired per-backend
+    ``embed``/``vulkan-embed`` seeds; the 1.0 ``embedding``/``reranking`` seeds
+    are device-agnostic logical tunes (no ``device_class``, no ``backend``), so
+    a CPU-only box gets them too. While the gate stood, a CPU embed/rerank slot
+    was seeded with a chat profile, launched without its mode flag, reported
+    ``state=ready`` and 501'd its own endpoint.
 
     An unknown device falls back to ``cpu-llm`` (the CPU-coherent llama-server
     profile) — returning a GPU profile there caused #807 to reject the slot on
@@ -139,29 +146,16 @@ def derive_profile(capability: str, device: str) -> str:
         # 2026-07-05; MTP dense now lives on the ROCmFPX profiles, which slots
         # opt into explicitly — derivation never silently forces MTP.)
         return "chat"
-    if capability == "embed":
-        # Embeddings get a dedicated embed profile (llama-server --embedding,
-        # -ub 8192) rather than the chat-tuned base — the chat KV-quant/batch
-        # flags are meaningless for a pooled encoder and the base chat profile
-        # never emits --embedding, so it would silently serve /v1/completions
-        # instead of /v1/embeddings. Route to the backend-coherent embed lane:
-        # gpu-rocm→embed, gpu-vulkan→vulkan-embed; other devices (incl. CPU,
-        # which has no dedicated embed seed yet) fall back to the base profile.
-        return (
-            "embedding"
-            if device in {"gpu-rocm", "gpu-vulkan"}
-            else DEVICE_DEFAULT_PROFILES.get(device, "cpu-chat")
-        )
-    if capability == "rerank":
-        # Rerankers get a dedicated rerank profile (llama-server --reranking →
-        # /v1/rerank); MUST stay a separate instance from embed. Same backend-
-        # coherent routing as embed (gpu-rocm→rerank, gpu-vulkan→vulkan-rerank);
-        # non-GPU falls back to the base profile (no dedicated CPU rerank seed).
-        return (
-            "reranking"
-            if device in {"gpu-rocm", "gpu-vulkan"}
-            else DEVICE_DEFAULT_PROFILES.get(device, "cpu-chat")
-        )
+    if capability in ("embed", "rerank") and device != "npu":
+        # Embeddings/rerankers get their dedicated profile (llama-server
+        # --embedding / --reranking, -ub 8192) rather than the chat-tuned base —
+        # the chat KV-quant/batch flags are meaningless for a pooled encoder,
+        # and the base chat profile never emits the mode flag, so the slot would
+        # silently serve /v1/completions instead of /v1/embeddings (or 501 on
+        # /v1/rerank). Device-agnostic (#1830): the seeds carry no device_class.
+        # NPU is excluded because it is a different runtime family (flm), which
+        # the base table below supplies.
+        return "embedding" if capability == "embed" else "reranking"
     if device == "cpu" and capability == "tts":
         # ``tts`` stays on the kokoro/CPU profile; everything else on CPU takes
         # the CPU-coherent llama-server profile from the base table below.

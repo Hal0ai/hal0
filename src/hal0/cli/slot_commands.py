@@ -471,6 +471,17 @@ def slot_create(
         max=65535,
     ),
     ctx_size: int = typer.Option(4096, "--ctx-size", min=128),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help=(
+            "Runtime profile (flag bundle + engine). Default: inferred from "
+            "--type/--hardware — embedding → embedding (--embedding), "
+            "reranking → reranking (--reranking), tts/transcription → the "
+            "engine hal0 ships for that device (none is inferred where it "
+            "ships none). llm and image slots infer none."
+        ),
+    ),
 ) -> None:
     """Create a new slot config (POST /api/slots)."""
     url = _api_base()
@@ -507,6 +518,12 @@ def slot_create(
         "provider": str(provider),
         "model": {"default": model, "context_size": ctx_size},
     }
+    # Absent = let the create chokepoint infer the capability profile from
+    # type/device (#1830); an explicit name always wins. Never send an empty
+    # placeholder — that reads as a deliberate operator choice and suppresses
+    # the inference.
+    if profile:
+        body["profile"] = profile
     if port is not None:
         body["port"] = port
     else:
@@ -545,6 +562,15 @@ def slot_edit(
         case_sensitive=False,
         help="Change the slot's hardware backend (vulkan | rocm | cpu).",
     ),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help=(
+            "Change the slot's runtime profile (flag bundle + engine) — e.g. "
+            "'embedding' / 'reranking' to repair a profile-less capability slot "
+            "created before the profile was inferred (#1830)."
+        ),
+    ),
     # HAL0-SUNSET: v1.0.0 — --backend renamed to --provider in v0.2; use --provider.
     backend: str | None = typer.Option(
         None,
@@ -580,10 +606,12 @@ def slot_edit(
         and ctx_size is None
         and provider is None
         and hardware is None
+        and profile is None
     ):
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  "
-            "Pass at least one of --model, --port, --ctx-size, --provider, --hardware."
+            "Pass at least one of --model, --port, --ctx-size, --provider, "
+            "--hardware, --profile."
         )
         raise typer.Exit(code=2)
 
@@ -592,6 +620,8 @@ def slot_edit(
         payload["port"] = port
     if provider is not None:
         payload["provider"] = str(provider)
+    if profile is not None:
+        payload["profile"] = profile
     if hardware is not None:
         payload["device"] = _HARDWARE_TO_DEVICE.get(hardware.value, hardware.value)
     if model is not None or ctx_size is not None:
@@ -669,6 +699,9 @@ def slot_add(
         model=model,
         port=port,
         ctx_size=ctx_size,
+        # Explicit: a direct Python call gets typer's OptionInfo sentinel for
+        # any omitted parameter, which would then be POSTed as the profile.
+        profile=None,
     )
 
 

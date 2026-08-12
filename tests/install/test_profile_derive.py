@@ -183,9 +183,22 @@ def test_cpu_host_coder_derives_cpu_llm_profile():
     assert derive_profile("coder", "cpu") == "cpu-chat"
 
 
-def test_cpu_host_embed_derives_cpu_llm_profile():
-    """embed capability on a CPU host must derive to 'cpu-llm', not 'vulkan'."""
-    assert derive_profile("embed", "cpu") == "cpu-chat"
+def test_cpu_host_embed_derives_the_embedding_lane():
+    """embed on a CPU host derives the ``embedding`` lane, never a GPU profile.
+
+    #1830: this used to assert ``cpu-chat`` — a chat profile that emits no
+    ``--embedding``, so a CPU-only box's embed slot loaded ``ready`` and 501'd
+    ``/v1/embeddings``. The ``embedding`` seed is device-agnostic (backend and
+    device_class both None), so the #807/#834 coherence property the original
+    test protected — never a GPU-pinned profile on a CPU device — still holds.
+    """
+    from hal0.config.schema import SEED_PROFILES
+
+    assert derive_profile("embed", "cpu") == "embedding"
+    assert derive_profile("rerank", "cpu") == "reranking"
+    for name in ("embedding", "reranking"):
+        assert SEED_PROFILES[name].get("backend") is None
+        assert SEED_PROFILES[name].get("device_class") is None
 
 
 def test_cpu_host_tts_still_derives_tts_profile():
