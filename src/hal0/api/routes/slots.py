@@ -44,6 +44,7 @@ from hal0.slot_view import (
     config_enrichment,
     container_enrichment,
     loaded_model_names_from_slots,
+    resolve_ctx_max,
     serialize_slot,
     synthesize_upstream_entries,
 )
@@ -1040,6 +1041,21 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
         if c_extra:
             for k, v in c_extra.items():
                 out.setdefault(k, v)
+
+        # #1835: config_enrichment above lifts ctx_max verbatim off the slot
+        # TOML (the raw hardware ceiling) — #1788/#1802 re-resolved this to
+        # the EFFECTIVE window on the list route only, leaving this detail
+        # route to advertise a number that can contradict its own
+        # ``resolved_command``. Mirror the list route's re-resolution here.
+        raw_ctx_max = out.get("ctx_max")
+        model_id = str(out.get("model_default") or "")
+        if model_id or isinstance(raw_ctx_max, int):
+            out["ctx_max"] = resolve_ctx_max(
+                raw_ctx_max if isinstance(raw_ctx_max, int) else None,
+                getattr(request.app.state, "model_registry", None),
+                model_id,
+                name,
+            )
         return out
     except Exception:
         # Fall through to synthetic lookup before re-raising — a remote
