@@ -18,18 +18,20 @@ privileged = false
 gpu = false
 cores = 8
 ram_gb = 16
-snapshot = "pristine"
+snapshot = "rc5-installed"
 api = "http://10.0.1.151:8080"
 auth_required = false
-status = "unusable as of 2026-08-11 — do not select without checking"
+status = "PREFERRED fresh box as of 2026-08-12 — two snapshots, verified rc.5 install"
 notes = """
-Fresh-install lane. Reset: `pct rollback 151 pristine` on the hypervisor.
+Fresh-install lane. Reset: `pct rollback 151 pristine|rc5-installed` on the hypervisor.
 
-BLOCKED (2026-08-10, still true at the end of the rc.5 run): `pct rollback 151` wedged the
-hypervisor on a pool-wide ZFS `z_zrele` deadlock — every `zfs unmount` on rpool blocks and
-clearing it needs a hypervisor reboot. Do not attempt a rollback of 151, and avoid running `zfs`
-commands on 10.0.1.110, until an operator has rebooted the hypervisor and re-verified the
-snapshot. ct152 exists because of this.
+UNBLOCKED 2026-08-12: the hypervisor was rebooted (sysrq-b), the ZFS deadlock is gone, and
+`pct rollback 151 <snap>` is verified working again. This is now the BEST fresh box in the fleet
+— the only one with snapshots. Two reset points:
+  * `pristine`       — pre-install Ubuntu 26.04, for exercising the installer itself
+  * `rc5-installed`  — hal0 1.0.0-rc.5 immediately post-install: api + hermes active, no models
+                       pulled, no slots loaded, no lane residue. Reproduces #1827 out of the box.
+Prefer this box over ct152, which has no snapshot and carries two runs of residue.
 
 GOTCHAS, in order:
   1. The pristine snapshot has broken DNS — /etc/resolv.conf points at an unreachable
@@ -96,6 +98,12 @@ upgrade history, so record the exact from-version in CONTEXT.md before upgrading
 As of the rc.5 run it sat on 1.0.0-rc.3 and carried hermes-agent 0.19.0 (which DOES ship
 `hermes_cli/web_dist`), so it cannot reproduce the fresh-install hermes packaging defects
 (#1829) — an upgrade preserves the newer wheel's artefacts.
+UPGRADED rc.3 -> rc.5 on 2026-08-12 and converged; it now sits on 1.0.0-rc.5, so the NEXT run's
+from-version is rc.5. Found on the way: #1844 (the updater never refreshes /usr/local/bin/hal0,
+so `hal0 --version` kept reporting rc.3 while the API served rc.5) and #1845 (the "Convergence
+incomplete" panel's remediation omits --stop-services and cannot work as printed). Its
+agent.toml still carries context_size = 4096 from an old seed — upgrades never reconcile slot
+seeds, which is why Hermes fails here for a DIFFERENT reason than on a fresh box (see #1827).
 """
 
 [boxes.ct163-cpu-fresh]
