@@ -724,6 +724,63 @@ def test_delete_evicts_even_when_an_unrelated_slot_toml_is_malformed(
     assert "qwen3-4b-q4_k_m" not in app.state.upstream_models.get("hal0", [])
 
 
+def test_a_degraded_eviction_self_heals_once_the_catalogue_reads_clean(
+    tmp_hal0_home: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+) -> None:
+    """Two slots can share a model id, and the degraded path can't tell.
+
+    If the SIBLING that still binds the id is the slot whose TOML was
+    skipped, the known-eviction drops an id that is still served. That
+    window has to close on its own: ``/v1/models`` re-reads the catalogue
+    behind its 5s TTL, so the first clean read restores the id without
+    waiting for a slot-ready event or a restart.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "twin",
+        [
+            'name = "twin"',
+            "port = 8198",
+            'type = "llm"',
+            'provider = "llama-server"',
+            "[model]",
+            'default = "qwen3-4b-q4_k_m"',  # same id as the `chat` slot
+        ],
+    )
+    app: FastAPI = create_app()
+    with TestClient(app) as client:
+        assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+        # `twin` is the slot that goes unreadable, so the post-delete read
+        # can't see that it still binds the shared id.
+        (slot_root / "twin.toml").write_text("name = = broken\n[model\n", encoding="utf-8")
+        assert client.delete("/api/slots/chat").status_code == 200
+        assert "qwen3-4b-q4_k_m" not in app.state.upstream_models.get("hal0", [])
+
+        # Operator fixes the TOML. No slot event, no restart — the next
+        # /v1/models re-read is what has to bring the id back.
+        _seed_slot_toml(
+            tmp_hal0_home,
+            "twin",
+            [
+                'name = "twin"',
+                "port = 8198",
+                'type = "llm"',
+                'provider = "llama-server"',
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+            ],
+        )
+        from hal0.api import _hal0_model_cache_clear
+
+        _hal0_model_cache_clear()  # skip the 5s TTL rather than sleeping
+
+        assert client.get("/v1/models").status_code == 200
+        assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+
 def test_delete_of_an_flm_slot_evicts_its_multiplex_tags_on_a_degraded_read(
     tmp_hal0_home: str,
     slot_root: Path,
