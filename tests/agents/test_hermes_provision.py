@@ -2085,9 +2085,7 @@ class TestChatModelReady:
         assert ready is False
         assert "gateway probe failed" in reason
 
-    def test_shipped_virtual_default_ready_via_by_id_route_not_list(
-        self, tmp_path: Path
-    ) -> None:
+    def test_shipped_virtual_default_ready_via_by_id_route_not_list(self, tmp_path: Path) -> None:
         """Regression (#1831): the shipped ``model.default: hal0/agent`` is
         NEVER a member of ``GET /v1/models``' list payload — that route
         deliberately never advertises hal0's canonical virtuals (#1153) — so
