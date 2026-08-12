@@ -3283,16 +3283,19 @@ def _fetch_model_route_ready(model_id: str, base_url: str = "") -> bool | None:
        deliberately never advertises them (#1153).
     2. On 404, ``GET {base_url}/models`` — llama-server and friends have no
        by-id route at all but do list the model they have loaded.
-    3. Still nothing: only a ``hal0/*`` name is conclusively absent (the
-       gateway resolves those by id or not at all). Any other id could
-       simply be folded into an alias row, so report ``None`` and let the
-       caller run the real probe rather than skip on a guess.
+    3. Still nothing: only a ``hal0/*`` name **asked of the hal0 gateway** is
+       conclusively absent — that is the one endpoint that resolves the
+       virtuals by id or not at all. Elsewhere the prefix carries no routing
+       meaning, and any other id could simply be folded into an alias row, so
+       report ``None`` and let the caller run the real probe rather than skip
+       on a guess.
 
     Never raises: every transport failure is inconclusive, not "not ready" —
     an unreachable endpoint is a fact the chat probe should report, not one
     the preflight should hide behind a skip.
     """
-    base = (base_url or f"{HAL0_API_URL}/v1").rstrip("/")
+    gateway = f"{HAL0_API_URL}/v1"
+    base = (base_url or gateway).rstrip("/")
     status = _http_status_json(f"{base}/models/{_quote_model_id(model_id)}")[0]
     if status is not None and 200 <= status < 300:
         return True
@@ -3310,8 +3313,12 @@ def _fetch_model_route_ready(model_id: str, base_url: str = "") -> bool | None:
     ids = {str(entry.get("id")) for entry in entries if isinstance(entry, dict) and entry.get("id")}
     if model_id in ids:
         return True
-    if model_id.startswith("hal0/"):
-        return False  # a virtual resolves through the by-id route or nowhere
+    if model_id.startswith("hal0/") and base == gateway.rstrip("/"):
+        # Only the gateway gives ``hal0/*`` routing meaning: it resolves the
+        # virtuals through the by-id route or nowhere. On a pinned backend the
+        # prefix is just characters in a model id, so its absence proves
+        # nothing.
+        return False
     return None
 
 
