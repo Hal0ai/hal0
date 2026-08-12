@@ -63,6 +63,20 @@ EVICTION_UNLOAD_ALLOWANCE = 3
 #: not just its health poll.
 LOCK_WAIT_ALLOWANCE_S = HEALTH_TIMEOUT_S + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S
 
+#: Slots one ``POST /api/stacks/{slug}/apply`` may converge in a single request.
+#: ``StackApplyEngine.converge`` walks the stack's entries sequentially
+#: (``load`` / ``swap`` / ``restart``, apply.py:472/475/481) and then unloads
+#: every running slot the stack does not claim (apply.py:541), so the true count
+#: is ``len(stack.entries) + len(residual slots)``. The MCP bridge is handed a
+#: slug, not a slot list, and would need an extra ``GET /api/stacks/{slug}``
+#: round trip to count — so, like :data:`EVICTION_UNLOAD_ALLOWANCE`, this is a
+#: documented policy allowance rather than a derived bound. Six covers every
+#: stack we ship and every hand-built one seen on the fleet; a larger stack
+#: degrades to the pre-existing behaviour (client gives up, server finishes),
+#: which is strictly better than the 30s generic default that could not even
+#: cover one unload.
+STACK_APPLY_SLOT_ALLOWANCE = 6
+
 #: Multiplier over the summed server budget covering what the server's own
 #: timeouts do not: podman/systemd fork + image resolution, JSON encode, the
 #: request/response hop, and the poll interval overshoot on each bound above.

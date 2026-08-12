@@ -1440,6 +1440,26 @@ async def test_slot_lifecycle_tools_forward_with_the_lifecycle_budget(
         f"{floor}s server worst case"
     )
 
+    # stack_apply fans the same state machine out over a whole stack:
+    # StackApplyEngine.converge loads/swaps/restarts per entry and then unloads
+    # every residual running slot, all inside the one request. It must clear at
+    # least a multi-slot worst case, not the single-slot one.
+    mock_transport["timeout"] = None
+    pending = await admin.dispatch(
+        tool="stack_apply",
+        args={"slug": "daily-driver"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    await queue.approve(pending["approval_id"])
+    assert mock_transport["timeout"] is not None, "stack_apply never reached REST"
+    assert mock_transport["timeout"] >= 2 * floor, (
+        f"stack_apply forwarded at {mock_transport['timeout']}s — it converges a "
+        f"whole stack sequentially, so it cannot ride a single slot's {floor}s"
+    )
+
     # A non-blocking read keeps the short generic default — the override is
     # scoped to the lifecycle tools, not a blanket widening.
     await admin.dispatch(

@@ -178,7 +178,7 @@ from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 from hal0.memory.namespace import is_known_namespace
-from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
+from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
@@ -1576,6 +1576,12 @@ _SLOT_LIFECYCLE_TIMEOUT_S: dict[str, float] = {
     # which drives SlotManager.load / unload / swap inline. Budget the worst
     # branch (swap = unload-then-load); the disable branch only unloads.
     "capability_set": slot_lifecycle_timeout_s(loads=1, unloads=1),
+    # POST /api/stacks/{slug}/apply awaits StackApplyEngine.converge, which
+    # drives load/swap/restart per stack entry and then unloads every residual
+    # running slot — the same fan-out shape as /api/updates/restart-slots, but
+    # over a slug the bridge cannot expand into a slot count without an extra
+    # round trip. Budget STACK_APPLY_SLOT_ALLOWANCE slots' worth.
+    "stack_apply": slot_lifecycle_timeout_s(loads=1, unloads=1, slots=STACK_APPLY_SLOT_ALLOWANCE),
 }
 
 
