@@ -99,6 +99,25 @@ def test_refs_repair_command_is_device_aware(tmp_hal0_home: str) -> None:
     assert "hal0 slot edit cpu-embed --profile embedding" in rows[1]["detail"]
 
 
+def test_refs_never_recommend_a_profile_missing_from_the_catalog(tmp_hal0_home: str) -> None:
+    """Repairing must not turn a 501 into a slot that cannot start at all.
+
+    If the seed the repair names has been removed/renamed in the installed
+    catalog, ``hal0 slot edit <slot> --profile <name>`` would write a dangling
+    reference — ``resolve_slot_profile`` then raises ``KeyError`` at start. The
+    row stays drift (the slot really is broken), but names no profile.
+    """
+    rows = check_slot_profile_refs(
+        [("rerank", None)],
+        {"chat"},  # catalog without the reranking seed
+        slot_types={"rerank": "reranking"},
+        slot_devices={"rerank": "cpu"},
+    )
+    assert rows[0]["status"] == "drift"
+    assert "--profile" not in rows[0]["detail"]
+    assert "501" in rows[0]["detail"]
+
+
 def test_refs_still_skip_a_profileless_llm_slot() -> None:
     """An llm slot has no mode flag at stake — profile-less is legal there."""
     assert check_slot_profile_refs([("agent", None)], {"chat"}, slot_types={"agent": "llm"}) == []

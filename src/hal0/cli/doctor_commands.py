@@ -1720,8 +1720,15 @@ _PROFILELESS_CAPABILITY_REPAIR: dict[str, str] = {
 }
 
 
-def _profileless_repair_for(slot_type: str, device: str) -> str | None:
-    """The profile that repairs a profile-less capability slot, or ``None``."""
+def _profileless_repair_for(slot_type: str, device: str, valid_names: set[str]) -> str | None:
+    """The profile that repairs a profile-less capability slot, or ``None``.
+
+    ``None`` means "this box has no profile that repairs it" — either the type
+    is not one where a missing profile is a proven 501, or the answer names a
+    profile the installed catalog does not have (a removed/renamed seed).
+    Never recommend a dangling reference: writing it would turn a slot that
+    starts-but-501s into one that cannot start at all.
+    """
     if slot_type not in _PROFILELESS_CAPABILITY_REPAIR:
         return None
     try:
@@ -1730,7 +1737,8 @@ def _profileless_repair_for(slot_type: str, device: str) -> str | None:
         inferred = type_implied_profile({"type": slot_type, "device": device})
     except Exception:  # unreadable catalog — fall back to the static answer
         inferred = None
-    return inferred or _PROFILELESS_CAPABILITY_REPAIR[slot_type]
+    repair = inferred or _PROFILELESS_CAPABILITY_REPAIR[slot_type]
+    return repair if repair in valid_names else None
 
 
 def check_slot_profile_refs(
@@ -1763,20 +1771,28 @@ def check_slot_profile_refs(
     rows: list[dict[str, str]] = []
     for slot, profile in slot_profiles:
         if not profile:
-            implied = _profileless_repair_for(
-                str(types.get(slot) or ""), str(devices.get(slot) or "")
-            )
-            if implied is None:
+            slot_type = str(types.get(slot) or "")
+            if slot_type not in _PROFILELESS_CAPABILITY_REPAIR:
                 continue  # llm / unknown type — no profile to resolve
+            implied = _profileless_repair_for(slot_type, str(devices.get(slot) or ""), valid_names)
+            repair = (
+                f"Repair: hal0 slot edit {slot} --profile {implied} && hal0 slot restart {slot}."
+                if implied
+                else (
+                    "No profile in this catalog serves that type/device — the seed it "
+                    "needs was removed or renamed. Restore the seed profiles before "
+                    "repairing the slot (pointing it at a missing profile would stop "
+                    "it starting at all)."
+                )
+            )
             rows.append(
                 {
                     "label": slot,
                     "status": "drift",
                     "detail": (
-                        f"{types[slot]} slot with NO profile — it will load "
+                        f"{slot_type} slot with NO profile — it will load "
                         f"'ready' and answer 501 on its own endpoint (the profile "
-                        f"carries the mode flag). Repair: hal0 slot edit {slot} "
-                        f"--profile {implied} && hal0 slot restart {slot}."
+                        f"carries the mode flag). {repair}"
                     ),
                 },
             )
