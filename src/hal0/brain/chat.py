@@ -907,6 +907,9 @@ def _resolve_tool(
     if name == "decompose_task":
         return (lambda s: s.decompose(tid, {})), tid
     if name == "nudge_dispatcher":
+        # Board-GLOBAL, exactly like ``POST /api/board/dispatch``: the store's
+        # ready-card query is not board-filtered, so neither surface can scope a
+        # nudge. Scoping it is a store change that must move both together.
         try:
             max_dispatch: int | None = int(args.get("max"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
@@ -1044,6 +1047,12 @@ async def _dispatch_tool(
             return await _dispatch_admin_tool(request, name, args)
         return {"error": f"unknown tool: {name}"}
 
+    # The store call is SYNCHRONOUS inside this async handler — deliberately
+    # the same shape the /api/board/* mutation handlers use, so chat writes and
+    # REST writes have identical execution and blocking characteristics. If the
+    # executor seam behind ``dispatch_nudge`` ever needs to come off the event
+    # loop, both surfaces move together (it is a store/route-layer decision, not
+    # a chat one).
     store = await _board_store(request)
     async with record_action(
         request,
