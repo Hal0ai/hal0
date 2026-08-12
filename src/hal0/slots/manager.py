@@ -78,6 +78,7 @@ from hal0.slots.profile_adopt import (
     preferred_profile_for as _profile_adopt_preferred_profile_for,
 )
 from hal0.slots.profile_adopt import profile_fits_slot as _profile_adopt_profile_fits_slot
+from hal0.slots.profile_adopt import type_implied_profile
 from hal0.slots.reaper import _EVICT_AFTER_S, _IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S, SlotReaper
 from hal0.slots.reaper import is_pinned as _reaper_is_pinned
 from hal0.slots.reaper import probe_host_free_mb as _reaper_probe_host_free_mb
@@ -2413,6 +2414,30 @@ class SlotManager:
             preferred = await self._preferred_profile_for(model_tbl.get("default"))
             if preferred and self._profile_fits_slot(preferred, cfg_dict):
                 cfg_dict["profile"] = preferred
+        # #1830: the model preference above was the ONLY create-time profile
+        # source, and auto-scan / ``model add`` / pull / the curated catalog all
+        # register models with ``defaults: null`` — so an embedding/reranking
+        # slot from ``hal0 slot create``, the New-slot modal, a stack apply or
+        # the capability orchestrator landed on disk with NO ``profile`` key.
+        # For those types the profile is not a tune, it is the mode flag
+        # (``--embedding`` / ``--reranking``) or the runtime engine; without it
+        # the slot loads to ``state=ready`` and 501s its own endpoint. Fall back
+        # to the profile the slot's TYPE implies (vetoed by the same fit check;
+        # ``llm`` slots infer nothing). An explicit profile still wins, and so
+        # does the model's stamped preference above.
+        if not cfg_dict.get("profile"):
+            implied = type_implied_profile(cfg_dict)
+            if implied:
+                cfg_dict["profile"] = implied
+                log.info(
+                    "slot.profile_inferred_from_type",
+                    extra={
+                        "slot": slot_name,
+                        "type": cfg_dict.get("type"),
+                        "device": cfg_dict.get("device"),
+                        "profile": implied,
+                    },
+                )
         # spec-hw-slot-ownership §2/§3: no model-driven runner/image adoption on
         # create. The runner is the slot's own ``binary`` field (default ""),
         # from which the launch path derives the image via

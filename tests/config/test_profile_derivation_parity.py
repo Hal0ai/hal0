@@ -54,11 +54,19 @@ _DERIVE_MATRIX: dict[tuple[str, str], str] = {
     ("tts", "gpu-vulkan"): "chat",
     ("agent", "gpu-vulkan"): "chat",
     ("image", "gpu-vulkan"): "chat",
-    # cpu — tts → kokoro; image → comfyui; everything else → cpu-chat.
+    # cpu — embed/rerank take their (device-agnostic) lanes; tts → kokoro;
+    # everything else → cpu-chat.
+    #
+    # #1830 (DELIBERATE change, rc.5 finding): embed/rerank on cpu used to
+    # derive ``cpu-chat``, a chat profile that emits no ``--embedding`` /
+    # ``--reranking``. The gate dated from the retired per-backend
+    # embed/vulkan-embed seeds; the 1.0 seeds are device-agnostic, so a CPU-only
+    # box gets them too. While it stood, a CPU-only box's embed/rerank slot
+    # reported ``state=ready`` and 501'd its own endpoint.
     ("chat", "cpu"): "cpu-chat",
     ("coder", "cpu"): "cpu-chat",
-    ("embed", "cpu"): "cpu-chat",
-    ("rerank", "cpu"): "cpu-chat",
+    ("embed", "cpu"): "embedding",
+    ("rerank", "cpu"): "reranking",
     ("utility", "cpu"): "cpu-chat",
     ("tts", "cpu"): "kokoro",
     ("agent", "cpu"): "cpu-chat",

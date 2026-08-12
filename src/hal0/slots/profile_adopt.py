@@ -88,6 +88,61 @@ def profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
     return True
 
 
+#: Slot type → the capability string the shared ``(capability, device) →
+#: profile`` rule speaks (:func:`hal0.capabilities.profile_fit.profile_name_for_fit`).
+#: ``llm`` is deliberately absent: a chat slot has no mode flag at stake, so its
+#: tune stays the operator's (or the model's stamped) choice rather than a
+#: device default silently written into every new slot.
+_SLOT_TYPE_TO_CAPABILITY: dict[str, str] = {
+    "embedding": "embed",
+    "reranking": "rerank",
+    "transcription": "stt",
+    "tts": "tts",
+    "image": "image",
+}
+
+
+def type_implied_profile(cfg_dict: dict[str, Any]) -> str | None:
+    """The runtime profile a slot's TYPE requires, or ``None`` (#1830).
+
+    Creation-time counterpart of :func:`profile_fits_slot`. For every slot type
+    except ``llm`` the profile is a CORRECTNESS fact, not a tuning choice: it
+    carries the llama-server mode flag (``--embedding`` / ``--reranking``) or
+    selects the runtime engine (kokoro / qwen3-tts, moonshine, comfyui, FLM). A
+    capability slot created without one launches as a plain chat server,
+    reaches ``state=ready`` and 501s the one endpoint it exists to serve.
+
+    The ``(capability, device) → profile`` mapping is NOT re-derived here — it
+    is the single shared rule the picker and capability-apply already use
+    (:func:`hal0.capabilities.profile_fit.profile_name_for_fit`), reached
+    through the slot-type→capability translation above.
+
+    The answer is vetoed by :func:`profile_fits_slot`, so a candidate the
+    catalog does not have (or that does not match the slot's device/type) is
+    dropped rather than persisted — e.g. ``transcription`` on a GPU device,
+    where hal0 ships no STT engine. A catalog that cannot be read at all yields
+    ``None``: slot creation must never fail because inference could not run.
+    """
+    capability = _SLOT_TYPE_TO_CAPABILITY.get(str(cfg_dict.get("type") or "").strip().lower())
+    if not capability:
+        return None
+    device = str(cfg_dict.get("device") or "").strip().lower()
+    try:
+        from hal0.capabilities.profile_fit import profile_name_for_fit
+
+        candidate = profile_name_for_fit(capability, device, str(cfg_dict.get("provider") or ""))
+        if not candidate:
+            return None
+        fits = profile_fits_slot(candidate, cfg_dict)
+    except Exception:  # unreadable/broken catalog — never block the create
+        log.warning(
+            "slot.profile_inference_skipped",
+            extra={"type": cfg_dict.get("type"), "device": device},
+        )
+        return None
+    return candidate if fits else None
+
+
 # RETIRED (spec-hw-slot-ownership §2/§3): the model-driven preferred-runner
 # adoption (``preferred_runner_for`` + ``apply_preferred_runner``) is gone — the
 # runner is the slot's own ``SlotConfig.binary`` field, set by the operator, and
@@ -219,4 +274,5 @@ __all__ = [
     "preferred_profile_for",
     "profile_fits_slot",
     "runner_fits_slot",
+    "type_implied_profile",
 ]
