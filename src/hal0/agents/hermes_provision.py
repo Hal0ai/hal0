@@ -55,17 +55,26 @@ from typing import Any
 import structlog
 
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
-from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
+from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 from hal0.system import seam as _seam
 
 log = structlog.get_logger(__name__)
 
 #: Per-server MCP client timeout for ``hal0-admin``. The catalog exposes the
 #: blocking slot lifecycle tools (slot_load / slot_restart / model_swap /
-#: npu_backend_load), so a 60s client cap aborted an agent-driven load long
-#: before the server gave up — the outer half of #1832. Derived from the same
-#: budget the tools themselves forward with, rounded up to whole seconds.
-_HAL0_ADMIN_MCP_TIMEOUT_S = int(slot_lifecycle_timeout_s(loads=1, unloads=1)) + 1
+#: npu_backend_load / capability_set / stack_apply), so a 60s client cap aborted
+#: an agent-driven load long before the server gave up — the outer half of
+#: #1832. It must cover the WORST tool in that catalog, not a representative
+#: one: derived from the restart shape, this outer client still truncated
+#: stack_apply, whose fan-out budget is several times larger.
+#: Computed from the same shape ``hal0.mcp.admin`` budgets its widest tool
+#: (stack_apply) with. It is NOT imported from that table: hal0.mcp.admin
+#: imports this module's package, so reaching into it here is a circular
+#: import that silently breaks MCP mounting. ``test_hal0_admin_mcp_timeout_
+#: covers_the_widest_bridge_tool`` pins the two against drift.
+_HAL0_ADMIN_MCP_TIMEOUT_S = (
+    int(slot_lifecycle_timeout_s(loads=1, unloads=1, slots=STACK_APPLY_SLOT_ALLOWANCE)) + 1
+)
 
 # Canonical last-run-report location. Lives outside $HERMES_HOME — Hermes owns
 # its own tree, and the report must survive a `hermes reset`. This is no longer

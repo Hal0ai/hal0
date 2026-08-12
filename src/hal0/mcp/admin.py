@@ -1584,6 +1584,22 @@ _SLOT_LIFECYCLE_TIMEOUT_S: dict[str, float] = {
     "stack_apply": slot_lifecycle_timeout_s(loads=1, unloads=1, slots=STACK_APPLY_SLOT_ALLOWANCE),
 }
 
+#: TCP connect bound for the REST forward, kept short and independent of the
+#: per-call read budget above — the same split ``hal0.cli._shared`` applies, for
+#: the same reason: a local hal0-api either accepts immediately or is not there,
+#: so spending a multi-minute lifecycle budget on *connect* turns a half-open
+#: daemon into a multi-minute hang instead of a fast failure.
+_CONNECT_TIMEOUT_S = 5.0
+
+
+def max_slot_lifecycle_timeout_s() -> float:
+    """Largest budget any lifecycle tool in this bridge can forward with.
+
+    An outer client that fronts these tools has to cover the worst of them, not
+    a representative one, or it truncates the slowest call it is responsible for.
+    """
+    return max(_SLOT_LIFECYCLE_TIMEOUT_S.values())
+
 
 async def _call_rest(
     *,
@@ -1618,7 +1634,8 @@ async def _call_rest(
     call_kwargs: dict[str, Any] = {"headers": headers}
     call_kwargs[payload_kwarg] = (payload or None) if payload_kwarg == "params" else (payload or {})
 
-    async with httpx.AsyncClient(base_url=base_url, timeout=timeout_s) as client:
+    timeout = httpx.Timeout(timeout_s, connect=min(_CONNECT_TIMEOUT_S, timeout_s))
+    async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
         verb = getattr(client, method.lower())
         response = await verb(url, **call_kwargs)
 

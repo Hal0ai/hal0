@@ -44,9 +44,18 @@ def mock_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             return self._payload
 
     class _MockClient:
-        def __init__(self, *, base_url: str, timeout: float) -> None:
+        def __init__(self, *, base_url: str, timeout: httpx.Timeout | float) -> None:
             captured["base_url"] = base_url
-            captured["timeout"] = timeout
+            # ``_call_rest`` splits the budget per phase (#1832): the lifecycle
+            # budget is the READ bound, connect stays short. Record both, and
+            # keep ``timeout`` meaning "the read budget" so the existing
+            # per-tool assertions still read naturally.
+            if isinstance(timeout, httpx.Timeout):
+                captured["timeout"] = timeout.read
+                captured["connect_timeout"] = timeout.connect
+            else:
+                captured["timeout"] = timeout
+                captured["connect_timeout"] = timeout
 
         async def __aenter__(self) -> _MockClient:
             return self
@@ -1480,3 +1489,41 @@ def test_server_stamps_hal0_version_not_sdk_version(queue: ApprovalQueue) -> Non
 
     server = admin.build_server(approval_queue=queue, base_url="http://t")
     assert server._mcp_server.version == hal0.__version__
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_budget_bounds_the_read_not_the_connect(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """A multi-minute lifecycle budget must not also be the TCP connect bound.
+
+    ``httpx.AsyncClient(timeout=<float>)`` applies that value to every phase, so
+    widening the forward budget from 30s to the slot lifecycle budget (#1832)
+    also widened *connect*. Against a half-open hal0-api that turns a fast
+    failure into a multi-minute hang — for ``stack_apply``, a 96-minute one.
+    The CLI already splits these in ``hal0.cli._shared._client_timeout``; the
+    MCP bridge has to do the same.
+    """
+    await admin.dispatch(
+        tool="model_swap",
+        args={"name": "primary", "model_id": "qwen3:0.6b"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+
+    assert mock_transport["connect_timeout"] == admin._CONNECT_TIMEOUT_S, (
+        f"connect bound is {mock_transport['connect_timeout']}s, expected the "
+        f"short {admin._CONNECT_TIMEOUT_S}s bound"
+    )
+    assert mock_transport["connect_timeout"] < mock_transport["timeout"], (
+        "connect must stay well under the read budget, otherwise the lifecycle "
+        "budget is being spent waiting for a socket that will never open"
+    )
+
+
+def test_max_slot_lifecycle_timeout_covers_every_bridge_tool() -> None:
+    """The advertised worst case must really be the worst of the table."""
+    assert admin.max_slot_lifecycle_timeout_s() == max(admin._SLOT_LIFECYCLE_TIMEOUT_S.values())
+    assert admin.max_slot_lifecycle_timeout_s() == admin._SLOT_LIFECYCLE_TIMEOUT_S["stack_apply"]

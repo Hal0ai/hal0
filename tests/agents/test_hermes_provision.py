@@ -2537,3 +2537,22 @@ def test_hal0_admin_mcp_timeout_clears_the_slot_lifecycle_budget():
     by_name = {s["name"]: s for s in hp._default_mcp_servers()}
     assert by_name["hal0-admin"]["timeout"] >= floor
     assert hp._build_brain_profile_mcp_servers()["hal0-admin"]["timeout"] >= floor
+
+
+def test_hal0_admin_mcp_timeout_covers_the_widest_bridge_tool():
+    """The outer MCP client must out-wait the WIDEST tool it fronts.
+
+    ``_HAL0_ADMIN_MCP_TIMEOUT_S`` was derived from the restart shape while the
+    catalog it fronts also exposes ``stack_apply``, whose fan-out budget is
+    several times larger — so the outer client truncated the single biggest
+    blocking call it is responsible for. It cannot import the bridge's table
+    directly (hal0.mcp.admin imports hal0.agents, so that is a circular import
+    that breaks MCP mounting), hence this drift pin.
+    """
+    from hal0.mcp.admin import max_slot_lifecycle_timeout_s
+
+    widest = max_slot_lifecycle_timeout_s()
+    assert widest <= hp._HAL0_ADMIN_MCP_TIMEOUT_S, (
+        f"outer MCP client caps at {hp._HAL0_ADMIN_MCP_TIMEOUT_S}s while the "
+        f"widest tool it fronts budgets {widest}s"
+    )
