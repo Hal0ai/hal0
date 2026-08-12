@@ -8,12 +8,26 @@ persisting.
 Detection strategy, cheapest first:
 
 1. ``.gguf`` files → :func:`hal0.registry.gguf_header.read_gguf_header`
-   to pull arch + context_length + pooling_type. Strong evidence →
-   ``confidence='high'``. The four GGUF backends are seeded:
-   ``vulkan``, ``rocm``, ``cuda``, ``cpu``. Capability is ``embed`` when
-   ``pooling_type`` is present and non-zero (llama.cpp marks pooling_type
-   = NONE as 0 for chat models, > 0 for embed/rerank pooled outputs),
-   else ``chat``.
+   to pull arch + context_length + pooling_type + tags + attention.causal.
+   The four GGUF backends are seeded: ``vulkan``, ``rocm``, ``cuda``,
+   ``cpu``. Capability is derived, cheapest/strongest signal first:
+
+   a. ``pooling_type`` present → ``rerank`` (RANK=4), ``embed``
+      (MEAN/CLS/LAST, i.e. any other non-zero value), else ``chat``.
+      ``confidence='high'`` — read directly off the header.
+   b. ``pooling_type`` absent but ``general.tags`` carries an
+      unambiguous rerank/embed token (some converters drop the pooling
+      key but keep the tags) → same, ``confidence='high'``.
+   c. Neither present → fall back to the filename token table (also
+      used by the install-time auto-scan). When the filename carries a
+      rerank/embed token, that token alone decides the outcome — a
+      *guess*, not a header read, even though the GGUF header itself
+      parsed fine — ``confidence='medium'`` (#1838: this used to report
+      ``'high'`` for a filename-only guess). When the filename carries
+      no signal either, the bare ``chat`` default applies and stays
+      ``confidence='high'`` — that's the expected, correct answer for
+      the overwhelming majority of causal chat ggufs, which don't set
+      ``pooling_type`` at all.
 2. Non-GGUF: filename heuristic only.  Keywords cover the providers we
    currently ship:
 
@@ -358,25 +372,68 @@ def detect(path: str | Path) -> DetectionResult:
         # pooling_type in its header registered as capabilities: chat).
         is_rerank = pooling == 4
         is_embed = not is_rerank and isinstance(pooling, int) and pooling > 0
+        cap_source = "pooling_type" if (is_rerank or is_embed) else None
 
-        # Filename token fallback in case pooling_type is missing but the
-        # file is clearly embed/rerank (some converters drop it). Uses the
-        # full shared token table, NOT the narrower ``_filename_capability``
-        # helper above — that one deliberately collapses "rerank" to None
-        # for detect()'s *older* embed/asr/tts-only contract, which is
-        # exactly the gap that let a rerank filename fall through to "chat"
-        # here. ``discover.scan_and_register`` (the install-time auto-scan)
-        # reads the same full table via ``_guess_capability`` and gets
-        # rerank right for the identical file — reuse its source of truth
-        # instead of re-diverging.
+        # #1838: header tie-breakers for converters that drop pooling_type
+        # entirely (the jina-reranker-v1-tiny-en case: no <arch>.pooling_type
+        # key at all, so without these the classification came *solely*
+        # from the filename while confidence was still reported "high").
+        # These three signals are unambiguous when present and are checked
+        # BEFORE the filename fallback:
+        #   * general.tags carrying "reranker"/"cross-encoder" or "embed"/
+        #     "sentence-similarity" tokens
+        #   * <arch>.attention.causal == False, which rules out a causal
+        #     chat model (combined with a tags hit to pick rerank vs embed)
+        if not is_rerank and not is_embed:
+            tags = header.get("general.tags")
+            tag_set = {str(t).lower() for t in tags} if isinstance(tags, list) else set()
+            if tag_set & {"reranker", "cross-encoder", "rerank"}:
+                is_rerank = True
+                cap_source = "header_tags"
+            elif tag_set & {"embed", "embedding", "sentence-similarity", "feature-extraction"}:
+                is_embed = True
+                cap_source = "header_tags"
+
+        # Filename token fallback in case pooling_type/tags are missing but
+        # the file is clearly embed/rerank (some converters drop both).
+        # Uses the full shared token table, NOT the narrower
+        # ``_filename_capability`` helper above — that one deliberately
+        # collapses "rerank" to None for detect()'s *older* embed/asr/tts-
+        # only contract, which is exactly the gap that let a rerank
+        # filename fall through to "chat" here. ``discover.scan_and_register``
+        # (the install-time auto-scan) reads the same full table via
+        # ``_guess_capability`` and gets rerank right for the identical
+        # file — reuse its source of truth instead of re-diverging.
+        #
+        # Anything landing here has NO header-derived capability signal —
+        # the classification is a filename guess, so confidence is lowered
+        # below (#1838) even though the header itself parsed cleanly.
         if not is_rerank and not is_embed:
             filename_cap = capability_from_filename(p.name)
             if filename_cap == "rerank":
                 is_rerank = True
+                cap_source = "filename"
             elif filename_cap == "embed":
                 is_embed = True
+                cap_source = "filename"
 
         caps = ["rerank"] if is_rerank else (["embed"] if is_embed else ["chat"])
+        if cap_source is None:
+            # Neither the header nor the filename carried any capability
+            # signal at all. This is the ordinary case for the overwhelming
+            # majority of causal chat ggufs (llama.cpp doesn't emit
+            # pooling_type for them) — "chat" is the correct, expected
+            # answer here, not a guess, so confidence stays high.
+            cap_source = "default"
+
+        # Confidence reflects how the *capability* (not just the header
+        # read) was derived. Only a filename token OVERRIDING the default
+        # is a guess (#1838's actual bug: a rerank/embed filename token is
+        # what silently decided the outcome while confidence still said
+        # "high"). A header-derived signal (pooling_type or the tags/causal
+        # tie-breakers) is a read, and the bare "chat" default is the
+        # documented, expected fallback — both stay high.
+        confidence: Confidence = "medium" if cap_source == "filename" else "high"
 
         name_candidate = header.get("general.name") or header.get("general.basename")
         suggested_name = (
@@ -402,13 +459,16 @@ def detect(path: str | Path) -> DetectionResult:
             suggested_backends=list(_GGUF_BACKENDS),
             suggested_capabilities=caps,
             context_length=ctx_len_int,
-            confidence="high",
+            confidence=confidence,
             suggested_name=suggested_name,
             kind="llama",
             raw_hints={
                 "source": "gguf_header",
                 "architecture": arch,
                 "pooling_type": pooling,
+                "attention_causal": header.get("attention_causal"),
+                "tags": header.get("general.tags"),
+                "capability_source": cap_source,
                 "version": header.get("version"),
                 "name": header.get("general.name"),
                 "basename": header.get("general.basename"),

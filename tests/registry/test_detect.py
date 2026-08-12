@@ -7,6 +7,8 @@ from pathlib import Path
 
 from hal0.registry.detect import detect
 from hal0.registry.gguf_header import (
+    _GGUF_TYPE_ARRAY,
+    _GGUF_TYPE_BOOL,
     _GGUF_TYPE_STRING,
     _GGUF_TYPE_UINT32,
 )
@@ -62,7 +64,10 @@ class TestGgufEmbed:
         p = _write_fixture(tmp_path, "bge-m3-embedding.gguf", _build_gguf(3, kvs))
         r = detect(p)
         assert r.suggested_capabilities == ["embed"]
-        assert r.confidence == "high"
+        # #1838: a filename-only capability guess must NOT report the same
+        # confidence as a header-derived read.
+        assert r.confidence == "medium"
+        assert r.raw_hints["capability_source"] == "filename"
 
 
 class TestGgufRerank:
@@ -91,6 +96,44 @@ class TestGgufRerank:
         p = _write_fixture(tmp_path, "jina-reranker-v2-base.gguf", _build_gguf(3, kvs))
         r = detect(p)
         assert r.suggested_capabilities == ["rerank"]
+        # #1838: this is a filename guess (no pooling_type, no header
+        # tags/causal tie-breaker) — confidence must reflect that.
+        assert r.confidence == "medium"
+        assert r.raw_hints["capability_source"] == "filename"
+
+    def test_header_tags_tiebreaker_wins_over_ambiguous_filename(self, tmp_path: Path) -> None:
+        """The live #1838 repro: two byte-identical files (no pooling_type),
+        one with a filename token ("jina-reranker...") and one without
+        ("zzscratchrr.gguf") must classify identically once the header
+        carries general.tags / attention.causal — the filename must stop
+        being the deciding factor."""
+        tags_bytes = (
+            struct.pack("<I", _GGUF_TYPE_STRING)
+            + struct.pack("<Q", 2)
+            + _enc_str("reranker")
+            + _enc_str("cross-encoder")
+        )
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("jina-bert-v2")),
+            ("general.tags", _GGUF_TYPE_ARRAY, tags_bytes),
+            ("jina-bert-v2.attention.causal", _GGUF_TYPE_BOOL, struct.pack("<B", 0)),
+        ]
+        payload = _build_gguf(3, kvs)
+
+        # Filename carries no rerank/embed token at all.
+        p_no_token = _write_fixture(tmp_path, "zzscratchrr.gguf", payload)
+        r_no_token = detect(p_no_token)
+        assert r_no_token.suggested_capabilities == ["rerank"]
+        assert r_no_token.confidence == "high"
+        assert r_no_token.raw_hints["capability_source"] == "header_tags"
+
+        # Byte-identical file, filename DOES carry the "rerank" token —
+        # must agree with the token-less copy, not merely happen to match.
+        p_token = _write_fixture(tmp_path, "jina-reranker-v1-tiny-en.Q8_0.gguf", payload)
+        r_token = detect(p_token)
+        assert r_token.suggested_capabilities == ["rerank"]
+        assert r_token.confidence == "high"
+        assert r_token.raw_hints["capability_source"] == "header_tags"
 
 
 class TestGgufUnreadable:

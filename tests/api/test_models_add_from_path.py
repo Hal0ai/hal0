@@ -63,10 +63,37 @@ def test_add_from_path_registers_gguf(
     # GGUF backend seed (vulkan/rocm/cuda/cpu).
     assert "chat" in body["capabilities"]
     assert "vulkan" in body["backends"]
+    # #1838 part B: a file with a .gguf extension but no valid GGUF magic
+    # is still registered (by design — recoverable with `model rm`), but
+    # the API response must surface that the header read failed instead
+    # of silently reporting a confident "chat" registration.
+    assert body["metadata"]["detection_confidence"] == "low"
+    assert "no valid GGUF header" in body["metadata"]["detection_warning"]
 
     listing = client.get("/api/models").json()
     ids = {m["id"] for m in listing.get("models", [])}
     assert body["id"] in ids
+
+
+def test_add_from_path_surfaces_medium_confidence_for_filename_guess(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """A real GGUF header that has to fall back to a filename token for
+    capability (no pooling_type) must report confidence='medium', not the
+    'high' a header-derived read gets — the core #1838 gap."""
+    client, drop = add_path_client
+    kvs = [
+        ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+    ]
+    target = drop / "jina-reranker-v2-base.gguf"
+    target.write_bytes(_build_gguf(3, kvs))
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target)})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["capabilities"] == ["rerank"]
+    assert body["metadata"]["detection_confidence"] == "medium"
+    assert "detection_warning" not in body["metadata"]
 
 
 def test_add_from_path_honours_explicit_id_and_labels(

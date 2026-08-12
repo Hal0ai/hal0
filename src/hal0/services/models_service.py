@@ -1083,6 +1083,18 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     metadata: dict[str, Any] = {"discovered": True, "source": "add-from-path"}
     if detection.context_length is not None:
         metadata["context_length"] = detection.context_length
+    # #1838: surface how confident detect() actually is instead of
+    # dropping it on the floor — an operator who supplied no explicit
+    # ``labels`` is trusting auto-detection, and a "medium"/"low" result
+    # (filename guess, or an unreadable/non-GGUF header) needs to reach
+    # the API response and the CLI line, not just detect()'s return value.
+    if not (isinstance(raw_labels, list) and raw_labels):
+        metadata["detection_confidence"] = detection.confidence
+        if detection.raw_hints.get("gguf_header_read") == "failed":
+            metadata["detection_warning"] = (
+                "no valid GGUF header found (bad or missing magic bytes); "
+                "capabilities/backends are a filename guess"
+            )
 
     try:
         model = Model(

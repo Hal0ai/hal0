@@ -71,6 +71,58 @@ def test_model_add_posts_add_from_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "hal0 model run" in result.output
 
 
+def test_model_add_warns_on_failed_gguf_header_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1838 part B: a .gguf file with no valid GGUF magic still registers
+    (by design), but the CLI must print the warning instead of the same
+    confident success line a real header-derived registration gets."""
+
+    def fake_post(path: str, *, json: Any = None, **_kw: Any) -> dict[str, Any]:
+        return {
+            "id": "zzskeprand",
+            "path": "/mnt/ai-models/zzskeprand.gguf",
+            "capabilities": ["chat"],
+            "metadata": {
+                "detection_confidence": "low",
+                "detection_warning": (
+                    "no valid GGUF header found (bad or missing magic bytes); "
+                    "capabilities/backends are a filename guess"
+                ),
+            },
+        }
+
+    monkeypatch.setattr(shared, "api_post", fake_post)
+    result = runner.invoke(
+        model_commands.app,
+        ["add", "/mnt/ai-models/zzskeprand.gguf"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "warning" in result.output.lower()
+    assert "no valid GGUF header" in result.output
+
+
+def test_model_add_shows_medium_confidence_for_filename_guess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1838: a filename-derived capability guess must be visibly flagged,
+    not printed identically to a header-derived 'high' confidence hit."""
+
+    def fake_post(path: str, *, json: Any = None, **_kw: Any) -> dict[str, Any]:
+        return {
+            "id": "jina-reranker-v2-base",
+            "path": "/mnt/ai-models/jina-reranker-v2-base.gguf",
+            "capabilities": ["rerank"],
+            "metadata": {"detection_confidence": "medium"},
+        }
+
+    monkeypatch.setattr(shared, "api_post", fake_post)
+    result = runner.invoke(
+        model_commands.app,
+        ["add", "/mnt/ai-models/jina-reranker-v2-base.gguf"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "medium" in result.output.lower()
+
+
 def test_model_add_with_license_follows_up_with_put(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI consolidation: `add` folded in `register`'s explicit-metadata
     flags — `--license` isn't accepted by add-from-path, so it's applied
