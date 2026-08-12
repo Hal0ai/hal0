@@ -29,6 +29,7 @@ import pytest
 
 from hal0.api import (
     _fetch_hal0_composite_models,
+    _fetch_hal0_composite_models_detailed,
     _hal0_model_cache_clear,
     _prime_hal0_composite_cache,
 )
@@ -302,3 +303,134 @@ def test_public_symbol_exports() -> None:
     assert callable(_prime_hal0_composite_cache)
     assert asyncio.iscoroutinefunction(_fetch_hal0_composite_models)
     assert asyncio.iscoroutinefunction(_prime_hal0_composite_cache)
+
+
+# ── #1837 follow-up: a degraded enumeration must not wipe the bucket ────────
+#
+# The replace-don't-merge fix (#1837) made the prime authoritative: whatever
+# the fetch returns becomes ``model_cache["hal0"]``. That is correct for a
+# COMPLETE enumeration and destructive for a partial one — ``iter_configs``
+# raising, or skipping a slot whose TOML momentarily won't parse, would
+# otherwise un-advertise a healthy slot's model until an unrelated slot went
+# ready or hal0-api restarted (``/v1/models`` reads the bucket, not the
+# fetch, so there is no self-heal).
+
+
+class _ExplodingSlotManager:
+    """Enumeration fails outright (permissions blip, IO error)."""
+
+    async def iter_configs(self) -> list[dict[str, Any]]:
+        raise RuntimeError("transient enumeration failure")
+
+    async def iter_configs_detailed(self) -> tuple[list[dict[str, Any]], list[str]]:
+        raise RuntimeError("transient enumeration failure")
+
+
+class _PartialSlotManager(_FakeSlotManager):
+    """One slot's TOML won't parse, so it's skipped.
+
+    The real ``SlotManager.iter_configs`` swallows ``SlotConfigError`` per
+    slot and keeps going, which makes a partial read indistinguishable
+    from a genuinely shorter catalogue unless the skip is reported —
+    ``iter_configs_detailed`` is what reports it (covered against the real
+    manager in ``tests/slots/test_iter_configs_detailed.py``).
+    """
+
+    def __init__(self, configs: list[dict[str, Any]], skipped: list[str]):
+        super().__init__(configs)
+        self._skipped = skipped
+
+    async def iter_configs_detailed(self) -> tuple[list[dict[str, Any]], list[str]]:
+        return list(self._configs), list(self._skipped)
+
+
+def _two_named_chat_slots() -> list[dict[str, Any]]:
+    return [
+        {"name": "slot-a", "type": "llm", "model_default": "m-a"},
+        {"name": "slot-b", "type": "llm", "model_default": "m-b"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_enumeration_leaves_the_previous_bucket_intact() -> None:
+    """A transient ``iter_configs`` failure must not empty
+    ``model_cache["hal0"]`` — it is a failure to observe, not an
+    observation that every slot is gone."""
+    registry = UpstreamRegistry()
+    model_cache: dict[str, list[str]] = {}
+    healthy = _FakeSlotManager(_two_named_chat_slots())
+
+    await _prime_hal0_composite_cache(registry, healthy, model_cache)
+    assert model_cache["hal0"] == ["m-a", "m-b"]
+
+    _hal0_model_cache_clear()
+    await _prime_hal0_composite_cache(registry, _ExplodingSlotManager(), model_cache)
+    assert model_cache["hal0"] == ["m-a", "m-b"], "a failed read wiped the catalogue"
+
+
+@pytest.mark.asyncio
+async def test_failed_enumeration_is_not_cached_under_the_ttl() -> None:
+    """The failure result must not be written to the 5s TTL cache, or a
+    single blip suppresses the catalogue for the whole window."""
+    _hal0_model_cache_clear()
+    models, degraded = await _fetch_hal0_composite_models_detailed(_ExplodingSlotManager())
+    assert (models, degraded) == ([], True)
+
+    # Immediately afterwards — well inside the TTL — a healthy manager
+    # must be consulted rather than served the cached failure.
+    recovered = await _fetch_hal0_composite_models(_FakeSlotManager(_two_named_chat_slots()))
+    assert recovered == ["m-a", "m-b"]
+
+
+@pytest.mark.asyncio
+async def test_partial_enumeration_does_not_drop_a_healthy_slots_model() -> None:
+    """One unparseable slot TOML shortens the enumeration; replacing the
+    bucket with that floor would permanently un-advertise ``m-b``."""
+    registry = UpstreamRegistry()
+    model_cache: dict[str, list[str]] = {}
+
+    await _prime_hal0_composite_cache(
+        registry, _FakeSlotManager(_two_named_chat_slots()), model_cache
+    )
+    assert model_cache["hal0"] == ["m-a", "m-b"]
+
+    _hal0_model_cache_clear()
+    partial = _PartialSlotManager(
+        [{"name": "slot-a", "type": "llm", "model_default": "m-a"}],
+        skipped=["slot-b"],
+    )
+    await _prime_hal0_composite_cache(registry, partial, model_cache)
+    assert model_cache["hal0"] == ["m-a", "m-b"], "a skipped slot's model was dropped"
+
+
+@pytest.mark.asyncio
+async def test_partial_enumeration_is_not_cached_under_the_ttl() -> None:
+    """A partial read must not be served for the rest of the TTL window
+    either — the next call re-reads and can recover the full catalogue."""
+    _hal0_model_cache_clear()
+    partial = _PartialSlotManager(
+        [{"name": "slot-a", "type": "llm", "model_default": "m-a"}],
+        skipped=["slot-b"],
+    )
+    models, degraded = await _fetch_hal0_composite_models_detailed(partial)
+    assert (models, degraded) == (["m-a"], True)
+
+    recovered = await _fetch_hal0_composite_models(_FakeSlotManager(_two_named_chat_slots()))
+    assert recovered == ["m-a", "m-b"]
+
+
+@pytest.mark.asyncio
+async def test_a_complete_enumeration_still_evicts_a_deleted_slot() -> None:
+    """The degraded guard must not resurrect the #1837 merge-forward: a
+    COMPLETE read that no longer lists ``slot-b`` still evicts ``m-b``."""
+    registry = UpstreamRegistry()
+    model_cache: dict[str, list[str]] = {}
+    slot_mgr = _FakeSlotManager(_two_named_chat_slots())
+
+    await _prime_hal0_composite_cache(registry, slot_mgr, model_cache)
+    assert model_cache["hal0"] == ["m-a", "m-b"]
+
+    _hal0_model_cache_clear()
+    slot_mgr._configs = [{"name": "slot-a", "type": "llm", "model_default": "m-a"}]
+    await _prime_hal0_composite_cache(registry, slot_mgr, model_cache)
+    assert model_cache["hal0"] == ["m-a"]

@@ -638,6 +638,49 @@ def test_delete_forwards_force_query_param(
     assert isolated_client.get("/api/slots/chat/config").status_code == 404
 
 
+def test_delete_evicts_the_slots_model_id_from_the_composite_catalogue(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """#1837: DELETE must un-advertise the slot's model id immediately.
+
+    ``SlotManager.delete`` unloads the slot (ready -> offline) and emits no
+    ``ready`` event, so the event-driven composite re-prime never fires for
+    it. Before the fix the id stayed in ``model_cache["hal0"]`` — which is
+    what ``/v1/models`` and the dashboard's synthetic ``hal0`` tile read —
+    until some UNRELATED slot went ready or hal0-api restarted, and it
+    hard-404s on dispatch the whole time (no slot, no registry entry).
+    """
+    app, client = isolated_app_client
+    cache = app.state.upstream_models
+    assert "qwen3-4b-q4_k_m" in cache.get("hal0", []), "precondition: id is advertised"
+
+    r = client.delete("/api/slots/chat")
+    assert r.status_code == 200, r.text
+
+    assert "qwen3-4b-q4_k_m" not in app.state.upstream_models.get("hal0", [])
+
+
+def test_config_write_rebinding_the_model_default_evicts_the_old_id(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """#1837, same shape via the other mutation: PUT /config that rebinds
+    ``model.default`` emits no ``ready`` event either, so the old id has to
+    be evicted (and the new one advertised) on the write itself."""
+    app, client = isolated_app_client
+    assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+    r = client.put("/api/slots/chat/config", json={"model": {"default": "qwen3-8b-q4_k_m"}})
+    assert r.status_code == 200, r.text
+
+    bucket = app.state.upstream_models.get("hal0", [])
+    assert "qwen3-4b-q4_k_m" not in bucket
+    assert "qwen3-8b-q4_k_m" in bucket
+
+
 # ── §21.10 operator pin: route guards + payload exposure (#1367) ────────────
 
 

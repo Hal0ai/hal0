@@ -1092,9 +1092,17 @@ async def delete_slot(name: str, request: Request, force: bool = False) -> dict[
     surfaces as 4xx. Pass ``?force=true`` to delete a seeded slot anyway (an
     install/update reconcile may re-seed it later).
     """
+    from hal0.api import hal0_refresh_composite_models
+
     sm = _get_slot_manager(request)
     async with record_action(request, category="slot", action="slot.delete", target=name):
         await sm.delete(name, force=force)
+    # #1837: deleting a slot unloads it (ready -> offline) and emits no
+    # ``ready`` event, so the composite-catalogue re-prime that rides on
+    # slot-ready never fires — the dead slot's model id kept being
+    # advertised by /v1/models (hard-404ing on dispatch) until an
+    # unrelated slot went ready or hal0-api restarted. Evict here.
+    await hal0_refresh_composite_models(request.app)
     return {"name": name, "deleted": True, "forced": force}
 
 
@@ -1147,6 +1155,8 @@ async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
 @_invalidates_snapshot
 async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     """Update a slot's config. Body: partial SlotConfig (shallow merge)."""
+    from hal0.api import hal0_refresh_composite_models
+
     sm = _get_slot_manager(request)
     try:
         body = await request.json()
@@ -1193,6 +1203,11 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
                 slot=name,
                 error=str(exc),
             )
+    # #1837: a config write can rebind ``model.default`` (or flip the slot's
+    # type), which changes the composite catalogue without producing a
+    # ``ready`` event. Re-derive it now rather than advertising the old id
+    # until some unrelated slot happens to go ready.
+    await hal0_refresh_composite_models(request.app)
     # NOTE (#1369): this route is a PURE config write — no lifecycle side
     # effect. It used to unload a running slot on an ``enabled: false`` body
     # (so the faded card matched reality); with the field gone, config edits

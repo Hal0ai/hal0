@@ -181,6 +181,23 @@ async def _fetch_hal0_composite_models(
     now: Callable[[], float] = time.monotonic,
     ttl_seconds: float = _HAL0_MODEL_CACHE_TTL_SECONDS,
 ) -> list[str]:
+    """Aggregated catalogue only — see :func:`_fetch_hal0_composite_models_detailed`.
+
+    Drops the ``degraded`` flag, so callers that REPLACE state from this
+    result should use the detailed form instead (#1837 follow-up).
+    """
+    models, _degraded = await _fetch_hal0_composite_models_detailed(
+        slot_manager, now=now, ttl_seconds=ttl_seconds
+    )
+    return models
+
+
+async def _fetch_hal0_composite_models_detailed(
+    slot_manager: SlotManager,
+    *,
+    now: Callable[[], float] = time.monotonic,
+    ttl_seconds: float = _HAL0_MODEL_CACHE_TTL_SECONDS,
+) -> tuple[list[str], bool]:
     """Aggregate every ready chat-capable slot's model id into one catalogue.
 
     Direct read over the live slot config — no pseudo-upstream is
@@ -204,17 +221,39 @@ async def _fetch_hal0_composite_models(
     The returned list is sorted + deduplicated and cached for
     ``ttl_seconds`` to keep the cold-start fan-out cheap while still
     picking up new slots within a handful of seconds.
+
+    Returns:
+        ``(models, degraded)``. ``degraded=True`` means the enumeration
+        did NOT see every configured slot — ``iter_configs`` raised, or
+        it skipped a slot whose TOML wouldn't parse. A degraded result is
+        a floor, not a catalogue: because callers REPLACE their bucket
+        with it, a degraded result must never be cached under the TTL nor
+        written over a known-good bucket, or one momentarily unparseable
+        slot TOML un-advertises a healthy slot's model until the next
+        refresh (and, since ``/v1/models`` reads the bucket rather than
+        this fetch, there is no self-heal short of another slot-ready
+        event or an ``hal0-api`` restart).
     """
     cached = _HAL0_MODEL_CACHE.get(_HAL0_COMPOSITE_CACHE_KEY)
     monotonic_now = now()
     if cached is not None and cached[0] > monotonic_now:
-        return list(cached[1])
+        return list(cached[1]), False
 
+    skipped: list[str] = []
     try:
-        cfgs = await slot_manager.iter_configs()
-    except Exception as exc:  # pragma: no cover — defensive
+        detailed = getattr(slot_manager, "iter_configs_detailed", None)
+        if callable(detailed):
+            cfgs, skipped = await detailed()
+        else:  # pragma: no cover — test doubles / older managers
+            cfgs = await slot_manager.iter_configs()
+    except Exception as exc:
         log.warning("upstream.hal0_composite_iter_failed", error=str(exc))
-        cfgs = []
+        # Enumeration failed outright — report an empty FLOOR, flagged
+        # degraded, and leave the TTL cache untouched so the next call
+        # retries immediately instead of serving this failure for 5s.
+        return [], True
+    if skipped:
+        log.warning("upstream.hal0_composite_partial_enumeration", skipped=list(skipped))
 
     seen: set[str] = set()
     models: list[str] = []
@@ -243,26 +282,17 @@ async def _fetch_hal0_composite_models(
         models.append(model_id)
 
     for cfg in cfgs:
-        name = cfg.get("name", "")
-        is_flm = "flm" in (cfg.get("provider", ""), cfg.get("backend", ""))
-        if not is_flm or not name:
-            continue
-        # Two config shapes accepted here — see _seed_multiplex_models for
-        # why (container-era [npu] table vs. pre-#733 [defaults] load_*).
-        npu_table = cfg.get("npu") or {}
-        defaults = cfg.get("defaults") or {}
-        load_embed = npu_table.get("embed") or defaults.get("load_embed")
-        load_asr = npu_table.get("asr") or defaults.get("load_asr")
-        if load_embed and _FLM_EMBED_TAG not in seen:
-            seen.add(_FLM_EMBED_TAG)
-            models.append(_FLM_EMBED_TAG)
-        if load_asr and _FLM_ASR_TAG not in seen:
-            seen.add(_FLM_ASR_TAG)
-            models.append(_FLM_ASR_TAG)
+        for tag in _flm_multiplex_tags(cfg):
+            if tag in seen:
+                continue
+            seen.add(tag)
+            models.append(tag)
 
     models.sort()
+    if skipped:
+        return models, True
     _HAL0_MODEL_CACHE[_HAL0_COMPOSITE_CACHE_KEY] = (monotonic_now + ttl_seconds, list(models))
-    return models
+    return models, False
 
 
 def _slot_model_id(cfg: dict[str, Any]) -> str:
@@ -644,6 +674,14 @@ async def _prime_hal0_composite_cache(
     :func:`_fetch_hal0_composite_models` — so replacing here doesn't drop
     them.
 
+    The one exception to the replace is a DEGRADED enumeration — see
+    :func:`_fetch_hal0_composite_models_detailed`. If the slot catalogue
+    couldn't be read in full (``iter_configs`` raised, or a slot's TOML
+    wouldn't parse) the previous bucket is left exactly as it was: a
+    partial read is a floor, and replacing with it would un-advertise a
+    healthy slot's model permanently. Deletion still evicts — a deleted
+    slot is simply absent from a complete enumeration.
+
     Skipped if an explicit ``upstreams.toml`` entry already claims the
     name ``hal0`` — operator overrides win, and their entry's model cache
     is populated the same way as any other remote upstream (dispatch
@@ -653,8 +691,44 @@ async def _prime_hal0_composite_cache(
     if upstreams.get("hal0") is not None:
         log.info("slots.hal0_composite_skipped", reason="explicit_upstream_registered")
         return
-    models = await _fetch_hal0_composite_models(slot_manager)
+    models, degraded = await _fetch_hal0_composite_models_detailed(slot_manager)
+    if degraded:
+        log.warning(
+            "slots.hal0_composite_prime_skipped",
+            reason="degraded_enumeration",
+            kept=len(model_cache.get("hal0", []) or []),
+        )
+        return
     model_cache["hal0"] = list(models)
+
+
+async def hal0_refresh_composite_models(app: Any) -> None:
+    """Re-derive ``model_cache["hal0"]`` right now, from live slot config.
+
+    Slot mutations that change the composite catalogue — DELETE
+    ``/api/slots/{name}``, or a config write that rebinds
+    ``model.default`` — produce no ``slot.state`` ``ready`` event, so the
+    event-driven re-prime in :func:`_refresh_model_cache_on_ready` never
+    fires for them. Without this, a deleted slot's model id stayed
+    advertised by ``/v1/models`` (and the dashboard's synthetic ``hal0``
+    tile) until some UNRELATED slot happened to go ready, or ``hal0-api``
+    restarted — #1837, reproduced on ct152.
+
+    Best-effort and never raises: the catalogue is a discovery surface,
+    and failing a successful delete because the cache refresh hiccupped
+    would be worse than a few seconds of staleness.
+    """
+    state = getattr(app, "state", None)
+    upstreams = getattr(state, "upstreams", None)
+    slot_manager = getattr(state, "slot_manager", None)
+    model_cache = getattr(state, "upstream_models", None)
+    if upstreams is None or slot_manager is None or model_cache is None:
+        return
+    try:
+        _hal0_model_cache_clear()
+        await _prime_hal0_composite_cache(upstreams, slot_manager, model_cache)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("model_cache.hal0_composite_refresh_failed", error=str(exc))
 
 
 # ── FLM multiplex model seeding ────────────────────────────────────────────
@@ -667,6 +741,34 @@ async def _prime_hal0_composite_cache(
 # to nowhere. Seed the cache explicitly.
 _FLM_EMBED_TAG = "embed-gemma:300m"
 _FLM_ASR_TAG = "whisper-v3:turbo"
+
+
+def _flm_multiplex_tags(cfg: dict[str, Any]) -> list[str]:
+    """Multiplex tags an FLM slot's config opts into, in stable order.
+
+    One shared derivation for both consumers — the composite fetch
+    (:func:`_fetch_hal0_composite_models_detailed`, which re-derives them
+    on every read so a REPLACE-based prime can't drop them) and
+    :func:`_seed_multiplex_models`. They used to be verbatim copies; a
+    drift between them would show as tags present at startup and silently
+    vanishing on the first slot-ready re-prime.
+
+    Two config shapes are accepted: the container-era ``[npu]`` table
+    (what FLMProvider builds its ``--asr`` / ``--embed`` argv from) and
+    the pre-#733 ``[defaults] load_*`` legacy keys.
+    """
+    if not cfg.get("name"):
+        return []
+    if "flm" not in (cfg.get("provider", ""), cfg.get("backend", "")):
+        return []
+    npu_table = cfg.get("npu") or {}
+    defaults = cfg.get("defaults") or {}
+    tags: list[str] = []
+    if npu_table.get("embed") or defaults.get("load_embed"):
+        tags.append(_FLM_EMBED_TAG)
+    if npu_table.get("asr") or defaults.get("load_asr"):
+        tags.append(_FLM_ASR_TAG)
+    return tags
 
 
 async def _refresh_model_cache_on_ready(
@@ -747,23 +849,11 @@ async def _seed_multiplex_models(
         return
     bucket = model_cache.setdefault("hal0", [])
     for cfg in cfgs:
-        name = cfg.get("name", "")
-        is_flm = "flm" in (cfg.get("provider", ""), cfg.get("backend", ""))
-        if not is_flm or not name:
-            continue
-        # Container-era schema is the [npu] table (what FLMProvider builds
-        # the --asr/--embed argv from); [defaults] load_* is the pre-#733
-        # legacy shape, kept so older tomls keep seeding.
-        npu_table = cfg.get("npu") or {}
-        defaults = cfg.get("defaults") or {}
-        load_embed = npu_table.get("embed") or defaults.get("load_embed")
-        load_asr = npu_table.get("asr") or defaults.get("load_asr")
-        if load_embed and _FLM_EMBED_TAG not in bucket:
-            bucket.append(_FLM_EMBED_TAG)
-            log.info("slots.multiplex_seeded", slot=name, model=_FLM_EMBED_TAG)
-        if load_asr and _FLM_ASR_TAG not in bucket:
-            bucket.append(_FLM_ASR_TAG)
-            log.info("slots.multiplex_seeded", slot=name, model=_FLM_ASR_TAG)
+        for tag in _flm_multiplex_tags(cfg):
+            if tag in bucket:
+                continue
+            bucket.append(tag)
+            log.info("slots.multiplex_seeded", slot=cfg.get("name", ""), model=tag)
 
 
 def _hydrate_upstreams(registry: UpstreamRegistry) -> None:

@@ -2183,7 +2183,27 @@ class SlotManager:
             least ``name`` and ``port``; the rest of the SlotConfig
             shape (``backend``, ``provider``, …) round-trips verbatim.
         """
+        cfgs, _skipped = await self.iter_configs_detailed()
+        return cfgs
+
+    async def iter_configs_detailed(self) -> tuple[list[dict[str, Any]], list[str]]:
+        """Like :meth:`iter_configs`, but also report the slots it skipped.
+
+        A slot whose TOML is momentarily unreadable or unparseable is
+        skipped with a warning and omitted from the returned list — so a
+        bare ``iter_configs()`` result is indistinguishable from "that
+        slot no longer exists". Callers that REPLACE derived state from
+        this enumeration (the ``/v1/models`` composite catalogue, #1837)
+        must be able to tell a genuinely shorter catalogue from a partial
+        read, or one unparseable TOML silently un-advertises a healthy
+        slot's model until the next refresh.
+
+        Returns:
+            ``(configs, skipped_names)`` — the config dicts in stable
+            order, and the names of the slots that failed to parse.
+        """
         out: list[dict[str, Any]] = []
+        skipped: list[str] = []
         for name in self._all_configured_slot_names():
             try:
                 cfg = await self._load_slot_config(name)
@@ -2192,9 +2212,10 @@ class SlotManager:
                     "slot.config_skipped",
                     extra={"slot": name, "error": str(exc)},
                 )
+                skipped.append(name)
                 continue
             out.append(cfg)
-        return out
+        return out, skipped
 
     # ── PR-10: seeded slot catalogue + routing helpers ──────────────────────
     #
