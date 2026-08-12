@@ -401,7 +401,11 @@ def model_add(
     """Register an already-downloaded model file — capabilities auto-detected.
 
     Reads the file header to derive id, capabilities and backends; the
-    file stays where it is (no copy). Folds in the explicit-metadata flags
+    file stays where it is (no copy). When the header doesn't carry enough
+    signal (e.g. no ``pooling_type``), capabilities fall back to a filename
+    guess — watch for the confidence/warning line this command prints, and
+    fix a wrong guess with ``PUT /api/models/<id>``
+    (``{"capabilities": [...]}``). Folds in the explicit-metadata flags
     (``--id``, ``--name``, ``--license``) that the old ``model register``
     command exposed, so this command now covers both cases.
     """
@@ -430,6 +434,25 @@ def model_add(
     console.print(f"Registered [bold]{mid}[/bold] → {m.get('path', path)}")
     caps = ", ".join(m.get("capabilities", []) or []) or "—"
     console.print(f"  capabilities: {caps}")
+    # #1838: detect() may have guessed capabilities/backends from the
+    # filename alone (confidence != "high") or failed to read a valid GGUF
+    # header at all — both cases used to print the same confident success
+    # line as a header-derived "high" hit, which reads like a fact when
+    # it's a guess.
+    meta = m.get("metadata") or {}
+    confidence = meta.get("detection_confidence")
+    warning = meta.get("detection_warning")
+    if warning:
+        console.print(f"  [yellow]warning:[/yellow] {warning}")
+    elif confidence and confidence != "high":
+        # #1838 (codex review): a medium result can come from a filename
+        # guess OR from a header signal (attention.causal=False) that
+        # contradicts the "chat" default — don't claim it's always the
+        # filename, just that it's not a confident header read.
+        console.print(
+            f"  [yellow]confidence: {confidence}[/yellow] "
+            "(capabilities/backends could not be reliably read from the file header)"
+        )
     console.print(
         f"[dim]Next: hal0 model run {mid}   (or: hal0 slot edit <slot> --model {mid})[/dim]"
     )

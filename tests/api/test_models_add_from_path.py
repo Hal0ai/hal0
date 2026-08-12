@@ -63,10 +63,37 @@ def test_add_from_path_registers_gguf(
     # GGUF backend seed (vulkan/rocm/cuda/cpu).
     assert "chat" in body["capabilities"]
     assert "vulkan" in body["backends"]
+    # #1838 part B: a file with a .gguf extension but no valid GGUF magic
+    # is still registered (by design — recoverable with `model rm`), but
+    # the API response must surface that the header read failed instead
+    # of silently reporting a confident "chat" registration.
+    assert body["metadata"]["detection_confidence"] == "low"
+    assert "no valid GGUF header" in body["metadata"]["detection_warning"]
 
     listing = client.get("/api/models").json()
     ids = {m["id"] for m in listing.get("models", [])}
     assert body["id"] in ids
+
+
+def test_add_from_path_surfaces_medium_confidence_for_filename_guess(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """A real GGUF header that has to fall back to a filename token for
+    capability (no pooling_type) must report confidence='medium', not the
+    'high' a header-derived read gets — the core #1838 gap."""
+    client, drop = add_path_client
+    kvs = [
+        ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+    ]
+    target = drop / "jina-reranker-v2-base.gguf"
+    target.write_bytes(_build_gguf(3, kvs))
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target)})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["capabilities"] == ["rerank"]
+    assert body["metadata"]["detection_confidence"] == "medium"
+    assert "detection_warning" not in body["metadata"]
 
 
 def test_add_from_path_honours_explicit_id_and_labels(
@@ -90,6 +117,12 @@ def test_add_from_path_honours_explicit_id_and_labels(
     assert body["id"] == "user.my-custom-id"
     assert body["name"] == "My custom name"
     assert body["capabilities"] == ["embed", "chat"]
+    # #1838 (codex review): explicit labels override CAPABILITY, but the
+    # header-invalid warning is a fact about the bytes on disk, not the
+    # requested capability — it must still surface even when labels were
+    # supplied (this fixture's bytes have no valid GGUF magic either).
+    assert "detection_confidence" not in body["metadata"]
+    assert "no valid GGUF header" in body["metadata"]["detection_warning"]
 
 
 def test_add_from_path_rejects_missing_file(
@@ -251,6 +284,40 @@ def test_add_from_path_accepts_gguf_symlink_into_extensionless_blob(
     assert "qwen3" in body["id"].lower()
     assert link.resolve().name not in body["id"]
     assert link.resolve().name not in body["name"]
+    # #1838 (codex review): this fixture's bytes have no valid GGUF magic,
+    # and the resolved blob is extensionless — before the fix, detect()
+    # only recognised "claims .gguf" off the resolved path's suffix, so
+    # this exact HF hub-cache shape silently fell through to "unknown, no
+    # backends, no warning" instead of the deliberate failed-header path.
+    assert set(body["backends"]) == {"vulkan", "rocm", "cuda", "cpu"}
+    assert "no valid GGUF header" in body["metadata"]["detection_warning"]
+
+
+def test_add_from_path_symlink_capability_uses_operators_filename(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """#1838 (codex review): a HF hub-cache symlink resolves to a sha-named
+    blob with no filename signal — detect() must fall back to the
+    operator-typed name (the symlink itself), not the opaque blob name, so
+    a real capability token like "reranker" isn't silently hidden."""
+    client, drop = add_path_client
+    kvs = [
+        ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+    ]
+    link = _hub_layout(
+        drop,
+        repo="jinaai/jina-reranker-v2-base-multilingual-GGUF",
+        revision="abc123",
+        filename="jina-reranker-v2-base.gguf",
+        body=_build_gguf(3, kvs),
+    )
+    assert link.resolve().suffix == "", "fixture must reproduce the extensionless blob"
+
+    r = client.post("/api/models/add-from-path", json={"path": str(link)})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["capabilities"] == ["rerank"]
+    assert body["metadata"]["detection_confidence"] == "medium"
 
 
 def test_add_from_path_id_from_filename_not_gguf_arch_header(

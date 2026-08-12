@@ -364,7 +364,10 @@ async def commit_scan_rows(
         except OSError:
             resolved = path
 
-        detection = detect(resolved)
+        # #1838: see add_from_path's matching comment — pass the operator-
+        # typed name so a HF hub-cache symlink's resolved sha-named blob
+        # doesn't hide a real filename capability token.
+        detection = detect(resolved, filename_hint=path.name)
         backends = row.get("backends")
         capabilities = row.get("capabilities")
         if not isinstance(backends, list):
@@ -1043,7 +1046,11 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             details={"path": str(path), "allowed": sorted(allowed_exts)},
         )
 
-    detection = detect(resolved)
+    # #1838: pass the operator-typed name for the capability filename-token
+    # fallback — a HF hub-cache symlink resolves to a sha-named blob whose
+    # name carries no signal at all, which would otherwise silently hide a
+    # real filename token like "jina-reranker-*.gguf" from detect().
+    detection = detect(resolved, filename_hint=path.name)
     raw_labels = body.get("labels")
     if isinstance(raw_labels, list) and raw_labels:
         capabilities = [str(c) for c in raw_labels if isinstance(c, str) and c.strip()]
@@ -1083,6 +1090,23 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     metadata: dict[str, Any] = {"discovered": True, "source": "add-from-path"}
     if detection.context_length is not None:
         metadata["context_length"] = detection.context_length
+    # #1838: surface how confident detect() actually is instead of
+    # dropping it on the floor — an operator who supplied no explicit
+    # ``labels`` is trusting auto-detection, and a "medium"/"low" result
+    # (filename guess) needs to reach the API response and the CLI line,
+    # not just detect()'s return value.
+    explicit_labels = isinstance(raw_labels, list) and raw_labels
+    if not explicit_labels:
+        metadata["detection_confidence"] = detection.confidence
+    # A failed GGUF header read is a fact about the FILE, not the requested
+    # capability — surface it even when the caller supplied explicit
+    # ``labels`` (only capability got overridden; the bytes on disk may
+    # still be garbage, and backends still come from detect()'s guess).
+    if detection.raw_hints.get("gguf_header_read") == "failed":
+        metadata["detection_warning"] = (
+            "no valid GGUF header found (bad or missing magic bytes); "
+            "capabilities/backends are a filename guess"
+        )
 
     try:
         model = Model(

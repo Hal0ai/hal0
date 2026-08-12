@@ -26,8 +26,10 @@ specifically::
 
     general.architecture
     general.embedding_length
+    general.tags
     <arch>.context_length
     <arch>.pooling_type
+    <arch>.attention.causal
 
 The parser skips other KV values without materialising them whenever it
 can, to keep memory + token cost bounded.
@@ -92,6 +94,11 @@ _INTERESTING_KEYS_STATIC: frozenset[str] = frozenset(
         # llama.cpp LLAMA_FTYPE enum — the authoritative quantisation
         # signal (WS-13); registry/detect maps it to a "Q4_K_M"-style label.
         "general.file_type",
+        # #1838: capability tie-breakers for headers that omit
+        # <arch>.pooling_type — a reranker/embed converter that drops the
+        # pooling key still tends to carry these. general.tags is an array
+        # of free-text strings (e.g. ["reranker", "cross-encoder"]).
+        "general.tags",
     }
 )
 
@@ -278,12 +285,28 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
 
                     want = key in _INTERESTING_KEYS_STATIC
                     if not want and arch is not None:
-                        want = key == f"{arch}.context_length" or key == f"{arch}.pooling_type"
-                    if not want and arch is None and key.endswith(".context_length"):
-                        # Capture arch-prefixed context_length even if we
-                        # haven't seen general.architecture yet (rare but
-                        # legal).  We stash both the value and the prefix
-                        # so we can promote later if it matches.
+                        want = key in (
+                            f"{arch}.context_length",
+                            f"{arch}.pooling_type",
+                            f"{arch}.attention.causal",
+                        )
+                    if (
+                        not want
+                        and arch is None
+                        and (
+                            key.endswith(".context_length")
+                            or key.endswith(".pooling_type")
+                            or key.endswith(".attention.causal")
+                        )
+                    ):
+                        # Capture arch-prefixed context_length/pooling_type/
+                        # attention.causal even if we haven't seen
+                        # general.architecture yet (rare but legal — the
+                        # spec doesn't promise ordering, #1838 codex
+                        # review). We stash the value under its own
+                        # <prefix>.<key> and promote it below once/if the
+                        # matching arch turns up (or, absent that, take
+                        # the first one we saw).
                         want = True
 
                     if want:
@@ -304,17 +327,28 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
             if arch:
                 ctx_key = f"{arch}.context_length"
                 pool_key = f"{arch}.pooling_type"
+                causal_key = f"{arch}.attention.causal"
                 if ctx_key in out:
                     out["context_length"] = out[ctx_key]
                 if pool_key in out:
                     out["pooling_type"] = out[pool_key]
+                if causal_key in out:
+                    out["attention_causal"] = out[causal_key]
             else:
-                # No arch but we may have captured a *.context_length on
-                # the speculative branch above.  Promote the first one.
-                for k, v in out.items():
-                    if k.endswith(".context_length") and k != "context_length":
-                        out["context_length"] = v
-                        break
+                # No arch but we may have captured a *.context_length /
+                # *.pooling_type / *.attention.causal on the speculative
+                # branch above. Promote the first one of each.
+                for suffix, alias in (
+                    (".context_length", "context_length"),
+                    (".pooling_type", "pooling_type"),
+                    (".attention.causal", "attention_causal"),
+                ):
+                    if alias in out:
+                        continue
+                    for k, v in out.items():
+                        if k.endswith(suffix) and k != alias:
+                            out[alias] = v
+                            break
 
             return out
         finally:

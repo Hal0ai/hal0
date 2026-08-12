@@ -8,12 +8,35 @@ persisting.
 Detection strategy, cheapest first:
 
 1. ``.gguf`` files → :func:`hal0.registry.gguf_header.read_gguf_header`
-   to pull arch + context_length + pooling_type. Strong evidence →
-   ``confidence='high'``. The four GGUF backends are seeded:
-   ``vulkan``, ``rocm``, ``cuda``, ``cpu``. Capability is ``embed`` when
-   ``pooling_type`` is present and non-zero (llama.cpp marks pooling_type
-   = NONE as 0 for chat models, > 0 for embed/rerank pooled outputs),
-   else ``chat``.
+   to pull arch + context_length + pooling_type + tags + attention.causal.
+   The four GGUF backends are seeded: ``vulkan``, ``rocm``, ``cuda``,
+   ``cpu``. Capability is derived, cheapest/strongest signal first:
+
+   a. ``pooling_type`` present → ``rerank`` (RANK=4), ``embed``
+      (MEAN/CLS/LAST, i.e. any other non-zero value), else ``chat``.
+      ``confidence='high'`` — read directly off the header.
+   b. ``pooling_type`` absent but ``general.tags`` carries an
+      unambiguous rerank/embed token (some converters drop the pooling
+      key but keep the tags) → same, ``confidence='high'``.
+   c. Neither present → fall back to the filename token table (also
+      used by the install-time auto-scan; a HF hub-cache symlink's own
+      name, not the resolved sha-blob's). When the filename carries a
+      rerank/embed token, that token alone decides the outcome — a
+      *guess*, not a header read, even though the GGUF header itself
+      parsed fine — ``confidence='medium'`` (#1838: this used to report
+      ``'high'`` for a filename-only guess). When the filename carries
+      no signal either:
+        - ``<arch>.attention.causal`` explicitly ``False`` contradicts
+          the ``chat`` default (it rules out a causal chat model) →
+          still ``chat`` (we don't know embed vs rerank), but
+          ``confidence='medium'``.
+        - otherwise the bare ``chat`` default applies and stays
+          ``confidence='high'`` — that's the expected, correct answer
+          for the overwhelming majority of causal chat ggufs, which
+          don't set ``pooling_type`` at all.
+   Note: an explicit ``pooling_type=0`` (NONE, the causal-chat value) is
+   authoritative and skips (b)/(c) entirely — a stray tag or filename
+   token can't override a header that already said "chat".
 2. Non-GGUF: filename heuristic only.  Keywords cover the providers we
    currently ship:
 
@@ -257,10 +280,16 @@ def _filename_capability(name: str) -> str | None:
     return cap if cap in ("embed", "asr", "tts") else None
 
 
-def _heuristic_only(path: Path) -> DetectionResult:
-    """Fallback detection: filename heuristic, no header read."""
-    name = path.name.lower()
-    cap = _filename_capability(name)
+def _heuristic_only(path: Path, *, filename_hint: str | None = None) -> DetectionResult:
+    """Fallback detection: filename heuristic, no header read.
+
+    ``filename_hint`` — see :func:`detect`'s docstring (#1838). Used for
+    capability-token matching and the ``.gguf`` backend-seed check only;
+    identity fields (``suggested_name``, ``quant``, ``raw_hints["stem"/
+    "suffix"]``) stay derived from ``path`` itself.
+    """
+    hint_name = (filename_hint or path.name).lower()
+    cap = _filename_capability(hint_name)
 
     # A file under the ComfyUI models tree is an image-gen asset — tag it
     # image/comfyui so add-by-path / scan-preview file it on the dashboard's
@@ -282,11 +311,11 @@ def _heuristic_only(path: Path) -> DetectionResult:
     backends: list[str] = []
     caps: list[str] = []
     kind: Kind = "unknown"
-    if "moonshine" in name:
+    if "moonshine" in hint_name:
         backends = ["moonshine"]
         caps = ["asr"]
         kind = "moonshine"
-    elif "kokoro" in name:
+    elif "kokoro" in hint_name:
         backends = ["kokoro"]
         caps = ["tts"]
         kind = "kokoro"
@@ -303,7 +332,11 @@ def _heuristic_only(path: Path) -> DetectionResult:
         # embed-ish filename but extension says it's not GGUF — leave
         # backends empty; user picks. Treat as unknown until format is clear.
         caps = ["embed"]
-    elif path.suffix.lower() == ".gguf":
+    elif path.suffix.lower() == ".gguf" or Path(hint_name).suffix == ".gguf":
+        # #1838: the resolved path may be an extensionless HF hub-cache
+        # blob even though the operator's own filename (the hint) is
+        # unmistakably "*.gguf" — either one claiming .gguf is enough to
+        # seed the GGUF backends instead of leaving the row unclassified.
         backends = list(_GGUF_BACKENDS)
         caps = ["chat"]
         kind = "llama"
@@ -324,23 +357,42 @@ def _heuristic_only(path: Path) -> DetectionResult:
 # ── public API ─────────────────────────────────────────────────────────────
 
 
-def detect(path: str | Path) -> DetectionResult:
+def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionResult:
     """Inspect ``path`` and return a :class:`DetectionResult`.
 
     Never raises for an unreadable / missing / non-GGUF file: we fall
     back to the filename heuristic and lower the confidence.
+
+    ``filename_hint`` — the operator-typed name to use for capability
+    filename-token matching AND the ".gguf claimed" check below, when it
+    differs from ``path`` (#1838: a HuggingFace hub-cache symlink's real,
+    human-readable name lives at ``snapshots/<rev>/<name>.gguf``; ``path``
+    here is usually the *resolved* sha-named blob it points at, which
+    carries no filename signal — and no ``.gguf`` suffix — at all).
+    Identity fields (``suggested_name``, quant-from-filename, ``stem``)
+    stay derived from ``path`` unchanged; only the two things that decide
+    "did the operator ask for a GGUF file" use the hint when given.
+    Defaults to ``path``'s own name when omitted.
     """
     p = Path(path)
     suffix = p.suffix.lower()
+    name_for_capability = filename_hint if filename_hint is not None else p.name
+    # #1838: a resolved HF hub-cache blob is extensionless even when the
+    # symlink the operator pointed at is unmistakably "*.gguf" — without
+    # also checking the hint's suffix, a bad-magic blob silently fell all
+    # the way to the generic "unknown, no backends, no warning" path
+    # instead of the deliberate "claims .gguf but magic failed" one.
+    hint_suffix = Path(name_for_capability).suffix.lower()
+    claims_gguf = suffix == ".gguf" or hint_suffix == ".gguf"
 
     # Try GGUF magic bytes regardless of extension — HF blob cache stores
     # GGUF data under content-hash filenames with no suffix.
     header = read_gguf_header(p)
-    if header is not None or suffix == ".gguf":
+    if header is not None or claims_gguf:
         if header is None:
-            # Suffix claimed .gguf but magic failed: degrade to heuristic
-            # with the GGUF backend seed.
-            r = _heuristic_only(p)
+            # Suffix (or the operator-typed hint) claimed .gguf but magic
+            # failed: degrade to heuristic with the GGUF backend seed.
+            r = _heuristic_only(p, filename_hint=filename_hint)
             r.raw_hints["gguf_header_read"] = "failed"
             return r
 
@@ -358,25 +410,104 @@ def detect(path: str | Path) -> DetectionResult:
         # pooling_type in its header registered as capabilities: chat).
         is_rerank = pooling == 4
         is_embed = not is_rerank and isinstance(pooling, int) and pooling > 0
+        # pooling_type==0 (NONE) is an explicit, authoritative "this is a
+        # causal chat model" read too — not just non-zero values — so it
+        # also gets the "pooling_type" source/high confidence. The
+        # tie-breakers/fallbacks below are for headers that DROP the key
+        # entirely, not ones that set it to the chat value. Gate everything
+        # past this point on the key being genuinely absent so an explicit
+        # 0 can't be second-guessed by a stray tag or filename token.
+        pooling_present = pooling is not None
+        cap_source = "pooling_type" if pooling_present else None
 
-        # Filename token fallback in case pooling_type is missing but the
-        # file is clearly embed/rerank (some converters drop it). Uses the
-        # full shared token table, NOT the narrower ``_filename_capability``
-        # helper above — that one deliberately collapses "rerank" to None
-        # for detect()'s *older* embed/asr/tts-only contract, which is
-        # exactly the gap that let a rerank filename fall through to "chat"
-        # here. ``discover.scan_and_register`` (the install-time auto-scan)
-        # reads the same full table via ``_guess_capability`` and gets
-        # rerank right for the identical file — reuse its source of truth
-        # instead of re-diverging.
-        if not is_rerank and not is_embed:
-            filename_cap = capability_from_filename(p.name)
+        causal = header.get("attention_causal")
+
+        # #1838: header tie-breakers for converters that drop pooling_type
+        # entirely (the jina-reranker-v1-tiny-en case: no <arch>.pooling_type
+        # key at all, so without these the classification came *solely*
+        # from the filename while confidence was still reported "high").
+        # These are unambiguous when present and are checked BEFORE the
+        # filename fallback: general.tags carrying "reranker"/"cross-encoder"
+        # or "embed"/"sentence-similarity" tokens.
+        if not pooling_present:
+            tags = header.get("general.tags")
+            tag_set = {str(t).lower() for t in tags} if isinstance(tags, list) else set()
+            rerank_tag_hit = bool(tag_set & {"reranker", "cross-encoder", "rerank"})
+            embed_tag_hit = bool(
+                tag_set & {"embed", "embedding", "sentence-similarity", "feature-extraction"}
+            )
+            # #1838 (codex review): general.tags is free text — a converter
+            # can legally carry BOTH a rerank token and an embed token
+            # (e.g. a reranker also tagged "feature-extraction" for its
+            # underlying encoder). That's genuinely ambiguous, not a tie-
+            # breaker; fall through to the filename table rather than
+            # silently picking whichever group happened to be checked
+            # first.
+            if rerank_tag_hit and not embed_tag_hit:
+                is_rerank = True
+                cap_source = "header_tags"
+            elif embed_tag_hit and not rerank_tag_hit:
+                is_embed = True
+                cap_source = "header_tags"
+
+        # Filename token fallback in case pooling_type/tags are missing but
+        # the file is clearly embed/rerank (some converters drop both).
+        # Uses the full shared token table, NOT the narrower
+        # ``_filename_capability`` helper above — that one deliberately
+        # collapses "rerank" to None for detect()'s *older* embed/asr/tts-
+        # only contract, which is exactly the gap that let a rerank
+        # filename fall through to "chat" here. ``discover.scan_and_register``
+        # (the install-time auto-scan) reads the same full table via
+        # ``_guess_capability`` and gets rerank right for the identical
+        # file — reuse its source of truth instead of re-diverging.
+        #
+        # Uses ``name_for_capability`` (the operator-typed name when the
+        # caller supplied one), NOT ``p.name`` — a HF hub-cache symlink
+        # resolves ``p`` to a sha-named blob whose name carries no signal
+        # at all, which would otherwise hide a real filename token like
+        # "jina-reranker-*.gguf" from this fallback (#1838).
+        #
+        # Anything landing here has NO header-derived capability signal —
+        # the classification is a filename guess, so confidence is lowered
+        # below (#1838) even though the header itself parsed cleanly.
+        if not pooling_present and not is_rerank and not is_embed:
+            filename_cap = capability_from_filename(name_for_capability)
             if filename_cap == "rerank":
                 is_rerank = True
+                cap_source = "filename"
             elif filename_cap == "embed":
                 is_embed = True
+                cap_source = "filename"
 
         caps = ["rerank"] if is_rerank else (["embed"] if is_embed else ["chat"])
+        if cap_source is None:
+            cap_source = "default"
+            if not pooling_present and causal is False:
+                # #1838: the header explicitly rules out a causal chat
+                # model (attention.causal=False) but neither tags nor the
+                # filename told us which non-chat capability it actually
+                # is. Defaulting to "chat" here would contradict evidence
+                # the header itself provided — that's worse than the
+                # ordinary "no signal at all" default, so it does not get
+                # the ordinary default's high confidence.
+                cap_source = "causal_conflict"
+            # else: neither the header nor the filename carried any
+            # capability signal at all. This is the ordinary case for the
+            # overwhelming majority of causal chat ggufs (llama.cpp doesn't
+            # emit pooling_type for them) — "chat" is the correct, expected
+            # answer here, not a guess, so confidence stays high.
+
+        # Confidence reflects how the *capability* (not just the header
+        # read) was derived. A filename token OVERRIDING the default, or a
+        # "chat" default that contradicts an explicit attention.causal=False
+        # read, is a guess (#1838's actual bug: a rerank/embed filename
+        # token is what silently decided the outcome while confidence still
+        # said "high"). A header-derived signal (pooling_type or the tags
+        # tie-breaker) is a read, and the ordinary no-signal "chat" default
+        # is the documented, expected fallback — both stay high.
+        confidence: Confidence = (
+            "medium" if cap_source in ("filename", "causal_conflict") else "high"
+        )
 
         name_candidate = header.get("general.name") or header.get("general.basename")
         suggested_name = (
@@ -402,13 +533,16 @@ def detect(path: str | Path) -> DetectionResult:
             suggested_backends=list(_GGUF_BACKENDS),
             suggested_capabilities=caps,
             context_length=ctx_len_int,
-            confidence="high",
+            confidence=confidence,
             suggested_name=suggested_name,
             kind="llama",
             raw_hints={
                 "source": "gguf_header",
                 "architecture": arch,
                 "pooling_type": pooling,
+                "attention_causal": header.get("attention_causal"),
+                "tags": header.get("general.tags"),
+                "capability_source": cap_source,
                 "version": header.get("version"),
                 "name": header.get("general.name"),
                 "basename": header.get("general.basename"),
@@ -419,7 +553,7 @@ def detect(path: str | Path) -> DetectionResult:
         )
 
     # Non-GGUF file: filename heuristic only.
-    return _heuristic_only(p)
+    return _heuristic_only(p, filename_hint=filename_hint)
 
 
 __all__ = [
