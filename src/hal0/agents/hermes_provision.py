@@ -3256,35 +3256,116 @@ def _fetch_model_contexts() -> dict[str, int]:
     return out
 
 
-def _fetch_model_route_ready(model_id: str) -> bool:
-    """Ask ``GET /v1/models/{id}`` whether ``model_id`` actually routes.
+def _fetch_model_route_ready(model_id: str, base_url: str = "") -> bool | None:
+    """Is ``model_id`` routable **on the endpoint the caller will dispatch to**?
 
-    Unlike :func:`_fetch_model_contexts` (backed by the **list** route,
-    ``GET /v1/models``), this hits the **by-id** route, which resolves hal0's
-    canonical virtual names (``hal0/agent``, ``hal0/utility``, ``hal0/npu``)
-    via the LiveSlotResolver (see ``_resolve_virtual_model_entry`` in
-    ``hal0.api.routes.v1``). The list route deliberately never advertises
-    those virtuals (#1153) and also folds a chat slot's raw model id into
-    its alias entry, so checking list *membership* against the shipped
-    ``model.default: hal0/agent`` can never succeed even when the model is
-    fully routable (#1831). 404/other client errors and network failures
-    both mean "not ready"; only a clean response counts.
+    Three-valued on purpose:
+
+    * ``True``  — the endpoint says the id resolves.
+    * ``False`` — the endpoint authoritatively says it does not.
+    * ``None``  — inconclusive; the endpoint's answer does not settle it.
+
+    ``base_url`` is hermes' ``model.base_url`` (empty → the hal0 gateway),
+    i.e. the same origin :func:`_smoke_chat_completions` POSTs
+    ``/chat/completions`` to. Asking a *different* server is how #1831
+    happened: under ``HAL0_HERMES_LIVE_RESOLVE=0`` the config pins a chat
+    slot's own llama-server plus that slot's RAW physical model id, and the
+    gateway catalog deliberately suppresses that id in favour of the slot's
+    alias row (``hal0_chat_slot_model_ids``) while its by-id route only
+    resolves ``hal0/*`` virtuals — so the gateway 404s an id that routes
+    perfectly well where the probe actually sends it.
+
+    Resolution order, cheapest first:
+
+    1. ``GET {base_url}/models/{id}`` — the by-id route. hal0's gateway
+       resolves the canonical virtuals (``hal0/agent`` …) here via the
+       LiveSlotResolver (``_resolve_virtual_model_entry``); the list route
+       deliberately never advertises them (#1153).
+    2. On 404, ``GET {base_url}/models`` — llama-server and friends have no
+       by-id route at all but do list the model they have loaded.
+    3. Still nothing: only a **canonical virtual name asked of the hal0
+       gateway** is conclusively absent — that pair is exactly what the by-id
+       route resolves. Elsewhere the ``hal0/`` prefix carries no routing
+       meaning, and any other id could simply be folded into an alias row, so
+       report ``None`` and let the caller run the real probe rather than skip
+       on a guess.
+
+    Never raises: every transport failure is inconclusive, not "not ready" —
+    an unreachable endpoint is a fact the chat probe should report, not one
+    the preflight should hide behind a skip.
+    """
+    gateway = f"{HAL0_API_URL}/v1"
+    base = (base_url or gateway).rstrip("/")
+    status = _http_status_json(f"{base}/models/{_quote_model_id(model_id)}")[0]
+    if status is not None and 200 <= status < 300:
+        return True
+    if status != 404:
+        return None  # 5xx / auth / unreachable — no evidence either way
+    listed_status, payload = _http_status_json(f"{base}/models")
+    if listed_status is None or not (200 <= listed_status < 300):
+        return None
+    entries = (payload or {}).get("data")
+    if not isinstance(entries, list):
+        # 2xx with a body we could not parse into a catalog is not evidence of
+        # an EMPTY catalog — it is no evidence at all. An empty ``data`` list
+        # is a real answer; a missing or malformed one is not.
+        return None
+    ids = {str(entry.get("id")) for entry in entries if isinstance(entry, dict) and entry.get("id")}
+    if model_id in ids:
+        return True
+    if base == gateway.rstrip("/") and _is_canonical_virtual(model_id):
+        # A CANONICAL virtual asked of the GATEWAY is the one conclusive
+        # negative available: that pair is exactly what the by-id route
+        # resolves, so a 404 plus a valid catalog means no slot backs it.
+        # Neither half generalises — on a pinned backend the ``hal0/`` prefix
+        # is just characters in a model id, and a physical registry id may
+        # legitimately carry the prefix while chat dispatch still resolves it
+        # by exact match.
+        return False
+    return None
+
+
+def _is_canonical_virtual(model_id: str) -> bool:
+    """Is ``model_id`` one of hal0's advertised virtual names?
+
+    Read from the resolver's own table rather than re-deriving it from the
+    ``hal0/`` prefix, which is deliberately broader (ADR-0023 §2: any enabled
+    llm slot is addressable as ``hal0/<slot>``).
+    """
+    try:
+        from hal0.normalize.resolver import DEFAULT_CHAINS
+    except Exception:  # pragma: no cover — defensive
+        return False
+    return model_id in DEFAULT_CHAINS
+
+
+def _quote_model_id(model_id: str) -> str:
+    from urllib.parse import quote
+
+    return quote(model_id, safe="/")
+
+
+def _http_status_json(url: str) -> tuple[int | None, dict[str, Any] | None]:
+    """``GET url`` → ``(status, decoded_json)``; ``(None, None)`` if unreachable.
+
+    An HTTP error still carries a status (that is the evidence callers need
+    to tell "the server said no" from "the server said nothing").
     """
     from urllib.error import HTTPError, URLError
-    from urllib.parse import quote
     from urllib.request import Request, urlopen
 
-    req = Request(
-        f"{HAL0_API_URL}/v1/models/{quote(model_id, safe='/')}",
-        headers={"Accept": "application/json"},
-    )
+    req = Request(url, headers={"Accept": "application/json"})
     try:
         with urlopen(req, timeout=3.0) as resp:
-            return 200 <= resp.status < 300
-    except HTTPError:
-        return False
+            try:
+                body = json.loads(resp.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                body = None
+            return (resp.status, body if isinstance(body, dict) else None)
+    except HTTPError as exc:
+        return (exc.code, None)
     except (URLError, OSError, TimeoutError):
-        return False
+        return (None, None)
 
 
 def _slot_kind(slot: dict[str, Any]) -> str:
@@ -4754,27 +4835,29 @@ _MODEL_DEPENDENT_PROBES = frozenset({"chat_completions"})
 def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     """Cheap preflight: is a chat-capable model actually routable right now?
 
-    Reads ``model.default`` from config.yaml — the exact field
-    :func:`_smoke_chat_completions` targets — and cross-checks it against the
-    live gateway via ``io.fetch_model_route_ready`` (``GET
-    /v1/models/{id}``), instead of paying a full chat-completion round trip
-    just to find out nothing is loaded.
+    Reads ``model.default`` AND ``model.base_url`` from config.yaml — the two
+    fields :func:`_smoke_chat_completions` dispatches with — and asks *that
+    endpoint* whether the id routes (``io.fetch_model_route_ready``), instead
+    of paying a full chat-completion round trip just to find out nothing is
+    loaded.
 
-    This resolves the anchor through the **by-id** route rather than
-    checking membership in the **list** route's payload (``GET
-    /v1/models``): the list route deliberately never advertises hal0's
-    canonical virtual names (``hal0/agent`` et al. — see
-    ``_aggregate_models`` in ``hal0.api.routes.v1``, #1153) and also folds a
-    chat slot's raw model id into its alias entry, so list membership can
-    never hold for the shipped ``model.default: hal0/agent`` even when the
-    model is fully routable. The by-id route resolves virtuals via the
-    LiveSlotResolver (``_resolve_virtual_model_entry``), matching exactly
-    what :func:`_smoke_chat_completions` itself dispatches against (#1831).
+    Two rules keep this honest, both learned from #1831:
 
-    This is what lets smoke_tests tell "the route is genuinely broken" (a
-    real failure) apart from "no chat model exists yet" (#1793) — never
-    raises; any config/parse/network problem reports not-ready with the
-    reason.
+    * **Ask the endpoint the probe will use.** Consulting the hal0 gateway's
+      catalog is answering a routability question with a discovery answer.
+      Under ``HAL0_HERMES_LIVE_RESOLVE=0`` the probe POSTs straight at a chat
+      slot's llama-server using that slot's raw physical model id, which the
+      gateway catalog suppresses in favour of the slot's alias row and whose
+      by-id route only resolves ``hal0/*`` virtuals — a guaranteed 404 for a
+      route that works.
+    * **Skip only on affirmative evidence.** ``fetch_model_route_ready``
+      returns ``None`` when the endpoint's answer settles nothing; then the
+      probe RUNS and reports what really happens. A skip is a claim ("no
+      chat model exists yet", #1793) and must be earned, because a wrong
+      skip is invisible — it reads as a clean install.
+
+    Never raises: any config/parse/probe problem resolves to a decision plus
+    the reason behind it.
     """
     import yaml  # type: ignore[import-untyped]
 
@@ -4785,15 +4868,21 @@ def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
         cfg = yaml.safe_load(config_path.read_text()) or {}
     except (OSError, yaml.YAMLError) as exc:
         return False, f"config parse: {exc}"
-    model_name = (cfg.get("model") or {}).get("default", "")
+    model_cfg = cfg.get("model") or {}
+    model_name = model_cfg.get("default", "")
     if not model_name:
         return False, "model.default unset in config.yaml"
+    base_url = str(model_cfg.get("base_url", "") or "")
     try:
-        routable = io.fetch_model_route_ready(model_name)
+        routable = io.fetch_model_route_ready(model_name, base_url)
     except Exception as exc:  # preflight must never raise
-        return False, f"gateway probe failed: {exc}"
+        # Inconclusive, not negative: let the probe report the real state.
+        return True, f"route probe errored ({exc}); probing anyway"
+    endpoint = base_url or f"{HAL0_API_URL}/v1"
+    if routable is None:
+        return True, f"'{model_name}' unverifiable at {endpoint}; probing anyway"
     if not routable:
-        return False, f"'{model_name}' not loaded on the gateway"
+        return False, f"'{model_name}' has no route at {endpoint}"
     return True, "ready"
 
 
@@ -5246,7 +5335,7 @@ class InstallIO:
     http_get: Callable[..., int] = _http_get
     fetch_slots: Callable[[], list[dict[str, Any]]] = _fetch_slots
     fetch_model_contexts: Callable[[], dict[str, int]] = _fetch_model_contexts
-    fetch_model_route_ready: Callable[[str], bool] = _fetch_model_route_ready
+    fetch_model_route_ready: Callable[[str, str], bool | None] = _fetch_model_route_ready
     probe_mcp_server: Callable[..., dict[str, Any]] = _probe_mcp_server
     mcp_memory_call: Callable[..., dict[str, Any]] = _mcp_memory_call
     install_venv: Callable[..., None] = _install_venv

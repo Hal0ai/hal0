@@ -427,25 +427,63 @@ regressions:
     issue: 1831
     from: v1.0.0-rc.5
     severity: major
-    tier: mechanical
+    tier: judgment
     lane: hermes
-    promote_ready: true
+    promote_ready: false
     summary: >-
-      rc.5's new `_chat_model_ready` preflight checks hermes' `model.default` (`hal0/agent`)
+      rc.5's `_chat_model_ready` preflight checked hermes' `model.default` (`hal0/agent`)
       against the ids in GET /v1/models, which deliberately never advertises the `hal0/*`
-      virtual names. The gate can never open on the shipped config, so `chat_completions` and
-      `memory_roundtrip` are skipped on every install — with a false reason ("not loaded on the
+      virtual names. The gate could never open on the shipped config, so `chat_completions` and
+      `memory_roundtrip` were skipped on every install — with a false reason ("not loaded on the
       gateway") while `GET /v1/models/hal0/agent` returns 200. `memory_roundtrip` has no chat
-      dependency at all and should not be behind the gate.
+      dependency at all and should not have been behind the gate.
+    fix: >-
+      Two waves. rc.5 ungated `memory_roundtrip` and resolved the anchor through the by-id
+      route; the follow-up made the preflight ask the endpoint hermes' `model.base_url` points
+      at (the one the probe POSTs to) and made the answer three-valued, so a skip requires
+      affirmative evidence and anything inconclusive runs the probe.
+    rc5_note: >-
+      The first wave fixed the DEFAULT config only. This register entry, as originally written,
+      probed only that config — so it would have reported `fixed` while the mode the issue
+      actually named was still broken. A register entry that cannot fail is worse than none.
+      Probe BOTH resolution modes below; they are different code paths.
     repro: |
+      # Mode A — shipped live-resolve default (model.default: hal0/agent, base_url :8080/v1)
       hal0 agent status hermes --json | jq '.phases.smoke_tests'
-      curl -s $API/v1/models | jq -r '.data[].id'
-      curl -s -o /dev/null -w '%{http_code}\n' $API/v1/models/hal0/agent
-      grep -n 'model:' -A3 /var/lib/hal0/.hermes/config.yaml
+      curl -s -o /dev/null -w '%{http_code}\n' $API/v1/models/hal0/agent   # expect 200
+      #
+      # Mode B — the pinned single-backend mode the issue named. This is the one that hid.
+      # `model.default` becomes a chat slot's RAW physical model id and `model.base_url` its own
+      # llama-server, neither of which the gateway catalog will confirm.
+      #
+      # Do NOT re-bootstrap hermes to get there: that rewrites the shared config.yaml while the
+      # other lanes probe the same box concurrently, and restoring it afterwards cannot undo what
+      # they observed in the meantime. Drive the installed preflight against a throwaway hermes
+      # home instead — same code, same live endpoints, nothing shared mutated.
+      # Needs a loaded chat slot; note its port and configured model id first.
+      hal0 slot list                                           # pick a loaded llm slot
+      grep -E '^(port|default)' /etc/hal0/slots/<slot>.toml     # -> PORT, PHYS_ID
+      curl -s http://127.0.0.1:<PORT>/v1/models                 # the backend knows the model...
+      curl -s -o /dev/null -w '%{http_code}\n' "$API/v1/models/<PHYS_ID>"   # ...gateway 404s it
+      /usr/lib/hal0/venv/bin/python - <<'PY'
+      import pathlib, tempfile
+      from hal0.agents import hermes_provision as hp
+      d = pathlib.Path(tempfile.mkdtemp())
+      (d / "config.yaml").write_text(
+          "model:\n  default: <PHYS_ID>\n  base_url: http://127.0.0.1:<PORT>/v1\n"
+      )
+      print(hp._chat_model_ready(hp.BootstrapState(hermes_home=str(d)), hp.InstallIO()))
+      PY
+      # (True, ...) = the probe would run. (False, ...) = the defect, still live.
     expect: >-
-      Neither chat_completions nor memory_roundtrip is skipped on a box where the anchor
-      resolves. If a probe IS skipped, cross-check the recorded reason against
-      `GET /v1/models/{id}` before believing it.
+      In BOTH modes, with a chat slot loaded, `chat_completions` runs (passes or fails on its
+      own merits) and `memory_roundtrip` runs unconditionally. A skip in mode B is the
+      regression, even if mode A is clean. Any recorded skip reason must be verified against
+      the endpoint in `model.base_url` — NOT the gateway catalog — before it is believed; the
+      original defect was precisely a plausible-sounding skip reason that named the wrong
+      server. Unit-level coverage of both modes now lives in
+      tests/agents/test_hermes_provision.py (the pinned-backend and unverifiable-route cases);
+      what stays here is the on-box half, which needs a real install and cannot be a pytest.
 
   - id: slot-verbs-10s-client-timeout
     issue: 1832
