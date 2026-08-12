@@ -70,6 +70,7 @@ __all__ = [
     "config_enrichment",
     "container_enrichment",
     "loaded_model_names_from_slots",
+    "resolve_ctx_max",
     "serialize_slot",
     "synthesize_upstream_entries",
 ]
@@ -429,7 +430,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return out
 
 
-def _resolve_ctx_max(
+def resolve_ctx_max(
     raw_ctx_max: int | None,
     model_registry: Any,
     model_id: str,
@@ -441,13 +442,15 @@ def _resolve_ctx_max(
     TOML — the raw hardware ceiling, not what llama-server actually runs
     with now that the MODEL owns context size (v1.0 ownership split; see
     :func:`hal0.providers.container._resolve_context_size`). The aggregator
-    calls this after merging ``config_enrichment``'s output so the
-    "ctx used / max" pane reports the same number the launch path resolved,
-    using the model registry the aggregator already carries.
+    (and, per #1835, the ``GET /api/slots/{name}`` detail route) calls this
+    after merging ``config_enrichment``'s output so the "ctx used / max"
+    pane and the per-slot detail body both report the same number the
+    launch path resolved, using the model registry the caller already
+    carries.
 
     Imported lazily (heavy neighbour, see module docstring) and never
     raises: a resolution failure degrades to the raw TOML ceiling — the
-    pre-fix behavior — rather than breaking the slots list.
+    pre-fix behavior — rather than breaking the caller.
     """
     try:
         from hal0.providers.container import resolve_effective_context_size
@@ -961,7 +964,7 @@ class SlotViewAggregator:
             raw_ctx_max = payload.get("ctx_max")
             model_id = str(payload.get("model_default") or "")
             if model_id or isinstance(raw_ctx_max, int):
-                payload["ctx_max"] = _resolve_ctx_max(
+                payload["ctx_max"] = resolve_ctx_max(
                     raw_ctx_max if isinstance(raw_ctx_max, int) else None,
                     self._registry,
                     model_id,
