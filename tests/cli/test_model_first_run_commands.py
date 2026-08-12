@@ -18,6 +18,23 @@ from hal0.cli import model_commands
 runner = CliRunner()
 
 
+def _assert_clears_load_budget(kwargs: dict[str, Any]) -> None:
+    """A blocking slot-load POST must out-wait the server's own worst case.
+
+    Floor is computed from the server modules (the health poll plus the two
+    sequential pre-load evictions ``preload_evict.admit`` may run inside the
+    load path), never from the client constant under test.
+    """
+    from hal0.providers.container import _HEALTH_TIMEOUT_S
+    from hal0.slots.manager import SlotManager
+
+    floor = float(_HEALTH_TIMEOUT_S) + 2 * float(SlotManager._terminate_timeout_s)
+    assert "timeout" in kwargs, "blocking load POST passed no explicit timeout kwarg"
+    assert kwargs["timeout"] >= floor, (
+        f"timeout={kwargs['timeout']} is under the server's {floor}s load worst case"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _api_reachable(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(model_commands, "_api_unreachable", lambda _url: False)
@@ -331,10 +348,13 @@ def test_model_run_loads_and_waits_ready(monkeypatch: pytest.MonkeyPatch) -> Non
             return {"name": "chat", "status": "ready", "port": 8081}
         raise AssertionError(path)
 
-    def fake_post(path: str, *, json: Any = None, **_kw: Any) -> Any:
+    posted: dict[str, Any] = {}
+
+    def fake_post(path: str, *, json: Any = None, **kw: Any) -> Any:
         calls.append(f"POST {path}")
         assert path == "/api/slots/chat/load"
         assert json == {"model_id": "qwen3-4b"}
+        posted["kwargs"] = kw
         return {"state": "loading"}
 
     monkeypatch.setattr(model_commands, "api_get", fake_get)
@@ -342,6 +362,11 @@ def test_model_run_loads_and_waits_ready(monkeypatch: pytest.MonkeyPatch) -> Non
     result = runner.invoke(model_commands.app, ["run", "qwen3-4b"])
     assert result.exit_code == 0, result.output
     assert "POST /api/slots/chat/load" in calls
+    # /api/slots/{name}/load blocks until the slot converges — the POST must
+    # carry the lifecycle budget, not api_post's generic 10s default (#1832).
+    # Without it the command reports failure on a load that succeeded, and
+    # never reaches the readiness poll its own --timeout advertises.
+    _assert_clears_load_budget(posted["kwargs"])
     assert "Ready" in result.output
     assert "curl" in result.output  # prints a copy-paste smoke test
 
@@ -359,3 +384,72 @@ def test_model_run_unregistered_model_names_the_fix(
     assert "hal0 model pull" in out
     assert "hal0 model add" in out
     assert "hal0 model scan" in out
+
+
+def test_model_run_explicit_timeout_caps_the_blocking_load_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--timeout is the operator's whole wait budget, POST included (#1832).
+
+    Giving the blocking load POST the full derived budget unconditionally would
+    make `hal0 model run --timeout 5` sit in the request for minutes before the
+    readiness poll it advertises ever starts.
+    """
+
+    def fake_get(path: str, **_kw: Any) -> Any:
+        if path == "/api/models/qwen3-4b":
+            return {"id": "qwen3-4b"}
+        if path == "/api/slots":
+            return {"slots": [{"name": "chat"}]}
+        if path == "/api/slots/chat":
+            return {"name": "chat", "status": "ready", "port": 8081}
+        raise AssertionError(path)
+
+    posted: dict[str, Any] = {}
+
+    def fake_post(path: str, *, json: Any = None, **kw: Any) -> Any:
+        posted["kwargs"] = kw
+        return {"state": "loading"}
+
+    monkeypatch.setattr(model_commands, "api_get", fake_get)
+    monkeypatch.setattr(shared, "api_post", fake_post)
+    result = runner.invoke(model_commands.app, ["run", "qwen3-4b", "--timeout", "5"])
+    assert result.exit_code == 0, result.output
+    assert posted["kwargs"]["timeout"] == 5.0
+
+
+def test_model_run_deadline_covers_the_load_not_just_the_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--timeout is one budget across both phases, not one per phase.
+
+    Opening the readiness deadline only after the POST returned meant a load
+    that consumed most of --timeout server-side still got a fresh full poll
+    window, so an advertised 100s limit could approach 200s.
+    """
+    import time as _time
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(_time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+
+    def fake_get(path: str, **_kw: Any) -> Any:
+        if path == "/api/models/qwen3-4b":
+            return {"id": "qwen3-4b"}
+        if path == "/api/slots":
+            return {"slots": [{"name": "chat"}]}
+        if path == "/api/slots/chat":
+            clock["now"] += 1.0  # never becomes ready
+            return {"name": "chat", "status": "warming"}
+        raise AssertionError(path)
+
+    def fake_post(path: str, *, json: Any = None, **_kw: Any) -> Any:
+        clock["now"] += 95.0  # the load ate most of the operator's budget
+        return {"state": "loading"}
+
+    monkeypatch.setattr(model_commands, "api_get", fake_get)
+    monkeypatch.setattr(shared, "api_post", fake_post)
+    result = runner.invoke(model_commands.app, ["run", "qwen3-4b", "--timeout", "100"])
+    assert result.exit_code == 1
+    # 95s of load plus at most 5s of polling — not 95 plus a fresh 100.
+    assert clock["now"] <= 100.0, f"waited {clock['now']}s against --timeout 100"

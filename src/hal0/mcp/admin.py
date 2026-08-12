@@ -178,6 +178,7 @@ from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 from hal0.memory.namespace import is_known_namespace
+from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
@@ -1555,6 +1556,51 @@ def _rest_error_payload(body: Any, *, text: str = "") -> dict[str, Any]:
     }
 
 
+#: Tools whose REST route blocks on the slot state machine, and therefore
+#: cannot use ``_call_rest``'s generic 30s forward timeout: at 30s against a
+#: 180s+ health poll the agent is told the op failed while it succeeds
+#: server-side, the same defect #1832 fixed for the CLI. Budgets derive from
+#: :mod:`hal0.slot_lifecycle_budget` so a server-side retune carries here too.
+_SLOT_LIFECYCLE_TIMEOUT_S: dict[str, float] = {
+    "slot_load": slot_lifecycle_timeout_s(loads=1, unloads=0),
+    "slot_unload": slot_lifecycle_timeout_s(loads=0, unloads=1),
+    "slot_restart": slot_lifecycle_timeout_s(loads=1, unloads=1),
+    "model_swap": slot_lifecycle_timeout_s(loads=1, unloads=1),
+    # SlotManager.delete unloads a running slot before removing it.
+    "slot_delete": slot_lifecycle_timeout_s(loads=0, unloads=1),
+    # POST /api/backends/npu/{load,unload} awaits SlotManager.load/unload on
+    # the dynamic NPU slot in the request handler, same budget as the rest.
+    "npu_backend_load": slot_lifecycle_timeout_s(loads=1, unloads=0),
+    "npu_backend_unload": slot_lifecycle_timeout_s(loads=0, unloads=1),
+    # POST /api/capabilities/{slot}/{child} awaits CapabilityOrchestrator.apply,
+    # which drives SlotManager.load / unload / swap inline. Budget the worst
+    # branch (swap = unload-then-load); the disable branch only unloads.
+    "capability_set": slot_lifecycle_timeout_s(loads=1, unloads=1),
+    # POST /api/stacks/{slug}/apply awaits StackApplyEngine.converge, which
+    # drives load/swap/restart per stack entry and then unloads every residual
+    # running slot — the same fan-out shape as /api/updates/restart-slots, but
+    # over a slug the bridge cannot expand into a slot count without an extra
+    # round trip. Budget STACK_APPLY_SLOT_ALLOWANCE slots' worth.
+    "stack_apply": slot_lifecycle_timeout_s(loads=1, unloads=1, slots=STACK_APPLY_SLOT_ALLOWANCE),
+}
+
+#: TCP connect bound for the REST forward, kept short and independent of the
+#: per-call read budget above — the same split ``hal0.cli._shared`` applies, for
+#: the same reason: a local hal0-api either accepts immediately or is not there,
+#: so spending a multi-minute lifecycle budget on *connect* turns a half-open
+#: daemon into a multi-minute hang instead of a fast failure.
+_CONNECT_TIMEOUT_S = 5.0
+
+
+def max_slot_lifecycle_timeout_s() -> float:
+    """Largest budget any lifecycle tool in this bridge can forward with.
+
+    An outer client that fronts these tools has to cover the worst of them, not
+    a representative one, or it truncates the slowest call it is responsible for.
+    """
+    return max(_SLOT_LIFECYCLE_TIMEOUT_S.values())
+
+
 async def _call_rest(
     *,
     base_url: str,
@@ -1588,7 +1634,8 @@ async def _call_rest(
     call_kwargs: dict[str, Any] = {"headers": headers}
     call_kwargs[payload_kwarg] = (payload or None) if payload_kwarg == "params" else (payload or {})
 
-    async with httpx.AsyncClient(base_url=base_url, timeout=timeout_s) as client:
+    timeout = httpx.Timeout(timeout_s, connect=min(_CONNECT_TIMEOUT_S, timeout_s))
+    async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
         verb = getattr(client, method.lower())
         response = await verb(url, **call_kwargs)
 
@@ -1899,12 +1946,16 @@ async def _execute_tool(
         }
     url = _format_url(base_url, template, path_args)
     payload: dict[str, Any] | None = remainder if remainder else None
+    call: dict[str, Any] = {}
+    if tool in _SLOT_LIFECYCLE_TIMEOUT_S:
+        call["timeout_s"] = _SLOT_LIFECYCLE_TIMEOUT_S[tool]
     result = await _call_rest(
         base_url=base_url,
         bearer=bearer,
         method=method,
         url=url,
         payload=payload,
+        **call,
     )
     # Redact every Bearer / HAL0_BEARER_TOKEN occurrence before a
     # journald-backed response leaves this process. The REST routes

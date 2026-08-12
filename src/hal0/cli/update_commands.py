@@ -39,6 +39,7 @@ from hal0.cli._shared import (
     api_put,
     die,
 )
+from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 console = Console()
 
@@ -470,11 +471,30 @@ def _restart_drifted_slots() -> None:
     drifted slots and lists successes + per-slot failures.
     """
     drift = _fetch_slot_drift()
-    if int(drift.get("count") or 0) == 0:
+    count = int(drift.get("count") or 0)
+    if count == 0:
         console.print(Panel("[green]no slots need restart.[/green]", border_style="green"))
         return
+    # restart_drifted_slots loops `await sm.restart(name)` over every drifted
+    # slot inside ONE request, so the client budget scales with the sweep
+    # (#1832). At api_post's generic 10s default this reported failure while
+    # the server went on bouncing every slot unattended.
+    #
+    # Send the slots we counted rather than letting the route recompute drift:
+    # otherwise a slot that drifts between the GET and the POST widens the
+    # server's sweep past the budget derived from that count.
+    names = [
+        str(s.get("slot"))
+        for s in (drift.get("slots") or [])
+        if isinstance(s, dict) and s.get("slot")
+    ]
+    payload = {"slots": names} if names else None
     try:
-        body = api_post("/api/updates/restart-slots")
+        body = api_post(
+            "/api/updates/restart-slots",
+            json=payload,
+            timeout=slot_lifecycle_timeout_s(loads=1, unloads=1, slots=max(len(names), count)),
+        )
     except CliApiError as exc:
         die(str(exc))
         return

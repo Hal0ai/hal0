@@ -21,6 +21,7 @@ from hal0.cli._shared import (
 )
 from hal0.cli.registry_commands import DEFAULT_REGISTRY_PATH, _do_import_backup
 from hal0.registry.import_toml import import_toml_to_sqlite
+from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 app = typer.Typer(help="Manage the local model registry.")
 console = Console()
@@ -535,7 +536,12 @@ def model_run(
         "", "--slot", "-s", help="Slot to run on (default: the first compatible slot)"
     ),
     timeout_s: int = typer.Option(
-        300, "--timeout", help="Seconds to wait for the slot to become ready."
+        # The default clears the server's own worst case for a load; a smaller
+        # explicit value is honoured end to end, including by the blocking POST
+        # below (#1832).
+        int(slot_lifecycle_timeout_s(loads=1, unloads=0)) + 1,
+        "--timeout",
+        help="Seconds to wait for the slot to become ready.",
     ),
 ) -> None:
     """Get a model serving: pull if needed, assign to a slot, load, wait ready.
@@ -583,14 +589,29 @@ def model_run(
         console.print(f"[dim]No --slot given; using slot [bold]{target}[/bold].[/dim]")
 
     # 3. Load with the model assigned.
+    #
+    # /api/slots/{name}/load blocks until the slot converges (#1832), so this
+    # POST needs the derived lifecycle budget: at api_post's generic 10s
+    # default the CLI died with a misleading "check compatibility" hint on a
+    # load that had in fact succeeded, and control never reached the readiness
+    # poll below that --timeout advertises. --timeout is the operator's whole
+    # wait budget, so the deadline starts HERE, before the POST, and both
+    # phases draw on it: `--timeout 30` must give up ~30s from now, not spend
+    # 30s in the POST and then a fresh 30s in the poll.
+    deadline = time.monotonic() + max(timeout_s, 1)
+    load_budget = min(slot_lifecycle_timeout_s(loads=1, unloads=0), float(max(timeout_s, 1)))
     try:
-        api_post(f"/api/slots/{target}/load", json={"model_id": ref})
+        api_post(
+            f"/api/slots/{target}/load",
+            json={"model_id": ref},
+            timeout=load_budget,
+        )
     except CliApiError as exc:
         die(f"{exc}\nCheck compatibility with: hal0 slot show {target}")
         return
 
-    # 4. Poll until ready (or failed/timeout).
-    deadline = time.monotonic() + max(timeout_s, 1)
+    # 4. Poll until ready (or failed/timeout) — on the deadline opened above,
+    # whose remaining budget the load has already been drawing down.
     state = "unknown"
     while time.monotonic() < deadline:
         try:

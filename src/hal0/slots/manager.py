@@ -43,6 +43,7 @@ from hal0.slot_config import (
     slot_write_lock,
     write_slot_toml,
 )
+from hal0.slot_lifecycle_budget import TERMINATE_TIMEOUT_S
 from hal0.slots._cfg_helpers import (
     _cfg_port,
     _cfg_provider,
@@ -294,7 +295,13 @@ class SlotManager:
     #: an already-``failed`` unit can block forever; past this we abandon the
     #: wait so the caller can converge instead of hanging. Class-level so a
     #: deployment (or a test) can retune it without touching every call site.
-    _terminate_timeout_s: float = 30.0
+    #: The value lives in :mod:`hal0.slot_lifecycle_budget` so the clients of
+    #: the blocking lifecycle endpoints derive their read timeout from the same
+    #: number (#1832). Retune it THERE, not by overriding this attribute at
+    #: runtime: the CLI and the MCP bridge are separate processes that read the
+    #: module constant, so an instance-level override widens the server's wait
+    #: without widening theirs and re-opens the timeout drift.
+    _terminate_timeout_s: float = TERMINATE_TIMEOUT_S
 
     def __init__(
         self,

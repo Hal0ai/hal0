@@ -156,7 +156,7 @@ selected with `--hardware`, and stored on the slot as `device` (`gpu-rocm`, `gpu
 | `model scan` | — | — |
 | `model add <path>` | `path` | `--id` (default `""`), `--name`, `--license` (default `""`), `--overwrite` |
 | `model store [path]` | optional `path` | `--migrate` |
-| `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default `300`) |
+| `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `622` at time of writing — see [slot lifecycle timeouts](#slot-lifecycle-timeouts)) |
 | `model import-backup <path>` | `path` (required) | `--force`/`-f`, `--dest` (default `/var/lib/hal0/registry/registry.toml`) |
 
 ## `hal0 memory` — manage hal0 memory (Hindsight engine)
@@ -358,6 +358,29 @@ dashboard/API-only (`/api/profiles`).
 | `board show <task_id>` | `task_id` | `--json` |
 | `board add <title>` | `title` | `--body` (default `""`), `--assignee` (default `""`), `--status` (default `triage`), `--board`, `--priority` (default `0`) |
 | `board move <task_id> <status>` | `task_id`, `status` | — |
+
+## Slot lifecycle timeouts
+
+Commands that drive the slot state machine — `slot load` / `unload` / `restart`
+/ `swap` / `delete`, `model run`, `capabilities set`, `update --restart-slots` —
+block until the server converges the slot. Their client read timeouts are not
+hand-picked; they are derived from the server's own bounds in
+`hal0.slot_lifecycle_budget` (the health poll, one container terminate per
+unload, an allowance for the pre-load evictions and for queueing behind an
+in-flight op on the same slot, plus a podman/systemd overhead factor).
+
+| Verb shape | Budget |
+|---|---|
+| load (`slot load`, `model run`, NPU backend load) | 621s |
+| unload (`slot unload`, `slot delete`, NPU backend unload) | 345s |
+| restart / swap (`slot restart`, `slot swap`, `capabilities set`) | 966s |
+| `update --restart-slots`, per drifted slot | 966s (3 slots = 2898s) |
+
+These are ceilings on a *wedged* daemon, not expected durations — a healthy
+load returns in seconds. But the commands print nothing while they wait, so a
+genuinely stuck slot can hold the terminal for the full budget. If you are
+scripting against them (CI, smoke tests), wrap the call in your own
+`timeout(1)` rather than relying on the CLI to give up first.
 
 ## Deprecated aliases
 

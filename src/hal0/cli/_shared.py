@@ -16,6 +16,20 @@ _console = Console(stderr=True)
 
 NOT_IMPLEMENTED = "not implemented yet — see PLAN.md §13"
 
+#: TCP connect bound, kept short and independent of the per-call read budget.
+#: A local hal0-api either accepts immediately or is not there.
+_CONNECT_TIMEOUT_S = 5.0
+
+
+def _client_timeout(timeout: float) -> httpx.Timeout:
+    """Spend ``timeout`` on the read, not on connect/write/pool.
+
+    ``httpx.Client(timeout=<float>)`` sets every phase to that value, so the
+    multi-minute slot lifecycle budgets (#1832) would also let a half-open or
+    wedged daemon hang the CLI for minutes before the first byte.
+    """
+    return httpx.Timeout(timeout, connect=min(_CONNECT_TIMEOUT_S, timeout))
+
 
 def _api_base() -> str:
     """Return the hal0 API base URL, honouring HAL0_API_URL env override."""
@@ -230,8 +244,12 @@ def _api_request(
         headers.update(_auth_headers())
     if headers:
         kwargs["headers"] = headers
+    # ``timeout`` is the READ budget: the slot lifecycle call sites pass
+    # minutes because the server blocks until the slot converges (#1832).
+    # Widening connect to match would let a half-open daemon stall the CLI for
+    # that whole budget with no output, so connect stays short.
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=_client_timeout(timeout)) as client:
             resp = client.request(method, url, **kwargs)
     except httpx.HTTPError as exc:
         raise CliApiError(f"{method} {url} failed: {type(exc).__name__}: {exc}") from exc
