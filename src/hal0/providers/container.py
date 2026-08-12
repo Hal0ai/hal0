@@ -1293,7 +1293,7 @@ def _native_ctx(model_info: dict[str, Any]) -> int | None:
             return int(md["context_length"])
         except (TypeError, ValueError):
             pass
-    model_id = model_info.get("_model_key")
+    model_id = model_info.get("_model_key") or model_info.get("id")
     if model_id:
         try:
             from hal0.registry.curated import get_curated
@@ -1314,11 +1314,24 @@ def _slot_ceiling_int(slot_ceiling: Any) -> int | None:
     hand-edited ``context_size = "64k"`` used to take the launch path out with a
     ``ValueError``. Unusable means ABSENT: the slot simply expresses no ceiling,
     exactly like a slot that never wrote one.
+
+    Implausible means unusable too, on the same
+    ``[_CTX_MIN_PLAUSIBLE, _CTX_MAX_PLAUSIBLE]`` range the MODEL path screens
+    against (:func:`_model_declared_ctx`). This matters more now than it did
+    when the ceiling could only clamp down: under #1827 the ceiling REPLACES
+    the dense cap on the derived path, so a hand-written ``context_size =
+    99999999`` (or a row persisted before the API's
+    ``model.context_size_out_of_range`` screen existed) would hand a 262144-
+    native model the very impractically-large KV cache :data:`_CTX_DENSE_CAP`
+    exists to prevent — #1108's first-warm OOM. ``0`` and ``-1`` are screened
+    here for the same reason: they are not a ceiling of zero, they are a slot
+    that never wrote one, and passing them through to ``--ctx-size`` is a slot
+    that never warms.
     """
     if slot_ceiling is None:
         return None
     try:
-        return int(slot_ceiling)
+        value = int(slot_ceiling)
     except (TypeError, ValueError):
         log.warning(
             "slot.context_size_unparseable_ceiling",
@@ -1329,6 +1342,20 @@ def _slot_ceiling_int(slot_ceiling: Any) -> int | None:
             },
         )
         return None
+    if not (_CTX_MIN_PLAUSIBLE <= value <= _CTX_MAX_PLAUSIBLE):
+        log.warning(
+            "slot.context_size_implausible_ceiling",
+            extra={
+                "value": value,
+                "min": _CTX_MIN_PLAUSIBLE,
+                "max": _CTX_MAX_PLAUSIBLE,
+                "hint": "the slot's [model].context_size is outside the plausible range; "
+                "ignoring it and letting the model's own window decide. Fix it in the "
+                "slot drawer.",
+            },
+        )
+        return None
+    return value
 
 
 def _dense_cap_for(slot_ceiling: int | None) -> int:
@@ -1448,6 +1475,13 @@ def _resolve_context_size(
         )
         return ceiling
     if ceiling > resolved:
+        # Two different situations share this branch, and the hint has to say
+        # which one it is. On the DERIVED path the ceiling already won as far
+        # as it can (#1827) and the remaining limit is the model's real native
+        # window — telling that operator to "set the window on the model" would
+        # invite them to write a defaults.context_size ABOVE what the GGUF
+        # actually supports, which is not dense-capped.
+        derived = source == "model.metadata.context_length"
         log.warning(
             "slot.context_size_no_longer_overrides",
             extra={
@@ -1456,9 +1490,15 @@ def _resolve_context_size(
                 "model_ctx_source": source,
                 "slot_context_size": ceiling,
                 "effective": resolved,
-                "hint": "the MODEL owns context size in 1.0; this slot's larger "
-                "[model].context_size no longer wins. Set the window on the model to "
-                "restore it.",
+                "hint": (
+                    "clamped to the model's native window; this slot's larger "
+                    "[model].context_size cannot conjure context the model does not "
+                    "support."
+                    if derived
+                    else "the MODEL owns context size in 1.0; this slot's larger "
+                    "[model].context_size no longer wins. Set the window on the model to "
+                    "restore it."
+                ),
             },
         )
     return resolved
@@ -1572,6 +1612,19 @@ def resolve_effective_context_size(
                 model_info = entry.model_dump() if hasattr(entry, "model_dump") else dict(entry)
             except Exception:
                 model_info = {}
+    # The launch path stamps ``_model_key`` onto the info dict it builds
+    # (:mod:`hal0.slots.manager`, :func:`_best_effort_model_info`);
+    # ``Model.model_dump()`` does NOT — it is not a
+    # field on :class:`hal0.registry.model.Model` and pydantic would not accept
+    # a leading-underscore one. Without this line the read-only surfaces reach
+    # :func:`_native_ctx` with no model id, so the #1617 curated backfill can
+    # never fire here and an empty-``metadata`` registry row advertises the
+    # 8192 safe floor while llama-server is launched with the real window.
+    # That is the Hermes-visible number (``/v1/models``,
+    # ``api.__init__._slot_ctx_size``, the SlotView aggregator), so the gate it
+    # refuses on was the advertised one, not the served one.
+    if model_id:
+        model_info.setdefault("_model_key", model_id)
     return _resolve_context_size(slot_ceiling, model_info, slot_name=slot_name)
 
 
