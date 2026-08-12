@@ -2518,3 +2518,22 @@ def test_resolve_installer_root_falls_back_to_fhs_current(tmp_path):
 
     got = hp._resolve_installer_root(module_file=mod, prefix=str(venv))
     assert got == fhs / "current"
+
+
+def test_hal0_admin_mcp_timeout_clears_the_slot_lifecycle_budget():
+    """The bundled hal0-admin MCP client must out-wait its own blocking tools.
+
+    The admin catalog exposes slot_load / slot_restart / model_swap /
+    npu_backend_load, all of which block on the slot state machine. A 60s
+    per-server client cap aborted an agent-driven load long before the server
+    gave up — the outer half of #1832. Floor read from the server modules.
+    """
+    from hal0.providers.container import _HEALTH_TIMEOUT_S
+    from hal0.slots.manager import SlotManager
+
+    terminate = float(SlotManager._terminate_timeout_s)
+    floor = terminate + float(_HEALTH_TIMEOUT_S) + 2 * terminate
+
+    by_name = {s["name"]: s for s in hp._default_mcp_servers()}
+    assert by_name["hal0-admin"]["timeout"] >= floor
+    assert hp._build_brain_profile_mcp_servers()["hal0-admin"]["timeout"] >= floor

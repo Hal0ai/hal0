@@ -384,3 +384,35 @@ def test_model_run_unregistered_model_names_the_fix(
     assert "hal0 model pull" in out
     assert "hal0 model add" in out
     assert "hal0 model scan" in out
+
+
+def test_model_run_explicit_timeout_caps_the_blocking_load_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--timeout is the operator's whole wait budget, POST included (#1832).
+
+    Giving the blocking load POST the full derived budget unconditionally would
+    make `hal0 model run --timeout 5` sit in the request for minutes before the
+    readiness poll it advertises ever starts.
+    """
+
+    def fake_get(path: str, **_kw: Any) -> Any:
+        if path == "/api/models/qwen3-4b":
+            return {"id": "qwen3-4b"}
+        if path == "/api/slots":
+            return {"slots": [{"name": "chat"}]}
+        if path == "/api/slots/chat":
+            return {"name": "chat", "status": "ready", "port": 8081}
+        raise AssertionError(path)
+
+    posted: dict[str, Any] = {}
+
+    def fake_post(path: str, *, json: Any = None, **kw: Any) -> Any:
+        posted["kwargs"] = kw
+        return {"state": "loading"}
+
+    monkeypatch.setattr(model_commands, "api_get", fake_get)
+    monkeypatch.setattr(shared, "api_post", fake_post)
+    result = runner.invoke(model_commands.app, ["run", "qwen3-4b", "--timeout", "5"])
+    assert result.exit_code == 0, result.output
+    assert posted["kwargs"]["timeout"] == 5.0

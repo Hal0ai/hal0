@@ -184,7 +184,7 @@ def test_restart_slots_scales_timeout_with_drifted_slot_count(
         return {}
 
     def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
-        posted[path] = kwargs
+        posted[path] = {**kwargs, "json": json}
         return {"restarted": drifted, "failed": [], "count": len(drifted)}
 
     monkeypatch.setattr(uc, "api_get", fake_get)
@@ -193,6 +193,9 @@ def test_restart_slots_scales_timeout_with_drifted_slot_count(
     assert result.exit_code == 0, result.output
 
     kwargs = posted["/api/updates/restart-slots"]
+    # The sweep is pinned to the slots the timeout was derived from — the route
+    # otherwise recomputes drift and can restart more than we budgeted for.
+    assert kwargs["json"] == {"slots": drifted}
     terminate = float(SlotManager._terminate_timeout_s)
     # Per slot: the unload (one terminate) plus the load (health poll + two
     # sequential pre-load evictions), times every drifted slot in the sweep.

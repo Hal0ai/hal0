@@ -535,7 +535,12 @@ def model_run(
         "", "--slot", "-s", help="Slot to run on (default: the first compatible slot)"
     ),
     timeout_s: int = typer.Option(
-        300, "--timeout", help="Seconds to wait for the slot to become ready."
+        # The default clears the server's own worst case for a load; a smaller
+        # explicit value is honoured end to end, including by the blocking POST
+        # below (#1832).
+        int(slot_lifecycle_timeout_s(loads=1, unloads=0)) + 1,
+        "--timeout",
+        help="Seconds to wait for the slot to become ready.",
     ),
 ) -> None:
     """Get a model serving: pull if needed, assign to a slot, load, wait ready.
@@ -588,12 +593,15 @@ def model_run(
     # POST needs the derived lifecycle budget: at api_post's generic 10s
     # default the CLI died with a misleading "check compatibility" hint on a
     # load that had in fact succeeded, and control never reached the readiness
-    # poll below that --timeout advertises.
+    # poll below that --timeout advertises. --timeout is the operator's whole
+    # wait budget, so it caps this POST too: `--timeout 30` must give up at
+    # ~30s, not sit in the request for minutes first.
+    load_budget = min(slot_lifecycle_timeout_s(loads=1, unloads=0), float(max(timeout_s, 1)))
     try:
         api_post(
             f"/api/slots/{target}/load",
             json={"model_id": ref},
-            timeout=slot_lifecycle_timeout_s(loads=1, unloads=0),
+            timeout=load_budget,
         )
     except CliApiError as exc:
         die(f"{exc}\nCheck compatibility with: hal0 slot show {target}")

@@ -479,10 +479,21 @@ def _restart_drifted_slots() -> None:
     # slot inside ONE request, so the client budget scales with the sweep
     # (#1832). At api_post's generic 10s default this reported failure while
     # the server went on bouncing every slot unattended.
+    #
+    # Send the slots we counted rather than letting the route recompute drift:
+    # otherwise a slot that drifts between the GET and the POST widens the
+    # server's sweep past the budget derived from that count.
+    names = [
+        str(s.get("slot"))
+        for s in (drift.get("slots") or [])
+        if isinstance(s, dict) and s.get("slot")
+    ]
+    payload = {"slots": names} if names else None
     try:
         body = api_post(
             "/api/updates/restart-slots",
-            timeout=slot_lifecycle_timeout_s(loads=1, unloads=1, slots=count),
+            json=payload,
+            timeout=slot_lifecycle_timeout_s(loads=1, unloads=1, slots=max(len(names), count)),
         )
     except CliApiError as exc:
         die(str(exc))

@@ -1387,6 +1387,22 @@ async def test_slot_lifecycle_tools_forward_with_the_lifecycle_budget(
         f"{floor}s server worst case"
     )
 
+    # npu_backend_load's handler awaits SlotManager.load on the dynamic NPU
+    # slot in-request, so it blocks the same way and needs the same budget.
+    # It is gated, so the REST hop only happens once approved.
+    mock_transport["timeout"] = None
+    pending = await admin.dispatch(
+        tool="npu_backend_load",
+        args={"model_id": "qwen3-4b"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    await queue.approve(pending["approval_id"])
+    assert mock_transport["timeout"] is not None, "npu_backend_load never reached REST"
+    assert mock_transport["timeout"] >= floor
+
     # A non-blocking read keeps the short generic default — the override is
     # scoped to the lifecycle tools, not a blanket widening.
     await admin.dispatch(

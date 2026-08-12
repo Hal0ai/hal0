@@ -44,9 +44,10 @@ EVICTION_UNLOAD_ALLOWANCE = 3
 
 #: Every lifecycle verb takes the per-slot lock (``SlotManager._lock``), so a
 #: request can sit queued behind whatever is already converging that slot
-#: before doing any of its own work. Charged once per request — the dominant
-#: blocking phase of the holder is its health poll.
-LOCK_WAIT_ALLOWANCE_S = HEALTH_TIMEOUT_S
+#: before doing any of its own work. Charged once per request, at the cost of
+#: the worst thing that can hold the lock — a full load, evictions included,
+#: not just its health poll.
+LOCK_WAIT_ALLOWANCE_S = HEALTH_TIMEOUT_S + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S
 
 #: Multiplier over the summed server budget covering what the server's own
 #: timeouts do not: podman/systemd fork + image resolution, JSON encode, the
