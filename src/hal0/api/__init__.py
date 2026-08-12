@@ -247,9 +247,8 @@ async def _fetch_hal0_composite_models(
         is_flm = "flm" in (cfg.get("provider", ""), cfg.get("backend", ""))
         if not is_flm or not name:
             continue
-        # Container-era schema is the [npu] table (what FLMProvider builds
-        # the --asr/--embed argv from); [defaults] load_* is the pre-#733
-        # legacy shape, kept so older tomls keep seeding.
+        # Two config shapes accepted here — see _seed_multiplex_models for
+        # why (container-era [npu] table vs. pre-#733 [defaults] load_*).
         npu_table = cfg.get("npu") or {}
         defaults = cfg.get("defaults") or {}
         load_embed = npu_table.get("embed") or defaults.get("load_embed")
