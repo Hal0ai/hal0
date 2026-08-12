@@ -40,6 +40,7 @@ from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     _UNIT_STOP_TIMEOUT_S,
     ContainerProvider,
+    _best_effort_model_info,
     _container_runtime,
     _image_mismatch,
     _llama_argv_segments,
@@ -51,6 +52,7 @@ from hal0.providers.container import (
     resolve_effective_context_size,
     resolved_command_for_slot,
 )
+from hal0.registry.model import Model
 from hal0.slots.argv import resolve_argv
 
 # Podman is the only supported runtime under Quadlet; the shims below ignore
@@ -1370,6 +1372,145 @@ class TestContextSizeOwnership:
         assert self._ctx(self._spec(cfg, mi).command) == str(_CTX_SAFE_FALLBACK)
 
 
+#: Hermes' hard gate — ``agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH`` in the
+#: bundled agent. Below it the agent REFUSES TO START (``agent_init.py`` raises);
+#: it does not degrade, so a slot that lands under this is a cannot-chat box.
+_HERMES_MIN_CONTEXT = 64_000
+
+#: A curated brain pick whose catalogue row carries a ``context_length`` but
+#: whose registry row on an older-build box carries no ``metadata`` at all
+#: (#1617). This is the shape the curated backfill exists for.
+_CURATED_BRAIN_ID = "hal0-brain-sft-q8-rocmfpx"
+
+
+class TestDenseCapDoesNotUndercutAConfiguredSlot:
+    """#1827 — the dense cap is an UNCONFIGURED-slot guard, not a hardware fact.
+
+    A fresh 1.0.0-rc.5 install could not run the bundled Hermes agent at all.
+    The installer-pulled brain model carries no ``defaults.context_size``, so
+    its window came from the DERIVED native path — where the blanket 32768
+    dense cap was applied *underneath* the shipped seed's ``context_size =
+    65536``. Every seeded chat slot therefore launched (and, post-#1802,
+    honestly advertised) 32768 no matter what the seed asked for and no matter
+    how much memory the box had. 32768 < 64000, so ``hermes -z`` hard-errored.
+
+    The seed ceiling is by definition *configured* state: written either by the
+    installer's hardware budget (:func:`hal0.install.orchestrate._clamp_context_size`)
+    or by an operator. Honoring it as the cap for the derived window restores
+    the pre-1.0 effective window for exactly these slots, while every other
+    guarantee holds: never above the model's native window, never above the
+    ceiling, and unchanged for a slot with no ceiling on disk.
+    """
+
+    def _spec(self, cfg: dict[str, Any], model_info: dict[str, Any]):
+        provider = ContainerProvider()
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            return provider.container_spec(cfg, model_info)
+
+    @staticmethod
+    def _ctx(command: list[str]) -> str | None:
+        return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
+
+    def test_fresh_install_brain_slot_clears_the_hermes_floor(self) -> None:
+        """THE REGRESSION: shipped seed ceiling 65536 + an installer-pulled
+        model with a 131072 native window and no explicit context size."""
+        mi = _model_info(
+            _model_key="hal0-brain-sft-f16",
+            metadata={"context_length": 131072},
+            defaults={"context_size": None},
+        )
+        resolved = _resolve_context_size(65536, mi, slot_name="brain")
+        assert resolved == 65536
+        assert resolved >= _HERMES_MIN_CONTEXT
+
+    def test_configured_ceiling_reaches_the_launch_command(self) -> None:
+        """End-to-end through ``container_spec``: ``--ctx-size 65536`` is what
+        llama-server actually serves, so #1802's honest ``/v1/models``
+        advertising reports the same number Hermes gates on."""
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 65536})
+        mi = _model_info(metadata={"context_length": 131072})
+        assert self._ctx(self._spec(cfg, mi).command) == "65536"
+
+    def test_curated_backfill_path_also_clears_the_floor(self) -> None:
+        """The #1617 self-heal shape (registry row with empty ``metadata``,
+        window recovered from the curated catalogue) is what a box pulled by an
+        older build actually has, so it must clear the floor too.
+
+        Deliberately built from a REAL :class:`hal0.registry.model.Model` dump
+        rather than a hand-written dict: the only thing this shape has to
+        identify the model by is whatever ``model_dump()`` actually emits.
+        """
+        mi = dict(Model(id=_CURATED_BRAIN_ID, path="/mnt/ai-models/brain.gguf").model_dump())
+        mi["_model_key"] = _CURATED_BRAIN_ID  # what slots/manager stamps at launch
+        assert mi.get("metadata") in ({}, None)
+        assert _resolve_context_size(65536, mi, slot_name="brain") >= _HERMES_MIN_CONTEXT
+
+    def test_unpinned_slot_is_still_dense_capped(self) -> None:
+        """No ceiling on disk means nothing is configured, so the blanket cap
+        still applies — the invariant :data:`hal0.slots.capacity._DEFAULT_CTX_TOKENS`
+        budgets against."""
+        mi = _model_info(metadata={"context_length": 131072})
+        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
+
+    @pytest.mark.parametrize("ceiling", [4096, 8192, 16384, 32768])
+    def test_ceiling_below_the_dense_cap_is_unchanged(self, ceiling: int) -> None:
+        """The installer's VRAM-budget clamp (#1108) is untouched: a ceiling at
+        or below the dense cap still wins outright."""
+        mi = _model_info(metadata={"context_length": 131072})
+        assert _resolve_context_size(ceiling, mi) == ceiling
+
+    def test_never_exceeds_the_models_native_window(self) -> None:
+        """A generous ceiling cannot conjure context the model does not have."""
+        mi = _model_info(metadata={"context_length": 40960})
+        assert _resolve_context_size(131072, mi) == 40960
+
+    @pytest.mark.parametrize("ceiling", [128, 4096, 32768, 65536, 131072, 262144])
+    def test_never_exceeds_the_configured_ceiling(self, ceiling: int) -> None:
+        """Property: for a derived window, effective <= ceiling always, so a
+        slot can only reach a window the box was explicitly configured for."""
+        mi = _model_info(metadata={"context_length": 262144})
+        assert _resolve_context_size(ceiling, mi) <= ceiling
+
+    def test_explicit_model_window_still_outranks_the_ceiling(self) -> None:
+        """Unchanged: the ceiling replaces the dense cap only on the DERIVED
+        path. An explicit model window is authoritative and is still only
+        clamped down by the ceiling, never raised by it."""
+        mi = _model_info(metadata={"context_length": 131072}, defaults={"context_size": 16384})
+        assert _resolve_context_size(65536, mi) == 16384
+
+    def test_no_model_window_at_all_still_uses_the_safe_floor(self) -> None:
+        """A slot ceiling is not evidence about the model, so it cannot inflate
+        the 8192 safe fallback either."""
+        mi = _model_info(_model_key="some-operator-pulled-custom-model", metadata={})
+        assert _resolve_context_size(65536, mi) == _CTX_SAFE_FALLBACK
+
+    @pytest.mark.parametrize("bad", ["nonsense", "", [65536], {}])
+    def test_unparseable_ceiling_falls_back_to_the_blanket_cap(self, bad: Any) -> None:
+        """A garbage hand-edited ``[model].context_size`` is not a configuration
+        signal — the slot table reaches this resolver unvalidated, so the
+        derived window falls back to the blanket cap instead of the launch path
+        dying on an ``int()`` of ``"64k"``."""
+        mi = _model_info(metadata={"context_length": 131072})
+        assert _resolve_context_size(bad, mi) == _CTX_DENSE_CAP
+
+    @pytest.mark.parametrize("bad", [0, -1, 99999999, 2**24 + 1, 127])
+    def test_implausible_ceiling_falls_back_to_the_blanket_cap(self, bad: int) -> None:
+        """Now that the ceiling REPLACES the dense cap on the derived path, an
+        implausible one has to be screened on the same
+        ``[_CTX_MIN_PLAUSIBLE, _CTX_MAX_PLAUSIBLE]`` range the model path uses.
+        ``ModelConfig.context_size`` has ``ge=128`` and no upper bound, and rows
+        written before the API's ``model.context_size_out_of_range`` screen are
+        still readable — so ``99999999`` really is on disk somewhere, and it
+        would hand a 262144-native model exactly the impractical KV cache
+        :data:`_CTX_DENSE_CAP` exists to prevent (#1108's first-warm OOM).
+        ``0``/``-1`` are a slot that never warms rather than a ceiling."""
+        mi = _model_info(metadata={"context_length": 262144})
+        assert _resolve_context_size(bad, mi) == _CTX_DENSE_CAP
+
+
 class _FakeCtxDefaults:
     def __init__(self, context_size: int | None) -> None:
         self.context_size = context_size
@@ -1434,6 +1575,79 @@ class TestResolveEffectiveContextSize:
 
     def test_always_returns_a_positive_int(self) -> None:
         assert isinstance(resolve_effective_context_size(None, None, ""), int)
+
+
+class TestAdvertisedWindowMatchesTheServedWindow:
+    """#1827 — the number Hermes gates on is the ADVERTISED one.
+
+    Hermes reads ``/v1/models``, which (like ``api.__init__._slot_ctx_size``
+    and the SlotView aggregator) goes through
+    :func:`resolve_effective_context_size`, NOT through the launch path. That
+    wrapper builds its ``model_info`` from ``Model.model_dump()`` — and
+    ``_model_key`` is not a field on :class:`hal0.registry.model.Model`; only
+    the launch path stamps it. So the #1617 curated backfill was unreachable
+    from the read-only side: an empty-``metadata`` registry row (every box
+    provisioned before #1657/#1707 stamped ``metadata.context_length``)
+    advertised the 8192 safe floor while llama-server was launched with the
+    real window. Hermes still refused, just with a different number.
+
+    These tests must use a REAL pydantic ``Model``. Hand-stamping
+    ``_model_key`` onto a literal dict tests a shape the read-only path can
+    never produce, and passes with or without the fix.
+    """
+
+    @staticmethod
+    def _registry(model: Model) -> Any:
+        class _Registry:
+            def get(self, model_id: str) -> Any:
+                if model_id != model.id:
+                    raise KeyError(model_id)
+                return model
+
+        return _Registry()
+
+    @staticmethod
+    def _ctx(command: list[str]) -> str | None:
+        return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
+
+    def test_curated_backfill_is_reachable_from_the_read_only_surface(self) -> None:
+        """THE REGRESSION: registry row with no metadata, seed ceiling 65536.
+        Without the fix this returns 8192 and Hermes refuses."""
+        model = Model(id=_CURATED_BRAIN_ID, path="/mnt/ai-models/brain.gguf")
+        assert not model.model_dump().get("metadata")
+        advertised = resolve_effective_context_size(
+            65536, self._registry(model), _CURATED_BRAIN_ID, slot_name="brain"
+        )
+        assert advertised == 65536
+        assert advertised >= _HERMES_MIN_CONTEXT
+
+    def test_advertised_equals_what_llama_server_is_launched_with(self) -> None:
+        """The two halves of #1802's honest-advertising contract, both driven
+        off the same registry entry through their own real code paths."""
+        model = Model(id=_CURATED_BRAIN_ID, path="/mnt/ai-models/brain.gguf")
+        cfg = _slot_cfg(model={"default": _CURATED_BRAIN_ID, "context_size": 65536})
+        registry = self._registry(model)
+
+        advertised = resolve_effective_context_size(
+            65536, registry, _CURATED_BRAIN_ID, slot_name="brain"
+        )
+        with (
+            patch("hal0.registry.store.ModelRegistry", lambda *a, **k: registry),
+            patch(
+                "hal0.providers.container._resolve_profile",
+                return_value=_moe_profile(),
+            ),
+        ):
+            served = self._ctx(
+                ContainerProvider().container_spec(cfg, _best_effort_model_info(cfg)).command
+            )
+        assert served == str(advertised) == "65536"
+
+    def test_registry_entry_without_an_id_key_still_degrades_safely(self) -> None:
+        """A duck-typed entry whose ``model_dump()`` omits both ``id`` and
+        ``metadata`` has nothing to look up — the safe floor, not a crash."""
+        registry = _FakeCtxRegistry({"m": _FakeCtxModel(None)})
+        assert resolve_effective_context_size(65536, registry, "m") == _CTX_SAFE_FALLBACK
 
 
 class TestFamilyDefaults:
