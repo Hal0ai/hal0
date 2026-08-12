@@ -220,35 +220,100 @@ class TestBuildPerSlotGpuCapabilityGating:
 
 class TestBuildPerSlotArtefactToken:
     @pytest.mark.asyncio
-    async def test_probes_by_slot_id_when_id_keyed(self):
-        """PR review (#1839): on an id-keyed box the container/unit is named
-        off the durable slot_id, not the mutable display name — the cgroup
-        probe must be called with the id, not the name."""
+    async def test_probes_by_slot_id_when_id_keyed(self, tmp_path):
+        """On a genuinely id-keyed box (``hal0 slot migrate-id-keying`` has
+        run, so ``<id>.toml`` is the config on disk) the container/unit is
+        named off the durable slot_id — the cgroup probe must use the id."""
         slot = _make_slot("brain", backend="vulkan", slot_id=42)
+        (tmp_path / "42.toml").write_text("name = 'brain'\n", encoding="utf-8")
 
-        with patch(
-            "hal0.slots.capacity._container_cgroup_mem_bytes",
-            new_callable=AsyncMock,
-            return_value=0,
-        ) as mock_probe:
+        with (
+            patch("hal0.config.paths.slots_config_dir", return_value=tmp_path),
+            patch(
+                "hal0.slots.capacity._container_cgroup_mem_bytes",
+                new_callable=AsyncMock,
+                return_value=0,
+            ) as mock_probe,
+        ):
             await build_per_slot([slot], gpu_capable=True)
 
         mock_probe.assert_awaited_once_with("42")
 
     @pytest.mark.asyncio
-    async def test_probes_by_name_when_not_id_keyed(self):
-        """Legacy (pre-migration) slots have no slot_id — falls back to the
-        display name, unchanged from before this review fix."""
-        slot = _make_slot("brain", backend="vulkan", slot_id=None)
+    async def test_probes_by_name_when_slot_id_set_but_artefacts_name_keyed(self, tmp_path):
+        """THE standard install (#1839 repro box, and every un-migrated box).
 
-        with patch(
-            "hal0.slots.capacity._container_cgroup_mem_bytes",
-            new_callable=AsyncMock,
-            return_value=0,
-        ) as mock_probe:
+        ``SlotManager.fold_identity()`` runs on every boot and stamps a
+        ``slot_id`` on every slot WITHOUT renaming a single on-disk artefact
+        — the destructive rename only happens under ``hal0 slot
+        migrate-id-keying``. So ``slot_id`` being set says nothing about how
+        the container/unit is named: here the config is still ``brain.toml``,
+        the unit is ``hal0-slot@brain.service`` and the container is
+        ``hal0-slot-brain``. Probing by id would miss both, collapse the
+        cgroup read to 0, and silently under-report resident memory.
+        """
+        slot = _make_slot("brain", backend="vulkan", slot_id=1)
+        (tmp_path / "brain.toml").write_text("name = 'brain'\n", encoding="utf-8")
+
+        with (
+            patch("hal0.config.paths.slots_config_dir", return_value=tmp_path),
+            patch(
+                "hal0.slots.capacity._container_cgroup_mem_bytes",
+                new_callable=AsyncMock,
+                return_value=0,
+            ) as mock_probe,
+        ):
             await build_per_slot([slot], gpu_capable=True)
 
         mock_probe.assert_awaited_once_with("brain")
+
+    @pytest.mark.asyncio
+    async def test_probes_by_name_when_not_id_keyed(self, tmp_path):
+        """Pre-fold slots have no slot_id at all — falls back to the display
+        name, unchanged from before this review fix."""
+        slot = _make_slot("brain", backend="vulkan", slot_id=None)
+
+        with (
+            patch("hal0.config.paths.slots_config_dir", return_value=tmp_path),
+            patch(
+                "hal0.slots.capacity._container_cgroup_mem_bytes",
+                new_callable=AsyncMock,
+                return_value=0,
+            ) as mock_probe,
+        ):
+            await build_per_slot([slot], gpu_capable=True)
+
+        mock_probe.assert_awaited_once_with("brain")
+
+    @pytest.mark.asyncio
+    async def test_id_keyed_probe_reports_real_cgroup_memory(self, tmp_path):
+        """End-to-end consequence of the token choice: a name-keyed box whose
+        unit reports 3 GiB must render 3072 MB, not the file-size estimate.
+
+        Drives the real :func:`_container_cgroup_mem_bytes` with only the
+        systemd property faked, so a wrong token shows up as a wrong number
+        rather than only a wrong mock argument.
+        """
+        slot = _make_slot("brain", backend="vulkan", slot_id=7)
+        (tmp_path / "brain.toml").write_text("name = 'brain'\n", encoding="utf-8")
+
+        async def fake_props(unit, *props):
+            if unit == "hal0-slot@brain.service":
+                return {"MemoryCurrent": str(3 * 1024 * 1024 * 1024)}
+            return {}
+
+        with (
+            patch("hal0.config.paths.slots_config_dir", return_value=tmp_path),
+            patch(
+                "hal0.slots.capacity._runtime_inspect_mem_bytes",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch("hal0.slots.capacity.systemd_props", new=fake_props),
+        ):
+            result = await build_per_slot([slot], gpu_capable=True)
+
+        assert result["brain"]["mem_mb"] == 3072.0
 
 
 # ── _systemd_unit_mem_bytes / _container_cgroup_mem_bytes fallback (defect 2) ──
@@ -281,6 +346,20 @@ class TestSystemdUnitMemFallback:
             "hal0.slots.capacity.systemd_props",
             new_callable=AsyncMock,
             return_value={"MemoryCurrent": "[not set]"},
+        ):
+            result = await _systemd_unit_mem_bytes("brain")
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_for_uint64_max_sentinel(self):
+        """Some systemd versions render an unset MemoryCurrent as UINT64_MAX
+        rather than '[not set]'. It parses cleanly, and capacity takes
+        max(cgroup_mb, estimate_mb) — so without a guard the slot renders
+        ~16 EiB resident instead of its real footprint."""
+        with patch(
+            "hal0.slots.capacity.systemd_props",
+            new_callable=AsyncMock,
+            return_value={"MemoryCurrent": "18446744073709551615"},
         ):
             result = await _systemd_unit_mem_bytes("brain")
         assert result == 0
