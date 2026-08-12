@@ -81,6 +81,15 @@ hal0 slot create embed \
 
 6. **`--ctx-size`** — context window in tokens (default `4096`).
 
+7. **`--profile`** — the runtime profile (flag bundle + engine). Omit it
+   and hal0 infers the profile the slot type implies: `embedding` →
+   `embedding` (`--embedding`), `reranking` → `reranking`
+   (`--reranking`), `tts`/`transcription` → the engine for the chosen
+   device, `image` → `comfyui`. An `llm` slot takes no profile — no mode
+   flag is at stake, so its tune stays the model's (or yours). Change it
+   later with `hal0 slot edit <name> --profile <profile>` or the slot
+   drawer.
+
 </Steps>
 
 Creating a slot writes its config and systemd drop-in but does **not**

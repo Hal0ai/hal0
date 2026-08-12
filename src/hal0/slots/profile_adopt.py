@@ -88,6 +88,77 @@ def profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
     return True
 
 
+def profile_for_slot_type(slot_type: str, device: str) -> str | None:
+    """The runtime profile a ``(slot type, device)`` pair *implies* (#1830).
+
+    Creation-time counterpart of :func:`profile_fits_slot`: the slot type names
+    a capability, and for every capability except ``llm`` the profile is a
+    CORRECTNESS fact, not a tuning choice — it carries the mode flag
+    (``--embedding`` / ``--reranking``) or selects the engine/runtime family
+    (kokoro vs qwen3-tts, moonshine, comfyui, FLM). A slot created without one
+    launches as a plain chat server, reports ``state=ready`` and 501s its own
+    endpoint (the rc.5 finding: ``hal0 slot create``, the dashboard New-slot
+    modal and a raw ``POST /api/slots`` all wrote no ``profile`` key).
+
+    ``llm`` deliberately returns ``None``: no mode flag is at stake there, so
+    the base tune stays the operator's (or the model's stamped) choice rather
+    than a device-default silently written into every new slot.
+
+    Mirrors :func:`hal0.install.profile_derive.derive_profile` and
+    :func:`hal0.capabilities.profile_fit.profile_name_for_fit` — the same rules
+    the installer seeds and capability-apply use — with one deliberate
+    difference: the seed ``embedding`` / ``reranking`` profiles are plain
+    device-agnostic llama-server profiles, so a CPU-only box gets them too
+    (those two paths fall back to the device base profile there).
+
+    The answer is a *candidate*: callers must run it through
+    :func:`profile_fits_slot` (see :func:`infer_slot_profile`).
+    """
+    from hal0.capabilities.catalog import tts_profile_for_device
+    from hal0.config.schema import DEVICE_DEFAULT_PROFILES
+
+    st = str(slot_type or "").strip().lower()
+    dev = str(device or "").strip().lower()
+    if st == "embedding":
+        # NPU embeddings run on the FLM runtime, not llama-server.
+        return DEVICE_DEFAULT_PROFILES.get("npu") if dev == "npu" else "embedding"
+    if st == "reranking":
+        # No NPU reranker exists; the fit gate drops an incoherent pick.
+        return "reranking"
+    if st == "tts":
+        return tts_profile_for_device(dev)
+    if st == "transcription":
+        if dev == "npu":
+            return DEVICE_DEFAULT_PROFILES.get("npu")
+        # hal0 ships no GPU STT engine — only the CPU Moonshine one.
+        return "moonshine" if dev == "cpu" else None
+    if st == "image":
+        return "comfyui"
+    return None
+
+
+def infer_slot_profile(cfg_dict: dict[str, Any]) -> str | None:
+    """The profile to write for a NEW slot config, or ``None`` (#1830).
+
+    :func:`profile_for_slot_type` picks the candidate; :func:`profile_fits_slot`
+    vetoes it when the catalog has no such profile or it doesn't match the
+    slot's device/type, so a wrong-family profile is never persisted. A catalog
+    that can't be read at all yields ``None`` — creation must not fail because
+    profile inference could not run.
+    """
+    candidate = profile_for_slot_type(
+        str(cfg_dict.get("type") or ""), str(cfg_dict.get("device") or "")
+    )
+    if not candidate:
+        return None
+    try:
+        fits = profile_fits_slot(candidate, cfg_dict)
+    except Exception:  # unreadable/broken catalog — never block the create
+        log.warning("slot.profile_inference_skipped", extra={"profile": candidate})
+        return None
+    return candidate if fits else None
+
+
 # RETIRED (spec-hw-slot-ownership §2/§3): the model-driven preferred-runner
 # adoption (``preferred_runner_for`` + ``apply_preferred_runner``) is gone — the
 # runner is the slot's own ``SlotConfig.binary`` field, set by the operator, and
@@ -216,7 +287,9 @@ __all__ = [
     "ProfileAdoptHost",
     "apply_preferred_profile",
     "defuse_stale_mtp_on_swap",
+    "infer_slot_profile",
     "preferred_profile_for",
+    "profile_for_slot_type",
     "profile_fits_slot",
     "runner_fits_slot",
 ]

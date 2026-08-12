@@ -636,6 +636,16 @@ def _normalize_create_body(
        ``[slots].port_range_start/end`` pool. Without this, new slots
        persist ``port=0`` and the dashboard card shows ``port=0``
        instead of a useable port.
+
+    Plus one inference (#1830): a capability slot created with NO ``profile``
+    key gets the profile its type implies
+    (:func:`hal0.slots.profile_adopt.infer_slot_profile`). Every explicit
+    creation path — ``hal0 slot create``, the dashboard New-slot modal, a raw
+    POST — funnels through here, and none of them sent a profile; bound to an
+    unstamped model (``defaults: null``, which auto-scan / ``model add`` / pull
+    / curated all produce) the #1787 template gate then had nothing to apply,
+    so an embedding/reranking slot launched with no ``--embedding`` /
+    ``--reranking``, reported ``state=ready`` and 501'd its own endpoint.
     """
     out = dict(body)
     model_val = out.get("model")
@@ -643,6 +653,12 @@ def _normalize_create_body(
         out["model"] = {"default": model_val}
     if "port" not in out or not isinstance(out.get("port"), int) or out.get("port") in (0, None):
         out["port"] = _next_free_slot_port(port_start, port_end, slot_snapshots)
+    if not str(out.get("profile") or "").strip():
+        from hal0.slots.profile_adopt import infer_slot_profile
+
+        inferred = infer_slot_profile(out)
+        if inferred:
+            out["profile"] = inferred
     return out
 
 

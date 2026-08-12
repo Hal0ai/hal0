@@ -457,6 +457,16 @@ def slot_create(
         max=65535,
     ),
     ctx_size: int = typer.Option(4096, "--ctx-size", min=128),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help=(
+            "Runtime profile name (flag bundle + engine). Default: inferred "
+            "from --type/--hardware by the API (embedding → embedding, "
+            "reranking → reranking, tts/transcription → the engine for the "
+            "device, image → comfyui); llm slots take no profile."
+        ),
+    ),
 ) -> None:
     """Create a new slot config (POST /api/slots)."""
     url = _api_base()
@@ -493,6 +503,10 @@ def slot_create(
         "provider": str(provider),
         "model": {"default": model, "context_size": ctx_size},
     }
+    # Absent = let the API infer the capability profile from type/device
+    # (#1830); an explicit name always wins.
+    if profile:
+        body["profile"] = profile
     if port is not None:
         body["port"] = port
     else:
@@ -531,6 +545,15 @@ def slot_edit(
         case_sensitive=False,
         help="Change the slot's hardware backend (vulkan | rocm | cpu).",
     ),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help=(
+            "Change the slot's runtime profile (flag bundle + engine) — e.g. "
+            "'embedding' / 'reranking' to repair a profile-less capability "
+            "slot created before the profile was inferred (#1830)."
+        ),
+    ),
     # HAL0-SUNSET: v1.0.0 — --backend renamed to --provider in v0.2; use --provider.
     backend: str | None = typer.Option(
         None,
@@ -566,10 +589,12 @@ def slot_edit(
         and ctx_size is None
         and provider is None
         and hardware is None
+        and profile is None
     ):
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  "
-            "Pass at least one of --model, --port, --ctx-size, --provider, --hardware."
+            "Pass at least one of --model, --port, --ctx-size, --provider, "
+            "--hardware, --profile."
         )
         raise typer.Exit(code=2)
 
@@ -578,6 +603,8 @@ def slot_edit(
         payload["port"] = port
     if provider is not None:
         payload["provider"] = str(provider)
+    if profile is not None:
+        payload["profile"] = profile
     if hardware is not None:
         payload["device"] = _HARDWARE_TO_DEVICE.get(hardware.value, hardware.value)
     if model is not None or ctx_size is not None:
