@@ -40,6 +40,18 @@ from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
 app = typer.Typer(help="Manage inference slots.")
 console = Console()
 
+# The server-side state machine blocks the HTTP response until the slot
+# converges: SlotManager.load -> _await_ready polls /health for up to
+# providers.container._HEALTH_TIMEOUT_S (180s). restart and swap both
+# unload the live slot before loading the replacement, so their worst-case
+# budget stretches past a single load's. api_post's default 10s read
+# timeout is far under any of these budgets — every mutating lifecycle
+# verb would raise ReadTimeout and exit 1 on an operation that in fact
+# succeeded server-side (#1832). Give these call sites a client timeout
+# with real headroom over the server's own worst case instead of the
+# blanket default.
+SLOT_LIFECYCLE_TIMEOUT_S = 220.0
+
 
 class SlotProvider(StrEnum):
     """Providers valid for a slot (mirrors PLAN.md §1 provider list).
@@ -260,7 +272,7 @@ def slot_load(
         raise typer.Exit(1)
     try:
         body = {"model_id": model} if model else {}
-        snap = api_post(f"/api/slots/{name}/load", json=body)
+        snap = api_post(f"/api/slots/{name}/load", json=body, timeout=SLOT_LIFECYCLE_TIMEOUT_S)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -278,7 +290,7 @@ def slot_unload(
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        snap = api_post(f"/api/slots/{name}/unload")
+        snap = api_post(f"/api/slots/{name}/unload", timeout=SLOT_LIFECYCLE_TIMEOUT_S)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -294,7 +306,7 @@ def slot_restart(
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        snap = api_post(f"/api/slots/{name}/restart")
+        snap = api_post(f"/api/slots/{name}/restart", timeout=SLOT_LIFECYCLE_TIMEOUT_S)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -348,7 +360,9 @@ def slot_swap(
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        snap = api_post(f"/api/slots/{name}/swap", json={"model_id": model})
+        snap = api_post(
+            f"/api/slots/{name}/swap", json={"model_id": model}, timeout=SLOT_LIFECYCLE_TIMEOUT_S
+        )
     except CliApiError as exc:
         die(str(exc))
         return
