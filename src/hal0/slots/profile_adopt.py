@@ -101,6 +101,48 @@ _SLOT_TYPE_TO_CAPABILITY: dict[str, str] = {
     "image": "image",
 }
 
+#: The CLI's legacy ``--provider`` default (``hal0 slot create`` always sends
+#: it, even for a capability type that has nothing to do with llama-server).
+#: Treated as "unspecified" by the inference below so the CLI and the dashboard
+#: modal — which sends no provider at all — infer the SAME profile.
+_UNSPECIFIED_PROVIDER = "llama-server"
+
+
+def _runtime_family_fits_device(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
+    """False when the profile's RUNTIME FAMILY has no runner for this device.
+
+    :func:`profile_fits_slot` compares the PROFILE's own ``device_class`` /
+    ``backend``, and the 1.0 seeds are deliberately device-agnostic logical
+    tunes with both fields ``None`` — so it waves ``qwen3-tts`` through for a
+    ``gpu-vulkan`` slot even though ``RUNNER_IMAGES["qwen3tts"]`` is ROCm-only
+    (``Qwen3TTSProvider`` unconditionally wires /dev/kfd + MIOpen). The runner
+    registry is the authority on which backend a runtime family can actually
+    run on, so an inferred profile is vetoed when the slot's backend conflicts
+    with its family's runner (#1830 follow-up).
+
+    Only the BACKEND is compared. The runner registry keys ComfyUI under the
+    pseudo device class ``img`` while its slot's device is ``gpu-rocm``, so a
+    device_class comparison would veto correct answers; hardware-class
+    coherence is already :func:`profile_fits_slot`'s job for any profile that
+    declares one.
+    """
+    from hal0.errors import NotFound
+    from hal0.model_meta import device_to_backend
+    from hal0.profiles import ProfileCatalog
+    from hal0.runners import get_runner, runner_matches
+
+    device = str(cfg_dict.get("device") or "").strip().lower()
+    if not device:
+        return True  # no device pinned yet — nothing to conflict with
+    try:
+        family = str(ProfileCatalog().resolve(profile_name).runtime_family or "")
+        runner = get_runner(family)
+    except NotFound:
+        # ``llama-server`` is a multi-runner family (one runner per backend)
+        # and so is not a runner key: nothing single-image to veto on.
+        return True
+    return runner_matches(runner, device_class=None, backend=device_to_backend(device)[1])
+
 
 def type_implied_profile(cfg_dict: dict[str, Any]) -> str | None:
     """The runtime profile a slot's TYPE requires, or ``None`` (#1830).
@@ -117,23 +159,38 @@ def type_implied_profile(cfg_dict: dict[str, Any]) -> str | None:
     (:func:`hal0.capabilities.profile_fit.profile_name_for_fit`), reached
     through the slot-type→capability translation above.
 
-    The answer is vetoed by :func:`profile_fits_slot`, so a candidate the
-    catalog does not have (or that does not match the slot's device/type) is
-    dropped rather than persisted — e.g. ``transcription`` on a GPU device,
-    where hal0 ships no STT engine. A catalog that cannot be read at all yields
-    ``None``: slot creation must never fail because inference could not run.
+    The answer is vetoed TWICE, so a candidate that cannot actually run on this
+    slot is dropped rather than persisted:
+
+    * :func:`profile_fits_slot` — the catalog must have it and its
+      device_class/backend/slot-type must match. E.g. ``transcription`` on a
+      GPU device, where hal0 ships no STT engine.
+    * :func:`_runtime_family_fits_device` — the profile's runtime family must
+      have a runner image for this slot's backend. E.g. ``tts`` on
+      ``gpu-vulkan``: the shared rule answers ``qwen3-tts`` for every GPU, but
+      the qwen3tts runner is ROCm-only, so a Vulkan box keeps the profile-less
+      Kokoro fallback ``providers/container._spec_provider_for`` applies
+      instead of being pinned to a container it cannot start.
+
+    A catalog that cannot be read at all yields ``None``: slot creation must
+    never fail because inference could not run.
     """
     capability = _SLOT_TYPE_TO_CAPABILITY.get(str(cfg_dict.get("type") or "").strip().lower())
     if not capability:
         return None
     device = str(cfg_dict.get("device") or "").strip().lower()
+    provider = str(cfg_dict.get("provider") or "").strip().lower()
+    if provider == _UNSPECIFIED_PROVIDER:
+        provider = ""
     try:
         from hal0.capabilities.profile_fit import profile_name_for_fit
 
-        candidate = profile_name_for_fit(capability, device, str(cfg_dict.get("provider") or ""))
+        candidate = profile_name_for_fit(capability, device, provider)
         if not candidate:
             return None
-        fits = profile_fits_slot(candidate, cfg_dict)
+        fits = profile_fits_slot(candidate, cfg_dict) and _runtime_family_fits_device(
+            candidate, cfg_dict
+        )
     except Exception:  # unreadable/broken catalog — never block the create
         log.warning(
             "slot.profile_inference_skipped",
