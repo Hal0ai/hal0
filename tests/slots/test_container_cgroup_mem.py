@@ -195,12 +195,13 @@ class TestBuildPerSlotContainerPath:
     """Verify build_per_slot uses cgroup bytes for container slots
     and falls back to file-size estimate when the cgroup probe is empty."""
 
-    def _make_slot(self, name, state="ready", model_id="mymodel", backend="rocm"):
+    def _make_slot(self, name, state="ready", model_id="mymodel", backend="rocm", slot_id=None):
         slot = MagicMock()
         slot.name = name
         slot.state = state
         slot.model_id = model_id
         slot.backend = backend
+        slot.slot_id = slot_id
         slot.metadata = {"provider": "llama-server", "backend": backend}
         return slot
 

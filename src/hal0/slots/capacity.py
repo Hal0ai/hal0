@@ -442,7 +442,15 @@ async def build_per_slot(
         # MAX of the cgroup and the registry estimate:
         #   • cgroup accurately includes weights → cgroup ≥ estimate → wins.
         #   • GTT not charged (cgroup too low)   → estimate wins → no under-report.
-        cgroup_bytes = await _container_cgroup_mem_bytes(s.name)
+        #
+        # Artefact token, not display name (#1839 review): on an id-keyed box
+        # (post ``hal0 slot migrate-id-keying``) the container/unit is named
+        # off the durable ``slot_id``, not the mutable display ``name`` — the
+        # two diverge the moment a slot is renamed. Mirrors
+        # :func:`hal0.slots.naming.slot_instance_token`'s id-over-name
+        # preference without needing a full config mapping.
+        artefact_token = str(getattr(s, "slot_id", None) or s.name)
+        cgroup_bytes = await _container_cgroup_mem_bytes(artefact_token)
         cgroup_mb = round(cgroup_bytes / (1024.0 * 1024.0), 1)
         resident_mb = max(cgroup_mb, estimate_mb)
 
@@ -464,8 +472,14 @@ async def build_per_slot(
         # hardware, so a GPU-declared slot on a GPU-less box (no
         # vulkan/compute-capable GPU probed) must ALSO book to ram_mb —
         # otherwise a CPU-only install shows phantom VRAM usage even
-        # though ``backend`` never says "cpu".
-        if backend == "cpu" or not gpu_capable:
+        # though ``backend`` never says "cpu". ``is_npu`` slots are
+        # EXCLUDED from this gate: an FLM slot that fell through to this
+        # common path (catalog miss / zero ``footprint_gb``) still uses the
+        # NPU's own UMA-style vram_mb accounting regardless of classic GPU
+        # capability — an NPU-only host has ``gpu_capable=False`` but its
+        # NPU slots never held phantom *GPU* VRAM in the first place, so
+        # the #1839 gate does not apply to them.
+        if backend == "cpu" or (not is_npu and not gpu_capable):
             vram_mb, ram_mb = 0.0, resident_mb
         else:
             vram_mb, ram_mb = resident_mb, 0.0

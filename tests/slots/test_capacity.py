@@ -34,12 +34,13 @@ from hal0.slots.capacity import (
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
-def _make_slot(name, state="ready", model_id="mymodel", backend="vulkan"):
+def _make_slot(name, state="ready", model_id="mymodel", backend="vulkan", slot_id=None):
     slot = MagicMock()
     slot.name = name
     slot.state = state
     slot.model_id = model_id
     slot.backend = backend
+    slot.slot_id = slot_id
     slot.metadata = {"provider": "llama-server", "backend": backend}
     return slot
 
@@ -181,6 +182,73 @@ class TestBuildPerSlotGpuCapabilityGating:
         row = result["brain"]
         assert row["vram_mb"] == 0.0
         assert row["ram_mb"] > 0.0
+
+    @pytest.mark.asyncio
+    async def test_npu_fallthrough_keeps_vram_attribution_without_gpu(self):
+        """PR review (#1839): an FLM slot that falls through the NPU catalog
+        branch (miss / zero footprint_gb) must keep its historical UMA-style
+        vram_mb attribution even on a box with gpu_capable=False (NPU-only
+        host) — the classic-GPU gate must not apply to NPU slots."""
+        slot = _make_slot("npu-chat", backend="flm")
+        slot.metadata = {"provider": "flm", "backend": "flm"}
+
+        model_mock = MagicMock()
+        model_mock.size_bytes = 4 * 1024 * 1024 * 1024
+        model_mock.model_dump = lambda: {}
+        registry = MagicMock()
+        registry.get = MagicMock(return_value=model_mock)
+
+        # footprint_gb missing/zero -> falls through past the FLM `continue`.
+        flm_catalog = {"mymodel": {"footprint_gb": 0.0, "size_bytes": 0}}
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=0,
+        ):
+            result = await build_per_slot(
+                [slot], registry=registry, flm_catalog=flm_catalog, gpu_capable=False
+            )
+
+        row = result["npu-chat"]
+        assert row["ram_mb"] == 0.0
+        assert row["vram_mb"] == row["mem_mb"] > 0.0
+
+
+# ── build_per_slot: artefact-token cgroup probe (id-keying review) ───────
+
+
+class TestBuildPerSlotArtefactToken:
+    @pytest.mark.asyncio
+    async def test_probes_by_slot_id_when_id_keyed(self):
+        """PR review (#1839): on an id-keyed box the container/unit is named
+        off the durable slot_id, not the mutable display name — the cgroup
+        probe must be called with the id, not the name."""
+        slot = _make_slot("brain", backend="vulkan", slot_id=42)
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=0,
+        ) as mock_probe:
+            await build_per_slot([slot], gpu_capable=True)
+
+        mock_probe.assert_awaited_once_with("42")
+
+    @pytest.mark.asyncio
+    async def test_probes_by_name_when_not_id_keyed(self):
+        """Legacy (pre-migration) slots have no slot_id — falls back to the
+        display name, unchanged from before this review fix."""
+        slot = _make_slot("brain", backend="vulkan", slot_id=None)
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=0,
+        ) as mock_probe:
+            await build_per_slot([slot], gpu_capable=True)
+
+        mock_probe.assert_awaited_once_with("brain")
 
 
 # ── _systemd_unit_mem_bytes / _container_cgroup_mem_bytes fallback (defect 2) ──
