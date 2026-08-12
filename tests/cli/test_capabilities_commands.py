@@ -159,3 +159,75 @@ def test_set_posts_only_provided_fields(monkeypatch: pytest.MonkeyPatch) -> None
     assert result.exit_code == 0, result.output
     assert captured["path"] == "/api/capabilities/embed/embed"
     assert captured["json"] == {"model": "bge-small"}
+
+
+# ── #1832: `capability set` blocks on the slot state machine ────────────────
+#
+# ``POST /api/capabilities/{slot}/{child}`` is not a config write that returns
+# immediately. ``routes/capabilities.py`` awaits ``CapabilityOrchestrator.apply``,
+# which awaits ``SlotManager.load`` (off→on), ``unload`` (on→off) or ``swap``
+# (model/backend change while on) *inline*, holding the response open until the
+# slot converges. On ``api_post``'s 10s default that is #1832 verbatim: the CLI
+# raises ReadTimeout and exits non-zero while the capability change succeeds.
+#
+# As in ``tests/cli/test_slot_commands.py``, the floor is computed from the
+# SERVER modules, never from the client constant under test — comparing the
+# client budget against the constant it was derived from would be a tautology.
+
+#: See ``tests/cli/test_slot_commands.py`` — ``preload_evict.admit`` runs one
+#: sequential ``host.unload`` per evicted candidate inside the load path; two
+#: is the modest case the client budget must at minimum cover.
+_MIN_EVICTION_UNLOADS = 2
+
+
+def _server_worst_case_s(*, loads: int = 1, unloads: int = 1) -> float:
+    from hal0.providers.container import _HEALTH_TIMEOUT_S
+    from hal0.slots.manager import SlotManager
+
+    terminate = float(SlotManager._terminate_timeout_s)
+    load_phase = loads * (float(_HEALTH_TIMEOUT_S) + _MIN_EVICTION_UNLOADS * terminate)
+    return load_phase + unloads * terminate
+
+
+def _capture_set(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    monkeypatch.setattr(cc, "_api_unreachable", lambda _u: False)
+    captured: dict[str, Any] = {}
+
+    def fake_post(path: str, *, json: Any = None, **kw: Any) -> dict:
+        captured["path"] = path
+        captured["json"] = json
+        captured["kwargs"] = kw
+        return {"ok": True, "selection": json}
+
+    monkeypatch.setattr(cc, "api_post", fake_post)
+    return captured
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # off→on: the orchestrator ensures the slot exists then awaits load.
+        ["set", "embed", "embed", "--enabled"],
+        # on→off: the orchestrator awaits unload.
+        ["set", "embed", "embed", "--disabled"],
+        # model change while on: the orchestrator awaits swap (unload-then-load).
+        ["set", "embed", "embed", "--model", "bge-small"],
+    ],
+)
+def test_capability_set_passes_the_lifecycle_timeout(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str]
+) -> None:
+    captured = _capture_set(monkeypatch)
+    result = runner.invoke(cc.app, argv)
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/api/capabilities/embed/embed"
+
+    # One request cannot know which branch the server will take, so the single
+    # budget it sends has to clear the worst one: swap, i.e. unload-then-load.
+    floor = _server_worst_case_s(loads=1, unloads=1)
+    kwargs = captured["kwargs"]
+    assert "timeout" in kwargs, "capability set passed no explicit timeout kwarg"
+    assert kwargs["timeout"] >= floor, (
+        f"timeout={kwargs['timeout']} is under the server's {floor}s worst case "
+        f"(the orchestrator's swap branch)"
+    )

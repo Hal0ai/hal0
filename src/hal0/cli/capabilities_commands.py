@@ -48,6 +48,17 @@ from hal0.capabilities.orchestrator import _CHILD_TO_CAPABILITY, LEGAL_SLOTS, le
 from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, api_post, die
 from hal0.config.locking import file_lock
 from hal0.registry.store import ModelRegistry
+from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
+
+#: ``POST /api/capabilities/{slot}/{child}`` awaits the slot state machine
+#: inline: ``routes/capabilities.py`` calls ``CapabilityOrchestrator.apply``,
+#: which — depending on which fields changed — awaits ``SlotManager.load``
+#: (off→on), ``SlotManager.unload`` (on→off) or ``SlotManager.swap`` (model or
+#: backend change while on). The client cannot know which branch the server
+#: will take, so it budgets for the worst one: ``swap``, i.e. unload-then-load
+#: (#1832). Without this the command rides ``api_post``'s 10s default and
+#: reports failure on a capability change that in fact succeeded.
+CAPABILITY_SET_TIMEOUT_S = slot_lifecycle_timeout_s(loads=1, unloads=1)
 
 app = typer.Typer(
     name="capabilities",
@@ -161,7 +172,11 @@ def set_capability(
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        result = api_post(f"/api/capabilities/{slot}/{child}", json=body)
+        result = api_post(
+            f"/api/capabilities/{slot}/{child}",
+            json=body,
+            timeout=CAPABILITY_SET_TIMEOUT_S,
+        )
     except CliApiError as exc:
         die(str(exc))
         return

@@ -1572,6 +1572,10 @@ _SLOT_LIFECYCLE_TIMEOUT_S: dict[str, float] = {
     # the dynamic NPU slot in the request handler, same budget as the rest.
     "npu_backend_load": slot_lifecycle_timeout_s(loads=1, unloads=0),
     "npu_backend_unload": slot_lifecycle_timeout_s(loads=0, unloads=1),
+    # POST /api/capabilities/{slot}/{child} awaits CapabilityOrchestrator.apply,
+    # which drives SlotManager.load / unload / swap inline. Budget the worst
+    # branch (swap = unload-then-load); the disable branch only unloads.
+    "capability_set": slot_lifecycle_timeout_s(loads=1, unloads=1),
 }
 
 

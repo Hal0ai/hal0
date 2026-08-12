@@ -1420,6 +1420,26 @@ async def test_slot_lifecycle_tools_forward_with_the_lifecycle_budget(
     # nothing left for the lock wait — is not enough.
     assert mock_transport["timeout"] >= float(_HEALTH_TIMEOUT_S) + terminate
 
+    # capability_set drives the same state machine one level up: the route
+    # awaits CapabilityOrchestrator.apply, which awaits SlotManager.load /
+    # unload / swap inline. Budget the worst branch — swap — exactly as the
+    # slot verbs do; the 30s generic forward is #1832 for agents.
+    mock_transport["timeout"] = None
+    pending = await admin.dispatch(
+        tool="capability_set",
+        args={"slot": "embed", "child": "embed", "model": "bge-small"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    await queue.approve(pending["approval_id"])
+    assert mock_transport["timeout"] is not None, "capability_set never reached REST"
+    assert mock_transport["timeout"] >= floor, (
+        f"capability_set forwarded at {mock_transport['timeout']}s, under the "
+        f"{floor}s server worst case"
+    )
+
     # A non-blocking read keeps the short generic default — the override is
     # scoped to the lifecycle tools, not a blanket widening.
     await admin.dispatch(
