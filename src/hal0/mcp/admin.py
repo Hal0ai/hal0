@@ -178,6 +178,7 @@ from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 from hal0.memory.namespace import is_known_namespace
+from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
@@ -1555,6 +1556,19 @@ def _rest_error_payload(body: Any, *, text: str = "") -> dict[str, Any]:
     }
 
 
+#: Tools whose REST route blocks on the slot state machine, and therefore
+#: cannot use ``_call_rest``'s generic 30s forward timeout: at 30s against a
+#: 180s+ health poll the agent is told the op failed while it succeeds
+#: server-side, the same defect #1832 fixed for the CLI. Budgets derive from
+#: :mod:`hal0.slot_lifecycle_budget` so a server-side retune carries here too.
+_SLOT_LIFECYCLE_TIMEOUT_S: dict[str, float] = {
+    "slot_load": slot_lifecycle_timeout_s(loads=1, unloads=0),
+    "slot_unload": slot_lifecycle_timeout_s(loads=0, unloads=1),
+    "slot_restart": slot_lifecycle_timeout_s(loads=1, unloads=1),
+    "model_swap": slot_lifecycle_timeout_s(loads=1, unloads=1),
+}
+
+
 async def _call_rest(
     *,
     base_url: str,
@@ -1899,12 +1913,16 @@ async def _execute_tool(
         }
     url = _format_url(base_url, template, path_args)
     payload: dict[str, Any] | None = remainder if remainder else None
+    call: dict[str, Any] = {}
+    if tool in _SLOT_LIFECYCLE_TIMEOUT_S:
+        call["timeout_s"] = _SLOT_LIFECYCLE_TIMEOUT_S[tool]
     result = await _call_rest(
         base_url=base_url,
         bearer=bearer,
         method=method,
         url=url,
         payload=payload,
+        **call,
     )
     # Redact every Bearer / HAL0_BEARER_TOKEN occurrence before a
     # journald-backed response leaves this process. The REST routes

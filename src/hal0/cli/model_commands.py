@@ -21,6 +21,7 @@ from hal0.cli._shared import (
 )
 from hal0.cli.registry_commands import DEFAULT_REGISTRY_PATH, _do_import_backup
 from hal0.registry.import_toml import import_toml_to_sqlite
+from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 app = typer.Typer(help="Manage the local model registry.")
 console = Console()
@@ -582,8 +583,18 @@ def model_run(
         console.print(f"[dim]No --slot given; using slot [bold]{target}[/bold].[/dim]")
 
     # 3. Load with the model assigned.
+    #
+    # /api/slots/{name}/load blocks until the slot converges (#1832), so this
+    # POST needs the derived lifecycle budget: at api_post's generic 10s
+    # default the CLI died with a misleading "check compatibility" hint on a
+    # load that had in fact succeeded, and control never reached the readiness
+    # poll below that --timeout advertises.
     try:
-        api_post(f"/api/slots/{target}/load", json={"model_id": ref})
+        api_post(
+            f"/api/slots/{target}/load",
+            json={"model_id": ref},
+            timeout=slot_lifecycle_timeout_s(loads=1, unloads=0),
+        )
     except CliApiError as exc:
         die(f"{exc}\nCheck compatibility with: hal0 slot show {target}")
         return

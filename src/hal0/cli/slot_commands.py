@@ -36,21 +36,22 @@ from hal0.cli._shared import (
     follow_sse_logs,
 )
 from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
+from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 app = typer.Typer(help="Manage inference slots.")
 console = Console()
 
 # The server-side state machine blocks the HTTP response until the slot
-# converges: SlotManager.load -> _await_ready polls /health for up to
-# providers.container._HEALTH_TIMEOUT_S (180s). restart and swap both
-# unload the live slot before loading the replacement, so their worst-case
-# budget stretches past a single load's. api_post's default 10s read
-# timeout is far under any of these budgets — every mutating lifecycle
-# verb would raise ReadTimeout and exit 1 on an operation that in fact
-# succeeded server-side (#1832). Give these call sites a client timeout
-# with real headroom over the server's own worst case instead of the
-# blanket default.
-SLOT_LIFECYCLE_TIMEOUT_S = 220.0
+# converges, so api_post's default 10s read timeout makes every mutating
+# lifecycle verb raise ReadTimeout and exit 1 on an operation that in fact
+# succeeded server-side (#1832). These budgets are DERIVED from the server's
+# own bounds (health poll + the terminates each verb performs, including the
+# sequential pre-load evictions inside load) — a hardcoded number is what let
+# #1832 come back at 220s against a 210s floor. See hal0.slot_lifecycle_budget.
+SLOT_LOAD_TIMEOUT_S = slot_lifecycle_timeout_s(loads=1, unloads=0)
+SLOT_UNLOAD_TIMEOUT_S = slot_lifecycle_timeout_s(loads=0, unloads=1)
+#: restart and swap are unload-then-load, so they carry both halves.
+SLOT_LIFECYCLE_TIMEOUT_S = slot_lifecycle_timeout_s(loads=1, unloads=1)
 
 
 class SlotProvider(StrEnum):
@@ -272,7 +273,7 @@ def slot_load(
         raise typer.Exit(1)
     try:
         body = {"model_id": model} if model else {}
-        snap = api_post(f"/api/slots/{name}/load", json=body, timeout=SLOT_LIFECYCLE_TIMEOUT_S)
+        snap = api_post(f"/api/slots/{name}/load", json=body, timeout=SLOT_LOAD_TIMEOUT_S)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -290,7 +291,7 @@ def slot_unload(
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        snap = api_post(f"/api/slots/{name}/unload", timeout=SLOT_LIFECYCLE_TIMEOUT_S)
+        snap = api_post(f"/api/slots/{name}/unload", timeout=SLOT_UNLOAD_TIMEOUT_S)
     except CliApiError as exc:
         die(str(exc))
         return

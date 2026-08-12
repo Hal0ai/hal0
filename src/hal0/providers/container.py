@@ -82,6 +82,7 @@ from hal0.providers._gpu import (
     resolve_gpu_group_ids,
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+from hal0.slot_lifecycle_budget import HEALTH_TIMEOUT_S
 from hal0.slots.activation import autoload_enabled
 from hal0.slots.argv import ResolvedArgv, resolve_argv
 from hal0.slots.naming import (
@@ -585,8 +586,11 @@ def _loopback_fence_command(command: list[str]) -> list[str]:
 
 
 # Health-check tuning: poll GET /health on the slot port.
+# The overall bound lives in hal0.slot_lifecycle_budget so the clients of the
+# blocking lifecycle endpoints derive their read timeout from it instead of
+# hardcoding a number this module can silently outgrow (#1832).
 _HEALTH_POLL_INTERVAL_S = 2.0
-_HEALTH_TIMEOUT_S = 180.0
+_HEALTH_TIMEOUT_S = HEALTH_TIMEOUT_S
 _HEALTH_REQUEST_TIMEOUT_S = 3.0
 
 #: Wall-clock bound on the teardown systemd verbs issued by

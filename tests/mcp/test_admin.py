@@ -1355,6 +1355,51 @@ async def test_registered_tool_raises_toolerror_on_missing_arg(queue: ApprovalQu
         await server.call_tool("model_show", {"args": {}})
 
 
+@pytest.mark.asyncio
+async def test_slot_lifecycle_tools_forward_with_the_lifecycle_budget(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """model_swap blocks on the slot state machine — 30s is not enough (#1832).
+
+    ``_call_rest``'s generic 30s forward timeout is far under the server's own
+    health-poll budget, so an agent driving a slot swap is told the call failed
+    while it succeeds server-side — the same defect the CLI carried. The floor
+    is read from the server modules, never from the budget module under test.
+    """
+    from hal0.providers.container import _HEALTH_TIMEOUT_S
+    from hal0.slots.manager import SlotManager
+
+    terminate = float(SlotManager._terminate_timeout_s)
+    # swap is unload-then-load: one terminate, plus the health poll and the two
+    # sequential pre-load evictions ``preload_evict.admit`` may run.
+    floor = terminate + float(_HEALTH_TIMEOUT_S) + 2 * terminate
+
+    await admin.dispatch(
+        tool="model_swap",
+        args={"name": "primary", "model_id": "qwen3:0.6b"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert mock_transport["timeout"] >= floor, (
+        f"model_swap forwarded at {mock_transport['timeout']}s, under the "
+        f"{floor}s server worst case"
+    )
+
+    # A non-blocking read keeps the short generic default — the override is
+    # scoped to the lifecycle tools, not a blanket widening.
+    await admin.dispatch(
+        tool="slot_list",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert mock_transport["timeout"] < floor
+
+
 def test_server_stamps_hal0_version_not_sdk_version(queue: ApprovalQueue) -> None:
     """serverInfo.version must be hal0's own version, not the ``mcp`` SDK
     package version FastMCP falls back to when nothing sets it explicitly."""

@@ -42,6 +42,12 @@ TERMINATE_TIMEOUT_S = 30.0
 #: resident at once) with the margin factor on top.
 EVICTION_UNLOAD_ALLOWANCE = 3
 
+#: Every lifecycle verb takes the per-slot lock (``SlotManager._lock``), so a
+#: request can sit queued behind whatever is already converging that slot
+#: before doing any of its own work. Charged once per request — the dominant
+#: blocking phase of the holder is its health poll.
+LOCK_WAIT_ALLOWANCE_S = HEALTH_TIMEOUT_S
+
 #: Multiplier over the summed server budget covering what the server's own
 #: timeouts do not: podman/systemd fork + image resolution, JSON encode, the
 #: request/response hop, and the poll interval overshoot on each bound above.
@@ -61,8 +67,11 @@ def slot_lifecycle_timeout_s(*, loads: int = 1, unloads: int = 1, slots: int = 1
 
     A load charges the health poll plus :data:`EVICTION_UNLOAD_ALLOWANCE`
     terminates for the evictions ``preload_evict.admit`` may run before the
-    spawn; an unload charges one terminate.
+    spawn; an unload charges one terminate; the whole request additionally
+    charges one :data:`LOCK_WAIT_ALLOWANCE_S` for queueing behind an in-flight
+    op on the same slot.
     """
     per_slot = loads * (HEALTH_TIMEOUT_S + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S)
     per_slot += unloads * TERMINATE_TIMEOUT_S
-    return round(per_slot * max(int(slots), 1) * OVERHEAD_FACTOR, 1)
+    total = per_slot * max(int(slots), 1) + LOCK_WAIT_ALLOWANCE_S
+    return round(total * OVERHEAD_FACTOR, 1)
