@@ -37,6 +37,14 @@ PROCESS RULES (learned the hard way during the rc.4 fix wave — follow them exa
   - Never force-push a shared branch, rewrite pushed history, or bypass branch protection.
   - Never automerge anything touching credentials, CI/CD configuration, infrastructure, or
     migrations — those get surfaced for human review.
+  - NEVER MERGE YOUR OWN PR, and never enable automerge on it. Open it, get it green, stop there.
+    Merging belongs to the Land phase, which runs only AFTER an independent reviewer has read your
+    diff. This is the single most expensive lesson of the rc.5 wave: fix agents self-merged 4 PRs
+    between 03:44 and 05:22 while the Review phase had not yet started, so the reviews were written
+    against code already on main. 7 of 10 PRs came back changes-requested and 2 of those did not
+    fix the reported defect at all — including one that introduced a fresh cache-poisoning
+    regression. Green CI is not review. The wave's own GitOps autonomy rules ("enable automerge
+    once checks are green") are SUSPENDED inside a fix wave for exactly this reason.
 `
 
 // ── phase 0: plan ────────────────────────────────────────────────────────────

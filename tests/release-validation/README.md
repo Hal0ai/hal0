@@ -86,6 +86,16 @@ A full two-box run is roughly 25–30 agents. Restrict `lanes` for smaller passe
   neither can reproduce.
 * **Run fix agents ~6 at a time.** A 12-wide fleet was killed twice by host restarts during the
   rc.4 wave, losing uncommitted work each time.
+* **Fix agents must never merge their own PR.** Green CI is not review. During the rc.5 wave four
+  agents self-merged between 03:44 and 05:22 UTC while the Review phase had not started, so those
+  reviews were written against code already on `main`. The round then returned **7 of 10 PRs
+  changes-requested**, two of which did not fix the reported defect at all and one of which
+  introduced a fresh cache-poisoning regression — all of it live on `main` and needing a
+  fix-forward wave. Opening the PR and getting it green is the fix agent's terminal state; the
+  Land phase merges, and only after an independent reviewer has read the diff.
+* **Commit and push early inside an agent worktree.** Every mid-flight kill so far (three across
+  rc.4 and rc.5) cost exactly the work that was sitting uncommitted. Squash-merge makes noisy
+  intermediate commits free. See the rescue recipe when a wave dies with dirty agent trees.
 * **No per-PR CHANGELOG hunks during a fix wave.** Every merge re-conflicts every remaining
   branch (tracked as #1545). Consolidate in one CHANGELOG PR at the end.
 * **The merge train catches what per-branch CI cannot.** rc.4's #1808 × #1799 integration break
