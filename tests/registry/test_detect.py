@@ -40,6 +40,24 @@ class TestGgufChat:
         r = detect(p)
         assert r.suggested_capabilities == ["chat"]
 
+    def test_explicit_pooling_zero_not_overridden_by_tags_or_filename(self, tmp_path: Path) -> None:
+        """#1838 (codex review): pooling_type=0 is an authoritative "chat"
+        read — a stray general.tags entry or a rerank-sounding filename
+        must not second-guess it."""
+        tags_bytes = (
+            struct.pack("<I", _GGUF_TYPE_STRING) + struct.pack("<Q", 1) + _enc_str("reranker")
+        )
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+            ("bert.pooling_type", _GGUF_TYPE_UINT32, struct.pack("<I", 0)),
+            ("general.tags", _GGUF_TYPE_ARRAY, tags_bytes),
+        ]
+        p = _write_fixture(tmp_path, "jina-reranker-mislabeled-chat.gguf", _build_gguf(3, kvs))
+        r = detect(p)
+        assert r.suggested_capabilities == ["chat"]
+        assert r.confidence == "high"
+        assert r.raw_hints["capability_source"] == "pooling_type"
+
 
 class TestGgufEmbed:
     def test_pooling_type_nonzero_means_embed(self, tmp_path: Path) -> None:
@@ -134,6 +152,40 @@ class TestGgufRerank:
         assert r_token.suggested_capabilities == ["rerank"]
         assert r_token.confidence == "high"
         assert r_token.raw_hints["capability_source"] == "header_tags"
+
+    def test_causal_false_downgrades_chat_default_confidence(self, tmp_path: Path) -> None:
+        """#1838 (codex review): no pooling_type, no tags, no filename token
+        — but attention.causal=False rules out a causal chat model. "chat"
+        is still returned (embed vs rerank is genuinely unknown) but must
+        not claim the ordinary default's high confidence."""
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("jina-bert-v2")),
+            ("jina-bert-v2.attention.causal", _GGUF_TYPE_BOOL, struct.pack("<B", 0)),
+        ]
+        p = _write_fixture(tmp_path, "zzscratchrr-no-tags.gguf", _build_gguf(3, kvs))
+        r = detect(p)
+        assert r.suggested_capabilities == ["chat"]
+        assert r.confidence == "medium"
+        assert r.raw_hints["capability_source"] == "causal_conflict"
+
+    def test_filename_hint_used_for_symlink_capability_fallback(self, tmp_path: Path) -> None:
+        """#1838 (codex review): the resolved path passed to detect() may be
+        a HF hub-cache sha-named blob with no filename signal — the caller
+        can pass the operator-typed name via filename_hint so a real
+        capability token isn't hidden by symlink resolution."""
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+        ]
+        blob = _write_fixture(tmp_path, "a1b2c3d4e5f6", _build_gguf(3, kvs))
+        # No hint: the blob's own name carries no rerank/embed token.
+        r_no_hint = detect(blob)
+        assert r_no_hint.suggested_capabilities == ["chat"]
+        # With the operator's real filename supplied as a hint, the token
+        # table sees "jina-reranker" and correctly classifies rerank.
+        r_hinted = detect(blob, filename_hint="jina-reranker-v2-base.gguf")
+        assert r_hinted.suggested_capabilities == ["rerank"]
+        assert r_hinted.confidence == "medium"
+        assert r_hinted.raw_hints["capability_source"] == "filename"
 
 
 class TestGgufUnreadable:
