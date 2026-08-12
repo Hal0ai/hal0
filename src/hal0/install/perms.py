@@ -246,6 +246,33 @@ def ownership_table(
         # agents/ is the dashboard-only Hermes world — pinned root:root (#843),
         # under the flip too: the API only reads it.
         PermRow(paths.agents_config_dir(), "root", "root", 0o755, role="agents/"),
+        # agent-skills/ — the bundled-skill MIRROR (#1828). Unlike agents/ next
+        # to it, this dir is WRITTEN by the provisioner: context_link's
+        # ``_mirror_bundled_skills`` symlinks each /usr/share/hal0/skills entry
+        # into it, and since the §7.4 privilege drop (5faef6d6) that writer is
+        # `hal0 agent bootstrap hermes` re-exec'd as the hal0 user. install.sh
+        # creates the dir as root (root:root 0755) and the /etc/hal0 root row
+        # above is non-recursive, so nothing ever handed it to hal0 — all five
+        # symlinks got EACCES on 100% of fresh installs and Hermes came up with
+        # an empty skill manifest.
+        #
+        # Narrowest row that fixes it: the DIRECTORY only, group-writable to the
+        # already-shared hal0 group, mirroring the /etc/hal0 config-root row
+        # (2775 — setgid so links planted by any hal0-group member keep the
+        # shared group). Deliberately NOT: world-writable (0777 would let any
+        # local user plant a skill Hermes then executes), recursive/globbed (the
+        # contents are symlinks, which the store refuses to write anyway —
+        # #1739), and NOT a change to any root-owned parent (/etc/hal0 is
+        # already hal0:hal0 2775 under the flip; nothing above it moves).
+        # Root-era (service_user="root") keeps root:root 0755 byte-for-byte —
+        # that era never drops privileges, so it never had the bug.
+        PermRow(
+            etc / "agent-skills",
+            etc_owner,
+            etc_group,
+            etc_dir_mode,
+            role="agent-skills/ (bundled-skill mirror)",
+        ),
         # ── /var/lib/hal0 — mutable state (already service-owned) ──────────────
         PermRow(
             var_lib,
