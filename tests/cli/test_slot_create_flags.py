@@ -285,6 +285,21 @@ def test_profile_flag_is_forwarded(captured_post: dict[str, Any]) -> None:
     assert captured_post["body"]["profile"] == "reranking"
 
 
+def test_deprecated_add_alias_sends_no_profile(captured_post: dict[str, Any]) -> None:
+    """``slot add`` calls ``slot_create`` in-process — no OptionInfo leak.
+
+    A direct Python call to a Typer command binds the ``typer.Option(...)``
+    sentinel for every omitted parameter, so a new parameter that the alias
+    forgets to pass gets POSTed as that sentinel object.
+    """
+    result = runner.invoke(
+        slot_commands.app,
+        ["add", "rr", "--type", "reranking", "--model", "demo"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "profile" not in captured_post["body"]
+
+
 def test_profile_omitted_leaves_the_key_absent(captured_post: dict[str, Any]) -> None:
     """No ``--profile`` → no ``profile`` key at all.
 

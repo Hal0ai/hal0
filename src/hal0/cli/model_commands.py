@@ -346,6 +346,7 @@ def model_assign(
         ctx_size=None,
         provider=None,
         hardware=None,
+        profile=None,
         backend=None,
     )
 

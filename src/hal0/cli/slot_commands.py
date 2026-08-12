@@ -684,6 +684,9 @@ def slot_add(
         model=model,
         port=port,
         ctx_size=ctx_size,
+        # Explicit: a direct Python call gets typer's OptionInfo sentinel for
+        # any omitted parameter, which would then be POSTed as the profile.
+        profile=None,
     )
 
 
