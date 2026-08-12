@@ -1195,6 +1195,12 @@ def _profile_runtime_family(slot_cfg: dict[str, Any]) -> str | None:
 # GGUF arch max, cap dense models so an unconfigured slot can't request an
 # impractically large KV cache, and otherwise use a safe floor. Mirrors
 # hal0.hardware.recommend's installer-side policy.
+#
+# _CTX_DENSE_CAP is an UNCONFIGURED-slot guard, not a hardware fact — see
+# _dense_cap_for. A slot that pins its own [model].context_size is by
+# definition configured, and applying this blanket constant *underneath* that
+# number is what shipped every fresh install at 32768 despite three seeds
+# asking for 65536 (#1827).
 _CTX_SAFE_FALLBACK = 8192
 _CTX_DENSE_CAP = 32768
 
@@ -1300,6 +1306,63 @@ def _native_ctx(model_info: dict[str, Any]) -> int | None:
     return None
 
 
+def _slot_ceiling_int(slot_ceiling: Any) -> int | None:
+    """The slot's ``[model].context_size`` as an int, or None when unusable.
+
+    The slot table reaches :func:`_resolve_context_size` as a raw dict straight
+    off the TOML — no schema validation between disk and here — so a
+    hand-edited ``context_size = "64k"`` used to take the launch path out with a
+    ``ValueError``. Unusable means ABSENT: the slot simply expresses no ceiling,
+    exactly like a slot that never wrote one.
+    """
+    if slot_ceiling is None:
+        return None
+    try:
+        return int(slot_ceiling)
+    except (TypeError, ValueError):
+        log.warning(
+            "slot.context_size_unparseable_ceiling",
+            extra={
+                "raw": repr(slot_ceiling),
+                "hint": "the slot's [model].context_size is not a number; ignoring it "
+                "and letting the model's own window decide. Fix it in the slot drawer.",
+            },
+        )
+        return None
+
+
+def _dense_cap_for(slot_ceiling: int | None) -> int:
+    """The cap to apply to a DERIVED (native/curated) window for this slot.
+
+    :data:`_CTX_DENSE_CAP` exists so an **unconfigured** slot cannot ask for an
+    impractically large KV cache off the back of a 131072/262144-token arch max.
+    It is a blanket constant: hardware-independent, box-independent and —
+    the bug — configuration-independent.
+
+    #1827: a slot with an on-disk ``[model].context_size`` is *configured*. That
+    number was written either by the installer as a hardware budget
+    (:func:`hal0.install.orchestrate._clamp_context_size`), by a shipped seed, or
+    by an operator in the slot drawer. Applying the 32768 constant underneath it
+    meant a fresh install resolved every installer-pulled model to 32768 no
+    matter what the slot asked for — ``installer/etc-hal0/slots/{agent,brain,
+    utility}.toml`` all ask for 65536, and all three silently launched (and,
+    post-#1802, honestly advertised) 32768. That is below the bundled Hermes
+    agent's hard 64,000 floor, so ``hermes -z`` could not start on a box
+    straight out of ``install.sh``.
+
+    So: when a ceiling is on disk, it *is* the cap. The result stays bounded
+    twice over — never above the model's own native window, and never above the
+    ceiling itself (the caller's clamp) — so a slot can only reach a window that
+    BOTH the model supports and the box was explicitly configured for. With no
+    ceiling on disk nothing is configured and the blanket cap still applies,
+    which keeps :data:`hal0.slots.capacity._DEFAULT_CTX_TOKENS` (the
+    unpinned-slot budget estimate) correct as written.
+    """
+    if slot_ceiling is None:
+        return _CTX_DENSE_CAP
+    return max(_CTX_DENSE_CAP, slot_ceiling)
+
+
 def _resolve_context_size(
     slot_ceiling: int | None,
     model_info: dict[str, Any],
@@ -1318,10 +1381,11 @@ def _resolve_context_size(
        but an unparseable or implausible value is ignored rather than launched
        (#1414; see :data:`_CTX_MIN_PLAUSIBLE`).
     2. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
-       window (:func:`_native_ctx`), dense-capped at :data:`_CTX_DENSE_CAP`.
-       Still a model fact, but a *derived* one, so an explicit choice outranks
-       it — the reverse of the pre-1.0 order, which let a 262144-token arch max
-       shadow a deliberate ``defaults.context_size``.
+       window (:func:`_native_ctx`), dense-capped at :func:`_dense_cap_for`
+       (:data:`_CTX_DENSE_CAP`, or the slot's own configured ceiling when that
+       is higher — #1827). Still a model fact, but a *derived* one, so an
+       explicit choice outranks it — the reverse of the pre-1.0 order, which let
+       a 262144-token arch max shadow a deliberate ``defaults.context_size``.
     3. :data:`_CTX_SAFE_FALLBACK` (8192) — never llama-server's silent 4096.
 
     ``slot_ceiling`` (the on-disk ``[model].context_size``) is NO LONGER an
@@ -1337,29 +1401,37 @@ def _resolve_context_size(
 
     Net effect on a box that already has a slot-level ``context_size`` on disk:
     where the clamp was below the model's window (the installer's case) the
-    effective context is UNCHANGED; where the slot was silently inflating the
-    model's window (the dual-ownership bug) it drops to what the model asked
-    for. The effective context can therefore only stay the same or shrink —
-    never grow — so no box gains a KV cache it cannot hold. Every case where
-    the ceiling actually changes the answer is logged, so the change is visible
-    in ``journalctl -u hal0-api`` rather than silent.
+    effective context is UNCHANGED; where the slot was silently inflating a
+    model's EXPLICIT window (the dual-ownership bug) it drops to what the model
+    asked for. The one case where the ceiling can RAISE the answer is the
+    *derived* window (path 2): there the ceiling replaces the blanket dense cap
+    instead of being applied under it (:func:`_dense_cap_for`, #1827), so the
+    slot gets the window its own config asked for — still bounded by the
+    model's native window, still never above the ceiling, and never reached at
+    all on a slot with no ceiling written. Every case where the ceiling changes
+    the answer is logged, so the change is visible in ``journalctl -u hal0-api``
+    rather than silent.
 
     Guarantees a non-None int.
     """
+    ceiling = _slot_ceiling_int(slot_ceiling)
+
     declared = _model_declared_ctx(model_info)
     if declared is not None:
         resolved, source = declared, "model.defaults.context_size"
     else:
         native = _native_ctx(model_info)
         if native:
-            resolved, source = min(native, _CTX_DENSE_CAP), "model.metadata.context_length"
+            resolved, source = (
+                min(native, _dense_cap_for(ceiling)),
+                "model.metadata.context_length",
+            )
         else:
             resolved, source = _CTX_SAFE_FALLBACK, "safe_fallback"
 
-    if slot_ceiling is None:
+    if ceiling is None:
         return resolved
 
-    ceiling = int(slot_ceiling)
     if ceiling < resolved:
         log.info(
             "slot.context_size_clamped_by_slot",
