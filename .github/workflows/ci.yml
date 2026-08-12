@@ -97,5 +97,10 @@ jobs:
       # renamed — a dead condition nothing could have caught here.
       - name: Typecheck
         run: npm run typecheck
+      # The vitest suite (src/**/*.test.ts) existed but no workflow ran it, so
+      # every unit test under ui/ was decorative — a passing local run gated
+      # nothing. ~0.4s for 13 files; there is no reason not to gate on it.
+      - name: Unit tests
+        run: npm run test:unit
       - name: Build
         run: npm run build
