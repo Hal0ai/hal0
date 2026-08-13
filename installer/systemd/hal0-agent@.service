@@ -110,9 +110,16 @@ LogsDirectory=hal0
 # tokens.toml / auth.toml gating anything; those files do not exist on any
 # box. Because the directory itself is hal0-owned and not sticky, the
 # agent can also unlink or replace root-owned files sitting directly in
-# /etc/hal0. Per-agent env files are the exception — /etc/hal0/agents is
-# root:root 0755, so `%i.env` (and its HAL0_MCP_TOKEN) is out of reach
-# (see #1876 for that file's own mode history).
+# /etc/hal0. Per-agent env files are a partial exception, and the two
+# gates are separate: /etc/hal0/agents is root:root 0755, which stops the
+# agent CREATING, REPLACING or UNLINKING `%i.env` — but 0755 is
+# world-traversable, so it does not stop a READ. What keeps
+# HAL0_MCP_TOKEN unreadable is the file's own mode, 0600 root:root.
+# That mode is only guaranteed going forward: #1876 left `%i.env` 0644
+# and world-readable on every box provisioned unprivileged, which in
+# practice meant every UPGRADED box. The self-heal now re-tightens it on
+# reprovision, so an existing box stays exposed until it reprovisions —
+# check with `stat -c '%a' /etc/hal0/agents/hermes.env` (expect 600).
 #
 # What ReadWritePaths= does buy is the rest of `ProtectSystem=strict`:
 # every other path — /etc at large, /usr, /boot — stays read-only in the
