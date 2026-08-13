@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hal0.agents.anchor_window import HERMES_MINIMUM_CONTEXT_LENGTH
 from hal0.config.schema import (
     FAMILY_DEFAULTS,
     MTP_FLAG_BUNDLE,
@@ -1375,7 +1376,8 @@ class TestContextSizeOwnership:
 #: Hermes' hard gate — ``agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH`` in the
 #: bundled agent. Below it the agent REFUSES TO START (``agent_init.py`` raises);
 #: it does not degrade, so a slot that lands under this is a cannot-chat box.
-_HERMES_MIN_CONTEXT = 64_000
+#: Imported, not re-typed: hal0 keeps exactly one copy of this number (#1867).
+_HERMES_MIN_CONTEXT = HERMES_MINIMUM_CONTEXT_LENGTH
 
 #: A curated brain pick whose catalogue row carries a ``context_length`` but
 #: whose registry row on an older-build box carries no ``metadata`` at all

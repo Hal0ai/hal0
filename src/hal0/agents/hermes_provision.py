@@ -54,6 +54,11 @@ from typing import Any, NamedTuple
 
 import structlog
 
+from hal0.agents.anchor_window import (
+    AnchorWindow,
+    read_hermes_minimum_context,
+    resolve_anchor_window,
+)
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 from hal0.system import seam as _seam
@@ -4681,7 +4686,8 @@ def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
 
 # ── Phase K: smoke_tests ────────────────────────────────────────────────────
 #
-# Six non-fatal probes per plan §14 + #246. Each surface check writes a
+# Seven non-fatal probes per plan §14 + #246 (the seventh, anchor_context_window,
+# is #1867's window preflight). Each surface check writes a
 # `passed: bool` row into PhaseResult.details["results"]; failures
 # also carry a remediation hint operators can paste at the user.
 #
@@ -4807,6 +4813,78 @@ def _smoke_memory_roundtrip(state: BootstrapState, io: InstallIO) -> tuple[bool,
     return (False, "memory_search returned no items for just-written marker")
 
 
+def _anchor_window(state: BootstrapState, io: InstallIO) -> AnchorWindow | str:
+    """Resolve the anchor slot's effective window, or a reason it can't be (#1867).
+
+    Reads ``model.default`` from the live config.yaml (the id Hermes actually
+    dispatches with), asks the installed Hermes for its own
+    ``MINIMUM_CONTEXT_LENGTH`` rather than trusting a second hardcoded 64,000,
+    and pairs the gateway's advertised window with the slot's on-disk ceiling.
+
+    Returns a plain string when the question could not even be asked (no
+    config.yaml, no ``model.default``) — that is a config problem, not a window
+    verdict.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    config_path = Path(state.hermes_home) / "config.yaml"
+    if not config_path.exists():
+        return "config.yaml missing — bootstrap incomplete"
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return f"config parse: {exc}"
+    model_name = ((cfg.get("model") or {}).get("default") or "").strip()
+    if not model_name:
+        return "model.default unset in config.yaml"
+    floor, floor_source = read_hermes_minimum_context(_venv_python(Path(state.venv)))
+    try:
+        contexts = io.fetch_model_contexts()
+    except Exception as exc:  # a preflight must never raise
+        return f"could not read advertised windows ({exc})"
+    return resolve_anchor_window(
+        model_name,
+        contexts=contexts,
+        floor=floor,
+        floor_source=floor_source,
+        slots_dir=ETC_HAL0_DIR / "slots",
+    )
+
+
+def _smoke_anchor_context_window(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
+    """Is the anchor's window at or above Hermes' hard floor? (#1867)
+
+    Hermes raises below ``MINIMUM_CONTEXT_LENGTH`` instead of degrading, so a
+    box whose anchor slot resolves under it refuses EVERY turn — and used to do
+    so as an opaque upstream error ~1.6s in, naming neither the slot nor the
+    ceiling that caused it. The classic shape is an upgraded box: the model
+    declares 96000, the agent slot's own ``[model].context_size`` is still the
+    4096 an older release seeded, and ``min()`` of the two is what Hermes sees.
+
+    Fails with both numbers, the slot, its ceiling, and the exact repair
+    command. An anchor that advertises nothing yet (no model loaded) is
+    ``unknown``, not a failure — the preflight only claims on evidence.
+    """
+    window = _anchor_window(state, io)
+    if isinstance(window, str):
+        return (False, window)
+    if window.verdict == "below_floor":
+        log.warning(
+            "hermes.anchor_window_below_floor",
+            extra={
+                "model": window.model,
+                "slot": window.slot,
+                "effective": window.effective,
+                "slot_ceiling": window.ceiling,
+                "floor": window.floor,
+                "floor_source": window.floor_source,
+                "fix": window.fix_command,
+            },
+        )
+        return (False, window.message())
+    return (True, window.message())
+
+
 def _smoke_admin_tools_list(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     probe = io.probe_mcp_server(
         "http://127.0.0.1:8080/mcp/admin",
@@ -4882,7 +4960,17 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
 #: memory_add/memory_search tools directly and has no chat dependency
 #: whatsoever (#1831); gating it behind the chat anchor over-skipped it even
 #: when memory itself was fully working.
-_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions"})
+#: ``anchor_context_window`` joins it for the same reason (#1867): with no chat
+#: model routable there is no advertised window to compare against Hermes'
+#: floor, so the honest report is ``skipped``, not a manufactured verdict.
+_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions", "anchor_context_window"})
+
+#: Why each model-dependent probe skipped — a skip is a claim (#1793), so it
+#: has to state the claim that probe is actually making, not a borrowed one.
+_SKIP_REASONS = {
+    "chat_completions": "no chat model loaded",
+    "anchor_context_window": "no routable anchor to measure a window on",
+}
 
 
 def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
@@ -4940,7 +5028,7 @@ def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
 
 
 def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
-    """Run six diagnostic probes; collect results into the checkpoint.
+    """Run the diagnostic probes; collect results into the checkpoint.
 
     ``status`` is ``warn`` (not ``ok``) when any probe genuinely fails — a
     phase that recorded failures must say so, not report a clean ``ok`` with
@@ -4952,6 +5040,7 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     probes = [
         ("wrapper_ready", _smoke_wrapper_ready),
         ("hermes_doctor", _smoke_hermes_doctor),
+        ("anchor_context_window", _smoke_anchor_context_window),
         ("chat_completions", _smoke_chat_completions),
         ("memory_roundtrip", _smoke_memory_roundtrip),
         ("admin_tools_list", _smoke_admin_tools_list),
@@ -4962,7 +5051,7 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     skipped: list[str] = []
     for name, fn in probes:
         if name in _MODEL_DEPENDENT_PROBES and not chat_ready:
-            detail = f"skipped: no chat model loaded ({chat_reason})"
+            detail = f"skipped: {_SKIP_REASONS[name]} ({chat_reason})"
             results[name] = {"passed": None, "skipped": True, "detail": detail}
             skipped.append(f"{name}: {detail}")
             continue
