@@ -95,9 +95,14 @@ def extract_structured(section_md: str) -> dict[str, list[str]]:
     """Pull the optional ``### Highlights`` / ``### Breaking`` / ``### Operator
     migrations`` subsections of a changelog version section into structured lists.
 
-    Only **top-level** bullet headlines (a line beginning ``- `` or ``* `` with
-    no leading indent) are collected — nested/continuation lines are skipped so
-    each entry stays a concise one-liner suitable for a CLI callout. Subsection
+    Only **top-level** bullets (a line beginning ``- `` or ``* `` with no
+    leading indent) start an entry. Markdown-wrapped continuation lines — the
+    indented lines that are not themselves bullets — are joined onto the entry
+    they belong to and collapsed to single spaces, so the entry reads as one
+    line without losing its tail. Nested sub-bullets are skipped and end the
+    entry they sit under. (Before #1874 only the first physical line survived,
+    which truncated every real migration entry mid-sentence and dropped every
+    remediation command past the first line break.) Subsection
     headings are matched case-insensitively and known spelling variants are
     folded onto their key (see :data:`_HEADING_ALIASES`: ``### Operator
     migrations`` — what every real release section writes — is ``migrations``);
@@ -119,7 +124,39 @@ def extract_structured(section_md: str) -> dict[str, list[str]]:
     for heading, body in zip(pairs, pairs, strict=False):
         key = _normalise_heading(heading)
         if key in out:
-            out[key].extend(
-                line[2:].strip() for line in body.splitlines() if line[:2] in ("- ", "* ")
-            )
+            out[key].extend(_bullet_entries(body))
     return out
+
+
+def _bullet_entries(body: str) -> list[str]:
+    """Top-level bullets of ``body``, each joined with its wrapped continuation lines.
+
+    A line starting ``- ``/``* `` at column 0 opens an entry. Indented lines that
+    are not themselves bullets continue it; a nested sub-bullet, a blank line or
+    an unindented non-bullet line closes it. Every entry is whitespace-collapsed
+    so a markdown-wrapped bullet becomes one readable callout line.
+    """
+    entries: list[str] = []
+    current: list[str] | None = None
+
+    def flush() -> None:
+        nonlocal current
+        if current is not None:
+            joined = " ".join(" ".join(current).split())
+            if joined:
+                entries.append(joined)
+            current = None
+
+    for line in body.splitlines():
+        if line[:2] in ("- ", "* "):
+            flush()
+            current = [line[2:]]
+            continue
+        stripped = line.strip()
+        indented = line[:1] in (" ", "\t")
+        if current is not None and indented and stripped and stripped[:2] not in ("- ", "* "):
+            current.append(stripped)
+            continue
+        flush()
+    flush()
+    return entries
