@@ -121,6 +121,29 @@ class TestCt152FalseNegative:
         assert "hal0 slot edit brain --ctx-size 65536" in message
         assert "agent.toml" not in message
 
+    def test_a_created_skew_still_names_the_serving_slot(self, tmp_path: Path) -> None:
+        """The gateway stamps ``created`` per request, and the by-id read and
+        the catalog read are two separate requests. A pair that straddles a
+        second boundary must still match, or the serving slot comes back
+        unnamed and the operator loses the repair command -- which is the whole
+        deliverable of #1867. Measured at ~2.5% on an idle ct152.
+        """
+        _write_slot(tmp_path, "agent", "[model]\ncontext_size = 65536\n")
+        _write_slot(tmp_path, "brain", "[model]\ncontext_size = 32768\n")
+        entry = dict(CT152_BY_ID)
+        entry["created"] = int(entry.get("created", 0)) + 1
+        window = aw.resolve_anchor_window(
+            "hal0/agent",
+            entry=entry,
+            catalog=CT152_CATALOG,
+            floor=64_000,
+            floor_source="hermes",
+            slots_dir=tmp_path,
+        )
+        assert window.verdict == "below_floor"
+        assert window.slot == "brain", "a one-second created skew lost the serving slot"
+        assert "hal0 slot edit brain --ctx-size 65536" in window.message()
+
     def test_a_virtual_is_never_named_from_its_spelling(self, tmp_path: Path) -> None:
         """Even with an ``agent.toml`` on disk, ``hal0/agent`` is only ever the
         slot the CATALOG says answered — the ct152 box has both, and the

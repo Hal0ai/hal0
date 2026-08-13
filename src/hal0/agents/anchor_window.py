@@ -185,9 +185,19 @@ def serving_slot(
     return None
 
 
+#: Fields that differ between two reads of the *same* row and so cannot take
+#: part in identity. ``created`` is stamped per request by the gateway
+#: (``api/routes/v1.py`` ``int(time.time())``), and the by-id read and the
+#: catalog read are two separate requests — so any pair that straddles a second
+#: boundary would compare unequal and the serving slot would come back unnamed,
+#: taking the repair command out of the operator's error message. Measured at
+#: ~2.5% on an idle box, and worse under load.
+_VOLATILE_ROW_FIELDS = frozenset({"id", "created"})
+
+
 def _row_identity(row: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
-    """A catalog row reduced to everything but its ``id``, order-independent."""
-    return tuple(sorted((str(k), repr(v)) for k, v in row.items() if k != "id"))
+    """A catalog row reduced to its stable fields, order-independent."""
+    return tuple(sorted((str(k), repr(v)) for k, v in row.items() if k not in _VOLATILE_ROW_FIELDS))
 
 
 def read_slot_ceiling(slot: str, *, slots_dir: Path = SLOTS_DIR) -> int | None:
