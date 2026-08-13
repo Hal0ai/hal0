@@ -24,6 +24,133 @@ def _write_slot(slots_dir: Path, name: str, body: str) -> None:
     (slots_dir / f"{name}.toml").write_text(body, encoding="utf-8")
 
 
+#: Verbatim ``GET /v1/models`` off ct152 (10.0.1.152, rc.5) — the box whose
+#: agent slot is offline, so ``hal0/agent`` resolves through the routing
+#: fallback chain to the ``brain`` slot. Nothing in this list is spelled
+#: ``agent``; that absence is the whole false negative.
+CT152_CATALOG: list[dict[str, Any]] = [
+    {
+        "id": "brain",
+        "object": "model",
+        "created": 1786589347,
+        "owned_by": "hal0",
+        "name": "brain · hal0-brain-sft-f16",
+        "downloaded": True,
+        "context_length": 32768,
+        "max_context_window": 32768,
+        "labels": ["chat"],
+        "recipe": "chat",
+    },
+    {
+        "id": "utility",
+        "object": "model",
+        "created": 1786589347,
+        "owned_by": "hal0",
+        "name": "utility · Qwen3.5-0.8B",
+        "downloaded": True,
+        "context_length": 32768,
+        "max_context_window": 32768,
+        "labels": ["chat"],
+        "checkpoint": "Q4_K_XL",
+    },
+]
+
+#: Verbatim ``GET /v1/models/hal0/agent`` off the same box: the brain row with
+#: ``id`` rewritten back to the handle that was asked about.
+CT152_BY_ID: dict[str, Any] = {**CT152_CATALOG[0], "id": "hal0/agent"}
+
+
+def _catalog(**windows: int) -> list[dict[str, Any]]:
+    """A ``/v1/models`` list in the gateway's shape, one row per slot."""
+    return [
+        {"id": alias, "object": "model", "owned_by": "hal0", "context_length": ctx}
+        for alias, ctx in windows.items()
+    ]
+
+
+def _by_id(handle: str, row: dict[str, Any]) -> dict[str, Any]:
+    """What ``GET /v1/models/{handle}`` returns for a row: it, re-``id``-ed."""
+    return {**row, "id": handle}
+
+
+class TestCt152FalseNegative:
+    """The demonstrated false negative: a box that cannot chat, reported green.
+
+    ct152 runs rc.5 with its agent slot offline. Hermes' anchor is
+    ``hal0/agent``; the gateway resolves it to the brain slot's 32,768-token
+    window, which is below the 64,000 Hermes refuses to start under. The
+    ``/v1/models`` LIST carries no ``agent`` row at all, so resolving the
+    anchor by its spelled alias finds nothing — and "found nothing" must never
+    read as "fine".
+    """
+
+    def test_the_list_route_alone_cannot_see_the_window_so_it_is_not_ok(
+        self, tmp_path: Path
+    ) -> None:
+        window = aw.resolve_anchor_window(
+            "hal0/agent",
+            contexts={"brain": 32768, "utility": 32768},
+            floor=64_000,
+            slots_dir=tmp_path,
+        )
+        assert window.effective is None
+        assert window.verdict == "unknown"
+        assert window.verdict != "ok"
+
+    def test_the_by_id_route_resolves_the_chain_and_names_the_serving_slot(
+        self, tmp_path: Path
+    ) -> None:
+        """The authoritative surface sees exactly what Hermes will be handed."""
+        _write_slot(tmp_path, "agent", "[model]\ncontext_size = 65536\n")
+        _write_slot(tmp_path, "brain", "[model]\ncontext_size = 32768\n")
+        window = aw.resolve_anchor_window(
+            "hal0/agent",
+            entry=CT152_BY_ID,
+            catalog=CT152_CATALOG,
+            floor=64_000,
+            floor_source="hermes",
+            slots_dir=tmp_path,
+        )
+        assert window.effective == 32768
+        assert window.verdict == "below_floor"
+        # The slot behind the anchor is brain — NOT the alias it is spelled
+        # with, whose own ceiling (65,536) is fine and must not be blamed.
+        assert window.slot == "brain"
+        assert window.ceiling == 32768
+        message = window.message()
+        assert "hal0 slot edit brain --ctx-size 65536" in message
+        assert "agent.toml" not in message
+
+    def test_a_virtual_is_never_named_from_its_spelling(self, tmp_path: Path) -> None:
+        """Even with an ``agent.toml`` on disk, ``hal0/agent`` is only ever the
+        slot the CATALOG says answered — the ct152 box has both, and the
+        spelled one is the wrong answer."""
+        _write_slot(tmp_path, "agent", "[model]\ncontext_size = 65536\n")
+        window = aw.resolve_anchor_window(
+            "hal0/agent",
+            entry={"id": "hal0/agent", "context_length": 32768},
+            catalog=[{"id": "something-else", "context_length": 4096}],
+            floor=64_000,
+            slots_dir=tmp_path,
+        )
+        assert window.slot is None
+        assert window.ceiling is None
+
+    def test_two_identical_rows_are_ambiguous_not_a_coin_flip(self, tmp_path: Path) -> None:
+        """Byte-identical rows under two aliases: the catalog cannot say which
+        one answered, and guessing names the wrong TOML in the fix command."""
+        row = {"object": "model", "owned_by": "hal0", "context_length": 32768}
+        window = aw.resolve_anchor_window(
+            "hal0/agent",
+            entry={**row, "id": "hal0/agent"},
+            catalog=[{**row, "id": "brain"}, {**row, "id": "spare"}],
+            floor=64_000,
+            slots_dir=tmp_path,
+        )
+        assert window.slot is None
+        assert window.fix_command == ""
+
+
 class TestResolveAnchorWindow:
     """The ct150 shape and its neighbours, resolved from injected facts only."""
 
@@ -38,11 +165,13 @@ class TestResolveAnchorWindow:
         """
         slots = tmp_path / "slots"
         _write_slot(slots, "agent", '[model]\ndefault = "brain-sft"\ncontext_size = 4096\n')
+        # What the gateway advertises for the agent slot on that box —
+        # min(96000 model window, 4096 slot ceiling).
+        catalog = _catalog(agent=4096, brain=96000)
         window = aw.resolve_anchor_window(
             "hal0/agent",
-            # What the gateway advertises for the agent slot on that box —
-            # min(96000 model window, 4096 slot ceiling).
-            contexts={"agent": 4096, "brain": 96000},
+            entry=_by_id("hal0/agent", catalog[0]),
+            catalog=catalog,
             floor=64_000,
             floor_source="hermes",
             slots_dir=slots,
@@ -73,9 +202,11 @@ class TestResolveAnchorWindow:
         """
         slots = tmp_path / "slots"
         _write_slot(slots, "agent", "[model]\ncontext_size = 65536\n")
+        catalog = _catalog(agent=32768)
         window = aw.resolve_anchor_window(
             "hal0/agent",
-            contexts={"agent": 32768},
+            entry=_by_id("hal0/agent", catalog[0]),
+            catalog=catalog,
             floor=64_000,
             floor_source="hermes",
             slots_dir=slots,
@@ -91,47 +222,81 @@ class TestResolveAnchorWindow:
     def test_window_at_or_above_the_floor_is_ok(self, tmp_path: Path) -> None:
         slots = tmp_path / "slots"
         _write_slot(slots, "agent", "[model]\ncontext_size = 65536\n")
+        catalog = _catalog(agent=65536)
         window = aw.resolve_anchor_window(
-            "hal0/agent", contexts={"agent": 65536}, floor=64_000, slots_dir=slots
+            "hal0/agent",
+            entry=_by_id("hal0/agent", catalog[0]),
+            catalog=catalog,
+            floor=64_000,
+            slots_dir=slots,
         )
         assert window.verdict == "ok"
         assert "65,536" in window.message()
 
-    def test_no_advertised_window_is_unknown_not_a_failure(self, tmp_path: Path) -> None:
-        """No evidence is not evidence of a failure — a preflight that cries
-        wolf when nothing is loaded is one operators learn to ignore."""
+    def test_no_advertised_window_is_unknown_and_says_it_is_not_a_pass(
+        self, tmp_path: Path
+    ) -> None:
+        """No evidence is not evidence of a failure — but it is emphatically
+        not a pass either, and the message has to say which of the two it is."""
         window = aw.resolve_anchor_window(
-            "hal0/agent", contexts={}, floor=64_000, slots_dir=tmp_path / "slots"
+            "hal0/agent", entry=None, catalog=[], floor=64_000, slots_dir=tmp_path / "slots"
         )
         assert window.verdict == "unknown"
         assert window.effective is None
         assert "cannot check" in window.message()
+        assert "NOT a pass" in window.message()
 
     def test_a_bare_pinned_slot_id_resolves_the_same_slot(self, tmp_path: Path) -> None:
         """``HAL0_HERMES_LIVE_RESOLVE=0`` pins the raw slot alias, not the virtual."""
         slots = tmp_path / "slots"
         _write_slot(slots, "agent", "[model]\ncontext_size = 4096\n")
         window = aw.resolve_anchor_window(
-            "agent", contexts={"agent": 4096}, floor=64_000, slots_dir=slots
+            "agent",
+            entry={"id": "agent", "context_length": 4096},
+            catalog=_catalog(agent=4096),
+            floor=64_000,
+            slots_dir=slots,
         )
         assert window.slot == "agent"
         assert window.verdict == "below_floor"
 
-    def test_the_virtual_id_wins_over_the_alias_when_both_are_advertised(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_raw_physical_model_id_never_invents_a_slot(self, tmp_path: Path) -> None:
+        """Codex's P1: under ``HAL0_HERMES_LIVE_RESOLVE=0`` the anchor is a raw
+        physical model id served by a slot-local llama-server. There is no
+        ``/etc/hal0/slots/<that id>.toml`` and never was, so no slot, no ceiling
+        and no ``--ctx-size`` command may be manufactured for it."""
         window = aw.resolve_anchor_window(
-            "hal0/agent",
-            contexts={"hal0/agent": 65536, "agent": 4096},
+            "qwen3-30b-a3b-instruct",
+            entry={"id": "qwen3-30b-a3b-instruct", "context_length": 8192},
+            catalog=[{"id": "qwen3-30b-a3b-instruct", "object": "model"}],
             floor=64_000,
             slots_dir=tmp_path,
         )
+        assert window.slot is None
+        assert window.slot_path is None
+        assert window.fix_command == ""
+        assert window.verdict == "below_floor"
+        message = window.message()
+        assert ".toml" not in message
+        assert "--ctx-size" not in message
+        assert "8,192" in message
+
+    def test_an_exact_id_in_the_list_route_still_counts(self, tmp_path: Path) -> None:
+        """A pinned id the LIST route carries verbatim is real evidence — but
+        only under that exact id, never under a spelled-alias guess."""
+        window = aw.resolve_anchor_window(
+            "hal0/agent", contexts={"hal0/agent": 65536}, floor=64_000, slots_dir=tmp_path
+        )
         assert window.effective == 65536
+        assert window.verdict == "ok"
 
     def test_fallback_floor_says_so_in_the_message(self, tmp_path: Path) -> None:
+        _write_slot(tmp_path, "agent", "[model]\ncontext_size = 4096\n")
+        catalog = _catalog(agent=4096)
         window = aw.resolve_anchor_window(
             "hal0/agent",
-            contexts={"agent": 4096},
+            entry=_by_id("hal0/agent", catalog[0]),
+            catalog=catalog,
             floor=64_000,
             floor_source="fallback:no-venv",
             slots_dir=tmp_path,

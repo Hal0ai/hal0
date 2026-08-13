@@ -502,6 +502,121 @@ def test_hermes_mcp_auth_warns_on_unreadable_config(tmp_path) -> None:  # type: 
     assert c.status == "warn"
 
 
+# ── check_hermes_anchor_window ────────────────────────────────────────────────
+#
+# #1867's window preflight has to be reachable on the path the defect lives on.
+# ``installer/install.sh`` only calls ``install_hermes`` when the hermes venv is
+# ABSENT ("covers the upgrade path where no provision ran"), so on an in-place
+# upgrade — the one shape where a stale ``[model].context_size`` from an older
+# release survives — the smoke probes never run at all. ``hal0 doctor`` is what
+# an operator runs when the agent misbehaves, so the row lives here too.
+#
+# The payloads below are verbatim captures from ct152 (10.0.1.152, rc.5), a box
+# whose agent slot is offline: ``hal0/agent`` resolves through the routing
+# fallback chain to the brain slot's 32,768-token window (under Hermes' 64,000
+# floor, i.e. it cannot chat) while ``/v1/models`` lists no ``agent`` row at all.
+
+_CT152_BRAIN_ROW = {
+    "id": "brain",
+    "object": "model",
+    "created": 1786589347,
+    "owned_by": "hal0",
+    "name": "brain · hal0-brain-sft-f16",
+    "downloaded": True,
+    "context_length": 32768,
+    "max_context_window": 32768,
+    "labels": ["chat"],
+    "recipe": "chat",
+}
+_CT152_CATALOG = [
+    _CT152_BRAIN_ROW,
+    {
+        "id": "utility",
+        "object": "model",
+        "created": 1786589347,
+        "owned_by": "hal0",
+        "name": "utility · Qwen3.5-0.8B",
+        "downloaded": True,
+        "context_length": 32768,
+        "max_context_window": 32768,
+        "labels": ["chat"],
+        "checkpoint": "Q4_K_XL",
+    },
+]
+_CT152_BY_ID = {**_CT152_BRAIN_ROW, "id": "hal0/agent"}
+
+
+def _hermes_config(tmp_path, anchor: str = "hal0/agent"):  # type: ignore[no-untyped-def]
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"model:\n  default: {anchor}\n  base_url: http://127.0.0.1:8080/v1\n")
+    return cfg
+
+
+def test_anchor_window_passes_when_hermes_is_not_provisioned(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    c = da.check_hermes_anchor_window(config_path=tmp_path / "nope.yaml")
+    assert c.status == "pass"
+    assert "not provisioned" in c.detail
+
+
+def test_anchor_window_fails_on_the_ct152_shape(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The demonstrated false negative, as an operator would meet it on an
+    upgraded box: `hal0 doctor` must name the real serving slot and the fix."""
+    slots = tmp_path / "slots"
+    slots.mkdir()
+    (slots / "brain.toml").write_text("[model]\ncontext_size = 32768\n")
+    (slots / "agent.toml").write_text("[model]\ncontext_size = 65536\n")
+    c = da.check_hermes_anchor_window(
+        config_path=_hermes_config(tmp_path),
+        fetch=lambda *_a: (_CT152_BY_ID, _CT152_CATALOG),
+        slots_dir=slots,
+        venv_python=tmp_path / "no-venv-python",
+    )
+    assert c.status == "fail"
+    assert "32,768" in c.detail and "64,000" in c.detail
+    assert "hal0 slot edit brain --ctx-size 65536" in c.detail
+    assert "agent.toml" not in c.detail
+
+
+def test_anchor_window_warns_rather_than_passing_when_it_cannot_see_the_window(  # type: ignore[no-untyped-def]
+    tmp_path,
+) -> None:
+    """The gateway is unreachable / advertises nothing: no evidence is not a
+    pass. Passing on no evidence is exactly how the broken box read green."""
+    c = da.check_hermes_anchor_window(
+        config_path=_hermes_config(tmp_path),
+        fetch=lambda *_a: (None, []),
+        slots_dir=tmp_path / "slots",
+        venv_python=tmp_path / "no-venv-python",
+    )
+    assert c.status == "warn"
+    assert "NOT a pass" in c.detail
+
+
+def test_anchor_window_passes_when_the_window_clears_the_floor(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    row = {"id": "agent", "owned_by": "hal0", "context_length": 65536}
+    c = da.check_hermes_anchor_window(
+        config_path=_hermes_config(tmp_path),
+        fetch=lambda *_a: ({**row, "id": "hal0/agent"}, [row]),
+        slots_dir=tmp_path / "slots",
+        venv_python=tmp_path / "no-venv-python",
+    )
+    assert c.status == "pass"
+    assert "65,536" in c.detail
+
+
+def test_anchor_window_warns_when_the_fetch_explodes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def _boom(*_a):  # type: ignore[no-untyped-def]
+        raise RuntimeError("connection refused")
+
+    c = da.check_hermes_anchor_window(
+        config_path=_hermes_config(tmp_path),
+        fetch=_boom,
+        venv_python=tmp_path / "no-venv-python",
+    )
+    assert c.status == "warn"
+    assert "connection refused" in c.detail
+
+
 # ── build_all_checks orchestration ────────────────────────────────────────────
 
 
@@ -563,6 +678,13 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "check_hindsight_llm_auth",
         lambda **_kw: Check("hindsight_llm_auth", "Memory engine LLM auth", "pass", "stubbed"),
     )
+    monkeypatch.setattr(
+        da,
+        "check_hermes_anchor_window",
+        lambda **_kw: Check(
+            "hermes_anchor_window", "Hermes anchor context window", "pass", "stubbed"
+        ),
+    )
 
     # Stale-DNAT + netns rows (#1814) shell out to nft/podman otherwise;
     # neutralise both so this composition test asserts the row list.
@@ -577,8 +699,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 14 extras.
-    assert keys[-14:] == [
+    # 7 verify rows + 15 extras.
+    assert keys[-15:] == [
         "auth",
         "models",
         "migrations",
@@ -592,6 +714,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "seams",
         "mcp_mounts",
         "hermes_mcp_auth",
+        "hermes_anchor_window",
         "hindsight_llm_auth",
     ]
     assert "api" in keys and "runners" in keys

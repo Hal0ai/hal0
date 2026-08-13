@@ -11,8 +11,10 @@ verify report-card classifiers (API, runners, DNS, capabilities, memory,
 OpenWebUI, Hermes), then adds the broader health rows the retrofit calls for:
 auth posture, model-store integrity, pending migrations, a stale-dashboard
 ``HAL0_UI_DIST`` override (#1589), bound slot ports, the ``hal0.target``
-boot-enable anchor (r5-sync-assessment §6.1), and the privileged sudo seams
-every slot op + self-update runs through (#1465).
+boot-enable anchor (r5-sync-assessment §6.1), the privileged sudo seams
+every slot op + self-update runs through (#1465), and the context window behind
+Hermes' anchor model (#1867 — the smoke probes never run on an in-place
+upgrade, which is the only shape that defect survives in).
 
 Strictly read-only — there is no ``--fix`` here; the per-surface subcommands
 own repair. Exit codes:
@@ -767,6 +769,82 @@ def check_hindsight_llm_auth(
     return Check(name, title, _PASS, "memory engine carries a current client-tier LLM key")
 
 
+def check_hermes_anchor_window(
+    *,
+    base: str | None = None,
+    config_path: Path | None = None,
+    fetch: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]] | None = None,
+    slots_dir: Path | None = None,
+    venv_python: Path | None = None,
+) -> Check:
+    """The window behind Hermes' anchor must clear Hermes' hard floor (#1867).
+
+    Hermes raises below ``agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH``
+    instead of degrading, so a box whose anchor resolves under it refuses EVERY
+    turn with an opaque upstream error that names neither the slot nor the
+    ceiling behind it.
+
+    This row exists because the smoke probe alone cannot cover the shape the
+    defect actually lives in: ``installer/install.sh`` calls
+    ``install_hermes`` only when the hermes venv is ABSENT ("covers the upgrade
+    path where no provision ran"), so on an in-place upgrade — the one case
+    where a stale ``[model].context_size`` seeded by an older release survives —
+    no smoke test ever runs. ``hal0 doctor`` is what an operator runs when the
+    agent misbehaves, so the check has to be here too.
+
+    Verdicts: below the floor is a ``fail`` with the repair command; a window
+    that cannot be read is a ``warn`` (never a pass — see #1831); an
+    unprovisioned Hermes passes with nothing to check.
+    """
+    from hal0.agents.anchor_window import read_hermes_minimum_context, resolve_anchor_window
+    from hal0.agents.hermes_provision import (
+        HERMES_HOME_DEFAULT,
+        HERMES_VENV_DEFAULT,
+        _fetch_anchor_models,
+        _venv_python,
+    )
+
+    name, title = "hermes_anchor_window", "Hermes anchor context window"
+    path = config_path if config_path is not None else (HERMES_HOME_DEFAULT / "config.yaml")
+    if not path.exists():
+        return Check(name, title, _PASS, "hermes not provisioned — nothing to check")
+
+    import yaml
+
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return Check(name, title, _WARN, f"could not read {path}: {exc}")
+    model_cfg = (data.get("model") or {}) if isinstance(data, dict) else {}
+    model_name = str(model_cfg.get("default") or "").strip()
+    if not model_name:
+        return Check(name, title, _WARN, f"model.default is unset in {path}")
+    base_url = str(model_cfg.get("base_url", "") or "")
+
+    python = venv_python if venv_python is not None else _venv_python(HERMES_VENV_DEFAULT)
+    floor, floor_source = read_hermes_minimum_context(python if python.exists() else None)
+    fetcher = fetch if fetch is not None else _fetch_anchor_models
+    try:
+        entry, catalog = fetcher(model_name, base_url, base or "")
+    except Exception as exc:  # a read-only row must never raise
+        return Check(name, title, _WARN, f"could not read the advertised window: {exc}")
+
+    window = resolve_anchor_window(
+        model_name,
+        entry=entry,
+        catalog=catalog,
+        floor=floor,
+        floor_source=floor_source,
+        slots_dir=slots_dir if slots_dir is not None else Path("/etc/hal0/slots"),
+        endpoint=base_url,
+    )
+    if window.verdict == "below_floor":
+        return Check(name, title, _FAIL, window.message())
+    if window.verdict == "unknown":
+        return Check(name, title, _WARN, window.message())
+    return Check(name, title, _PASS, window.message())
+
+
 # ── orchestration ──────────────────────────────────────────────────────────────
 
 # GET /api/slots is the slowest read-only route hal0 serves: the aggregator
@@ -829,6 +907,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_seams(),
         check_mcp_mounts(),
         check_hermes_mcp_config_auth(auth=auth_payload),
+        check_hermes_anchor_window(base=base),
         check_hindsight_llm_auth(auth=auth_payload),
     ]
     return verify_rows + extra_rows
@@ -913,6 +992,7 @@ __all__ = [
     "build_all_checks",
     "check_auth_posture",
     "check_hal0_target",
+    "check_hermes_anchor_window",
     "check_hermes_mcp_config_auth",
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
