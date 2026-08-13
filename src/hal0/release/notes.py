@@ -71,16 +71,37 @@ def extract_changelog_section(changelog: str, version: str) -> str:
 #: structured ``release.json`` lists the updater CLI renders as callouts.
 _STRUCTURED_KEYS = ("highlights", "breaking", "migrations")
 
+#: Heading spellings the CHANGELOG actually uses that mean one of
+#: :data:`_STRUCTURED_KEYS`, normalised to that key so ``release.json`` keeps its
+#: three-key shape and ``hal0.updater.updater._read_release_notes`` is unchanged.
+#: ``Operator migrations`` is the convention every release section since 1.0.0
+#: writes — and it silently matched nothing until #1874, so the migrations
+#: callout in ``hal0 update`` was empty for every release ever cut.
+_HEADING_ALIASES = {
+    "operator migrations": "migrations",
+    "migration": "migrations",
+    "breaking changes": "breaking",
+    "highlight": "highlights",
+}
+
+
+def _normalise_heading(heading: str) -> str:
+    """Lowercase a ``### `` heading and fold known spelling variants onto a key."""
+    key = heading.strip().lower()
+    return _HEADING_ALIASES.get(key, key)
+
 
 def extract_structured(section_md: str) -> dict[str, list[str]]:
-    """Pull the optional ``### Highlights`` / ``### Breaking`` / ``### Migrations``
-    subsections of a changelog version section into structured lists.
+    """Pull the optional ``### Highlights`` / ``### Breaking`` / ``### Operator
+    migrations`` subsections of a changelog version section into structured lists.
 
     Only **top-level** bullet headlines (a line beginning ``- `` or ``* `` with
     no leading indent) are collected — nested/continuation lines are skipped so
     each entry stays a concise one-liner suitable for a CLI callout. Subsection
-    headings are matched case-insensitively; any missing subsection yields an
-    empty list. A heading repeated within one version section **accumulates**
+    headings are matched case-insensitively and known spelling variants are
+    folded onto their key (see :data:`_HEADING_ALIASES`: ``### Operator
+    migrations`` — what every real release section writes — is ``migrations``);
+    any missing subsection yields an empty list. A heading repeated within one version section **accumulates**
     in document order rather than overwriting (#1499) — union-resolving a
     CHANGELOG merge conflict routinely leaves two ``### Breaking`` blocks in
     one release, and dropping the earlier one under-reports the update in the
@@ -96,7 +117,7 @@ def extract_structured(section_md: str) -> dict[str, list[str]]:
     parts = re.split(r"^###\s+(.+?)\s*$", section_md, flags=re.MULTILINE)
     pairs = iter(parts[1:])
     for heading, body in zip(pairs, pairs, strict=False):
-        key = heading.strip().lower()
+        key = _normalise_heading(heading)
         if key in out:
             out[key].extend(
                 line[2:].strip() for line in body.splitlines() if line[:2] in ("- ", "* ")

@@ -445,6 +445,19 @@ def test_rc6_operator_migrations_are_extracted():
             assert issue in joined, f"rc.6 migration for {issue} missing from {migrations}"
 
 
+def test_heading_aliases_fold_onto_the_three_release_json_keys():
+    """Variant spellings normalise instead of adding a fourth key — release.json
+    keeps the shape ``hal0.updater.updater._read_release_notes`` expects."""
+    s = extract_structured(
+        "### Operator migrations\n- run doctor ports\n\n"
+        "### Breaking changes\n- removed the old seam\n\n"
+        "### Migrations\n- and the short spelling too\n"
+    )
+    assert sorted(s) == ["breaking", "highlights", "migrations"]
+    assert s["migrations"] == ["run doctor ports", "and the short spelling too"]
+    assert s["breaking"] == ["removed the old seam"]
+
+
 def test_no_shipped_structured_heading_variant_is_unrecognised():
     """Sibling-risk sweep: any breaking/migration-flavoured ``###`` heading the real
     CHANGELOG uses must land in one of the structured keys. Catches a future
