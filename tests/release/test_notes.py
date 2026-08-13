@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
+import pytest
+
 from hal0.release.notes import extract_changelog_section, extract_structured
 
 # ── Sample CHANGELOG document used across tests ────────────────────────────
@@ -359,3 +364,97 @@ def test_preview_notes_heading_audience_present(tmp_path):
     notes = (out / "RELEASE_NOTES.md").read_text(encoding="utf-8")
     assert "## Audience" in notes
     assert "## Known issues" in notes
+
+
+# ── Regression: the *shipped* CHANGELOG.md, not a fixture (#1874) ────────────
+#
+# ``extract_structured`` was only ever exercised against synthetic fixtures that
+# used a ``### Migrations`` heading. Every real release section writes ``###
+# Operator migrations``, which matched nothing — so ``release.json``'s
+# ``migrations`` list, the callout ``hal0 update`` renders before an operator
+# confirms, has been empty for every release ever cut. These tests read the real
+# CHANGELOG.md that ships in the tarball, so a heading the project actually uses
+# can never again be silently unrecognised.
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SHIPPED_CHANGELOG = (_REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
+def _shipped_sections() -> list[tuple[str, str]]:
+    """``(version, body)`` for every ``## [<version>]`` section of CHANGELOG.md."""
+    parts = re.split(r"^## \[v?([^\]]+)\][^\n]*$", _SHIPPED_CHANGELOG, flags=re.MULTILINE)
+    it = iter(parts[1:])
+    return [(v.strip(), body) for v, body in zip(it, it, strict=False)]
+
+
+def _bullets_under(body: str, heading: str) -> list[str]:
+    """Top-level bullet headlines under ``### <heading>``, parsed independently of
+    ``extract_structured`` so the expectation is not derived from the code under test."""
+    m = re.search(rf"^###\s+{re.escape(heading)}\s*$", body, re.MULTILINE | re.IGNORECASE)
+    if not m:
+        return []
+    rest = body[m.end() :]
+    stop = re.search(r"^#{2,3} ", rest, re.MULTILINE)
+    block = rest[: stop.start()] if stop else rest
+    return [line[2:].strip() for line in block.splitlines() if line[:2] in ("- ", "* ")]
+
+
+_SECTIONS_WITH_OPERATOR_MIGRATIONS = [
+    pytest.param(version, body, id=version)
+    for version, body in _shipped_sections()
+    if _bullets_under(body, "Operator migrations")
+]
+
+
+def test_shipped_changelog_actually_uses_the_operator_migrations_heading():
+    """Guard the guard: if the convention ever changes, the sweep below must not
+    quietly degrade into asserting nothing."""
+    assert _SECTIONS_WITH_OPERATOR_MIGRATIONS, (
+        "no shipped CHANGELOG section carries '### Operator migrations' with bullets"
+    )
+
+
+@pytest.mark.parametrize(("version", "body"), _SECTIONS_WITH_OPERATOR_MIGRATIONS)
+def test_shipped_operator_migrations_reach_release_json(version, body):
+    """Every real release section that documents operator migrations must yield
+    them in ``release.json``'s ``migrations`` list."""
+    extracted = extract_structured(body)["migrations"]
+    expected = _bullets_under(body, "Operator migrations")
+    assert extracted, f"{version}: documents {len(expected)} operator migrations, extracted none"
+    for bullet in expected:
+        assert bullet in extracted, f"{version}: migration bullet dropped: {bullet!r}"
+
+
+def test_rc6_operator_migrations_are_extracted():
+    """#1874's headline case: the rc.6 section's operator migrations (#1830 /
+    #1827 / #1828) must reach the update callout.
+
+    The rc.6 CHANGELOG section is owned by a separate PR; until it lands this
+    pins rc.5 — the newest shipped section with the heading — and self-arms for
+    rc.6 the moment that section exists.
+    """
+    sections = dict(_shipped_sections())
+    version = "1.0.0-rc.6" if "1.0.0-rc.6" in sections else "1.0.0-rc.5"
+    migrations = extract_structured(sections[version])["migrations"]
+    assert migrations, f"{version} documents operator migrations but extracted none"
+    if version == "1.0.0-rc.5":
+        assert any("#1819" in m for m in migrations), migrations
+    else:
+        joined = " ".join(migrations)
+        for issue in ("#1830", "#1827", "#1828"):
+            assert issue in joined, f"rc.6 migration for {issue} missing from {migrations}"
+
+
+def test_no_shipped_structured_heading_variant_is_unrecognised():
+    """Sibling-risk sweep: any breaking/migration-flavoured ``###`` heading the real
+    CHANGELOG uses must land in one of the structured keys. Catches a future
+    ``### Breaking changes`` the same way this caught ``### Operator migrations``."""
+    headings = {
+        h.strip()
+        for h in re.findall(r"^###\s+(.+?)\s*$", _SHIPPED_CHANGELOG, flags=re.MULTILINE)
+        if re.search(r"migrat|breaking", h, re.IGNORECASE)
+    }
+    unrecognised = sorted(
+        h for h in headings if not any(extract_structured(f"### {h}\n- probe\n").values())
+    )
+    assert not unrecognised, f"CHANGELOG headings that extract into nothing: {unrecognised}"
