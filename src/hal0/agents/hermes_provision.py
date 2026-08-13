@@ -5221,11 +5221,40 @@ def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
         if unchanged:
             # Re-tighten perms even on a no-op content match — self-heals a
             # file written 0644 by an older build now that it may carry a
-            # secret. geteuid()==0 only; the seam path re-asserts 0600 on
-            # every write regardless (see installer/wrappers/hal0-agentenv).
+            # secret.
+            #
+            # Both privilege levels must heal here (issue #1876). Provisioning
+            # normally runs as `hal0`, NOT root (§7.4 F.7), so a root-only
+            # chmod healed exactly nothing on the population that needs it:
+            # an UPGRADED box hits `unchanged=True` on every reprovision and
+            # returned early with the stale 0644 intact, while a fresh install
+            # always takes the content-changing branch below (which pins 0600)
+            # and so looked fine. Unprivileged we cannot chmod a root:root
+            # file, so we re-drive the same `write-driver-env` seam verb with
+            # byte-identical content — the seam writes atomically (tmp + mv)
+            # and pins 0600 root:root, so the mode converges with no window in
+            # which the unit's EnvironmentFile is missing or partial.
+            #
+            # Reusing the existing verb rather than adding a `tighten-*` one is
+            # deliberate: it needs no new sudoers surface and it works against
+            # the hal0-agentenv wrapper already deployed on the old boxes that
+            # carry this defect.
             if os.geteuid() == 0:
                 with contextlib.suppress(OSError):
                     path.chmod(0o600)
+                return path, False
+            try:
+                mode = path.stat().st_mode & 0o777
+            except OSError:
+                mode = None
+            if mode == 0o600:
+                return path, False
+            log.info(
+                "hermes_provision.driver_env_perms_tightening",
+                path=str(path),
+                mode=None if mode is None else f"{mode:04o}",
+            )
+            _privileged_env_write("write-driver-env", body)
             return path, False
     if os.geteuid() == 0:
         path.parent.mkdir(parents=True, exist_ok=True)
