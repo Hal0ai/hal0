@@ -87,13 +87,46 @@ RuntimeDirectoryPreserve=yes
 LogsDirectory=hal0
 
 # Carve out the exact paths Hermes + hal0 need to write to under the
-# `ProtectSystem=strict` lockdown. /run/hal0 is for sockets, lock
-# files, and the agent's NOTIFY_SOCKET helpers. /etc/hal0 is needed by
-# the `render-context` ExecStartPre, which (re)writes HERMES.md/STATE.md
-# there — without it the render fails with a read-only-fs error and the
-# agent boots with stale live-context. File perms still gate writes:
-# tokens.toml / auth.toml stay root-owned 0600, so the hal0 user can't
-# read or rewrite secrets even with the path made writable.
+# `ProtectSystem=strict` lockdown. /run/hal0 is for sockets, lock files,
+# and the agent's NOTIFY_SOCKET helpers; /var/lib/hal0 holds HERMES.md +
+# STATE.md and the agent venv; /var/log/hal0 is the agent log.
+#
+# /etc/hal0 is the carve-out that needs explaining. It is NOT the
+# `render-context` ExecStartPre (see the hermes drop-in) that needs it:
+# since #473 that writer lands HERMES.md + STATE.md under /var/lib/hal0
+# and /etc/hal0/HERMES.md is a provision-maintained symlink to the
+# /var/lib copy, so render-context never writes into /etc/hal0
+# (`src/hal0/agents/hermes_provision.py` `render_live_context`). What
+# does write there is provisioning — `_phase_context_link` renders
+# /etc/hal0/AGENTS.md and /etc/hal0/MCP-CLIENTS.md and mirrors the
+# bundled agent-skills symlinks into /etc/hal0/agent-skills — and that
+# runs from the operator CLI / bootstrap route (`hal0-agent %i
+# reprovision`, install.sh), not from this unit's ExecStart.
+#
+# Be honest about what the boundary buys. /etc/hal0 is hal0:hal0 2775 and
+# most of its contents are hal0-owned: api.env is 0600 hal0:hal0,
+# upstreams.toml 0644 hal0:hal0 — both readable AND rewritable by the
+# User=hal0 agent once the path is writable. There is no root-owned
+# tokens.toml / auth.toml gating anything; those files do not exist on any
+# box. Because the directory itself is hal0-owned and not sticky, the
+# agent can also unlink or replace root-owned files sitting directly in
+# /etc/hal0. Per-agent env files are a partial exception, and the two
+# gates are separate: /etc/hal0/agents is root:root 0755, which stops the
+# agent CREATING, REPLACING or UNLINKING `%i.env` — but 0755 is
+# world-traversable, so it does not stop a READ. What keeps
+# HAL0_MCP_TOKEN unreadable is the file's own mode, 0600 root:root.
+# That mode is only guaranteed going forward: #1876 left `%i.env` 0644
+# and world-readable on every box provisioned unprivileged, which in
+# practice meant every UPGRADED box. The self-heal now re-tightens it on
+# reprovision, so an existing box stays exposed until it reprovisions —
+# check with `stat -c '%a' /etc/hal0/agents/hermes.env` (expect 600).
+#
+# What ReadWritePaths= does buy is the rest of `ProtectSystem=strict`:
+# every other path — /etc at large, /usr, /boot — stays read-only in the
+# agent's namespace, and NoNewPrivileges + ProtectHome + the
+# Protect*/Restrict* set above still block escalation beyond the hal0
+# user. It does not isolate the agent from hal0's own configuration or
+# secrets, and nothing here should be read as claiming that it does.
 ReadWritePaths=/etc/hal0 /var/lib/hal0 /var/log/hal0 /run/hal0
 
 # Stream stdout/stderr into journald with a per-instance identifier

@@ -327,14 +327,20 @@ def test_api_server_refuses_placeholder_or_weak_key() -> None:
 
 @pytest.mark.xfail(
     reason=(
-        "SECURITY item-4 deviation: the pinned Hermes ref defaults "
-        "terminal.backend to 'local' (host command execution), which the "
-        "lxc105 checklist flags as an unsandboxed-by-default local terminal. "
-        "hal0's compensating control is the systemd-sandboxed Hermes service; "
-        "hal0's own provisioning (src/hal0/agents/hermes_provision.py) also "
-        "explicitly sets terminal.backend='local'. Orchestrator decides whether "
-        "to require an explicit sandboxed backend. Recorded, not silently "
-        "accepted — see the handback."
+        "SECURITY item-4 deviation: terminal.backend is 'local' (host command "
+        "execution), which the lxc105 checklist flags as an unsandboxed-by-"
+        "default local terminal. The pin is NOT what forces this: the pinned "
+        "ref also ships sandboxed backends (hermes_cli/config.py branches on "
+        "docker | singularity | modal | daytona | ssh, and "
+        "tools/environments/{docker,singularity,modal,daytona,ssh}.py all exist "
+        "in the installed venv), so no pin bump is needed to change it. 'local' "
+        "is hal0's own choice — hermes_provision.py sets terminal.backend="
+        "'local' explicitly. The trade: a containerised shell cannot reach the "
+        "host filesystem or 127.0.0.1:8080, which would break the bundled "
+        "host-management skills (hal0-service-management, hal0-bench, hal0-tune, "
+        "hal0-quantize). Compensating control is the systemd-sandboxed agent "
+        "unit. Operator decision on the backend is still open — recorded, not "
+        "silently accepted."
     ),
     strict=True,
 )
