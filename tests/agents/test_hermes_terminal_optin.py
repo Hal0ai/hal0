@@ -489,6 +489,55 @@ def test_non_local_backend_is_recognised_whatever_its_cwd(
     assert (doc.get("agent") or {}).get("disabled_toolsets") == []
 
 
+def test_a_working_legacy_box_is_never_disabled_by_an_unwritable_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Fail-closed is for a FRESH opt-in only. A legacy box already has a
+    # working terminal, and the marker is root-only /etc/hal0/agents/ — so a
+    # provisioning path that runs unprivileged and skips the root prelude
+    # (`hal0 agent reprovision hermes` as a non-root user) simply cannot write
+    # it. Downgrading to state-unwritable there would take away a shell the
+    # operator has been using, on a run that asked for no such thing.
+    home = tmp_path / "hh"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"terminal": {"backend": "local", "cwd": "/etc/hal0"}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    blocked = tmp_path / "blocked" / "hermes-terminal-tool"
+    blocked.mkdir(parents=True)  # a dir at the marker path blocks the write
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home, state_path=blocked)
+
+    assert out.details["terminal_tool_decision"] == "on"
+    assert out.details["terminal_tool_reason"] == "existing-config+state-stale"
+    assert out.details["terminal_state_stale"] is True
+    assert (doc.get("agent") or {}).get("disabled_toolsets") == []
+    # Applied and warned, never silently accepted.
+    assert out.status == hp.PhaseStatus.WARN
+    assert "could not be recorded" in (out.reason or "")
+
+
+def test_the_stale_marker_warning_names_the_direction_that_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The two stale cases point opposite ways — an unrecorded opt-out would be
+    # re-enabled next run, an unrecorded enable would be disabled next run —
+    # so the operator-facing line must not describe one as the other.
+    home = tmp_path / "hh"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"terminal": {"backend": "local", "cwd": "/etc/hal0"}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    blocked = tmp_path / "blocked" / "hermes-terminal-tool"
+    blocked.mkdir(parents=True)
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    out, _doc = _run_config_write(tmp_path, monkeypatch, home=home, state_path=blocked)
+
+    assert "opt-out" not in (out.reason or ""), out.reason
+
+
 def test_unwritable_state_file_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

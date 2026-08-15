@@ -2169,10 +2169,26 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # alone — refusing to record must not disable something already in use.
     terminal_state_stale = False
     if recorded != terminal_enabled and not write_terminal_state(terminal_enabled):
-        if terminal_enabled:
-            # An unrecorded "on" is what a later run could re-derive
-            # permissively — refuse it outright.
+        if terminal_enabled and terminal_reason == "opt-in":
+            # A FRESH opt-in only. An unrecorded "on" that nothing else on disk
+            # attests to is what a later run could re-derive permissively —
+            # refuse it outright.
             terminal_enabled, terminal_reason = False, "state-unwritable"
+        elif terminal_enabled:
+            # `existing-config`: the box is already working, and the marker is
+            # root-only, so a provisioning path that legitimately runs
+            # unprivileged (`hal0 agent reprovision hermes` as a non-root user,
+            # which has no root prelude) simply cannot write it. Disabling here
+            # would take a shell away from an operator who asked for nothing of
+            # the sort — and the evidence is on disk in config.yaml, so the next
+            # run re-derives the same answer rather than a permissive one.
+            # Applied and warned, never silently accepted.
+            terminal_state_stale = True
+            terminal_reason = f"{terminal_reason}+state-stale"
+            log.warning(
+                "hermes_provision.terminal_enable_not_recorded",
+                marker=str(TERMINAL_STATE_PATH),
+            )
         elif recorded is True:
             # The inverse, and quieter: this run disables the tools, but the
             # marker still says "on", so the NEXT unflagged provision would put
@@ -2278,9 +2294,12 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # FAIL only when the overlay couldn't apply at all (hermes_bin broken) —
     # that's a real, actionable stop the operator must see.
     status = PhaseStatus.OK if (applied or not pairs) else PhaseStatus.FAIL
+    # Both stale cases point the opposite way from each other, so the line the
+    # operator reads has to name the direction rather than assume opt-out.
     stale_reason = (
-        f"terminal-tool opt-out could not be recorded at {TERMINAL_STATE_PATH} — "
-        "the next provision would re-enable it; re-run as root"
+        f"terminal-tool posture ({'on' if terminal_enabled else 'off'}) could not be "
+        f"recorded at {TERMINAL_STATE_PATH} — it was applied to the config, but the "
+        "marker still disagrees; re-run as root"
     )
     if status == PhaseStatus.OK and terminal_state_stale:
         status = PhaseStatus.WARN
