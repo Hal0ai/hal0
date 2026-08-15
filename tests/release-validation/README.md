@@ -153,7 +153,9 @@ known-issues, or regressions, and add a line to the changelog below. A report re
   passthrough and an `rc6-installed` snapshot (gpu=false, HAL0_ALLOW_CPU_ONLY and the sysfs
   gotchas were all stale — preflight caught every one); ct150 is privileged/GPU, now on rc.6 via
   the GitHub asset URL; the "no GPU fresh box" standing-gap note replaced with the real
-  remaining gaps (no CPU-only box left; host ROCm only on prod; record each box's actual
+  remaining gap (no fresh-install box that also has `/dev/kfd` — ct151 exercises Vulkan-only,
+  ct150/ct105 have `/dev/kfd` but are not fresh installs; ct152-cpu-fresh still exists and is
+  CPU-only, gpu=false, no snapshot; host ROCm only on prod; record each box's actual
   ROCm-vs-Vulkan lane at preflight).
 * **3** (2026-08-12) — `smoke-preflight-skips-chat-probes` (#1831) rewritten. As filed it probed
   only hermes' default live-resolve config — the half of the defect rc.5 fixed — so it would have

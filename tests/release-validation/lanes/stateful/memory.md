@@ -21,11 +21,16 @@ declare `utility` off-limits — say in your report which of the two you got.
 2. **Baseline inventory.** `hal0 memory status`, `hal0 memory --help`, `GET /api/memory/engine`,
    `/api/memory/banks`, `/api/memory/list`. A fresh box should have zero failed operations.
    Enumerate the banks you EXPECT on a fresh install (`shared`, and `agents` for the peer
-   registry) and record which exist and when each was created. The `agents` bank's `created_at`
-   must be ~= install time: rc.6 proved the seeding write runs at install boot but lands in the
-   volatile pgvector fallback (hindsight cold start outruns the boot probe) and is never
-   replayed after `provider_healed` — the bank only appears on a later hal0-api restart.
-   Regression `agents-bank-boot-writes-lost`; grep the boot journal for
+   registry) and record which exist and when each was created. rc.6 proved the seeding write
+   runs at install boot but can land in the volatile pgvector fallback (hindsight cold start
+   outruns the boot probe) and never gets replayed after `provider_healed` — the bank then only
+   appears on a later hal0-api restart. Two remedies are both acceptable, so accept EITHER: (a)
+   the durable `agents` bank exists with `created_at` ~= install time (the boot write landed
+   durably first try), or (b) the durable bank exists, carries the expected identity cards, and
+   its `created_at` is <= the timestamp of the first `provider_healed` journal line (the heal
+   path replayed the idempotent card publish). Only fail this check if the bank is STILL absent,
+   or exists but is missing cards, after a `provider_healed` line has already appeared in the
+   journal. Regression `agents-bank-boot-writes-lost`; grep the boot journal for
    `boot_degraded|degraded_write|provider_healed` to attribute it.
 3. **Fix the routing.** Assign a chat model to the utility slot and load it. Confirm the
    hindsight target ref now routes (`POST /v1/chat/completions` with that exact ref). If it

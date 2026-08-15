@@ -95,7 +95,9 @@ hostname = "halo"
 ip = "10.0.1.150"
 os = "ubuntu 24.04"
 privileged = true    # /proc/1/uid_map = full map; 32 cores / 107 GiB — prod-class, unlike every fresh box
-gpu = true           # AMD iGPU passthrough; slots serve on vulkan (with /dev/kfd -> ROCm lane)
+gpu = true           # AMD iGPU passthrough + /dev/kfd; slot TOMLs say device=gpu-vulkan but
+                      # llama.cpp actually executes on ROCm here (ROCm wins whenever /dev/kfd
+                      # is visible) — the vulkan label is a seed lie, not the real backend
 api = "http://10.0.1.150:8080"
 auth_required = false
 notes = """
@@ -161,11 +163,16 @@ work?".
 """
 
 # Fleet coverage note (updated 2026-08-15): ct151 now has iGPU+NPU passthrough and exercises
-# the vulkan/container path on fresh installs, so "no GPU fresh box" is closed — but no box has
-# host-side ROCm WITHOUT /dev/kfd removed, and NO CPU-only box (no /dev/dri at all) remains in
-# the fleet, so the original #1841 "host telemetry on a GPU-less box" class is now code-read
-# only. Also: only prod (ct105) has host rocm-smi, so compute_capable=true exists on exactly one
-# box — capability-flag findings need that cross-check. Every box class runs the ROCm lane when
-# /dev/kfd is visible and the Vulkan lane otherwise; after rc.6's Vulkan garbage-output finding,
-# record which lane a box actually executes (podman exec <slot ctr> ls /dev/kfd) in every
-# preflight.
+# the vulkan/container path on fresh installs, so "no GPU fresh box" is closed for the Vulkan
+# lane specifically. ct152-cpu-fresh (gpu=false, no /dev/dri) still exists and is CPU-only —
+# do not claim "no CPU-only box remains"; it has no snapshot and carries residue, so treat it
+# as read-only-usable only (stateful lanes must not run there without a fresh install first).
+# The actual remaining gap is a GPU fresh-install box WITH /dev/kfd: ct151 has no /dev/kfd, so
+# it only ever exercises the Vulkan lane, and ct150/ct105 both have /dev/kfd but are not fresh
+# installs (update/prod) — no box in the fleet is both freshly installed and representative of
+# a bare-metal AMD host with amdkfd loaded, which is precisely how the rc.6 Vulkan garbage-output
+# defect survived undetected. Also: only prod (ct105) has host rocm-smi, so compute_capable=true
+# exists on exactly one box — capability-flag findings need that cross-check. Every box class
+# runs the ROCm lane when /dev/kfd is visible and the Vulkan lane otherwise; after rc.6's Vulkan
+# garbage-output finding, record which lane a box actually executes
+# (podman exec <slot ctr> ls /dev/kfd) in every preflight.

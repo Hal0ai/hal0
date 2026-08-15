@@ -914,7 +914,7 @@ regressions:
   - id: brain-vulkan-backend-garbage-output
     issue: 1888   # GA-blocker — filed by rc.6 fix wave
     from: v1.0.0-rc.6
-    severity: major
+    severity: ga-blocker
     tier: judgment
     lane: brain
     summary: >-
@@ -1378,3 +1378,30 @@ regressions:
       3. cat /proc/uptime; curl -s $API/api/stats/hardware | jq .uptime_s   # frozen = defect
       4. hal0 agent peers   # on a box with published identity cards
     expect: Each corrected. Report per-item, not as one verdict.
+
+  - id: chat-to-embed-slot-500-passthrough
+    issue: 1894   # enhancement — typed capability-mismatch envelope, filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: mechanical
+    lane: routing
+    summary: >-
+      With the `embed` slot loaded, POST /v1/chat/completions naming any model whose id contains
+      "embed" or "rerank" is forwarded to the embeddings llama-server and returns that server's
+      verbatim HTTP 500 "the current context does not logits computation. skipping". The routing
+      (Rule 7 name-substring pinning) and the verbatim upstream passthrough are both intentional,
+      test-locked designs — see known-issues.yaml `chat-to-embed-slot-500-passthrough` for the
+      full by-design adjudication. This register entry exists only so the missing typed error is
+      re-probed every release rather than only living inside a known-issue's still_report_if.
+    repro: |
+      # With embed slot loaded:
+      curl -s -X POST $API/v1/chat/completions \
+        -d '{"model":"<any model id containing embed or rerank>","messages":[{"role":"user","content":"hi"}]}'
+      # -> raw upstream 500, not a typed capability-mismatch error
+      # With embed OFFLINE, the same request must instead return a clean typed 404.
+    expect: >-
+      A typed 409/400 capability-mismatch envelope when a request names a model whose disclosed
+      capability (/v1/models labels/recipe) does not include the requested capability, instead of
+      leaking the upstream's raw 500. Still by-design (do not re-file) unless a CHAT-capable
+      model is routed to a non-chat slot, the 500 occurs with embed OFFLINE, or /v1/models stops
+      disclosing per-model labels/recipe — those clauses escalate per the known-issues entry.

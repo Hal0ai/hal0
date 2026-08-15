@@ -40,11 +40,20 @@ curl -s -X POST http://127.0.0.1:<port>/completion \
   -d '{"prompt":"The capital of France is","n_predict":12,"temperature":0}'
 ```
 
-`Paris` must appear. If it does not, every text-dependent result on that box is untrusted:
-record the canary failure once (regression `brain-vulkan-backend-garbage-output`), attribute
-downstream symptoms (hermes hangs, memory never landing, steward unusable) to it rather than
-filing them as independent defects, and do not key anything on the garbage's exact form — it
-varies with argv.
+`Paris` must appear. If it does not, record the canary failure once (regression
+`brain-vulkan-backend-garbage-output`) and scope the suppression narrowly — a failed canary only
+invalidates checks that assert something about the *content* of generated text (a correct
+answer, coherent prose, a specific fact, a well-formed tool call). Attribute those downstream
+symptoms to the canary failure rather than filing them as independent defects, and do not key
+anything on the garbage's exact form — it varies with argv.
+
+**A failed canary does NOT suppress checks that assert something independent of content
+quality** — timeouts, cancellation behavior, retry/backoff bounds, error-surfacing honesty,
+queue-drain mechanics, and similar structural properties still hold or fail on their own terms
+regardless of whether the generated text is coherent. A retain queue that never drains because
+of an uncapped `max_tokens` and a broken requeue ladder is a real, independently-reproducible
+defect even on a box whose model is also producing garbage — do not let the canary rule swallow
+findings like that one (`memory-extraction-never-lands`, #1834) into the garbage-token bucket.
 
 ## Discipline about the box
 
