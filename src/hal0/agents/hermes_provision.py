@@ -1593,9 +1593,9 @@ def persist_terminal_decision(
     """Resolve the posture and record it. Returns ``(enabled, why, recorded)``.
 
     Called from the CLI's ROOT prelude — the one point in the flow that can
-    write :data:`TERMINAL_STATE_PATH` — so that both a fresh answer and a legacy
-    box's pre-#1863 configuration end up recorded once, out of the agent's
-    reach, before provisioning drops to the ``hal0`` user.
+    write :data:`TERMINAL_STATE_PATH` — so that a fresh answer and a box whose
+    pre-#1863 configuration already enabled the tool both end up recorded once,
+    out of the agent's reach, before provisioning drops to the ``hal0`` user.
     """
     config_path = Path(hermes_home) / "config.yaml"
     try:
