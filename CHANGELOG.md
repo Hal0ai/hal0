@@ -86,10 +86,12 @@ unconditionally (#1828). Both now fail loudly.
   running as the `hal0` service user — root-equivalent on this box — without
   the operator saying so. Opt in at the installer prompt, with
   `hal0 agent install hermes --terminal-tool`, or via `HAL0_HERMES_TERMINAL=1`;
-  a box whose `config.yaml` already carries an explicit `terminal.backend`
-  keeps it enabled across the update. Off also disables the `code_execution`
-  and `delegation` toolsets, since both reach a shell one hop away from
-  `terminal` (#1882).
+  a box whose `config.yaml` already carries a non-`local` backend, or `local`
+  with a non-default `cwd` (hal0-provisioned or hand-set), keeps it enabled
+  across the update — `local` with no `cwd` or the default `cwd: "."` is not
+  read as consent and starts off, like a fresh install. Off also disables the
+  `code_execution` and `delegation` toolsets, since both reach a shell one
+  hop away from `terminal` (#1882).
 
 ### Breaking
 
@@ -107,10 +109,14 @@ unconditionally (#1828). Both now fail loudly.
   hand a subagent the `terminal` toolset directly. Skills that stop working
   with it off: `hal0-service-management`, `hal0-bench`,
   `hal0-bench-autopilot`, `hal0-tune` and `hal0-quantize`. A box whose
-  `config.yaml` already carries an explicit `terminal.backend` — set by
-  hal0's own provisioning at any point in its history, or by the operator by
-  hand — is read as a prior opt-in and keeps the terminal enabled across
-  `hal0 update`; no action needed there (#1882).
+  `config.yaml` already carries a backend other than `local`, or `local`
+  together with a non-default `cwd` — anything hal0's own provisioning has
+  ever written, or a path the operator set by hand — is read as a prior
+  opt-in and keeps the terminal enabled across `hal0 update`. `local` with no
+  `cwd`, or the default `cwd: "."` that `hermes config migrate` can
+  materialise on its own, is NOT read as consent: that box starts off, same
+  as a fresh install, and needs `hal0 agent install hermes --terminal-tool`
+  to opt back in (#1882).
 
 ### Added
 
@@ -225,10 +231,13 @@ unconditionally (#1828). Both now fail loudly.
   `hal0 config edit` now lands at its canonical mode (`0600`, `0640`, `0600`
   respectively) instead of the umask-mediated `0644` a bare file write
   produced, and is chowned to the `hal0` service owner on a real install so
-  `hal0-api.service` can still read what it seeded. An operator whose seed
-  can't reach that ownership — running as neither `hal0` nor root — now gets
-  a loud failure pointing at `sudo` instead of a file `hal0-api` cannot open
-  (#1881).
+  `hal0-api.service` can still read what it seeded. An operator who can
+  create the file — in the `hal0` group, on a box where `/etc/hal0` is
+  group-writable — but is neither `hal0` nor root now gets a loud failure
+  pointing at `sudo` instead of a file `hal0-api` cannot open. An operator
+  outside the `hal0` group entirely still fails earlier, at file creation,
+  with a raw permission error rather than that same clean message — tracked
+  separately (#1881).
 
 ### Security
 
@@ -250,12 +259,17 @@ unconditionally (#1828). Both now fail loudly.
   "Bundled agent trust boundary" section laying out the posture
   control-by-control, with a status of accepted, documented risk for 1.0 —
   the agent/API UID split is tracked for 1.1 under ADR-0002 (#1881).
-- `upstreams.toml` drops from world-readable `0644` to `0640`. The file
-  carries no credential values — `auth_value_env` only names an environment
-  variable the registry resolves from the process environment at request
-  time — but its provider/endpoint inventory was readable by every local
-  account; every real consumer (`hal0-api`, `hal0-agent@*`, the CLI) runs as
-  `hal0` or root, group `hal0` (#1881).
+- `upstreams.toml`'s canonical mode drops from world-readable `0644` to
+  `0640` on a fresh install and on every rewrite through `hal0 config edit
+  upstreams` or the API's own writer. The file carries no credential values —
+  `auth_value_env` only names an environment variable the registry resolves
+  from the process environment at request time — but its provider/endpoint
+  inventory was readable by every local account; every real consumer
+  (`hal0-api`, `hal0-agent@*`, the CLI) runs as `hal0` or root, group `hal0`.
+  **A bare `hal0 update` does not rewrite the file**, so an existing
+  `upstreams.toml` already on disk at `0644` stays `0644` until something
+  rewrites it or an operator converges it directly with
+  `sudo hal0 doctor perms --fix` (#1881).
 
 ### Docs
 
@@ -381,11 +395,15 @@ targeted at the 1.0.x line.
   and `delegation` come off with it. Nothing to run if that is what you want.
   To enable it, answer yes at the installer's prompt on an interactive
   install, or run `hal0 agent install hermes --terminal-tool` (add
-  `HAL0_HERMES_TERMINAL=1` for an unattended install). An existing box whose
-  `config.yaml` already carries an explicit `terminal.backend` — anything
-  hal0 has ever provisioned, or a cwd the operator set by hand — is read as a
-  prior opt-in and keeps it enabled across `hal0 update`; nothing to run
-  there either.
+  `HAL0_HERMES_TERMINAL=1` for an unattended install). An existing box keeps
+  its terminal enabled across `hal0 update` only when `config.yaml` reads as
+  a real prior choice: a backend other than `local`, or `local` with a `cwd`
+  hal0's own provisioning has ever written, or one the operator set by hand.
+  `local` with no `cwd`, or the default `cwd: "."`, is NOT read as consent —
+  that box starts off after the update, same as a fresh install, so an
+  operator who hand-configured a plain `local` backend at its default `cwd`
+  needs to re-opt-in with `hal0 agent install hermes --terminal-tool` (or
+  `HAL0_HERMES_TERMINAL=1`) to get it back.
 
 ### Rollback
 
