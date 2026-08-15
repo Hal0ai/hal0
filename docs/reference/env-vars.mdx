@@ -70,6 +70,7 @@ rely on the default rather than setting it explicitly, verify which code path ap
 | `HAL0_HERMES_PORT` | `9119` | — |
 | `HAL0_HERMES_PYTHON` | unset (auto-discovered interpreter) | — |
 | `HAL0_HERMES_LIVE_RESOLVE` | `"1"` | — |
+| `HAL0_HERMES_TERMINAL` | unset (→ terminal tool OFF) | Opt the agent into a terminal tool at provisioning time. `1` enables it, `0` disables it. With it on, Hermes can run shell commands as the `hal0` user, which is root-equivalent on this box. A non-interactive install never enables it; see [Run agents](/guides/run-agents/#hermes-terminal-tool-off-by-default). |
 | `HAL0_HERMES_OFFLINE` | unset | Set programmatically by `hal0 agent bootstrap --offline`. |
 | `HAL0_AGENTENV` | `/usr/lib/hal0/bin/hal0-agentenv` | — |
 | `HAL0_SYSTEMCTL` | `/usr/lib/hal0/bin/hal0-systemctl` | — |

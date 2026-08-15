@@ -12,11 +12,11 @@ Hermes v2026.7.7.2 / 0.18.2).
 
 SECURITY (board fold, lxc105): ``TERMINAL_BACKEND_DEFAULT`` is frozen as an
 *observed* upstream default, NOT an endorsement. The pinned ref defaults
-``terminal.backend`` to ``"local"`` (host command execution). The matching
-xfail in ``test_contract_compatibility.py`` records this as a known deviation
-from the "never enable an unsandboxed local terminal backend by default"
-checklist item, for the orchestrator to rule on (hal0's compensating control is
-the systemd-sandboxed Hermes service). See the handback item-4 list.
+``terminal.backend`` to ``"local"`` (host command execution). hal0 no longer
+inherits that posture: since #1863 the terminal tool is an explicit operator
+opt-in and provisioning disables the ``terminal`` + ``code_execution`` toolsets
+by default. The matching xfail in ``test_contract_compatibility.py`` remains as
+the drift watch on the UPSTREAM default.
 """
 
 from __future__ import annotations

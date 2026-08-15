@@ -114,8 +114,13 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH]
                       Omit it and the installer asks on an interactive terminal;
                       a piped (\`curl … | bash\`) or headless run takes the default.
 
-Interactive prompts (models dir, HuggingFace token) only run when stdin is a
-terminal. Set HAL0_NONINTERACTIVE=1 to force the flag/env values everywhere.
+Interactive prompts (models dir, HuggingFace token, Hermes terminal tool) only
+run when stdin is a terminal. Set HAL0_NONINTERACTIVE=1 to force the flag/env
+values everywhere.
+
+HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
+it run commands as the hal0 user (root-equivalent on this box). It is OFF by
+default and a non-interactive install never enables it.
 EOF
             exit 0
             ;;
@@ -481,6 +486,59 @@ if _interactive; then
         HF_TOKEN_VAL="${_hf_answer}"
         unset _hf_answer
     fi
+fi
+
+# ── Hermes terminal tool: explicit opt-in, DEFAULTS OFF ─────────────────────
+# The bundled agent can be given a terminal tool. Its only viable backend on
+# this box is `local`, which runs commands as the hal0 service user — and that
+# user is root-equivalent here (rootful podman + the hal0-systemctl /
+# hal0-agentenv sudo wrappers). The agent also reads untrusted content (web
+# pages, stored memories, MCP output), so this is asked out loud instead of
+# being switched on silently.
+#
+# Non-interactive / piped / CI installs never reach this prompt and therefore
+# default OFF. HAL0_HERMES_TERMINAL=1 in the environment is the unattended
+# opt-in; the value is exported so `hal0 agent install hermes` (and the
+# privilege-dropped provisioning under it) sees the same answer.
+#
+# Not asked on an upgrade (the hermes venv already exists): that box already
+# has a recorded answer, and the provisioner preserves it. Re-asking would let
+# a distracted Enter silently disable a working agent.
+#
+# Also not asked when this run will not provision Hermes at all (--dev,
+# --no-start — the provisioning block lives inside the service-start branch —
+# or HAL0_SKIP_HERMES=1): the answer lives only in this shell's environment, so
+# asking for consent we would then drop on the floor is worse than not asking —
+# the operator answers again on the deferred `hal0 agent install hermes
+# --terminal-tool`.
+_ht_answer=""
+if [[ -z "${HAL0_HERMES_TERMINAL:-}" ]] \
+   && [[ "${DEV_MODE}" -eq 0 ]] \
+   && [[ "${NO_START}" -eq 0 ]] \
+   && [[ "${HAL0_SKIP_HERMES:-0}" -ne 1 ]] \
+   && [[ ! -x /var/lib/hal0/venvs/hermes/bin/hermes ]] \
+   && _interactive; then
+    printf '\n' >/dev/tty 2>/dev/null || true
+    info "Hermes can be given a terminal tool. If you enable it, the agent will be able to run"
+    info "commands as the hal0 user on this box — that user is root-equivalent here, so this"
+    info "effectively gives the agent full control of the machine, including anything it is"
+    info "talked into running by a web page or a stored memory. There is no sandboxed option:"
+    info "the bundled host-management skills (hal0-service-management, hal0-bench, hal0-tune,"
+    info "hal0-quantize) need the real host, so a container would break them by design."
+    info "Leave it off unless you want that; you can turn it on later with"
+    info "  hal0 agent install hermes --terminal-tool"
+    _tty_read _ht_answer "Enable Hermes' terminal tool (run commands as a root-equivalent user)? [y/N]" "N"
+    if [[ "${_ht_answer}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        export HAL0_HERMES_TERMINAL=1
+        warn "Hermes terminal tool ENABLED at your request — the agent can run root-equivalent commands."
+    else
+        export HAL0_HERMES_TERMINAL=0
+        info "Hermes terminal tool disabled (default)."
+    fi
+    unset _ht_answer
+elif [[ -n "${HAL0_HERMES_TERMINAL:-}" ]]; then
+    export HAL0_HERMES_TERMINAL
+    info "Hermes terminal tool: taken from the environment (HAL0_HERMES_TERMINAL=${HAL0_HERMES_TERMINAL})"
 fi
 if [[ "${MODELS_DIR}" != /* ]]; then
     die "model store must be an absolute path (got: ${MODELS_DIR})"
