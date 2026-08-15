@@ -1581,6 +1581,12 @@ def write_terminal_state(enabled: bool) -> bool:
     try:
         TERMINAL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(TERMINAL_STATE_PATH, "1\n" if enabled else "0\n")
+        # Explicit 0644: _atomic_write inherits the process umask, and a root
+        # umask of 077 would leave the marker 0600 — unreadable to the `hal0`
+        # user the provisioner drops to, which would then see no record and
+        # fail an operator's opt-in closed. The value is a posture, not a
+        # secret; root-owned + world-readable is exactly right.
+        TERMINAL_STATE_PATH.chmod(0o644)
         return True
     except OSError as exc:
         log.warning("hermes_provision.terminal_state_write_failed", error=str(exc))

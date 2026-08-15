@@ -651,7 +651,7 @@ def test_provision_hermes_forwards_terminal_answer_across_the_privilege_drop(
     captured: dict[str, Any] = {}
     monkeypatch.setattr("os.geteuid", lambda: 0)
     monkeypatch.setattr("shutil.which", lambda _n: "/usr/local/bin/hal0")
-    monkeypatch.setattr(ac, "_hermes_root_prelude", lambda: None)
+    monkeypatch.setattr(ac, "_hermes_root_prelude", lambda env=None: None)
     monkeypatch.setattr(ac, "_restart_hermes_after_posture_change", lambda: None)
 
     def _fake_run_as_hal0(argv: list[str], *, extra_env: Any = None, stdin: Any = None) -> int:
@@ -735,6 +735,25 @@ def test_posture_restart_covers_every_provisioning_entry_point(monkeypatch) -> N
     monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", lambda **_k: 3, raising=True)
     assert ac._provision_hermes() == 3
     assert seen == []
+
+
+def test_root_prelude_receives_the_flag_answer(monkeypatch) -> None:
+    """The prelude is the only place that can write the root-only marker, so it
+    has to see the CLI flag — resolving from this process' environment alone
+    would record the OLD posture, and the privilege-dropped child cannot fix it."""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setattr("shutil.which", lambda _n: "/usr/local/bin/hal0")
+    monkeypatch.setattr(ac, "_run_as_hal0", lambda *_a, **_k: 0)
+    monkeypatch.setattr(ac, "_restart_hermes_after_posture_change", lambda: None)
+    monkeypatch.setattr(ac, "_hermes_root_prelude", lambda env=None: seen.update(env=env))
+    monkeypatch.delenv("HAL0_HERMES_TERMINAL", raising=False)
+
+    ac._provision_hermes(terminal_tool=True)
+    assert seen["env"] == {"HAL0_HERMES_TERMINAL": "1"}
+
+    ac._provision_hermes(terminal_tool=False)
+    assert seen["env"] == {"HAL0_HERMES_TERMINAL": "0"}
 
 
 def test_run_as_hal0_places_extra_env_as_env_assignments(monkeypatch) -> None:
@@ -900,7 +919,7 @@ def test_provision_hermes_root_drops_to_hal0(monkeypatch) -> None:
     monkeypatch.setattr("os.geteuid", lambda: 0)
 
     events: list[str] = []
-    monkeypatch.setattr(ac, "_hermes_root_prelude", lambda: events.append("prelude"))
+    monkeypatch.setattr(ac, "_hermes_root_prelude", lambda env=None: events.append("prelude"))
     monkeypatch.setattr("shutil.which", lambda _n: "/usr/local/bin/hal0")
 
     captured: dict[str, Any] = {}

@@ -422,6 +422,25 @@ def test_persist_terminal_decision_records_a_fresh_box_as_off(
     assert hp.read_terminal_state() is False
 
 
+def test_marker_is_world_readable_under_a_restrictive_umask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Root writes it; the privilege-dropped provisioner reads it. Under a root
+    # umask of 077 an inherited-mode write would land 0600 and the `hal0` child
+    # would see no record — failing an operator's opt-in closed.
+    import os
+
+    state_path = tmp_path / "state" / "hermes-terminal-tool"
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", state_path)
+    old = os.umask(0o077)
+    try:
+        assert hp.write_terminal_state(True) is True
+    finally:
+        os.umask(old)
+
+    assert state_path.stat().st_mode & 0o044 == 0o044
+
+
 def test_undecodable_marker_reads_as_unrecorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

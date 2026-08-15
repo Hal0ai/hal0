@@ -441,7 +441,7 @@ def _ensure_hermes_writable_or_die() -> None:
 # caller runs the pipeline in-process unchanged.
 
 
-def _hermes_root_prelude() -> None:
+def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     """Root-only prep run before dropping provisioning to hal0 (§7.4).
 
     Installs the ``/usr/local/bin`` CLI wrapper (which ``_phase_install`` skips
@@ -482,7 +482,13 @@ def _hermes_root_prelude() -> None:
     # gets captured into the marker for the first time.
     from hal0.agents.hermes_provision import HERMES_HOME_DEFAULT, persist_terminal_decision
 
-    enabled, why, recorded = persist_terminal_decision(HERMES_HOME_DEFAULT)
+    # ``terminal_env`` carries the answer the CLI resolved (flag first, then an
+    # inherited env value). Without it the prelude would resolve from this
+    # process' environment alone and record the OLD posture, which the dropped
+    # child then cannot correct — the marker is root-only by design.
+    enabled, why, recorded = persist_terminal_decision(
+        HERMES_HOME_DEFAULT, env={**_os.environ, **(terminal_env or {})}
+    )
     if not recorded:
         console.print(
             "[yellow]could not record the Hermes terminal-tool decision at "
@@ -626,7 +632,7 @@ def _provision_hermes(
                 else:
                     _os.environ[HERMES_TERMINAL_ENV] = previous
     else:
-        _hermes_root_prelude()
+        _hermes_root_prelude(provision_env)
         hal0_bin = _shutil.which("hal0") or "hal0"
         argv = [hal0_bin, "agent", "bootstrap", "hermes"]
         if repair:
