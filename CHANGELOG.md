@@ -434,7 +434,11 @@ targeted at the 1.0.x line.
   if it was deliberately stopped. To change only the posture, without that
   side effect, run `sudo env HAL0_HERMES_TERMINAL=0 hal0 agent reprovision
   hermes` instead: `reprovision` only `try-restart`s an already-running
-  unit, a no-op on a stopped one.
+  unit, a no-op on a stopped one. Either command only works on the CLI that
+  is actually rc.6: on an in-place upgrade, `/usr/local/bin/hal0` can still
+  resolve the previous release (#1844) — check with `hal0 --version` and
+  re-run the installer if it disagrees with the installed tag before
+  relying on either opt-out.
 
 ### Rollback
 
