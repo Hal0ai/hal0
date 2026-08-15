@@ -2,17 +2,17 @@
 
 ## Status
 
-**PROPOSAL — requires an operator decision. Not accepted, not implemented.**
+**ACCEPTED — Option C for 1.0 (operator decision, 2026-08-15). The
+agent-UID split (Option B) is scheduled for 1.1.**
 
-This document exists so the decision can be made cheaply. It contains a
-complete design for the requested change *and* a recommendation against
-shipping that change for 1.0. Nothing in this ADR has been implemented; no
-production code changed with it.
-
-**Recommendation: reject the root-only-file design. Adopt Option C (document
-the boundary honestly, add a doctor check, defer the real fix).** The reasoning
-is in "Why the proposed design does not close the chain" below and rests on two
-bypasses, one verified empirically and one already documented in-tree.
+The root-only-file design this ADR was asked to evaluate is **rejected**; the
+reasoning is in "Why the proposed design does not close the chain" below and
+rests on two bypasses, one verified empirically and one already documented
+in-tree. Option C's compensating measures shipped with rc.6: the `SECURITY.md`
+trust-boundary disclosure, the `hal0 doctor all` agent-UID warn row, and the
+`upstreams.toml` 0640 tightening (#1881), alongside making the terminal tool an
+explicit opt-in, default off (#1882). The rejected root-only-file design itself
+remains unimplemented by intent.
 
 ## Context
 
