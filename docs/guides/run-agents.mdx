@@ -101,9 +101,19 @@ when the terminal tool is off:
 | `hal0-tune` | Apply and measure runtime/tuning parameter changes |
 | `hal0-quantize` | Produce quantised model variants on the box |
 
-Everything else — chat, memory, personas, the kanban board, the hal0 MCP
-tools (slot state, model management, hardware readouts) — is unaffected: those
-go through the hal0 API, not a shell.
+Hermes' `delegation` toolset (`delegate_task`, which spawns subagents) goes off
+with them. A subagent's tools are chosen in the call that creates it and the
+parent's disabled toolsets are not inherited, so leaving `delegate_task`
+reachable would let anything that can talk to your agent ask for a child
+*with* a terminal — the shell you declined, one hop away. Turning the terminal
+on brings delegation back with it. What you give up in the meantime is
+parallel fan-out for subagent work that needs no shell; no bundled skill or
+persona uses it.
+
+Everything else — chat, memory, personas, the kanban board (its workers are
+spawned by hal0's own dispatcher, not `delegate_task`), and the hal0 MCP tools
+(slot state, model management, hardware readouts) — is unaffected: those go
+through the hal0 API, not a shell.
 
 ## Manage the lifecycle
 

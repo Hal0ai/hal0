@@ -1449,8 +1449,39 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 # which runs arbitrary Python as the same user — disabling one without the
 # other would leave the shell reachable by another name.
 HERMES_TERMINAL_ENV = "HAL0_HERMES_TERMINAL"
-# Toolsets subtracted when the terminal tool is OFF.
+# The EXECUTION toolsets. Both must be subtracted for a config to read as
+# "no command execution"; this pair is the readback predicate
+# (:func:`terminal_enabled_in_config`) and never grows, so a box provisioned by
+# an earlier build of this change keeps reporting the posture it actually has.
 TERMINAL_TOOLSETS: list[str] = ["terminal", "code_execution"]
+# What hal0 SUBTRACTS when the terminal is off — the execution pair plus
+# ``delegation`` (#1882 review, finding 3).
+#
+# ``delegate_task`` builds a child agent from the toolsets named in the CALL.
+# The pinned hermes-agent 0.18.2 constructs that child from ``enabled_toolsets``
+# alone and never forwards the parent's ``disabled_toolsets``, and its
+# ``DELEGATE_BLOCKED_TOOLS`` blocks ``execute_code`` but not ``terminal`` or
+# ``process``. So on a terminal-OFF box a prompt-injected agent could call
+# ``delegate_task(toolsets=["terminal"])`` and have the child run the very
+# commands the operator declined — the subtraction would be one hop deep
+# instead of closed. Same reasoning that already bundles ``code_execution``
+# with ``terminal``: a shell reachable under another name is still a shell.
+#
+# ``delegation`` is a plain toolset in hermes' registry (tools: ``delegate_task``,
+# no ``posture`` key, not a ``hermes-*`` bundle), so ``disabled_toolsets``
+# applies the same strict subtraction it already applies to the other two.
+#
+# The cost is parallel fan-out for pure-MCP subagent work; hal0 ships no skill
+# or persona that asks for it (the bundled skills using ``delegate_task`` are
+# all shell workflows that are already off), the kanban board spawns its
+# workers through its own dispatcher rather than ``delegate_task``, and hal0's
+# own cross-slot ``route_to_chat`` delegation is untouched. Opting the terminal
+# IN returns delegation with it.
+#
+# Only the TOOLSET goes. The ``delegation.{model,provider,base_url}`` config
+# block that routes subagents to the ``agent`` role slot is still written, so
+# the posture stays a pure toolset decision.
+TERMINAL_OFF_TOOLSETS: list[str] = [*TERMINAL_TOOLSETS, "delegation"]
 # hal0's own record of the decision. It exists because config.yaml alone cannot
 # tell "the operator opted in before this change" from "hermes config migrate
 # just materialised its own terminal.backend default on a half-finished fresh
@@ -1681,15 +1712,16 @@ def _config_list_keys(
 
     ``agent.disabled_toolsets`` is written in BOTH directions so the posture is
     convergent: opting in later clears the subtraction instead of leaving a
-    stale one behind. Only hal0's OWN two entries are added/removed — anything
-    else the operator disabled (``browser``, ``cronjob``, …) is preserved in
-    place, since a list value replaces rather than merges (:func:`_deep_merge`).
-    ``overrides.yaml`` still deep-merges on top last, so a hand override wins.
+    stale one behind. Only hal0's OWN entries (:data:`TERMINAL_OFF_TOOLSETS`)
+    are added/removed — anything else the operator disabled (``browser``,
+    ``cronjob``, …) is preserved in place, since a list value replaces rather
+    than merges (:func:`_deep_merge`). ``overrides.yaml`` still deep-merges on
+    top last, so a hand override wins.
     """
     keys = {k: dict(v) for k, v in HAL0_CONFIG_LIST_KEYS.items()}
-    disabled = [t for t in (existing_disabled or []) if t not in TERMINAL_TOOLSETS]
+    disabled = [t for t in (existing_disabled or []) if t not in TERMINAL_OFF_TOOLSETS]
     if not terminal_enabled:
-        disabled += TERMINAL_TOOLSETS
+        disabled += TERMINAL_OFF_TOOLSETS
     keys["agent"] = {"disabled_toolsets": disabled}
     return keys
 

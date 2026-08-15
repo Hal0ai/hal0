@@ -278,6 +278,73 @@ def test_existing_box_can_be_turned_off_explicitly(
     assert "terminal" in disabled and "code_execution" in disabled
 
 
+# ── delegation cannot be used to mint a shell the box said no to ───────────
+
+
+def test_terminal_off_also_subtracts_delegation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `delegate_task` builds a child agent from toolsets named in the CALL, and
+    # the pinned hermes-agent passes only enabled_toolsets to that child — its
+    # DELEGATE_BLOCKED_TOOLS blocks execute_code but not terminal/process. So a
+    # prompt-injected agent on a terminal-OFF box could call
+    # delegate_task(toolsets=["terminal"]) and get the shell back one hop away.
+    # With the terminal off, `delegation` goes too.
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    _out, doc = _run_config_write(tmp_path, monkeypatch)
+
+    disabled = (doc.get("agent") or {}).get("disabled_toolsets") or []
+    assert "delegation" in disabled, disabled
+
+
+def test_terminal_on_keeps_delegation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An operator who opted the terminal IN has accepted host execution, so
+    # subagents are theirs to spawn — nothing is subtracted.
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    _out, doc = _run_config_write(tmp_path, monkeypatch)
+
+    assert (doc.get("agent") or {}).get("disabled_toolsets") == []
+
+
+def test_opting_in_later_clears_the_delegation_subtraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The posture is convergent in both directions: turning the terminal on
+    # must not leave a stale `delegation` subtraction behind.
+    home = tmp_path / "hh"
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    _run_config_write(tmp_path, monkeypatch, home=home)
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    _out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+
+    assert (doc.get("agent") or {}).get("disabled_toolsets") == []
+
+
+def test_delegation_config_block_is_still_written_when_the_terminal_is_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only the TOOLSET is subtracted. The `delegation:` block routes subagents
+    # to the `agent` role slot; leaving it written keeps the posture a pure
+    # toolset decision and keeps re-enabling a one-key change.
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    _out, on_doc = _run_config_write(tmp_path, monkeypatch, home=tmp_path / "on")
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    _out2, off_doc = _run_config_write(tmp_path, monkeypatch, home=tmp_path / "off")
+
+    assert off_doc.get("delegation") == on_doc.get("delegation")
+
+
+def test_readback_posture_still_keys_on_the_execution_toolsets_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A box provisioned by an earlier build of this change has only
+    # `terminal, code_execution` on disk. It has no shell, and the reported
+    # posture must keep saying "off" — so the readback predicate stays at the
+    # two EXECUTION toolsets even though the write set is now three.
+    already_off = "agent:\n  disabled_toolsets: [terminal, code_execution]\n"
+    assert hp.terminal_enabled_in_config(already_off) is False
+
+
 # ── it must not trample anything else the operator disabled ────────────────
 
 
@@ -294,9 +361,9 @@ def test_unrelated_disabled_toolsets_are_preserved(
     _out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
 
     disabled = (doc.get("agent") or {}).get("disabled_toolsets") or []
-    assert set(disabled) == {"browser", "cronjob", "terminal", "code_execution"}
+    assert set(disabled) == {"browser", "cronjob", *hp.TERMINAL_OFF_TOOLSETS}
 
-    # And opting in removes ONLY hal0's two entries.
+    # And opting in removes ONLY hal0's own entries.
     monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
     _out2, doc2 = _run_config_write(tmp_path, monkeypatch, home=home)
     assert (doc2.get("agent") or {}).get("disabled_toolsets") == ["browser", "cronjob"]
