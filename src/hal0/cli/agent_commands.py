@@ -247,15 +247,6 @@ def _install_hermes(
     # Bring the unit up so the agent actually runs (and survives reboot).
     _enable_and_start_hermes_unit()
 
-    # A terminal-tool answer only takes effect on a process that re-reads the
-    # config. `enable --now` merely activates an already-running unit, so
-    # without this `--no-terminal-tool` would report success while live sessions
-    # kept the execution tools (and the inverse for an opt-in). Covers the env
-    # interface too (HAL0_HERMES_TERMINAL, what the installer exports) — that is
-    # an explicit answer as much as the flag is.
-    if terminal_tool is not None or _terminal_answer_in_env():
-        _restart_hermes_after_posture_change()
-
     # Telegram/Discord gateway — installer/install.sh runs this inline at
     # install time; folding it in here means the DEFERRED path (this
     # command, run after HAL0_SKIP_HERMES=1 or standalone) wires it too
@@ -274,21 +265,6 @@ def _install_hermes(
 
 
 _HERMES_POSTURE_UNITS = ("hal0-agent@hermes.service", "hermes-gateway.service")
-
-
-def _terminal_answer_in_env() -> bool:
-    """Did the environment carry an explicit terminal-tool answer?
-
-    ``HAL0_HERMES_TERMINAL`` is the documented unattended interface (and what
-    installer/install.sh exports after prompting), so it is an operator answer
-    exactly like the flag — including for deciding whether a running agent has
-    to be restarted onto the new posture.
-    """
-    import os as _os
-
-    from hal0.agents.hermes_provision import HERMES_TERMINAL_ENV
-
-    return bool(str(_os.environ.get(HERMES_TERMINAL_ENV) or "").strip())
 
 
 def _restart_hermes_after_posture_change() -> None:
@@ -611,28 +587,48 @@ def _provision_hermes(
         provision_env = {}
 
     if _os.geteuid() != 0:
+        # In-process path: the pipeline reads the answer off the environment, so
+        # set it for the duration and put it back — a permanent mutation of this
+        # process' env would outlive the call and colour a later one.
+        previous = _os.environ.get(HERMES_TERMINAL_ENV)
         _os.environ.update(provision_env)
-        return bootstrap_cli(
-            repair=repair,
-            dry_run=dry_run,
-            skip_phases=tuple(skip_phases),
-            verbose=verbose,
-        )
+        try:
+            rc = bootstrap_cli(
+                repair=repair,
+                dry_run=dry_run,
+                skip_phases=tuple(skip_phases),
+                verbose=verbose,
+            )
+        finally:
+            if provision_env:
+                if previous is None:
+                    _os.environ.pop(HERMES_TERMINAL_ENV, None)
+                else:
+                    _os.environ[HERMES_TERMINAL_ENV] = previous
+    else:
+        _hermes_root_prelude()
+        hal0_bin = _shutil.which("hal0") or "hal0"
+        argv = [hal0_bin, "agent", "bootstrap", "hermes"]
+        if repair:
+            argv.append("--repair")
+        if dry_run:
+            argv.append("--dry-run")
+        for phase in skip_phases:
+            argv += ["--skip-phase", phase]
+        if offline:
+            argv.append("--offline")
+        if verbose:
+            argv.append("--verbose")
+        rc = _run_as_hal0(argv, extra_env=provision_env)
 
-    _hermes_root_prelude()
-    hal0_bin = _shutil.which("hal0") or "hal0"
-    argv = [hal0_bin, "agent", "bootstrap", "hermes"]
-    if repair:
-        argv.append("--repair")
-    if dry_run:
-        argv.append("--dry-run")
-    for phase in skip_phases:
-        argv += ["--skip-phase", phase]
-    if offline:
-        argv.append("--offline")
-    if verbose:
-        argv.append("--verbose")
-    return _run_as_hal0(argv, extra_env=provision_env)
+    # A posture change only reaches the model once the process re-reads its
+    # config. Done HERE rather than in _install_hermes so every provisioning
+    # entry point is covered — `reprovision`, `bootstrap` and `upgrade` all
+    # land in this function and all now honour an explicit answer. No-op on a
+    # dry run (nothing was written) or a failed provision (nothing to apply).
+    if rc == 0 and not dry_run and provision_env:
+        _restart_hermes_after_posture_change()
+    return rc
 
 
 def _enable_and_start_hermes_unit() -> None:

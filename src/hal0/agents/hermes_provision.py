@@ -1546,7 +1546,10 @@ def read_terminal_state(hermes_home: Path | str) -> bool | None:
     """hal0's recorded terminal decision for this box, or ``None`` if unrecorded."""
     try:
         raw = (Path(hermes_home) / TERMINAL_STATE_FILE).read_text(encoding="utf-8").strip().lower()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # Unreadable OR undecodable both mean "no usable record" — a corrupt
+        # marker must degrade to the default-off/explicit-answer path, never
+        # abort provisioning and leave the operator unable to repair it.
         return None
     if raw in _TRUTHY:
         return True
