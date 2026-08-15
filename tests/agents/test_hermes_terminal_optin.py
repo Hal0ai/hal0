@@ -329,6 +329,26 @@ def test_an_operator_moved_backend_is_not_widened_back_to_local(
     assert (doc.get("agent") or {}).get("disabled_toolsets") == []
 
 
+def test_non_local_backend_is_recognised_whatever_its_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # hermes' own default backend is `local`, so a docker/ssh value cannot have
+    # been materialised by a migration — it is someone's choice even when the
+    # cwd is theirs too, and disabling it would break their setup.
+    home = tmp_path / "hh"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"terminal": {"backend": "ssh", "cwd": "/srv/work"}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+
+    assert out.details["terminal_tool_reason"] == "existing-config"
+    assert doc["terminal"] == {"backend": "ssh", "cwd": "/srv/work"}
+    assert (doc.get("agent") or {}).get("disabled_toolsets") == []
+
+
 def test_unwritable_state_file_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

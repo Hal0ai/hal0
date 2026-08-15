@@ -718,6 +718,13 @@ def test_posture_restart_only_fires_when_the_flag_was_answered(monkeypatch) -> N
     ac._install_hermes(switch=False, gateway=False, terminal_tool=False)
     assert seen == [True]
 
+    # The env interface is an answer too — installer/install.sh exports it, and
+    # a box that answered that way must not keep serving the old posture.
+    seen.clear()
+    monkeypatch.setenv("HAL0_HERMES_TERMINAL", "0")
+    ac._install_hermes(switch=False, gateway=False)
+    assert seen == [True]
+
 
 def test_run_as_hal0_places_extra_env_as_env_assignments(monkeypatch) -> None:
     import subprocess as _sp

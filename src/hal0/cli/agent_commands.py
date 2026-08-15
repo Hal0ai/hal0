@@ -250,8 +250,10 @@ def _install_hermes(
     # A terminal-tool answer only takes effect on a process that re-reads the
     # config. `enable --now` merely activates an already-running unit, so
     # without this `--no-terminal-tool` would report success while live sessions
-    # kept the execution tools (and the inverse for an opt-in).
-    if terminal_tool is not None:
+    # kept the execution tools (and the inverse for an opt-in). Covers the env
+    # interface too (HAL0_HERMES_TERMINAL, what the installer exports) — that is
+    # an explicit answer as much as the flag is.
+    if terminal_tool is not None or _terminal_answer_in_env():
         _restart_hermes_after_posture_change()
 
     # Telegram/Discord gateway — installer/install.sh runs this inline at
@@ -272,6 +274,21 @@ def _install_hermes(
 
 
 _HERMES_POSTURE_UNITS = ("hal0-agent@hermes.service", "hermes-gateway.service")
+
+
+def _terminal_answer_in_env() -> bool:
+    """Did the environment carry an explicit terminal-tool answer?
+
+    ``HAL0_HERMES_TERMINAL`` is the documented unattended interface (and what
+    installer/install.sh exports after prompting), so it is an operator answer
+    exactly like the flag — including for deciding whether a running agent has
+    to be restarted onto the new posture.
+    """
+    import os as _os
+
+    from hal0.agents.hermes_provision import HERMES_TERMINAL_ENV
+
+    return bool(str(_os.environ.get(HERMES_TERMINAL_ENV) or "").strip())
 
 
 def _restart_hermes_after_posture_change() -> None:

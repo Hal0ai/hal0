@@ -1512,13 +1512,18 @@ def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) 
     ``None`` means "the file says nothing that can be read as an operator
     decision" — the fresh-install case, which defaults OFF.
 
-    A box provisioned before this change carries hal0's own terminal overlay:
-    a backend AND ``terminal.cwd`` pointing at ``$HERMES_HOME/scratch``, which
-    only this provisioner ever writes (hermes' own default cwd is ``"."``).
-    That pair is the evidence, and it is load-bearing: ``hermes config migrate``
-    materialises hermes' own ``terminal.backend: local`` default, so "a backend
-    is set" on its own would read a half-provisioned FRESH box as consent.
-    Consent is never inferred from a file hal0 has not finished writing.
+    Two shapes count as an operator decision:
+
+    * any backend OTHER than ``local`` — hermes' own default is ``local``, so a
+      docker/ssh/modal value cannot have been materialised by a migration and
+      is necessarily someone's choice, whatever ``cwd`` it carries;
+    * ``local`` together with ``terminal.cwd`` == ``$HERMES_HOME/scratch``,
+      which only this provisioner ever writes (hermes' default cwd is ``"."``).
+
+    The cwd evidence on the ``local`` branch is load-bearing: ``hermes config
+    migrate`` materialises ``terminal.backend: local``, so "a backend is set" on
+    its own would read a half-provisioned FRESH box as consent. Consent is never
+    inferred from a file hal0 has not finished writing.
     """
     data = _parse_yaml_config(config_text)
     if data is None:
@@ -1526,8 +1531,13 @@ def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) 
     if "terminal" in _disabled_toolsets(data):
         return False
     terminal = data.get("terminal")
-    if not (isinstance(terminal, dict) and str(terminal.get("backend") or "").strip()):
+    if not isinstance(terminal, dict):
         return None
+    backend = str(terminal.get("backend") or "").strip()
+    if not backend:
+        return None
+    if backend != "local":
+        return True
     cwd = str(terminal.get("cwd") or "").strip()
     return True if cwd and cwd == str(Path(hermes_home) / "scratch") else None
 
