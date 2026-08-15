@@ -1470,6 +1470,21 @@ TERMINAL_TOOLSETS: list[str] = ["terminal", "code_execution"]
 # next restart. What this closes is the laundering path: agent-controlled state
 # can never present itself to a later provision as the operator's decision.
 TERMINAL_STATE_PATH = Path("/etc/hal0/agents/hermes-terminal-tool")
+
+# Hermes' OWN default ``terminal.cwd``, as materialised by `hermes config
+# migrate`. A config carrying only this is upstream's default, never hal0's
+# overlay, so it can never be read as operator consent.
+HERMES_DEFAULT_TERMINAL_CWDS: frozenset[str] = frozenset({".", "./"})
+# Every literal ``terminal.cwd`` hal0 itself has written in a released tag, from
+# `git log -S'terminal.cwd' -- src/hal0/agents/hermes_provision.py`:
+#
+#   ce4f9ded (v0.7.3-nightly.20260621 … v0.9.8) → "/etc/hal0"
+#   cda957c3 (v0.9.8-nightly.20260720084155 …)  → "$HERMES_HOME/scratch"
+#
+# The scratch shape is $HERMES_HOME-relative and so is matched dynamically in
+# _existing_terminal_choice; only the fixed literals live here. Boxes carrying
+# either shape have a working terminal today and keep it across an update.
+HAL0_WRITTEN_TERMINAL_CWDS: frozenset[str] = frozenset({"/etc/hal0"})
 _TRUTHY = {"1", "true", "yes", "on", "y"}
 _FALSEY = {"0", "false", "no", "off", "n"}
 
@@ -1529,13 +1544,20 @@ def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) 
     * any backend OTHER than ``local`` — hermes' own default is ``local``, so a
       docker/ssh/modal value cannot have been materialised by a migration and
       is necessarily someone's choice, whatever ``cwd`` it carries;
-    * ``local`` together with ``terminal.cwd`` == ``$HERMES_HOME/scratch``,
-      which only this provisioner ever writes (hermes' default cwd is ``"."``).
+    * ``local`` together with ANY ``terminal.cwd`` that is not hermes' own
+      default (:data:`HERMES_DEFAULT_TERMINAL_CWDS` — ``"."`` or unset).
 
     The cwd evidence on the ``local`` branch is load-bearing: ``hermes config
     migrate`` materialises ``terminal.backend: local``, so "a backend is set" on
     its own would read a half-provisioned FRESH box as consent. Consent is never
     inferred from a file hal0 has not finished writing.
+
+    Any non-default cwd counts, rather than only today's
+    ``$HERMES_HOME/scratch``, because hal0 has written more than one shape over
+    its releases (:data:`HAL0_WRITTEN_TERMINAL_CWDS`) and an operator may have
+    pointed it somewhere of their own. Every one of those boxes has a working
+    shell right now, and matching only the newest shape would silently disable
+    it on update (#1882 review, finding 1).
     """
     data = _parse_yaml_config(config_text)
     if data is None:
@@ -1551,7 +1573,11 @@ def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) 
     if backend != "local":
         return True
     cwd = str(terminal.get("cwd") or "").strip()
-    return True if cwd and cwd == str(Path(hermes_home) / "scratch") else None
+    if cwd in HAL0_WRITTEN_TERMINAL_CWDS or cwd == str(Path(hermes_home) / "scratch"):
+        return True
+    if not cwd or cwd in HERMES_DEFAULT_TERMINAL_CWDS:
+        return None
+    return True
 
 
 def read_terminal_state() -> bool | None:

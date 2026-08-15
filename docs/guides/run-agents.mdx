@@ -78,11 +78,15 @@ writes can present itself to a later provision as your decision.
 
 `hal0 agent status hermes` prints the current posture on its own line.
 
-**Upgrades keep your setting.** A box provisioned before this change already
-has `terminal.backend: local` in its Hermes config, and an update treats that
-as your answer and leaves it enabled. Run
-`sudo hal0 agent install hermes --no-terminal-tool` if you would rather it
-were off.
+**Upgrades keep your setting.** Every hal0 release that provisioned Hermes
+wrote both `terminal.backend: local` and a `terminal.cwd` of its own — first
+`/etc/hal0`, then `$HERMES_HOME/scratch`. An update recognises any of those
+shapes, and any `cwd` you set yourself, as your answer and leaves the terminal
+enabled. Only Hermes' own untouched default (backend `local` with no `cwd`, or
+`cwd: "."`, which `hermes config migrate` writes on a box hal0 never finished
+provisioning) is not read as consent — those boxes start off, like a fresh
+install. Run `sudo hal0 agent install hermes --no-terminal-tool` if you would
+rather an upgraded box were off.
 
 ### What you lose with it off
 

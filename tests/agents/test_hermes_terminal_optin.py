@@ -196,6 +196,69 @@ def test_existing_local_backend_survives_an_update(
     assert doc["agent"]["max_turns"] == 60
 
 
+def test_legacy_etc_hal0_cwd_survives_an_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Shape of a box provisioned between v0.7.3-nightly.20260621 (commit
+    # ce4f9ded) and v0.9.8 (commit cda957c3 moved it): hal0 wrote
+    # terminal.cwd: /etc/hal0. That agent has a working shell today and an
+    # update must not silently take it away.
+    home = tmp_path / "hh"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {"default": "hal0/agent"},
+                "terminal": {"backend": "local", "cwd": "/etc/hal0"},
+                "agent": {"max_turns": 60},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+
+    assert out.details["terminal_tool"] == "on"
+    assert out.details["terminal_tool_reason"] == "existing-config"
+    assert doc["terminal"]["backend"] == "local"
+    assert (doc.get("agent") or {}).get("disabled_toolsets") == []
+
+
+def test_operator_custom_cwd_survives_an_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An operator who pointed the local terminal at their own directory made a
+    # choice hermes' migration could never have made for them. Any cwd that is
+    # not hermes' own default is evidence of a deliberate, working setup.
+    home = tmp_path / "hh"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {"terminal": {"backend": "local", "cwd": "/srv/agent-work"}}, sort_keys=False
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+
+    assert out.details["terminal_tool_reason"] == "existing-config"
+    assert (doc.get("agent") or {}).get("disabled_toolsets") == []
+
+
+@pytest.mark.parametrize("cwd", [None, "", ".", "./", " . "])
+def test_upstream_default_shape_is_never_read_as_consent(cwd: str | None) -> None:
+    # hermes' own `config migrate` writes backend: local with cwd "." (or leaves
+    # cwd unset). That is upstream's default, not hal0's overlay, so it can
+    # never be operator consent — those boxes stay default-OFF.
+    terminal: dict[str, str] = {"backend": "local"}
+    if cwd is not None:
+        terminal["cwd"] = cwd
+    config_text = yaml.safe_dump({"terminal": terminal}, sort_keys=False)
+
+    assert hp.terminal_tool_enabled(config_text=config_text, env={}) == (False, "default-off")
+
+
 def test_existing_box_can_be_turned_off_explicitly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
