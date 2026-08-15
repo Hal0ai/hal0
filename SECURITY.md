@@ -77,13 +77,11 @@ document warns about. Closing the chain for 1.1 means the UID split *and*
 dropping the agent out of the `hal0` group / config-tree write access — not
 the UID split alone. The analysis, the evidence, and the rejected alternatives
 are in
-ADR-0002 — agent credential isolation, under review in
-[PR #1880](https://github.com/Hal0ai/hal0/pull/1880) and landing at
-`docs/adr/0002-agent-credential-isolation.md`. (Linked as a PR, not as a
-relative path, because the ADR is still a proposal awaiting an operator
-decision — a link that 404s in-tree would be worse than one extra click.)
+[ADR-0002 — agent credential isolation](docs/adr/0002-agent-credential-isolation.md),
+accepted for 1.0 as Option C on 2026-08-15 (merged in
+[PR #1880](https://github.com/Hal0ai/hal0/pull/1880)).
 
-`hal0 doctor` reports this posture directly: the **Agent UID split** row warns
+`hal0 doctor all` reports this posture directly: the **Agent UID split** row warns
 when an agent unit resolves to the same `User=` as `hal0-api.service`.
 
 ### If you cannot accept it
