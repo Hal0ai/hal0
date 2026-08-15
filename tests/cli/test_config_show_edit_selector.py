@@ -70,3 +70,36 @@ def test_config_edit_upstreams_seeds_and_opens_upstreams_toml(monkeypatch, tmp_p
     assert seeded.exists()
     # hal0.toml's bespoke seed content must NOT leak into other files.
     assert "port_range_start" not in seeded.read_text()
+
+
+def test_permission_denied_hint_does_not_recommend_widening_the_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The remedy is sudo or group membership — never `chmod 0644`.
+
+    upstreams.toml is 0640 as of ADR-0002 (its provider inventory is not public
+    information). The old hint told an operator hitting PermissionError to
+    `sudo chmod 0644` the selected file, i.e. to undo that tightening by hand —
+    and `hal0 doctor perms` would then converge it back, so the advice was both
+    harmful and wrong. Asserts the rendered hint directly.
+    """
+    cfg_dir = _set_home(monkeypatch, tmp_path)
+    target = cfg_dir / "upstreams.toml"
+    target.write_text("[[upstream]]\nname = 'demo'\n")
+
+    def _boom(*_a, **_k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+
+    result = runner.invoke(config_commands.app, ["show", "upstreams"])
+
+    assert result.exit_code == 1, result.output
+    # Rich wraps the panel, so compare with all whitespace removed — a
+    # recommendation split across two lines is still a recommendation.
+    out = "".join(result.output.split())
+    assert "Permissiondenied" in out
+    assert "0644" not in out, f"hint still names a world-readable mode: {result.output}"
+    assert "sudochmod" not in out, f"hint still recommends a chmod: {result.output}"
+    assert "sudo" in out
+    assert "usermod-aGhal0" in out

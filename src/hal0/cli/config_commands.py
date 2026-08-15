@@ -70,17 +70,24 @@ def config_show(
     # Translate PermissionError into a clear hint — pre-v0.1.3 installs
     # left /etc/hal0 mode 0700 in some umask-tightened environments,
     # which makes `hal0 config show` from a non-root shell explode with
-    # a raw Python traceback. Re-run under sudo or chmod the config tree
-    # 0755/0644 (the installer does this for fresh installs as of
-    # v0.1.3).
+    # a raw Python traceback.
+    #
+    # The remedy is sudo, or membership of the `hal0` group — deliberately NOT
+    # `chmod 0644`, which this hint used to recommend. Every file under
+    # /etc/hal0 is either secret-bearing (api.env, hal0.toml, slots/*.toml) or
+    # inventory the box has no reason to publish to every local account
+    # (upstreams.toml, ADR-0002); telling an operator to widen it is telling
+    # them to undo `hal0 doctor perms`, which converges the mode straight back.
     try:
         body = path.read_text()
     except PermissionError as exc:
         console.print(f"[red]Permission denied:[/red] {path}")
         console.print(
-            "[dim]The config is owned by root. Re-run with [bold]sudo[/bold], "
-            "or run [bold]sudo chmod 0755 /etc/hal0 && sudo chmod 0644 "
-            f"{path}[/bold] once and the command will work without sudo.[/dim]"
+            "[dim]The config is owned by the service account. Re-run with "
+            "[bold]sudo[/bold], or add yourself to the [bold]hal0[/bold] group "
+            "([bold]sudo usermod -aG hal0 $USER[/bold], then re-login). Do not "
+            "chmod it world-readable — /etc/hal0 holds credentials and provider "
+            "inventory, and `hal0 doctor perms` re-tightens it anyway.[/dim]"
         )
         raise typer.Exit(1) from exc
     console.print(

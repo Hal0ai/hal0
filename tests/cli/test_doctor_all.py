@@ -344,9 +344,10 @@ def test_agent_uid_flags_only_the_sharing_instance() -> None:
 
 
 def test_agent_uid_probes_degrade_without_systemctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No systemctl → *unknown*, never an empty inventory (which would read clean)."""
     monkeypatch.setattr(da.shutil, "which", lambda _cmd: None)
     assert da._unit_user("hal0-api.service") is None
-    assert da._agent_units() == []
+    assert da._agent_units() is None
 
 
 def test_unit_user_reports_root_for_an_empty_user_directive(
@@ -365,6 +366,7 @@ def test_unit_user_reports_root_for_an_empty_user_directive(
 
 def test_agent_units_parses_list_units_output(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
+    monkeypatch.setattr(da, "_enabled_agent_units", lambda: [])
 
     class _R:
         returncode = 0
@@ -375,6 +377,95 @@ def test_agent_units_parses_list_units_output(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
     assert da._agent_units() == ["hal0-agent@hermes.service", "hal0-agent@other.service"]
+
+
+def test_agent_units_is_unknown_when_systemctl_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A manager error must not be laundered into "no agent installed"."""
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
+
+    class _R:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
+    assert da._agent_units() is None
+
+
+def test_agent_units_finds_a_stopped_unloaded_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`list-units` only reports units in memory; the enable symlink outlives that.
+
+    An operator who stopped the agent has not uninstalled it — the boundary is
+    still there the moment it starts again, so the row must still see it.
+    """
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
+
+    class _R:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
+    monkeypatch.setattr(da, "_enabled_agent_units", lambda: ["hal0-agent@hermes.service"])
+    assert da._agent_units() == ["hal0-agent@hermes.service"]
+
+
+def test_enabled_agent_units_reads_wants_symlinks(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    wants = tmp_path / "multi-user.target.wants"
+    wants.mkdir()
+    (wants / "hal0-agent@hermes.service").symlink_to(tmp_path / "hal0-agent@.service")
+    (wants / "hal0-api.service").symlink_to(tmp_path / "hal0-api.service")
+    assert da._enabled_agent_units(tmp_path) == ["hal0-agent@hermes.service"]
+
+
+def test_enabled_agent_units_missing_unit_dir_is_empty(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    assert da._enabled_agent_units(tmp_path / "nope") == []
+
+
+def test_agent_uid_unknown_inventory_warns() -> None:
+    """systemd could not be asked → warn, not a clean row."""
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda _u: "hal0",
+        agent_units=lambda: None,
+    )
+    assert c.status == "warn"
+    assert "could not enumerate" in c.detail
+
+
+def test_agent_uid_unknown_agent_user_warns_instead_of_passing() -> None:
+    """An unreadable agent User= must not fall through to "runs as a different user"."""
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda u: "hal0" if u == "hal0-api.service" else None,
+        agent_units=lambda: ["hal0-agent@hermes.service"],
+    )
+    assert c.status == "warn"
+    assert "hal0-agent@hermes.service" in c.detail
+    assert "could not read User=" in c.detail
+
+
+def test_agent_uid_compares_resolved_uids_not_strings() -> None:
+    """A drop-in spelling one side numerically is still the same UID to the kernel."""
+    users = {"hal0-api.service": "hal0", "hal0-agent@hermes.service": "991"}
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda u: users[u],
+        agent_units=lambda: ["hal0-agent@hermes.service"],
+        resolve_uid=lambda user: 991 if user in ("hal0", "991") else None,
+    )
+    assert c.status == "warn", "numeric-vs-name spelling must not read as a UID split"
+    assert "uid 991" in c.detail
+
+
+def test_agent_uid_distinct_uids_pass_despite_a_shared_prefix() -> None:
+    users = {"hal0-api.service": "hal0", "hal0-agent@hermes.service": "hal0-agent"}
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda u: users[u],
+        agent_units=lambda: ["hal0-agent@hermes.service"],
+        resolve_uid=lambda user: {"hal0": 991, "hal0-agent": 992}[user],
+    )
+    assert c.status == "pass"
+
+
+def test_resolve_uid_accepts_a_numeric_literal_and_unknown_names() -> None:
+    assert da._resolve_uid("4242") == 4242
+    assert da._resolve_uid("definitely-not-a-real-account-x9") is None
 
 
 # ── overall_verdict + exit codes ──────────────────────────────────────────────

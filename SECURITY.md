@@ -51,7 +51,7 @@ injection from content it reads — it can reach every credential the box holds.
 | `User=hal0` (unprivileged, not root) | The agent is not UID 0; kernel-level and other-user data stay out of reach | Any separation from `hal0-api`, which is the same UID |
 | systemd sandboxing on the units (`ProtectSystem=strict`, `PrivateTmp`, restricted `ReadWritePaths=`) | Integrity: the agent cannot rewrite `/usr`, `/boot`, or most of `/etc` | Confidentiality of anything the `hal0` user may read, including `/proc` of same-UID processes |
 | `NoNewPrivileges=yes` on `hal0-agent@` | The agent's own processes cannot invoke the setuid `sudo` wrappers | Anything about `hal0-api`, which sets no such restriction and is reachable with the admin key the agent can read |
-| `0600 root:root` on `/etc/hal0/agents/<instance>.env` | The agent cannot read *another* agent's MCP token | Protection of `api.env`-sourced values, which are already in the API's environment |
+| `0600 root:root` on `/etc/hal0/agents/<instance>.env` | The agent cannot *open another instance's file*, and cannot create, replace or unlink one | Confidentiality of that instance's `HAL0_MCP_TOKEN`: with two agent instances running as the same user, either can read the other's `/proc/<pid>/environ`, so the file mode does not isolate the token itself |
 | Owner-only `0600` on `/etc/hal0/api.env` | Other local accounts cannot read it | Anything against the agent, which is the owner |
 
 Moving secrets into a `root:root 0600` file loaded by pid1 does **not** close
