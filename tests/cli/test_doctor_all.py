@@ -417,12 +417,19 @@ def test_provisioned_agent_units_reads_wants_symlinks(tmp_path, monkeypatch) -> 
     assert da._provisioned_agent_units(tmp_path) == ["hal0-agent@hermes.service"]
 
 
-def test_provisioned_agent_units_reads_dropin_dirs(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """`hal0 agent disable` leaves the drop-in dir behind — that instance still counts."""
+def test_provisioned_agent_units_ignores_the_shipped_dropin_dir(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A drop-in dir alone is not evidence of an installed agent.
+
+    `installer/install.sh` writes `hal0-agent@hermes.service.d/override.conf`
+    on every install "whether or not bootstrap has been run", so a box built
+    with the documented `HAL0_SKIP_HERMES=1` has the drop-in and no agent.
+    Counting it would warn about an agent the operator deliberately declined.
+    """
     monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
-    (tmp_path / "hal0-agent@hermes.service.d").mkdir()
-    (tmp_path / "hal0-api.service.d").mkdir()
-    assert da._provisioned_agent_units(tmp_path) == ["hal0-agent@hermes.service"]
+    dropin = tmp_path / "hal0-agent@hermes.service.d"
+    dropin.mkdir()
+    (dropin / "override.conf").write_text("[Service]\n")
+    assert da._provisioned_agent_units(tmp_path) == []
 
 
 def test_provisioned_agent_units_reads_per_agent_config(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

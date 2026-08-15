@@ -64,8 +64,11 @@ This is the shipped default for hal0 1.0 and an accepted risk, disclosed here
 rather than papered over. Giving the agent its own system user with no sudoers
 grants — the change that actually closes the chain — is tracked for 1.1. The
 analysis, the evidence, and the rejected alternatives are in
-[ADR-0002 — agent credential isolation](docs/adr/0002-agent-credential-isolation.md)
-(proposed in [PR #1880](https://github.com/Hal0ai/hal0/pull/1880)).
+ADR-0002 — agent credential isolation, under review in
+[PR #1880](https://github.com/Hal0ai/hal0/pull/1880) and landing at
+`docs/adr/0002-agent-credential-isolation.md`. (Linked as a PR, not as a
+relative path, because the ADR is still a proposal awaiting an operator
+decision — a link that 404s in-tree would be worse than one extra click.)
 
 `hal0 doctor` reports this posture directly: the **Agent UID split** row warns
 when an agent unit resolves to the same `User=` as `hal0-api.service`.

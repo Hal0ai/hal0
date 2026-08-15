@@ -211,14 +211,20 @@ def _provisioned_agent_units(unit_dir: Path | None = None) -> list[str]:
 
     ``systemctl list-units`` reports units *in memory*, and the ``.wants``
     symlinks only cover *enabled* instances — but ``hal0 agent disable`` stops
-    and disables an instance without removing its drop-in, its env file or its
-    config, and ``hal0 agent start`` brings it straight back. That instance is
-    still the boundary this row reports on, so discovery also reads the
-    persistent artifacts:
+    and disables an instance without removing its env file or its config, and
+    ``hal0 agent start`` brings it straight back. That instance is still the
+    boundary this row reports on, so discovery also reads the install-state
+    artifacts:
 
     * ``<unit_dir>/*.target.wants/hal0-agent@*.service`` — enable symlinks
-    * ``<unit_dir>/hal0-agent@<i>.service.d/`` — per-instance drop-in dirs
-    * ``/etc/hal0/agents/<i>.{toml,env}`` — per-instance config / env
+    * ``/etc/hal0/agents/<i>.{toml,env}`` — per-instance config / env, written
+      by provisioning
+
+    Deliberately **not** the ``hal0-agent@<i>.service.d/`` drop-in dirs:
+    ``installer/install.sh`` lays down ``hal0-agent@hermes.service.d/`` on every
+    install "whether or not bootstrap has been run", so a box installed with the
+    documented ``HAL0_SKIP_HERMES=1`` escape hatch has the drop-in and no agent.
+    Counting it would warn about an agent the operator deliberately declined.
 
     Best effort: an unreadable directory contributes nothing rather than
     raising. Callers treat "found nothing anywhere" as no agent only when the
@@ -229,9 +235,6 @@ def _provisioned_agent_units(unit_dir: Path | None = None) -> list[str]:
     with contextlib.suppress(OSError):
         for wants in sorted(root.glob("*.target.wants")):
             names.update(p.name for p in wants.glob(_AGENT_UNIT_GLOB))
-    with contextlib.suppress(OSError):
-        for dropin in root.glob("hal0-agent@*.service.d"):
-            names.add(dropin.name[: -len(".d")])
     with contextlib.suppress(OSError):
         for cfg in paths.agents_config_dir().iterdir():
             if cfg.suffix in (".toml", ".env") and cfg.stem:
@@ -338,7 +341,7 @@ def check_agent_uid_isolation(
             f"{', '.join(shared)} runs as the same user as {_API_UNIT} — {who} — so the "
             "bundled agent's shell can read the API's /proc/<pid>/environ and every credential "
             "in it — accepted, documented 1.0 posture; see SECURITY.md 'Bundled agent trust "
-            "boundary' and docs/adr/0002-agent-credential-isolation.md",
+            "boundary' (ADR-0002)",
         )
     if unknown:
         return Check(
