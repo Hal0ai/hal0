@@ -12,7 +12,9 @@ OpenWebUI, Hermes), then adds the broader health rows the retrofit calls for:
 auth posture, model-store integrity, pending migrations, a stale-dashboard
 ``HAL0_UI_DIST`` override (#1589), bound slot ports, the ``hal0.target``
 boot-enable anchor (r5-sync-assessment §6.1), the privileged sudo seams
-every slot op + self-update runs through (#1465), and the context window behind
+every slot op + self-update runs through (#1465), whether the bundled agent
+shares ``hal0-api``'s UID (ADR-0002 — advisory, it is the shipped default),
+and the context window behind
 Hermes' anchor model (#1867 — the smoke probes never run on an in-place
 upgrade, which is the only shape that defect survives in).
 
@@ -120,6 +122,135 @@ def check_secret_file_modes() -> Check:
             critical=True,
         )
     return Check("secret-modes", "Secret file modes", _PASS, "secret files are owner-only")
+
+
+#: The API unit, and the agent template whose instances carry the bundled agent.
+_API_UNIT = "hal0-api.service"
+_AGENT_UNIT_GLOB = "hal0-agent@*.service"
+
+
+def _unit_user(unit: str) -> str | None:
+    """``systemctl show -p User --value <unit>`` → the effective ``User=``.
+
+    ``None`` means the question could not be asked (no ``systemctl``, unit
+    unknown); an empty ``User=`` means the unit runs as ``root``, which
+    systemd reports as the empty string, so that is normalised here.
+    """
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        result = subprocess.run(  # nosec B603 B607
+            ["systemctl", "show", "-p", "User", "--value", unit],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or "root"
+
+
+def _agent_units() -> list[str]:
+    """Installed/loaded ``hal0-agent@<instance>.service`` units, best effort."""
+    if shutil.which("systemctl") is None:
+        return []
+    try:
+        result = subprocess.run(  # nosec B603 B607
+            [
+                "systemctl",
+                "list-units",
+                "--all",
+                "--plain",
+                "--no-legend",
+                "--no-pager",
+                "--type=service",
+                _AGENT_UNIT_GLOB,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    units: list[str] = []
+    for line in result.stdout.splitlines():
+        name = line.split(maxsplit=1)[0] if line.split() else ""
+        if name.startswith("hal0-agent@") and name.endswith(".service"):
+            units.append(name)
+    return units
+
+
+def check_agent_uid_isolation(
+    *,
+    unit_user: Callable[[str], str | None] | None = None,
+    agent_units: Callable[[], list[str]] | None = None,
+) -> Check:
+    """Does the bundled agent share ``hal0-api``'s UID? (ADR-0002, advisory.)
+
+    ``hal0-api.service`` and ``hal0-agent@<instance>.service`` both ship with
+    ``User=hal0``. Same UID means the agent — which is provisioned with
+    ``terminal.backend = local`` and can therefore run shell commands — passes
+    ``PTRACE_MODE_READ_FSCREDS`` against the API process and can read
+    ``/proc/<pid>/environ``, i.e. every credential the API holds. Yama's
+    ``ptrace_scope`` does not stop this; it gates ``PTRACE_MODE_ATTACH``, not
+    same-UID reads. The ``hal0`` account additionally holds the sudo grants
+    that author rootful podman slot specs, so it is root-equivalent by design
+    (``installer/wrappers/hal0-systemctl``'s HONEST BOUNDARY block).
+
+    This is the **shipped 1.0 default** and an accepted, documented risk, so
+    the row is a ``warn``, never a ``fail``: it exists to make sure an operator
+    reading ``hal0 doctor`` learns where the boundary is rather than inferring
+    a boundary that is not there. ADR-0002 tracks the agent-UID split for 1.1.
+
+    Both probes are injectable so the classification is testable without
+    systemd (mirrors :func:`check_hal0_target`).
+    """
+    probe_user = unit_user if unit_user is not None else _unit_user
+    probe_units = agent_units if agent_units is not None else _agent_units
+    units = probe_units()
+    if not units:
+        return Check(
+            "agent-uid",
+            "Agent UID split",
+            _PASS,
+            "no hal0-agent@* unit installed — no bundled agent on this box",
+        )
+    api_user = probe_user(_API_UNIT)
+    if api_user is None:
+        return Check(
+            "agent-uid",
+            "Agent UID split",
+            _WARN,
+            f"could not read User= for {_API_UNIT} — agent/API UID split unknown "
+            "(see SECURITY.md 'Bundled agent trust boundary')",
+        )
+    shared = []
+    for unit in units:
+        agent_user = probe_user(unit)
+        if agent_user is not None and agent_user == api_user:
+            shared.append(unit)
+    if shared:
+        return Check(
+            "agent-uid",
+            "Agent UID split",
+            _WARN,
+            f"{', '.join(shared)} runs as the same user as {_API_UNIT} ({api_user}), so the "
+            "bundled agent's shell can read the API's /proc/<pid>/environ and every credential "
+            "in it — accepted, documented 1.0 posture; see SECURITY.md 'Bundled agent trust "
+            "boundary' and docs/adr/0002-agent-credential-isolation.md",
+        )
+    return Check(
+        "agent-uid",
+        "Agent UID split",
+        _PASS,
+        f"agent unit(s) run as a different user than {_API_UNIT} ({api_user})",
+    )
 
 
 def check_voice_stt_weights() -> Check:
@@ -903,6 +1034,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_netns_durability(),
         check_hal0_target(),
         check_secret_file_modes(),
+        check_agent_uid_isolation(),
         check_voice_stt_weights(),
         check_seams(),
         check_mcp_mounts(),

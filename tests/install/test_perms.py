@@ -746,3 +746,21 @@ def test_regular_files_are_still_reconciled_alongside_symlinks(tmp_path: Path) -
     assert plain in applied
     assert oct(plain.stat().st_mode & 0o7777) == oct(0o644)
     assert oct(outside.stat().st_mode & 0o7777) == oct(0o600)
+
+
+def test_upstreams_toml_is_not_world_readable(tmp_hal0_home: str) -> None:
+    """upstreams.toml drops the world bit (ADR-0002, Option C item 3).
+
+    The file carries no credential *values* — ``auth_value_env`` names an
+    environment variable and the registry resolves it at request time — but the
+    provider/endpoint inventory it does carry was readable by every local
+    account at 0644. 0640 keeps every in-tree consumer working: hal0-api,
+    hal0-agent@* and the CLI all run as ``hal0`` (or root), and the file's group
+    is ``hal0``. Asserted against the ownership table under the service-user
+    flip, because that is the posture every installed box runs.
+    """
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    row = rows[paths.etc() / "upstreams.toml"]
+    assert (row.owner, row.group) == ("hal0", "hal0")
+    assert row.mode & 0o007 == 0, f"upstreams.toml is world-readable: {row.mode:o}"
+    assert row.mode == 0o640

@@ -105,7 +105,7 @@ LogsDirectory=hal0
 #
 # Be honest about what the boundary buys. /etc/hal0 is hal0:hal0 2775 and
 # most of its contents are hal0-owned: api.env is 0600 hal0:hal0,
-# upstreams.toml 0644 hal0:hal0 — both readable AND rewritable by the
+# upstreams.toml 0640 hal0:hal0 — both readable AND rewritable by the
 # User=hal0 agent once the path is writable. There is no root-owned
 # tokens.toml / auth.toml gating anything; those files do not exist on any
 # box. Because the directory itself is hal0-owned and not sticky, the
