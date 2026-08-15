@@ -502,10 +502,18 @@ fi
 # privilege-dropped provisioning under it) sees the same answer.
 #
 # Not asked on an upgrade (the hermes venv already exists): that box already
-# has an answer recorded in its config.yaml, and the provisioner preserves it.
-# Re-asking would let a distracted Enter silently disable a working agent.
+# has a recorded answer, and the provisioner preserves it. Re-asking would let
+# a distracted Enter silently disable a working agent.
+#
+# Also not asked when this run will not provision Hermes at all (--dev,
+# HAL0_SKIP_HERMES=1): the answer lives only in this shell's environment, so
+# asking for consent we would then drop on the floor is worse than not asking —
+# the operator answers again on the deferred `hal0 agent install hermes
+# --terminal-tool`.
 _ht_answer=""
 if [[ -z "${HAL0_HERMES_TERMINAL:-}" ]] \
+   && [[ "${DEV_MODE}" -eq 0 ]] \
+   && [[ "${HAL0_SKIP_HERMES:-0}" -ne 1 ]] \
    && [[ ! -x /var/lib/hal0/venvs/hermes/bin/hermes ]] \
    && _interactive; then
     printf '\n' >/dev/tty 2>/dev/null || true

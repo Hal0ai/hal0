@@ -47,10 +47,15 @@ def _run_config_write(
 
 
 def _terminal_is_off(doc: dict) -> bool:
-    """Both halves of "off": no hal0-written backend, and the toolsets subtracted."""
+    """What actually removes the tool from hermes' schema: the subtraction.
+
+    A leftover ``terminal.backend`` in the file is harmless and deliberately not
+    deleted — hal0 layers its keys onto a hermes-owned file and never strips
+    hermes' own. The fresh-install cases assert separately that hal0 writes no
+    ``terminal.*`` key of its own.
+    """
     disabled = (doc.get("agent") or {}).get("disabled_toolsets") or []
-    terminal = doc.get("terminal") or {}
-    return "terminal" in disabled and "code_execution" in disabled and "backend" not in terminal
+    return "terminal" in disabled and "code_execution" in disabled
 
 
 # ── fresh install ───────────────────────────────────────────────────────────
@@ -66,6 +71,8 @@ def test_fresh_install_defaults_terminal_off(
     assert out.details["terminal_tool"] == "off"
     assert out.details["terminal_tool_reason"] == "default-off"
     assert _terminal_is_off(doc), doc
+    # hal0 writes no terminal.* key at all on a fresh box.
+    assert "terminal" not in doc, doc.get("terminal")
 
 
 def test_fresh_config_yaml_never_ships_a_local_terminal_backend(
@@ -132,7 +139,7 @@ def test_opt_in_persists_across_a_later_reprovision(
     monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
     out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
 
-    assert out.details["terminal_tool_reason"] == "existing-config"
+    assert out.details["terminal_tool_reason"] == "recorded"
     assert doc["terminal"]["backend"] == "local"
 
 
@@ -162,6 +169,7 @@ def test_existing_local_backend_survives_an_update(
         yaml.safe_dump(
             {
                 "model": {"default": "hal0/agent"},
+                "memory": {"provider": "hal0-memory"},
                 "terminal": {"backend": "local", "cwd": str(home / "scratch")},
                 "agent": {"max_turns": 60},
             },
@@ -186,7 +194,10 @@ def test_existing_box_can_be_turned_off_explicitly(
     home = tmp_path / "hh"
     home.mkdir(parents=True)
     (home / "config.yaml").write_text(
-        yaml.safe_dump({"terminal": {"backend": "local", "cwd": "/x"}}, sort_keys=False),
+        yaml.safe_dump(
+            {"memory": {"provider": "hal0-memory"}, "terminal": {"backend": "local", "cwd": "/x"}},
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "0")
@@ -194,6 +205,106 @@ def test_existing_box_can_be_turned_off_explicitly(
 
     disabled = (doc.get("agent") or {}).get("disabled_toolsets") or []
     assert "terminal" in disabled and "code_execution" in disabled
+
+
+# ── it must not trample anything else the operator disabled ────────────────
+
+
+def test_unrelated_disabled_toolsets_are_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hh"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"agent": {"disabled_toolsets": ["browser", "cronjob"]}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    _out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+
+    disabled = (doc.get("agent") or {}).get("disabled_toolsets") or []
+    assert set(disabled) == {"browser", "cronjob", "terminal", "code_execution"}
+
+    # And opting in removes ONLY hal0's two entries.
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    _out2, doc2 = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert (doc2.get("agent") or {}).get("disabled_toolsets") == ["browser", "cronjob"]
+
+
+# ── a half-finished provision is not consent ───────────────────────────────
+
+
+def test_bare_migrate_output_is_not_read_as_an_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fresh run that died after `hermes config migrate` leaves hermes' OWN
+    # defaults on disk, including terminal.backend: local. The next run must not
+    # read that as the operator having opted in.
+    home = tmp_path / "hh"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {"model": "", "toolsets": ["hermes-cli"], "terminal": {"backend": "local", "cwd": "."}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+
+    assert out.details["terminal_tool_decision"] == "off"
+    assert _terminal_is_off(doc), doc
+
+
+def test_recorded_state_outranks_a_reappearing_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hh"
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    _run_config_write(tmp_path, monkeypatch, home=home)
+    assert hp.read_terminal_state(home) is False
+
+    # Something puts a terminal backend back (a hand edit, a hermes migration).
+    doc = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    doc["terminal"] = {"backend": "local", "cwd": "."}
+    doc["agent"].pop("disabled_toolsets", None)
+    (home / "config.yaml").write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+    out, doc2 = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert out.details["terminal_tool_reason"] == "recorded"
+    assert _terminal_is_off(doc2), doc2
+
+
+# ── the reported posture is the effective one ──────────────────────────────
+
+
+def test_reported_posture_follows_an_operator_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # overrides.yaml deep-merges last and wins over hal0's disabled_toolsets, so
+    # the reported posture has to be read back off the final file — otherwise
+    # the status line would claim "off" on a box where the tool is loaded.
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text("agent:\n  disabled_toolsets: []\n", encoding="utf-8")
+    home = tmp_path / "hh"
+    state = hp.BootstrapState(hermes_home=str(home))
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", overrides)
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.InstallIO(
+        fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run()
+    )
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
+
+    assert out.details["terminal_tool_decision"] == "off"
+    assert out.details["terminal_tool"] == "on", "the override re-enabled it — say so"
 
 
 # ── the decision function itself ────────────────────────────────────────────

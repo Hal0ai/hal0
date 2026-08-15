@@ -1451,23 +1451,19 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 HERMES_TERMINAL_ENV = "HAL0_HERMES_TERMINAL"
 # Toolsets subtracted when the terminal tool is OFF.
 TERMINAL_TOOLSETS: list[str] = ["terminal", "code_execution"]
+# hal0's own record of the decision, under $HERMES_HOME. It exists because
+# config.yaml alone cannot tell "the operator opted in before this change" from
+# "hermes config migrate just materialised its own terminal.backend default on a
+# half-finished fresh provision" — and getting that wrong the permissive way
+# would hand out a root-equivalent shell nobody asked for. Written BEFORE the
+# migrate on every run, so an interrupted run still leaves the posture recorded.
+TERMINAL_STATE_FILE = ".hal0-terminal-tool"
 _TRUTHY = {"1", "true", "yes", "on", "y"}
 _FALSEY = {"0", "false", "no", "off", "n"}
 
 
-def _existing_terminal_choice(config_text: str | None) -> bool | None:
-    """Read an EXISTING ``config.yaml``'s terminal posture, or ``None``.
-
-    ``None`` means "the file does not exist / says nothing" — a fresh install,
-    which defaults OFF. A pre-1.0 box provisioned before this change carries an
-    explicit ``terminal.backend`` and no ``terminal`` in
-    ``agent.disabled_toolsets``; that is the operator's working setup and an
-    update must not silently disable it (#1863 requirement 5).
-
-    Must be called with the content read BEFORE ``hermes config migrate`` runs:
-    migrate materialises hermes' own defaults (including ``terminal.backend``),
-    so a post-migrate read would mistake every fresh box for an existing opt-in.
-    """
+def _parse_yaml_config(config_text: str | None) -> dict[str, Any] | None:
+    """Parse a config.yaml body, or ``None`` if absent/unusable."""
     if not config_text:
         return None
     try:
@@ -1478,21 +1474,90 @@ def _existing_terminal_choice(config_text: str | None) -> bool | None:
         data = yaml.safe_load(config_text) or {}
     except Exception:  # a corrupt config must never decide the security posture
         return None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _disabled_toolsets(data: dict[str, Any] | None) -> list[str]:
+    """``agent.disabled_toolsets`` as a list of strings (empty when unset)."""
+    agent = (data or {}).get("agent")
+    raw = agent.get("disabled_toolsets") if isinstance(agent, dict) else None
+    return [str(t) for t in raw] if isinstance(raw, list) else []
+
+
+def terminal_enabled_in_config(config_text: str | None) -> bool:
+    """Whether a config body as written leaves the terminal tool reachable.
+
+    This is the EFFECTIVE reading — what hermes will actually load — so it is
+    also correct after ``overrides.yaml`` has been merged on top.
+    """
+    return "terminal" not in _disabled_toolsets(_parse_yaml_config(config_text))
+
+
+def _existing_terminal_choice(config_text: str | None) -> bool | None:
+    """Read an EXISTING ``config.yaml``'s terminal posture, or ``None``.
+
+    ``None`` means "the file says nothing that can be read as an operator
+    decision" — the fresh-install case, which defaults OFF.
+
+    A box provisioned before this change carries hal0's own overlay AND an
+    explicit ``terminal.backend``; that is the operator's working setup and an
+    update must not silently disable it (#1863 requirement 5). The hal0-overlay
+    evidence is load-bearing: ``hermes config migrate`` materialises hermes' own
+    ``terminal.backend: local`` default, so "backend is set" on its own would
+    read a half-provisioned fresh box as consent. Consent is never inferred from
+    a file hal0 has not finished writing.
+    """
+    data = _parse_yaml_config(config_text)
+    if data is None:
         return None
-    agent = data.get("agent")
-    disabled = agent.get("disabled_toolsets") if isinstance(agent, dict) else None
-    if isinstance(disabled, list) and any(str(t) == "terminal" for t in disabled):
+    if "terminal" in _disabled_toolsets(data):
         return False
     terminal = data.get("terminal")
-    if isinstance(terminal, dict) and str(terminal.get("backend") or "").strip():
+    if not (isinstance(terminal, dict) and str(terminal.get("backend") or "").strip()):
+        return None
+    return True if _is_hal0_provisioned_config(data) else None
+
+
+def _is_hal0_provisioned_config(data: dict[str, Any]) -> bool:
+    """Did hal0's overlay land in this config, i.e. is it a real hal0 box?
+
+    Keyed on ``memory.provider: hal0-memory`` and the hal0 skills dirs — both
+    written only by this provisioner, neither present in a bare
+    ``hermes config migrate`` result.
+    """
+    memory = data.get("memory")
+    if isinstance(memory, dict) and str(memory.get("provider") or "") == "hal0-memory":
         return True
+    skills = data.get("skills")
+    dirs = skills.get("external_dirs") if isinstance(skills, dict) else None
+    return isinstance(dirs, list) and any(str(d) in SKILLS_EXTERNAL_DIRS for d in dirs)
+
+
+def read_terminal_state(hermes_home: Path | str) -> bool | None:
+    """hal0's recorded terminal decision for this box, or ``None`` if unrecorded."""
+    try:
+        raw = (Path(hermes_home) / TERMINAL_STATE_FILE).read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return None
+    if raw in _TRUTHY:
+        return True
+    if raw in _FALSEY:
+        return False
     return None
+
+
+def write_terminal_state(hermes_home: Path | str, enabled: bool) -> None:
+    """Record the decision. Best-effort: a write failure must not fail install."""
+    with contextlib.suppress(OSError):
+        path = Path(hermes_home) / TERMINAL_STATE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, "1\n" if enabled else "0\n")
 
 
 def terminal_tool_enabled(
     *,
     config_text: str | None = None,
+    recorded: bool | None = None,
     env: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
     """Decide whether Hermes gets the terminal tool. Returns ``(enabled, why)``.
@@ -1501,8 +1566,9 @@ def terminal_tool_enabled(
 
     1. ``HAL0_HERMES_TERMINAL`` — the explicit operator answer, set by the
        installer prompt / ``hal0 agent install hermes --terminal-tool``.
-    2. An existing ``config.yaml`` that already enables it (update path).
-    3. OFF — the default, including every non-interactive/silent install.
+    2. hal0's recorded decision for this box (:data:`TERMINAL_STATE_FILE`).
+    3. A pre-#1863 hal0-provisioned ``config.yaml`` that already enables it.
+    4. OFF — the default, including every non-interactive/silent install.
     """
     environ = os.environ if env is None else env
     raw = str(environ.get(HERMES_TERMINAL_ENV) or "").strip().lower()
@@ -1510,23 +1576,31 @@ def terminal_tool_enabled(
         return True, "opt-in"
     if raw in _FALSEY:
         return False, "opt-out"
+    if recorded is not None:
+        return recorded, "recorded"
     existing = _existing_terminal_choice(config_text)
     if existing is not None:
         return existing, "existing-config"
     return False, "default-off"
 
 
-def _config_list_keys(*, terminal_enabled: bool) -> dict[str, Any]:
+def _config_list_keys(
+    *, terminal_enabled: bool, existing_disabled: list[str] | None = None
+) -> dict[str, Any]:
     """The list-valued overlay, with the terminal posture folded in.
 
     ``agent.disabled_toolsets`` is written in BOTH directions so the posture is
     convergent: opting in later clears the subtraction instead of leaving a
-    stale one behind. Lists replace rather than merge (see :func:`_deep_merge`),
-    and ``overrides.yaml`` still deep-merges on top last, so an operator can
-    always override either way.
+    stale one behind. Only hal0's OWN two entries are added/removed — anything
+    else the operator disabled (``browser``, ``cronjob``, …) is preserved in
+    place, since a list value replaces rather than merges (:func:`_deep_merge`).
+    ``overrides.yaml`` still deep-merges on top last, so a hand override wins.
     """
     keys = {k: dict(v) for k, v in HAL0_CONFIG_LIST_KEYS.items()}
-    keys["agent"] = {"disabled_toolsets": [] if terminal_enabled else list(TERMINAL_TOOLSETS)}
+    disabled = [t for t in (existing_disabled or []) if t not in TERMINAL_TOOLSETS]
+    if not terminal_enabled:
+        disabled += TERMINAL_TOOLSETS
+    keys["agent"] = {"disabled_toolsets": disabled}
     return keys
 
 
@@ -1947,11 +2021,17 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             config_before = config_path.read_text(encoding="utf-8")
         with contextlib.suppress(OSError):
             shutil.copy2(config_path, config_path.with_name("config.yaml.bak"))
-    # Terminal-tool posture is decided from the PRE-migrate content (#1863):
-    # `hermes config migrate` materialises hermes' own ``terminal.backend``
-    # default, so reading after it would make every fresh box look like an
-    # existing opt-in. See terminal_tool_enabled.
-    terminal_enabled, terminal_reason = terminal_tool_enabled(config_text=config_before)
+    # Terminal-tool posture (#1863). Decided from hal0's recorded state plus the
+    # PRE-migrate content — `hermes config migrate` materialises hermes' own
+    # ``terminal.backend`` default, so reading after it would make a fresh box
+    # look like an existing opt-in. Recorded BEFORE the migrate so a run that
+    # dies mid-provision still leaves the decision on disk rather than letting
+    # the next run re-derive it from hermes' own defaults. See
+    # terminal_tool_enabled.
+    terminal_enabled, terminal_reason = terminal_tool_enabled(
+        config_text=config_before, recorded=read_terminal_state(hermes_home)
+    )
+    write_terminal_state(hermes_home, terminal_enabled)
     migrated = _ensure_hermes_config(hermes_bin, hermes_home, run)
 
     primary_raw = _resolve_primary_slot(slots_fetcher=ctx.io.fetch_slots)
@@ -2017,9 +2097,15 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
     )
+    # Toolsets the operator disabled by hand survive: hal0 only ever adds or
+    # removes its own two terminal entries (a list value replaces on merge).
+    pre_merge = config_path.read_text(encoding="utf-8") if config_path.exists() else None
     list_merge_changed = _merge_config_yaml_layers(
         config_path,
-        list_keys=_config_list_keys(terminal_enabled=terminal_enabled),
+        list_keys=_config_list_keys(
+            terminal_enabled=terminal_enabled,
+            existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
+        ),
         overrides_path=OVERRIDES_PATH,
     )
 
@@ -2054,7 +2140,12 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "delegation_model": (delegation or {}).get("model"),
             "auxiliary_utility_model": _utility_aux_model(auxiliary_tasks),
             "memory_provider": "hal0-memory",
-            "terminal_tool": "on" if terminal_enabled else "off",
+            # EFFECTIVE posture, read back off the final merged file — an
+            # operator's overrides.yaml wins over hal0's disabled_toolsets, so
+            # reporting the decision alone could claim "off" on a box where the
+            # tool is in fact loaded. The decision is reported alongside it.
+            "terminal_tool": "on" if terminal_enabled_in_config(config_after) else "off",
+            "terminal_tool_decision": "on" if terminal_enabled else "off",
             "terminal_tool_reason": terminal_reason,
             "honcho_json_changed": honcho_json_changed,
             "config_set_errors": errors,

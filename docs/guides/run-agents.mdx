@@ -71,6 +71,9 @@ The installer also asks once, on an interactive install. A piped
 asked and always leaves it off; set `HAL0_HERMES_TERMINAL=1` to opt in
 unattended.
 
+Your answer is recorded at `/var/lib/hal0/.hermes/.hal0-terminal-tool`, so
+re-provisioning, `--repair` and updates all keep it.
+
 **Upgrades keep your setting.** A box provisioned before this change already
 has `terminal.backend: local` in its Hermes config, and an update treats that
 as your answer and leaves it enabled. Run
