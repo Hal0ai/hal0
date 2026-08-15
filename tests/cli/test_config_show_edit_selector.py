@@ -11,7 +11,6 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from hal0.cli import config_commands
@@ -19,26 +18,19 @@ from hal0.cli import config_commands
 runner = CliRunner()
 
 
-@pytest.fixture(autouse=True)
-def _no_real_service_account(monkeypatch):
-    """Default every test in this file to "no system hal0 account" for
-    ``_seed_config_file``'s ownership step.
+def _simulate_real_etc_hal0(monkeypatch) -> None:
+    """Make ``_fchown_to_service_owner``'s "is this the real /etc/hal0?"
+    guard say yes, while file I/O still happens in the test's HAL0_HOME
+    sandbox.
 
-    A HAL0_HOME sandbox is never actually ``/etc/hal0`` — it's a throwaway
-    temp tree — so there is no real chown target, regardless of whether
-    *this* machine happens to have a system ``hal0`` account (hal0's own
-    dev/CI boxes do, since hal0 is genuinely installed on them). Without
-    this, seed tests would pass or fail depending on host state instead of
-    on the code under test. The tests that specifically exercise the
-    privileged/chown-denied paths override ``pwd.getpwnam``/
-    ``grp.getgrnam`` themselves, after this fixture runs.
+    Only the tests that specifically exercise the privileged/chown-denied
+    ownership paths need this — everything else should exercise the
+    ordinary "we're in a sandbox, skip ownership entirely" branch exactly
+    as production code does outside a real install, regardless of whether
+    this particular host happens to have a system ``hal0`` account (hal0's
+    own dev/CI boxes do, since hal0 also runs on them for real).
     """
-
-    def _no_such_account(name: str):
-        raise KeyError(name)
-
-    monkeypatch.setattr(config_commands.pwd, "getpwnam", _no_such_account)
-    monkeypatch.setattr(config_commands.grp, "getgrnam", _no_such_account)
+    monkeypatch.setattr(config_commands._config_paths, "etc", lambda: Path("/etc/hal0"))
 
 
 def _set_home(monkeypatch, tmp_path: Path) -> Path:
@@ -149,6 +141,7 @@ def test_config_edit_seed_chowns_to_service_owner_when_privileged(
     having a system ``hal0`` account.
     """
     _set_home(monkeypatch, tmp_path)
+    _simulate_real_etc_hal0(monkeypatch)
     monkeypatch.setenv("EDITOR", "true")
 
     class _FakePasswd:
@@ -183,6 +176,7 @@ def test_config_edit_seed_rejects_seed_when_chown_denied(monkeypatch, tmp_path: 
     and a message that tells the operator to re-run under sudo.
     """
     cfg_dir = _set_home(monkeypatch, tmp_path)
+    _simulate_real_etc_hal0(monkeypatch)
     monkeypatch.setenv("EDITOR", "true")
 
     class _FakePasswd:
@@ -211,6 +205,7 @@ def test_config_edit_seed_rejects_seed_on_other_oserror(monkeypatch, tmp_path: P
     abort, not an unhandled traceback.
     """
     cfg_dir = _set_home(monkeypatch, tmp_path)
+    _simulate_real_etc_hal0(monkeypatch)
     monkeypatch.setenv("EDITOR", "true")
 
     class _FakePasswd:
@@ -230,6 +225,33 @@ def test_config_edit_seed_rejects_seed_on_other_oserror(monkeypatch, tmp_path: P
     assert result.exit_code != 0
     assert not (cfg_dir / "upstreams.toml").exists()
     assert "sudo" in result.output
+
+
+def test_config_edit_seed_ignores_host_hal0_account_in_sandbox(monkeypatch, tmp_path: Path) -> None:
+    """A HAL0_HOME sandbox seed must succeed regardless of whether the real
+    host machine happens to have a system ``hal0`` account.
+
+    Deliberately does NOT monkeypatch ``pwd``/``grp``/``os.fchown``/``etc()``
+    — this exercises the actual ``pwd.getpwnam("hal0")`` lookup against
+    whatever this box really has. hal0's own dev/CI boxes genuinely install
+    a system ``hal0`` account (hal0 also runs on them for real), so on such
+    a box this is also a regression test for keying the ownership
+    requirement off "does a hal0 account exist" instead of "is this the
+    real /etc/hal0" (review finding on commit ca3295ff): that version
+    resolved the real ``hal0`` uid/gid, tried to ``fchown`` a HAL0_HOME
+    sandbox file to it, failed (the test process isn't root or ``hal0``),
+    and made this command die with the sudo hint for a throwaway temp tree
+    ``hal0-api`` will never read.
+    """
+    cfg_dir = _set_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("EDITOR", "true")
+
+    result = runner.invoke(config_commands.app, ["edit", "upstreams"])
+    assert result.exit_code == 0, result.output
+    seeded = cfg_dir / "upstreams.toml"
+    assert seeded.exists()
+    mode = stat.S_IMODE(seeded.stat().st_mode)
+    assert mode == 0o640, f"expected upstreams.toml seeded at 0640, got {oct(mode)}"
 
 
 def test_permission_denied_hint_does_not_recommend_widening_the_file(

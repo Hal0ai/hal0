@@ -19,6 +19,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, die
+from hal0.config import paths as _config_paths
 from hal0.config.paths import UPSTREAMS_TOML_MODE
 
 #: Canonical mode for a freshly-seeded hal0.toml — matches perms.py's
@@ -107,14 +108,24 @@ def _fchown_to_service_owner(fd: int) -> None:
     never hit this because 0644 stays world-readable regardless of owner —
     the mode fix alone introduced this gap (Codex review on a5f4fe5d).
 
+    Only enforced against the REAL ``/etc/hal0`` — a HAL0_HOME sandbox is
+    never actually the tree ``hal0-api.service`` reads, so there is no real
+    ownership requirement to enforce there regardless of whether this
+    particular host happens to have a system ``hal0`` account. (hal0's own
+    dev/CI boxes do, since hal0 also runs on them for real — keying this
+    off "does a hal0 account exist" instead of "is this the real
+    ``/etc/hal0``" made ``HAL0_HOME=$(mktemp -d) hal0 config edit`` die with
+    the sudo hint on every one of those boxes, a regression caught on
+    review of commit ca3295ff.)
+
     Only root can ``chown`` to an arbitrary uid; an unprivileged owner can
-    at most ``chgrp`` to a group they already belong to. So:
+    at most ``chgrp`` to a group they already belong to. So, once we know
+    we're targeting the real ``/etc/hal0``:
 
     - No system ``hal0`` account on this box (``pwd.getpwnam``/
-      ``grp.getgrnam`` raise ``KeyError`` — the common case in a dev/CI
-      sandbox with no hal0 service installed): nothing sensible to chown
-      to, and nothing is going to try reading this file as that user
-      either — skip silently, seed succeeds.
+      ``grp.getgrnam`` raise ``KeyError`` — a hal0 install that hasn't
+      created its service account yet): nothing sensible to chown to,
+      skip silently, seed succeeds.
     - Invoking as the ``hal0`` service user already: ``os.fchown`` is a
       no-op modulo confirming the uid/gid, succeeds trivially.
     - Invoking as root (the ``sudo hal0 config edit`` case): chown
@@ -129,6 +140,8 @@ def _fchown_to_service_owner(fd: int) -> None:
       outright instead of quietly publishing a file ``hal0-api`` can't
       read — see :func:`_seed_config_file`.
     """
+    if _config_paths.etc() != Path("/etc/hal0"):
+        return
     try:
         uid = pwd.getpwnam(_SERVICE_USER).pw_uid
         gid = grp.getgrnam(_SERVICE_GROUP).gr_gid
