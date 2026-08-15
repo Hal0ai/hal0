@@ -1,7 +1,7 @@
 """RATIFIED 2026-07-18 security/validation deliverables (2, 3, 6).
 
-* D2 — terminal.cwd moves off /etc/hal0 to a scratch dir under HERMES_HOME
-  (terminal.backend=local stays).
+* D2 — when the terminal tool is opted into (#1863 — it is OFF by default),
+  terminal.cwd points at a scratch dir under HERMES_HOME, never /etc/hal0.
 * D3 — a strong random API_SERVER_KEY is generated (>=32 chars, cryptographic),
   never a placeholder / hardcoded fallback; idempotent across reruns.
 * D6 — `--repair` reconciles HERMES_HOME/agents + venv ownership drift to hal0.
@@ -31,6 +31,10 @@ def _overlay(hermes_home: Path | str) -> dict[str, object]:
             personality_name="",
             live_resolve_enabled=True,
             hermes_home=hermes_home,
+            # D2 is about WHERE the shell lands once the operator has opted in;
+            # the default-off posture itself is covered in
+            # test_hermes_terminal_optin.py.
+            terminal_enabled=True,
         )
     )
 
@@ -46,8 +50,28 @@ def test_terminal_cwd_never_etc_hal0() -> None:
     assert "/etc/hal0" not in str(overlay["terminal.cwd"])
 
 
-def test_terminal_backend_stays_local() -> None:
+def test_terminal_backend_is_local_only_when_opted_in() -> None:
+    # `local` is still the only viable backend on this box (podman, no docker;
+    # a container could not reach the host or 127.0.0.1:8080), so opting in
+    # reproduces the historical config exactly. Opting out writes no backend.
     assert _overlay("/var/lib/hal0/.hermes")["terminal.backend"] == "local"
+    off = dict(
+        hp._build_config_overlay(
+            primary={"model_id": "m", "backend_url": "http://x/v1", "placeholder": False},
+            chat_slots=[],
+            delegation=None,
+            auxiliary_tasks={},
+            mcp_servers=[],
+            agent_id="hermes",
+            system_prompt="",
+            personality_name="",
+            live_resolve_enabled=True,
+            hermes_home="/var/lib/hal0/.hermes",
+            terminal_enabled=False,
+        )
+    )
+    assert "terminal.backend" not in off
+    assert "terminal.cwd" not in off
 
 
 def test_scratch_dir_is_seeded_by_home_init() -> None:

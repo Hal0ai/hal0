@@ -91,6 +91,16 @@ def agent_install(
             "moved persona seeding out of the install pipeline."
         ),
     ),
+    terminal_tool: bool | None = typer.Option(
+        None,
+        "--terminal-tool/--no-terminal-tool",
+        help=(
+            "Hermes only: give the agent a terminal tool. OFF by default — with "
+            "it on, the agent can run shell commands as the hal0 user, which is "
+            "root-equivalent on this box. Omit the flag to keep the default "
+            "(off on a fresh install; an existing box's setting is preserved)."
+        ),
+    ),
 ) -> None:
     """Install a bundled agent.
 
@@ -107,7 +117,12 @@ def agent_install(
     #1102 / decision Q9.
     """
     if name == "hermes":
-        _install_hermes(switch=switch, gateway=gateway, reset_personas=reset_personas)
+        _install_hermes(
+            switch=switch,
+            gateway=gateway,
+            reset_personas=reset_personas,
+            terminal_tool=terminal_tool,
+        )
         return
 
     url = _api_base()
@@ -128,7 +143,13 @@ def agent_install(
     )
 
 
-def _install_hermes(*, switch: bool, gateway: bool = True, reset_personas: bool = False) -> None:
+def _install_hermes(
+    *,
+    switch: bool,
+    gateway: bool = True,
+    reset_personas: bool = False,
+    terminal_tool: bool | None = None,
+) -> None:
     """Foreground provision of Hermes into the hal0-managed venv.
 
     Six steps, all local + foreground:
@@ -198,7 +219,7 @@ def _install_hermes(*, switch: bool, gateway: bool = True, reset_personas: bool 
     # §7.4: when invoked as root this drops to the hal0 user so every HERMES_HOME
     # write is born hal0:hal0 (root-only prelude + re-exec). Non-root runs the
     # pipeline in-process. See _provision_hermes.
-    rc = _provision_hermes()
+    rc = _provision_hermes(terminal_tool=terminal_tool)
     if rc != 0:
         die(
             "Hermes provisioning failed — inspect `hal0 agent status hermes` / `hal0 agent log hermes`."
@@ -451,7 +472,9 @@ def _hermes_root_prelude() -> None:
             console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
 
 
-def _run_as_hal0(argv: list[str], *, stdin: int | None = None) -> int:
+def _run_as_hal0(
+    argv: list[str], *, stdin: int | None = None, extra_env: dict[str, str] | None = None
+) -> int:
     """Run ``argv`` as the hal0 service user, returning its exit code.
 
     Sanitizes the env (strips ``HERMES_HOME``, sets ``HOME`` to hal0's home) and
@@ -464,6 +487,11 @@ def _run_as_hal0(argv: list[str], *, stdin: int | None = None) -> int:
     ``stdin`` is forwarded to ``subprocess.run`` (e.g. ``subprocess.DEVNULL`` for
     a caller like ``hermes gateway install`` that prompts interactively with no
     bypass flag — a real TTY would block, and a closed fd 0 crashes it).
+
+    ``extra_env`` is passed as explicit ``NAME=VALUE`` assignments on the same
+    ``env`` prefix, so a provisioning answer survives the privilege drop on all
+    three tools — the ``sudo`` fallback resets the environment, and relying on
+    inheritance would silently lose it there (see HAL0_HERMES_TERMINAL).
     """
     import pwd as _pwd
     import shutil as _shutil
@@ -473,7 +501,8 @@ def _run_as_hal0(argv: list[str], *, stdin: int | None = None) -> int:
         home = _pwd.getpwnam(_AGENT_RUNTIME_USER).pw_dir or "/var/lib/hal0"
     except KeyError:
         home = "/var/lib/hal0"
-    env_argv = ["env", "-u", "HERMES_HOME", f"HOME={home}", *argv]
+    assignments = [f"{k}={v}" for k, v in sorted((extra_env or {}).items())]
+    env_argv = ["env", "-u", "HERMES_HOME", f"HOME={home}", *assignments, *argv]
     if _shutil.which("runuser"):
         cmd = ["runuser", "-u", _AGENT_RUNTIME_USER, "--", *env_argv]
     elif _shutil.which("setpriv"):
@@ -501,19 +530,35 @@ def _provision_hermes(
     skip_phases: tuple[str, ...] = (),
     offline: bool = False,
     verbose: bool = False,
+    terminal_tool: bool | None = None,
 ) -> int:
     """Run the Hermes bootstrap pipeline, dropping to hal0 first when root (§7.4).
 
     Non-root (dev / already-hal0): call ``bootstrap_cli`` in-process. Root: run
     the root-only prelude, then re-exec ``hal0 agent bootstrap hermes`` as hal0
     so every provisioning write is born ``hal0:hal0``.
+
+    ``terminal_tool`` is the operator's explicit answer to the terminal-tool
+    opt-in (``None`` = not asked → the provisioner's default-off / preserve-
+    existing rule). It travels as ``HAL0_HERMES_TERMINAL`` because the
+    provisioning that consumes it runs in a re-exec'd, privilege-dropped child.
     """
     import os as _os
     import shutil as _shutil
 
-    from hal0.agents.hermes_provision import bootstrap_cli
+    from hal0.agents.hermes_provision import HERMES_TERMINAL_ENV, bootstrap_cli
+
+    # The flag wins; otherwise forward an inherited answer (install.sh exports
+    # it after prompting) explicitly, since the sudo drop path resets the env.
+    if terminal_tool is not None:
+        provision_env = {HERMES_TERMINAL_ENV: str(int(terminal_tool))}
+    elif _os.environ.get(HERMES_TERMINAL_ENV):
+        provision_env = {HERMES_TERMINAL_ENV: _os.environ[HERMES_TERMINAL_ENV]}
+    else:
+        provision_env = {}
 
     if _os.geteuid() != 0:
+        _os.environ.update(provision_env)
         return bootstrap_cli(
             repair=repair,
             dry_run=dry_run,
@@ -534,7 +579,7 @@ def _provision_hermes(
         argv.append("--offline")
     if verbose:
         argv.append("--verbose")
-    return _run_as_hal0(argv)
+    return _run_as_hal0(argv, extra_env=provision_env)
 
 
 def _enable_and_start_hermes_unit() -> None:

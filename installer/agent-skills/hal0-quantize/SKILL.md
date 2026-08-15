@@ -6,6 +6,11 @@ description: Creating ROCmFPX-family quants (ROCmFP3/4/6/8, straight or agent) f
 
 # hal0 ROCmFPX quantization
 
+> **Requires the terminal tool.** hal0 ships Hermes with no terminal tool unless the
+> operator opted in (`hal0 agent install hermes --terminal-tool`). Without it this skill
+> cannot run its commands — say so plainly instead of improvising.
+
+
 Turn a **BF16/F16 GGUF** into a **ROCmFPX-family quant** using the
 [`Hal0ai/Hal0_ROCmFPX`](https://github.com/Hal0ai/Hal0_ROCmFPX) runner — the
 hal0-branded fork of `charlie12345/ROCmFPX`. It is a llama.cpp fork that adds the

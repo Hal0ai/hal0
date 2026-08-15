@@ -6,6 +6,11 @@ description: Operating and troubleshooting hal0-managed user-level systemd servi
 
 # hal0 service management
 
+> **Requires the terminal tool.** hal0 ships Hermes with no terminal tool unless the
+> operator opted in (`hal0 agent install hermes --terminal-tool`). Without it this skill
+> cannot run its commands — say so plainly instead of improvising.
+
+
 Hal0 runs platform services as **user-level systemd units** under the agent's user account (often root's user systemd at `/root/.config/systemd/user/`). The orchestrator's provisioners (e.g. `hermes_provision.py`) write secrets to a canonical env file, but they do **not** add the `EnvironmentFile=` directive to the service unit. The unit must be wired by hand. This is the single most common reason a hal0 service comes up silent.
 
 ## When to use this skill

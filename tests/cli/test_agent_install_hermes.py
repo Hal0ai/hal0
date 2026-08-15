@@ -586,10 +586,11 @@ def test_install_hermes_reset_personas_cli_flag_parses_and_forwards(monkeypatch)
 
     captured: dict[str, Any] = {}
 
-    def _fake_install_hermes(*, switch, gateway=True, reset_personas=False):  # type: ignore[no-untyped-def]
+    def _fake_install_hermes(*, switch, gateway=True, reset_personas=False, terminal_tool=None):  # type: ignore[no-untyped-def]
         captured["switch"] = switch
         captured["gateway"] = gateway
         captured["reset_personas"] = reset_personas
+        captured["terminal_tool"] = terminal_tool
 
     monkeypatch.setattr(ac, "_install_hermes", _fake_install_hermes)
 
@@ -604,6 +605,98 @@ def test_install_hermes_reset_personas_cli_flag_parses_and_forwards(monkeypatch)
     res2 = runner.invoke(ac.app, ["install", "hermes"])
     assert res2.exit_code == 0, res2.output
     assert captured["reset_personas"] is False
+
+
+# ── Terminal-tool opt-in (#1863) ────────────────────────────────────────────
+
+
+def test_install_hermes_terminal_tool_flag_is_tri_state(monkeypatch) -> None:
+    """`--terminal-tool` / `--no-terminal-tool` forward; omitting it stays None.
+
+    ``None`` matters: it means "the operator did not answer here", which lets
+    the provisioner apply its default-off / preserve-an-existing-setting rule
+    instead of an install-time re-run silently flipping a working box.
+    """
+    from typer.testing import CliRunner
+
+    captured: dict[str, Any] = {}
+
+    def _fake_install_hermes(*, switch, gateway=True, reset_personas=False, terminal_tool=None):  # type: ignore[no-untyped-def]
+        captured["terminal_tool"] = terminal_tool
+
+    monkeypatch.setattr(ac, "_install_hermes", _fake_install_hermes)
+    runner = CliRunner()
+
+    assert runner.invoke(ac.app, ["install", "hermes"]).exit_code == 0
+    assert captured["terminal_tool"] is None
+
+    assert runner.invoke(ac.app, ["install", "hermes", "--terminal-tool"]).exit_code == 0
+    assert captured["terminal_tool"] is True
+
+    assert runner.invoke(ac.app, ["install", "hermes", "--no-terminal-tool"]).exit_code == 0
+    assert captured["terminal_tool"] is False
+
+
+def test_provision_hermes_forwards_terminal_answer_across_the_privilege_drop(
+    monkeypatch,
+) -> None:
+    """The answer must ride an explicit env assignment, not inheritance.
+
+    ``_run_as_hal0``'s sudo fallback resets the environment, so an inherited
+    HAL0_HERMES_TERMINAL would be silently dropped there and the operator's
+    opt-in would evaporate on exactly the boxes without runuser/setpriv.
+    """
+    from hal0.agents.hermes_provision import HERMES_TERMINAL_ENV
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setattr("shutil.which", lambda _n: "/usr/local/bin/hal0")
+    monkeypatch.setattr(ac, "_hermes_root_prelude", lambda: None)
+
+    def _fake_run_as_hal0(argv: list[str], *, extra_env: Any = None, stdin: Any = None) -> int:
+        captured["extra_env"] = extra_env
+        return 0
+
+    monkeypatch.setattr(ac, "_run_as_hal0", _fake_run_as_hal0)
+
+    assert ac._provision_hermes(terminal_tool=True) == 0
+    assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "1"}
+
+    assert ac._provision_hermes(terminal_tool=False) == 0
+    assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "0"}
+
+    # No flag and nothing in the environment → nothing forced.
+    monkeypatch.delenv(HERMES_TERMINAL_ENV, raising=False)
+    assert ac._provision_hermes() == 0
+    assert captured["extra_env"] == {}
+
+    # No flag but the installer exported an answer → forwarded verbatim.
+    monkeypatch.setenv(HERMES_TERMINAL_ENV, "1")
+    assert ac._provision_hermes() == 0
+    assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "1"}
+
+
+def test_run_as_hal0_places_extra_env_as_env_assignments(monkeypatch) -> None:
+    import subprocess as _sp
+
+    captured: dict[str, Any] = {}
+
+    class _Done:
+        returncode = 0
+
+    monkeypatch.setattr(_sp, "run", lambda cmd, **_k: (captured.update(cmd=cmd), _Done())[1])
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/usr/bin/runuser" if name == "runuser" else None
+    )
+
+    ac._run_as_hal0(
+        ["hal0", "agent", "bootstrap", "hermes"], extra_env={"HAL0_HERMES_TERMINAL": "1"}
+    )
+
+    cmd = captured["cmd"]
+    # `env … NAME=VALUE … command` — assignments must precede the command.
+    assert "HAL0_HERMES_TERMINAL=1" in cmd
+    assert cmd.index("HAL0_HERMES_TERMINAL=1") < cmd.index("agent")
 
 
 # ── Single-pick enforcement (Finding 11) ─────────────────────────────────────
@@ -751,8 +844,9 @@ def test_provision_hermes_root_drops_to_hal0(monkeypatch) -> None:
 
     captured: dict[str, Any] = {}
 
-    def _fake_run_as_hal0(argv: list[str]) -> int:
+    def _fake_run_as_hal0(argv: list[str], *, extra_env: Any = None) -> int:
         captured["argv"] = argv
+        captured["extra_env"] = extra_env
         events.append("run_as_hal0")
         return 0
 

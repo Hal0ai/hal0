@@ -6,6 +6,11 @@ description: Tuning LLM inference settings on hal0 / Strix Halo for throughput, 
 
 # hal0 tuning
 
+> **Requires the terminal tool.** hal0 ships Hermes with no terminal tool unless the
+> operator opted in (`hal0 agent install hermes --terminal-tool`). Without it this skill
+> cannot run its commands — say so plainly instead of improvising.
+
+
 Find the flags/values that maximize a target metric for a model on this box, by
 **measuring**, not guessing. The measurement engine is the [`hal0-bench`](../hal0-bench/SKILL.md)
 CLI; this skill is the method that drives it.
