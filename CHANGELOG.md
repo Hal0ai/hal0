@@ -237,9 +237,11 @@ slot's configured ceiling win over the blanket cap, which repairs a *fresh*
 install with no migration step. It does not reconcile a slot seed the operator
 never chose: a box upgraded from an earlier release whose agent slot carries a
 ceiling below Hermes' 64,000-token floor will keep refusing, even though its
-model advertises a large enough window. Nothing preflights the anchor window to
-say so. If chat refuses after an in-place upgrade, check the agent slot's
-configured ceiling before anything else.
+model advertises a large enough window. `hal0 doctor` now preflights the
+anchor window and names the serving slot, both limits, and the repair
+command — but the update itself does not raise the ceiling; the operator
+still has to run that command. If chat refuses after an in-place upgrade,
+run `hal0 doctor` first.
 
 **The brain's board tools are fixed but the underlying credential is not
 (#1829).** The steward now reads hal0's own board store, so the 401s are gone.
