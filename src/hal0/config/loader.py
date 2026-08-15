@@ -110,6 +110,12 @@ def write_toml_atomic(path: Path | str, data: dict[str, Any], *, mode: int | Non
         tmp_path = Path(tmp_str)
         try:
             with os.fdopen(fd, "wb") as f:
+                # fchmod, not chmod: the mode is applied to the descriptor we
+                # already own, before the rename — so there is never a moment
+                # where the destination carries the wrong mode, and no second
+                # path lookup that a swapped tempfile could ride in on.
+                if mode is not None:
+                    os.fchmod(f.fileno(), mode)
                 tomli_w.dump(data, f)
                 f.flush()
                 os.fsync(f.fileno())
@@ -117,8 +123,6 @@ def write_toml_atomic(path: Path | str, data: dict[str, Any], *, mode: int | Non
             with contextlib.suppress(OSError):
                 os.close(fd)
             raise
-        if mode is not None:
-            os.chmod(tmp_path, mode)  # before the rename: never a visible wrong mode
         os.replace(tmp_path, path)
         tmp_path = None  # rename succeeded; don't clean up in finally
     finally:
