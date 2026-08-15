@@ -7,6 +7,7 @@ import json as jsonlib
 import os
 import stat
 import subprocess
+import tempfile
 from enum import StrEnum
 from pathlib import Path
 
@@ -16,6 +17,19 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, die
+from hal0.config.paths import UPSTREAMS_TOML_MODE
+
+#: Canonical mode for a freshly-seeded hal0.toml — matches perms.py's
+#: PermRow for the file. No shared constant exists yet (perms.py inlines
+#: the literal too); this comment is the cross-reference.
+HAL0_TOML_SEED_MODE = 0o600
+
+#: Canonical mode for a freshly-seeded providers.toml. save_providers_config's
+#: atomic rewrite passes no explicit mode to write_toml_atomic, so
+#: tempfile.mkstemp's own default (0600) is what "canonical" already means
+#: for this file — matched here so the seed doesn't drift from the first
+#: real write.
+PROVIDERS_TOML_SEED_MODE = 0o600
 
 app = typer.Typer(help="Inspect and manage hal0 configuration.")
 console = Console()
@@ -54,6 +68,42 @@ def _config_path(which: ConfigFile) -> Path:
 def _hal0_toml_path() -> Path:
     """Return the on-disk hal0.toml path, honouring HAL0_HOME."""
     return _config_path(ConfigFile.hal0)
+
+
+def _seed_config_file(path: Path, content: str, mode: int) -> None:
+    """Atomically create *path* with *content*, at its canonical *mode*.
+
+    Mirrors ``hal0.config.loader.write_toml_atomic``'s fchmod-before-rename
+    pattern (tempfile.mkstemp + os.fchmod on the owned descriptor +
+    os.replace), but for the raw commented-TOML text `config edit` seeds a
+    missing file with — that text isn't a TOML-encodable dict, so
+    ``write_toml_atomic`` itself can't be reused directly. A bare
+    ``Path.write_text`` would instead go through ``open()``'s 0644 default
+    (mediated by the process umask), silently widening a file whose
+    canonical mode is 0600/0640 the moment it's created via ``edit`` rather
+    than via the API's own writer.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        tmp_path = Path(tmp_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                os.fchmod(f.fileno(), mode)
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        os.replace(tmp_path, path)
+        tmp_path = None  # rename succeeded; don't clean up in finally
+    finally:
+        if tmp_path is not None:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink(missing_ok=True)
 
 
 @app.command("show")
@@ -127,14 +177,24 @@ def config_edit(
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         if which == ConfigFile.hal0:
-            path.write_text(
+            _seed_config_file(
+                path,
                 "# hal0 configuration — see `hal0 config show` for the live shape.\n"
                 "[meta]\nschema_version = 1\n\n"
-                "[slots]\nport_range_start = 8081\nport_range_end = 8099\n"
+                "[slots]\nport_range_start = 8081\nport_range_end = 8099\n",
+                HAL0_TOML_SEED_MODE,
+            )
+        elif which == ConfigFile.upstreams:
+            _seed_config_file(
+                path,
+                f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n",
+                UPSTREAMS_TOML_MODE,
             )
         else:
-            path.write_text(
-                f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n"
+            _seed_config_file(
+                path,
+                f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n",
+                PROVIDERS_TOML_SEED_MODE,
             )
     try:
         subprocess.run([editor, str(path)], check=True)

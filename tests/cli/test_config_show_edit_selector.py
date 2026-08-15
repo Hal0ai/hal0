@@ -8,6 +8,7 @@ error in upstreams.toml, there was no `edit`/`show` target for it.
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -70,6 +71,43 @@ def test_config_edit_upstreams_seeds_and_opens_upstreams_toml(monkeypatch, tmp_p
     assert seeded.exists()
     # hal0.toml's bespoke seed content must NOT leak into other files.
     assert "port_range_start" not in seeded.read_text()
+
+
+def test_config_edit_upstreams_seeds_at_canonical_mode(monkeypatch, tmp_path: Path) -> None:
+    """A freshly-seeded upstreams.toml must land at 0640, not the 0644 that a
+    bare ``Path.write_text`` produces.
+
+    ADR-0002 tightened upstreams.toml to 0640 (UPSTREAMS_TOML_MODE) precisely
+    because its provider/endpoint inventory is not public information —
+    `save_upstreams_config`'s atomic rewrite already honours that mode, but
+    `hal0 config edit upstreams` seeding a *missing* file went through a bare
+    `write_text`, which carries the process umask (typically 0644) instead.
+    """
+    cfg_dir = _set_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("EDITOR", "true")
+
+    result = runner.invoke(config_commands.app, ["edit", "upstreams"])
+    assert result.exit_code == 0, result.output
+    seeded = cfg_dir / "upstreams.toml"
+    assert seeded.exists()
+    mode = stat.S_IMODE(seeded.stat().st_mode)
+    assert mode == 0o640, f"expected upstreams.toml seeded at 0640, got {oct(mode)}"
+
+
+def test_config_edit_hal0_seeds_at_canonical_mode(monkeypatch, tmp_path: Path) -> None:
+    """A freshly-seeded hal0.toml must land at 0600, matching perms.py's
+    canonical mode for the file — the same bare-``write_text`` gap as
+    upstreams.toml, pre-existing but fixed by the same change.
+    """
+    cfg_dir = _set_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("EDITOR", "true")
+
+    result = runner.invoke(config_commands.app, ["edit", "hal0"])
+    assert result.exit_code == 0, result.output
+    seeded = cfg_dir / "hal0.toml"
+    assert seeded.exists()
+    mode = stat.S_IMODE(seeded.stat().st_mode)
+    assert mode == 0o600, f"expected hal0.toml seeded at 0600, got {oct(mode)}"
 
 
 def test_permission_denied_hint_does_not_recommend_widening_the_file(

@@ -24,12 +24,16 @@ runs as. Two consequences follow, and neither is hypothetical:
   `PTRACE_MODE_READ_FSCREDS`, which a same-UID process passes. Yama's
   `kernel.yama.ptrace_scope` does not prevent it — that knob gates
   `PTRACE_MODE_ATTACH`, not same-UID reads. So every secret in the API's
-  environment (`HAL0_ADMIN_KEY`, provider API keys, `HF_TOKEN`, the agent's own
-  session token) is reachable by the agent regardless of the mode or ownership
-  of the file those values were loaded from. This has been verified on a live
-  box, not merely reasoned about.
+  environment (`HAL0_ADMIN_KEY`, provider API keys, `HF_TOKEN`) is reachable by
+  the agent regardless of the mode or ownership of the file those values were
+  loaded from. The chat-proxy session secret is not an API env var — it is a
+  file at `/var/lib/hal0/agents/secret.bin` (`0600`, owned by `hal0`) — but the
+  same same-UID logic applies to it too: the agent is the file's owner, so it
+  can simply read the file directly, no `/proc` trick required. This has been
+  verified on a live box, not merely reasoned about.
 - **The `hal0` account is root-equivalent by design.** The sudo grants hal0
-  installs (`hal0-systemctl`, `hal0-agentenv`, `hal0-benchctl`, `hal0-update`)
+  installs (`hal0-systemctl`, `hal0-agentenv`, `hal0-benchctl`, `hal0-podman-ro`,
+  `hal0-update`)
   are issued to the *user* `hal0`, which the agent also is. Slots run under
   rootful podman, so anything that can author a slot's `[Container]` spec can
   `Volume=`-mount arbitrary host paths — `installer/wrappers/hal0-systemctl`'s
@@ -49,7 +53,7 @@ injection from content it reads — it can reach every credential the box holds.
 | Control | Buys | Does not buy |
 | --- | --- | --- |
 | `User=hal0` (unprivileged, not root) | The agent is not UID 0; kernel-level and other-user data stay out of reach | Any separation from `hal0-api`, which is the same UID |
-| systemd sandboxing on the units (`ProtectSystem=strict`, `PrivateTmp`, restricted `ReadWritePaths=`) | Integrity: the agent cannot rewrite `/usr`, `/boot`, or most of `/etc` | Confidentiality of anything the `hal0` user may read, including `/proc` of same-UID processes |
+| systemd sandboxing on `hal0-agent@` (`ProtectSystem=strict`, `PrivateTmp`, restricted `ReadWritePaths=`) | Integrity: the agent cannot rewrite `/usr`, `/boot`, or most of `/etc` | Confidentiality of anything the `hal0` user may read, including `/proc` of same-UID processes; `hal0-api.service` sets none of these directives |
 | `NoNewPrivileges=yes` on `hal0-agent@` | The agent's own processes cannot invoke the setuid `sudo` wrappers | Anything about `hal0-api`, which sets no such restriction and is reachable with the admin key the agent can read |
 | `0600 root:root` on `/etc/hal0/agents/<instance>.env` | The agent cannot *open another instance's file*, and cannot create, replace or unlink one | Confidentiality of that instance's `HAL0_MCP_TOKEN`: with two agent instances running as the same user, either can read the other's `/proc/<pid>/environ`, so the file mode does not isolate the token itself |
 | Owner-only `0600` on `/etc/hal0/api.env` | Other local accounts cannot read it | Anything against the agent, which is the owner |
