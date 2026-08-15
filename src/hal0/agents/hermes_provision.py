@@ -1449,10 +1449,9 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 # which runs arbitrary Python as the same user — disabling one without the
 # other would leave the shell reachable by another name.
 HERMES_TERMINAL_ENV = "HAL0_HERMES_TERMINAL"
-# The EXECUTION toolsets. Both must be subtracted for a config to read as
-# "no command execution"; this pair is the readback predicate
-# (:func:`terminal_enabled_in_config`) and never grows, so a box provisioned by
-# an earlier build of this change keeps reporting the posture it actually has.
+# The two DIRECT execution toolsets, kept named because they are what the
+# ``terminal`` opt-in is about; :data:`TERMINAL_OFF_TOOLSETS` is what hal0
+# actually writes and reads back.
 TERMINAL_TOOLSETS: list[str] = ["terminal", "code_execution"]
 # What hal0 SUBTRACTS when the terminal is off — the execution pair plus
 # ``delegation`` (#1882 review, finding 3).
@@ -1546,13 +1545,22 @@ def terminal_enabled_in_config(config_text: str | None) -> bool:
     """Whether a config body as written leaves command execution reachable.
 
     The EFFECTIVE reading — what hermes will actually load — so it stays correct
-    after ``overrides.yaml`` has merged on top. BOTH toolsets must be subtracted
-    to count as off: ``execute_code`` alone still runs arbitrary Python as the
-    same root-equivalent user, so "terminal disabled, code_execution not" is not
-    a safe posture and must never be reported as off.
+    after ``overrides.yaml`` has merged on top. The question it answers is "can
+    this agent still reach command execution?", so EVERY route must be gone
+    (:data:`TERMINAL_OFF_TOOLSETS`) before it reports off:
+
+    * ``execute_code`` alone still runs arbitrary Python as the same
+      root-equivalent user — a shell under another name;
+    * ``delegate_task`` alone still builds a child agent from toolsets named at
+      call time, which the pinned build grants without inheriting this config's
+      subtraction — a shell one hop away.
+
+    An ``overrides.yaml`` handing either of them back is the reachable way to
+    land in that shape, and calling it a clean "off" would be exactly the
+    mistake the execution pair already refuses to make.
     """
     disabled = set(_disabled_toolsets(_parse_yaml_config(config_text)))
-    return not set(TERMINAL_TOOLSETS).issubset(disabled)
+    return not set(TERMINAL_OFF_TOOLSETS).issubset(disabled)
 
 
 def _terminal_backend_in_config(config_text: str | None) -> str | None:

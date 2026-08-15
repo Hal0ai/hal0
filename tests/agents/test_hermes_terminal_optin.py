@@ -334,15 +334,47 @@ def test_delegation_config_block_is_still_written_when_the_terminal_is_off(
     assert off_doc.get("delegation") == on_doc.get("delegation")
 
 
-def test_readback_posture_still_keys_on_the_execution_toolsets_only(
+def test_readback_requires_delegation_gone_too() -> None:
+    # The readback answers "can this agent reach command execution?", so it has
+    # to include every route. `delegate_task` left live is a shell one hop
+    # away, exactly as `execute_code` left live is a shell under another name —
+    # reporting that shape as a clean "off" would be the same mistake the
+    # execution pair already refuses to make.
+    execution_only = "agent:\n  disabled_toolsets: [terminal, code_execution]\n"
+    all_three = "agent:\n  disabled_toolsets: [terminal, code_execution, delegation]\n"
+    assert hp.terminal_enabled_in_config(execution_only) is True
+    assert hp.terminal_enabled_in_config(all_three) is False
+
+
+def test_an_override_that_restores_only_delegation_is_reported_as_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A box provisioned by an earlier build of this change has only
-    # `terminal, code_execution` on disk. It has no shell, and the reported
-    # posture must keep saying "off" — so the readback predicate stays at the
-    # two EXECUTION toolsets even though the write set is now three.
-    already_off = "agent:\n  disabled_toolsets: [terminal, code_execution]\n"
-    assert hp.terminal_enabled_in_config(already_off) is False
+    # The reachable version of the above: overrides.yaml deep-merges last, so an
+    # operator can hand back `delegation` alone. The status line must say the
+    # tool is reachable rather than claim off.
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text(
+        "agent:\n  disabled_toolsets: [terminal, code_execution]\n", encoding="utf-8"
+    )
+    home = tmp_path / "hh"
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", tmp_path / "state" / "hermes-terminal-tool")
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", overrides)
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.InstallIO(
+        fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run()
+    )
+    out = hp._phase_config_write(hp._StepCtx(state=hp.BootstrapState(hermes_home=str(home)), io=io))
+
+    assert out.details["terminal_tool_decision"] == "off"
+    assert out.details["terminal_tool"] == "on", "delegate_task is live — do not report a clean off"
 
 
 # ── it must not trample anything else the operator disabled ────────────────
@@ -688,14 +720,18 @@ def test_post_migrate_defaults_do_not_look_like_an_opt_in() -> None:
     assert hp.terminal_tool_enabled(config_text="{}\n", env={}) == (False, "default-off")
 
 
-def test_effective_off_requires_both_execution_toolsets() -> None:
-    # `execute_code` runs arbitrary Python as the same root-equivalent user, so
-    # "terminal disabled, code_execution not" is not a safe posture and must
-    # never be reported as off.
-    only_terminal = "agent:\n  disabled_toolsets: [terminal]\n"
-    both = "agent:\n  disabled_toolsets: [terminal, code_execution]\n"
-    assert hp.terminal_enabled_in_config(only_terminal) is True
-    assert hp.terminal_enabled_in_config(both) is False
+def test_effective_off_requires_every_route_gone() -> None:
+    # Each of the three is independently sufficient to reach command execution:
+    # `execute_code` runs arbitrary Python as the same root-equivalent user, and
+    # `delegate_task` hands a child agent whatever toolsets the call names. Any
+    # one of them left live means the posture is not off.
+    for left_live in hp.TERMINAL_OFF_TOOLSETS:
+        rest = [t for t in hp.TERMINAL_OFF_TOOLSETS if t != left_live]
+        partial = f"agent:\n  disabled_toolsets: [{', '.join(rest)}]\n"
+        assert hp.terminal_enabled_in_config(partial) is True, left_live
+
+    everything = f"agent:\n  disabled_toolsets: [{', '.join(hp.TERMINAL_OFF_TOOLSETS)}]\n"
+    assert hp.terminal_enabled_in_config(everything) is False
 
 
 def test_corrupt_config_does_not_enable_terminal() -> None:

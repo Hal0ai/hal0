@@ -338,9 +338,10 @@ def test_api_server_refuses_placeholder_or_weak_key() -> None:
         "reach the host filesystem or 127.0.0.1:8080, which would break the "
         "bundled host-management skills (hal0-service-management, hal0-bench, "
         "hal0-tune, hal0-quantize). The 'by default' half is now answered "
-        "(#1863): hal0 ships the terminal tool OFF and subtracts the `terminal` "
-        "+ `code_execution` toolsets via agent.disabled_toolsets unless the "
-        "operator explicitly opts in, in which case 'local' is what they get. "
+        "(#1863): hal0 ships the terminal tool OFF and subtracts the `terminal`, "
+        "`code_execution` and `delegation` toolsets via agent.disabled_toolsets "
+        "unless the operator explicitly opts in, in which case 'local' is what "
+        "they get. "
         "This xfail asserts on the UPSTREAM default, which is still 'local', so "
         "it stays as the drift watch."
     ),
