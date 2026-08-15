@@ -81,44 +81,49 @@ unconditionally (#1828). Both now fail loudly.
   GPU and reads real container memory instead of silently under-reporting it by
   roughly a third (#1839), and `hal0 model add` no longer claims high confidence
   for a capability it guessed from the filename (#1838).
-- **Hermes' terminal tool is off by default.** A fresh, piped or
-  non-interactive install no longer hands the bundled agent a local shell
-  running as the `hal0` service user — root-equivalent on this box — without
-  the operator saying so. Opt in at the installer prompt, with
+- **Hermes' terminal tool is off by default on a fresh install.** A fresh
+  install — interactive (declined at the prompt), piped, headless, or run
+  with `HAL0_NONINTERACTIVE=1` — no longer hands the bundled agent a local
+  shell running as the `hal0` service user — root-equivalent on this box —
+  without the operator saying so. Opt in at the installer prompt, with
   `sudo hal0 agent install hermes --terminal-tool`, or via
-  `HAL0_HERMES_TERMINAL=1`. This only changes what a fresh provision writes:
-  a bare `hal0 update` never touches Hermes' config, so an already-provisioned
-  box keeps its existing terminal posture untouched by the update itself; the
-  new default-off rule is evaluated the next time Hermes is reprovisioned —
-  where a `config.yaml` already carrying a non-`local` backend, or `local`
-  with a non-default `cwd` (hal0-provisioned or hand-set), still reads as
-  consent and keeps it enabled, while `local` with no `cwd` or the default
-  `cwd: "."` does not and comes back off. Off also disables the
-  `code_execution` and `delegation` toolsets, since both reach a shell one
-  hop away from `terminal` (#1882).
+  `HAL0_HERMES_TERMINAL=1`. This governs only a fresh provision: a bare
+  `hal0 update` never touches Hermes' config, and re-running the installer
+  against a box that already has Hermes provisioned skips the prompt and
+  any environment answer entirely, so an already-provisioned box's terminal
+  posture is untouched either way. The new default-off rule is evaluated
+  the next time Hermes is actually reprovisioned — where a `config.yaml`
+  already carrying a non-`local` backend, or `local` with a non-default
+  `cwd` (hal0-provisioned or hand-set), still reads as consent and keeps it
+  enabled, while `local` with no `cwd` or the default `cwd: "."` does not
+  and comes back off. Off also disables the `code_execution` and
+  `delegation` toolsets, since both reach a shell one hop away from
+  `terminal` (#1882).
 
 ### Breaking
 
-- **Hermes' terminal tool now defaults off on a fresh, piped or
-  non-interactive install.** Every prior release wrote
-  `terminal.backend: local` unconditionally, handing the bundled agent a
-  shell running as the `hal0` service user — root-equivalent on this box —
-  without asking. A fresh install, a piped (`curl … | bash`) install, a
-  headless install, or any install run with `HAL0_NONINTERACTIVE=1` now
-  leaves the terminal tool disabled unless the operator opts in: the
-  installer's interactive prompt, `sudo hal0 agent install hermes
-  --terminal-tool`, or `HAL0_HERMES_TERMINAL=1`. Turning it off also
-  disables the `code_execution` and `delegation` toolsets — `execute_code`
-  runs arbitrary code as the same user, and `delegate_task` could otherwise
-  hand a subagent the `terminal` toolset directly. Skills that stop working
-  with it off: `hal0-service-management`, `hal0-bench`,
-  `hal0-bench-autopilot`, `hal0-tune` and `hal0-quantize`. This default only
-  governs what a fresh Hermes provision writes — a bare `hal0 update` never
-  reprovisions Hermes, so it does not touch an existing box's terminal
-  posture at all. At the next reprovision or bootstrap, a `config.yaml`
-  that already carries a backend other than `local`, or `local` together
-  with a non-default `cwd` — anything hal0's own provisioning has ever
-  written, or a path the operator set by hand — is read as a prior opt-in
+- **Hermes' terminal tool now defaults off on a fresh install.** Every
+  prior release wrote `terminal.backend: local` unconditionally, handing
+  the bundled agent a shell running as the `hal0` service user —
+  root-equivalent on this box — without asking. A fresh install —
+  interactive (declined), piped (`curl … | bash`), headless, or run with
+  `HAL0_NONINTERACTIVE=1` — now leaves the terminal tool disabled unless
+  the operator opts in: the installer's interactive prompt (fresh installs
+  only), `sudo hal0 agent install hermes --terminal-tool`, or
+  `HAL0_HERMES_TERMINAL=1`. Turning it off also disables the
+  `code_execution` and `delegation` toolsets — `execute_code` runs
+  arbitrary code as the same user, and `delegate_task` could otherwise hand
+  a subagent the `terminal` toolset directly. Skills that stop working with
+  it off: `hal0-service-management`, `hal0-bench`, `hal0-bench-autopilot`,
+  `hal0-tune` and `hal0-quantize`. This default only governs what a fresh
+  Hermes provision writes — a bare `hal0 update` never reprovisions Hermes,
+  and re-running the installer against a box that already has Hermes
+  provisioned skips the prompt and any environment answer entirely, so
+  neither touches an existing box's terminal posture at all. At the next
+  ACTUAL reprovision or bootstrap, a `config.yaml` that already carries a
+  backend other than `local`, or `local` together with a non-default
+  `cwd` — anything hal0's own provisioning has ever written, or a path the
+  operator set by hand — is read as a prior opt-in
   and keeps the terminal enabled. `local` with no `cwd`, or the default
   `cwd: "."` that `hermes config migrate` can materialise on its own, is
   NOT read as consent: that box comes back off at the next reprovision,
@@ -256,8 +261,8 @@ unconditionally (#1828). Both now fail loudly.
   installs were always 0600. **Existing boxes are repaired on the next
   reprovision, not by the update itself** — check with
   `stat -c '%a' /etc/hal0/agents/hermes.env`, expect `600` (#1876).
-- `hal0 doctor` gains an **Agent UID split** row that warns — never fails,
-  since sharing a UID is the shipped 1.0 default — when a `hal0-agent@*` unit
+- `hal0 doctor all` gains an **Agent UID split** row that warns — never
+  fails, since sharing a UID is the shipped 1.0 default — when a `hal0-agent@*` unit
   resolves to the same `User=` as `hal0-api.service`. Same UID means the
   bundled agent's `local` terminal backend can read the API process's
   `/proc/<pid>/environ`, and therefore every credential the API holds;
@@ -279,7 +284,11 @@ unconditionally (#1828). Both now fail loudly.
   **A bare `hal0 update` does not touch the file either**, so an existing
   `upstreams.toml` already on disk at `0644` stays `0644` until an actual
   provider write happens or an operator converges it directly with
-  `sudo hal0 doctor perms --fix` (#1881).
+  `sudo hal0 doctor perms --fix`. CLI impact: `hal0 config show upstreams`
+  reads the file directly as the invoking user — no privilege drop — so once
+  a box is at `0640`, an ordinary login user who is neither `hal0` nor root
+  and not in the `hal0` group gets a permission error and needs `sudo` or
+  `hal0`-group membership to read it (#1881).
 
 ### Docs
 
@@ -398,9 +407,9 @@ targeted at the 1.0.x line.
   the seam (#1759)** / **releases-URL override (#1750)** migrations from rc.4,
   still apply to boxes coming from an older tag; see the
   [1.0.0-rc.5 section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100-rc5--2026-08-10).
-- **Terminal tool off by default on new installs (#1882):** a box installed
-  fresh, or provisioned non-interactively (a piped `curl … | bash` install, a
-  headless install, or one run with `HAL0_NONINTERACTIVE=1`), no longer
+- **Terminal tool off by default on new installs (#1882):** a box freshly
+  provisioned — interactive (declined), piped (`curl … | bash`), headless,
+  or run with `HAL0_NONINTERACTIVE=1` — no longer
   enables Hermes' `local` terminal backend automatically — `code_execution`
   and `delegation` come off with it. Nothing to run if that is what you want.
   To enable it, answer yes at the installer's prompt on an interactive
@@ -420,8 +429,12 @@ targeted at the 1.0.x line.
   `HAL0_HERMES_TERMINAL=1` before reprovisioning — rather than relying on
   the default. Since this is a root-equivalent shell, an operator who wants
   it off right now, without waiting for a reprovision, can run
-  `sudo hal0 agent install hermes --no-terminal-tool` (or
-  `HAL0_HERMES_TERMINAL=0` before reprovisioning) at any time.
+  `sudo hal0 agent install hermes --no-terminal-tool` at any time — note
+  this also `systemctl enable --now`s the agent unit, so it starts Hermes
+  if it was deliberately stopped. To change only the posture, without that
+  side effect, run `sudo env HAL0_HERMES_TERMINAL=0 hal0 agent reprovision
+  hermes` instead: `reprovision` only `try-restart`s an already-running
+  unit, a no-op on a stopped one.
 
 ### Rollback
 
