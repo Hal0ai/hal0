@@ -259,29 +259,42 @@ systemd/podman start subprocesses behind a lifecycle wait are unbounded
 server-side (#1869).
 
 **Installing by the documented one-liner still does not work for this channel
-(#1530, #1531).** No channel manifest is published to `releases.hal0.dev` for
-`preview` (404), and `stable` remains a self-declared `0.0.0` placeholder; only
-`nightly` is live. Install and update from the GitHub release asset URL below. The 0.9.8 CLI's
-spurious end-of-update `ConnectError` and the first-boot `unattended-upgrades`
-dpkg race (#1584) carry forward, as does the rc.1/rc.2 venv case where the
-passive check does not offer a newer tag and `hal0 update --target <version>`
-is the recovery path (#1715). Literal memory recall still leans on a
-client-side document fallback; the durable fix needs server-side content search
-in the memory engine (#1794).
+(#1883).** The `preview.json` channel manifest now serves the real signed
+release manifest — the proxy 404 tracked as #1531 is fixed. But the
+channel-URL path still fails at mandatory manifest verification for every
+channel: `releases.hal0.dev` does not proxy the manifest's sibling cosign
+bundle (`<channel>.json.bundle`, 404), and there is no bypass for signature
+verification. Install and update from the GitHub release asset URL below,
+which remains the working path (#1530, still open, flips at GA). The 0.9.8
+CLI's spurious end-of-update `ConnectError` carries forward, as does the
+rc.1/rc.2 venv case where the passive check does not offer a newer tag and
+`hal0 update --target <version>` is the recovery path (#1715).
+
+**Memory retention on CPU-only installs remains unreliable (#1833, #1834).**
+`hal0 memory status` can report `Writes landing` on a store that has never
+landed a fact, and the hindsight extraction queue has no concurrency cap or
+`max_tokens`, so it can fail to drain on a CPU-only box. Both remain open,
+targeted at the 1.0.x line.
 
 ### Operator migrations
 
 - **Profile-less capability slots (#1830):** a slot created under rc.5 or
   earlier may have been written without a profile and will keep 501ing after
   the update, because the fix applies at creation time. Run `hal0 doctor
-  profiles` — it names each affected slot — then
-  `hal0 slot edit <name> --profile embedding` (or `reranking`) followed by
-  `hal0 slot restart <name>`.
+  profiles` — it names each affected slot and prints the exact
+  `hal0 slot edit <name> --profile <profile>` command to run, then follow with
+  `hal0 slot restart <name>`. Use the command doctor prints, not a guess: an
+  NPU embedding slot repairs to `--profile flm`, not `--profile embedding` —
+  `--profile embedding` (or `reranking`) is only representative of the
+  common case.
 - **Context windows widen on update (#1827):** brain, agent and utility slots
   relaunch with a 65,536-token window instead of 32,768 and therefore reserve
-  more memory. On a tightly provisioned box, check `hal0 slot capacity` after
-  updating. If chat still refuses after the update, the box is carrying an agent
-  slot ceiling below Hermes' 64,000-token floor that this fix does not
+  more memory. A bare `hal0 update` does not relaunch slots, so the wider
+  window only takes effect once the operator restarts them — run
+  `hal0 update --restart-slots` or `hal0 slot restart <name>` after updating.
+  On a tightly provisioned box, check `hal0 slot capacity` once slots are
+  restarted. If chat still refuses after the update, the box is carrying an
+  agent slot ceiling below Hermes' 64,000-token floor that this fix does not
   reconcile — run `hal0 doctor`, which now names the slot and prints the exact
   `hal0 slot edit` command to raise it (#1867).
 - **World-readable agent token on upgraded boxes (#1876):** the agent env file
@@ -290,13 +303,17 @@ in the memory engine (#1794).
   was provisioned unprivileged, which in practice means every box upgraded
   rather than freshly installed. Run `stat -c '%a' /etc/hal0/agents/hermes.env`
   — if it reads `644`, either reprovision the agent
-  (`hal0 agent bootstrap hermes`) or `chmod 600` it directly. The update alone
-  does not repair it, because the repair happens during provisioning.
+  (`hal0 agent bootstrap hermes`) or fix it directly: the file is root:root in
+  a root-owned directory, so a non-root operator needs
+  `sudo chmod 600 /etc/hal0/agents/hermes.env`. The update alone does not
+  repair it, because the repair happens during provisioning.
 - **Bundled agent skills on an already-installed box (#1828):** the permission
-  fix applies when the installer next writes the ownership table, so re-run the
-  installer or `hal0 update` and confirm the skill-link phase reports `ok`
-  rather than `warn`. A box whose skills never linked shows them absent under
-  `/etc/hal0/agent-skills`.
+  fix and the skill-link phase both live in the installer and the agent
+  provisioning path, not in `hal0 update` — an update alone does not re-run
+  either. Re-run the installer, or reprovision the agent
+  (`hal0 agent bootstrap hermes`), and confirm the skill-link phase reports
+  `ok` rather than `warn`. A box whose skills never linked shows them absent
+  under `/etc/hal0/agent-skills`.
 - **Stale DNAT rules (#1819)** from rc.5, and the **deprecated `extra_args` at
   the seam (#1759)** / **releases-URL override (#1750)** migrations from rc.4,
   still apply to boxes coming from an older tag; see the
