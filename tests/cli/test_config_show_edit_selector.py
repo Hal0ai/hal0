@@ -11,11 +11,34 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from hal0.cli import config_commands
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_service_account(monkeypatch):
+    """Default every test in this file to "no system hal0 account" for
+    ``_seed_config_file``'s ownership step.
+
+    A HAL0_HOME sandbox is never actually ``/etc/hal0`` — it's a throwaway
+    temp tree — so there is no real chown target, regardless of whether
+    *this* machine happens to have a system ``hal0`` account (hal0's own
+    dev/CI boxes do, since hal0 is genuinely installed on them). Without
+    this, seed tests would pass or fail depending on host state instead of
+    on the code under test. The tests that specifically exercise the
+    privileged/chown-denied paths override ``pwd.getpwnam``/
+    ``grp.getgrnam`` themselves, after this fixture runs.
+    """
+
+    def _no_such_account(name: str):
+        raise KeyError(name)
+
+    monkeypatch.setattr(config_commands.pwd, "getpwnam", _no_such_account)
+    monkeypatch.setattr(config_commands.grp, "getgrnam", _no_such_account)
 
 
 def _set_home(monkeypatch, tmp_path: Path) -> Path:
@@ -150,10 +173,14 @@ def test_config_edit_seed_chowns_to_service_owner_when_privileged(
     assert (uid, gid) == (4242, 4343), f"chowned to the wrong target: {chown_calls}"
 
 
-def test_config_edit_seed_survives_chown_permission_denied(monkeypatch, tmp_path: Path) -> None:
+def test_config_edit_seed_rejects_seed_when_chown_denied(monkeypatch, tmp_path: Path) -> None:
     """An unprivileged third-user invocation cannot chown to the service
-    account (POSIX: only root may chown to an arbitrary uid) — the seed
-    must still be written successfully rather than the command crashing.
+    account (POSIX: only root may chown to an arbitrary uid). Publishing the
+    seed anyway would hand the operator a self-owned hal0.toml at 0600 that
+    hal0-api (User=hal0) cannot read — and _config_require_auth() turns that
+    unreadable-config case into a silent fall-back to require_auth OFF. The
+    command must instead abort loudly: nonzero exit, no file left behind,
+    and a message that tells the operator to re-run under sudo.
     """
     cfg_dir = _set_home(monkeypatch, tmp_path)
     monkeypatch.setenv("EDITOR", "true")
@@ -172,11 +199,37 @@ def test_config_edit_seed_survives_chown_permission_denied(monkeypatch, tmp_path
     monkeypatch.setattr(config_commands.os, "fchown", _denied_fchown)
 
     result = runner.invoke(config_commands.app, ["edit", "hal0"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, "a chown-denied seed must abort, not silently succeed"
     seeded = cfg_dir / "hal0.toml"
-    assert seeded.exists()
-    mode = stat.S_IMODE(seeded.stat().st_mode)
-    assert mode == 0o600, "mode must still land correctly even when chown is denied"
+    assert not seeded.exists(), "the unreadable-to-hal0-api seed must not be left on disk"
+    assert "sudo" in result.output, f"error must point the operator at sudo: {result.output}"
+
+
+def test_config_edit_seed_rejects_seed_on_other_oserror(monkeypatch, tmp_path: Path) -> None:
+    """Widened from bare PermissionError to OSError on review (e.g. EROFS on
+    a read-only-remounted /etc) — any chown failure must hit the same loud
+    abort, not an unhandled traceback.
+    """
+    cfg_dir = _set_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("EDITOR", "true")
+
+    class _FakePasswd:
+        pw_uid = 4242
+
+    class _FakeGroup:
+        gr_gid = 4343
+
+    def _erofs_fchown(fd: int, uid: int, gid: int) -> None:
+        raise OSError(30, "Read-only file system")  # errno.EROFS
+
+    monkeypatch.setattr(config_commands.pwd, "getpwnam", lambda name: _FakePasswd())
+    monkeypatch.setattr(config_commands.grp, "getgrnam", lambda name: _FakeGroup())
+    monkeypatch.setattr(config_commands.os, "fchown", _erofs_fchown)
+
+    result = runner.invoke(config_commands.app, ["edit", "upstreams"])
+    assert result.exit_code != 0
+    assert not (cfg_dir / "upstreams.toml").exists()
+    assert "sudo" in result.output
 
 
 def test_permission_denied_hint_does_not_recommend_widening_the_file(

@@ -81,20 +81,31 @@ def _hal0_toml_path() -> Path:
     return _config_path(ConfigFile.hal0)
 
 
+class ConfigSeedOwnershipError(RuntimeError):
+    """A freshly-seeded config file could not be chowned to the hal0 service account.
+
+    Raised by :func:`_fchown_to_service_owner` and left uncaught by
+    :func:`_seed_config_file` on purpose — the caller (``config edit``)
+    turns this into a loud, non-zero-exit error rather than silently
+    publishing a file the service account can't read (see both docstrings
+    for why that matters).
+    """
+
+
 def _fchown_to_service_owner(fd: int) -> None:
-    """Best-effort ``fchown`` a freshly-seeded config file's fd to hal0:hal0.
+    """``fchown`` a freshly-seeded config file's fd to hal0:hal0, or abort.
 
     Seeding at 0600/0640 (:data:`HAL0_TOML_SEED_MODE` /
     :data:`UPSTREAMS_TOML_MODE`) is only correct if the file ends up owned
     by the account those modes are meant to admit. ``hal0-api.service`` runs
     ``User=hal0``/``Group=hal0`` (``installer/install.sh``); left unhandled,
     ``sudo hal0 config edit`` — or any invocation by root, or by a third
-    unprivileged user — seeds a file the service account cannot open, and
-    ``load_hal0_config()``/``_config_require_auth()`` swallow that
-    ``PermissionError`` into a bare "unset", silently falling back to
-    ``require_auth`` OFF. The previous bare ``write_text`` at 0644 never hit
-    this because 0644 stays world-readable regardless of owner — the mode
-    fix alone introduced this gap (Codex review on a5f4fe5d).
+    unprivileged user in the ``hal0`` group — seeds a file the service
+    account cannot open, and ``load_hal0_config()``/``_config_require_auth()``
+    swallow that ``PermissionError`` into a bare "unset", silently falling
+    back to ``require_auth`` OFF. The previous bare ``write_text`` at 0644
+    never hit this because 0644 stays world-readable regardless of owner —
+    the mode fix alone introduced this gap (Codex review on a5f4fe5d).
 
     Only root can ``chown`` to an arbitrary uid; an unprivileged owner can
     at most ``chgrp`` to a group they already belong to. So:
@@ -102,25 +113,33 @@ def _fchown_to_service_owner(fd: int) -> None:
     - No system ``hal0`` account on this box (``pwd.getpwnam``/
       ``grp.getgrnam`` raise ``KeyError`` — the common case in a dev/CI
       sandbox with no hal0 service installed): nothing sensible to chown
-      to, skip.
+      to, and nothing is going to try reading this file as that user
+      either — skip silently, seed succeeds.
     - Invoking as the ``hal0`` service user already: ``os.fchown`` is a
       no-op modulo confirming the uid/gid, succeeds trivially.
     - Invoking as root (the ``sudo hal0 config edit`` case): chown
       succeeds, the canonical owner is applied.
-    - Invoking as any other unprivileged user: ``os.fchown`` raises
-      ``PermissionError``, caught and swallowed here. The seed is left
-      owned by the invoking user — a narrower, pre-existing-class gap
-      (the file didn't exist at all a moment ago) rather than a new one;
-      ``hal0 doctor perms --fix`` (root-gated) is the documented
-      remediation, same as any other ownership drift under ``/etc/hal0``.
+    - Invoking as any other unprivileged user — including one in the
+      ``hal0`` group, since group membership never lets you ``chown``
+      to a different owner: ``os.fchown`` raises ``OSError``
+      (``PermissionError`` is the common case; widened from that to
+      ``OSError`` on review, since a read-only mount raising ``EROFS``
+      deserves the identical loud abort, not a bare traceback). Raises
+      :class:`ConfigSeedOwnershipError` so the caller aborts the seed
+      outright instead of quietly publishing a file ``hal0-api`` can't
+      read — see :func:`_seed_config_file`.
     """
     try:
         uid = pwd.getpwnam(_SERVICE_USER).pw_uid
         gid = grp.getgrnam(_SERVICE_GROUP).gr_gid
     except KeyError:
         return
-    with contextlib.suppress(PermissionError):
+    try:
         os.fchown(fd, uid, gid)
+    except OSError as exc:
+        raise ConfigSeedOwnershipError(
+            f"could not chown to {_SERVICE_USER}:{_SERVICE_GROUP}: {exc}"
+        ) from exc
 
 
 def _seed_config_file(path: Path, content: str, mode: int) -> None:
@@ -137,6 +156,12 @@ def _seed_config_file(path: Path, content: str, mode: int) -> None:
     the CLI, silently widening a file whose canonical mode is 0600/0640 and
     whose canonical owner is the ``hal0`` service account, the moment it's
     created via ``edit`` rather than via the API's own writer.
+
+    Raises:
+        ConfigSeedOwnershipError: if a system ``hal0`` account exists but
+            the seed could not be chowned to it. The temp file is closed
+            and unlinked before this propagates — ``path`` is left exactly
+            as it was (absent), never published half-owned.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path: Path | None = None
@@ -233,24 +258,26 @@ def config_edit(
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         if which == ConfigFile.hal0:
-            _seed_config_file(
-                path,
+            seed_content = (
                 "# hal0 configuration — see `hal0 config show` for the live shape.\n"
                 "[meta]\nschema_version = 1\n\n"
-                "[slots]\nport_range_start = 8081\nport_range_end = 8099\n",
-                HAL0_TOML_SEED_MODE,
+                "[slots]\nport_range_start = 8081\nport_range_end = 8099\n"
             )
+            seed_mode = HAL0_TOML_SEED_MODE
         elif which == ConfigFile.upstreams:
-            _seed_config_file(
-                path,
-                f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n",
-                UPSTREAMS_TOML_MODE,
-            )
+            seed_content = f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n"
+            seed_mode = UPSTREAMS_TOML_MODE
         else:
-            _seed_config_file(
-                path,
-                f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n",
-                PROVIDERS_TOML_SEED_MODE,
+            seed_content = f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n"
+            seed_mode = PROVIDERS_TOML_SEED_MODE
+        try:
+            _seed_config_file(path, seed_content, seed_mode)
+        except ConfigSeedOwnershipError as exc:
+            die(
+                f"cannot seed {path}: {exc}. This box has a hal0 service "
+                "account, and hal0-api (User=hal0) would not be able to read "
+                "a seed owned by you at this file's canonical mode. Re-run "
+                "with [bold]sudo[/bold] so the seed lands hal0-owned."
             )
     try:
         subprocess.run([editor, str(path)], check=True)
