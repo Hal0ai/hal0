@@ -54,6 +54,11 @@ from typing import Any, NamedTuple
 
 import structlog
 
+from hal0.agents.anchor_window import (
+    AnchorWindow,
+    read_hermes_minimum_context,
+    resolve_anchor_window,
+)
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 from hal0.system import seam as _seam
@@ -3309,6 +3314,40 @@ def _fetch_model_contexts() -> dict[str, int]:
     return out
 
 
+def _fetch_anchor_models(
+    model_id: str, base_url: str = "", gateway_url: str = ""
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """``(by-id row, catalog rows)`` for ``model_id`` on the endpoint that serves it.
+
+    The by-id row is the authoritative window: ``GET /v1/models/{id}`` resolves
+    the routing fallback chain exactly as chat dispatch does and returns the
+    RESOLVED model's row (``api/routes/v1.py::_resolve_virtual_model_entry``),
+    so its ``context_length`` is the window Hermes will really be handed. The
+    list route cannot answer this — it deliberately never advertises the
+    canonical virtuals (#1153), and on a box whose agent slot is offline it
+    carries no row spelled like the anchor at all.
+
+    ``base_url`` is hermes' ``model.base_url``, so under
+    ``HAL0_HERMES_LIVE_RESOLVE=0`` the question goes to the pinned
+    llama-server the turns actually reach rather than to a gateway catalog
+    that deliberately suppresses that id (#1831's lesson, applied here).
+
+    Never raises: an unreachable endpoint yields ``(None, [])``, which the
+    caller must report as "cannot see", not as a pass.
+    """
+    base = (base_url or f"{(gateway_url or HAL0_API_URL).rstrip('/')}/v1").rstrip("/")
+    _status, entry = _http_status_json(f"{base}/models/{_quote_model_id(model_id)}")
+    row = entry if isinstance(entry, dict) and entry.get("id") else None
+    _listed_status, payload = _http_status_json(f"{base}/models")
+    entries = (payload or {}).get("data")
+    catalog = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    if row is None:
+        # No by-id route (llama-server has none): the list route may still carry
+        # the id verbatim, which for a pinned physical id is the same evidence.
+        row = next((e for e in catalog if str(e.get("id")) == model_id), None)
+    return (row, catalog)
+
+
 def _fetch_model_route_ready(model_id: str, base_url: str = "") -> bool | None:
     """Is ``model_id`` routable **on the endpoint the caller will dispatch to**?
 
@@ -4681,7 +4720,8 @@ def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
 
 # ── Phase K: smoke_tests ────────────────────────────────────────────────────
 #
-# Six non-fatal probes per plan §14 + #246. Each surface check writes a
+# Seven non-fatal probes per plan §14 + #246 (the seventh, anchor_context_window,
+# is #1867's window preflight). Each surface check writes a
 # `passed: bool` row into PhaseResult.details["results"]; failures
 # also carry a remediation hint operators can paste at the user.
 #
@@ -4807,6 +4847,88 @@ def _smoke_memory_roundtrip(state: BootstrapState, io: InstallIO) -> tuple[bool,
     return (False, "memory_search returned no items for just-written marker")
 
 
+def _anchor_window(state: BootstrapState, io: InstallIO) -> AnchorWindow | str:
+    """Resolve the anchor slot's effective window, or a reason it can't be (#1867).
+
+    Reads ``model.default`` from the live config.yaml (the id Hermes actually
+    dispatches with), asks the installed Hermes for its own
+    ``MINIMUM_CONTEXT_LENGTH`` rather than trusting a second hardcoded 64,000,
+    and pairs the gateway's advertised window with the slot's on-disk ceiling.
+
+    Returns a plain string when the question could not even be asked (no
+    config.yaml, no ``model.default``) — that is a config problem, not a window
+    verdict.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    config_path = Path(state.hermes_home) / "config.yaml"
+    if not config_path.exists():
+        return "config.yaml missing — bootstrap incomplete"
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return f"config parse: {exc}"
+    model_cfg = cfg.get("model") or {}
+    model_name = str(model_cfg.get("default") or "").strip()
+    if not model_name:
+        return "model.default unset in config.yaml"
+    base_url = str(model_cfg.get("base_url", "") or "")
+    floor, floor_source = read_hermes_minimum_context(_venv_python(Path(state.venv)))
+    try:
+        entry, catalog = io.fetch_anchor_models(model_name, base_url)
+    except Exception as exc:  # a preflight must never raise
+        return f"could not read advertised windows ({exc})"
+    return resolve_anchor_window(
+        model_name,
+        entry=entry,
+        catalog=catalog,
+        floor=floor,
+        floor_source=floor_source,
+        slots_dir=ETC_HAL0_DIR / "slots",
+        endpoint=base_url or f"{HAL0_API_URL}/v1",
+    )
+
+
+def _smoke_anchor_context_window(state: BootstrapState, io: InstallIO) -> tuple[bool | None, str]:
+    """Is the anchor's window at or above Hermes' hard floor? (#1867)
+
+    Hermes raises below ``MINIMUM_CONTEXT_LENGTH`` instead of degrading, so a
+    box whose anchor slot resolves under it refuses EVERY turn — and used to do
+    so as an opaque upstream error ~1.6s in, naming neither the slot nor the
+    ceiling that caused it. The classic shape is an upgraded box: the model
+    declares 96000, the agent slot's own ``[model].context_size`` is still the
+    4096 an older release seeded, and ``min()`` of the two is what Hermes sees.
+
+    Fails with both numbers, the slot, its ceiling, and the exact repair
+    command. An anchor whose window cannot be read (nothing loaded, endpoint
+    unreachable, a backend that advertises no ``context_length``) is
+    ``unknown`` — reported as ``None``/SKIPPED, never as a pass. A preflight
+    that cannot see the value has to say so: passing on no evidence is how a
+    box that refuses every turn read green (#1831, and the ct152 shape that
+    #1867's own first cut still reported clean).
+    """
+    window = _anchor_window(state, io)
+    if isinstance(window, str):
+        return (False, window)
+    if window.verdict == "unknown":
+        return (None, window.message())
+    if window.verdict == "below_floor":
+        log.warning(
+            "hermes.anchor_window_below_floor",
+            extra={
+                "model": window.model,
+                "slot": window.slot,
+                "effective": window.effective,
+                "slot_ceiling": window.ceiling,
+                "floor": window.floor,
+                "floor_source": window.floor_source,
+                "fix": window.fix_command,
+            },
+        )
+        return (False, window.message())
+    return (True, window.message())
+
+
 def _smoke_admin_tools_list(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     probe = io.probe_mcp_server(
         "http://127.0.0.1:8080/mcp/admin",
@@ -4882,7 +5004,17 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
 #: memory_add/memory_search tools directly and has no chat dependency
 #: whatsoever (#1831); gating it behind the chat anchor over-skipped it even
 #: when memory itself was fully working.
-_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions"})
+#: ``anchor_context_window`` joins it for the same reason (#1867): with no chat
+#: model routable there is no advertised window to compare against Hermes'
+#: floor, so the honest report is ``skipped``, not a manufactured verdict.
+_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions", "anchor_context_window"})
+
+#: Why each model-dependent probe skipped — a skip is a claim (#1793), so it
+#: has to state the claim that probe is actually making, not a borrowed one.
+_SKIP_REASONS = {
+    "chat_completions": "no chat model loaded",
+    "anchor_context_window": "no routable anchor to measure a window on",
+}
 
 
 def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
@@ -4940,7 +5072,7 @@ def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
 
 
 def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
-    """Run six diagnostic probes; collect results into the checkpoint.
+    """Run the diagnostic probes; collect results into the checkpoint.
 
     ``status`` is ``warn`` (not ``ok``) when any probe genuinely fails — a
     phase that recorded failures must say so, not report a clean ``ok`` with
@@ -4949,9 +5081,10 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     """
     state = ctx.state
     chat_ready, chat_reason = _chat_model_ready(state, ctx.io)
-    probes = [
+    probes: list[tuple[str, Callable[[BootstrapState, InstallIO], tuple[bool | None, str]]]] = [
         ("wrapper_ready", _smoke_wrapper_ready),
         ("hermes_doctor", _smoke_hermes_doctor),
+        ("anchor_context_window", _smoke_anchor_context_window),
         ("chat_completions", _smoke_chat_completions),
         ("memory_roundtrip", _smoke_memory_roundtrip),
         ("admin_tools_list", _smoke_admin_tools_list),
@@ -4962,7 +5095,7 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     skipped: list[str] = []
     for name, fn in probes:
         if name in _MODEL_DEPENDENT_PROBES and not chat_ready:
-            detail = f"skipped: no chat model loaded ({chat_reason})"
+            detail = f"skipped: {_SKIP_REASONS[name]} ({chat_reason})"
             results[name] = {"passed": None, "skipped": True, "detail": detail}
             skipped.append(f"{name}: {detail}")
             continue
@@ -4970,6 +5103,13 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
             passed, detail = fn(state, ctx.io)
         except Exception as exc:
             passed, detail = (False, f"{type(exc).__name__}: {exc}")
+        if passed is None:
+            # A probe that ran and could not reach a verdict reports SKIPPED,
+            # never a pass — the roll-up must not read clean off no evidence.
+            detail = f"skipped: {detail}"
+            results[name] = {"passed": None, "skipped": True, "detail": detail}
+            skipped.append(f"{name}: {detail}")
+            continue
         results[name] = {"passed": passed, "detail": detail}
         if not passed:
             failures.append(f"{name}: {detail}")
@@ -5418,6 +5558,9 @@ class InstallIO:
     fetch_slots: Callable[[], list[dict[str, Any]]] = _fetch_slots
     fetch_model_contexts: Callable[[], dict[str, int]] = _fetch_model_contexts
     fetch_model_route_ready: Callable[[str, str], bool | None] = _fetch_model_route_ready
+    fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]] = (
+        _fetch_anchor_models
+    )
     probe_mcp_server: Callable[..., dict[str, Any]] = _probe_mcp_server
     mcp_memory_call: Callable[..., dict[str, Any]] = _mcp_memory_call
     install_venv: Callable[..., None] = _install_venv

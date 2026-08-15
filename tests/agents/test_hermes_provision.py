@@ -2036,6 +2036,7 @@ def test_smoke_tests_phase_runs_each_probe_collecting_results(
     monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s, io: (True, "1 item"))
     monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
     monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
+    monkeypatch.setattr(hp, "_smoke_anchor_context_window", lambda s, io: (True, "65,536 ≥ floor"))
     out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["failures"] == []
@@ -2043,6 +2044,7 @@ def test_smoke_tests_phase_runs_each_probe_collecting_results(
     assert set(out.details["results"].keys()) == {
         "wrapper_ready",
         "hermes_doctor",
+        "anchor_context_window",
         "chat_completions",
         "memory_roundtrip",
         "admin_tools_list",
@@ -2096,7 +2098,12 @@ def test_smoke_tests_phase_skips_model_dependent_probes_without_chat_model(
     assert calls == []  # the chat-gated probe never ran
     assert out.status == hp.PhaseStatus.OK  # skips aren't failures
     assert out.details["failures"] == []
-    assert len(out.details["skipped"]) == 1
+    # Both model-dependent probes skip: chat_completions and #1867's
+    # anchor_context_window, which has no advertised window to measure either.
+    assert {s.split(":")[0] for s in out.details["skipped"]} == {
+        "chat_completions",
+        "anchor_context_window",
+    }
     assert out.details["results"]["chat_completions"]["skipped"] is True
     assert "no chat model loaded" in out.details["results"]["chat_completions"]["detail"]
     assert out.details["results"]["memory_roundtrip"] == {"passed": True, "detail": "1 item"}
@@ -2313,7 +2320,10 @@ def test_pinned_backend_config_does_not_skip_chat_probe(
         f"chat_completions was skipped on a live pinned backend: "
         f"{out.details['results']['chat_completions']} (probed: {seen})"
     )
-    assert out.details["skipped"] == []
+    # Scoped to the chat probe: #1867's anchor_context_window legitimately
+    # skips here (this fake catalog advertises no context_length), and a
+    # blanket "nothing skipped" would make that skip look like a chat bug.
+    assert not any(s.startswith("chat_completions") for s in out.details["skipped"])
 
 
 def test_unverifiable_route_runs_the_probe_instead_of_skipping(
@@ -2339,7 +2349,10 @@ def test_unverifiable_route_runs_the_probe_instead_of_skipping(
     state = hp.BootstrapState(hermes_home=str(hh))
     out = hp._phase_smoke_tests(hp._StepCtx(state=state))
     assert ran == ["x"]
-    assert out.details["skipped"] == []
+    # Scoped to the chat probe: #1867's anchor_context_window legitimately
+    # skips here (this fake catalog advertises no context_length), and a
+    # blanket "nothing skipped" would make that skip look like a chat bug.
+    assert not any(s.startswith("chat_completions") for s in out.details["skipped"])
     assert any("chat_completions" in f for f in out.details["failures"])
 
 
@@ -2362,7 +2375,10 @@ def test_virtual_anchor_with_no_live_slot_still_skips(
     state = hp.BootstrapState(hermes_home=str(hh))
     out = hp._phase_smoke_tests(hp._StepCtx(state=state))
     assert out.details["results"]["chat_completions"]["skipped"] is True
-    assert len(out.details["skipped"]) == 1
+    assert {s.split(":")[0] for s in out.details["skipped"]} == {
+        "chat_completions",
+        "anchor_context_window",
+    }
 
 
 def test_live_resolve_virtual_anchor_runs_the_probe(
@@ -2390,7 +2406,241 @@ def test_live_resolve_virtual_anchor_runs_the_probe(
     state = hp.BootstrapState(hermes_home=str(hh))
     out = hp._phase_smoke_tests(hp._StepCtx(state=state))
     assert ran == ["x"]
-    assert out.details["skipped"] == []
+    # Scoped to the chat probe: #1867's anchor_context_window legitimately
+    # skips here (this fake catalog advertises no context_length), and a
+    # blanket "nothing skipped" would make that skip look like a chat bug.
+    assert not any(s.startswith("chat_completions") for s in out.details["skipped"])
+
+
+class TestAnchorContextWindowPreflight:
+    """#1867 — the anchor's window is checked before Hermes ever sees it.
+
+    Reproduces the ct150 box exactly: the model behind the agent slot declares
+    96000, but the slot's own ``[model].context_size`` ceiling is still the 4096
+    an older release seeded, so ``min()`` hands Hermes 4,096 and Hermes — which
+    raises below ``MINIMUM_CONTEXT_LENGTH`` rather than degrading — refuses
+    every turn. Before this preflight nothing named the slot or the ceiling; the
+    operator saw only an opaque upstream error ~1.6 s into the first turn.
+
+    Production wiring only: the real ``_phase_smoke_tests``, the real
+    ``_fetch_anchor_models`` over a fake network, a real slot TOML on disk.
+    """
+
+    @staticmethod
+    def _ct150_box(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        slot_ceiling: int,
+        advertised: int,
+    ) -> hp.BootstrapState:
+        hh = tmp_path / "hh"
+        hh.mkdir()
+        (hh / "config.yaml").write_text(
+            "model:\n  default: hal0/agent\n  base_url: http://127.0.0.1:8080/v1\n"
+        )
+        etc = tmp_path / "etc-hal0"
+        (etc / "slots").mkdir(parents=True)
+        (etc / "slots" / "agent.toml").write_text(
+            f'[model]\ndefault = "hal0-brain-sft-q8-rocmfpx"\ncontext_size = {slot_ceiling}\n'
+        )
+        monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
+        # The by-id row is the RESOLVED slot's catalog row with ``id`` rewritten
+        # back to the requested handle — the gateway's own construction
+        # (``api/routes/v1.py::_resolve_virtual_model_entry``), captured off a
+        # live box in ``_CT152_*`` below.
+        agent_row = {
+            "id": "agent",
+            "object": "model",
+            "owned_by": "hal0",
+            "name": "agent · hal0-brain-sft-q8-rocmfpx",
+            "context_length": advertised,
+        }
+        _fake_http(
+            monkeypatch,
+            {
+                # The anchor routes fine — this box is not broken in the way the
+                # #1831 routability preflight looks for. What it hands Hermes is
+                # min(96000 model window, the slot's own ceiling).
+                "http://127.0.0.1:8080/v1/models/hal0/agent": {**agent_row, "id": "hal0/agent"},
+                "http://127.0.0.1:8080/v1/models": {
+                    "data": [
+                        agent_row,
+                        {"id": "brain", "owned_by": "hal0", "context_length": 96000},
+                    ]
+                },
+            },
+        )
+        _stub_non_chat_probes(monkeypatch)
+        monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s, io: (True, "ready"))
+        # No provisioned Hermes venv under a unit test, so the floor comes from
+        # hal0's pinned copy of MINIMUM_CONTEXT_LENGTH.
+        return hp.BootstrapState(hermes_home=str(hh), venv=str(tmp_path / "no-venv"))
+
+    def test_a_slot_ceiling_under_the_floor_fails_loudly_with_the_fix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = self._ct150_box(tmp_path, monkeypatch, slot_ceiling=4096, advertised=4096)
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+
+        result = out.details["results"]["anchor_context_window"]
+        assert result["passed"] is False, out.details["results"]
+        assert out.status == hp.PhaseStatus.WARN
+        detail = result["detail"]
+        # Everything an operator needs, without opening a source file.
+        assert "agent" in detail
+        assert "4,096" in detail
+        assert "64,000" in detail
+        assert "agent.toml" in detail
+        assert "hal0 slot edit agent --ctx-size 65536" in detail
+        assert any("anchor_context_window" in f for f in out.details["failures"])
+
+    def test_a_ceiling_above_the_floor_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = self._ct150_box(tmp_path, monkeypatch, slot_ceiling=65536, advertised=65536)
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+        assert out.details["results"]["anchor_context_window"]["passed"] is True
+        assert out.status == hp.PhaseStatus.OK
+
+    def test_no_routable_anchor_skips_instead_of_inventing_a_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Install-time run, before any model was ever loaded: there is no
+        advertised window to judge, so the probe reports ``skipped`` — the same
+        rule the chat probe follows (#1793)."""
+        hh = tmp_path / "hh"
+        hh.mkdir()
+        (hh / "config.yaml").write_text(
+            "model:\n  default: hal0/agent\n  base_url: http://127.0.0.1:8080/v1\n"
+        )
+        _fake_http(monkeypatch, {"http://127.0.0.1:8080/v1/models": {"data": []}})
+        _stub_non_chat_probes(monkeypatch)
+        monkeypatch.setattr(
+            hp, "_smoke_chat_completions", lambda s, io: pytest.fail("probe must not run")
+        )
+        state = hp.BootstrapState(hermes_home=str(hh))
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+        assert out.details["results"]["anchor_context_window"]["skipped"] is True
+        assert out.status == hp.PhaseStatus.OK
+
+    def test_ct152_the_anchor_falls_back_to_another_slot_and_must_not_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE false negative, off the live ct152 box (rc.5).
+
+        The agent slot is offline (``model_id: null``) so ``hal0/agent``
+        resolves through the routing fallback chain to the BRAIN slot's
+        32,768-token window — under Hermes' 64,000 floor, i.e. a box that
+        cannot chat. But ``/v1/models`` lists only ``brain`` and ``utility``:
+        there is no row spelled ``agent`` or ``hal0/agent`` anywhere in it, so
+        a probe that looks the anchor up by its spelled alias sees nothing,
+        calls the window unknown, and reports a PASS.
+
+        Payloads are verbatim captures from 10.0.1.152 — the expectation comes
+        from the gateway itself, not from anything hal0's resolver computes.
+        """
+        hh = tmp_path / "hh"
+        hh.mkdir()
+        (hh / "config.yaml").write_text(
+            "model:\n  default: hal0/agent\n  base_url: http://127.0.0.1:8080/v1\n"
+        )
+        etc = tmp_path / "etc-hal0"
+        (etc / "slots").mkdir(parents=True)
+        # The agent slot's TOML still exists on that box; it is simply not what
+        # the anchor resolves to, so its ceiling must not be blamed.
+        (etc / "slots" / "agent.toml").write_text("[model]\ncontext_size = 65536\n")
+        (etc / "slots" / "brain.toml").write_text("[model]\ncontext_size = 32768\n")
+        monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
+        _fake_http(
+            monkeypatch,
+            {
+                "http://127.0.0.1:8080/v1/models/hal0/agent": _CT152_BY_ID,
+                "http://127.0.0.1:8080/v1/models": {"data": _CT152_CATALOG},
+            },
+        )
+        _stub_non_chat_probes(monkeypatch)
+        monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s, io: (True, "ready"))
+        state = hp.BootstrapState(hermes_home=str(hh), venv=str(tmp_path / "no-venv"))
+
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+        result = out.details["results"]["anchor_context_window"]
+        assert result["passed"] is not True, result  # the whole point of #1867
+        assert result["passed"] is False
+        detail = result["detail"]
+        assert "32,768" in detail
+        assert "64,000" in detail
+        # The serving slot is brain, not the alias the anchor is spelled with.
+        assert "'brain'" in detail
+        assert "hal0 slot edit brain --ctx-size 65536" in detail
+        assert "agent.toml" not in detail
+
+    def test_an_unreadable_window_skips_rather_than_passing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A routable anchor whose backend advertises no ``context_length``
+        (the ``HAL0_HERMES_LIVE_RESOLVE=0`` shape against a plain llama-server)
+        is unknown — and unknown is reported as SKIPPED, never as a pass."""
+        hh = tmp_path / "hh"
+        hh.mkdir()
+        (hh / "config.yaml").write_text(
+            "model:\n  default: qwen3-30b-a3b-instruct\n  base_url: http://127.0.0.1:8081/v1\n"
+        )
+        _fake_http(
+            monkeypatch,
+            {
+                "http://127.0.0.1:8081/v1/models": {
+                    "data": [{"id": "qwen3-30b-a3b-instruct", "object": "model"}]
+                }
+            },
+        )
+        _stub_non_chat_probes(monkeypatch)
+        monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s, io: (True, "ready"))
+        state = hp.BootstrapState(hermes_home=str(hh), venv=str(tmp_path / "no-venv"))
+
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+        result = out.details["results"]["anchor_context_window"]
+        assert result["passed"] is None
+        assert result["skipped"] is True
+        assert "NOT a pass" in result["detail"]
+        # A slot TOML path is never invented for a raw physical model id.
+        assert ".toml" not in result["detail"]
+        assert out.details["failures"] == []
+
+
+#: Verbatim ``GET /v1/models`` from ct152 (10.0.1.152, rc.5, agent slot
+#: offline). Note what is NOT here: any row spelled ``agent`` or ``hal0/agent``.
+_CT152_CATALOG: list[dict[str, Any]] = [
+    {
+        "id": "brain",
+        "object": "model",
+        "created": 1786589347,
+        "owned_by": "hal0",
+        "name": "brain · hal0-brain-sft-f16",
+        "downloaded": True,
+        "context_length": 32768,
+        "max_context_window": 32768,
+        "labels": ["chat"],
+        "recipe": "chat",
+    },
+    {
+        "id": "utility",
+        "object": "model",
+        "created": 1786589347,
+        "owned_by": "hal0",
+        "name": "utility · Qwen3.5-0.8B",
+        "downloaded": True,
+        "context_length": 32768,
+        "max_context_window": 32768,
+        "labels": ["chat"],
+        "checkpoint": "Q4_K_XL",
+    },
+]
+
+#: Verbatim ``GET /v1/models/hal0/agent`` from the same box — the routing
+#: fallback chain resolved to the brain slot, so this is the brain row with
+#: ``id`` rewritten back to the handle Hermes asked about.
+_CT152_BY_ID: dict[str, Any] = {**_CT152_CATALOG[0], "id": "hal0/agent"}
 
 
 class TestFetchModelRouteReady:

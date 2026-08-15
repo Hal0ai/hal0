@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hal0.agents.anchor_window import HERMES_MINIMUM_CONTEXT_LENGTH
 from hal0.install.brain_model import BRAIN_MODEL_IDS
 from hal0.install.static_seeds import STATIC_SEED_SLOTS, seed_static_slots
 from hal0.providers.container import _resolve_context_size
@@ -137,7 +138,8 @@ def test_seed_static_slots_default_args_seed_real_tree(tmp_path: Path) -> None:
 # so either half drifting back down fails here instead of on a box.
 
 #: ``agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH`` in the bundled Hermes.
-_HERMES_MIN_CONTEXT = 64_000
+#: Imported, not re-typed: hal0 keeps exactly one copy of this number (#1867).
+_HERMES_MIN_CONTEXT = HERMES_MINIMUM_CONTEXT_LENGTH
 
 #: Seeds the bundled Hermes agent can be pointed at: ``hal0/agent`` (which falls
 #: back to ``brain`` while the agent slot is model-less), ``hal0/brain``, and
