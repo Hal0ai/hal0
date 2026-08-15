@@ -1451,13 +1451,25 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 HERMES_TERMINAL_ENV = "HAL0_HERMES_TERMINAL"
 # Toolsets subtracted when the terminal tool is OFF.
 TERMINAL_TOOLSETS: list[str] = ["terminal", "code_execution"]
-# hal0's own record of the decision, under $HERMES_HOME. It exists because
-# config.yaml alone cannot tell "the operator opted in before this change" from
-# "hermes config migrate just materialised its own terminal.backend default on a
-# half-finished fresh provision" — and getting that wrong the permissive way
-# would hand out a root-equivalent shell nobody asked for. Written BEFORE the
-# migrate on every run, so an interrupted run still leaves the posture recorded.
-TERMINAL_STATE_FILE = ".hal0-terminal-tool"
+# hal0's own record of the decision. It exists because config.yaml alone cannot
+# tell "the operator opted in before this change" from "hermes config migrate
+# just materialised its own terminal.backend default on a half-finished fresh
+# provision" — and getting that wrong the permissive way would hand out a
+# root-equivalent shell nobody asked for.
+#
+# It lives in /etc/hal0/agents/ (root:root 0755 — verified on a live box), NOT
+# under $HERMES_HOME: that tree is owned by the same `hal0` user the agent runs
+# as and is a ReadWritePath of the agent unit, so a marker there would be
+# agent-writable and a prompt-injected agent could launder its own "1" into
+# operator consent at the next re-provision. Root writes it (the CLI's root
+# prelude, before the §7.4 privilege drop); the unprivileged provisioner only
+# reads it.
+#
+# NOT a containment boundary against an already-compromised agent — one with
+# write_file can edit its own config.yaml directly and get the tools back at the
+# next restart. What this closes is the laundering path: agent-controlled state
+# can never present itself to a later provision as the operator's decision.
+TERMINAL_STATE_PATH = Path("/etc/hal0/agents/hermes-terminal-tool")
 _TRUTHY = {"1", "true", "yes", "on", "y"}
 _FALSEY = {"0", "false", "no", "off", "n"}
 
@@ -1542,10 +1554,10 @@ def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) 
     return True if cwd and cwd == str(Path(hermes_home) / "scratch") else None
 
 
-def read_terminal_state(hermes_home: Path | str) -> bool | None:
+def read_terminal_state() -> bool | None:
     """hal0's recorded terminal decision for this box, or ``None`` if unrecorded."""
     try:
-        raw = (Path(hermes_home) / TERMINAL_STATE_FILE).read_text(encoding="utf-8").strip().lower()
+        raw = TERMINAL_STATE_PATH.read_text(encoding="utf-8").strip().lower()
     except (OSError, UnicodeDecodeError):
         # Unreadable OR undecodable both mean "no usable record" — a corrupt
         # marker must degrade to the default-off/explicit-answer path, never
@@ -1558,22 +1570,45 @@ def read_terminal_state(hermes_home: Path | str) -> bool | None:
     return None
 
 
-def write_terminal_state(hermes_home: Path | str, enabled: bool) -> bool:
+def write_terminal_state(enabled: bool) -> bool:
     """Record the decision; return whether it landed.
 
-    The caller FAILS CLOSED on False (forces the tool off for this run) rather
-    than aborting the install: an unrecorded decision is exactly the state a
-    later run could re-derive the permissive way, so the safe response is to
-    not enable anything until the record can be kept.
+    Only root can write :data:`TERMINAL_STATE_PATH` (that is the point), so this
+    is a no-op-with-False under the unprivileged provisioner. The caller decides
+    what an unrecordable decision means; a FRESH opt-in fails closed rather than
+    being honoured unrecorded, while an already-working box is left alone.
     """
     try:
-        path = Path(hermes_home) / TERMINAL_STATE_FILE
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(path, "1\n" if enabled else "0\n")
+        TERMINAL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(TERMINAL_STATE_PATH, "1\n" if enabled else "0\n")
         return True
     except OSError as exc:
         log.warning("hermes_provision.terminal_state_write_failed", error=str(exc))
         return False
+
+
+def persist_terminal_decision(
+    hermes_home: Path | str, *, env: Mapping[str, str] | None = None
+) -> tuple[bool, str, bool]:
+    """Resolve the posture and record it. Returns ``(enabled, why, recorded)``.
+
+    Called from the CLI's ROOT prelude — the one point in the flow that can
+    write :data:`TERMINAL_STATE_PATH` — so that both a fresh answer and a legacy
+    box's pre-#1863 configuration end up recorded once, out of the agent's
+    reach, before provisioning drops to the ``hal0`` user.
+    """
+    config_path = Path(hermes_home) / "config.yaml"
+    try:
+        config_text: str | None = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        config_text = None
+    enabled, why = terminal_tool_enabled(
+        config_text=config_text,
+        recorded=read_terminal_state(),
+        hermes_home=hermes_home,
+        env=env,
+    )
+    return enabled, why, write_terminal_state(enabled)
 
 
 def terminal_tool_enabled(
@@ -2056,15 +2091,27 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # dies mid-provision still leaves the decision on disk rather than letting
     # the next run re-derive it from hermes' own defaults. See
     # terminal_tool_enabled.
+    recorded = read_terminal_state()
     terminal_enabled, terminal_reason = terminal_tool_enabled(
         config_text=config_before,
-        recorded=read_terminal_state(hermes_home),
+        recorded=recorded,
         hermes_home=hermes_home,
     )
-    # Fail closed: if the decision cannot be recorded, do not enable anything —
-    # an unrecorded "on" is the state a later run could re-derive permissively.
-    if not write_terminal_state(hermes_home, terminal_enabled) and terminal_enabled:
+    # Persist when the record does not already say this (root-only path — the
+    # CLI's root prelude normally got there first; this covers dev/root runs of
+    # the pipeline itself). Fail closed on a FRESH opt-in that cannot be
+    # recorded: an unrecorded "on" is the state a later run could re-derive
+    # permissively. A box that is already working (`existing-config`) is left
+    # alone — refusing to record must not disable something already in use.
+    if (
+        recorded != terminal_enabled
+        and terminal_enabled
+        and terminal_reason == "opt-in"
+        and not write_terminal_state(terminal_enabled)
+    ):
         terminal_enabled, terminal_reason = False, "state-unwritable"
+    elif recorded != terminal_enabled:
+        write_terminal_state(terminal_enabled)
     # An operator who moved the backend off `local` by hand keeps that backend.
     terminal_backend = _terminal_backend_in_config(config_before)
     migrated = _ensure_hermes_config(hermes_bin, hermes_home, run)

@@ -724,10 +724,11 @@ def test_posture_restart_covers_every_provisioning_entry_point(monkeypatch) -> N
     ac._provision_hermes()
     assert seen == ["restart"]
 
-    # A dry run writes nothing, so there is nothing to re-apply.
+    # `dry_run` in this pipeline only suppresses the run report — the config is
+    # still written — so the restart must still happen.
     seen.clear()
     ac._provision_hermes(dry_run=True)
-    assert seen == []
+    assert seen == ["restart"]
 
     # A failed provision likewise leaves the old posture in place.
     seen.clear()

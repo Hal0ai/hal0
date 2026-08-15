@@ -71,8 +71,12 @@ The installer also asks once, on an interactive install. A piped
 asked and always leaves it off; set `HAL0_HERMES_TERMINAL=1` to opt in
 unattended.
 
-Your answer is recorded at `/var/lib/hal0/.hermes/.hal0-terminal-tool`, so
-re-provisioning, `--repair` and updates all keep it.
+Your answer is recorded at `/etc/hal0/agents/hermes-terminal-tool`, so
+re-provisioning, `--repair` and updates all keep it. That file is root-owned on
+purpose: it sits outside the agent's own writable home, so nothing the agent
+writes can present itself to a later provision as your decision.
+
+`hal0 agent status hermes` prints the current posture on its own line.
 
 **Upgrades keep your setting.** A box provisioned before this change already
 has `terminal.backend: local` in its Hermes config, and an update treats that

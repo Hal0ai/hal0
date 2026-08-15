@@ -24,10 +24,18 @@ from ._hermes_fakes import fake_hermes_run
 
 
 def _run_config_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, home: Path | None = None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    home: Path | None = None,
+    state_path: Path | None = None,
 ) -> tuple[hp.PhaseResult, dict]:
     """Run the real config_write phase offline; return (result, parsed yaml)."""
     hermes_home = home if home is not None else tmp_path / "hh"
+    # The real marker lives in root-only /etc/hal0/agents/; point it at tmp.
+    monkeypatch.setattr(
+        hp, "TERMINAL_STATE_PATH", state_path or (tmp_path / "state" / "hermes-terminal-tool")
+    )
     state = hp.BootstrapState(hermes_home=str(hermes_home))
     monkeypatch.setattr(
         hp,
@@ -261,8 +269,10 @@ def test_recorded_state_outranks_a_reappearing_backend(
 ) -> None:
     home = tmp_path / "hh"
     monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
-    _run_config_write(tmp_path, monkeypatch, home=home)
-    assert hp.read_terminal_state(home) is False
+    state_path = tmp_path / "state" / "hermes-terminal-tool"
+    _run_config_write(tmp_path, monkeypatch, home=home, state_path=state_path)
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", state_path)
+    assert hp.read_terminal_state() is False
 
     # Something puts a terminal backend back (a hand edit, a hermes migration).
     doc = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
@@ -355,13 +365,73 @@ def test_unwritable_state_file_fails_closed(
     # If the decision cannot be recorded, an "on" answer must not be honoured:
     # an unrecorded opt-in is exactly the state a later run could re-derive the
     # permissive way, so refuse to enable rather than enable unrecorded.
-    home = tmp_path / "hh"
-    (home / hp.TERMINAL_STATE_FILE).mkdir(parents=True)  # a dir blocks the write
+    blocked = tmp_path / "blocked" / "hermes-terminal-tool"
+    blocked.mkdir(parents=True)  # a dir at the marker path blocks the write
     monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
-    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+    out, doc = _run_config_write(tmp_path, monkeypatch, state_path=blocked)
 
     assert out.details["terminal_tool_reason"] == "state-unwritable"
     assert _terminal_is_off(doc), doc
+
+
+# ── the marker is out of the agent's reach ─────────────────────────────────
+
+
+def test_state_marker_lives_outside_the_agent_writable_home() -> None:
+    # $HERMES_HOME is owned by the same `hal0` user the agent runs as and is a
+    # ReadWritePath of the agent unit, so a marker there would be agent-
+    # writable: a prompt-injected agent could write "1" and have the next
+    # re-provision read its own state back as operator consent. /etc/hal0/agents
+    # is root:root 0755 on a real box — root writes, the provisioner reads.
+    assert Path("/etc/hal0/agents/hermes-terminal-tool") == hp.TERMINAL_STATE_PATH
+    assert "/.hermes" not in str(hp.TERMINAL_STATE_PATH)
+    assert str(hp.TERMINAL_STATE_PATH).startswith("/etc/hal0/agents/")
+
+
+def test_persist_terminal_decision_records_a_legacy_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The root-side capture: a pre-#1863 box's existing setting is resolved and
+    # written to the root-only marker once, before provisioning drops to hal0.
+    home = tmp_path / "hh"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {"terminal": {"backend": "local", "cwd": str(home / "scratch")}}, sort_keys=False
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "state" / "hermes-terminal-tool"
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", state_path)
+
+    enabled, why, recorded = hp.persist_terminal_decision(home, env={})
+
+    assert (enabled, why, recorded) == (True, "existing-config", True)
+    assert hp.read_terminal_state() is True
+
+
+def test_persist_terminal_decision_records_a_fresh_box_as_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "state" / "hermes-terminal-tool"
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", state_path)
+
+    enabled, why, recorded = hp.persist_terminal_decision(tmp_path / "nonexistent", env={})
+
+    assert (enabled, why, recorded) == (False, "default-off", True)
+    assert hp.read_terminal_state() is False
+
+
+def test_undecodable_marker_reads_as_unrecorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Non-UTF-8 bytes must not raise out of provisioning — that would block the
+    # very `HAL0_HERMES_TERMINAL=0` run that repairs the marker.
+    state_path = tmp_path / "hermes-terminal-tool"
+    state_path.write_bytes(b"\xff\xfe\x00")
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", state_path)
+
+    assert hp.read_terminal_state() is None
 
 
 # ── the decision function itself ────────────────────────────────────────────

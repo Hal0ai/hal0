@@ -475,6 +475,26 @@ def _hermes_root_prelude() -> None:
         except OSError as exc:
             console.print(f"[yellow]hermes wrapper pre-install hint:[/yellow] {exc}")
 
+    # Terminal-tool posture (#1863): resolve and record it HERE, as root. The
+    # marker lives in root-only /etc/hal0/agents/, deliberately out of reach of
+    # the `hal0` user the agent runs as, so the unprivileged provisioner below
+    # can only read it. This is also where a pre-#1863 box's existing setting
+    # gets captured into the marker for the first time.
+    from hal0.agents.hermes_provision import HERMES_HOME_DEFAULT, persist_terminal_decision
+
+    enabled, why, recorded = persist_terminal_decision(HERMES_HOME_DEFAULT)
+    if not recorded:
+        console.print(
+            "[yellow]could not record the Hermes terminal-tool decision at "
+            "/etc/hal0/agents/ — provisioning will fall back to its default-off "
+            "rule.[/yellow]"
+        )
+    elif enabled and why == "opt-in":
+        console.print(
+            "[yellow]Hermes terminal tool ENABLED — the agent will be able to run "
+            "commands as the hal0 user, which is root-equivalent on this box.[/yellow]"
+        )
+
     try:
         ent = _pwd.getpwnam(_AGENT_RUNTIME_USER)
     except KeyError:
@@ -624,9 +644,11 @@ def _provision_hermes(
     # A posture change only reaches the model once the process re-reads its
     # config. Done HERE rather than in _install_hermes so every provisioning
     # entry point is covered — `reprovision`, `bootstrap` and `upgrade` all
-    # land in this function and all now honour an explicit answer. No-op on a
-    # dry run (nothing was written) or a failed provision (nothing to apply).
-    if rc == 0 and not dry_run and provision_env:
+    # land in this function and all now honour an explicit answer. NOT gated on
+    # ``dry_run``: in this pipeline that flag only suppresses the run report,
+    # the config is still written, so a "dry" opt-out that skipped the restart
+    # would leave the live agent holding the tools.
+    if rc == 0 and provision_env:
         _restart_hermes_after_posture_change()
     return rc
 
@@ -1459,11 +1481,39 @@ def agent_status(
             f"[yellow]warn: {', '.join(warn_phases)} recorded failures — "
             f"see Detail or `--json` for the full list.[/yellow]"
         )
+    # Terminal-tool posture gets its own line rather than living inside the
+    # truncated Detail blob: it is the one security-relevant setting an operator
+    # is most likely to want to confirm at a glance, and `--json` should not be
+    # the only way to see it.
+    _print_terminal_posture((data.get("phases") or {}).get("config_write") or {})
     console.print(
         f"[dim]hal0={data.get('hal0_version', '?')} "
         f"hermes={data.get('hermes_version', '?')} "
         f"completed_at={data.get('completed_at', '—')}[/dim]"
     )
+
+
+def _print_terminal_posture(config_write_entry: dict[str, Any]) -> None:
+    """One line stating whether the agent can run commands on this box."""
+    details = config_write_entry.get("details")
+    if not isinstance(details, dict):
+        return
+    effective = details.get("terminal_tool")
+    if effective not in {"on", "off"}:
+        return
+    decision = details.get("terminal_tool_decision", effective)
+    reason = details.get("terminal_tool_reason", "?")
+    if effective == "on":
+        console.print(
+            f"[yellow]terminal tool: ON[/yellow] — the agent can run commands as the "
+            f"hal0 user (root-equivalent on this box). [dim]decision={decision} "
+            f"({reason})[/dim]"
+        )
+    else:
+        console.print(
+            f"[green]terminal tool: off[/green] — the agent cannot run shell commands. "
+            f"[dim]({reason})[/dim]"
+        )
 
 
 @app.command("log")
