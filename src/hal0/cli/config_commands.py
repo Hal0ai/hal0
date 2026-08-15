@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import grp
 import json as jsonlib
 import os
+import pwd
 import stat
 import subprocess
 import tempfile
@@ -30,6 +32,15 @@ HAL0_TOML_SEED_MODE = 0o600
 #: for this file — matched here so the seed doesn't drift from the first
 #: real write.
 PROVIDERS_TOML_SEED_MODE = 0o600
+
+#: Service account a freshly-seeded config file should end up owned by, so
+#: hal0-api.service (``User=hal0``/``Group=hal0``) can actually read it.
+#: Mirrors ``hal0.install.perms.ownership_table()``'s ``service_user`` /
+#: ``service_group`` defaults — the single source of truth for hal0 path
+#: ownership — without importing that module here (it pulls in the full
+#: installer surface for one pair of names).
+_SERVICE_USER = "hal0"
+_SERVICE_GROUP = "hal0"
 
 app = typer.Typer(help="Inspect and manage hal0 configuration.")
 console = Console()
@@ -70,18 +81,62 @@ def _hal0_toml_path() -> Path:
     return _config_path(ConfigFile.hal0)
 
 
+def _fchown_to_service_owner(fd: int) -> None:
+    """Best-effort ``fchown`` a freshly-seeded config file's fd to hal0:hal0.
+
+    Seeding at 0600/0640 (:data:`HAL0_TOML_SEED_MODE` /
+    :data:`UPSTREAMS_TOML_MODE`) is only correct if the file ends up owned
+    by the account those modes are meant to admit. ``hal0-api.service`` runs
+    ``User=hal0``/``Group=hal0`` (``installer/install.sh``); left unhandled,
+    ``sudo hal0 config edit`` — or any invocation by root, or by a third
+    unprivileged user — seeds a file the service account cannot open, and
+    ``load_hal0_config()``/``_config_require_auth()`` swallow that
+    ``PermissionError`` into a bare "unset", silently falling back to
+    ``require_auth`` OFF. The previous bare ``write_text`` at 0644 never hit
+    this because 0644 stays world-readable regardless of owner — the mode
+    fix alone introduced this gap (Codex review on a5f4fe5d).
+
+    Only root can ``chown`` to an arbitrary uid; an unprivileged owner can
+    at most ``chgrp`` to a group they already belong to. So:
+
+    - No system ``hal0`` account on this box (``pwd.getpwnam``/
+      ``grp.getgrnam`` raise ``KeyError`` — the common case in a dev/CI
+      sandbox with no hal0 service installed): nothing sensible to chown
+      to, skip.
+    - Invoking as the ``hal0`` service user already: ``os.fchown`` is a
+      no-op modulo confirming the uid/gid, succeeds trivially.
+    - Invoking as root (the ``sudo hal0 config edit`` case): chown
+      succeeds, the canonical owner is applied.
+    - Invoking as any other unprivileged user: ``os.fchown`` raises
+      ``PermissionError``, caught and swallowed here. The seed is left
+      owned by the invoking user — a narrower, pre-existing-class gap
+      (the file didn't exist at all a moment ago) rather than a new one;
+      ``hal0 doctor perms --fix`` (root-gated) is the documented
+      remediation, same as any other ownership drift under ``/etc/hal0``.
+    """
+    try:
+        uid = pwd.getpwnam(_SERVICE_USER).pw_uid
+        gid = grp.getgrnam(_SERVICE_GROUP).gr_gid
+    except KeyError:
+        return
+    with contextlib.suppress(PermissionError):
+        os.fchown(fd, uid, gid)
+
+
 def _seed_config_file(path: Path, content: str, mode: int) -> None:
-    """Atomically create *path* with *content*, at its canonical *mode*.
+    """Atomically create *path* with *content*, at its canonical *mode* and
+    owner.
 
     Mirrors ``hal0.config.loader.write_toml_atomic``'s fchmod-before-rename
-    pattern (tempfile.mkstemp + os.fchmod on the owned descriptor +
-    os.replace), but for the raw commented-TOML text `config edit` seeds a
+    pattern (tempfile.mkstemp + os.fchmod/os.fchown on the owned descriptor
+    + os.replace), but for the raw commented-TOML text `config edit` seeds a
     missing file with — that text isn't a TOML-encodable dict, so
     ``write_toml_atomic`` itself can't be reused directly. A bare
     ``Path.write_text`` would instead go through ``open()``'s 0644 default
-    (mediated by the process umask), silently widening a file whose
-    canonical mode is 0600/0640 the moment it's created via ``edit`` rather
-    than via the API's own writer.
+    (mediated by the process umask) and leave the file owned by whoever ran
+    the CLI, silently widening a file whose canonical mode is 0600/0640 and
+    whose canonical owner is the ``hal0`` service account, the moment it's
+    created via ``edit`` rather than via the API's own writer.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path: Path | None = None
@@ -91,6 +146,7 @@ def _seed_config_file(path: Path, content: str, mode: int) -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 os.fchmod(f.fileno(), mode)
+                _fchown_to_service_owner(f.fileno())
                 f.write(content)
                 f.flush()
                 os.fsync(f.fileno())

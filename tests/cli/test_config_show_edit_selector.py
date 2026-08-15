@@ -110,6 +110,75 @@ def test_config_edit_hal0_seeds_at_canonical_mode(monkeypatch, tmp_path: Path) -
     assert mode == 0o600, f"expected hal0.toml seeded at 0600, got {oct(mode)}"
 
 
+def test_config_edit_seed_chowns_to_service_owner_when_privileged(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A seed written while running as root (e.g. ``sudo hal0 config edit``)
+    must land owned by the ``hal0`` service account, not root.
+
+    hal0-api.service runs ``User=hal0``; combined with the seed's new
+    canonical 0600/0640 mode, a root-owned (or third-user-owned) seed is one
+    the API's own service account cannot open — ``_config_require_auth()``
+    swallows that ``PermissionError`` into "unset" and falls back to
+    ``require_auth`` OFF (Codex P2 on a5f4fe5d, the mode-only fix). Faking
+    "root" here via monkeypatched ``pwd``/``grp``/``os.fchown`` so the test
+    doesn't depend on the runner actually being root or this box actually
+    having a system ``hal0`` account.
+    """
+    _set_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("EDITOR", "true")
+
+    class _FakePasswd:
+        pw_uid = 4242
+
+    class _FakeGroup:
+        gr_gid = 4343
+
+    chown_calls: list[tuple[int, int, int]] = []
+
+    def _fake_fchown(fd: int, uid: int, gid: int) -> None:
+        chown_calls.append((fd, uid, gid))
+
+    monkeypatch.setattr(config_commands.pwd, "getpwnam", lambda name: _FakePasswd())
+    monkeypatch.setattr(config_commands.grp, "getgrnam", lambda name: _FakeGroup())
+    monkeypatch.setattr(config_commands.os, "fchown", _fake_fchown)
+
+    result = runner.invoke(config_commands.app, ["edit", "hal0"])
+    assert result.exit_code == 0, result.output
+    assert len(chown_calls) == 1, f"expected exactly one fchown attempt, got {chown_calls}"
+    _fd, uid, gid = chown_calls[0]
+    assert (uid, gid) == (4242, 4343), f"chowned to the wrong target: {chown_calls}"
+
+
+def test_config_edit_seed_survives_chown_permission_denied(monkeypatch, tmp_path: Path) -> None:
+    """An unprivileged third-user invocation cannot chown to the service
+    account (POSIX: only root may chown to an arbitrary uid) — the seed
+    must still be written successfully rather than the command crashing.
+    """
+    cfg_dir = _set_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("EDITOR", "true")
+
+    class _FakePasswd:
+        pw_uid = 4242
+
+    class _FakeGroup:
+        gr_gid = 4343
+
+    def _denied_fchown(fd: int, uid: int, gid: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(config_commands.pwd, "getpwnam", lambda name: _FakePasswd())
+    monkeypatch.setattr(config_commands.grp, "getgrnam", lambda name: _FakeGroup())
+    monkeypatch.setattr(config_commands.os, "fchown", _denied_fchown)
+
+    result = runner.invoke(config_commands.app, ["edit", "hal0"])
+    assert result.exit_code == 0, result.output
+    seeded = cfg_dir / "hal0.toml"
+    assert seeded.exists()
+    mode = stat.S_IMODE(seeded.stat().st_mode)
+    assert mode == 0o600, "mode must still land correctly even when chown is denied"
+
+
 def test_permission_denied_hint_does_not_recommend_widening_the_file(
     monkeypatch, tmp_path: Path
 ) -> None:

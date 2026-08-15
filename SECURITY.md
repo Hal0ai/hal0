@@ -66,8 +66,17 @@ the agent can `cat`. The axis that matters is which UID the agent runs as.
 
 This is the shipped default for hal0 1.0 and an accepted risk, disclosed here
 rather than papered over. Giving the agent its own system user with no sudoers
-grants — the change that actually closes the chain — is tracked for 1.1. The
-analysis, the evidence, and the rejected alternatives are in
+grants is tracked for 1.1, but a new `User=` alone does not close the chain:
+`/etc/hal0` is `hal0:hal0 2775` (setgid, see
+`hal0.install.perms.ownership_table()`), so a split agent left in the shared
+`hal0` *group* could still create or replace `hal0.toml`/`api.env` there —
+and an unreadable or malformed `hal0.toml` makes the API's own auth gate
+(`hal0.api.auth._config_require_auth()`) treat `require_auth` as unset and
+fall back to its OFF default, reopening the exact privileged-API path this
+document warns about. Closing the chain for 1.1 means the UID split *and*
+dropping the agent out of the `hal0` group / config-tree write access — not
+the UID split alone. The analysis, the evidence, and the rejected alternatives
+are in
 ADR-0002 — agent credential isolation, under review in
 [PR #1880](https://github.com/Hal0ai/hal0/pull/1880) and landing at
 `docs/adr/0002-agent-credential-isolation.md`. (Linked as a PR, not as a
