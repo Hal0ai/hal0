@@ -307,6 +307,43 @@ def test_reported_posture_follows_an_operator_override(
     assert out.details["terminal_tool"] == "on", "the override re-enabled it — say so"
 
 
+def test_an_operator_moved_backend_is_not_widened_back_to_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An operator who moved the backend to docker/ssh has a NARROWER execution
+    # boundary than hal0's default. Re-asserting `local` on top would silently
+    # widen it back to root-equivalent host execution.
+    home = tmp_path / "hh"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {"terminal": {"backend": "docker", "cwd": str(home / "scratch")}}, sort_keys=False
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+
+    assert out.details["terminal_tool_reason"] == "existing-config"
+    assert doc["terminal"]["backend"] == "docker"
+    assert (doc.get("agent") or {}).get("disabled_toolsets") == []
+
+
+def test_unwritable_state_file_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If the decision cannot be recorded, an "on" answer must not be honoured:
+    # an unrecorded opt-in is exactly the state a later run could re-derive the
+    # permissive way, so refuse to enable rather than enable unrecorded.
+    home = tmp_path / "hh"
+    (home / hp.TERMINAL_STATE_FILE).mkdir(parents=True)  # a dir blocks the write
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+
+    assert out.details["terminal_tool_reason"] == "state-unwritable"
+    assert _terminal_is_off(doc), doc
+
+
 # ── the decision function itself ────────────────────────────────────────────
 
 
@@ -340,6 +377,16 @@ def test_post_migrate_defaults_do_not_look_like_an_opt_in() -> None:
     # (the fresh-install case) must never read as an existing opt-in.
     assert hp.terminal_tool_enabled(config_text=None, env={}) == (False, "default-off")
     assert hp.terminal_tool_enabled(config_text="{}\n", env={}) == (False, "default-off")
+
+
+def test_effective_off_requires_both_execution_toolsets() -> None:
+    # `execute_code` runs arbitrary Python as the same root-equivalent user, so
+    # "terminal disabled, code_execution not" is not a safe posture and must
+    # never be reported as off.
+    only_terminal = "agent:\n  disabled_toolsets: [terminal]\n"
+    both = "agent:\n  disabled_toolsets: [terminal, code_execution]\n"
+    assert hp.terminal_enabled_in_config(only_terminal) is True
+    assert hp.terminal_enabled_in_config(both) is False
 
 
 def test_corrupt_config_does_not_enable_terminal() -> None:

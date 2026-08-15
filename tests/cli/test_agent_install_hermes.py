@@ -676,6 +676,49 @@ def test_provision_hermes_forwards_terminal_answer_across_the_privilege_drop(
     assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "1"}
 
 
+def test_posture_change_restarts_the_running_hermes(monkeypatch) -> None:
+    """An answered terminal flag must reach the running process, not just disk.
+
+    `systemctl enable --now` only activates an already-running unit, so without
+    an explicit restart `--no-terminal-tool` would report success while live
+    sessions kept the execution tools.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
+
+    class _Done:
+        returncode = 0
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda argv, *_a, **_k: (calls.append(list(argv)), _Done())[1]
+    )
+
+    ac._restart_hermes_after_posture_change()
+
+    assert calls == [
+        ["systemctl", "try-restart", "hal0-agent@hermes.service"],
+        ["systemctl", "try-restart", "hermes-gateway.service"],
+    ]
+
+
+def test_posture_restart_only_fires_when_the_flag_was_answered(monkeypatch) -> None:
+    seen: list[bool | None] = []
+    monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
+    monkeypatch.setattr(ac, "_enforce_hermes_single_pick", lambda **_k: None)
+    monkeypatch.setattr(ac, "_provision_hermes", lambda **_k: 0)
+    monkeypatch.setattr(ac, "_enable_and_start_hermes_unit", lambda: None)
+    monkeypatch.setattr(ac, "_api_unreachable", lambda _url: True)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: type("_D", (), {"returncode": 0})())
+    monkeypatch.setattr(ac, "_restart_hermes_after_posture_change", lambda: seen.append(True))
+
+    ac._install_hermes(switch=False, gateway=False)
+    assert seen == [], "no answer given — nothing to re-apply to a running agent"
+
+    ac._install_hermes(switch=False, gateway=False, terminal_tool=False)
+    assert seen == [True]
+
+
 def test_run_as_hal0_places_extra_env_as_env_assignments(monkeypatch) -> None:
     import subprocess as _sp
 

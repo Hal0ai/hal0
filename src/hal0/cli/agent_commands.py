@@ -247,6 +247,13 @@ def _install_hermes(
     # Bring the unit up so the agent actually runs (and survives reboot).
     _enable_and_start_hermes_unit()
 
+    # A terminal-tool answer only takes effect on a process that re-reads the
+    # config. `enable --now` merely activates an already-running unit, so
+    # without this `--no-terminal-tool` would report success while live sessions
+    # kept the execution tools (and the inverse for an opt-in).
+    if terminal_tool is not None:
+        _restart_hermes_after_posture_change()
+
     # Telegram/Discord gateway — installer/install.sh runs this inline at
     # install time; folding it in here means the DEFERRED path (this
     # command, run after HAL0_SKIP_HERMES=1 or standalone) wires it too
@@ -262,6 +269,35 @@ def _install_hermes(
             border_style="green",
         )
     )
+
+
+_HERMES_POSTURE_UNITS = ("hal0-agent@hermes.service", "hermes-gateway.service")
+
+
+def _restart_hermes_after_posture_change() -> None:
+    """``try-restart`` the Hermes consumers so a tool-posture change takes hold.
+
+    ``try-restart`` (not ``restart``) deliberately: it is a no-op on a unit that
+    is not running, so this never starts the gateway on a box that runs without
+    one. Both consumers are covered — the agent unit and the gateway each load
+    the config in their own process. Best-effort and loud on failure: the
+    provisioned config is already correct on disk, but the operator has to know
+    a live process may still be serving the old posture.
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    if _shutil.which("systemctl") is None:
+        return
+    for unit in _HERMES_POSTURE_UNITS:
+        rc = _subprocess.run(  # nosec B603 B607 — fixed argv
+            ["systemctl", "try-restart", unit], check=False
+        ).returncode
+        if rc != 0:
+            console.print(
+                f"[yellow]Could not restart {unit} — a running Hermes may still be "
+                "serving the previous terminal-tool posture. Restart it manually.[/yellow]"
+            )
 
 
 def _reset_hermes_personas() -> None:

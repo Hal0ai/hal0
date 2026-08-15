@@ -1485,27 +1485,40 @@ def _disabled_toolsets(data: dict[str, Any] | None) -> list[str]:
 
 
 def terminal_enabled_in_config(config_text: str | None) -> bool:
-    """Whether a config body as written leaves the terminal tool reachable.
+    """Whether a config body as written leaves command execution reachable.
 
-    This is the EFFECTIVE reading — what hermes will actually load — so it is
-    also correct after ``overrides.yaml`` has been merged on top.
+    The EFFECTIVE reading — what hermes will actually load — so it stays correct
+    after ``overrides.yaml`` has merged on top. BOTH toolsets must be subtracted
+    to count as off: ``execute_code`` alone still runs arbitrary Python as the
+    same root-equivalent user, so "terminal disabled, code_execution not" is not
+    a safe posture and must never be reported as off.
     """
-    return "terminal" not in _disabled_toolsets(_parse_yaml_config(config_text))
+    disabled = set(_disabled_toolsets(_parse_yaml_config(config_text)))
+    return not set(TERMINAL_TOOLSETS).issubset(disabled)
 
 
-def _existing_terminal_choice(config_text: str | None) -> bool | None:
+def _terminal_backend_in_config(config_text: str | None) -> str | None:
+    """The configured ``terminal.backend``, or ``None`` when unset."""
+    terminal = (_parse_yaml_config(config_text) or {}).get("terminal")
+    if not isinstance(terminal, dict):
+        return None
+    backend = str(terminal.get("backend") or "").strip()
+    return backend or None
+
+
+def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) -> bool | None:
     """Read an EXISTING ``config.yaml``'s terminal posture, or ``None``.
 
     ``None`` means "the file says nothing that can be read as an operator
     decision" — the fresh-install case, which defaults OFF.
 
-    A box provisioned before this change carries hal0's own overlay AND an
-    explicit ``terminal.backend``; that is the operator's working setup and an
-    update must not silently disable it (#1863 requirement 5). The hal0-overlay
-    evidence is load-bearing: ``hermes config migrate`` materialises hermes' own
-    ``terminal.backend: local`` default, so "backend is set" on its own would
-    read a half-provisioned fresh box as consent. Consent is never inferred from
-    a file hal0 has not finished writing.
+    A box provisioned before this change carries hal0's own terminal overlay:
+    a backend AND ``terminal.cwd`` pointing at ``$HERMES_HOME/scratch``, which
+    only this provisioner ever writes (hermes' own default cwd is ``"."``).
+    That pair is the evidence, and it is load-bearing: ``hermes config migrate``
+    materialises hermes' own ``terminal.backend: local`` default, so "a backend
+    is set" on its own would read a half-provisioned FRESH box as consent.
+    Consent is never inferred from a file hal0 has not finished writing.
     """
     data = _parse_yaml_config(config_text)
     if data is None:
@@ -1515,22 +1528,8 @@ def _existing_terminal_choice(config_text: str | None) -> bool | None:
     terminal = data.get("terminal")
     if not (isinstance(terminal, dict) and str(terminal.get("backend") or "").strip()):
         return None
-    return True if _is_hal0_provisioned_config(data) else None
-
-
-def _is_hal0_provisioned_config(data: dict[str, Any]) -> bool:
-    """Did hal0's overlay land in this config, i.e. is it a real hal0 box?
-
-    Keyed on ``memory.provider: hal0-memory`` and the hal0 skills dirs — both
-    written only by this provisioner, neither present in a bare
-    ``hermes config migrate`` result.
-    """
-    memory = data.get("memory")
-    if isinstance(memory, dict) and str(memory.get("provider") or "") == "hal0-memory":
-        return True
-    skills = data.get("skills")
-    dirs = skills.get("external_dirs") if isinstance(skills, dict) else None
-    return isinstance(dirs, list) and any(str(d) in SKILLS_EXTERNAL_DIRS for d in dirs)
+    cwd = str(terminal.get("cwd") or "").strip()
+    return True if cwd and cwd == str(Path(hermes_home) / "scratch") else None
 
 
 def read_terminal_state(hermes_home: Path | str) -> bool | None:
@@ -1546,18 +1545,29 @@ def read_terminal_state(hermes_home: Path | str) -> bool | None:
     return None
 
 
-def write_terminal_state(hermes_home: Path | str, enabled: bool) -> None:
-    """Record the decision. Best-effort: a write failure must not fail install."""
-    with contextlib.suppress(OSError):
+def write_terminal_state(hermes_home: Path | str, enabled: bool) -> bool:
+    """Record the decision; return whether it landed.
+
+    The caller FAILS CLOSED on False (forces the tool off for this run) rather
+    than aborting the install: an unrecorded decision is exactly the state a
+    later run could re-derive the permissive way, so the safe response is to
+    not enable anything until the record can be kept.
+    """
+    try:
         path = Path(hermes_home) / TERMINAL_STATE_FILE
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, "1\n" if enabled else "0\n")
+        return True
+    except OSError as exc:
+        log.warning("hermes_provision.terminal_state_write_failed", error=str(exc))
+        return False
 
 
 def terminal_tool_enabled(
     *,
     config_text: str | None = None,
     recorded: bool | None = None,
+    hermes_home: Path | str = HERMES_HOME_DEFAULT,
     env: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
     """Decide whether Hermes gets the terminal tool. Returns ``(enabled, why)``.
@@ -1578,7 +1588,7 @@ def terminal_tool_enabled(
         return False, "opt-out"
     if recorded is not None:
         return recorded, "recorded"
-    existing = _existing_terminal_choice(config_text)
+    existing = _existing_terminal_choice(config_text, hermes_home)
     if existing is not None:
         return existing, "existing-config"
     return False, "default-off"
@@ -1635,6 +1645,7 @@ def _build_config_overlay(
     live_resolve_enabled: bool,
     hermes_home: Path | str = HERMES_HOME_DEFAULT,
     terminal_enabled: bool = False,
+    terminal_backend: str | None = None,
 ) -> list[tuple[str, Any]]:
     """Ordered ``(dotted_key, value)`` overlay applied via ``hermes config set``.
 
@@ -1760,7 +1771,11 @@ def _build_config_overlay(
     # Written ONLY when the operator opted in (#1863 — see TERMINAL_TOOLSETS).
     # With the tool off there is no backend to configure, so hal0 writes no
     # ``terminal.*`` key at all and subtracts the toolsets in _config_list_keys.
-    if terminal_enabled:
+    # Also skipped when the operator has moved the backend off `local` by hand
+    # (docker/ssh/…): that is a narrower execution boundary than hal0's default,
+    # and re-asserting `local` on top of it would silently widen it back to
+    # root-equivalent host execution.
+    if terminal_enabled and terminal_backend in (None, "", "local"):
         terminal_scratch = str(Path(hermes_home) / "scratch")
         pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
     pairs += [("agent.max_turns", 60), ("agent.reasoning_effort", "medium")]
@@ -2029,9 +2044,16 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # the next run re-derive it from hermes' own defaults. See
     # terminal_tool_enabled.
     terminal_enabled, terminal_reason = terminal_tool_enabled(
-        config_text=config_before, recorded=read_terminal_state(hermes_home)
+        config_text=config_before,
+        recorded=read_terminal_state(hermes_home),
+        hermes_home=hermes_home,
     )
-    write_terminal_state(hermes_home, terminal_enabled)
+    # Fail closed: if the decision cannot be recorded, do not enable anything —
+    # an unrecorded "on" is the state a later run could re-derive permissively.
+    if not write_terminal_state(hermes_home, terminal_enabled) and terminal_enabled:
+        terminal_enabled, terminal_reason = False, "state-unwritable"
+    # An operator who moved the backend off `local` by hand keeps that backend.
+    terminal_backend = _terminal_backend_in_config(config_before)
     migrated = _ensure_hermes_config(hermes_bin, hermes_home, run)
 
     primary_raw = _resolve_primary_slot(slots_fetcher=ctx.io.fetch_slots)
@@ -2093,6 +2115,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         live_resolve_enabled=live_resolve_enabled,
         hermes_home=hermes_home,
         terminal_enabled=terminal_enabled,
+        terminal_backend=terminal_backend,
     )
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
