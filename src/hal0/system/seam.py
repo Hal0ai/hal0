@@ -80,6 +80,10 @@ AGENT_UNIT_VERBS: dict[str, str] = {
     "disable": "disable-agent",
     "start": "start-agent",
     "restart": "restart-agent",
+    # try-restart is a no-op on an inactive unit (#1882). The Hermes
+    # terminal-tool posture refresh uses it so re-provisioning can update a
+    # running agent without starting one the operator deliberately stopped.
+    "try-restart": "try-restart-agent",
     "enable": "enable-agent",
 }
 

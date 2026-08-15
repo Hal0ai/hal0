@@ -95,6 +95,7 @@ def test_agent_unit_argv_rejects_unknown_verb() -> None:
         ("disable", "disable-agent"),
         ("start", "start-agent"),
         ("restart", "restart-agent"),
+        ("try-restart", "try-restart-agent"),
         ("enable", "enable-agent"),
     ],
 )
@@ -121,6 +122,7 @@ def test_unprivileged_routes_through_sudo_seam(verb: str, seam_verb: str) -> Non
         ("disable", "disable-agent"),
         ("start", "start-agent"),
         ("restart", "restart-agent"),
+        ("try-restart", "try-restart-agent"),
         ("enable", "enable-agent"),
     ],
 )
@@ -206,6 +208,7 @@ def test_wrapper_rejects_malformed_agent_id(
         ("disable-agent", "disable hal0-agent@hermes.service"),
         ("start-agent", "start hal0-agent@hermes.service"),
         ("restart-agent", "restart hal0-agent@hermes.service"),
+        ("try-restart-agent", "try-restart hal0-agent@hermes.service"),
         ("enable-agent", "enable hal0-agent@hermes.service"),
     ],
 )
@@ -298,6 +301,39 @@ def test_wrapper_usage_documents_the_agent_verbs() -> None:
     assert "stop-agent <agent-id>" in proc.stdout
     assert "disable-agent <agent-id>" in proc.stdout
     assert "hal0-agent@<id>.service" in proc.stdout
+
+
+def test_the_posture_restart_verb_never_starts_a_stopped_unit(
+    fake_systemctl: tuple[dict[str, str], Path],
+) -> None:
+    """``try-restart`` is the whole point of the verb (#1882 review).
+
+    The terminal-tool posture restart runs from every provisioning entry point,
+    including ones the operator drove with the agent deliberately stopped. A
+    plain ``restart`` would start it; ``try-restart`` is a no-op on an inactive
+    unit, so re-provisioning can refresh a running Hermes without resurrecting
+    a stopped one.
+    """
+    env, log = fake_systemctl
+
+    proc = _run_wrapper(env, "try-restart-agent", "hermes")
+
+    assert proc.returncode == 0, proc.stderr
+    assert log.read_text().strip() == "try-restart hal0-agent@hermes.service"
+    assert "restart hal0-agent" not in log.read_text().replace("try-restart", "")
+
+
+def test_companion_family_offers_try_restart_too(
+    fake_systemctl: tuple[dict[str, str], Path],
+) -> None:
+    """The gateway is the second consumer of the posture and needs the same
+    invariant off root — the root branch has always used ``try-restart``."""
+    env, log = fake_systemctl
+
+    proc = _run_wrapper(env, "svc-try-restart", "hermes-gateway")
+
+    assert proc.returncode == 0, proc.stderr
+    assert log.read_text().strip() == "try-restart hermes-gateway.service"
 
 
 def test_wrapper_and_python_validators_agree() -> None:

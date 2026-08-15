@@ -268,7 +268,13 @@ def _restart_hermes_after_posture_change() -> None:
     """Restart the Hermes consumers so a tool-posture change takes hold.
 
     Both consumers are covered — the agent unit and the gateway each load the
-    config in their own process.
+    config in their own process — and both go through ``try-restart``, which is
+    a no-op on an inactive unit. That invariant matters: this runs from every
+    provisioning entry point, including ones the operator drove with Hermes
+    deliberately stopped, and a plain ``restart`` would resurrect it. Off root
+    the seam supplies its own ``try-restart-agent`` / ``svc-try-restart`` verbs
+    so the invariant survives the privilege routing rather than only holding
+    for root.
 
     Privilege routing matters here: this runs from every provisioning entry
     point, including the ones the unprivileged ``hal0`` service user drives, and
@@ -290,12 +296,12 @@ def _restart_hermes_after_posture_change() -> None:
         return
     root = _os.geteuid() == 0
     plans: list[tuple[str, list[str]]] = [
-        ("hal0-agent@hermes.service", agent_unit_argv("restart", "hermes")),
+        ("hal0-agent@hermes.service", agent_unit_argv("try-restart", "hermes")),
         (
             "hermes-gateway.service",
             ["systemctl", "try-restart", "hermes-gateway.service"]
             if root
-            else ["sudo", "-n", SEAM_BIN, "svc-restart", "hermes-gateway"],
+            else ["sudo", "-n", SEAM_BIN, "svc-try-restart", "hermes-gateway"],
         ),
     ]
     for unit, argv in plans:

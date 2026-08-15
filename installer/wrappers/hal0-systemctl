@@ -788,6 +788,16 @@ case "$cmd" in
     exec systemctl restart "${AGENT_UNIT_PREFIX}${id}.service"
     ;;
 
+  # try-restart-agent (#1882): restart the unit ONLY if it is already running.
+  # The Hermes terminal-tool posture change refreshes a live agent, and it runs
+  # from every provisioning entry point — including ones the operator drove
+  # with the agent deliberately stopped. `restart` would resurrect it; this
+  # verb is a no-op on an inactive unit. Strictly narrower than restart-agent.
+  try-restart-agent)          # try-restart-agent <agent-id> -> systemctl try-restart hal0-agent@<id>.service
+    id="${1:-}"; validate_agent_id "$id"
+    exec systemctl try-restart "${AGENT_UNIT_PREFIX}${id}.service"
+    ;;
+
   enable-agent)               # enable-agent <agent-id> -> systemctl enable hal0-agent@<id>.service
     id="${1:-}"; validate_agent_id "$id"
     exec systemctl enable "${AGENT_UNIT_PREFIX}${id}.service"
@@ -796,14 +806,16 @@ case "$cmd" in
   # Companion-service units (#1590). A CLOSED name->unit map — the caller
   # supplies a service key, never a unit string, so this family can only ever
   # reach the units enumerated here. Growing the map is a reviewable diff.
-  svc-start|svc-stop|svc-restart|svc-enable|svc-disable)
+  svc-start|svc-stop|svc-restart|svc-try-restart|svc-enable|svc-disable)
     key="${1:-}"
     case "$key" in
       openwebui)  unit="hal0-openwebui.service" ;;
       hindsight)  unit="hindsight-api.service" ;;
       # #1863: the Hermes terminal-tool posture only reaches the model once the
       # process re-reads its config, and the gateway is a second consumer of it.
-      # Restart-only in practice, but the whole svc-* family shares one map.
+      # Reached via svc-try-restart in practice (#1882 — a posture refresh must
+      # not start a gateway the operator stopped), but the svc-* family shares
+      # one map.
       hermes-gateway) unit="hermes-gateway.service" ;;
       *) die "bad service key: ${key:-<missing>}" ;;
     esac
@@ -839,6 +851,7 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   disable-agent <agent-id>         systemctl disable ${AGENT_UNIT_PREFIX}<id>.service
   start-agent <agent-id>           systemctl start ${AGENT_UNIT_PREFIX}<id>.service
   restart-agent <agent-id>         systemctl restart ${AGENT_UNIT_PREFIX}<id>.service
+  try-restart-agent <agent-id>     systemctl try-restart ${AGENT_UNIT_PREFIX}<id>.service (no-op if stopped)
   enable-agent <agent-id>          systemctl enable ${AGENT_UNIT_PREFIX}<id>.service
   svc-<verb> <openwebui|hindsight|hermes-gateway>
                                    systemctl <verb> on the mapped companion unit

@@ -695,7 +695,7 @@ def test_posture_change_restarts_the_running_hermes_as_root(monkeypatch) -> None
     ac._restart_hermes_after_posture_change()
 
     assert calls == [
-        ["systemctl", "restart", "hal0-agent@hermes.service"],
+        ["systemctl", "try-restart", "hal0-agent@hermes.service"],
         ["systemctl", "try-restart", "hermes-gateway.service"],
     ]
 
@@ -720,8 +720,8 @@ def test_posture_restart_routes_through_the_seam_when_unprivileged(monkeypatch) 
     ac._restart_hermes_after_posture_change()
 
     assert calls == [
-        ["sudo", "-n", SEAM_BIN, "restart-agent", "hermes"],
-        ["sudo", "-n", SEAM_BIN, "svc-restart", "hermes-gateway"],
+        ["sudo", "-n", SEAM_BIN, "try-restart-agent", "hermes"],
+        ["sudo", "-n", SEAM_BIN, "svc-try-restart", "hermes-gateway"],
     ]
 
 
