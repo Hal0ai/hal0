@@ -21,11 +21,11 @@ bypasses, one verified empirically and one already documented in-tree.
 > untrusted content → prompt injection → shell → read credentials → exfiltrate
 
 The bundled Hermes agent is provisioned with `terminal.backend = local`
-(`src/hal0/agents/hermes_provision.py:1553`), so it can execute arbitrary shell
+(`src/hal0/agents/hermes_provision.py:1570`), so it can execute arbitrary shell
 commands. It runs under `hal0-agent@hermes.service` as `User=hal0`
 (`installer/systemd/hal0-agent@.service`, `[Service] User=hal0 / Group=hal0`).
 
-`hal0-api` also runs as `User=hal0` (`installer/install.sh:1244-1245`, inside
+`hal0-api` also runs as `User=hal0` (`installer/install.sh:1246-1247`, inside
 the heredoc that writes `/etc/hal0/hal0-api.service`).
 
 The two run as **the same UID**. That single fact is what this ADR turns on.
@@ -113,7 +113,11 @@ The pattern the brief asks for **already exists** and works:
    intent: *"Persist: root:root 0600, under secrets/ — NOT api.env"*.
 2. The Hermes gateway's platform tokens live in
    `/var/lib/hal0/secrets/agents/hermes.env`, `root:root 0600`, wired in via a
-   systemd drop-in (`src/hal0/agents/hermes_provision.py:3890-3937`).
+   systemd drop-in (`src/hal0/agents/hermes_provision.py:3944-3958`). The
+   vault itself is written and re-pinned root:root by
+   `_write_secrets_env()` (`src/hal0/agents/hermes_provision.py:4406-4419`);
+   the same root:root/0600 pattern recurs for the other per-agent artifacts
+   (driver env, seed TOML) scattered across `hermes_provision.py:4262-5238`.
 3. The privileged write seam is `installer/wrappers/hal0-agentenv` +
    `packaging/sudoers/hal0-agentenv` — argv-validated, path-constructed on the
    root side, content on stdin, `merge-secrets` doing the read-merge-write as
@@ -159,7 +163,7 @@ agent can `cat`. The chain is unbroken.
 ### Bypass B — the `hal0` account is already root-equivalent (documented in-tree)
 
 The sudoers grants are issued to the **user** `hal0`
-(`packaging/sudoers/hal0-agentenv:24`,
+(`packaging/sudoers/hal0-agentenv:22`,
 `packaging/sudoers/hal0-systemctl` final line,
 `packaging/sudoers/hal0-benchctl`, `hal0-podman-ro`, `hal0-update`). The agent
 runs as `hal0`, so the agent holds every one of those grants, not just the API.
@@ -216,7 +220,7 @@ for every non-root reader:
   an auth-enabled box. `src/hal0/cli/_shared.py:28-49` and
   `src/hal0/cli/doctor_all.py:756-758` both depend on this read.
 - `hal0.agents.hermes_provision` calls `service_key(prefer="admin")` at
-  `:1529`, `:2007`, `:2720`, `:3113`, `:5064`, `:5158`. In-process under
+  `:1546`, `:2024`, `:2773`, `:3166`, `:5117`, `:5211`. In-process under
   `hal0-api` that is fine (env). Invoked from a CLI path as a non-root user it
   is not.
 
@@ -275,6 +279,30 @@ refresh a privileged operation for no benefit. So:
   `auth_value_env` provider credential. Its `EnvironmentFile=` line loses the
   `-` (see §5).
 
+**Known-incomplete, recorded for reference only.** The design above has not
+been executed and, as written, has unresolved gaps that would need closing
+before it could ship — not that it matters, since Option A is rejected below,
+but future readers should not treat this section as execute-ready:
+
+- The `HF_TOKEN` installer writer (`installer/install.sh:1136-1173`)
+  wholesale-overwrites `/var/lib/hal0/secrets/hal0-api.env` rather than
+  merging into it. Moving more keys into that file means every writer touching
+  it — including this section's `hal0-secretenv` — must agree on a
+  read-merge-write contract, and the installer path does not have one today.
+- A fresh, keyless install never creates `/var/lib/hal0/secrets/hal0-api.env`
+  at all. Dropping the `EnvironmentFile=-` leading dash (as §5 proposes) on a
+  box that never gathered a token at install time would fail the unit closed
+  and break auth-off installs, not just harden auth-on ones.
+- The `rotate admin|client` verb, per its own contract, returns only
+  `{tier, key_len, fingerprint}` — never the value — so it cannot live-update
+  `hal0-api`'s already-running `os.environ`. A rotation still requires a
+  process restart to take effect; nothing in this design says so.
+- The doctor duplicate-key check called for in the rollback section (item 4 of
+  "Migration and rollback") needs a privileged comparison verb of its own —
+  comparing values across a `hal0:hal0`-readable file and a `root:root`-only
+  one is not something an unprivileged `hal0 doctor` invocation can do without
+  a seam, and no such verb is designed here.
+
 ### 3. What the agent legitimately still needs — and what this does NOT achieve
 
 State plainly: **this design cannot make the agent credential-free, and does
@@ -285,7 +313,7 @@ not try to.**
 agent-writable. It contains:
 
 - `config.yaml` with `providers.custom.api_key`
-  (`src/hal0/agents/hermes_provision.py:1487`) — today the literal
+  (`src/hal0/agents/hermes_provision.py:1504`) — today the literal
   `"hal0-local"` placeholder, but on an auth-enabled box it is a live bearer.
 - `auth.json` and `mcp-tokens/` — real credentials for real upstreams.
 - `HAL0_MCP_TOKEN`, injected via `/etc/hal0/agents/hermes.env`, which is the
@@ -381,6 +409,18 @@ across both units — needs a group or a split); new `PermRow`s in
 `render-context` `ExecStartPre`) has to become a narrower path or the agent can
 still clobber config. This is a real week of work with real upgrade risk. It is
 the **correct** fix and it is **not a 1.0 change**.
+
+Open question for 1.1 planning, not covered by the UID split alone:
+`_write_driver_env()` (`src/hal0/agents/hermes_provision.py:5180-5211`) writes
+`service_key(prefer="admin")` — a literal copy of the box admin key — into the
+agent's own `HAL0_MCP_TOKEN` in `/etc/hal0/agents/hermes.env`. Splitting the
+UID stops the agent from reading `hal0-api`'s environment or `api.env`, but it
+does nothing about the admin key the agent already holds in its *own* env
+file. Until that token is scoped down to something narrower than the full box
+admin key, an agent under Option B still authenticates to hal0's API surface
+with full admin authority — it has simply lost the extra read paths, not the
+credential itself. This has to be resolved before Option B can be called
+"done".
 
 **Option C — document the boundary, fix the cheap real bugs, defer.**
 Recommended. See below.
@@ -498,7 +538,7 @@ class of migration that has produced this wave's regressions.
 - `src/hal0/install/perms.py:207,217` — the `api.env` / `upstreams.toml` rows
 - `src/hal0/config/paths.py:91` — `API_ENV_MODE = 0o600`
 - `src/hal0/cli/doctor_all.py:87` — `check_secret_file_modes`
-- `src/hal0/agents/hermes_provision.py:1487,1553,3890` — agent's own
-  credential, `terminal.backend = local`, the gateway secrets vault
+- `src/hal0/agents/hermes_provision.py:1504,1570,4406` — agent's own
+  credential, `terminal.backend = local`, the gateway secrets vault writer
 - CHANGELOG `#1466` — the four-writers-three-opinions `api.env` mode bug that
   produced the current 0600 posture
