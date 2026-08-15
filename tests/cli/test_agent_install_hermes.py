@@ -677,15 +677,13 @@ def test_provision_hermes_forwards_terminal_answer_across_the_privilege_drop(
     assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "1"}
 
 
-def test_posture_change_restarts_the_running_hermes(monkeypatch) -> None:
-    """An answered terminal flag must reach the running process, not just disk.
-
-    `systemctl enable --now` only activates an already-running unit, so without
-    an explicit restart `--no-terminal-tool` would report success while live
-    sessions kept the execution tools.
-    """
+def test_posture_change_restarts_the_running_hermes_as_root(monkeypatch) -> None:
+    """Root restarts both consumers directly — `enable --now` only activates an
+    already-running unit, so without this an opt-out would report success while
+    live sessions kept the execution tools."""
     calls: list[list[str]] = []
     monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
+    monkeypatch.setattr("os.geteuid", lambda: 0)
 
     class _Done:
         returncode = 0
@@ -697,8 +695,33 @@ def test_posture_change_restarts_the_running_hermes(monkeypatch) -> None:
     ac._restart_hermes_after_posture_change()
 
     assert calls == [
-        ["systemctl", "try-restart", "hal0-agent@hermes.service"],
+        ["systemctl", "restart", "hal0-agent@hermes.service"],
         ["systemctl", "try-restart", "hermes-gateway.service"],
+    ]
+
+
+def test_posture_restart_routes_through_the_seam_when_unprivileged(monkeypatch) -> None:
+    """A bare systemctl from an unprivileged euid escalates through polkit — it
+    prompts (nobody is there) or fails, and the provisioning command would still
+    report success. Both consumers go through the sudo -n seam instead."""
+    from hal0.system.seam import SEAM_BIN
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+
+    class _Done:
+        returncode = 0
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda argv, *_a, **_k: (calls.append(list(argv)), _Done())[1]
+    )
+
+    ac._restart_hermes_after_posture_change()
+
+    assert calls == [
+        ["sudo", "-n", SEAM_BIN, "restart-agent", "hermes"],
+        ["sudo", "-n", SEAM_BIN, "svc-restart", "hermes-gateway"],
     ]
 
 

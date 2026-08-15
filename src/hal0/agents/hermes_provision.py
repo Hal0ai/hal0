@@ -2109,15 +2109,24 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # recorded: an unrecorded "on" is the state a later run could re-derive
     # permissively. A box that is already working (`existing-config`) is left
     # alone — refusing to record must not disable something already in use.
-    if (
-        recorded != terminal_enabled
-        and terminal_enabled
-        and terminal_reason == "opt-in"
-        and not write_terminal_state(terminal_enabled)
-    ):
-        terminal_enabled, terminal_reason = False, "state-unwritable"
-    elif recorded != terminal_enabled:
-        write_terminal_state(terminal_enabled)
+    terminal_state_stale = False
+    if recorded != terminal_enabled and not write_terminal_state(terminal_enabled):
+        if terminal_enabled:
+            # An unrecorded "on" is what a later run could re-derive
+            # permissively — refuse it outright.
+            terminal_enabled, terminal_reason = False, "state-unwritable"
+        elif recorded is True:
+            # The inverse, and quieter: this run disables the tools, but the
+            # marker still says "on", so the NEXT unflagged provision would put
+            # them back. Applied anyway (off now is better than on now) and
+            # surfaced as a warn — silently accepting a posture that cannot
+            # survive the next run is exactly what must not happen here.
+            terminal_state_stale = True
+            terminal_reason = f"{terminal_reason}+state-stale"
+            log.warning(
+                "hermes_provision.terminal_optout_not_recorded",
+                marker=str(TERMINAL_STATE_PATH),
+            )
     # An operator who moved the backend off `local` by hand keeps that backend.
     terminal_backend = _terminal_backend_in_config(config_before)
     migrated = _ensure_hermes_config(hermes_bin, hermes_home, run)
@@ -2211,10 +2220,20 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # FAIL only when the overlay couldn't apply at all (hermes_bin broken) —
     # that's a real, actionable stop the operator must see.
     status = PhaseStatus.OK if (applied or not pairs) else PhaseStatus.FAIL
+    stale_reason = (
+        f"terminal-tool opt-out could not be recorded at {TERMINAL_STATE_PATH} — "
+        "the next provision would re-enable it; re-run as root"
+    )
+    if status == PhaseStatus.OK and terminal_state_stale:
+        status = PhaseStatus.WARN
     return PhaseResult(
         status=status,
         hash=new_hash,
-        reason=("; ".join(errors[:3]) if status == PhaseStatus.FAIL else None),
+        reason=(
+            "; ".join(errors[:3])
+            if status == PhaseStatus.FAIL
+            else (stale_reason if terminal_state_stale else None)
+        ),
         details={
             "config_path": str(config_path),
             "changed": changed,
@@ -2236,6 +2255,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "terminal_tool": "on" if terminal_enabled_in_config(config_after) else "off",
             "terminal_tool_decision": "on" if terminal_enabled else "off",
             "terminal_tool_reason": terminal_reason,
+            "terminal_state_stale": terminal_state_stale,
             "honcho_json_changed": honcho_json_changed,
             "config_set_errors": errors,
             "fallbacks": fallbacks,

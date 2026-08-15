@@ -258,6 +258,9 @@ def test_wrapper_rejects_unknown_agent_verb(
         ("svc-restart", "hindsight", "restart hindsight-api.service"),
         ("svc-enable", "hindsight", "enable hindsight-api.service"),
         ("svc-disable", "openwebui", "disable hal0-openwebui.service"),
+        # #1863: the Hermes gateway is a second consumer of the terminal-tool
+        # posture and has to be restartable from the unprivileged side.
+        ("svc-restart", "hermes-gateway", "restart hermes-gateway.service"),
     ],
 )
 def test_wrapper_companion_family_maps_key_to_unit(

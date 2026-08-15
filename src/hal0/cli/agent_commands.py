@@ -264,28 +264,42 @@ def _install_hermes(
     )
 
 
-_HERMES_POSTURE_UNITS = ("hal0-agent@hermes.service", "hermes-gateway.service")
-
-
 def _restart_hermes_after_posture_change() -> None:
-    """``try-restart`` the Hermes consumers so a tool-posture change takes hold.
+    """Restart the Hermes consumers so a tool-posture change takes hold.
 
-    ``try-restart`` (not ``restart``) deliberately: it is a no-op on a unit that
-    is not running, so this never starts the gateway on a box that runs without
-    one. Both consumers are covered — the agent unit and the gateway each load
-    the config in their own process. Best-effort and loud on failure: the
-    provisioned config is already correct on disk, but the operator has to know
-    a live process may still be serving the old posture.
+    Both consumers are covered — the agent unit and the gateway each load the
+    config in their own process.
+
+    Privilege routing matters here: this runs from every provisioning entry
+    point, including the ones the unprivileged ``hal0`` service user drives, and
+    a bare ``systemctl`` from an unprivileged euid escalates through polkit —
+    which either prompts (nobody is there) or fails. Root uses plain
+    ``systemctl``; anyone else goes through the ``hal0-systemctl`` seam's closed
+    verb map with ``sudo -n``, so it can fail but can never prompt.
+
+    Loud on failure: the provisioned config is already correct on disk, but the
+    operator has to know a live process may still be serving the old posture.
     """
+    import os as _os
     import shutil as _shutil
     import subprocess as _subprocess
 
+    from hal0.system.seam import SEAM_BIN, agent_unit_argv
+
     if _shutil.which("systemctl") is None:
         return
-    for unit in _HERMES_POSTURE_UNITS:
-        rc = _subprocess.run(  # nosec B603 B607 — fixed argv
-            ["systemctl", "try-restart", unit], check=False
-        ).returncode
+    root = _os.geteuid() == 0
+    plans: list[tuple[str, list[str]]] = [
+        ("hal0-agent@hermes.service", agent_unit_argv("restart", "hermes")),
+        (
+            "hermes-gateway.service",
+            ["systemctl", "try-restart", "hermes-gateway.service"]
+            if root
+            else ["sudo", "-n", SEAM_BIN, "svc-restart", "hermes-gateway"],
+        ),
+    ]
+    for unit, argv in plans:
+        rc = _subprocess.run(argv, check=False).returncode  # nosec B603 — seam-validated argv
         if rc != 0:
             console.print(
                 f"[yellow]Could not restart {unit} — a running Hermes may still be "

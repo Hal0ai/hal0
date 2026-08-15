@@ -422,6 +422,27 @@ def test_persist_terminal_decision_records_a_fresh_box_as_off(
     assert hp.read_terminal_state() is False
 
 
+def test_optout_that_cannot_be_recorded_is_applied_but_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An opt-out from the unprivileged path cannot replace the root-owned
+    # marker. Disabling now is still right, but the marker would re-enable the
+    # tools at the next unflagged provision — that must not pass silently.
+    state_path = tmp_path / "state" / "hermes-terminal-tool"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text("1\n", encoding="utf-8")
+    real_write = hp.write_terminal_state
+    monkeypatch.setattr(hp, "write_terminal_state", lambda _enabled: False)
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "0")
+    out, doc = _run_config_write(tmp_path, monkeypatch, state_path=state_path)
+    monkeypatch.setattr(hp, "write_terminal_state", real_write)
+
+    assert out.status == hp.PhaseStatus.WARN
+    assert out.details["terminal_state_stale"] is True
+    assert "re-run as root" in (out.reason or "")
+    assert _terminal_is_off(doc), doc
+
+
 def test_marker_is_world_readable_under_a_restrictive_umask(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

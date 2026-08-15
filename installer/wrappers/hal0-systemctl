@@ -801,6 +801,10 @@ case "$cmd" in
     case "$key" in
       openwebui)  unit="hal0-openwebui.service" ;;
       hindsight)  unit="hindsight-api.service" ;;
+      # #1863: the Hermes terminal-tool posture only reaches the model once the
+      # process re-reads its config, and the gateway is a second consumer of it.
+      # Restart-only in practice, but the whole svc-* family shares one map.
+      hermes-gateway) unit="hermes-gateway.service" ;;
       *) die "bad service key: ${key:-<missing>}" ;;
     esac
     exec systemctl "${cmd#svc-}" "$unit"
@@ -836,7 +840,8 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   start-agent <agent-id>           systemctl start ${AGENT_UNIT_PREFIX}<id>.service
   restart-agent <agent-id>         systemctl restart ${AGENT_UNIT_PREFIX}<id>.service
   enable-agent <agent-id>          systemctl enable ${AGENT_UNIT_PREFIX}<id>.service
-  svc-<verb> <openwebui|hindsight> systemctl <verb> on the mapped companion unit
+  svc-<verb> <openwebui|hindsight|hermes-gateway>
+                                   systemctl <verb> on the mapped companion unit
   restart-self                     systemctl restart ${SELF_UNIT}
 EOF
     ;;
