@@ -366,7 +366,7 @@ def test_unit_user_reports_root_for_an_empty_user_directive(
 
 def test_agent_units_parses_list_units_output(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
-    monkeypatch.setattr(da, "_enabled_agent_units", lambda: [])
+    monkeypatch.setattr(da, "_provisioned_agent_units", lambda: [])
 
     class _R:
         returncode = 0
@@ -391,7 +391,7 @@ def test_agent_units_is_unknown_when_systemctl_errors(monkeypatch: pytest.Monkey
     assert da._agent_units() is None
 
 
-def test_agent_units_finds_a_stopped_unloaded_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agent_units_finds_a_stopped_disabled_instance(monkeypatch: pytest.MonkeyPatch) -> None:
     """`list-units` only reports units in memory; the enable symlink outlives that.
 
     An operator who stopped the agent has not uninstalled it — the boundary is
@@ -404,20 +404,43 @@ def test_agent_units_finds_a_stopped_unloaded_instance(monkeypatch: pytest.Monke
         stdout = ""
 
     monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
-    monkeypatch.setattr(da, "_enabled_agent_units", lambda: ["hal0-agent@hermes.service"])
+    monkeypatch.setattr(da, "_provisioned_agent_units", lambda: ["hal0-agent@hermes.service"])
     assert da._agent_units() == ["hal0-agent@hermes.service"]
 
 
-def test_enabled_agent_units_reads_wants_symlinks(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_provisioned_agent_units_reads_wants_symlinks(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
     wants = tmp_path / "multi-user.target.wants"
     wants.mkdir()
     (wants / "hal0-agent@hermes.service").symlink_to(tmp_path / "hal0-agent@.service")
     (wants / "hal0-api.service").symlink_to(tmp_path / "hal0-api.service")
-    assert da._enabled_agent_units(tmp_path) == ["hal0-agent@hermes.service"]
+    assert da._provisioned_agent_units(tmp_path) == ["hal0-agent@hermes.service"]
 
 
-def test_enabled_agent_units_missing_unit_dir_is_empty(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    assert da._enabled_agent_units(tmp_path / "nope") == []
+def test_provisioned_agent_units_reads_dropin_dirs(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`hal0 agent disable` leaves the drop-in dir behind — that instance still counts."""
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    (tmp_path / "hal0-agent@hermes.service.d").mkdir()
+    (tmp_path / "hal0-api.service.d").mkdir()
+    assert da._provisioned_agent_units(tmp_path) == ["hal0-agent@hermes.service"]
+
+
+def test_provisioned_agent_units_reads_per_agent_config(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    agents = tmp_path / "home" / "etc" / "hal0" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "hermes.toml").write_text("")
+    (agents / "other.env").write_text("")
+    (agents / "README").write_text("")
+    assert da._provisioned_agent_units(tmp_path) == [
+        "hal0-agent@hermes.service",
+        "hal0-agent@other.service",
+    ]
+
+
+def test_provisioned_agent_units_missing_unit_dir_is_empty(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    assert da._provisioned_agent_units(tmp_path / "nope") == []
 
 
 def test_agent_uid_unknown_inventory_warns() -> None:

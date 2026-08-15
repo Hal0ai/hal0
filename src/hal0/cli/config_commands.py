@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json as jsonlib
 import os
+import stat
 import subprocess
 from enum import StrEnum
 from pathlib import Path
@@ -72,21 +74,33 @@ def config_show(
     # which makes `hal0 config show` from a non-root shell explode with
     # a raw Python traceback.
     #
-    # The remedy is sudo, or membership of the `hal0` group — deliberately NOT
-    # `chmod 0644`, which this hint used to recommend. Every file under
-    # /etc/hal0 is either secret-bearing (api.env, hal0.toml, slots/*.toml) or
-    # inventory the box has no reason to publish to every local account
-    # (upstreams.toml, ADR-0002); telling an operator to widen it is telling
-    # them to undo `hal0 doctor perms`, which converges the mode straight back.
+    # The remedy is sudo — deliberately NOT `chmod 0644`, which this hint used
+    # to recommend. Every file under /etc/hal0 is either secret-bearing
+    # (api.env, hal0.toml, slots/*.toml) or inventory the box has no reason to
+    # publish to every local account (upstreams.toml, ADR-0002); telling an
+    # operator to widen it is telling them to undo `hal0 doctor perms`, which
+    # converges the mode straight back.
+    #
+    # Group membership is offered ONLY when this file actually grants group
+    # read: hal0.toml is 0600 by design, so "join the hal0 group" would send an
+    # operator through a re-login to hit the identical error.
     try:
         body = path.read_text()
     except PermissionError as exc:
         console.print(f"[red]Permission denied:[/red] {path}")
+        group_readable = False
+        with contextlib.suppress(OSError):
+            group_readable = bool(path.stat().st_mode & stat.S_IRGRP)
+        remedy = (
+            "Re-run with [bold]sudo[/bold], or add yourself to the file's group "
+            "([bold]sudo usermod -aG hal0 $USER[/bold], then re-login)."
+            if group_readable
+            else "Re-run with [bold]sudo[/bold] — this file is owner-only by design, "
+            "so group membership will not help."
+        )
         console.print(
-            "[dim]The config is owned by the service account. Re-run with "
-            "[bold]sudo[/bold], or add yourself to the [bold]hal0[/bold] group "
-            "([bold]sudo usermod -aG hal0 $USER[/bold], then re-login). Do not "
-            "chmod it world-readable — /etc/hal0 holds credentials and provider "
+            f"[dim]The config is owned by the service account. {remedy} Do not "
+            "widen it with chmod — /etc/hal0 holds credentials and provider "
             "inventory, and `hal0 doctor perms` re-tightens it anyway.[/dim]"
         )
         raise typer.Exit(1) from exc

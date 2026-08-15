@@ -28,6 +28,7 @@ own repair. Exit codes:
 
 from __future__ import annotations
 
+import contextlib
 import json as jsonlib
 import pwd
 import shutil
@@ -164,8 +165,9 @@ def _agent_units() -> list[str] | None:
       ``--all`` adds inactive-but-loaded ones, not an instance that was stopped
       and unloaded. That instance is still installed and still the boundary
       this row exists to report on.
-    * enable symlinks under ``<unit_dir>/multi-user.target.wants/`` survive an
-      unload, so an enabled-but-unloaded instance is found there.
+    * the persistent artifacts an instance leaves on disk (enable symlink,
+      drop-in dir, per-agent config/env) survive both an unload and a
+      ``hal0 agent disable`` — see :func:`_provisioned_agent_units`.
 
     ``None`` is *unknown*, distinct from ``[]`` (definitively no agent): no
     ``systemctl`` on PATH, or the manager failed to answer. Collapsing the two
@@ -200,24 +202,41 @@ def _agent_units() -> list[str] | None:
         name = fields[0] if fields else ""
         if name.startswith("hal0-agent@") and name.endswith(".service"):
             units.add(name)
-    units |= set(_enabled_agent_units())
+    units |= set(_provisioned_agent_units())
     return sorted(units)
 
 
-def _enabled_agent_units(unit_dir: Path | None = None) -> list[str]:
-    """Enabled ``hal0-agent@*`` instances, from the ``.wants`` enable symlinks.
+def _provisioned_agent_units(unit_dir: Path | None = None) -> list[str]:
+    """Agent instances that exist on disk, whatever systemd currently has loaded.
 
-    Catches the instance systemd has unloaded (stopped, no drop-in touched
-    since), which ``list-units`` does not report at all.
+    ``systemctl list-units`` reports units *in memory*, and the ``.wants``
+    symlinks only cover *enabled* instances — but ``hal0 agent disable`` stops
+    and disables an instance without removing its drop-in, its env file or its
+    config, and ``hal0 agent start`` brings it straight back. That instance is
+    still the boundary this row reports on, so discovery also reads the
+    persistent artifacts:
+
+    * ``<unit_dir>/*.target.wants/hal0-agent@*.service`` — enable symlinks
+    * ``<unit_dir>/hal0-agent@<i>.service.d/`` — per-instance drop-in dirs
+    * ``/etc/hal0/agents/<i>.{toml,env}`` — per-instance config / env
+
+    Best effort: an unreadable directory contributes nothing rather than
+    raising. Callers treat "found nothing anywhere" as no agent only when the
+    systemd probe *also* answered cleanly.
     """
     root = unit_dir if unit_dir is not None else Path("/etc/systemd/system")
-    found: list[str] = []
-    try:
+    names: set[str] = set()
+    with contextlib.suppress(OSError):
         for wants in sorted(root.glob("*.target.wants")):
-            found.extend(p.name for p in sorted(wants.glob(_AGENT_UNIT_GLOB)))
-    except OSError:
-        return []
-    return found
+            names.update(p.name for p in wants.glob(_AGENT_UNIT_GLOB))
+    with contextlib.suppress(OSError):
+        for dropin in root.glob("hal0-agent@*.service.d"):
+            names.add(dropin.name[: -len(".d")])
+    with contextlib.suppress(OSError):
+        for cfg in paths.agents_config_dir().iterdir():
+            if cfg.suffix in (".toml", ".env") and cfg.stem:
+                names.add(f"hal0-agent@{cfg.stem}.service")
+    return sorted(names)
 
 
 def _resolve_uid(user: str) -> int | None:

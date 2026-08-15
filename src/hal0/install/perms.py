@@ -221,7 +221,13 @@ def ownership_table(
         # inventory readable by every local account. 0640 keeps every real
         # consumer working (hal0-api, hal0-agent@* and the CLI all run as
         # hal0/root, group hal0) and drops the world bit (ADR-0002, Option C).
-        PermRow(etc / "upstreams.toml", etc_owner, etc_group, 0o640, role="upstreams.toml"),
+        PermRow(
+            etc / "upstreams.toml",
+            etc_owner,
+            etc_group,
+            paths.UPSTREAMS_TOML_MODE,
+            role="upstreams.toml",
+        ),
         PermRow(paths.hardware_json(), etc_owner, etc_group, 0o644, role="hardware.json"),
         PermRow(paths.openwebui_env(), etc_owner, etc_group, 0o600, role="openwebui.env"),
         PermRow(

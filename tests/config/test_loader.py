@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from unittest.mock import patch
@@ -715,3 +716,29 @@ class TestManifestLoader:
         )
         loaded = load_manifest()
         assert loaded["toolbox_images"]["flm"]["digest"] == "sha256:etc"
+
+
+def test_save_upstreams_config_lands_the_canonical_mode(tmp_path: Path) -> None:
+    """The atomic rewrite must not drop upstreams.toml's declared mode.
+
+    ``write_toml_atomic`` builds its replacement with ``tempfile.mkstemp``
+    (0600) and ``os.replace``s it over the destination, so every provider
+    create/patch/delete used to discard the 0640 that ``install/perms.py``
+    declares — the file sat in permission drift until ``doctor perms --fix``
+    ran, and an operator in the ``hal0`` group lost read access mid-session.
+    """
+    target = tmp_path / "upstreams.toml"
+    target.write_text("")
+    os.chmod(target, 0o600)
+
+    save_upstreams_config(UpstreamsConfig(upstream=[]), path=target)
+
+    assert target.stat().st_mode & 0o777 == paths.UPSTREAMS_TOML_MODE
+    assert paths.UPSTREAMS_TOML_MODE & 0o007 == 0, "canonical mode must not be world-readable"
+
+
+def test_write_toml_atomic_without_a_mode_is_unchanged(tmp_path: Path) -> None:
+    """The mode argument is opt-in: callers that pass nothing keep mkstemp's 0600."""
+    target = tmp_path / "plain.toml"
+    write_toml_atomic(target, {"a": 1})
+    assert target.stat().st_mode & 0o777 == 0o600
