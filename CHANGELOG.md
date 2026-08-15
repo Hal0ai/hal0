@@ -119,7 +119,12 @@ unconditionally (#1828). Both now fail loudly.
   seconds. Any model load slower than that printed a `ReadTimeout` and exited 1
   on an operation the server had completed successfully. `slot create` and
   `slot rename`, which never block on a health poll, keep the short client
-  timeout (#1832).
+  timeout. The client budget is now derived from the server's own health-poll
+  and terminate timeouts rather than hardcoded, so a server-side retune carries
+  through instead of silently invalidating the client. `hal0 capability set`,
+  the MCP bridge's lifecycle tools and `update --restart-slots` all get the same
+  treatment, and connect stays bounded at 5s so a half-open daemon still fails
+  fast rather than consuming the whole multi-minute budget (#1832).
 - `GET /api/slots/{name}` returns the effective context window in `ctx_max`
   rather than the raw ceiling from the slot's config file. The slot list and
   `/v1/models` were corrected in rc.5; the single-slot detail route — what the
@@ -171,6 +176,32 @@ unconditionally (#1828). Both now fail loudly.
   actually running instead of always claiming there are none. The `ui/` unit
   test suite existed but no workflow ran it, so it gated nothing; CI now runs it
   (#1836).
+- The operator-migration callout in `hal0 update` fires at all. `release.json`'s
+  `migrations` list — the panel shown before an update is confirmed — has been
+  empty for every release ever cut, because the extractor matched the heading
+  `Migrations` while every release section writes `Operator migrations`. rc.4
+  and rc.5 both documented mandatory manual steps that no operator was ever
+  shown. Wrapped bullets are also joined now, so each entry keeps its
+  remediation commands instead of being cut at the first line break (#1874).
+- `hal0 doctor` checks the context window behind Hermes' anchor model, and names
+  the slot actually serving it, its ceiling, Hermes' required floor and the
+  command that repairs it. Previously a box whose anchor resolved below the
+  floor simply refused every turn with no explanation. The window is read
+  through `GET /v1/models/{id}`, so a slot reached via the routing fallback
+  chain is measured and named correctly rather than guessed from the model's
+  spelling, and a window hal0 cannot read reports as skipped rather than as a
+  pass (#1867).
+
+### Security
+
+- `/etc/hal0/agents/hermes.env` carries `HAL0_MCP_TOKEN` and was left mode 0644,
+  world-readable, on every box provisioned unprivileged — in practice every
+  box upgraded rather than freshly installed. The mode self-heal was gated on
+  running as root, but provisioning runs as the `hal0` service user, so the one
+  case that needed repair silently did nothing on every reprovision. Fresh
+  installs were always 0600. **Existing boxes are repaired on the next
+  reprovision, not by the update itself** — check with
+  `stat -c '%a' /etc/hal0/agents/hermes.env`, expect `600` (#1876).
 
 ### Docs
 
@@ -251,7 +282,16 @@ in the memory engine (#1794).
   more memory. On a tightly provisioned box, check `hal0 slot capacity` after
   updating. If chat still refuses after the update, the box is carrying an agent
   slot ceiling below Hermes' 64,000-token floor that this fix does not
-  reconcile — raise it by hand and restart the slot (#1867).
+  reconcile — run `hal0 doctor`, which now names the slot and prints the exact
+  `hal0 slot edit` command to raise it (#1867).
+- **World-readable agent token on upgraded boxes (#1876):** the agent env file
+  `/etc/hal0/agents/hermes.env` holds `HAL0_MCP_TOKEN` and was left mode 0644
+  on every box that
+  was provisioned unprivileged, which in practice means every box upgraded
+  rather than freshly installed. Run `stat -c '%a' /etc/hal0/agents/hermes.env`
+  — if it reads `644`, either reprovision the agent
+  (`hal0 agent bootstrap hermes`) or `chmod 600` it directly. The update alone
+  does not repair it, because the repair happens during provisioning.
 - **Bundled agent skills on an already-installed box (#1828):** the permission
   fix applies when the installer next writes the ownership table, so re-run the
   installer or `hal0 update` and confirm the skill-link phase reports `ok`
