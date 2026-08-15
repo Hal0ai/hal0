@@ -35,10 +35,30 @@ command group is unfamiliar, run `--help` first and only run the verbs that clea
    * every slot's declared `context_size` against the `--ctx-size` in its resolved command; a
      clamp must be visible to the user, not only in the hal0-api journal
 5. **Presentation.** Broken tables, unformatted raw floats, empty output where a table was
-   promised, debug log lines leaking above output, colour codes in non-tty output.
+   promised, debug log lines leaking above output. Colour codes in non-tty output: sweep all
+   captured output in one pass with `grep -cP '\x1b\['` rather than eyeballing. Zero bytes where
+   ANY output was promised is its own class — `hal0 bench history` with no matching rows printed
+   nothing at rc=0 for three releases (regression `bench-history-blank-empty-state`); when a
+   read verb returns empty, check its siblings print an explicit empty-state line. Panel-rendered
+   JSON visually clipping at terminal width is by-design
+   (`known-issues: cli-slot-show-panel-clips-long-json-lines`) — verify `--json` carries the full
+   value before filing truncation.
 6. **Error quality.** Run 2–3 commands with wrong arguments (unknown slot, unknown model,
    missing required arg, a path the `hal0` service user cannot read). The error should tell a
    user what to do next, and must not blame the wrong cause.
+7. **Perms audit on the install-time state.** `hal0 doctor perms` (no --fix) as early as
+   possible, and record the exit code: on a pristine install it should be green, and rc.6's was
+   not (regression `doctor-perms-never-converges`). Date any DRIFT row against the installer's
+   own `--fix` backstop by **ctime** (chmod bumps ctime, not mtime) so install-time drift is
+   distinguishable from lane damage. Never assert a drift row COUNT — it grows with every slot
+   load and model pull. The secrets-dir 0755 want is declared
+   (`known-issues: doctor-perms-secrets-dir-0755-is-declared`).
+8. **Service-user writability of state the daemon writes.** For each dir/db under
+   /var/lib/hal0 that hal0-api writes (model-pull-jobs, activity.db, hal0.db, slots/, ...):
+   `sudo -u hal0 test -w <path>` plus one journal grep for `persist_failed|init_failed`. A
+   root-owned state path the ownership table has no row for is the shape of the rc.6
+   `model-pull-jobs-root-owned` finding, and `doctor perms --fix` cannot heal what the table
+   does not name.
 
 ## Before you diff CLI state against systemd
 

@@ -22,10 +22,15 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 ## Checks
 
 1. Protocol handshake completes; session id is honoured.
-2. **Tool counts, four surfaces.** Compare `tools/list`, `hal0 mcp list`,
-   `GET /api/mcp/servers`, and the shipped docs — not just two. A mismatch between the REST view
-   and the MCP view means the registry and the served surface have diverged. A drift in count
-   between releases is worth reporting even if nothing is broken.
+2. **Tool counts, four surfaces — and the docs by NAME SET, not count.** Compare `tools/list`,
+   `hal0 mcp list`, `GET /api/mcp/servers`, and the shipped docs. A mismatch between the REST
+   view and the MCP view means the registry and the served surface have diverged. For the docs,
+   regex the backticked tool names out of `docs/reference/mcp-tools.mdx`'s table rows and `comm`
+   them against the served set — a raw count hides an 89-tool gap (rc.6: the page claimed "every
+   tool" while naming 91 of 180, including 21 undocumented GATED/destructive tools). Also verify
+   the connect guide's URLs are directly usable: every URL in `connect-mcp.mdx`'s Connect
+   section must end in `/mcp` and answer an initialize POST with 200 on loopback (regression
+   `mcp-docs-connect-url-and-tool-tables`).
 3. Tool schemas are structurally valid (name, description, non-empty inputSchema).
 4. **Annotations.** Every tool in `tools/list` must carry `annotations`, and `destructiveHint`
    must be `true` for the delete family (`model_delete`, `slot_delete`, …) and `false` for
@@ -37,12 +42,14 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
    than `-32601 Method not found`.
 6. **Session scoping.** Replay a session id obtained from `/mcp/admin/mcp` against
    `/mcp/memory/mcp` and require rejection (rc.5 correctly returns `-32600 Session not found`).
-   A cross-mount session leak is a security finding.
+   A cross-mount session leak is a security finding. Also send a `tools/list` with NO session id
+   at all and require rejection (`-32600 Missing session ID`).
 7. Call 1–2 clearly read-only tools per server (a status/list/recall tool — nothing that
    creates, mutates, or deletes) and judge the result.
-8. **Error protocol.** Call a tool with (a) a missing required arg and (b) a wrong-typed
-   required value. Both must return `isError: true` — rc.4 returned `isError: false` on argument
-   errors, which makes every client treat a failure as a success. Then call one with an
+8. **Error protocol.** Call a tool with (a) a missing required arg, (b) a wrong-typed
+   required value, and (c) **unwrapped arguments** — the tool's fields passed flat with no inner
+   `args` object. All three must return `isError: true`; (c) pins the required args-wrapper
+   contract, which confused this lane's own first probe in rc.6. Then call one with an
    **unknown extra key** and record what happens: the inner `args` object is deliberately open
    (`known-issues.yaml: mcp-args-additional-properties-open`), so an ignored unknown key is
    expected — read that entry's `still_report_if` before filing anything.

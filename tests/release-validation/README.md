@@ -125,6 +125,41 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **4** (2026-08-15) — curation after the `v1.0.0-rc.6` run. Landed as mode=report, so the 17
+  new entries first carried `issue: null`; the filing PR then filed all of them (plus one more
+  found during Codex review of that PR, `chat-to-embed-slot-500-passthrough`, #1894) and filled
+  in every issue number — `regressions.yaml` now carries no unfiled entries. `regressions.yaml`
+  grows from 26 to 44 entries: every previously registered entry gets an rc.6 `last_result` (11
+  fixed, 2 regressed-but-known, the rest partial/blocked with the exact residue named), and 18
+  new entries land — headlined by
+  `brain-vulkan-backend-garbage-output`, the run's most severe finding (the pinned runner's
+  Vulkan lane computes wrong values for every model while every health surface stays green).
+  Its lesson is promoted into `_shared.md` as a global **coherence canary**: no lane may trust
+  generated text before a temp-0 "capital of France" probe passes, because two lanes green-lit a
+  box that never produced language. Two register entries were REWRITTEN because their expect
+  clauses had gone wrong rather than stale: `slot-capacity-vram-attribution`'s "no
+  compute-capable GPU => no VRAM" clause was refiring as a false positive on every vulkan-only
+  box (the correct predicate is `vulkan_capable OR compute_capable`), and
+  `hermes-polish-rollup` demanded a shipped `web_dist` the rc.4 report itself had ruled
+  infeasible. `known-issues.yaml` grows to 47: sixteen rc.6 adjudications banked with rationale
+  and `still_report_if` (notably: the update job's restart_error breadcrumb on success, the
+  chat-to-embed 500 pass-through, capability-apply persisting intent on lifecycle failure, the
+  model-add detection surfacing residue of #1855, and the hermes wheel/web_dist ruling), plus
+  rc6_notes on four existing entries whose clauses fired — including deleting the
+  `spawn_context_refresh` misdiagnosis from `hermes-state-md-as-of-is-change-marker` (a wrong
+  guess in a still_report_if clause sent a verifier chasing it; clauses must state symptoms, not
+  theories). Lane briefs absorbed the run's invented checks: name-set diffs instead of counts
+  (MCP docs tables, footer service chips), grounding probes for memory extraction and the
+  steward, hang triangulation for hermes turns, service-user writability sweeps, the
+  args-wrapper and no-session MCP probes, and mid-lane contention re-diffs (three rc.6 slot
+  checks were invalidated by foreign zz* slots). `boxes.toml` corrected: ct151 has iGPU+NPU
+  passthrough and an `rc6-installed` snapshot (gpu=false, HAL0_ALLOW_CPU_ONLY and the sysfs
+  gotchas were all stale — preflight caught every one); ct150 is privileged/GPU, now on rc.6 via
+  the GitHub asset URL; the "no GPU fresh box" standing-gap note replaced with the real
+  remaining gap (no fresh-install box that also has `/dev/kfd` — ct151 exercises Vulkan-only,
+  ct150/ct105 have `/dev/kfd` but are not fresh installs; ct152-cpu-fresh still exists and is
+  CPU-only, gpu=false, no snapshot; host ROCm only on prod; record each box's actual
+  ROCm-vs-Vulkan lane at preflight).
 * **3** (2026-08-12) — `smoke-preflight-skips-chat-probes` (#1831) rewritten. As filed it probed
   only hermes' default live-resolve config — the half of the defect rc.5 fixed — so it would have
   reported `fixed` while the `HAL0_HERMES_LIVE_RESOLVE=0` mode the issue actually named stayed
