@@ -8,13 +8,22 @@ that state actually is before you change it.
 Record `systemctl --failed` and `hal0 slot list` verbatim at lane entry and lane exit, and diff
 them. That makes residue you create attributable instead of anonymous, and it fails loudly if
 another agent is mutating the box: if slots appear that you did not create, stop and say so —
-capacity, port and failed-unit assertions are worthless on a contended box.
+capacity, port and failed-unit assertions are worthless on a contended box. Re-diff against the
+entry snapshot **before every capacity, port, or failed-unit assertion**, not only at exit —
+in rc.6 foreign `zz*` slots appeared mid-lane and invalidated three checks that had only diffed
+at the ends.
 
 ## Checks
 
 1. **Post-install baseline.** Record every slot, its assigned model, its state, and the unit
    status, before touching anything. On a fresh install this is a finding-rich moment: which
-   slots ship seeded, which ship model-less, and does anything already look wrong?
+   slots ship seeded, which ship model-less, and does anything already look wrong? Include an
+   ownership sweep of the state the daemon writes: for each dir under /var/lib/hal0 that
+   hal0-api must write (model-pull-jobs especially), `sudo -u hal0 test -w`, and grep the boot
+   journal for `pull_job_persist_failed` after the installer's own pull — regression
+   `model-pull-jobs-root-owned`. And spot the API's image view: any slot with
+   `container_status: running` must not read `image_status: missing`
+   (regression `image-status-wrong-podman-store`).
 2. **Assign + load.** Take the embed slot: `hal0 slot edit embed --model <embedding model>
    --hardware <backend>`, then `hal0 slot load embed`. **Time the load and record the CLI exit
    code** (`out=$(...); rc=$?`) — regression `slot-verbs-10s-client-timeout` (#1832): the client
@@ -48,19 +57,25 @@ capacity, port and failed-unit assertions are worthless on a contended box.
    state that never converges, an empty message on `error`, or a death nothing surfaces in
    `hal0 status` / `hal0 doctor`. Then swap it to a good model and clean it up.
 9. **Reject a bad model file.** Feed `hal0 model add` a file with a `.gguf` name and no GGUF
-   magic (`head -c 2000000 /dev/urandom`). rc.5 admitted it as `capabilities: chat` (#1838) —
-   precisely the input that makes check 8's crash loop reachable by accident rather than on
-   purpose. Delete the registration afterwards.
+   magic (`head -c 2000000 /dev/urandom`). The registration-with-warning outcome is now
+   by-design (`known-issues: model-add-detection-surfacing`) — what you assert is the warning
+   line and `detection_confidence: low` actually appearing. Delete the registration afterwards.
+   While a first load of a guaranteed-fatal model is in hand, also assert the FAST-CRASH error
+   path: `POST /api/slots/<n>/load` must answer a mapped slot error
+   (`slot.spawn_failed`/`slot.crash_looping`), never a generic `system.internal` 500 with an
+   empty message — the empty-message shape is regression
+   `container-health-readerror-unhandled`, intermittent, so record which envelope you got.
 10. **Backend selection is real, not a label.** Diff `systemctl cat hal0-slot@<slot>` between the
     same slot pinned to `cpu` and to the box's GPU backend. What must change is the runner
     **image** and the `AddDevice=` lines; a residual `-ngl -1` on a CPU-pinned slot is inert and
     adjudicated (`known-issues.yaml: cpu-pinned-slot-keeps-ngl-flag`). Restore the original
     device when done.
 11. **Memory accounting** — regression `slot-capacity-vram-attribution` (#1839).
-    `hal0 slot capacity` must not book VRAM on a box where `/api/hardware` reports no
-    compute-capable GPU, and its Total MB must be reconcilable with `hal0 slot metrics` Mem MB
-    for the same slot in the same second. State which figure is real RSS and which is an
-    estimate.
+    `hal0 slot capacity` must not book VRAM on a box where `/api/hardware` reports no GPU that
+    is either `vulkan_capable` or `compute_capable` — a vulkan-only box booking resident memory
+    to VRAM is the FIX, not the bug (`known-issues: slot-capacity-vram-on-vulkan-is-declared`).
+    Total MB must match `/api/slots/metrics` mem_rss_mb for the same RESIDENT slot in the same
+    second. State which figure is real RSS and which is an estimate.
 
 ## Leave behind
 

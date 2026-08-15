@@ -15,32 +15,40 @@ hostname = "hal0-rc2-fresh-2604"
 ip = "10.0.1.151"
 os = "ubuntu 26.04"
 privileged = false
-gpu = false
+gpu = true          # dev0 /dev/dri/renderD128 (Strix Halo iGPU) + dev3 /dev/accel/accel0 (XDNA NPU), both gid=991
 cores = 8
 ram_gb = 16
-snapshot = "rc5-installed"
+snapshot = "rc6-installed"
 api = "http://10.0.1.151:8080"
 auth_required = false
-status = "PREFERRED fresh box as of 2026-08-12 — two snapshots, verified rc.5 install"
+status = "PREFERRED fresh box as of 2026-08-15 — two snapshots, verified rc.6 install"
 notes = """
-Fresh-install lane. Reset: `pct rollback 151 pristine|rc5-installed` on the hypervisor.
+Fresh-install lane. Reset: `pct rollback 151 pristine|rc6-installed` on the hypervisor.
 
-UNBLOCKED 2026-08-12: the hypervisor was rebooted (sysrq-b), the ZFS deadlock is gone, and
-`pct rollback 151 <snap>` is verified working again. This is now the BEST fresh box in the fleet
-— the only one with snapshots. Two reset points:
+This is the BEST fresh box in the fleet — the only one with snapshots. Two reset points:
   * `pristine`       — pre-install Ubuntu 26.04, for exercising the installer itself
-  * `rc5-installed`  — hal0 1.0.0-rc.5 immediately post-install: api + hermes active, no models
-                       pulled, no slots loaded, no lane residue. Reproduces #1827 out of the box.
-Prefer this box over ct152, which has no snapshot and carries two runs of residue.
+  * `rc6-installed`  — hal0 1.0.0-rc.6 immediately post-install (2026-08-15): api + hermes
+                       active, installer-seeded brain model present and serving. Do NOT assert
+                       "no models on a fresh install" — the installer pulls the brain model.
+(`rc5-installed` no longer exists.) Prefer this box over ct152, which has no snapshot and
+carries residue.
+
+GPU PASSTHROUGH since the rc.5 era (boxes' oldest gotchas predate it): the box exercises the
+vulkan/container path (ghcr.io/hal0ai/hal0-rocmfpx runner in root's podman store). It has NO
+/dev/kfd, so llama.cpp runs the VULKAN lane here — which is precisely what caught the rc.6
+garbage-output defect. Run the coherence canary (_shared.md) before trusting any generated text.
+Do not frame findings as "CPU-only box".
 
 GOTCHAS, in order:
   1. The pristine snapshot has broken DNS — /etc/resolv.conf points at an unreachable
      Tailscale 100.100.100.100. Fix it before anything else or the install fails opaquely.
-  2. No GPU passthrough: the install needs HAL0_ALLOW_CPU_ONLY=1.
+  2. (stale, retired) The install no longer needs HAL0_ALLOW_CPU_ONLY=1 — GPU passthrough
+     exists.
   3. No NFS mount. Test models must be rsynced to /mnt/ai-models; workstation ggufs are often
-     symlinks into huggingface/hub, so use `rsync -L`.
-  4. An unprivileged LXC sees the host's sysfs with no /dev/dri — hardware probes that key on
-     AMD DRM sysfs alone will misreport (root cause of #1790).
+     symlinks into huggingface/hub, so use `rsync -L` — and /mnt/ai-models is NOT in hal0's
+     model roots, so a staged gguf is invisible until `hal0 model add`.
+  4. (stale, retired) "/dev/dri absent in sysfs" predates the dev0/dev3 passthrough. After any
+     `pct rollback 151`, confirm dev0/dev3 keep gid=991 or the installer's GPU preflight aborts.
 """
 
 [boxes.ct152-cpu-fresh]
@@ -85,25 +93,29 @@ role = "update"
 ctid = 150
 hostname = "halo"
 ip = "10.0.1.150"
-os = "ubuntu"
-gpu = false
+os = "ubuntu 24.04"
+privileged = true    # /proc/1/uid_map = full map; 32 cores / 107 GiB — prod-class, unlike every fresh box
+gpu = true           # AMD iGPU passthrough; slots serve on vulkan (with /dev/kfd -> ROCm lane)
 api = "http://10.0.1.150:8080"
 auth_required = false
 notes = """
 In-place upgrade lane. Left on the PREVIOUS release; the run upgrades it to the RC under test.
-HAL0_RELEASES_URL is a file:// stage at /var/lib/hal0/rc2/preview.json (directory name is
-historical, not a version claim) — restage the new manifest + bundle there, or point it at the
-GitHub asset URL (works end-to-end since rc.3). No snapshot reset: its value is accumulated
-upgrade history, so record the exact from-version in CONTEXT.md before upgrading.
-As of the rc.5 run it sat on 1.0.0-rc.3 and carried hermes-agent 0.19.0 (which DOES ship
-`hermes_cli/web_dist`), so it cannot reproduce the fresh-install hermes packaging defects
-(#1829) — an upgrade preserves the newer wheel's artefacts.
-UPGRADED rc.3 -> rc.5 on 2026-08-12 and converged; it now sits on 1.0.0-rc.5, so the NEXT run's
-from-version is rc.5. Found on the way: #1844 (the updater never refreshes /usr/local/bin/hal0,
-so `hal0 --version` kept reporting rc.3 while the API served rc.5) and #1845 (the "Convergence
-incomplete" panel's remediation omits --stop-services and cannot work as printed). Its
-agent.toml still carries context_size = 4096 from an old seed — upgrades never reconcile slot
-seeds, which is why Hermes fails here for a DIFFERENT reason than on a fresh box (see #1827).
+HAL0_RELEASES_URL now points at the GitHub release asset URL (works end-to-end; the historical
+file:// stage /var/lib/hal0/rc2/ still exists on disk but holds a stale rc.5 manifest — residue,
+not the active source). No snapshot reset: its value is accumulated upgrade history, so record
+the exact from-version in CONTEXT.md before upgrading.
+UPGRADED rc.5 -> rc.6 on 2026-08-15 and converged; it now sits on 1.0.0-rc.6, so the NEXT run's
+from-version is rc.6. Box history: 0.9.8 -> nightly -> rc.1 -> rc.2 -> rc.3 -> rc.5 -> rc.6;
+every old tree still under /usr/lib/hal0/.
+Carries hermes-agent 0.19.0 from a hand-installed PyPI wheel (DOES ship `hermes_cli/web_dist`),
+so it cannot reproduce the fresh-install hermes packaging defects (#1829) — record such checks
+as known/skipped with that reason.
+KNOWN, do not re-file: #1844 — /usr/local/bin/hal0 is a stale rc.3 wrapper; use
+/usr/lib/hal0/venv/bin/hal0 for a truthful CLI, or you will "reproduce" pre-fix behaviour and
+misread it as a regression (this happened in rc.6). #1845 (convergence panel remediation).
+Seed drift is expected box state, NOT a defect: agent.toml pins context_size = 4096 from an old
+seed — upgrades never reconcile slot seeds, which is why Hermes fails here for a DIFFERENT
+reason than on a fresh box (see #1827/#1867).
 """
 
 [boxes.ct163-cpu-fresh]
@@ -148,7 +160,12 @@ Use it to answer "is this CPU-only or hardware-independent?", never "does a fres
 work?".
 """
 
-# No GPU fresh-install box exists today. Every fresh-install finding that touches backend
-# selection, profile flags, hardware probing, or native tool-calling therefore carries an
-# explicit "would a GPU box hit this?" judgement (read-only cross-check on ct105-prod) rather
-# than a measurement. Standing gap — worth closing before GA.
+# Fleet coverage note (updated 2026-08-15): ct151 now has iGPU+NPU passthrough and exercises
+# the vulkan/container path on fresh installs, so "no GPU fresh box" is closed — but no box has
+# host-side ROCm WITHOUT /dev/kfd removed, and NO CPU-only box (no /dev/dri at all) remains in
+# the fleet, so the original #1841 "host telemetry on a GPU-less box" class is now code-read
+# only. Also: only prod (ct105) has host rocm-smi, so compute_capable=true exists on exactly one
+# box — capability-flag findings need that cross-check. Every box class runs the ROCm lane when
+# /dev/kfd is visible and the Vulkan lane otherwise; after rc.6's Vulkan garbage-output finding,
+# record which lane a box actually executes (podman exec <slot ctr> ls /dev/kfd) in every
+# preflight.

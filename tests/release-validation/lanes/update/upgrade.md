@@ -33,8 +33,18 @@ the fact otherwise:
    gates (a box with `UMASK 002` produces a 0775 staged tree that the activate security gate
    refuses — the gate's own hint is the remediation), signature/digest verification, service
    restarts, and how long the API is unavailable.
-4. **Failure honesty.** If any phase fails or warns, does the command say so and exit non-zero?
-   A successful-looking upgrade that half-applied is the worst outcome in this lane.
+4. **Failure honesty — in both directions.** If any phase fails or warns, does the command say
+   so and exit non-zero? A successful-looking upgrade that half-applied is the worst outcome in
+   this lane. Then the inverse: audit the applied job JSON for error-shaped fields on the
+   SUCCESS path (`restart_error`, `error`, `*_skipped`) and cross-check each against the journal
+   outcome before reading any as a failure — `restarted: null` + `restart_error: "systemctl
+   exited -15"` on a successful upgrade is the designed ambiguous-self-restart representation
+   (`known-issues: update-restart-error-breadcrumb-on-success`). While in the journal, note that
+   parent-side `updater.*` lines log `job_id=None` and a successful prepare leaves NO
+   verification breadcrumbs (regression `update-audit-trail-gaps`) — correlate by request_id and
+   timestamps instead, and confirm the verification evidence that DOES persist:
+   `/var/lib/hal0/cache/<ver>/manifest.json` must exist, post-date the sha256/cosign checks, and
+   record the digest and signer identity.
 5. **Migrations.** Which migrations ran? Do they log what they changed? Re-run the upgrade (or
    the activation step) and confirm migrations are idempotent.
 6. **Rollback.** `hal0 update --rollback`. Does it return the box to the previous version with

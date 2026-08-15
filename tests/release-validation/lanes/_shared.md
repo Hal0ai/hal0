@@ -28,6 +28,24 @@ You are validating a hal0 release candidate on a real box. Read, in this order:
 * Report what a *user* would experience, not what an expert who knows the workaround would.
   "Works once you load the utility slot" is a finding, not a pass, on a fresh install.
 
+## The coherence canary — run it before trusting any generated text
+
+Structural checks (HTTP 200, container health, tok/s, well-formed SSE) all pass over pure
+garbage. In rc.6 an entire box produced zero usable language for the whole run while every
+health surface stayed green, and two lanes green-lit it. Before any check that depends on
+generated text, probe each serving llm slot's own port:
+
+```sh
+curl -s -X POST http://127.0.0.1:<port>/completion \
+  -d '{"prompt":"The capital of France is","n_predict":12,"temperature":0}'
+```
+
+`Paris` must appear. If it does not, every text-dependent result on that box is untrusted:
+record the canary failure once (regression `brain-vulkan-backend-garbage-output`), attribute
+downstream symptoms (hermes hangs, memory never landing, steward unusable) to it rather than
+filing them as independent defects, and do not key anything on the garbage's exact form — it
+varies with argv.
+
 ## Discipline about the box
 
 * Respect your lane's mutation budget. Read-only lanes: GET requests and read-only CLI verbs

@@ -24,6 +24,10 @@ Also verify each entrypoint verb EXISTS before planning around it (`hal0 agent -
 brief named `hal0 agent smoke <name>`, which does not ship — a missing verb is a recorded finding,
 not something to improvise past.
 
+Then read the provision record's `completed_at` and `smoke_tests.details.failures` BEFORE any
+live chat: it is install-time ground truth, and it distinguishes "broken out of the box" from
+"broken by lane leave-behind state" for free.
+
 ## Checks
 
 1. **Entrypoint.** Find how a user talks to hermes: `hal0 agent` verbs, the hermes CLI on the box
@@ -32,7 +36,17 @@ not something to improvise past.
    characters. Restore any config file you modify, byte for byte, and say so.
 2. **Plain chat.** Send: *"Reply with exactly: HERMES-RC-OK"* with the SHIPPED config, not a
    patched one. Does a reply come back? Record latency. From the journals, which model did it
-   actually use, and did the request reach hal0's `/v1` with a ref that routes?
+   actually use, and did the request reach hal0's `/v1` with a ref that routes? If the turn
+   HANGS, triangulate before blaming either side: (a) client side — `ss -tnp` plus
+   `/proc/<hermes pid>/wchan` (an ESTAB socket to :8080 with a poll/recv loop proves
+   request-in-flight, not a client stall; strace shows whether it is consuming a
+   never-terminating stream — regression `hermes-stream-no-stall-guard`); (b) upstream side —
+   hit the serving slot's own port with the SAME streamed request and read `finish_reason`
+   (forever-null means the model, not hermes — the coherence canary in `_shared.md` would have
+   caught it earlier); (c) dispatcher side — correlate `dispatch.decision` →
+   `dispatch.forward_failed` per request_id to MEASURE the timeout rather than asserting it, and
+   match forwarded ReadTimeouts on upstream/model — the timeout lines in your window are usually
+   the hindsight extraction backlog, not your turn.
 3. **Memory roundtrip, as a delta not an absolute.** Time a no-memory turn of the same shape
    FIRST, then the memory turn, and report the multiplier. On a contended CPU box the absolute
    is meaningless; a 3x is not. Then:
@@ -54,6 +68,11 @@ not something to improvise past.
    external integrations are enabled.
 7. **Tool use.** Ask hermes something requiring a hal0 tool call (platform state). Same
    fabrication standard as the brain lane: fluent and wrong with no tool call is a finding.
+8. **Unreadable-cwd probe, 2 seconds.** From `/root`, run one `hermes -z` turn through the
+   CANONICAL `/usr/local/bin/hermes` wrapper. It must not die with
+   `[Errno 13] Permission denied: '/root/.git'` — the wrapper's cwd-safety guard exists for
+   exactly this and its absence on a fresh install is the finding
+   (`known-issues: hermes-cwd-eacces-crash`; the raw venv binary failing is by-design).
 
 ## Leave behind
 

@@ -17,7 +17,10 @@ did not ask for?**
    * memory banks — counts preserved, nothing dropped, no new failed operations
    * `/etc/hal0` and `/var/lib/hal0` — ownership and permissions unchanged
    Report every difference, including the intended ones; the intended ones are the release note
-   material.
+   material. Add a service-DB writability probe: for every `*.db` under /var/lib/hal0, assert
+   the hal0 service user can write it, and grep the first minute of the post-upgrade journal for
+   `*.init_failed` — this catches the #1546 family (legacy root-owned DBs) that convergence and
+   doctor both miss; an upgrade never repairs ownership the perms table has no row for.
 2. **Seed reconciliation.** New seeds shipped by the release (profiles, slots, curated models)
    must be *added* without clobbering user modifications. Find a seed the user had modified and
    confirm the modification survived. Tombstoned/retired seeds must actually disappear rather
@@ -29,12 +32,22 @@ did not ask for?**
 3. **Functional smoke on the upgraded box.** A short version of the fresh-box lanes: chat
    completion, embeddings, a memory retain and recall, a brain steward question, the dashboard
    loading with real data. Anything broken here that works on the freshly installed box is an
-   upgrade-path defect, and those are the most expensive kind to ship.
+   upgrade-path defect, and those are the most expensive kind to ship. Two grounding probes that
+   caught real defects in rc.6: retain a unique marker and verify every fact recalled under that
+   document id derives from the marker (catches extraction-prompt leakage — an upgraded box's
+   historical anchor pins make it the likelier victim, see
+   `known-issues: memory-extraction-quality-is-anchor-dependent`); and ask the steward a
+   system-state question with a known answer (the running version) and check it against
+   /api/health — separates SSE mechanics from steward grounding.
 4. **Version consistency.** Every surface reports the new version: CLI, API, dashboard, MCP
    `serverInfo`, systemd unit descriptions.
 5. **Unit and quadlet refresh.** Did unit files, quadlets, and runner image references actually
    get rewritten to the new release's values, or are stale ones still on disk? Check for leftover
-   files from the previous version's layout.
+   files from the previous version's layout. Prove `updater.unit_rerender rewritten=0` is
+   correct rather than a miss: grep /etc/systemd/system and /etc/containers/systemd for the
+   PREVIOUS version's tree path — zero hits means the units were version-independent all along.
+   Cross-check /api/updates/slot-drift against each slot unit's ActiveEnterTimestamp to prove
+   slots were (not) bounced as documented.
 6. **Second update check.** `hal0 update --check` on the upgraded box must now report up to
    date, against the same manifest.
 

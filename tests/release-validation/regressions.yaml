@@ -22,7 +22,11 @@
 # delete the entry. Moving work out of this kit and into CI is the goal, not a loss.
 
 schema: 1
-updated: 2026-08-11
+updated: 2026-08-15
+
+# NOTE on the v1.0.0-rc.6 entries: that run executed in mode=report, so nothing was filed.
+# Entries carry `issue: null` until the operator files them; replace null with the issue number
+# in the filing PR. An entry with issue: null is still probed every release.
 
 regressions:
   # ── Carried from v1.0.0-rc.4 ────────────────────────────────────────────────
@@ -33,7 +37,14 @@ regressions:
     severity: ga-blocker
     tier: judgment
     lane: slots
-    last_result: { release: v1.0.0-rc.5, result: partial }
+    last_result: { release: v1.0.0-rc.6, result: partial }
+    rc6_note: >-
+      The #1787 mechanism held on both seeded slots (flags reach argv even for defaults=null
+      models; embeddings 200 end-to-end). Rerank scores could NOT be demonstrated because the
+      curated `bge-reranker-base-q4_k_m` gguf is unloadable on the shipped runner (see
+      `curated-reranker-base-row-unloadable`) — a bad catalog artifact, not the flag gate. When
+      probing rerank, use the seeded default `bge-reranker-v2-m3-q4_k_m`, which loads and scores
+      correctly.
     summary: >-
       Profile flags never reached llama-server argv for models with no `defaults.profile` stamp.
       /v1/embeddings and /v1/rerank returned 501 "start with --embeddings" while the capability
@@ -63,7 +74,12 @@ regressions:
     tier: mechanical
     lane: api
     promote_ready: true
-    last_result: { release: v1.0.0-rc.5, result: partial }
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      All four surfaces agree on rc.6, including on a slot with a real ceiling/effective
+      mismatch (TOML 4096 vs resolved 512 — every surface reported 512). Together with
+      slot-detail-ctx-max-raw this is ready to promote: one release-test.sh step comparing the
+      four surfaces per slot, then delete both entries.
     summary: >-
       Slot `ctx_max` and `/v1/models` `context_length` advertised the raw slot-TOML context
       (65536) while the effective resolved window was 32768.
@@ -88,7 +104,14 @@ regressions:
     severity: major
     tier: judgment
     lane: brain
-    last_result: { release: v1.0.0-rc.5, result: blocked }
+    last_result: { release: v1.0.0-rc.6, result: partial }
+    rc6_note: >-
+      The gate half is fixed in source and config (`_image_native_tools` is now a DENY-list plus
+      a runtime-learned set, default CAPABLE). The steward half was unobservable: every brain
+      turn on ct151 degenerated into the box's garbage-generation defect (see
+      `brain-vulkan-backend-garbage-output`) before a tool round could run. No fabrication was
+      observed — failures were loud (error+done frames). Re-probe the live half on a box whose
+      brain output passes the coherence canary first.
     summary: >-
       Brain native-tools were gated on `image == DEFAULT_ROCMFPX_IMAGE`, so any other runner
       silently stripped tools and the steward fabricated live platform state with no signal.
@@ -119,7 +142,16 @@ regressions:
     tier: judgment
     lane: preflight
     promote_ready: true
-    last_result: { release: v1.0.0-rc.5, result: fixed }
+    last_result: { release: v1.0.0-rc.6, result: partial }
+    rc6_note: >-
+      The primary remediation (probe gated on a real render node) is intact and the install
+      picked a viable brain model. The 422 backstop REGRESSED-by-construction: it has never
+      fired for a pull-registered model, because `registry/pull.py::_register_pulled` never
+      stores `Model.quant` — the guard is called with quant=None and returns at its first line.
+      An operator hand-swap onto a cpu slot crash-loops with no 422. Root cause and repro live in
+      the dedicated rc.6 entry `fpx-quant-guard-dead-null-quant`; probe that, not this, for the
+      guard half. Also note this probe's CPU-only preconditions are stale — ct151 has /dev/dri
+      passthrough since rc.5, so the `Vulkan=no` expectation no longer applies there.
     summary: >-
       A CPU-only fresh install defaulted the brain slot to an FPX quant whose runner exits 139
       (SIGSEGV) ~5 s into load. Root cause: `hardware.probe._amd_gpu_info` hardcoding
@@ -149,7 +181,13 @@ regressions:
     severity: major
     tier: judgment
     lane: slots
-    last_result: { release: v1.0.0-rc.5, result: partial }
+    last_result: { release: v1.0.0-rc.6, result: partial }
+    rc6_note: >-
+      Same partial as rc.5: error-state convergence, container_status=crashed, and swap-writes-
+      new-model all held; `hal0 status` surfaces the failed unit. Still missing, both tracked as
+      #1840 items 5 and 6: delete leaves `hal0-slot@<n>.service not-found failed` in
+      `systemctl --failed` (adjudicated as an open known-issue, `slot-delete-leaves-failed-unit`
+      — do not re-file), and `hal0 doctor` never mentions a failed slot unit.
     summary: >-
       A crash-looping slot reported `warming` indefinitely, died silently at the systemd start
       limit, and `hal0 slot swap` on it rewrote the quadlet with the OLD model.
@@ -178,7 +216,11 @@ regressions:
     severity: minor
     tier: judgment
     lane: memory
-    last_result: { release: v1.0.0-rc.5, result: partial }
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      The 404/dead-letter mechanism is gone: zero dispatch.no_route with utility pristine,
+      failures recorded loudly on the op record, and passthrough:utility once a model is bound.
+      The queue still does not drain for the #1834 reason — probe that there, not here.
     summary: >-
       On a fresh install, HINDSIGHT_API_LLM_MODEL=hal0/utility targets a model-less clean-seed
       slot, so every retain's fact extraction 404s (dispatch.no_route) and dead-letters
@@ -206,7 +248,12 @@ regressions:
     tier: mechanical
     lane: hermes
     promote_ready: true
-    last_result: { release: v1.0.0-rc.5, result: partial }
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      The honesty mechanism works: smoke_tests reports warn with both failures recorded
+      verbatim, skipped=[], context_link ok with all five skills linked. The two recorded
+      failures themselves were real box conditions (brain saturation + memory wedge), which is
+      exactly what the mechanism exists to surface.
     summary: >-
       Hermes provisioning recorded 2/6 smoke-test failures and still reported phase `status=ok`.
     rc5_note: >-
@@ -233,7 +280,10 @@ regressions:
     lane: memory
     partial_fix: true
     depends_on: memory-extraction-never-lands
-    last_result: { release: v1.0.0-rc.5, result: blocked }
+    last_result: { release: v1.0.0-rc.6, result: blocked }
+    rc6_note: >-
+      Blocked again — no retain reached `completed` inside the 10-minute deadline (26 min
+      observed, still processing). Still gated on #1834.
     summary: >-
       Fact extraction strips literal values, so stored markers were unrecoverable via recall.
       Fixed hal0-side with a document fallback; a durable fix needs server-side content search.
@@ -256,7 +306,7 @@ regressions:
     severity: rollup
     tier: mechanical
     lane: hermes
-    last_result: { release: v1.0.0-rc.5, result: fixed }
+    last_result: { release: v1.0.0-rc.6, result: fixed }
     summary: >-
       Four hermes rough edges: dishonest "dashboard reachable" status string, non-allowlisted
       session hook, plugin kind `provider` downgraded, per-session dispatch.no_route noise.
@@ -264,6 +314,12 @@ regressions:
       All four held. But the unbuilt hermes dashboard frontend is NOT out of scope after all —
       the pinned wheel shipping no `web_dist` is the root cause of #1829. Check the wheel, not
       just the status string.
+    rc6_note: >-
+      The former expect clause demanded "the hermes wheel ships web_dist and GET :9119/ returns
+      200" — an outcome the rc.4 report itself declared infeasible hal0-side, adjudicated
+      by-design in rc.6 (`known-issues: hermes-wheel-missing-web-dist`, tracked as open #1829).
+      The clause is rewritten below to what hal0 actually owns: truthful degradation. All four
+      original items held on rc.6.
     repro: |
       Check the hermes unit status string, the session-hook allowlist, the plugin kind
       resolution, grep the hermes journal for dispatch.no_route on a fresh session, and:
@@ -271,7 +327,10 @@ regressions:
         curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9119/
     expect: >-
       Status strings truthful; hook allowlisted; plugin kind resolves; no per-session no_route
-      noise; the hermes wheel ships `web_dist` and `GET :9119/` returns 200.
+      noise. On the wheel: if web_dist is ABSENT the unit STATUS string must say so honestly
+      (rc.6 wording: "hermes agent up; dashboard UI not built (no web_dist bundled)") and
+      :9119/api/status must still 200 — the missing static UI itself is #1829/by-design, not a
+      finding (see known-issues `hermes-wheel-missing-web-dist` for what re-opens it).
 
   - id: cli-api-polish-rollup
     issue: 1796
@@ -280,7 +339,10 @@ regressions:
     tier: mechanical
     lane: cli
     promote_ready: true
-    last_result: { release: v1.0.0-rc.5, result: fixed }
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Fixed again on rc.6, item by item. Second consecutive clean pass — write the
+      release-test.sh step and delete this entry.
     summary: >-
       Fourteen CLI/API rough edges from the rc.4 sweep.
     rc5_note: >-
@@ -300,18 +362,28 @@ regressions:
     severity: rollup
     tier: mechanical
     lane: ui
-    last_result: { release: v1.0.0-rc.5, result: partial }
+    last_result: { release: v1.0.0-rc.6, result: partial }
     summary: >-
       Six dashboard rough edges from the rc.4 Playwright sweep.
     rc5_note: >-
       Five of six fixed. Item 3 (host GPU telemetry presented as local capacity) was fixed on
       Overview and Settings but MISSED on the Slots page telemetry header — refiled inside
       #1841. Check every page that draws an accelerator tile, not "the dashboard".
+    rc6_note: >-
+      Held except item 3 (still #1841's territory — see ui-polish-rollup-rc5). The bench-worker
+      badge item was mis-probed twice this run: the redesigned dashboard has no bench badge on
+      Overview because it lives on the Benchmarks page ("Run Queue" tab), reachable via the
+      `nav-benchmarks` rail entry — adjudicated by-design
+      (`known-issues: ui-bench-worker-badge-on-benchmarks-page`). Repro rewritten below.
     repro: |
       Drive the dashboard with Playwright and check on EVERY page that renders an accelerator
-      tile: bench worker badge vs `systemctl is-active hal0-bench-worker`; Settings version
-      string; GPU/NPU tiles gated on /api/hardware `compute_capable`; empty interpolations;
-      pluralisation; nav rail accessible names.
+      tile: Settings version string; GPU/NPU tiles gated on /api/hardware capability flags;
+      empty interpolations; pluralisation; nav rail accessible names.
+      Bench worker badge: navigate to `#benchmarks` (rail entry `nav-benchmarks`), open the
+      "Run Queue" tab, and compare the worker liveness text/tooltip against
+      `systemctl is-active hal0-bench-worker` AND the `updated` heartbeat age in
+      GET /api/benchmarks/queue. "stopped" beside a running unit is the ARMED state and is
+      by-design; the liveness signal is the subtitle/tooltip.
     expect: All six corrected, on every page — not just the page the fix PR named.
 
   # ── Filed from v1.0.0-rc.5 ──────────────────────────────────────────────────
@@ -323,8 +395,17 @@ regressions:
     tier: mechanical
     lane: hermes-e2e
     promote_ready: true
-    summary: >-
-      On a fresh install the bundled Hermes agent refuses to start: the installer-pulled brain
+    last_result: { release: v1.0.0-rc.6, result: partial }
+    rc6_note: >-
+      The floor MECHANISM is fixed: /v1/models advertises 65536 >= the 64000 floor, the anchor
+      resolves through the by-id route, and the #1877 anchor-ctx preflight passes. "Hermes
+      answers" did NOT hold on ct151 — but the cause is the box's garbage-generation defect
+      (`brain-vulkan-backend-garbage-output`): the model streams an unterminated `)` repetition
+      and hermes consumes it forever. Do NOT re-file that symptom under this entry. Verify a
+      hermes stall with a direct streamed request to the serving slot's own port and confirm
+      finish_reason is non-null before attributing anything to hermes, the anchor, or the floor.
+      Residue worth its own probe: hermes has no stall guard or partial rendering for a
+      never-terminating stream (see `hermes-stream-no-stall-guard`).
       model resolves to an effective 32768 ctx (`_CTX_DENSE_CAP` in providers/container.py),
       below Hermes' hard 64000 floor. Nothing on the install path stamps a model-level
       `defaults.context_size`, so the 65536 ceilings in the shipped slot TOMLs are discarded.
@@ -353,10 +434,15 @@ regressions:
       /etc/hal0/agent-skills as root:root 0755 with no PermRow, and the privilege-dropped
       `hal0 agent bootstrap hermes` (running as hal0) gets EACCES on every symlink. Hermes comes
       up with an empty skill manifest while `_phase_context_link` still returns PhaseStatus.OK.
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Fixed: agent-skills is hal0:hal0 2775 with all five symlinks, context_link details list
+      them, doctor perms carries the rows. The old `.skills_prompt_snapshot.json` path no longer
+      exists — the manifest evidence now lives in the provision phase detail
+      (`context_link.details.bundled_skills_linked`); repro updated.
     repro: |
       ls -la /etc/hal0/agent-skills/ ; ls /usr/share/hal0/skills/
-      cat /var/lib/hal0/.hermes/.skills_prompt_snapshot.json
-      hal0 agent status hermes --json | jq '.phases.context_link'
+      hal0 agent status hermes --json | jq '.phases.context_link.details.bundled_skills_linked'
       hal0 doctor perms | grep -i skill
     expect: >-
       /etc/hal0/agent-skills is hal0-owned and holds a symlink per bundled skill; the Hermes
@@ -394,6 +480,12 @@ regressions:
       A token is obtained (or none is needed because the brain reads the local BoardStore) and
       the board read returns data. NOTE: this cannot be validated on an UPGRADED box — an
       orphaned `web_dist` from an older hermes makes prod pass by accident. Fresh box only.
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Fixed via the second branch of the expect: brain board READ tools were rewired onto the
+      local BoardStore (brain/chat.py comment naming #1829), so no token is needed. The legacy
+      HermesKanbanClient still 401s (wheel still ships no web_dist — by-design, see
+      known-issues `hermes-wheel-missing-web-dist`).
 
   - id: slot-create-no-profile-501
     issue: 1830
@@ -422,6 +514,12 @@ regressions:
       applies the capability flag anyway); the resolved argv contains --reranking/--embeddings;
       the endpoint returns 200. A slot that reports `ready` and 501s its own endpoint is the
       regression.
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Fixed: `slot create` has --profile, derives it from --type, argv carries the flag, and the
+      embedding path answered 200 end to end. The rerank 200 could not be shown only because the
+      staged curated gguf is unloadable (`curated-reranker-base-row-unloadable`) — use the
+      seeded v2-m3 model to close that half next run, then promote this entry.
 
   - id: smoke-preflight-skips-chat-probes
     issue: 1831
@@ -484,6 +582,11 @@ regressions:
       server. Unit-level coverage of both modes now lives in
       tests/agents/test_hermes_provision.py (the pinned-backend and unverifiable-route cases);
       what stays here is the on-box half, which needs a real install and cannot be a pytest.
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Both modes open the gate: skipped=[] with both headline probes RUN (and honestly failed on
+      real box conditions), and the pinned-single-backend mode resolves through the backend
+      endpoint. The gate mechanism is fixed.
 
   - id: slot-verbs-10s-client-timeout
     issue: 1832
@@ -507,6 +610,11 @@ regressions:
     expect: >-
       A load/unload/restart that succeeds exits 0. If the CLI cannot wait, it must poll and say
       so — never exit 1 on a successful operation.
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Fixed: a failing load blocked 3m01s and exited 1 with the real server verdict; a
+      successful load and unload exited 0. Exit status tracks the server-side outcome. Second
+      consecutive mechanical pass shape — promote to release-test.sh and delete.
 
   - id: memory-status-green-while-empty
     issue: 1833
@@ -529,6 +637,15 @@ regressions:
       `hal0 memory status` never reports "Writes landing" while the write bank's fact_count is 0
       with pending/processing ops outstanding, or while the hindsight worker is emitting
       STUCK_STACK. Recovery must be evidence-based (one completed op), not a 600 s timer.
+    last_result: { release: v1.0.0-rc.6, result: regressed }
+    rc6_note: >-
+      Still reproduces verbatim, INCLUDING green beside failed=4 — but this is a carried-forward
+      known state, not news: `git diff v1.0.0-rc.5..v1.0.0-rc.6 -- src/hal0/cli/memory_commands.py
+      src/hal0/memory/` is empty, #1833 is open/ready-for-agent, and the rc.6 release notes
+      disclose it (CHANGELOG "Memory retention ... remains unreliable (#1833, #1834)"). Record as
+      "still reproduces, code unchanged, disclosed" — do NOT file a duplicate or escalate it as
+      "worse than rc.5". New datum appended to the issue: reproduced on a box WITH GPU
+      passthrough, so the "CPU-only" framing in #1833/#1834 and the release notes is too narrow.
 
   - id: memory-extraction-never-lands
     issue: 1834
@@ -556,6 +673,19 @@ regressions:
       operator-visible reason. `requests_deferred` on the extraction slot must not be pinned
       non-zero while an interactive chat request to the same slot is starved. An op whose age
       RESETS after `attempt=4/4` is the requeue loop and is the regression.
+    last_result: { release: v1.0.0-rc.6, result: regressed }
+    rc6_note: >-
+      The requeue loop is now POSITIVELY confirmed, on GPU-accelerated hardware (prefill 2716
+      tok/s), with hindsight-api NRestarts=0: op age resets after attempt=4/4 at least 5 times
+      in 96 min while younger ops reach terminal failed. #1834's "CPU-only install" title is
+      disproved — the three residual defects are hardware-independent: no max_tokens cap on the
+      extraction call (n_predict=64000 vs n_ctx=65536), no cancellation of an abandoned
+      generation after the 300 s client timeout (id_task persists on /slots for ~25 min), and a
+      ladder that requeues after 4/4. BEFORE blaming memory: probe the extraction slot's model
+      with `n_predict=12, temperature=0` and read the text — a box whose only model is a
+      known-garbage generator (ct151 this run) cannot terminate any extraction; file that
+      upstream, not here. An age reset with NRestarts=0, or an abandoned generation outliving
+      HINDSIGHT_API_LLM_TIMEOUT, is this entry regardless of the model.
 
   - id: slot-detail-ctx-max-raw
     issue: 1835
@@ -577,6 +707,11 @@ regressions:
     expect: >-
       Detail and list agree, and both equal the `--ctx-size` in the same payload's
       resolved_command.
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Fixed, and discriminated on a slot with a real ceiling/effective mismatch (TOML 4096 vs
+      resolved 512; every surface reported 512). Promote together with ctx-advertised-vs-resolved
+      as one release-test.sh step, then delete both.
 
   - id: ui-overview-services-widget-dead
     issue: 1836
@@ -596,6 +731,10 @@ regressions:
     expect: >-
       The widget lists a card per entry returned by /api/services. Better: a `ui/tests/e2e/`
       spec asserting RDServicesCard renders N cards for an N-entry fixture.
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Fixed — all four services rendered with live status. Promote: write the fixture spec in
+      ui/tests/e2e/ and delete this entry.
 
   - id: v1-models-never-evicts
     issue: 1837
@@ -617,6 +756,10 @@ regressions:
       Empty output — every id advertised by /v1/models is either a registered model or a
       configured slot name. Run this AFTER a stateful lane has created and deleted a slot; that
       is when the ghost appears.
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Fixed after real churn (slot create+delete and a model deregistration in the window).
+      Promote the comm check into release-test.sh and delete this entry.
 
   - id: model-add-detection-honesty
     issue: 1838
@@ -644,6 +787,17 @@ regressions:
       Architecture / attention.causal / general.tags are consulted before the filename. A model
       added under its UPSTREAM filename must be classified correctly — that half is the #1796
       regression and is the serious one.
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      #1855 satisfies every branch of the expect: filename-derived caps print
+      `confidence: medium`, no-magic files register with `warning:` + detection_confidence=low,
+      upstream-filename classification is correct, and tags/causal are consulted before the
+      filename. An rc.6 probe initially scored this "partial" by demanding things #1855
+      explicitly declared out of scope (bare-chat default staying high; general.architecture as
+      tie-breaker) — the adversarial pass adjudicated those by-design; read
+      `known-issues: model-add-detection-surfacing` before re-scoring this entry, and use
+      /usr/lib/hal0/venv/bin/hal0 on the update box (#1844 stale wrapper reproduces pre-fix
+      behaviour). Promote the remaining branches into tests/registry and delete.
 
   - id: slot-capacity-vram-attribution
     issue: 1839
@@ -665,9 +819,26 @@ regressions:
       curl -s $API/api/hardware | jq '.gpus[0] | {compute_capable, vulkan_capable}'
       curl -s $API/api/slots/metrics | jq '.[] | {name, mem_rss_mb}'
     expect: >-
-      On a box where /api/hardware reports no compute-capable GPU, no slot reports non-zero
-      VRAM MB. `hal0 slot capacity` Total MB and `hal0 slot metrics` Mem MB agree for the same
-      slot in the same second, or the kit records which is RSS and which is model size.
+      On a box where /api/hardware reports NO gpu that is either `vulkan_capable` or
+      `compute_capable` (or `gpus: []`), no slot reports non-zero VRAM MB, and a slot whose
+      resolved device/backend is `cpu` reports zero VRAM. A box with vulkan_capable=true and
+      compute_capable=false (render node passed through, no host ROCm) MUST book resident slot
+      memory to VRAM — that is the fix, not the bug: `compute_capable` only means rocm-smi
+      answered, and a vulkan runner genuinely serves on the iGPU. `hal0 slot capacity` Total MB
+      must agree with `/api/slots/metrics` mem_rss_mb for the same RESIDENT slot in the same
+      second (a warming slot showing the file-size+KV fallback while metrics reads 0.0 is
+      documented, not a finding).
+    last_result: { release: v1.0.0-rc.6, result: fixed }
+    rc6_note: >-
+      Both halves resolved: cgroup probe routes around the rootful-store denial via
+      `systemctl show ... MemoryCurrent` (Total 2183.3 == mem_rss_mb 2183.3, above the model
+      file size), and the VRAM gate is `vulkan_capable OR compute_capable` — the previous expect
+      clause was stale for vulkan-only boxes and is rewritten above. The Overview/Settings tiles
+      saying "No GPU compute access" on a vulkan-serving box is a SEPARATE UI defect tracked
+      under `ui-polish-rollup-rc5` / `known-issues: slots-gpu-telemetry-on-vulkan-box-is-correct`
+      — do not file it here. Upgrade nuance worth one line in the post-upgrade lane: an old
+      hardware.json lacking the capability keys degrades the gate to RAM booking until the next
+      `hal0 probe`.
 
   - id: cli-api-polish-rollup-rc5
     issue: 1840
@@ -697,6 +868,16 @@ regressions:
         12. GET /api/slots/hal0 with every slot offline   # must not report status=serving
         13. /etc/hal0/capabilities.toml img.img device    # must be offerable by the img picker
     expect: All thirteen corrected. Report per-item, not as one verdict.
+    last_result: { release: v1.0.0-rc.6, result: regressed }
+    rc6_note: >-
+      All thirteen items remain unfixed on rc.6 (an rc.6 probe scored item 7 fixed — wrongly:
+      router.py is byte-identical between the tags; absence of repro is not a fix). This is
+      EXPECTED, not a finding: #1840 is an open, unmilestoned backlog the rc.6 changelog itself
+      names as the tracker; rc.5 banded it "minors + cosmetics". Tick the per-item state, file
+      nothing, and never aggregate the 13 items above the highest individual severity — see
+      `known-issues: cli-api-polish-rollup-1840-still-open` for the escalation triggers. If one
+      item is worth promoting out of the rollup for GA it is item 9 (200-with-fabricated-config
+      defaults for a nonexistent bank) on silent-wrongness grounds — an operator decision.
 
   - id: ui-polish-rollup-rc5
     issue: 1841
@@ -715,3 +896,485 @@ regressions:
       3. Sidebar at a 721-1080 px viewport (rail mode): the OpenWebUI and Hermes service anchors
          must have a non-empty accessible name — the `.lbl` span is display:none at that width.
     expect: All three corrected.
+    last_result: { release: v1.0.0-rc.6, result: partial }
+    rc6_note: >-
+      Item 2 fixed. Items 1 and 3 NOT fixed — and an rc.6 probe scored both "fixed" by testing
+      at the wrong width / on the wrong box; the adversarial pass reproduced both. Item 1:
+      ThCellGpu/ThCellNpu still ungated, BUT the fix must NOT copy the `computeCapable` gate —
+      on a vulkan-serving box the Slots-page numbers are CORRECT and the defect is inverted:
+      Overview/Settings claim "No GPU compute access" while slots generate tokens on that GPU.
+      The right predicate is `computeCapable || vulkanCapable` (see known-issues
+      `slots-gpu-telemetry-on-vulkan-box-is-correct`). Item 3: the anchors are named at >=1081px
+      and the rail is display:none at <=720px — the unnamed band is exactly 721–1080 px, so the
+      probe MUST resize into it; textContent stays "OpenWebUI" (read innerText or the a11y tree,
+      not textContent).
+
+  # ── Filed from v1.0.0-rc.6 (mode=report — issue numbers pending) ────────────
+
+  - id: brain-vulkan-backend-garbage-output
+    issue: 1888   # GA-blocker — filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: major
+    tier: judgment
+    lane: brain
+    summary: >-
+      The Vulkan backend of the release-pinned runner image ghcr.io/hal0ai/hal0-rocmfpx:ade07ba
+      emits invalid tokens for EVERY model it serves, at full speed, while HTTP 200, container
+      health, `hal0 doctor` and tok/s all read green. llama.cpp picks ROCm when /dev/kfd is
+      visible in the container and falls back to Vulkan otherwise; hal0 passes /dev/kfd only if
+      it exists on the host (providers/_gpu.resolve_gpu_device_paths), so every box without
+      /dev/kfd runs the broken Vulkan lane. Consequences: slots seeded `device="gpu-vulkan"`
+      actually execute on ROCm wherever /dev/kfd exists (the advertised Vulkan lane has never
+      been exercised by validation), the install guide RECOMMENDS the broken lane for Strix
+      Halo, bench harness lane `vulkan_radv` pins `-dev Vulkan0` and benchmarks garbage, and no
+      layer between "container healthy" and "slot ready" validates output sanity. Workaround:
+      expose /dev/kfd to the box/container. Separately observed: the blessed FPX brain model has
+      no working CPU fallback (`-ngl 0` segfaults, exit 139).
+    repro: |
+      # Coherence canary — run on every box, every release, against each serving llm slot port:
+      curl -s -X POST http://127.0.0.1:<port>/completion \
+        -d '{"prompt":"The capital of France is","n_predict":12,"temperature":0}'
+      # 'Paris' must appear. Do NOT key on the ')' garbage string — the garbage form varies
+      # with argv (--jinja slots emit ')' runs; bare /completion emits empty content).
+      # A/B the backend on one box, identical argv except -dev:
+      #   -dev ROCm0   -> correct text        -dev Vulkan0 -> garbage
+      # /dev/kfd present in the slot container decides which lane actually runs:
+      podman exec hal0-slot-brain ls /dev/kfd
+    expect: >-
+      Temp-0 "The capital of France is" contains "Paris" on BOTH the ROCm and Vulkan lanes of
+      the pinned runner image, with an unrelated non-FPX gguf as a second sample. Until this is
+      fixed, every text-generation result from a box whose only llama.cpp device is Vulkan0 is
+      untrusted — gate every lane that elicits a completion on this canary first.
+
+  - id: hermes-stream-no-stall-guard
+    issue: 1893   # filed by rc.6 fix wave — residue of the hermes-cannot-chat candidate (dup of the garbage finding, merged into #1888)
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: judgment
+    lane: hermes-e2e
+    summary: >-
+      Neither hermes nor the hal0 provider plugin has a stall guard or partial rendering for a
+      never-terminating upstream stream: fed an unterminated repetition (finish_reason forever
+      null), `hermes -z ... --cli` prints zero bytes, never self-terminates, and leaves no
+      session file — a completely dead terminal with no diagnostic for as long as the operator
+      waits.
+    repro: |
+      Stream a request to the anchor's serving slot directly and confirm the pathological shape
+      (finish_reason null past max_tokens' worth of tokens), then run a hermes turn against it:
+        sudo -u hal0 HOME=/var/lib/hal0 timeout 300 \
+          /usr/lib/hal0/venvs/hermes/bin/hermes -z "Reply with exactly: HERMES-RC-OK" --cli
+      (Via /usr/local/bin/hermes for a supported invocation; the raw path is fine here because
+      the cwd is controlled.)
+    expect: >-
+      A never-terminating stream produces SOMETHING operator-visible within a bounded time:
+      partial output, a stall warning, or a client-side cutoff naming the cause — never an
+      indefinitely silent turn.
+
+  - id: image-status-wrong-podman-store
+    issue: 1889   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: major
+    tier: mechanical
+    lane: api
+    promote_ready: true
+    summary: >-
+      `ContainerProvider.image_present()`/`running_image()` shell out to bare podman as the
+      `hal0` user against ROOT's image store (and hal0 has no subuid ranges at all), so on every
+      standard install: /api/slots reports `image_status: "missing"` for running healthy slots,
+      /api/slots/{name}/pull/status reads "missing" for a present image, `actual_image` is
+      always null, and the #663 image-drift detector is permanently inert. The same process
+      answers correctly on /api/system-info via the O12 `hal0-podman-ro` sudo seam — the fix
+      (route those three methods through podman_introspect) already exists in-tree for a sibling
+      call site (commit cbc8e94d). Pre-existing (also on rc.5 prod), not an rc.6 regression. No
+      UI surface renders the wrong value; the lying surfaces are the JSON payloads,
+      `hal0 slot show`, and any agent reading them.
+    repro: |
+      curl -s $API/api/slots | jq -c '.[] | select(.container_status=="running")
+        | {name, image_status, actual_image}'
+      ssh <box> podman image inspect <the slot image> >/dev/null && echo present-in-root-store
+    expect: >-
+      For any slot with container_status=running, image_status is "present" (never "missing"),
+      and actual_image is populated so image_mismatch can ever fire. Promote as a pytest on the
+      is_hal0_service_user() gate in providers/container.py once fixed.
+
+  - id: fpx-quant-guard-dead-null-quant
+    issue: 1890   # filed by rc.6 fix wave — root cause behind cpu-install-fpx-brain-default's rc.6 partial
+    from: v1.0.0-rc.6
+    severity: major
+    tier: mechanical
+    lane: slots
+    promote_ready: true
+    summary: >-
+      `registry/pull.py::_register_pulled` builds Model(...) with no quant= argument, so every
+      pull-registered model (including the installer-seeded brain model) stores quant=None. Only
+      the API list serializer backfills it (lazy_quant), so GET /api/models LOOKS right while
+      `_guard_fpx_quant_runner` — fed raw model_dump() on both the launch and preview paths —
+      can never raise for a pulled model. Binding the FPX brain model to a non-FPX runner
+      crash-loops (5 restarts) instead of returning the promised 422. Models registered via
+      `hal0 model add`/scan DO store quant, which is why the guard's unit tests pass: they
+      hand-build model_info instead of exercising SlotManager._resolve_model_info.
+    repro: |
+      sudo -u hal0 /usr/lib/hal0/venv/bin/python -c \
+        "from hal0.registry.store import ModelRegistry; \
+         print(ModelRegistry().get('<pulled model id>').model_dump()['quant'])"   # None = defect
+      # end to end:
+      hal0 slot create zzfpx --hardware cpu --model <the FPX brain model> --port 8099
+      curl -s -X POST $API/api/slots/zzfpx/load --max-time 240    # expect 422, not a crash loop
+      # clean up: hal0 slot delete zzfpx --force; systemctl reset-failed hal0-slot@zzfpx
+    expect: >-
+      The registry stores the detected quant for pulled models (or _resolve_model_info adopts
+      lazy_quant), and loading an FPX quant on a non-FPX runner returns 422
+      slot.unsupported_quant_for_runner with no container launched. Promote: a pytest that runs
+      the guard through SlotManager._resolve_model_info on a pull-registered model, not a
+      hand-built dict.
+
+  - id: curated-reranker-base-row-unloadable
+    issue: 1891   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: major
+    tier: mechanical
+    lane: capabilities
+    summary: >-
+      Curated catalog row `bge-reranker-base-q4_k_m` (cstr/bge-reranker-base-GGUF) carries a
+      non-mainline fork's bert KV schema (no bert.context_length) and cannot load on the shipped
+      runner: "error loading model hyperparameters: key not found in model: bert.context_length".
+      hal0 offers it FIRST and smallest in the rerank catalog with fit_status=allowed, pulls it
+      unvalidated, and the slot crash-loops invisibly (#1429/#1424 — already known, record those
+      halves as `known`). The row's curated.py note ("includes the classifier-head fix") is
+      false. NOT a rerank-capability defect: the seeded default `bge-reranker-v2-m3-q4_k_m`
+      loads and returns correctly ordered scores on the identical image. Present since v0.1.1.
+    repro: |
+      podman run --rm -v /var/lib/hal0/models:/var/lib/hal0/models:ro,z \
+        ghcr.io/hal0ai/hal0-rocmfpx:<pinned tag> --host 127.0.0.1 --port 18999 \
+        --model /var/lib/hal0/models/rerank/bge-reranker-base-q4_k_m/model.gguf --reranking
+      # decisive line: "key not found in model: bert.context_length"
+    expect: >-
+      The row is dropped from src/hal0/registry/curated.py or repointed at a mainline-convertible
+      mirror, and the false note deleted. Fixed means: every curated rerank row the picker offers
+      loads on the pinned runner. Do not scope-creep into the runner, the flag plumbing, or
+      #1787.
+
+  - id: hermes-state-chat-model-resolver
+    issue: 1892   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: major
+    tier: judgment
+    lane: hermes
+    summary: >-
+      On a fresh install the "# Live system state" block injected into every hermes session says
+      "no chat model loaded — wire one via `hal0 slot create`" while llm slots are serving and
+      advertised on the very gateway hermes uses. Not staleness: hermes_provision's
+      `_resolve_primary_slot()` picks the slot NAMED agent/chat/primary unconditionally (the
+      model-less agent seed), falls back to the sentinel "primary" which the template guard
+      discards, and the rescue path is dead because `_is_ready()` accepts
+      {ready,running,loaded,ok,online} while the real slot enum uses serving/idle/warming — a
+      serving slot reads not-ready. The same predicate gates the Capabilities rollup line.
+      Remediation text is also wrong (`slot create` for a slot that exists). Boxes whose agent
+      slot carries a model do not hit it.
+    repro: |
+      curl -s $API/api/slots | jq -c '.[] | select(.type=="llm") | {name, state, model_id}'
+      sudo -u hal0 /usr/lib/hal0/hermes-hooks/inject-system-state.sh | grep 'Chat model'
+      /usr/lib/hal0/venv/bin/python -c "from hal0.agents import hermes_provision as hp; \
+        s=hp._fetch_slots(); print(hp._resolve_primary_slot(slots_fetcher=lambda: s)); \
+        print([(x['name'], hp._is_ready(x)) for x in s])"
+    expect: >-
+      The injected "Chat model:" line never claims no chat model loaded while any type=llm slot
+      is in a resident state (warming/ready/serving/idle) with a bound model that appears in
+      GET /v1/models; `_is_ready()` knows the real state vocabulary; the remediation names a
+      command valid for the box's actual state.
+
+  - id: model-pull-jobs-root-owned
+    issue: 1895   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: mechanical
+    lane: cli
+    promote_ready: true
+    summary: >-
+      The installer's root-run brain-model pull lazily mkdirs /var/lib/hal0/model-pull-jobs
+      under root's umask, so on every fresh install it is root:root 0755 with a root-only 0600
+      snapshot inside. hal0-api (User=hal0) then fails every pull-job snapshot write
+      (model.pull_job_persist_failed, WARNING only) and cannot read the existing one, so the
+      #626 restart-survival fallback is dead in both directions — GET
+      /api/models/<id>/pull/status 404s after a restart. install/perms.py has no row for the
+      directory, so `doctor perms --fix` cannot heal it, and install.sh's O13 chown list omits
+      it. Pulls themselves work. The fail-soft WARNING and the installer-scoped "writable paths"
+      doctor line are by-design (see known-issues `pull-job-persist-fail-soft-scope`).
+    repro: |
+      ls -ld /var/lib/hal0/model-pull-jobs && sudo -u hal0 test -w /var/lib/hal0/model-pull-jobs \
+        || echo "hal0 CANNOT write"
+      journalctl -u hal0-api -b 0 | grep -c model.pull_job_persist_failed
+      systemctl restart hal0-api && curl -s $API/api/models/<seeded id>/pull/status   # 404 = defect
+    expect: >-
+      /var/lib/hal0/model-pull-jobs is hal0-writable after a fresh install, perms.py carries a
+      row for it (and for activity.db + -wal/-shm), and a pull's status survives an hal0-api
+      restart. Promote: a pytest over the perms table covering every path hal0-api writes.
+
+  - id: doctor-perms-never-converges
+    issue: 1896   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: mechanical
+    lane: cli
+    summary: >-
+      `hal0 doctor perms` exits 1 with DRIFT rows on a freshly installed box, and its own
+      remediation (`sudo hal0 doctor perms --fix`) cannot produce a durably green audit — three
+      drift classes regenerate after the installer's own --fix backstop: STATE.md rewritten 0644
+      by hermes_provision._atomic_write (tmp-write, no chmod, UMask=0022) vs the table's 0664;
+      hal0-agentenv re-tightens secrets/ to 0700 on every merge-secrets vs the table's 0755 (the
+      two shipped components disagree — the contradiction is the defect, not a leak: *.env stays
+      0600 either way, see known-issues `doctor-perms-secrets-dir-0755-is-declared`); and every
+      daemon-created dir under recursive rows lands 2755 vs 2775. A self-audit that can never be
+      green trains operators to ignore it. Do not assert a drift ROW COUNT — it grows with every
+      slot loaded and model pulled.
+    repro: |
+      hal0 doctor perms >/dev/null 2>&1; echo rc=$?          # 1 on a pristine install = defect
+      COLUMNS=200 hal0 doctor perms | grep DRIFT
+      # date the drift against the installer's backstop by ctime, not mtime
+    expect: >-
+      On a fresh install, `hal0 doctor perms` is green, and stays green after a slot load, a
+      model pull, and a hermes STATE.md render. Fixes are localised: chmod after os.replace in
+      _atomic_write (or tolerate 0644 for STATE.md), reconcile agentenv 0700 vs perms.py 0755 in
+      one direction, and mkdir state dirs with an explicit mode.
+
+  - id: agents-bank-boot-writes-lost
+    issue: 1897   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: judgment
+    lane: memory
+    summary: >-
+      hal0-api's install-time boot runs the agents-dataset seeding while hindsight is still
+      cold-starting, so the identity-card writes land in the in-memory pgvector fallback
+      ("VOLATILE and will be LOST"), and the #1613 runtime self-heal swaps the provider without
+      replaying them — the durable `agents` bank does not exist until some later hal0-api
+      restart re-runs brain_lane against a healthy engine. Generalised defect: writes issued by
+      hal0-api's own boot phases during the degraded-provider window are silently lost and never
+      re-issued after provider_healed. Even after the bank appears, `hal0 agent peers` can stay
+      empty because the card retains are stuck in extraction (that half is
+      hindsight-extraction-shares-utility-slot / #1834). Spin-off found while cross-checking,
+      worth its own small issue: `hal0 agent peers` on ct150 crashes with AttributeError at
+      agent_commands.py:1372 when a card's hal0_state comes back as a JSON string.
+    repro: |
+      # On a fresh install, before any manual restart:
+      curl -s $API/api/memory/banks | jq '.[] | {bank_id, created_at}'   # agents absent = defect
+      journalctl -u hal0-api | grep -E 'boot_degraded|degraded_write|provider_healed'
+      # then: systemctl restart hal0-api; the bank appears (created lazily by the re-run write)
+    expect: >-
+      The agents bank exists with created_at ~= install time on a fresh box, OR the heal path
+      re-runs the (idempotent) brain_lane card publishes from the provider_healed branch. A
+      degraded-window boot write lost with no journal warning, or the bank still missing after
+      a restart with a durable provider, is the hard fail.
+
+  - id: container-health-readerror-unhandled
+    issue: 1898   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: mechanical
+    lane: slots
+    promote_ready: true
+    summary: >-
+      `ContainerProvider.health()` catches only (httpx.ConnectError, httpx.TimeoutException). A
+      runner that binds its port and dies mid-read raises httpx.ReadError (str() == ""),
+      unguarded up through wait_ready/_await_ready/SlotManager.load: the load aborts at ~7 s
+      instead of the 180 s window, the ERROR stamp gets an EMPTY metadata.message (the explicit
+      still_report_if of crash-loop-warming-180s-window), and the route answers the generic
+      system.internal 500 (symptom already covered by #1424 — record that half as known). Every
+      other httpx catch in src/hal0 uses HTTPError/RequestError; the sibling call in
+      slots/watchdog.py is guarded. Same unguarded probe sits on the dispatch hot path
+      (SlotWatchdog.readiness_check via Dispatcher._check_container_slot_ready) — code-read
+      only, would 500 an inference request instead of the retryable slot.loading 503. No test in
+      the suite simulates anything but ConnectError.
+    repro: |
+      # Deterministic: bind a socket, accept one connection, SO_LINGER{1,0} abortive close, then
+      # await container_provider().health(port) -> raises httpx.ReadError str=''.
+      # In the wild: intermittent during a crash-looping load (1 in 5 failed loads on rc.6);
+      # decisive journal shape: `hal0.unhandled  error=` (empty) + ReadError + POST .../load 500.
+    expect: >-
+      health() catches httpx.TransportError; a mid-read RST is "unhealthy", the load runs its
+      full window, metadata.message is never empty on error, and the dispatch gate keeps its
+      slot.loading 503 contract. Promote: a pytest ReadError case beside the existing
+      ConnectError simulations.
+
+  - id: ui-footer-services-omits-comfyui
+    issue: 1899   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: mechanical
+    lane: ui
+    promote_ready: true
+    summary: >-
+      The dashboard footer's `services` LED group is a hardcoded three-member array (hal0,
+      hermes, openwebui) in ui/src/dash/chrome.jsx; comfyui is not a member, so on a box where
+      ComfyUI is a real running service (prod) an outage leaves the always-visible footer at an
+      unqualified green "services 3 / 3 ready". Not a miscount (the three rendered pips are
+      truthful and labelled), not a regression (identical in every bundle back to 0.7.3-beta.2),
+      and no repo artifact supports the fixed set as intentional. The sibling runtimes group
+      proves the ribbon can render degradation.
+    repro: |
+      curl -s $API/api/services/health | jq 'keys'
+      # Playwright: [data-testid="foot-health-services"] innerText + pip titles; diff the chip
+      # id set against the /api/services/health id set.
+    expect: >-
+      The footer services group enumerates (or explicitly summarises) every id in
+      /api/services/health — a down comfyui must move the count or trip the warn styling.
+      Promote: a ui/tests/e2e fixture spec diffing chip ids against a services fixture.
+
+  - id: ui-inference-card-free-memory-wrong
+    issue: 1900   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: mechanical
+    lane: ui
+    summary: >-
+      The Slots-page Inference Engine card footer computes free memory as
+      `pool.totalGb - self.gttUsedGb` (inference-pane.jsx), and memory-map.jsx hard-zeroes
+      gttUsedGb whenever computeCapable is false — so on any box without host rocm-smi the
+      footer reads free == the ENTIRE pool ("16 GB free" beside a ruler on the same screen
+      showing "free 6.3 GB"), ignoring every loaded model. On a compute-capable box it
+      subtracts the wrong thing (host-wide GTT vs the ruler's live slot sum — ~30 GB apart on
+      prod). Dates to #745/#853; no UI test covers it. The header count half of the original
+      candidate ("7 iGPU · 1 FLM" not summing to 8 rows) is by-design — see known-issues
+      `ui-inference-card-header-is-device-highlight`.
+    repro: |
+      # Same screen, same second, on #slots:
+      #   .infer-pane .body-status  -> "N serving · X GB free"
+      #   .th-ruler-h               -> "memory · ... free Y GB"
+      # X must reconcile with Y. Cross-check /api/stats/hardware gtt_used_mb and the slot sum.
+    expect: >-
+      The card footer and the telemetry ruler derive free memory from the same basis and agree
+      within rounding on one screen; gttUsedGb is not zeroed on a vulkan-capable box.
+
+  - id: update-audit-trail-gaps
+    issue: 1901   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: mechanical
+    lane: upgrade
+    summary: >-
+      Three observability gaps in the updater's job/log correlation (verification itself is
+      sound — the verified manifest with digest_sha256 + signer identity is durably written to
+      /var/lib/hal0/cache/<version>/manifest.json only after sha256+cosign pass): (1) all three
+      job runners construct Updater(channel=channel) without the job_id the parameter exists to
+      thread, so every parent-side updater.* journal line logs job_id=None; (2) the routed
+      `hal0-update stage` child pins its structured log to stderr, which is captured and
+      surfaced only on failure, so NO prepare/verify breadcrumb (sha256_ok, cosign_verify_ok,
+      prepare_ok...) ever reaches the journal on success; (3) `cosign_skipped` is a dead job
+      field — stage_release() never emits the key, so it is structurally always null. Do NOT
+      re-report: version:null on a prepare job (that is the operator's pin, paired with
+      resolved_version) or the absence of digest fields on the job record while the cached
+      manifest exists.
+    repro: |
+      journalctl --since <upgrade window> -o cat | grep -oE 'updater\.[a-z_]+' | sort | uniq -c
+      journalctl -u hal0-api -o cat | grep updater.swap_ok        # job_id=None = defect (1)
+      grep -rn cosign_skipped src/ | grep -v test                 # one consumer, no producer (3)
+      python3 -c "import json; d=json.load(open('/var/lib/hal0/cache/<ver>/manifest.json')); \
+        print(d['digest_sha256'], d['signer_identity'])"          # attestation exists (context)
+    expect: >-
+      updater.* lines carry the real job_id; a successful prepare leaves at least
+      sha256_ok/cosign_verify_ok breadcrumbs somewhere durable; cosign_skipped either gains a
+      producer or is removed. Escalate to a REAL finding if the cached manifest is missing, is
+      written before verification passes, or records a digest that mismatches the extracted
+      tarball.
+
+  - id: mcp-docs-connect-url-and-tool-tables
+    issue: 1902   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: mechanical
+    lane: mcp
+    promote_ready: true
+    summary: >-
+      Two shipped-docs defects: (1) docs/guides/connect-mcp.mdx "### Connect" gives
+      http://localhost:8080/mcp/admin and /mcp/memory as the URLs to point a client at — both
+      405 on loopback (no redirect; the working transport URL is <mount>/mcp, as
+      /etc/hal0/MCP-CLIENTS.md itself says). This is the literal still_report_if of
+      mcp-lan-421-invalid-host firing. (2) docs/reference/mcp-tools.mdx claims to enumerate
+      "Every MCP tool" but its tables name 91 of the 180 admin tools (21 GATED/destructive tools
+      undocumented) and 5 of the 26 memory tools; the source frozensets were already complete
+      when the page was written.
+    repro: |
+      sed -n 69,74p docs/guides/connect-mcp.mdx     # bare mount URLs = defect
+      # tools/list over /mcp/admin/mcp -> count; regex backticked names out of the doc's table
+      # rows; comm the two name sets.
+    expect: >-
+      The Connect section's URLs end in /mcp and initialize returns 200 against them verbatim;
+      the tool reference either enumerates every served tool (assert by name-set diff, not
+      count) or stops claiming to. Promote: a doc-lint pytest diffing the mdx tables against
+      AUTONOMOUS_READ/WRITE + GATED frozensets, and grepping connect-mcp.mdx for bare mount URLs.
+
+  - id: memory-extraction-ctx-preflight-missing
+    issue: 1903   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: judgment
+    lane: memory
+    summary: >-
+      hal0 never preflights the hindsight extraction prompt against the resolved extraction
+      slot's context window (the #1877 analogue exists for Hermes only). When the anchor's ctx
+      is too small, /api/memory/add returns HTTP 200 with a document id, the engine then drops
+      the retain with retain_extract_facts HTTP 500 "Context size has been exceeded", and the
+      document was never stored (DELETE 404s); when it barely fits, the degraded extractor can
+      persist prompt content (few-shot examples, Narrator scaffolding) as facts. The routing
+      (model-less utility -> agent anchor) and the engine's lack of grounding validation are
+      by-design — see known-issues `memory-extraction-quality-is-anchor-dependent`.
+    repro: |
+      systemctl cat hindsight-api | grep LLM_MODEL
+      # resolve where hal0/utility actually lands; check that slot's --ctx-size against the
+      # ~3-4k-token extraction prompt; POST /api/memory/add and follow the op + journal:
+      journalctl -u hindsight-api | grep -E 'retain_extract_facts|Context size'
+    expect: >-
+      A retain whose extraction cannot fit the resolved slot's window fails FAST and LOUDLY at
+      add time (or the op records a named ctx failure) — never HTTP 200 + a document id for a
+      document that is then silently dropped.
+
+  - id: bench-history-blank-empty-state
+    issue: 1904   # filed by rc.6 fix wave
+    from: v1.0.0-rc.6
+    severity: minor
+    tier: mechanical
+    lane: cli
+    promote_ready: true
+    summary: >-
+      `hal0 bench history` prints ZERO bytes at rc=0 whenever its query matches no rows — empty
+      store OR a non-matching --model/--cell filter on a populated store — while the sibling
+      `bench results` prints "no records" (that branch was added by #1807 for exactly this
+      "indistinguishable from a hang" reason; cmd_history was missed). --json correctly prints
+      [] on both.
+    repro: |
+      hal0 bench history --model nosuchmodel >/tmp/h.out 2>/tmp/h.err; echo rc=$?; wc -c /tmp/h.*
+    expect: >-
+      An empty result prints "no records" (mirroring cmd_results) at rc=0. Promote immediately:
+      tests/bench/test_cli_history.py mirroring test_cli_results's two empty-state cases — this
+      entry should not survive to the next release.
+
+  - id: rc6-polish-rollup
+    issue: 1905   # filed by rc.6 fix wave — rollup of 4 residues
+    from: v1.0.0-rc.6
+    severity: rollup
+    tier: mechanical
+    lane: cli
+    summary: >-
+      Small residues that survived rc.6 adversarial verification, individually below filing
+      threshold, collected here so they are not lost:
+        1. `hal0 capabilities list` drops the per-selection `status` field its own API payload
+           carries — a failed apply renders "yes" with no Status column
+           (src/hal0/cli/capabilities_commands.py ~96-118; the enabled=true persistence itself
+           is by-design, see capability-apply-persists-intent-on-lifecycle-failure).
+        2. `GET /api/slots/hal0/logs` 404s with the same slot.not_found envelope as a
+           nonexistent slot, and the synthetic entry's `_synthetic_reason` string ("Backed by
+           remote upstream; install a local slot of the same name to take over") is factually
+           wrong for the hal0 composite (slot_view/__init__.py:861 vs the UI's own copy).
+        3. `uptime_s` in /api/hardware AND /api/stats/hardware is host uptime frozen at
+           hardware.json write time; the dashboard host row renders it as live uptime forever
+           (can exceed or undercut real uptime by weeks; worst on upgraded boxes, which never
+           re-probe).
+        4. `hal0 agent peers` crashes with AttributeError ('str' object has no attribute 'get',
+           agent_commands.py:1372) when a card's hal0_state metadata is a JSON string (seen on
+           the upgraded box).
+    repro: |
+      1. fail a capability apply, then: hal0 capabilities list   # no Status column
+      2. curl -s $API/api/slots/hal0/logs ; curl -s $API/api/slots/hal0 | jq ._synthetic_reason
+      3. cat /proc/uptime; curl -s $API/api/stats/hardware | jq .uptime_s   # frozen = defect
+      4. hal0 agent peers   # on a box with published identity cards
+    expect: Each corrected. Report per-item, not as one verdict.

@@ -7,8 +7,9 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
 
 1. **Route inventory.** `GET $API/api/openapi.json` first — it is the source of truth for what
    exists in this build. Record the **full sorted path list** in your report, not just the count:
-   a count-only comparison cannot tell an added route from a removed one. Diff it against the
-   list in the previous release's report. A route that vanished between releases is a finding.
+   a count-only comparison cannot tell an added route from a removed one. Save it as a lane
+   artifact in the run directory (`<box>-api-openapi-paths.txt`) and diff it against the previous
+   release's artifact. A route that vanished between releases is a finding.
 2. **Core surface.** Walk at minimum: `/health`, `/api/status`, `/api/slots`,
    `/api/slots/{name}`, `/api/slots/{name}/config`, `/api/models`, `/api/settings`,
    `/api/capabilities`, `/api/hardware`, `/api/profiles`, `/api/activity`, `/api/services`,
@@ -30,8 +31,14 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
    Every id in `/v1/models` must be either a registered model in `/api/models` or a configured
    slot name in `/api/slots`. One `comm -23` over the two sorted sets. Run it late in the run,
    after a stateful lane has created and deleted a slot — that is when a ghost appears.
-6. **Self-consistency, elsewhere.** slot `health_ok` / `image_status` vs the slot's reported
-   state (rc.4 had a ready+healthy slot advertising `health_ok=false, image_status=missing`).
+6. **Self-consistency, elsewhere.** slot `container_health` / `image_status` vs the slot's
+   reported state (the rc.4-era `health_ok` field is gone; the field is `container_health` now).
+   Specifically — regression `image-status-wrong-podman-store`: for any slot with
+   `container_status: running`, `image_status` must not read `missing` and `actual_image` must
+   not be null. If it does, cross-check `podman image inspect` in the store the containers
+   actually run from (root's, on a standard install) and note which user the API's probe
+   executes as — the rc.6 defect was a wrong-store probe, self-contradicted by
+   `/api/system-info` in the same second.
 7. **Error shape.** Probe malformed requests: unknown slot name, bad query params, unknown model
    in a GET. Expect clean structured 4xx JSON. A 200 with zeroed data for a nonexistent resource
    is a finding.

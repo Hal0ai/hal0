@@ -11,7 +11,10 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
 1. **Baseline, cross-checked against the advertised backends.** `hal0 capabilities --help` and
    `list`, plus `GET /api/capabilities`. Then assert that every device named in the shipped
    `/etc/hal0/capabilities.toml` appears in `/api/capabilities` `.backends` **and** in the
-   catalog rows the picker actually offers for that child. The seed copying a GPU device out of
+   catalog rows the picker actually offers for that child. Also the inverse: catalog rows must
+   only advertise backends the box's `.backends` actually offers — rc.6 had ~30 npu rows plus a
+   gpu-rocm row that were un-selectable on a box that physically HAS the NPU; either the backend
+   should be advertised or the rows hidden. The seed copying a GPU device out of
    the shipped slot TOML is by-design (`known-issues.yaml:
    capabilities-seed-devices-from-slot-tomls`); a default selection naming a backend the host
    never advertises, or one no catalog row can match, is a hard fail — that is where the seed
@@ -23,7 +26,15 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
 3. **Same for the rerank child**, then verify the path that consumes it: the memory reranker
    config (`[memory.embedding] rerank_model`, `rerank_gateway_url`). Issue a rerank through the
    gateway with a query and three documents. In rc.4 this whole path was dead because profile
-   flags never reached argv (#1787).
+   flags never reached argv (#1787). Use the SEEDED default row (`bge-reranker-v2-m3-q4_k_m`):
+   the curated base row is unloadable on the pinned runner (regression
+   `curated-reranker-base-row-unloadable`) and it is offered FIRST and smallest in the picker —
+   load-test every curated row the picker surfaces for at least one model per capability, and a
+   row whose gguf the runner cannot parse is a catalog finding, not a rerank finding. A failed
+   apply must be judged on ALL its surfaces: the POST's typed 500, `capabilities list` (which
+   today silently renders "yes" with no Status column — rc6-polish-rollup item 1), the
+   `status` field in GET /api/capabilities, and the persisted `enabled` value — persistence of
+   intent is by-design (`known-issues: capability-apply-persists-intent-on-lifecycle-failure`).
 4. **Model defaults.** Promote a model to default for its type. Verify `hal0 model list` marks it
    with the `*` in the unlabelled first column. Then probe dispatch with all three client shapes
    — omitted `model`, `model: "default"`, and the explicit id — because only the third normally
@@ -34,9 +45,10 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
 5. **Registry mutations.** `hal0 model add` on copies of a gguf staged into a scratch directory
    (copy, never move, and never touch the shared store's originals):
    * Is the capability type auto-detected correctly? Register the **same file twice under two
-     different names** — the upstream filename and a neutral one. Byte-identical input yielding
-     two different types is the shortest possible proof of a detection bug and removes all
-     argument about whether the file is unusual (#1838).
+     different names** — the upstream filename and a neutral one. When the header carries no
+     pooling/tags/causal signal, the two differing purely by filename is now ADJUDICATED
+     by-design provided the filename-derived one prints `confidence: medium` — read
+     `known-issues: model-add-detection-surfacing` for what still re-opens #1838 before filing.
    * Register the same bytes by two different PATHS as well (`hal0 model add` versus the
      install-time auto-scan) and diff the resulting ids and display names.
    * Feed it a file with a `.gguf` name and no GGUF magic. Accepted as `chat` is a finding.

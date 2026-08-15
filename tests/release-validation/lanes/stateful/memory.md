@@ -21,18 +21,28 @@ declare `utility` off-limits — say in your report which of the two you got.
 2. **Baseline inventory.** `hal0 memory status`, `hal0 memory --help`, `GET /api/memory/engine`,
    `/api/memory/banks`, `/api/memory/list`. A fresh box should have zero failed operations.
    Enumerate the banks you EXPECT on a fresh install (`shared`, and `agents` for the peer
-   registry) and record which exist and when each was created — rc.5 had no `agents` bank at all
-   after 16 h of uptime, and with no check the fleet has no signal on whether agent identity
-   cards have anywhere to land.
+   registry) and record which exist and when each was created. The `agents` bank's `created_at`
+   must be ~= install time: rc.6 proved the seeding write runs at install boot but lands in the
+   volatile pgvector fallback (hindsight cold start outruns the boot probe) and is never
+   replayed after `provider_healed` — the bank only appears on a later hal0-api restart.
+   Regression `agents-bank-boot-writes-lost`; grep the boot journal for
+   `boot_degraded|degraded_write|provider_healed` to attribute it.
 3. **Fix the routing.** Assign a chat model to the utility slot and load it. Confirm the
    hindsight target ref now routes (`POST /v1/chat/completions` with that exact ref). If it
    still does not resolve, find what ref *does* and report the mapping gap precisely.
-4. **Retain, then prove it LANDED.** Store a memory containing a literal marker, e.g. *"the
-   <BOX> validation marker is MARKER-7734"*. Do not stop at the HTTP 200 and the operation id —
-   that is what made rc.5's headline defect invisible to every check. Poll until the store is
-   actually non-empty: `GET /api/memory/list` returns items AND the write bank's `fact_count` is
-   non-zero, with an explicit deadline. **An op still `processing` past the deadline is a `fail`,
-   not a `skipped`.** Regression `memory-extraction-never-lands` (#1834).
+4. **Retain, then prove it LANDED — and prove what landed is GROUNDED.** Store a memory
+   containing a literal marker, e.g. *"the <BOX> validation marker is MARKER-7734"*. Do not stop
+   at the HTTP 200 and the operation id — that is what made rc.5's headline defect invisible to
+   every check. Poll until the store is actually non-empty: `GET /api/memory/list` returns items
+   AND the write bank's `fact_count` is non-zero, with an explicit deadline. **An op still
+   `processing` past the deadline is a `fail`, not a `skipped`.** Regression
+   `memory-extraction-never-lands` (#1834) — and BEFORE blaming memory for a non-draining queue,
+   run the coherence canary on the extraction slot's model (`_shared.md`); a garbage generator
+   cannot terminate any extraction and that is the upstream defect, not this one. When facts DO
+   land, verify every fact stored under your document id derives from the marker text — rc.6
+   found the extraction prompt's own few-shot examples and Narrator scaffolding stored as facts
+   on an undersized anchor (`known-issues: memory-extraction-quality-is-anchor-dependent`,
+   regression `memory-extraction-ctx-preflight-missing`).
 5. **Terminal state within a bound.** Independently of check 4, assert that every operation you
    create reaches `completed` or `failed` within a stated time. rc.4 dead-lettered and rc.5 hung
    in `processing`; a check written against either behaviour alone misses the other. Terminal-
@@ -61,14 +71,20 @@ declare `utility` off-limits — say in your report which of the two you got.
    (`known-issues.yaml: memory-ops-processing-not-retryable`), but check the 409 body reaches the
    user and that a way to see the scheduled retry exists (`retry_count` / `next_retry_at`).
    "Nothing to retry" printed over a visibly wedged queue is a passing-looking output for a
-   broken situation.
+   broken situation. Two additions: run the POSITIVE path too — once an op reaches `failed`,
+   `hal0 memory ops retry --all-failed` must actually queue it (status back to processing,
+   retries reset), which no run has asserted; and diff what the CLI prints for each 4xx against
+   `details.upstream.detail` in the raw REST body — the 409's actionable detail is lost in the
+   CLI today (#1840 item 1).
 10. **Disable / enable.** `hal0 memory disable` then `enable`, checking `/api/memory/engine`
     between steps. Deferred-apply is by-design (`known-issues.yaml:
     memory-enabled-is-restart-scoped`) — record whether POST /api/memory/add still 200s in that
     window, and whether the restart actually disables the subsystem.
 11. **Bank hygiene and error surfacing.** A nonexistent bank must 404 on its sub-resources, not
-    return an empty 200 (the api lane sweeps all of them; spot-check here). Send a malformed add
-    (wrong field name) — the error should name the field, not surface as `system.internal`.
+    return an empty 200 (the api lane sweeps all of them; spot-check here — `/operations` and
+    `/config` diverge from the bank root, and `/config` even fabricates default values for a
+    bank that 404s one path up). Send a malformed add (wrong field name) — the error should name
+    the field, not surface as `system.internal`.
 
 ## Leave behind
 

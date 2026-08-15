@@ -18,6 +18,13 @@ and described a layout that had already changed.
 
 ## Checks
 
+0. **Coherence canary first** (see `_shared.md`), on the brain slot's own port, temp=0. If
+   `Paris` does not come back, every check below is confounded — record the canary failure
+   (regression `brain-vulkan-backend-garbage-output`), then triage BEFORE blaming the release:
+   `sha256sum` the gguf against prod's copy (rules out a corrupt file in one command), check
+   whether `/dev/kfd` is visible inside the slot container (decides ROCm vs Vulkan lane), and
+   run the identical minimal completion on another fleet box with the same model+image — the
+   cross-box control is what splits a box-environment defect from a release defect.
 1. **Find the surface and record the runner.** `hal0 chat --help` on the box, grep the OpenAPI
    paths for brain/chat routes, and record the current `brain_chat` config (enabled, read_only,
    model, tool_model, max_rounds) **and the brain slot's resolved runner image**
@@ -27,9 +34,11 @@ and described a layout that had already changed.
    Does it connect, answer from the expected slot, and exit cleanly? Quote the reply. Note that
    `hal0 chat --brain` hard-codes a 120 s client timeout against a 300 s server budget — a
    `transport error: ReadTimeout` there is a client artefact, not a server hang.
-3. **The stream says something.** POST the brain chat route and assert that a frame — token,
-   ping, tool_call, or error — arrives within a bounded time, and that the stream always
-   terminates with `done`. The rc.5 failure mode was a zero-byte HTTP 200, which every
+3. **The stream says something.** POST the brain chat route and count SSE frames BY TYPE
+   (token / ping / tool_call / tool_result / error / done) plus first-frame latency, rather than
+   eyeballing the stream — a small frame-accounting script catches zero-frame 200s and
+   single-frame buffering cheaply. Assert a frame arrives within a bounded time and the stream
+   always terminates with `done`. The rc.5 failure mode was a zero-byte HTTP 200, which every
    "did it 200?" check passes. Note the head goes out in ~15 ms and silence until the first
    round is by-design (`known-issues.yaml: brain-chat-sse-silent-until-first-frame`); what is
    reportable is a stream held past `completion_timeout_s` with neither an error nor a done
