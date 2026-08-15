@@ -1090,6 +1090,7 @@ regressions:
     tier: mechanical
     lane: cli
     promote_ready: true
+    serialize: true   # repro restarts hal0-api — must not run concurrently with other lanes/probes
     summary: >-
       The installer's root-run brain-model pull lazily mkdirs /var/lib/hal0/model-pull-jobs
       under root's umask, so on every fresh install it is root:root 0755 with a root-only 0600
@@ -1212,7 +1213,9 @@ regressions:
       and no repo artifact supports the fixed set as intentional. The sibling runtimes group
       proves the ribbon can render degradation.
     repro: |
-      curl -s $API/api/services/health | jq 'keys'
+      curl -s $API/api/services/health | jq -r '.services[].id'
+      # response shape is {"services": [{"id": ..., "up": ..., ...}, ...]} — `jq keys` on the
+      # top-level object only yields ["services"]; extract the id set from .services[].
       # Playwright: [data-testid="foot-health-services"] innerText + pip titles; diff the chip
       # id set against the /api/services/health id set.
     expect: >-

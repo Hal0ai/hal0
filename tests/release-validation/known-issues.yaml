@@ -627,14 +627,23 @@ known_issues:
       leaks. Clears on reboot, on `systemctl reset-failed`, or on re-creating and LOADING the
       same slot name (the load path calls reset_failed before every start). Deleting a healthy
       slot leaves nothing. The NPU delete route already does the reset (backends.py:434) —
-      SlotManager.delete() never got the same treatment. Not an unmet #1791 clause (#1791 is
-      warming/start-limit/swap, not delete). On an id-keyed (upgraded) box the residue reads
-      `hal0-slot@<id>.service`.
+      SlotManager.delete() never got the same treatment. On an id-keyed (upgraded) box the
+      residue reads `hal0-slot@<id>.service`.
+
+      This IS the literal unmet clause of `crash-loop-lifecycle`'s (#1791) own `expect` —
+      "delete leaves no failed unit behind" (regressions.yaml lines 207/211, its repro's final
+      step) — not a separate, unrelated defect. #1791 keeps scoring `partial` on this exact
+      clause every release until it closes; do not let curation quietly detach it from #1791
+      just because it is *also* filed and tracked for fix-agent purposes as #1840 item 5. Both
+      references must be kept: #1791's register entry for "is #1791 fully fixed yet", #1840
+      item 5 for "where is the fix ticket".
     still_report_if: >-
       Deleting a HEALTHY slot leaves a failed unit; OR the residue blocks re-creating/loading
       the same slot name (systemd refuses the start); OR a hal0-owned artefact (TOML, state dir,
       quadlet, port claim) also survives the delete; OR the delete returns non-200 while leaving
-      the residue. Do NOT re-report the bare `systemctl --failed` line.
+      the residue. Do NOT re-file a NEW issue for the bare `systemctl --failed` line — it is
+      already tracked at #1840 item 5 and as the unmet clause of #1791 above — but DO keep
+      recording it against both entries every release until it is fixed.
     review_at: v1.1.0
 
   - id: hermes-wheel-missing-web-dist

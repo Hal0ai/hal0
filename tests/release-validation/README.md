@@ -125,10 +125,13 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
-* **4** (2026-08-15) — curation after the `v1.0.0-rc.6` run (mode=report, so new entries carry
-  `issue: null` until the operator files them). `regressions.yaml` grows from 26 to 43 entries:
-  every previously registered entry gets an rc.6 `last_result` (11 fixed, 2 regressed-but-known,
-  the rest partial/blocked with the exact residue named), and 17 new entries land — headlined by
+* **4** (2026-08-15) — curation after the `v1.0.0-rc.6` run. Landed as mode=report, so the 17
+  new entries first carried `issue: null`; the filing PR then filed all of them (plus one more
+  found during Codex review of that PR, `chat-to-embed-slot-500-passthrough`, #1894) and filled
+  in every issue number — `regressions.yaml` now carries no unfiled entries. `regressions.yaml`
+  grows from 26 to 44 entries: every previously registered entry gets an rc.6 `last_result` (11
+  fixed, 2 regressed-but-known, the rest partial/blocked with the exact residue named), and 18
+  new entries land — headlined by
   `brain-vulkan-backend-garbage-output`, the run's most severe finding (the pinned runner's
   Vulkan lane computes wrong values for every model while every health surface stays green).
   Its lesson is promoted into `_shared.md` as a global **coherence canary**: no lane may trust

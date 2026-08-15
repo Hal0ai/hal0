@@ -51,7 +51,10 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
      `known-issues: model-add-detection-surfacing` for what still re-opens #1838 before filing.
    * Register the same bytes by two different PATHS as well (`hal0 model add` versus the
      install-time auto-scan) and diff the resulting ids and display names.
-   * Feed it a file with a `.gguf` name and no GGUF magic. Accepted as `chat` is a finding.
+   * Feed it a file with a `.gguf` name and no GGUF magic. Registering it as `chat` is by-design
+     (`known-issues: model-add-detection-surfacing`) PROVIDED it is surfaced honestly — a
+     warning line, `detection_confidence: low`, and `detection_warning` present. Accepted as
+     `chat` with NO warning and no lowered confidence is the finding.
    * Try one add from a directory the `hal0` service user cannot read (e.g. under `/root`) — the
      first place an operator puts a downloaded gguf. The refusal is correct; an error that
      cannot distinguish "unreadable" from "missing" is not.

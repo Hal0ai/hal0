@@ -321,6 +321,12 @@ tests and CI, not against a fresh end-to-end install — proving they are actual
 box is the entire point of this phase.
 
 Rules:
+  - SKIP any entry whose \`lane\` is "${LANES.update.join('" or "')}" — those belong to the
+    update box and are probed separately, against ${updateBox || '(no update box this run)'}.
+  - SKIP any entry whose \`serialize: true\` is set. Those run separately, after this parallel
+    sweep finishes, because their repro mutates box-wide shared state (e.g. restarting hal0-api)
+    that would poison the concurrently-running read-only/stateful lanes and sibling regression
+    batches. Do not run them here even if you have time.
   - Use the result vocabulary defined in the file: fixed | regressed | partial | blocked.
   - "blocked" is honest and useful. Reporting a probe you could not run as "fixed" is not.
   - "partial" needs you to say exactly which part of \`expect\` held and which did not.
@@ -334,10 +340,64 @@ Rules:
 Return one result object per entry you ran.`, regOpts))
   }
 }
+if (updateBox && wanted('regressions')) {
+  for (const b of REG_BATCHES) {
+    const regOpts = Object.assign(
+      { label: `regressions:${b.tier}:update`, phase: 'Sweep', schema: REGRESSION_RESULT },
+      b.model ? { model: b.model } : {},
+    )
+    work.push(() => agent(`${BASE}
+YOU RUN THE REGRESSION PROBES (${b.desc}) on box ${updateBox}.
+
+Read ${KIT}/regressions.yaml. Take EVERY entry whose tier is "${b.tier}" AND whose \`lane\` is
+"${LANES.update.join('" or "')}" — these entries evidence lives in the update box's journal
+and cache, not the fresh box — and run its \`repro\` against this box, comparing what you
+observe to its \`expect\`. Do not run any entry whose \`lane\` is not in that set; those are
+covered by the fresh-box regression batch running concurrently.
+
+Rules:
+  - Use the result vocabulary defined in the file: fixed | regressed | partial | blocked.
+  - "blocked" is honest and useful. Reporting a probe you could not run as "fixed" is not.
+  - "partial" needs you to say exactly which part of \`expect\` held and which did not.
+  - The update lane is running on this same box concurrently — read state before mutating,
+    never interrupt an in-flight upgrade.
+  - If an entry's repro no longer matches the current CLI or API surface, say so — a stale
+    regression entry is itself a finding worth reporting to the curation phase.
+
+Return one result object per entry you ran.`, regOpts))
+  }
+}
 
 const swept = await parallel(work)
+
+// Serialized regression probes: entries whose repro mutates box-wide shared state (e.g.
+// restarting hal0-api) run here, sequentially, AFTER every parallel lane and regression batch
+// has finished — never alongside them, or the mutation poisons sibling lanes mid-run.
+let serializedRegressionResults = []
+if (freshBox && wanted('regressions')) {
+  const serialResult = await agent(`${BASE}
+YOU RUN THE SERIALIZED REGRESSION PROBES on box ${freshBox}. The parallel sweep (read-only
+lanes, the stateful chain, and the non-serialized regression batches) has now finished, so
+nothing else is running concurrently on this box.
+
+Read ${KIT}/regressions.yaml. Take EVERY entry with \`serialize: true\` and run its \`repro\`
+against this box, comparing what you observe to its \`expect\`.
+
+Rules:
+  - Use the result vocabulary defined in the file: fixed | regressed | partial | blocked.
+  - "blocked" is honest and useful. Reporting a probe you could not run as "fixed" is not.
+  - "partial" needs you to say exactly which part of \`expect\` held and which did not.
+  - You may restart services or otherwise disrupt the box for the duration of a single repro —
+    that is exactly why these entries are serialized — but leave the box in a working state
+    when you finish (services back up, nothing left crashed).
+  - If an entry's repro no longer matches the current CLI or API surface, say so.
+
+Return one result object per entry you ran.`,
+    { label: 'regressions:serialized', phase: 'Sweep', schema: REGRESSION_RESULT })
+  serializedRegressionResults = (serialResult && serialResult.results) || []
+}
 const laneResults = swept.filter(Boolean).flatMap((r) => (Array.isArray(r) ? r : (r.results ? [] : [r])))
-const regressionResults = swept.filter(Boolean).filter((r) => !Array.isArray(r) && r.results).flatMap((r) => r.results)
+const regressionResults = swept.filter(Boolean).filter((r) => !Array.isArray(r) && r.results).flatMap((r) => r.results).concat(serializedRegressionResults)
 
 const totalChecks = laneResults.reduce((n, r) => n + (r.tested ? r.tested.length : 0), 0)
 const rawFindings = laneResults.flatMap((r) => (r.findings || []).map((f) => Object.assign({}, f, { lane: r.lane, box: r.box })))
@@ -418,10 +478,11 @@ the \`still_report_if\` clause that should go into known-issues.yaml, so no futu
 relitigates it.
 
 Also judge \`other_hardware_applicability\`: would a GPU box, a privileged container, or an
-upgraded (rather than freshly installed) box hit this? There is no GPU fresh-install box in the
-fleet, so a read-only cross-check against the production box is the best available evidence —
-use it when the finding touches backend selection, profile flags, hardware probing, or native
-tool calling.
+upgraded (rather than freshly installed) box hit this? No box in the fleet is BOTH a fresh
+install AND has /dev/kfd visible (the fresh boxes lack /dev/kfd and run the Vulkan lane only;
+the boxes with /dev/kfd — update and prod — are not fresh installs), so a read-only cross-check
+against the production box is the best available evidence — use it when the finding touches
+backend selection, profile flags, hardware probing, or native tool calling.
 
 Non-destructive repro only. If you load a slot, restore what you found. Set key="${c.key}".`,
   { label: `verify:${c.key}`, phase: 'Verify', schema: VERDICT, model: 'opus', effort: 'high' })))).filter(Boolean)
@@ -463,7 +524,8 @@ Requirements:
     them — that reasoning is what stops the next run rediscovering them.
   - Record kit_version from ${KIT}/kit.toml and the exact box configurations.
   - Be honest about coverage: which lanes were skipped, which checks were skipped, what the
-    fleet cannot test at all (there is no GPU fresh-install box).
+    fleet cannot test at all (no box is both a fresh install and has /dev/kfd visible — see
+    ${KIT}/boxes.toml's fleet coverage note).
 
 Return the path you wrote plus a 10-line summary suitable for pasting into a release thread.`,
   { label: 'report', phase: 'Report', model: 'opus' })
