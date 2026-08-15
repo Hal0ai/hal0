@@ -276,6 +276,228 @@ def test_hal0_target_enabled_probe_no_systemctl(monkeypatch: pytest.MonkeyPatch)
     assert da._hal0_target_enabled_probe() is None
 
 
+# ── check_agent_uid_isolation (ADR-0002) ──────────────────────────────────────
+
+
+def test_agent_uid_shared_with_api_warns() -> None:
+    """The shipped default: both units are User=hal0 → advisory warn, never fail.
+
+    This is the row's whole reason to exist — an operator reading `hal0 doctor`
+    on a stock box must be told that the bundled agent shares the API's UID and
+    can therefore read its credentials out of /proc.
+    """
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda _u: "hal0",
+        agent_units=lambda: ["hal0-agent@hermes.service"],
+    )
+    assert c.key == "agent-uid"
+    assert c.status == "warn"
+    assert c.critical is False
+    assert "hal0-agent@hermes.service" in c.detail
+    assert "SECURITY.md" in c.detail
+
+
+def test_agent_uid_split_passes() -> None:
+    """The 1.1 posture: the agent has its own account → clean row."""
+    users = {"hal0-api.service": "hal0", "hal0-agent@hermes.service": "hal0-agent"}
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda u: users[u],
+        agent_units=lambda: ["hal0-agent@hermes.service"],
+    )
+    assert c.status == "pass"
+
+
+def test_agent_uid_no_agent_unit_passes() -> None:
+    """No bundled agent installed — there is no boundary to report on."""
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda _u: "hal0",
+        agent_units=lambda: [],
+    )
+    assert c.status == "pass"
+    assert "no bundled agent" in c.detail
+
+
+def test_agent_uid_unknown_api_user_warns() -> None:
+    """systemctl could not answer for hal0-api — say unknown, do not claim clean."""
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda u: None if u == "hal0-api.service" else "hal0",
+        agent_units=lambda: ["hal0-agent@hermes.service"],
+    )
+    assert c.status == "warn"
+    assert "unknown" in c.detail
+
+
+def test_agent_uid_flags_only_the_sharing_instance() -> None:
+    """A mixed box names the instance that shares, not the one that does not."""
+    users = {
+        "hal0-api.service": "hal0",
+        "hal0-agent@hermes.service": "hal0",
+        "hal0-agent@other.service": "hal0-agent",
+    }
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda u: users[u],
+        agent_units=lambda: ["hal0-agent@hermes.service", "hal0-agent@other.service"],
+    )
+    assert c.status == "warn"
+    assert "hal0-agent@hermes.service" in c.detail
+    assert "hal0-agent@other.service" not in c.detail
+
+
+def test_agent_uid_probes_degrade_without_systemctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No systemctl → *unknown*, never an empty inventory (which would read clean)."""
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: None)
+    assert da._unit_user("hal0-api.service") is None
+    assert da._agent_units() is None
+
+
+def test_unit_user_reports_root_for_an_empty_user_directive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """systemd renders an unset User= as the empty string; that means root."""
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
+
+    class _R:
+        returncode = 0
+        stdout = "\n"
+
+    monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
+    assert da._unit_user("hal0-api.service") == "root"
+
+
+def test_agent_units_parses_list_units_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
+    monkeypatch.setattr(da, "_provisioned_agent_units", lambda: [])
+
+    class _R:
+        returncode = 0
+        stdout = (
+            "hal0-agent@hermes.service loaded active running hal0 agent (hermes)\n"
+            "hal0-agent@other.service  loaded inactive dead  hal0 agent (other)\n"
+        )
+
+    monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
+    assert da._agent_units() == ["hal0-agent@hermes.service", "hal0-agent@other.service"]
+
+
+def test_agent_units_is_unknown_when_systemctl_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A manager error must not be laundered into "no agent installed"."""
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
+
+    class _R:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
+    assert da._agent_units() is None
+
+
+def test_agent_units_finds_a_stopped_disabled_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`list-units` only reports units in memory; the enable symlink outlives that.
+
+    An operator who stopped the agent has not uninstalled it — the boundary is
+    still there the moment it starts again, so the row must still see it.
+    """
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
+
+    class _R:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
+    monkeypatch.setattr(da, "_provisioned_agent_units", lambda: ["hal0-agent@hermes.service"])
+    assert da._agent_units() == ["hal0-agent@hermes.service"]
+
+
+def test_provisioned_agent_units_reads_wants_symlinks(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    wants = tmp_path / "multi-user.target.wants"
+    wants.mkdir()
+    (wants / "hal0-agent@hermes.service").symlink_to(tmp_path / "hal0-agent@.service")
+    (wants / "hal0-api.service").symlink_to(tmp_path / "hal0-api.service")
+    assert da._provisioned_agent_units(tmp_path) == ["hal0-agent@hermes.service"]
+
+
+def test_provisioned_agent_units_ignores_the_shipped_dropin_dir(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A drop-in dir alone is not evidence of an installed agent.
+
+    `installer/install.sh` writes `hal0-agent@hermes.service.d/override.conf`
+    on every install "whether or not bootstrap has been run", so a box built
+    with the documented `HAL0_SKIP_HERMES=1` has the drop-in and no agent.
+    Counting it would warn about an agent the operator deliberately declined.
+    """
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    dropin = tmp_path / "hal0-agent@hermes.service.d"
+    dropin.mkdir()
+    (dropin / "override.conf").write_text("[Service]\n")
+    assert da._provisioned_agent_units(tmp_path) == []
+
+
+def test_provisioned_agent_units_reads_per_agent_config(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    agents = tmp_path / "home" / "etc" / "hal0" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "hermes.toml").write_text("")
+    (agents / "other.env").write_text("")
+    (agents / "README").write_text("")
+    assert da._provisioned_agent_units(tmp_path) == [
+        "hal0-agent@hermes.service",
+        "hal0-agent@other.service",
+    ]
+
+
+def test_provisioned_agent_units_missing_unit_dir_is_empty(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    assert da._provisioned_agent_units(tmp_path / "nope") == []
+
+
+def test_agent_uid_unknown_inventory_warns() -> None:
+    """systemd could not be asked → warn, not a clean row."""
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda _u: "hal0",
+        agent_units=lambda: None,
+    )
+    assert c.status == "warn"
+    assert "could not enumerate" in c.detail
+
+
+def test_agent_uid_unknown_agent_user_warns_instead_of_passing() -> None:
+    """An unreadable agent User= must not fall through to "runs as a different user"."""
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda u: "hal0" if u == "hal0-api.service" else None,
+        agent_units=lambda: ["hal0-agent@hermes.service"],
+    )
+    assert c.status == "warn"
+    assert "hal0-agent@hermes.service" in c.detail
+    assert "could not read User=" in c.detail
+
+
+def test_agent_uid_compares_resolved_uids_not_strings() -> None:
+    """A drop-in spelling one side numerically is still the same UID to the kernel."""
+    users = {"hal0-api.service": "hal0", "hal0-agent@hermes.service": "991"}
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda u: users[u],
+        agent_units=lambda: ["hal0-agent@hermes.service"],
+        resolve_uid=lambda user: 991 if user in ("hal0", "991") else None,
+    )
+    assert c.status == "warn", "numeric-vs-name spelling must not read as a UID split"
+    assert "uid 991" in c.detail
+
+
+def test_agent_uid_distinct_uids_pass_despite_a_shared_prefix() -> None:
+    users = {"hal0-api.service": "hal0", "hal0-agent@hermes.service": "hal0-agent"}
+    c = da.check_agent_uid_isolation(
+        unit_user=lambda u: users[u],
+        agent_units=lambda: ["hal0-agent@hermes.service"],
+        resolve_uid=lambda user: {"hal0": 991, "hal0-agent": 992}[user],
+    )
+    assert c.status == "pass"
+
+
+def test_resolve_uid_accepts_a_numeric_literal_and_unknown_names() -> None:
+    assert da._resolve_uid("4242") == 4242
+    assert da._resolve_uid("definitely-not-a-real-account-x9") is None
+
+
 # ── overall_verdict + exit codes ──────────────────────────────────────────────
 
 
@@ -697,10 +919,18 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         lambda *_a, **_k: Check("netns", "Container netns", "pass", "stubbed"),
     )
 
+    # Agent-UID row (ADR-0002) shells out to systemctl otherwise; neutralise it
+    # so this composition test asserts the row list, not the host's units.
+    monkeypatch.setattr(
+        da,
+        "check_agent_uid_isolation",
+        lambda **_kw: Check("agent-uid", "Agent UID split", "pass", "stubbed"),
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 15 extras.
-    assert keys[-15:] == [
+    # 7 verify rows + 16 extras.
+    assert keys[-16:] == [
         "auth",
         "models",
         "migrations",
@@ -710,6 +940,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "netns",
         "hal0_target",
         "secret-modes",
+        "agent-uid",
         "stt-weights",
         "seams",
         "mcp_mounts",

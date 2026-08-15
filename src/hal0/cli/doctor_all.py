@@ -12,7 +12,9 @@ OpenWebUI, Hermes), then adds the broader health rows the retrofit calls for:
 auth posture, model-store integrity, pending migrations, a stale-dashboard
 ``HAL0_UI_DIST`` override (#1589), bound slot ports, the ``hal0.target``
 boot-enable anchor (r5-sync-assessment §6.1), the privileged sudo seams
-every slot op + self-update runs through (#1465), and the context window behind
+every slot op + self-update runs through (#1465), whether the bundled agent
+shares ``hal0-api``'s UID (ADR-0002 — advisory, it is the shipped default),
+and the context window behind
 Hermes' anchor model (#1867 — the smoke probes never run on an in-place
 upgrade, which is the only shape that defect survives in).
 
@@ -26,7 +28,9 @@ own repair. Exit codes:
 
 from __future__ import annotations
 
+import contextlib
 import json as jsonlib
+import pwd
 import shutil
 import stat
 import subprocess
@@ -120,6 +124,239 @@ def check_secret_file_modes() -> Check:
             critical=True,
         )
     return Check("secret-modes", "Secret file modes", _PASS, "secret files are owner-only")
+
+
+#: The API unit, and the agent template whose instances carry the bundled agent.
+_API_UNIT = "hal0-api.service"
+_AGENT_UNIT_GLOB = "hal0-agent@*.service"
+
+
+def _unit_user(unit: str) -> str | None:
+    """``systemctl show -p User --value <unit>`` → the effective ``User=``.
+
+    ``None`` means the question could not be asked (no ``systemctl``, unit
+    unknown); an empty ``User=`` means the unit runs as ``root``, which
+    systemd reports as the empty string, so that is normalised here.
+    """
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        result = subprocess.run(  # nosec B603 B607
+            ["systemctl", "show", "-p", "User", "--value", unit],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or "root"
+
+
+def _agent_units() -> list[str] | None:
+    """Provisioned ``hal0-agent@<instance>.service`` units, or ``None`` if unknown.
+
+    Two sources, unioned, because neither alone answers "is a bundled agent
+    installed on this box":
+
+    * ``systemctl list-units --all`` only lists units currently *in memory* —
+      ``--all`` adds inactive-but-loaded ones, not an instance that was stopped
+      and unloaded. That instance is still installed and still the boundary
+      this row exists to report on.
+    * the persistent artifacts an instance leaves on disk (enable symlink,
+      drop-in dir, per-agent config/env) survive both an unload and a
+      ``hal0 agent disable`` — see :func:`_provisioned_agent_units`.
+
+    ``None`` is *unknown*, distinct from ``[]`` (definitively no agent): no
+    ``systemctl`` on PATH, or the manager failed to answer. Collapsing the two
+    would turn a transient systemd error into a clean row.
+    """
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        result = subprocess.run(  # nosec B603 B607
+            [
+                "systemctl",
+                "list-units",
+                "--all",
+                "--plain",
+                "--no-legend",
+                "--no-pager",
+                "--type=service",
+                _AGENT_UNIT_GLOB,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    units: set[str] = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        name = fields[0] if fields else ""
+        if name.startswith("hal0-agent@") and name.endswith(".service"):
+            units.add(name)
+    units |= set(_provisioned_agent_units())
+    return sorted(units)
+
+
+def _provisioned_agent_units(unit_dir: Path | None = None) -> list[str]:
+    """Agent instances that exist on disk, whatever systemd currently has loaded.
+
+    ``systemctl list-units`` reports units *in memory*, and the ``.wants``
+    symlinks only cover *enabled* instances — but ``hal0 agent disable`` stops
+    and disables an instance without removing its env file or its config, and
+    ``hal0 agent start`` brings it straight back. That instance is still the
+    boundary this row reports on, so discovery also reads the install-state
+    artifacts:
+
+    * ``<unit_dir>/*.target.wants/hal0-agent@*.service`` — enable symlinks
+    * ``/etc/hal0/agents/<i>.{toml,env}`` — per-instance config / env, written
+      by provisioning
+
+    Deliberately **not** the ``hal0-agent@<i>.service.d/`` drop-in dirs:
+    ``installer/install.sh`` lays down ``hal0-agent@hermes.service.d/`` on every
+    install "whether or not bootstrap has been run", so a box installed with the
+    documented ``HAL0_SKIP_HERMES=1`` escape hatch has the drop-in and no agent.
+    Counting it would warn about an agent the operator deliberately declined.
+
+    Best effort: an unreadable directory contributes nothing rather than
+    raising. Callers treat "found nothing anywhere" as no agent only when the
+    systemd probe *also* answered cleanly.
+    """
+    root = unit_dir if unit_dir is not None else Path("/etc/systemd/system")
+    names: set[str] = set()
+    with contextlib.suppress(OSError):
+        for wants in sorted(root.glob("*.target.wants")):
+            names.update(p.name for p in wants.glob(_AGENT_UNIT_GLOB))
+    with contextlib.suppress(OSError):
+        for cfg in paths.agents_config_dir().iterdir():
+            if cfg.suffix in (".toml", ".env") and cfg.stem:
+                names.add(f"hal0-agent@{cfg.stem}.service")
+    return sorted(names)
+
+
+def _resolve_uid(user: str) -> int | None:
+    """``User=`` value → numeric uid. Accepts a name or a numeric literal."""
+    if user.isdigit():
+        return int(user)
+    try:
+        return pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return None
+
+
+def check_agent_uid_isolation(
+    *,
+    unit_user: Callable[[str], str | None] | None = None,
+    agent_units: Callable[[], list[str] | None] | None = None,
+    resolve_uid: Callable[[str], int | None] | None = None,
+) -> Check:
+    """Does the bundled agent share ``hal0-api``'s UID? (ADR-0002, advisory.)
+
+    ``hal0-api.service`` and ``hal0-agent@<instance>.service`` both ship with
+    ``User=hal0``. Same UID means the agent — which is provisioned with
+    ``terminal.backend = local`` and can therefore run shell commands — passes
+    ``PTRACE_MODE_READ_FSCREDS`` against the API process and can read
+    ``/proc/<pid>/environ``, i.e. every credential the API holds. Yama's
+    ``ptrace_scope`` does not stop this; it gates ``PTRACE_MODE_ATTACH``, not
+    same-UID reads. The ``hal0`` account additionally holds the sudo grants
+    that author rootful podman slot specs, so it is root-equivalent by design
+    (``installer/wrappers/hal0-systemctl``'s HONEST BOUNDARY block).
+
+    This is the **shipped 1.0 default** and an accepted, documented risk, so
+    the row is a ``warn``, never a ``fail``: it exists to make sure an operator
+    reading ``hal0 doctor`` learns where the boundary is rather than inferring
+    a boundary that is not there. ADR-0002 tracks the agent-UID split for 1.1.
+
+    All three probes (unit discovery, ``User=`` lookup, uid resolution) are
+    injectable so the classification is testable without systemd or a real
+    passwd database (mirrors :func:`check_hal0_target`). Every "could not tell"
+    answer warns rather than passing: a row whose failure mode is a silent
+    all-clear would be worse than no row.
+    """
+    probe_user = unit_user if unit_user is not None else _unit_user
+    probe_units = agent_units if agent_units is not None else _agent_units
+    probe_uid = resolve_uid if resolve_uid is not None else _resolve_uid
+
+    units = probe_units()
+    if units is None:
+        return Check(
+            "agent-uid",
+            "Agent UID split",
+            _WARN,
+            "could not enumerate hal0-agent@* units (systemd unavailable or not answering) — "
+            "agent/API UID split unknown; see SECURITY.md 'Bundled agent trust boundary'",
+        )
+    if not units:
+        return Check(
+            "agent-uid",
+            "Agent UID split",
+            _PASS,
+            "no bundled agent: no hal0-agent@* unit is installed on this box",
+        )
+    api_user = probe_user(_API_UNIT)
+    if api_user is None:
+        return Check(
+            "agent-uid",
+            "Agent UID split",
+            _WARN,
+            f"could not read User= for {_API_UNIT} — agent/API UID split unknown "
+            "(see SECURITY.md 'Bundled agent trust boundary')",
+        )
+    api_uid = probe_uid(api_user)
+
+    shared: list[str] = []
+    unknown: list[str] = []
+    for unit in units:
+        agent_user = probe_user(unit)
+        if agent_user is None:
+            unknown.append(unit)
+            continue
+        # Compare resolved UIDs when both sides resolve: a drop-in may spell one
+        # side numerically or via an alias account, and the kernel check this row
+        # audits is on the UID, not on the string in the unit file. Fall back to
+        # the strings only when a name does not resolve (e.g. a unit naming an
+        # account that does not exist on this box).
+        agent_uid = probe_uid(agent_user)
+        same = (
+            api_uid == agent_uid
+            if (api_uid is not None and agent_uid is not None)
+            else agent_user == api_user
+        )
+        if same:
+            shared.append(unit)
+    if shared:
+        who = f"{api_user} (uid {api_uid})" if api_uid is not None else api_user
+        return Check(
+            "agent-uid",
+            "Agent UID split",
+            _WARN,
+            f"{', '.join(shared)} runs as the same user as {_API_UNIT} — {who} — so the "
+            "bundled agent's shell can read the API's /proc/<pid>/environ and every credential "
+            "in it — accepted, documented 1.0 posture; see SECURITY.md 'Bundled agent trust "
+            "boundary' (ADR-0002)",
+        )
+    if unknown:
+        return Check(
+            "agent-uid",
+            "Agent UID split",
+            _WARN,
+            f"could not read User= for {', '.join(unknown)} — cannot claim the agent runs "
+            "under its own UID; see SECURITY.md 'Bundled agent trust boundary'",
+        )
+    return Check(
+        "agent-uid",
+        "Agent UID split",
+        _PASS,
+        f"agent unit(s) run as a different user than {_API_UNIT} ({api_user})",
+    )
 
 
 def check_voice_stt_weights() -> Check:
@@ -903,6 +1140,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_netns_durability(),
         check_hal0_target(),
         check_secret_file_modes(),
+        check_agent_uid_isolation(),
         check_voice_stt_weights(),
         check_seams(),
         check_mcp_mounts(),

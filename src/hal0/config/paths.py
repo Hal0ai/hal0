@@ -90,6 +90,20 @@ def etc() -> Path:
 #: becomes world-readable the moment a second account joins the group.
 API_ENV_MODE = 0o600
 
+#: Mode for ``/etc/hal0/upstreams.toml``.
+#:
+#: The file carries no credential *values* (``auth_value_env`` names a variable
+#: the upstream registry resolves from the environment at request time), but the
+#: provider/endpoint inventory it does carry is not public information — ADR-0002
+#: dropped it from 0644. 0640, not 0600: every consumer is ``hal0`` or root, and
+#: the group bit keeps an operator added to the ``hal0`` group able to read it.
+#:
+#: One constant, two writers: :mod:`hal0.install.perms` converges it and
+#: :func:`hal0.config.loader.save_upstreams_config` applies it on every atomic
+#: rewrite. api.env earned its comment above by having four disagreeing writers;
+#: this one starts with one number.
+UPSTREAMS_TOML_MODE = 0o640
+
 
 def api_env() -> Path:
     """Return the api.env path (/etc/hal0/api.env or the HAL0_HOME sandbox).
