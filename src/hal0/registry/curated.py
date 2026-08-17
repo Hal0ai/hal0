@@ -831,32 +831,16 @@ CURATED_MODELS: list[CuratedModel] = [
     # Per memory hal0_rerank_slot_wiring, the working recipe is
     # llama-server on a non-8081 port with --reranking; bge-reranker-v2-m3
     # Q4_K_M is already running in production on hal0 LXC.
-    CuratedModel(
-        id="bge-reranker-base-q4_k_m",
-        display_name="BGE Reranker Base (Q4_K_M)",
-        description=(
-            "Light cross-encoder reranker for English RAG. ~260 MB on "
-            "disk, runs on CPU comfortably."
-        ),
-        family="bge",
-        size_gb=0.26,
-        vram_gb_min=0.5,
-        license="MIT",
-        license_url="https://opensource.org/license/mit",
-        hf_repo="cstr/bge-reranker-base-GGUF",
-        hf_file="bge-reranker-base-q4_k.gguf",
-        context_length=512,
-        recommended_slot="embed",
-        tags=["rerank", "light"],
-        notes=(
-            "cstr's GGUF mirror includes the classifier-head fix needed "
-            "for llama-server --reranking; the upstream BAAI repo ships "
-            "PyTorch only. Q4_K is the smallest quant that preserves "
-            "rerank ordering on BEIR."
-        ),
-        capability="rerank",
-        backend="llamacpp",
-    ),
+    # bge-reranker-base-q4_k_m (cstr/bge-reranker-base-GGUF) was removed
+    # here (#1891): that mirror carries a non-mainline fork's bert KV
+    # schema (no `bert.context_length`) and cannot load on the shipped
+    # runner ("key not found in model: bert.context_length"). It was
+    # offered FIRST and smallest in the rerank catalog with
+    # fit_status=allowed, so hal0 pulled it unvalidated and the slot
+    # crash-looped invisibly. The row's note claiming the mirror "includes
+    # the classifier-head fix needed for llama-server --reranking" was
+    # also false. Use bge-reranker-v2-m3-q4_k_m below instead — it loads
+    # and scores correctly on the identical runner image.
     CuratedModel(
         id="bge-reranker-v2-m3-q4_k_m",
         display_name="BGE Reranker v2 M3 (Q4_K_M)",

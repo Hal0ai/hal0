@@ -69,6 +69,34 @@ def test_lookup_index_matches_list() -> None:
     assert set(CURATED_BY_ID.keys()) == {m.id for m in CURATED_MODELS}
 
 
+def test_bge_reranker_base_row_removed() -> None:
+    """#1891: cstr/bge-reranker-base-GGUF carries a non-mainline bert KV
+    schema (no ``bert.context_length``) and cannot load on the shipped
+    runner ("key not found in model: bert.context_length"). hal0 offered
+    it FIRST and smallest in the rerank catalog with fit_status=allowed,
+    pulled it unvalidated, and the slot crash-looped invisibly. The row's
+    "classifier-head fix" note was also false. The row must not be in the
+    curated catalogue, and no remaining rerank row may cite that false
+    fix-note language.
+    """
+    assert get_curated("bge-reranker-base-q4_k_m") is None
+    assert "bge-reranker-base-q4_k_m" not in CURATED_BY_ID
+    for m in CURATED_MODELS:
+        assert "classifier-head fix" not in (m.notes or ""), (
+            f"{m.id}: false 'classifier-head fix' claim about cstr's mirror survives"
+        )
+
+
+def test_every_curated_rerank_row_has_hf_coordinates() -> None:
+    """#1891 guard: every curated rerank row the picker offers must resolve
+    to a pullable hf_repo/hf_file so a bad catalog artifact can't silently
+    become the offered default again."""
+    rerank_rows = [m for m in CURATED_MODELS if m.capability == "rerank"]
+    assert rerank_rows, "expected at least one curated rerank row"
+    for m in rerank_rows:
+        assert m.hf_repo and m.hf_file, f"{m.id}: rerank row missing hf coordinates"
+
+
 def test_memory_pipeline_default_embed_model_is_pullable() -> None:
     """The memory pipeline's default embed id must resolve to a real curated pull source (#F28).
 
