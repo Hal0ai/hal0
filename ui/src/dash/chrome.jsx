@@ -816,7 +816,14 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
   const runtimeTitle = degraded
     ? `degraded — ${failing.length ? failing.join("; ") : "see /api/health/system"}`
     : `${L.ready}/${L.total} slot container${L.total === 1 ? "" : "s"} ready`;
-  const serviceById = Object.fromEntries((serviceHealth.services || []).map((s) => [s.id, s]));
+  // The `services` group is driven by whatever /api/services/health actually
+  // reports (#1899) — NOT a hardcoded id list. The three-member array here
+  // used to omit `comfyui` (and would silently omit any future service too),
+  // leaving the always-visible footer reporting an unqualified "3 / 3 ready"
+  // while a real backing service sat down. `hal0` itself is prepended since
+  // it isn't in the services-health payload (it IS the API answering the
+  // request) but every backend-reported id — including comfyui — renders a
+  // pip and counts toward the ready total.
   const footerIndicators = [
     {
       id: 'hal0',
@@ -824,18 +831,12 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
       tone: degraded ? 'warn' : health.isError ? 'warn' : 'up',
       title: degraded ? `hal0 degraded — ${failing.join("; ") || "see /api/health/system"}` : 'hal0 api ok',
     },
-    {
-      id: 'hermes',
-      label: 'hermes',
-      tone: serviceHealth.pending ? 'warn' : serviceById.hermes?.up ? 'up' : 'err',
-      title: serviceById.hermes?.detail || (serviceHealth.pending ? 'service health pending' : 'hermes down'),
-    },
-    {
-      id: 'openwebui',
-      label: 'openwebui',
-      tone: serviceHealth.pending ? 'warn' : serviceById.openwebui?.up ? 'up' : 'err',
-      title: serviceById.openwebui?.detail || (serviceHealth.pending ? 'service health pending' : 'openwebui down'),
-    },
+    ...(serviceHealth.services || []).map((s) => ({
+      id: s.id,
+      label: s.name || s.id,
+      tone: serviceHealth.pending ? 'warn' : s.up ? 'up' : 'err',
+      title: s.detail || (serviceHealth.pending ? 'service health pending' : `${s.name || s.id} down`),
+    })),
   ];
   // runtimes group — one LED pip per CONFIGURED slot (a model bound is what
   // makes a slot real, #1369), plus the ready count.
