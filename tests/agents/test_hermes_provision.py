@@ -816,6 +816,44 @@ def test_resolve_primary_slot_fallback_when_no_slots() -> None:
     assert out["base_url"] == "http://127.0.0.1:8080/v1"
 
 
+def test_resolve_primary_slot_skips_modelless_named_seed_for_serving_slot() -> None:
+    """Regression for #1892.
+
+    A fresh install carries an unwired ``agent`` seed slot (no model bound)
+    alongside a genuinely serving llm slot under another name. The name-based
+    match must not shadow the slot that is actually serving traffic.
+    """
+    fake = lambda: [  # noqa: E731
+        {"name": "agent", "type": "llm", "state": "idle", "model_id": None},
+        {
+            "name": "qwen-coder",
+            "type": "llm",
+            "state": "serving",
+            "model_id": "qwen3-coder:30b",
+            "backend_url": "http://127.0.0.1:8001/v1",
+            "context_length": 32768,
+        },
+    ]
+    out = hp._resolve_primary_slot(slots_fetcher=fake)
+    assert out["model"] == "qwen3-coder:30b"
+    assert out["placeholder"] is False
+
+
+@pytest.mark.parametrize("state", ["ready", "serving", "idle"])
+def test_is_ready_accepts_every_dispatchable_slot_state(state: str) -> None:
+    """Regression for #1892: _is_ready must agree with the canonical
+    dispatchable-state set in hal0.slots.state, not a stale ad-hoc vocabulary.
+    """
+    assert hp._is_ready({"state": state}) is True
+
+
+@pytest.mark.parametrize(
+    "state", ["offline", "pulling", "starting", "warming", "unloading", "error"]
+)
+def test_is_ready_rejects_non_dispatchable_slot_states(state: str) -> None:
+    assert hp._is_ready({"state": state}) is False
+
+
 def _build_overlay_keys(**over):
     """Helper: run _build_config_overlay with sane defaults → ``{key: value}``."""
     base = dict(
@@ -964,9 +1002,13 @@ def test_resolve_delegation_none_when_slot_absent() -> None:
 
 
 def test_resolve_delegation_none_when_slot_not_ready() -> None:
+    # "idle" is a dispatchable state (hal0.slots.state.DISPATCHABLE_STATES) —
+    # a container that's up with a bound model but past its idle timeout is
+    # still safe to route to (#1892). Use "warming" (model still loading,
+    # genuinely not yet dispatchable) as the not-ready fixture instead.
     slots = [
         *_ROLE_SLOTS[:1],
-        {"name": "agent", "type": "llm", "state": "idle", "model_id": "x"},
+        {"name": "agent", "type": "llm", "state": "warming", "model_id": "x"},
     ]
     assert hp._resolve_delegation(slots, hal0_base_url=_HAL0_V1) is None
 

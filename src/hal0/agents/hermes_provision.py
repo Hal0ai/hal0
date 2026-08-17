@@ -61,6 +61,7 @@ from hal0.agents.anchor_window import (
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
+from hal0.slots.state import is_dispatchable_state
 from hal0.system import seam as _seam
 
 log = structlog.get_logger(__name__)
@@ -1307,11 +1308,18 @@ def _resolve_primary_slot(
         return kind in {"llm", "chat"}
 
     candidates = [s for s in slots if isinstance(s, dict) and _chat(s)]
-    # ADR-0023: the canonical primary is the `agent` slot; accept legacy
-    # `chat`/`primary` names for boxes not yet reseeded.
-    primary = next((s for s in candidates if s.get("name") in ("agent", "chat", "primary")), None)
+    # A candidate only counts as "wired" once it is both dispatchable AND
+    # carries a bound model — an `agent` seed slot that hasn't been loaded
+    # yet is neither (#1892: picking it by name alone, unconditionally,
+    # shadowed genuinely serving llm slots under other names and produced
+    # the "primary" sentinel forever).
+    wired = [s for s in candidates if _is_ready(s) and _slot_model_id(s)]
+    # ADR-0023: the canonical primary is the `agent` slot; prefer legacy
+    # `chat`/`primary` names too, but only among slots that are actually
+    # wired — never let the name match override readiness.
+    primary = next((s for s in wired if s.get("name") in ("agent", "chat", "primary")), None)
     if primary is None:
-        primary = next((s for s in candidates if _is_ready(s)), None)
+        primary = next(iter(wired), None)
     if primary is None:
         return fallback
 
@@ -3914,9 +3922,17 @@ _DEFAULT_PRIMARY_BACKEND_URL = f"{HAL0_API_URL}/v1"
 
 
 def _is_ready(slot: dict[str, Any]) -> bool:
-    """True iff the slot reports a live/ready state."""
+    """True iff the slot reports a dispatchable (request-safe) state.
+
+    Delegates to :func:`hal0.slots.state.is_dispatchable_state`, the ONE
+    canonical definition of "safe to route to" (finding DR-8). Before #1892
+    this re-declared its own vocabulary (``ready``/``running``/``loaded``/
+    ``ok``/``online``) that never matched the real ``SlotState`` wire values
+    (``ready``/``serving``/``idle``) — a serving slot always read as
+    not-ready here.
+    """
     state = slot.get("state") or slot.get("status") or ""
-    return str(state).lower() in {"ready", "running", "loaded", "ok", "online"}
+    return is_dispatchable_state(str(state))
 
 
 def _slot_context_length(slot: dict[str, Any]) -> int | None:
