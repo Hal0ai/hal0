@@ -2203,8 +2203,19 @@ class ContainerProvider(Provider):
                     "ok": ok,
                     "status": "healthy" if ok else f"http_{models_resp.status_code}",
                 }
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            return {"ok": False, "status": str(exc)}
+        except httpx.TransportError as exc:
+            # TransportError is the base class for ConnectError,
+            # TimeoutException, ReadError, WriteError, etc. — every failure
+            # mode where the connection dies without producing an HTTP
+            # response (#1898: a runner that binds its port and then dies
+            # mid-read raises ReadError, whose str() is empty; that escaped
+            # the old narrow (ConnectError, TimeoutException) catch as an
+            # unhandled exception, abandoning wait_ready()'s poll loop after
+            # a single strike instead of reporting "unhealthy" and retrying
+            # for the full window). status falls back to the exception's
+            # class name so metadata.message is never empty even when
+            # str(exc) is "".
+            return {"ok": False, "status": str(exc) or type(exc).__name__}
 
     async def wait_ready(self, port: int) -> None:
         """Poll /health until 200 or HEALTH_TIMEOUT_S exceeded.
