@@ -31,6 +31,7 @@ from hal0.dispatcher.router import (
     UnknownUpstream,
     UpstreamCall,
 )
+from hal0.errors import CapabilityMismatch
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 # ── test doubles ──────────────────────────────────────────────────────────────
@@ -363,6 +364,46 @@ async def test_legacy_fallback_routes_colon_model_to_npu_slot() -> None:
     )
     assert call.resolution_path == "legacy_slot:flm"
     assert call.upstream_name == "flm"
+
+
+@pytest.mark.asyncio
+async def test_legacy_fallback_chat_request_naming_embed_model_raises_typed_mismatch() -> None:
+    """#1894: a chat/completions request naming an embed/rerank-hinted model
+    must raise a typed ``CapabilityMismatch`` (409) instead of being silently
+    forwarded to the embed slot — which can never serve a chat request and
+    would otherwise leak that slot's raw upstream 500 to the client.
+    """
+    embed = make_slot("embed", "http://127.0.0.1:8082/v1")
+    upstreams = FakeUpstreamRegistry([embed])
+    models = FakeModelRegistry(routes={})
+
+    dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
+    with pytest.raises(CapabilityMismatch) as exc:
+        await dispatcher.dispatch(
+            make_request(path="/v1/chat/completions"),
+            body={"model": "bge-m3-embed", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert exc.value.code == "dispatch.capability_mismatch"
+    assert exc.value.status == 409
+    assert exc.value.details["model"] == "bge-m3-embed"
+    assert exc.value.details["hint"] == "embed"
+
+
+@pytest.mark.asyncio
+async def test_legacy_fallback_chat_request_naming_rerank_model_raises_typed_mismatch() -> None:
+    """Same gate for the ``rerank`` name hint (#1894)."""
+    embed = make_slot("embed", "http://127.0.0.1:8082/v1")
+    upstreams = FakeUpstreamRegistry([embed])
+    models = FakeModelRegistry(routes={})
+
+    dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
+    with pytest.raises(CapabilityMismatch) as exc:
+        await dispatcher.dispatch(
+            make_request(path="/v1/chat/completions"),
+            body={"model": "bge-rerank-v2", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert exc.value.code == "dispatch.capability_mismatch"
+    assert exc.value.details["hint"] == "rerank"
 
 
 @pytest.mark.asyncio

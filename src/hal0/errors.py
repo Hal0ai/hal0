@@ -173,6 +173,32 @@ class Conflict(Hal0Error):
     status = 409
 
 
+class CapabilityMismatch(Hal0Error):
+    """409 — the named model's disclosed capability does not serve this endpoint.
+
+    Use when dispatch can already tell, from the model id itself (or its
+    ``/v1/models`` labels/recipe), that the request cannot succeed — e.g. a
+    chat-completions request naming a model whose id/labels mark it
+    embed-only or rerank-only. Without this gate, such a request would
+    otherwise be forwarded to a slot that can't serve it and the caller
+    would see that upstream's raw, confusing error (e.g. llama-server's
+    "the current context does not logits computation" 500) instead of a
+    typed hal0 envelope (#1894).
+
+    Example::
+
+        raise CapabilityMismatch(
+            f"model {model!r} looks embed/rerank-only (matched {hint!r}) and "
+            "cannot serve chat/completions requests",
+            code="dispatch.capability_mismatch",
+            details={"model": model, "path": path, "hint": hint},
+        )
+    """
+
+    code = "dispatch.capability_mismatch"
+    status = 409
+
+
 class TooManyRequests(Hal0Error):
     """429 — the caller has exceeded a rate budget and should back off.
 
@@ -241,6 +267,7 @@ class UnprocessableEntity(Hal0Error):
 
 __all__ = [
     "BadRequest",
+    "CapabilityMismatch",
     "Conflict",
     "Forbidden",
     "Hal0Error",

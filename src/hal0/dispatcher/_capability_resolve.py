@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hal0.errors import Hal0Error
+from hal0.errors import CapabilityMismatch, Hal0Error
 from hal0.slots.manager import SLOT_ALIASES
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
@@ -128,7 +128,12 @@ def resolve_by_capability(  # TIER1
     require ``kind="slot"``.
       5. Model id contains ``:`` (FLM tag-style) → ``npu`` slot.
       6. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
-      7. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
+      7. Model id contains ``embed`` or ``rerank`` substring on a non-path-
+         pinned endpoint (i.e. not already matched by rules 1-4) → typed
+         ``CapabilityMismatch`` (409). The request is chat/completions-shaped
+         but names a model that can only ever serve embed/rerank requests, so
+         hal0 rejects it instead of forwarding to guaranteed upstream
+         breakage (#1894).
       8. Model id exactly matches a registered slot upstream name (other
          than the default ``agent`` anchor) → that slot.  Back-compat alias
          (``agent-hermes`` → ``agent``) is resolved first.
@@ -146,6 +151,10 @@ def resolve_by_capability(  # TIER1
         LegacyResolutionFailed: If the heuristics select a slot name but no
             matching slot Upstream is registered.  Carries a
             ``dispatch.legacy_unresolved`` code via the typed Hal0Error envelope.
+        CapabilityMismatch: If rule 7 fires — the model id looks embed/
+            rerank-only but the request path isn't one of the path-pinned
+            capability endpoints.  Carries a ``dispatch.capability_mismatch``
+            code (409) via the typed Hal0Error envelope (#1894).
     """
     candidate: str | None = None
     # Path-pinned candidates ("route purely by path") may also resolve to a
@@ -196,8 +205,24 @@ def resolve_by_capability(  # TIER1
                 candidate = "img"
                 path_pinned = True
             # Rule 7 — name-substring pin (embed/rerank → embed slot).
-            elif any(hint in m for hint in _EMBED_NAME_HINTS):
-                candidate = "embed"
+            #
+            # Reaching this branch means the request path did NOT match any
+            # of the path-pinned capability endpoints (rules 1-4: embeddings/
+            # rerankings/audio/images all short-circuit before this ``elif
+            # body:`` block runs). So a model name matching an embed/rerank
+            # hint here always means: a chat/completions-shaped request named
+            # a model that is embed/rerank-only. Forwarding that to the embed
+            # slot can never succeed — the embed llama-server has no chat
+            # template/logits path — so hal0 raises a typed capability
+            # mismatch instead of silently routing to guaranteed upstream
+            # breakage (#1894: the caller previously just saw the embed
+            # server's raw, confusing HTTP 500).
+            elif matched_hint := next((h for h in _EMBED_NAME_HINTS if h in m), None):
+                raise CapabilityMismatch(
+                    f"model {model!r} looks embed/rerank-only (matched "
+                    f"{matched_hint!r}) and cannot serve requests on {path!r}",
+                    details={"model": model, "path": path, "hint": matched_hint},
+                )
             else:
                 # Rule 8 — explicit slot-name addressing.
                 # Resolve back-compat aliases (agent-hermes→agent) before the
