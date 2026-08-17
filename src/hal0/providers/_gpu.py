@@ -117,10 +117,10 @@ def require_kfd_for_gpu_slot(
     Scope, deliberately narrow:
 
     * ``gpu-rocm`` — always gated. The device name IS the ROCm claim.
-    * ``gpu-vulkan`` — gated only on an **AMD** host (``amdgpu`` bound). A
-      legacy AMD slot still carrying the old label runs the same broken lane;
-      an Intel iGPU or an NVIDIA card without CDI has no ``/dev/kfd`` by
-      design and keeps working.
+    * ``gpu-vulkan`` — gated only on an **AMD** host (``amdgpu`` bound). An
+      older AMD slot still carrying that label runs the same broken lane; an
+      Intel iGPU or an NVIDIA card without CDI has no ``/dev/kfd`` by design
+      and keeps working.
     * ``cpu`` / ``npu`` / ``gpu-cuda`` — never gated: none of them can reach
       the ROCmFPX image's Vulkan fallback.
 
