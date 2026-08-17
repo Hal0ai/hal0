@@ -131,10 +131,12 @@ export function useMemoryMapModel() {
   // sees the host's DRM node (LXC shares the kernel's /sys/class/drm) even
   // when this container has no real GPU compute access, so an unqualified
   // "unified" memoryKind on a CPU-only box reported the host's ~116GB GTT
-  // ceiling as this box's own pool. `computeCapable` is the one probe field
-  // backed by an actual capability check (rocm-smi presence) — gate the
-  // GPU-pool framing on it and fall back to plain system RAM otherwise.
-  const hasGpu = !!rawHw.computeCapable
+  // ceiling as this box's own pool. `computeCapable` (rocm-smi presence) and
+  // `vulkanCapable` (a render node under /dev/dri) are the two probe fields
+  // backed by an actual capability check — gate the GPU-pool framing on
+  // EITHER (a box can be Vulkan-only with no ROCm stack, per #1900) and fall
+  // back to plain system RAM only when NEITHER reports a real GPU.
+  const hasGpu = !!(rawHw.computeCapable || rawHw.vulkanCapable)
   const ramTotalGb = rawHw.ram?.total ?? 0
   const gttCapGb = hasGpu ? mbToGb(stats.data?.gpu_vram_total_mb || stats.data?.gtt_total_mb || 0) : 0
   const unifiedFromProbe = hasGpu ? mbToGb(rawHw.unified_memory_mb || 0) : 0
