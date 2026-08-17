@@ -40,7 +40,7 @@ def test_chat_on_rocm_box_picks_rocm():
     assert derive_profile("chat", "gpu-rocm") == "chat"
 
 
-def test_chat_on_amd_box_without_rocm_picks_cpu_not_vulkan():
+def test_chat_on_amd_box_without_rocm_picks_cpu_not_vulkan(monkeypatch):
     """#1888: an AMD GPU with no ROCm compute is NOT a Vulkan lane.
 
     llama.cpp slots run the unified ROCmFPX runner image on every AMD GPU
@@ -49,6 +49,7 @@ def test_chat_on_amd_box_without_rocm_picks_cpu_not_vulkan():
     install with three slots that served garbage while reading green — CPU is
     the only honest fallback.
     """
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
     hw = _hw(compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
     assert derive_profile("chat", "cpu") == "cpu-chat"
@@ -148,10 +149,22 @@ def test_tts_is_cpu_kokoro():
     assert derive_profile("tts", "cpu") == "kokoro"
 
 
-def test_strix_platform_forces_rocm_even_if_compute_flag_missing():
-    # platform=strix-halo is the canonical FP4 signal.
+def test_strix_platform_forces_rocm_when_the_compute_node_is_there(monkeypatch):
+    """platform=strix-halo is the canonical FP4 signal — but since #1888 it is
+    necessary, not sufficient: /dev/kfd must actually be reachable."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
     hw = _hw(platform="strix-halo", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
+
+
+def test_strix_platform_without_kfd_derives_cpu(monkeypatch):
+    """#1888: a Strix Halo box whose amdkfd node was never forwarded is the
+    exact fresh-LXC shape the blocker was found on. Deriving gpu-rocm there
+    would hand every seeded slot a load-time refusal immediately after a
+    deliberately CPU-only install."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    hw = _hw(platform="strix-halo", compute=False, vulkan=True)
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
 
 
 # ── CPU-only host fixes (#834) ─────────────────────────────────────────────────

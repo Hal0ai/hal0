@@ -499,10 +499,24 @@ def plan(
             )
 
     stale: list[Cell] = []
+    warned_unsupported: set[str] = set()
     for model in selected_models:
         tokenizer = _resolve_tokenizer(model) or ""
         for lane_token in suite.matrix.lanes:
             lane = _resolve_lane(model, lane_token)
+            # #1888: an UNSUPPORTED lane is opt-in only and must never be
+            # planned silently — a vulkan_radv record is a throughput
+            # measurement of invalid output, and would otherwise be stored and
+            # published indistinguishably from a supported one.
+            if not harness.lane_is_supported(lane) and lane not in warned_unsupported:
+                warned_unsupported.add(lane)
+                print(
+                    f"WARNING: suite {suite.id!r} plans the UNSUPPORTED lane {lane!r} — "
+                    "the ROCmFPX runner's Vulkan backend emits invalid tokens for every "
+                    "model (#1888), so any throughput it reports measures garbage. "
+                    "Records from this lane must not be published.",
+                    file=sys.stderr,
+                )
             for kind in suite.cells.kinds:
                 if kind in _TIER_A_KINDS and lane not in known_lanes:
                     # Fail fast at plan time, not with a bare KeyError out of

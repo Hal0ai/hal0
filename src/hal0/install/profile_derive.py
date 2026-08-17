@@ -14,6 +14,7 @@ The (device, profile) pairs this produces are backend-coherent per #807:
 from __future__ import annotations
 
 from hal0.config.schema import DEVICE_DEFAULT_PROFILES, HardwareInfo
+from hal0.providers._gpu import kfd_present
 
 #: NPU-trio capabilities (NPU chat agent + npu stt/embed passengers). Kept as a
 #: symbol because the trio code is left **dormant** (out of scope to remove,
@@ -100,18 +101,25 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
         return "npu" if (hw.npu.present and npu_opt_in) else None
     # chat / coder / embed → GPU lane. platform=="strix-halo" is the canonical
     # FP4 signal; compute_capable means a ROCm/CUDA runtime was detected.
-    if hw.platform == "strix-halo" or any(g.compute_capable for g in hw.gpus):
+    # #1888: the ROCm lane is the ONLY valid GPU LLM lane on AMD, and it needs
+    # the /dev/kfd compute node. The strix-halo / compute_capable signals are
+    # necessary but NOT sufficient — a Strix Halo box whose amdkfd node was
+    # never forwarded is exactly the fresh-LXC shape the blocker was found on,
+    # and deriving gpu-rocm there would hand every seeded slot a load-time
+    # refusal right after a deliberately CPU-only install.
+    rocm_ok = any(g.compute_capable for g in hw.gpus) or kfd_present()
+    if rocm_ok and (hw.platform == "strix-halo" or any(g.compute_capable for g in hw.gpus)):
         return "gpu-rocm"
-    # AMD without ROCm compute is NOT a Vulkan lane: llama.cpp slots run the
-    # ROCmFPX runner image on both GPU devices, and that image's Vulkan
-    # backend emits invalid tokens for every model (#1888). CPU is the only
-    # honest fallback for AMD here. Non-AMD vulkan-capable GPUs (Intel iGPU,
-    # NVIDIA without CDI) keep the Vulkan lane — the defect is characterised
-    # on the AMD/HIP build; see the PR for the open question.
-    if any(g.vendor == "amd" for g in hw.gpus):
-        return "cpu"
-    if any(g.vulkan_capable for g in hw.gpus):
+    # Non-AMD vulkan-capable GPUs (Intel iGPU, NVIDIA without CDI) keep the
+    # Vulkan lane — the defect is characterised on the AMD/HIP build. Checked
+    # BEFORE the AMD→CPU fallback so a mixed host with a dead AMD adapter and
+    # a usable Intel one still gets its GPU.
+    if any(g.vulkan_capable and g.vendor != "amd" for g in hw.gpus):
         return "gpu-vulkan"
+    # AMD without a ROCm compute node is NOT a Vulkan lane: llama.cpp slots
+    # run the ROCmFPX runner image on both GPU devices, and that image's
+    # Vulkan backend emits invalid tokens for every model. CPU is the only
+    # honest answer.
     return "cpu"
 
 

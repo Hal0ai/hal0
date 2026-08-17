@@ -59,7 +59,11 @@
 # deliberately want a bigger steward voice.
 name = "brain"
 type = "llm"
-device = "gpu-vulkan"
+# #1888: gpu-rocm, not gpu-vulkan. llama.cpp slots launch the unified
+# ROCmFPX runner on both GPU devices; that image's Vulkan backend emits
+# invalid tokens for every model, so gpu-vulkan named a lane no slot
+# could validly run. Requires /dev/kfd (preflight + load-time guard).
+device = "gpu-rocm"
 runtime = "container"
 profile = "brain"
 port = 8089
