@@ -40,11 +40,13 @@ raising, so the API can surface a partial result instead of 500ing.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import structlog
 
+from hal0.agents.anchor_window import SLOTS_DIR, AnchorWindow, resolve_anchor_window
 from hal0.system.seam import SystemCtlSeam
 
 log = structlog.get_logger(__name__)
@@ -62,6 +64,26 @@ _SYSTEMCTL_TIMEOUT_S = 60.0
 
 #: Default daemon LLM timeout (seconds) — mirrors MemoryGraphConfig.llm_timeout_s.
 DEFAULT_LLM_TIMEOUT_S = 300
+
+#: Conservative floor for Hindsight's native extraction prompt (#1903).
+#:
+#: Hindsight builds its graph via its OWN extraction LLM call, dispatched to
+#: ``hal0/<extraction_slot>`` (see the module docstring) — the same
+#: virtual-model-through-the-routing-fallback-chain shape #1867 preflights
+#: for Hermes' anchor, just never checked on this side. hal0 never sees the
+#: vendored prompt template (it lives in the hindsight-api package, not this
+#: repo), so this is deliberately a ROUND, DEFENSIBLE floor rather than an
+#: exact token count: rc.6 validation observed the prompt (few-shot examples
+#: + narrator scaffolding + the extraction schema) run ~3-4k tokens on its
+#: own, and the reproduced failure (ct150, `known-issues.yaml:
+#: memory-extraction-quality-is-anchor-dependent`) sat at ctx=4096 — i.e.
+#: at or below the prompt's own footprint, before a single byte of the
+#: document being retained is added. 8192 doubles that observed prompt cost
+#: so a slot which clears the floor has headroom left for the document text
+#: itself; a slot still under it cannot fit the prompt regardless of what is
+#: being retained, which is the catastrophic (retain silently dropped, or
+#: prompt content persisted as fact) shape this preflight exists to catch.
+EXTRACTION_MIN_CONTEXT_TOKENS = 8192
 
 _DROP_IN_TEMPLATE = (
     "# Managed by hal0 (ADR-0023 — memory.graph.extraction_slot / llm_timeout_s).\n"
@@ -220,4 +242,62 @@ def apply_extraction_slot(
     return result
 
 
-__all__ = ["DROP_IN_PATH", "apply_extraction_slot", "drop_in_matches", "render_drop_in"]
+#: Local alias so this module doesn't have to re-derive the ``hal0/`` prefix
+#: :mod:`hal0.agents.anchor_window` already owns.
+_VIRTUAL_PREFIX = "hal0/"
+
+
+def extraction_model_name(slot: str) -> str:
+    """The virtual model id Hindsight's extraction LLM call is spelled as.
+
+    Mirrors :data:`_DROP_IN_TEMPLATE`'s ``HINDSIGHT_API_LLM_MODEL=hal0/{slot}``
+    — the same string, so a caller resolving the extraction window is asking
+    about the exact handle the drop-in actually points the engine at.
+    """
+    return f"{_VIRTUAL_PREFIX}{slot}"
+
+
+def resolve_extraction_window(
+    slot: str,
+    *,
+    entry: Mapping[str, Any] | None,
+    catalog: Sequence[Mapping[str, Any]] | None = None,
+    floor: int = EXTRACTION_MIN_CONTEXT_TOKENS,
+    slots_dir: Path = SLOTS_DIR,
+    endpoint: str = "",
+) -> AnchorWindow:
+    """Resolve the extraction slot's effective window against the prompt floor (#1903).
+
+    Reuses :func:`hal0.agents.anchor_window.resolve_anchor_window` — the
+    #1877 resolver — rather than reimplementing the virtual-model routing
+    resolution it already gets right (never trust the ``hal0/<slot>``
+    spelling; ask the by-id catalog row the routing fallback chain actually
+    answered with). Only the model handle and the floor differ from the
+    Hermes-anchor call: extraction is checked against
+    :data:`EXTRACTION_MIN_CONTEXT_TOKENS` (the prompt's own footprint), not
+    Hermes' much larger hard floor.
+
+    ``entry``/``catalog`` are the caller's ``GET /v1/models/{id}`` row and
+    ``GET /v1/models`` list for ``hal0/<slot>`` — injected so this stays pure
+    and testable without a running gateway (see :class:`AnchorWindow`).
+    """
+    return resolve_anchor_window(
+        extraction_model_name(slot),
+        entry=entry,
+        catalog=catalog,
+        floor=floor,
+        floor_source="hal0:extraction-prompt-floor",
+        slots_dir=slots_dir,
+        endpoint=endpoint,
+    )
+
+
+__all__ = [
+    "DROP_IN_PATH",
+    "EXTRACTION_MIN_CONTEXT_TOKENS",
+    "apply_extraction_slot",
+    "drop_in_matches",
+    "extraction_model_name",
+    "render_drop_in",
+    "resolve_extraction_window",
+]

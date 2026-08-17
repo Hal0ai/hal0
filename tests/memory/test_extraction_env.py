@@ -14,9 +14,12 @@ from pathlib import Path
 
 from hal0.memory.extraction_env import (
     DROP_IN_PATH,
+    EXTRACTION_MIN_CONTEXT_TOKENS,
     apply_extraction_slot,
     drop_in_matches,
+    extraction_model_name,
     render_drop_in,
+    resolve_extraction_window,
 )
 from hal0.system.seam import SEAM_BIN, SystemCtlSeam
 
@@ -322,3 +325,64 @@ def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Pat
         ["systemctl", "daemon-reload"],
         ["systemctl", "restart", "hindsight-api.service"],
     ]
+
+
+# ── #1903: extraction-slot context-window preflight ─────────────────────────
+#
+# Hindsight's native extraction call is dispatched to ``hal0/<extraction_slot>``
+# regardless of the hal0-side enable toggle (reporting-only on this engine).
+# Nothing ever preflighted that dispatch's window before this — an undersized
+# resolved slot used to answer /add with HTTP 200 + a document id and then
+# either drop the retain (Hindsight's own "Context size has been exceeded")
+# or persist the extraction prompt's own scaffolding as fact. These pin the
+# resolution logic reused from #1877's `resolve_anchor_window`.
+
+
+def test_extraction_model_name_matches_the_drop_in_spelling():
+    assert extraction_model_name("utility") == "hal0/utility"
+    assert extraction_model_name("agent") == "hal0/agent"
+
+
+def test_resolve_extraction_window_below_floor_on_the_repro_shape(tmp_path: Path):
+    """The reported ct150 shape: extraction slot resolves to a live 4096-token
+    window — clearly under the extraction prompt's own footprint."""
+    entry = {"id": "hal0/utility", "context_length": 4096}
+    catalog = [{"id": "utility", "context_length": 4096}]
+
+    window = resolve_extraction_window("utility", entry=entry, catalog=catalog, slots_dir=tmp_path)
+
+    assert window.verdict == "below_floor"
+    assert window.effective == 4096
+    assert window.floor == EXTRACTION_MIN_CONTEXT_TOKENS
+    assert window.slot == "utility"
+
+
+def test_resolve_extraction_window_ok_when_the_slot_clears_the_floor(tmp_path: Path):
+    entry = {"id": "hal0/utility", "context_length": 32768}
+    catalog = [{"id": "utility", "context_length": 32768}]
+
+    window = resolve_extraction_window("utility", entry=entry, catalog=catalog, slots_dir=tmp_path)
+
+    assert window.verdict == "ok"
+
+
+def test_resolve_extraction_window_unknown_when_the_catalog_has_no_evidence(tmp_path: Path):
+    """No advertised context anywhere — the caller must treat this as
+    "cannot prove", never as a silent pass (#1831's lesson, reused here)."""
+    window = resolve_extraction_window("utility", entry=None, catalog=[], slots_dir=tmp_path)
+
+    assert window.verdict == "unknown"
+
+
+def test_resolve_extraction_window_uses_a_dedicated_floor_not_hermes():
+    """The extraction floor is the prompt's own footprint, not Hermes' much
+    larger MINIMUM_CONTEXT_LENGTH — an extraction slot deliberately sized
+    well below 64,000 (typical for a small local utility model) must not be
+    flagged just because it would fail Hermes' anchor check."""
+    entry = {"id": "hal0/utility", "context_length": 16384}
+    catalog = [{"id": "utility", "context_length": 16384}]
+
+    window = resolve_extraction_window("utility", entry=entry, catalog=catalog)
+
+    assert window.verdict == "ok"
+    assert window.floor < 64_000
