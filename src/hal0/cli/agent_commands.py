@@ -1360,14 +1360,35 @@ def agent_peers() -> None:
     table.add_column("Roles")
     table.add_column("Endpoint")
     table.add_column("Registered")
+
+    def _as_dict(value: Any) -> dict[str, Any]:
+        """Nested card metadata, tolerant of engine round-trip shapes (#1897).
+
+        Some memory engines return nested metadata objects re-encoded as JSON
+        strings rather than dicts. ``hal0 agent peers`` used to assume a dict
+        and died with ``AttributeError: 'str' object has no attribute 'get'``
+        on the whole listing because one card came back that way.
+        """
+        if isinstance(value, str):
+            try:
+                value = _json.loads(value)
+            except _json.JSONDecodeError:
+                return {}
+        return value if isinstance(value, dict) else {}
+
     for item in items:
-        md = item.get("metadata") or {} if isinstance(item, dict) else {}
-        endpoint = md.get("endpoint") or {}
-        hal0_state = md.get("hal0_state") or {}
+        md = _as_dict(item.get("metadata")) if isinstance(item, dict) else {}
+        endpoint = _as_dict(md.get("endpoint"))
+        hal0_state = _as_dict(md.get("hal0_state"))
+        roles = md.get("roles")
+        if isinstance(roles, str):
+            roles = [roles]
+        elif not isinstance(roles, list):
+            roles = []
         table.add_row(
             str(md.get("agent_id") or "—"),
             str(md.get("display_name") or "—"),
-            ", ".join(md.get("roles") or []) or "—",
+            ", ".join(str(r) for r in roles) or "—",
             str(endpoint.get("url") or "—"),
             str(hal0_state.get("registered_at") or "—"),
         )

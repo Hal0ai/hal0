@@ -1759,6 +1759,28 @@ async def _boot_metrics_state(app: FastAPI, ctx: BootState) -> None:
     app.state.metrics_seam = ctx.metrics_seam
 
 
+async def _memory_reprobe_loop(provider: Any, interval_s: float) -> None:
+    """Poll a boot-degraded memory provider until the durable engine answers.
+
+    Armed by ``_boot_background_tasks`` only when ``create_app`` wrapped a
+    degraded boot result in ``SelfHealingMemoryProvider`` (#1613). ``try_heal``
+    is synchronous, probe-bounded I/O, so it runs off-loop via ``to_thread``.
+
+    After the swap, drain the provider's heal hooks (#1897) — the writes hal0-api
+    made through the volatile fallback during the degrade window are gone from
+    the engine that just came up, and the phases that issued them registered a
+    replay. Draining here, on the loop, is what makes those writes durable
+    without waiting for the next hal0-api restart.
+    """
+    while True:
+        await asyncio.sleep(interval_s)
+        if await asyncio.to_thread(provider.try_heal):
+            run_hooks = getattr(provider, "run_heal_hooks", None)
+            if run_hooks is not None:
+                await run_hooks()
+            return
+
+
 async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     """Phase — MCP session managers + refresh / GPU-arbiter loops + omni & NPU routers.
 
@@ -1826,14 +1848,9 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     _mem_provider = getattr(app.state, "memory_provider", None)
     if hasattr(_mem_provider, "try_heal"):
         _reprobe_interval = float(os.environ.get("HAL0_MEMORY_REPROBE_INTERVAL_S", "30") or "30")
-
-        async def _memory_reprobe_loop(provider: Any = _mem_provider) -> None:
-            while True:
-                await asyncio.sleep(_reprobe_interval)
-                if await asyncio.to_thread(provider.try_heal):
-                    return
-
-        ctx.memory_reprobe_task = asyncio.create_task(_memory_reprobe_loop())
+        ctx.memory_reprobe_task = asyncio.create_task(
+            _memory_reprobe_loop(_mem_provider, _reprobe_interval)
+        )
         log.info("hal0.memory.reprobe_loop_started", interval_s=_reprobe_interval)
 
     async def _stop_memory_reprobe_task() -> None:
@@ -2010,7 +2027,7 @@ def _boot_mcp_memory_call(
         return {"ok": False, "error": str(exc)}
 
 
-async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
+async def _boot_brain_lane(app: FastAPI, ctx: BootState, *, replay: bool = False) -> None:
     """Phase — RELOCATE(brain-lane): identity-card + self-report memory publishes.
 
     Runs LAST (after ``background_tasks``, the final named phase before this
@@ -2033,8 +2050,27 @@ async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
     self-test of chat/memory/etc. Flagged here and in the relocation
     handoff notes; a future lane could add a lightweight post-boot
     self-check if a closer smoke_tests equivalent is wanted.
+
+    #1897 — degraded-window replay. On a fresh install this phase always runs
+    inside the memory degrade window: the installer starts hal0-api and the
+    hindsight daemon in the same pass, so the engine is still cold-starting
+    (embedded postgres init + model load) and ``create_app`` handed every
+    consumer the volatile in-memory ``PgVectorProvider``. All three publishes
+    below are then accepted, warned about ("VOLATILE and will be LOST"), and
+    dropped — the durable ``agents`` bank is never created. The #1613 self-heal
+    swaps the engine in later but cannot recover writes the engine never saw,
+    so the bank stayed missing until an unrelated hal0-api restart happened to
+    re-run this phase against a healthy provider. When the provider is degraded
+    on entry we therefore arm a one-shot replay of this same phase on the heal
+    path; the publishes are idempotent (each searches + deletes its prior card
+    before rewriting), so replaying is safe whether or not the first pass
+    reached a durable engine. ``replay=True`` marks the re-run so it does not
+    arm another.
     """
     import functools
+
+    provider = getattr(app.state, "memory_provider", None)
+    degraded_on_entry = bool(getattr(provider, "degraded", False))
 
     from hal0.agents.hermes_provision import (
         BootstrapState,
@@ -2086,6 +2122,35 @@ async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
             )
     except Exception as exc:  # pragma: no cover — defensive, must never block boot
         log.warning("brain_lane.self_report_failed", error=str(exc))
+
+    # #1897: the writes above went to a volatile fallback — owe a replay.
+    if replay or not degraded_on_entry:
+        return
+    add_heal_hook = getattr(provider, "add_heal_hook", None)
+    if add_heal_hook is None:
+        # Deliberate [memory].engine = "pgvector", or memory disabled: no
+        # durable engine is ever coming, so there is nothing to replay onto.
+        log.warning(
+            "brain_lane.degraded_writes_volatile",
+            detail="brain-lane publishes accepted by a volatile provider with no self-heal "
+            "shell — the agents dataset will not survive a restart",
+        )
+        return
+    if add_heal_hook(functools.partial(_boot_brain_lane, app, ctx, replay=True)):
+        log.warning(
+            "brain_lane.degraded_replay_armed",
+            detail="brain-lane publishes landed in the volatile pgvector fallback — "
+            "queued for replay once the durable memory engine heals",
+        )
+    else:
+        # The provider healed while this phase was mid-flight, after its heal
+        # hooks were drained: nothing would ever run our replay. Do it inline.
+        log.warning(
+            "brain_lane.degraded_replay_inline",
+            detail="memory provider healed mid-phase — replaying the brain-lane "
+            "publishes against the durable engine now",
+        )
+        await _boot_brain_lane(app, ctx, replay=True)
 
 
 @asynccontextmanager

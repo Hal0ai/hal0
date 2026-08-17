@@ -7,6 +7,8 @@ factory that the one construction site in ``api/__init__.py`` calls.
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -61,16 +63,64 @@ class SelfHealingMemoryProvider:
     polls :meth:`try_heal` until the durable engine answers. The swap is a
     single attribute rebind, so every captured reference — closures
     included — recovers at once.
+
+    Rebinding the delegate does NOT recover the writes that were accepted by
+    the volatile fallback while it was live (#1897): they are gone, and the
+    engine that just came up has never seen them. Callers that issued such
+    writes — hal0-api's own boot phases are the ones that always do, because
+    they run inside the degrade window by construction — register a replay
+    with :meth:`add_heal_hook`; the lifespan's re-probe loop drains them via
+    :meth:`run_heal_hooks` right after a successful swap.
     """
 
     def __init__(self, provider: MemoryProvider, cfg: Any) -> None:
         self._target = provider
         self._cfg = cfg
+        self._heal_hooks: list[Callable[[], Any]] = []
+        self._healed = False
 
     @property
     def target(self) -> Any:
         """The current delegate (tests introspect which side is live)."""
         return self._target
+
+    @property
+    def healed(self) -> bool:
+        """True once the durable engine has been swapped in."""
+        return self._healed
+
+    def add_heal_hook(self, hook: Callable[[], Any]) -> bool:
+        """Register a replay to run once the durable engine is swapped in.
+
+        The hook may be sync or return an awaitable; it runs on the event
+        loop in :meth:`run_heal_hooks`, and is dropped after one run (a
+        replay must not re-arm itself).
+
+        Returns ``False`` — and registers nothing — when the provider has
+        ALREADY healed, because that heal's hooks were drained before this
+        call. The caller owns running its own replay in that case; a hook
+        queued after the drain would never fire.
+        """
+        if self._healed:
+            return False
+        self._heal_hooks.append(hook)
+        return True
+
+    async def run_heal_hooks(self) -> None:
+        """Run + clear every hook armed for this heal, best-effort.
+
+        A replay that raises is logged and skipped: recovering the agents
+        dataset must never take down the process that just recovered its
+        memory engine.
+        """
+        hooks, self._heal_hooks = self._heal_hooks, []
+        for hook in hooks:
+            try:
+                result = hook()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                log.warning("hal0.memory.heal_hook_failed", error=str(exc))
 
     def try_heal(self) -> bool:
         """One re-probe attempt; True once the durable engine is live.
@@ -80,6 +130,7 @@ class SelfHealingMemoryProvider:
         the probe is synchronous I/O.
         """
         if not getattr(self._target, "degraded", False):
+            self._healed = True
             return True
         try:
             candidate = provider_from_config(self._cfg)
@@ -89,6 +140,7 @@ class SelfHealingMemoryProvider:
         if getattr(candidate, "degraded", False):
             return False
         self._target = candidate
+        self._healed = True
         log.warning(
             "hal0.memory.provider_healed",
             detail="hindsight engine recovered — swapped out the degraded pgvector fallback",
