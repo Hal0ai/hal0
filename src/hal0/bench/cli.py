@@ -548,6 +548,10 @@ def cmd_history(args: argparse.Namespace) -> int:
     rows = store.history(cell_key=args.cell, model=args.model, limit=args.limit)
     if args.json:
         print(json.dumps(rows, indent=2))
+    elif not rows:
+        # Same "empty table" vs. "nothing has ever run" ambiguity as
+        # cmd_results (#1796) — say so instead of printing nothing (#1904).
+        print("no records")
     else:
         for r in rows:
             print(f"  {r['ts']}  {r['model_id']:40s} {r['decode_ts_med']}")
