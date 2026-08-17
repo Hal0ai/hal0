@@ -416,8 +416,20 @@ def _backend_variants(entry: Any) -> list[str]:
             # Llama.cpp-compatible — fan out to every GPU/CPU backend
             # the host actually advertises so the picker shows what's
             # really runnable here.
+            #
+            # ROCm FIRST, and gpu-vulkan is SUPPRESSED entirely on a host
+            # that advertises gpu-rocm (#1888): both GPU devices run the same
+            # ROCmFPX runner image for llama.cpp, and that image's Vulkan
+            # backend emits invalid tokens for every model. Offering it in the
+            # picker would let an operator choose a lane whose slot reads
+            # ready, serves HTTP 200 and returns garbage. gpu-vulkan survives
+            # for the non-llama runtimes below (kokoro / whisper.cpp /
+            # ComfyUI), which run their own genuinely-Vulkan images.
             host_backends = {b["id"] for b in available_backends()}
-            for candidate in ("gpu-vulkan", "gpu-rocm", "cpu"):
+            candidates = (
+                ("gpu-rocm", "cpu") if "gpu-rocm" in host_backends else ("gpu-vulkan", "cpu")
+            )
+            for candidate in candidates:
                 if candidate in host_backends and candidate not in out:
                     out.append(candidate)
         elif low in {"rocm", "gpu-rocm"}:

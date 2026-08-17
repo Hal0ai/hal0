@@ -78,6 +78,7 @@ from hal0.providers._gpu import (
     gpu_visibility_env,
     is_nvidia_gpu_device,
     nvidia_cdi_devices,
+    require_kfd_for_gpu_slot,
     resolve_gpu_device_paths,
     resolve_gpu_group_ids,
 )
@@ -2319,10 +2320,21 @@ class ContainerProvider(Provider):
 
         Single launch path: unit text comes from the one renderer
         :meth:`_render_quadlet_text` (shared with the update-time re-render), and
-        this method layers on the install-only steps — the NPU loud-fail guard
-        plus writing the Quadlet file and starting the service.
+        this method layers on the install-only steps — the NPU and ROCm
+        loud-fail guards plus writing the Quadlet file and starting the service.
         """
         token = slot_instance_token(slot_cfg)
+
+        # Loud-fail for AMD-GPU llama.cpp slots with no /dev/kfd: the runner
+        # image would silently fall back to its Vulkan backend, which emits
+        # invalid tokens for every model while every health surface reads
+        # green (#1888). Enforced HERE (the load path) rather than in
+        # ``container_spec`` so unit rendering, previews and status renders
+        # stay host-independent.
+        require_kfd_for_gpu_slot(
+            str(slot_cfg.get("name", "") or token),
+            device=str(slot_cfg.get("device", "") or ""),
+        )
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
         # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are

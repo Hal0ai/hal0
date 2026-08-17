@@ -158,7 +158,14 @@ def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list
 # hal0 /api/models backend token -> benchlab lane token. The registry reports a
 # model's runner backend as "vulkan"/"rocm"; benchlab's lanes are "vulkan_radv"/
 # "rocm" (the lane names harness.lane_specs() defines).
-_BACKEND_TO_LANE = {"vulkan": "vulkan_radv", "vulkan_radv": "vulkan_radv", "rocm": "rocm"}
+#
+# #1888: the registry's "vulkan" hint now resolves to the **rocm** lane. Both
+# GPU lanes share the unified ROCmFPX runner image, and llama.cpp runs ROCm on
+# it whenever /dev/kfd is visible — so a "vulkan"-labelled model was already
+# executing on ROCm in every serving path, and benching it on `-dev Vulkan0`
+# measured a backend that emits invalid tokens. An explicit "vulkan_radv"
+# still resolves to itself so a deliberate opt-in comparison remains possible.
+_BACKEND_TO_LANE = {"vulkan": "rocm", "vulkan_radv": "vulkan_radv", "rocm": "rocm"}
 
 
 def _model_caps(m: dict[str, Any]) -> set[str]:

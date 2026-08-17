@@ -190,7 +190,10 @@ async def _create_missing_slots(
     for entry in cfg.slots:
         if not entry.model or _slot_toml_exists(entry.slot):
             continue
-        device = entry.device or "gpu-vulkan"
+        # #1888: an entry with no device lands on the ROCm lane, not Vulkan —
+        # llama.cpp slots run the ROCmFPX runner image on both GPU devices and
+        # that image's Vulkan backend emits invalid tokens for every model.
+        device = entry.device or "gpu-rocm"
         profile = entry.profile or DEVICE_TO_DEFAULT_PROFILE.get(device, "")
         # spec-hw-slot-ownership §1: vision/mtp/enable_thinking are model-owned
         # typed capabilities, so a stack-created slot must not be born carrying

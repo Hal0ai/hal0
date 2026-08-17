@@ -102,6 +102,14 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
     # FP4 signal; compute_capable means a ROCm/CUDA runtime was detected.
     if hw.platform == "strix-halo" or any(g.compute_capable for g in hw.gpus):
         return "gpu-rocm"
+    # AMD without ROCm compute is NOT a Vulkan lane: llama.cpp slots run the
+    # ROCmFPX runner image on both GPU devices, and that image's Vulkan
+    # backend emits invalid tokens for every model (#1888). CPU is the only
+    # honest fallback for AMD here. Non-AMD vulkan-capable GPUs (Intel iGPU,
+    # NVIDIA without CDI) keep the Vulkan lane — the defect is characterised
+    # on the AMD/HIP build; see the PR for the open question.
+    if any(g.vendor == "amd" for g in hw.gpus):
+        return "cpu"
     if any(g.vulkan_capable for g in hw.gpus):
         return "gpu-vulkan"
     return "cpu"

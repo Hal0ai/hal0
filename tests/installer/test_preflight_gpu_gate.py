@@ -29,6 +29,7 @@ PREFLIGHT = Path(__file__).resolve().parents[2] / "installer" / "lib" / "preflig
 RC_OK = 0
 RC_BROKEN_GID = 3
 RC_NO_DEVICE = 4
+RC_NO_KFD = 5
 
 # A gid with no matching group on any sane host — forces "maps to NO group".
 UNMAPPED_GID = "61999"
@@ -48,7 +49,10 @@ def _run_gpu_gate(env_overrides: dict[str, str]) -> int:
         "preflight_gpu >/dev/null 2>&1 || rc=$?\n"
         "exit $rc\n"
     )
-    env = {**os.environ, **env_overrides}
+    # HAL0_GPU_AMD_OVERRIDE defaults OFF here so the ROCm-compute check (#1888)
+    # stays hermetic: the box running the suite may itself be an AMD LXC with
+    # (or without) a real /dev/kfd. Tests that exercise that check set it.
+    env = {**os.environ, "HAL0_GPU_AMD_OVERRIDE": "0", **env_overrides}
     proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
     return proc.returncode
 
@@ -235,6 +239,80 @@ def test_doctor_mode_no_device_lxc_is_soft(tmp_path: Path) -> None:
         {
             "HAL0_GPU_DRI_GLOB": str(tmp_path / "NONE*"),
             "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+        }
+    )
+    assert rc == RC_OK
+
+
+# ── #1888: /dev/kfd is required on AMD ───────────────────────────────────────
+# The release-pinned ROCmFPX runner is one HIP+Vulkan build: llama.cpp runs
+# ROCm when /dev/kfd is visible and SILENTLY falls back to that image's Vulkan
+# backend when it is not — and that backend emits invalid tokens for every
+# model, at full nominal speed, while every health surface reads green. A
+# render node without /dev/kfd is therefore not a working GPU box, and the
+# gate must say so instead of installing "successfully".
+
+
+def test_gate_amd_render_node_without_kfd_stops(render_glob: str, tmp_path: Path) -> None:
+    rc = _run_gpu_gate(
+        {
+            "HAL0_GPU_GATE": "1",
+            "HAL0_GPU_DRI_GLOB": render_glob,
+            "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+            "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+            "HAL0_GPU_AMD_OVERRIDE": "1",
+            "HAL0_GPU_KFD_PATH": str(tmp_path / "no-such-kfd"),
+        }
+    )
+    assert rc == RC_NO_KFD
+
+
+def test_gate_amd_render_node_with_kfd_proceeds(render_glob: str, tmp_path: Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    rc = _run_gpu_gate(
+        {
+            "HAL0_GPU_GATE": "1",
+            "HAL0_GPU_DRI_GLOB": render_glob,
+            "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+            "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+            "HAL0_GPU_AMD_OVERRIDE": "1",
+            "HAL0_GPU_KFD_PATH": str(kfd),
+        }
+    )
+    assert rc == RC_OK
+
+
+def test_gate_non_amd_gpu_without_kfd_proceeds(render_glob: str, tmp_path: Path) -> None:
+    """The check is AMD-scoped: an NVIDIA/Intel box has no /dev/kfd to forward
+    and must not be blocked by it."""
+    rc = _run_gpu_gate(
+        {
+            "HAL0_GPU_GATE": "1",
+            "HAL0_GPU_DRI_GLOB": render_glob,
+            "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+            "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+            "HAL0_GPU_AMD_OVERRIDE": "0",
+            "HAL0_GPU_KFD_PATH": str(tmp_path / "no-such-kfd"),
+        }
+    )
+    assert rc == RC_OK
+
+
+def test_doctor_mode_missing_kfd_is_soft(render_glob: str, tmp_path: Path) -> None:
+    """`hal0 doctor` (no HAL0_GPU_GATE) stays advisory-only — it reports the
+    missing compute node but never aborts the report."""
+    rc = _run_gpu_gate(
+        {
+            "HAL0_GPU_DRI_GLOB": render_glob,
+            "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+            "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+            "HAL0_GPU_AMD_OVERRIDE": "1",
+            "HAL0_GPU_KFD_PATH": str(tmp_path / "no-such-kfd"),
         }
     )
     assert rc == RC_OK

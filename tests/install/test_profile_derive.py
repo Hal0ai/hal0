@@ -40,10 +40,18 @@ def test_chat_on_rocm_box_picks_rocm():
     assert derive_profile("chat", "gpu-rocm") == "chat"
 
 
-def test_chat_on_vulkan_only_box_picks_vulkan():
+def test_chat_on_amd_box_without_rocm_picks_cpu_not_vulkan():
+    """#1888: an AMD GPU with no ROCm compute is NOT a Vulkan lane.
+
+    llama.cpp slots run the unified ROCmFPX runner image on every AMD GPU
+    device, and that image's Vulkan backend emits invalid tokens for every
+    model. Deriving ``gpu-vulkan`` here is what seeded a fresh unprivileged
+    install with three slots that served garbage while reading green — CPU is
+    the only honest fallback.
+    """
     hw = _hw(compute=False, vulkan=True)
-    assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
-    assert derive_profile("chat", "gpu-vulkan") == "chat"
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
+    assert derive_profile("chat", "cpu") == "cpu-chat"
 
 
 def test_embed_on_rocm_box_uses_embed_profile():
