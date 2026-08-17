@@ -167,15 +167,37 @@ def is_alias(model_id: str) -> bool:
 
 _DONE_SENTINEL = "[DONE]"
 
+# hal0's stall-guard extension field (see hal0.dispatcher.router). The gateway
+# stamps it on the terminal chunk when it cuts off a never-terminating upstream
+# so the consumer can name the cutoff instead of reporting a clean stop.
+_STALL_FIELD = "x_hal0_stall"
 
-def iter_sse_data(lines: Iterable[bytes | str]) -> Iterator[str]:
+# Consumer-side ceiling on SSE events per turn (#1893). A pathological upstream
+# that the gateway's guard somehow does not bound (a direct slot connection, a
+# gateway on an older build) still cannot spin this consumer forever.
+DEFAULT_MAX_SSE_EVENTS = 200_000
+
+
+def iter_sse_data(
+    lines: Iterable[bytes | str],
+    *,
+    max_events: int | None = DEFAULT_MAX_SSE_EVENTS,
+) -> Iterator[str]:
     """Yield the ``data:`` payloads of an SSE stream.
 
     Tolerates gaps: blank keep-alive lines and ``:``-comment heartbeats are
     skipped, non-``data:`` fields are ignored, and the terminal ``[DONE]``
     sentinel stops iteration.
+
+    ``max_events`` bounds how many payloads are consumed before iteration
+    stops regardless of what the upstream is doing — a never-terminating
+    stream must never become an unbounded loop here (#1893). Pass ``None``
+    to disable the ceiling.
     """
+    emitted = 0
     for raw in lines:
+        if max_events is not None and emitted >= max_events:
+            return
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
         line = line.rstrip("\r\n")
         if not line or line.startswith(":"):
@@ -185,12 +207,17 @@ def iter_sse_data(lines: Iterable[bytes | str]) -> Iterator[str]:
         payload = line[len("data:") :].strip()
         if payload == _DONE_SENTINEL:
             return
+        emitted += 1
         yield payload
 
 
-def parse_sse_chunks(lines: Iterable[bytes | str]) -> Iterator[dict[str, Any]]:
+def parse_sse_chunks(
+    lines: Iterable[bytes | str],
+    *,
+    max_events: int | None = DEFAULT_MAX_SSE_EVENTS,
+) -> Iterator[dict[str, Any]]:
     """Parse SSE ``data:`` payloads into chunk dicts, dropping malformed ones."""
-    for payload in iter_sse_data(lines):
+    for payload in iter_sse_data(lines, max_events=max_events):
         try:
             obj = json.loads(payload)
         except (ValueError, TypeError):
@@ -206,14 +233,26 @@ def assemble_stream(chunks: Iterable[dict[str, Any]]) -> dict[str, Any]:
     across chunks, preserves ``reasoning_content`` verbatim, and reassembles
     indexed ``tool_calls`` with gap tolerance (missing / non-contiguous /
     repeated indices are folded by index, then emitted in index order).
+
+    Also reports whether the turn actually *finished* (#1893). ``stalled`` is
+    True when the stream ended without any ``finish_reason`` — the shape a
+    never-terminating upstream produces once something bounds it — or when
+    hal0's gateway stamped its ``x_hal0_stall`` stall-guard extension on the
+    terminal chunk. ``stall`` carries the gateway's structured reason when
+    there is one. Callers must render a cutoff notice rather than presenting
+    a stalled turn as a clean, complete answer.
     """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
     role: str | None = None
     finish_reason: str | None = None
+    stall: dict[str, Any] | None = None
 
     for chunk in chunks:
+        raw_stall = chunk.get(_STALL_FIELD)
+        if isinstance(raw_stall, dict):
+            stall = dict(raw_stall)
         for choice in chunk.get("choices") or []:
             if not isinstance(choice, dict):
                 continue
@@ -249,7 +288,14 @@ def assemble_stream(chunks: Iterable[dict[str, Any]]) -> dict[str, Any]:
         message["reasoning_content"] = "".join(reasoning_parts)
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-    return {"message": message, "finish_reason": finish_reason}
+    result: dict[str, Any] = {
+        "message": message,
+        "finish_reason": finish_reason,
+        "stalled": stall is not None or finish_reason is None,
+    }
+    if stall is not None:
+        result["stall"] = stall
+    return result
 
 
 # ── The profile ────────────────────────────────────────────────────────────

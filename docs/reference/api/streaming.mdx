@@ -16,11 +16,12 @@ hal0's streaming forward path in the dispatcher (`hal0.dispatcher.router`).
   specifically so a connect failure surfaces as a clean `502 UpstreamUnavailable`
   rather than failing partway through an already-started response generator.
 - The client response is a Starlette `StreamingResponse` whose body iterator does a
-  **raw byte passthrough** — `async for chunk in resp.aiter_raw(): yield chunk`. hal0
+  **raw byte passthrough** — every upstream chunk is yielded unmodified. hal0
   does **not** parse or re-emit SSE events itself; the OpenAI-standard
   `data: {...}\n\n` ... `data: [DONE]\n\n` framing and the `text/event-stream`
   content-type come from whatever upstream is serving the slot (llama-server, FLM, or
-  a remote provider), copied through verbatim.
+  a remote provider), copied through verbatim. The one exception is the stall guard
+  below, which may **append** a terminal chunk after cutting a stream off.
 - Status code and `content-type` on the client response are copied verbatim from the
   upstream response.
 
@@ -34,6 +35,45 @@ apply — only the underlying HTTP client's `connect` (5.0s), `write` (10.0s), a
 `pool` (5.0s) timeouts constrain the streaming path's connection setup. There is no
 separate configurable read timeout once bytes start flowing.
 </Aside>
+
+## Stall guard
+
+Because no read timeout applies to an open stream, a pathological upstream that
+never terminates (`finish_reason` forever `null`) would be relayed forever, leaving
+the client — Hermes `--cli`, the dashboard, any OpenAI-compatible caller — waiting
+on a socket that never closes, with no output and no diagnostic. Two bounds prevent
+that:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `[dispatcher].stream_total_timeout_s` | `900.0` | Max wall clock for one relayed stream |
+| `[dispatcher].stream_idle_timeout_s` | `300.0` | Max gap between two upstream chunks |
+
+Either bound tripping closes the upstream stream and logs
+`dispatch.stream_stall_guard_tripped` (with `reason`, `elapsed_s`, and the upstream
+name). On a `text/event-stream` response hal0 then appends a final
+`chat.completion.chunk` before `data: [DONE]`:
+
+```json
+{
+  "id": "hal0-stall-guard",
+  "object": "chat.completion.chunk",
+  "choices": [
+    {
+      "index": 0,
+      "delta": { "role": "assistant", "content": "\n\n[hal0] stall guard: ..." },
+      "finish_reason": "length"
+    }
+  ],
+  "x_hal0_stall": { "reason": "total", "elapsed_s": 900.0, "upstream": "llm" }
+}
+```
+
+The notice is rendered as ordinary assistant content so the operator sees the cutoff,
+`finish_reason` is the standard `"length"` so strict clients terminate cleanly, and
+the precise cause lives in the `x_hal0_stall` extension. Non-SSE streaming bodies
+(audio, images) are cut off without any injected frame. Set either key to `0` to
+disable that bound.
 
 ## Slot state during a stream
 

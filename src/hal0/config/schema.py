@@ -2178,6 +2178,29 @@ class DispatcherConfig(BaseModel):
             "Streaming paths are unaffected. Range 30-600."
         ),
     )
+    stream_total_timeout_s: float = Field(
+        default=900.0,
+        ge=0.0,
+        le=86400.0,
+        description=(
+            "Stall guard: max wall-clock duration of a relayed upstream stream "
+            "before hal0 cuts it off and emits a terminal diagnostic chunk. "
+            "httpx applies no read timeout once a stream is open, so without "
+            "this a never-terminating upstream hangs the client forever (#1893). "
+            "0 disables the bound."
+        ),
+    )
+    stream_idle_timeout_s: float = Field(
+        default=300.0,
+        ge=0.0,
+        le=86400.0,
+        description=(
+            "Stall guard: max gap between two chunks of a relayed upstream "
+            "stream before hal0 cuts it off. Must stay above the slowest "
+            "expected prompt-processing silence on a cold CPU slot. "
+            "0 disables the bound."
+        ),
+    )
     prefetch_parallel_cap: int = Field(
         default=4,
         ge=1,

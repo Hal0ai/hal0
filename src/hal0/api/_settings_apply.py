@@ -120,6 +120,9 @@ SERVICE_HAL0_API: str = "hal0-api"
 #                                            Router at create_app time,
 #                                            same as the other two
 #                                            dispatcher knobs above).
+#   * ``[dispatcher].{stream_total_timeout_s, → service-restart[hal0-api]
+#     stream_idle_timeout_s}``                (stall-guard bounds, same
+#                                            create_app-time wiring).
 #   * ``[memory].unified_bank``             → service-restart[hal0-api]
 #                                            (constructor arg to
 #                                            HindsightProvider, built once
@@ -242,6 +245,14 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     },
     # [dispatcher] — same create_app-time wiring as the other two entries.
     "dispatcher.direct_read_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "dispatcher.stream_total_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "dispatcher.stream_idle_timeout_s": {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
     },

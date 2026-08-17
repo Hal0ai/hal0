@@ -71,7 +71,16 @@ Root model `Hal0Config`, `extra="allow"`.
 |---|---|---|---|
 | `prefetch_timeout_s` | float | `8.0` | `> 0.0` |
 | `direct_read_timeout_s` | float | `300.0` | `30.0-600.0` |
+| `stream_total_timeout_s` | float | `900.0` | `0.0-86400.0` (`0` disables) |
+| `stream_idle_timeout_s` | float | `300.0` | `0.0-86400.0` (`0` disables) |
 | `prefetch_parallel_cap` | int | `4` | `>= 1` |
+
+`stream_total_timeout_s` / `stream_idle_timeout_s` are the streaming **stall
+guard**: no read timeout applies once a stream is open, so a never-terminating
+upstream would otherwise be relayed forever. When either bound trips, hal0
+closes the upstream stream and — on `text/event-stream` responses — appends one
+terminal chunk carrying a human-readable notice, `finish_reason: "length"`, and
+an `x_hal0_stall` object naming the reason, followed by `data: [DONE]`.
 
 ### `[telemetry]`
 

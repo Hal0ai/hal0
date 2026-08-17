@@ -136,6 +136,28 @@ _DISPATCHER_MAX_KEEPALIVE: int = 16
 # unaffected — the read timeout is not applied once the stream is open).
 _DIRECT_READ_TIMEOUT_S: float = 60.0
 
+# Streaming stall guard (#1893).  httpx applies NO read timeout once a stream
+# is open, so a never-terminating upstream — the shape the Vulkan garbage-token
+# defect produces, ``finish_reason`` forever null — used to be relayed forever:
+# the client (Hermes ``--cli``, the dashboard, any OpenAI-compat caller) sat on
+# an open socket with no output and no diagnostic for as long as the operator
+# waited.  Two independent bounds close that:
+#
+#   * total   — wall clock from first byte of the response to end of stream.
+#   * idle    — the gap between two consecutive upstream chunks.
+#
+# Both are deliberately generous: prompt processing on a cold CPU-only slot is
+# genuinely silent for minutes, and a long agentic turn genuinely runs for
+# minutes.  The guard exists to convert "hangs forever" into "ends with a named
+# reason", not to police slow-but-working inference.  ``0`` disables a bound.
+_STREAM_TOTAL_TIMEOUT_S: float = 900.0
+_STREAM_IDLE_TIMEOUT_S: float = 300.0
+
+# Content types that get the operator-visible terminal frame.  Anything else
+# (binary audio, image bytes) is cut off silently — injecting SSE into a
+# non-SSE body would corrupt it.
+_SSE_CONTENT_TYPE = "text/event-stream"
+
 # Outgoing upstream path rewrites applied before forwarding.
 # Key: incoming /v1/* path (as-is from the client).
 # Value: replacement path to use in the upstream URL.
@@ -380,6 +402,11 @@ class Dispatcher:
                             (PLAN.md §5 Tier 2 — was hardcoded 4s, now 8s).
         direct_read_timeout_s: Non-streaming upstream read timeout in seconds.
                             Configurable via [dispatcher].direct_read_timeout_s.
+        stream_total_timeout_s: Max wall-clock duration of a relayed stream
+                            before the stall guard cuts it off (#1893).
+                            ``0`` disables the bound.
+        stream_idle_timeout_s: Max gap between two upstream chunks before the
+                            stall guard cuts the stream off.  ``0`` disables.
         prefetch_parallel_cap: Max concurrent cold-prefetch legs
                             ([dispatcher].prefetch_parallel_cap, default 4).
         cached_models:      Returns the cached /v1/models for an upstream.
@@ -395,6 +422,8 @@ class Dispatcher:
         *,
         prefetch_timeout_s: float = 8.0,  # TIER2 — configurable (was hardcoded 4s)
         direct_read_timeout_s: float = _DIRECT_READ_TIMEOUT_S,
+        stream_total_timeout_s: float = _STREAM_TOTAL_TIMEOUT_S,
+        stream_idle_timeout_s: float = _STREAM_IDLE_TIMEOUT_S,
         prefetch_parallel_cap: int = 4,  # max concurrent cold-prefetch legs
         cached_models: CachedModelsFn | None = None,
         is_online: IsOnlineFn | None = None,
@@ -420,6 +449,11 @@ class Dispatcher:
         self._owns_http_client: bool = http_client is None
         # Non-streaming read timeout — configurable via TOML (default 300s).
         self._direct_read_timeout_s: float = direct_read_timeout_s
+        # Streaming stall guard bounds (#1893) — configurable via TOML.
+        # Negative is coerced to 0 ("disabled") so a bad value can never make
+        # every stream cut off instantly.
+        self._stream_total_timeout_s: float = max(0.0, stream_total_timeout_s)
+        self._stream_idle_timeout_s: float = max(0.0, stream_idle_timeout_s)
         # SlotManager — when supplied, forward() wraps slot-kind calls in
         # SlotManager.serving() so the slot transitions READY/IDLE →
         # SERVING → READY around each /v1 request (task #10 SERVING).
@@ -1212,19 +1246,90 @@ class Dispatcher:
                 },
             ) from exc
 
-        async def _iter() -> AsyncIterator[bytes]:
-            try:
-                async for chunk in resp.aiter_raw():
-                    yield chunk
-            finally:
-                await resp.aclose()
-
         return StreamingResponse(
-            _iter(),
+            self._guarded_stream(resp, call),
             status_code=resp.status_code,
             headers=_filter_response_headers(resp.headers),
             media_type=resp.headers.get("content-type"),
         )
+
+    async def _guarded_stream(
+        self,
+        resp: httpx.Response,
+        call: UpstreamCall,
+    ) -> AsyncIterator[bytes]:
+        """Relay ``resp`` to the client under the stall guard (#1893).
+
+        Chunks pass through byte-for-byte.  What changes is that the relay is
+        now *bounded*: it ends when the upstream ends, when the total
+        wall-clock budget is spent, or when the gap since the last chunk
+        exceeds the idle budget — whichever comes first.  A stream that trips
+        a bound is closed and, if it is an OpenAI-compatible SSE stream,
+        terminated with one chunk naming the cutoff plus ``data: [DONE]``, so
+        the client's stream loop exits cleanly with the partial output it
+        already received instead of waiting forever on a socket that will
+        never close.
+        """
+        started = time.monotonic()
+        source = resp.aiter_raw().__aiter__()
+        stall: str | None = None
+        try:
+            while True:
+                budget = self._next_chunk_budget(started)
+                if budget is not None and budget <= 0.0:
+                    stall = "total"
+                    break
+                try:
+                    if budget is None:
+                        chunk = await source.__anext__()
+                    else:
+                        chunk = await asyncio.wait_for(source.__anext__(), timeout=budget)
+                except StopAsyncIteration:
+                    return
+                except TimeoutError:
+                    stall = self._stall_reason(started)
+                    break
+                yield chunk
+        finally:
+            await resp.aclose()
+
+        elapsed = round(time.monotonic() - started, 3)
+        log.warning(
+            "dispatch.stream_stall_guard_tripped",
+            upstream=call.upstream_name,
+            target=call.target_url,
+            reason=stall,
+            elapsed_s=elapsed,
+            total_timeout_s=self._stream_total_timeout_s,
+            idle_timeout_s=self._stream_idle_timeout_s,
+        )
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if content_type.startswith(_SSE_CONTENT_TYPE):
+            yield _stall_sse_frames(
+                reason=stall or "total",
+                elapsed_s=elapsed,
+                upstream=call.upstream_name,
+                total_timeout_s=self._stream_total_timeout_s,
+                idle_timeout_s=self._stream_idle_timeout_s,
+            )
+
+    def _next_chunk_budget(self, started: float) -> float | None:
+        """Seconds to wait for the next chunk, or ``None`` when unbounded."""
+        idle = self._stream_idle_timeout_s or None
+        if not self._stream_total_timeout_s:
+            return idle
+        remaining_total = self._stream_total_timeout_s - (time.monotonic() - started)
+        if idle is None:
+            return remaining_total
+        return min(idle, remaining_total)
+
+    def _stall_reason(self, started: float) -> str:
+        """Classify which bound a timed-out read hit."""
+        if not self._stream_total_timeout_s:
+            return "idle"
+        if (time.monotonic() - started) >= self._stream_total_timeout_s:
+            return "total"
+        return "idle"
 
     # ── internals ────────────────────────────────────────────────────────
 
@@ -1521,6 +1626,69 @@ def _join_url(upstream_url: str, request_path: str) -> str:
 def _filter_response_headers(headers: httpx.Headers) -> dict[str, str]:
     """Drop hop-by-hop and length headers so Starlette can recompute them."""
     return {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS}
+
+
+_STALL_MESSAGES = {
+    "total": (
+        "upstream stream exceeded the {total_timeout_s:g}s total budget "
+        "without terminating (stall guard)"
+    ),
+    "idle": ("upstream stream sent nothing for {idle_timeout_s:g}s (stall guard)"),
+}
+
+
+def _stall_sse_frames(
+    *,
+    reason: str,
+    elapsed_s: float,
+    upstream: str,
+    total_timeout_s: float,
+    idle_timeout_s: float,
+) -> bytes:
+    """Build the terminal SSE frames for a stall-guard cutoff (#1893).
+
+    Shaped as a normal ``chat.completion.chunk`` so every OpenAI-compatible
+    client handles it without special-casing:
+
+    * ``delta.content`` carries a human-readable line — the operator sees
+      *something* rather than a silent terminal, which is the whole point.
+    * ``finish_reason`` is ``"length"``, the closest standard enum member for
+      "cut off at a limit"; clients that branch on the enum terminate cleanly.
+      The precise cause lives in the ``x_hal0_stall`` extension so nothing is
+      lost to that approximation.
+    * ``data: [DONE]`` ends the stream loop for clients that wait for the
+      sentinel rather than for the socket to close.
+    """
+    detail = _STALL_MESSAGES.get(reason, _STALL_MESSAGES["total"]).format(
+        total_timeout_s=total_timeout_s,
+        idle_timeout_s=idle_timeout_s,
+    )
+    text = (
+        f"\n\n[hal0] stall guard: {detail} after {elapsed_s:g}s "
+        f"(upstream {upstream!r}). Output above is partial."
+    )
+    chunk = {
+        "id": "hal0-stall-guard",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": text},
+                "finish_reason": "length",
+            }
+        ],
+        "x_hal0_stall": {
+            "reason": reason,
+            "elapsed_s": elapsed_s,
+            "upstream": upstream,
+            "total_timeout_s": total_timeout_s,
+            "idle_timeout_s": idle_timeout_s,
+            "detail": detail,
+        },
+    }
+    return (f"data: {json.dumps(chunk, separators=(',', ':'))}\n\ndata: [DONE]\n\n").encode()
 
 
 __all__ = [
