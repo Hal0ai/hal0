@@ -102,6 +102,7 @@ def list_capabilities() -> None:
     table.add_column("Provider")
     table.add_column("Model")
     table.add_column("Enabled")
+    table.add_column("Status")
     for slot, children in sorted(selections.items()):
         if not isinstance(children, dict):
             continue
@@ -116,6 +117,7 @@ def list_capabilities() -> None:
                 str(sel.get("provider") or "—"),
                 str(sel.get("model") or "—"),
                 "[green]yes[/green]" if enabled else "[dim]no[/dim]",
+                str(sel.get("status") or "—"),
             )
     console.print(table)
 

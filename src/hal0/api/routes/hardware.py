@@ -24,6 +24,7 @@ from hal0.config import paths
 from hal0.config.loader import load_hardware_info
 from hal0.hardware import gpu_view
 from hal0.hardware.gpu_view import GPUMemorySample
+from hal0.hardware.uptime import read_uptime_s
 from hal0.providers import podman_introspect
 from hal0.providers.podman_introspect import PodmanImagesResult
 
@@ -209,25 +210,40 @@ async def _gpu_sample(request: Request) -> GPUMemorySample | None:
         return None
 
 
+def _with_live_uptime(flat: dict[str, Any]) -> dict[str, Any]:
+    """Overwrite ``uptime_s`` with a fresh ``/proc/uptime`` read.
+
+    #1905: ``hardware.json``'s ``uptime_s`` is frozen at the last ``hal0
+    probe`` write — on a box that's never re-probed since an upgrade it
+    can be off by weeks (under- or over-reporting). The dashboard renders
+    this as if it were live, so every serve of this shape must recompute
+    it. The read is a cheap sysfs stat (not the heavy subprocess-fanout
+    probe), so doing it on every request is fine.
+    """
+    flat["uptime_s"] = read_uptime_s()
+    return flat
+
+
 @router.get("/hardware")
 async def get_hardware(request: Request) -> dict[str, Any]:
     """Return cached /etc/hal0/hardware.json, falling back to a fresh probe.
 
     The probe is heavy enough (subprocess fanout) that we prefer the
     cached snapshot; ``POST /api/hardware/probe`` forces a re-run.
+    ``uptime_s`` is always re-read live (#1905) regardless of cache state.
     """
     gpu = await _gpu_sample(request)
     target = paths.hardware_json()
     if target.exists():
         try:
             info = load_hardware_info().model_dump(mode="python")
-            return _flatten_for_ui(info, gpu)
+            return _with_live_uptime(_flatten_for_ui(info, gpu))
         except Exception:
             pass
     # Cache miss → probe now.
     probe = request.app.state.hardware_probe
     info = (await probe.probe_async()).model_dump(mode="python")
-    return _flatten_for_ui(info, gpu)
+    return _with_live_uptime(_flatten_for_ui(info, gpu))
 
 
 @router.post("/hardware/probe")

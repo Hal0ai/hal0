@@ -214,6 +214,14 @@ def _read_uptime_s() -> int:
 
     /proc/uptime is "<uptime_seconds> <idle_seconds>"; we take the first
     float and floor it. The UI formats this into "Nd HH:MM".
+
+    #1905: routes that must re-read uptime live on every request (rather
+    than trust the value cached in ``hardware.json`` at the last ``hal0
+    probe`` write) use :func:`hal0.hardware.uptime.read_uptime_s` instead
+    of this function, to avoid pulling in this module's private GPU/NPU
+    probe internals into the API route layer (#703). This is the same
+    read duplicated locally so this module's own ``_read_text`` test seam
+    keeps working unchanged.
     """
     txt = _read_text(Path("/proc/uptime"))
     if not txt:

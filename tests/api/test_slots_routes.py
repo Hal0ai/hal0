@@ -240,6 +240,31 @@ def test_list_real_wins_on_name_collision(
     assert primaries[0].get("_synthetic") is not True
 
 
+def test_logs_synthetic_hal0_composite_returns_hint_not_404(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """#1905: ``GET /api/slots/hal0/logs`` 404'd with the typed
+    ``slot.not_found`` envelope — identical to a genuinely nonexistent slot
+    name — even though ``hal0`` is a legitimate, listable synthetic
+    composite entry (see ``_UpstreamsWithHal0Composite``). It has no
+    journal of its own, so it should 200 with an explanatory hint instead
+    of looking indistinguishable from a typo.
+    """
+    r = isolated_client.get("/api/slots/hal0/logs")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "hal0"
+    assert body.get("hint")
+
+    # A genuinely unknown slot name must still 404 with the typed envelope.
+    r2 = isolated_client.get("/api/slots/definitely-not-a-slot/logs")
+    assert r2.status_code == 404
+    assert r2.json()["error"]["code"] == "slot.not_found"
+
+
 # ── lifespan auto-register ─────────────────────────────────────────────────
 
 

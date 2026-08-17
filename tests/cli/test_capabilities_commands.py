@@ -125,6 +125,34 @@ def test_list_renders_selections(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "bge-small" in result.output
 
 
+def test_list_renders_status_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1905: the API payload carries a per-selection ``status`` field
+    (e.g. "failed" after a botched apply) that the table used to drop
+    entirely, leaving a failed apply looking identical to a healthy one."""
+    monkeypatch.setattr(cc, "_api_unreachable", lambda _u: False)
+    monkeypatch.setattr(
+        cc,
+        "api_get",
+        lambda path, **_k: {
+            "selections": {
+                "embed": {
+                    "default": {
+                        "backend": "cpu",
+                        "provider": "",
+                        "model": "bge-small",
+                        "enabled": True,
+                        "status": "failed",
+                    }
+                }
+            }
+        },
+    )
+    result = runner.invoke(cc.app, ["list"])
+    assert result.exit_code == 0, result.output
+    assert "Status" in result.output
+    assert "failed" in result.output
+
+
 def test_list_empty_selections(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cc, "_api_unreachable", lambda _u: False)
     monkeypatch.setattr(cc, "api_get", lambda path, **_k: {"selections": {}})

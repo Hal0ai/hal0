@@ -1485,11 +1485,29 @@ async def slot_logs(
     never started, returns an empty string with a hint. The UI tolerates
     that (renders "No logs available") rather than treating it as an error.
     The journalctl tail lives in :func:`hal0.slots.logs.read_tail`.
+
+    #1905: a synthetic upstream entry (e.g. the ``hal0`` composite) isn't
+    a real slot and has no ``hal0-slot@{name}.service`` journal of its
+    own, but it also isn't "not found" — it's a legitimate, listable
+    entry. Distinguish the two: a genuinely unknown name still 404s with
+    the typed ``slot.not_found`` envelope, but a synthetic entry gets a
+    200 with an explanatory hint instead, mirroring how :func:`get_slot`
+    already falls through for its detail view.
     """
     sm = _get_slot_manager(request)
     # Validate slot exists so unknown names get the typed slot.not_found
     # envelope instead of an empty 200.
-    await sm.status(name)
+    try:
+        await sm.status(name)
+    except Exception:
+        for entry in _synthesize_slots_from_upstreams(request):
+            if entry["name"] == name:
+                return {
+                    "name": name,
+                    "logs": "",
+                    "hint": "synthetic composite slot has no journal of its own",
+                }
+        raise
 
     text, hint = await _logs.read_tail(f"hal0-slot@{name}.service", lines, quiet)
     if hint is not None:

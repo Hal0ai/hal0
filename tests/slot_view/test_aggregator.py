@@ -1047,6 +1047,29 @@ class TestSyntheticEntries:
         assert e["model"] == "m-1"
         assert e["_synthetic"] is True
 
+    def test_synthetic_reason_differs_by_kind(self) -> None:
+        """#1905: the local ``hal0`` composite isn't "backed by a remote
+        upstream" — that reason string was copy-pasted onto every synthetic
+        entry regardless of kind, so the hal0 tile lied about why it's
+        synthetic. Only genuinely remote-backed entries get the "install a
+        local slot" reason; the local composite gets its own copy."""
+        upstreams = FakeUpstreams(
+            [
+                SimpleNamespace(name="hal0", kind="slot", url="http://l"),
+                SimpleNamespace(name="haloai", kind="remote", url="http://r"),
+            ]
+        )
+        entries = synthesize_upstream_entries(
+            upstreams,
+            model_cache={},
+            last_used_model={},
+            loaded_models=set(),
+        )
+        by_name = {e["name"]: e for e in entries}
+        assert "remote upstream" not in by_name["hal0"]["_synthetic_reason"]
+        assert "composite" in by_name["hal0"]["_synthetic_reason"].lower()
+        assert "remote upstream" in by_name["haloai"]["_synthetic_reason"]
+
 
 class TestSnapshotComposition:
     async def test_real_slots_win_over_synthetic_on_name_collision(self, no_mem: None) -> None:

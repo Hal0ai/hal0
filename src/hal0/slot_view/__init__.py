@@ -860,7 +860,12 @@ def synthesize_upstream_entries(
                 "last_used_model": last_used_model.get(u.name) or None,
                 "_synthetic": True,
                 "_synthetic_reason": (
-                    "Backed by remote upstream; install a local slot of the same name to take over."
+                    "Composite /v1 endpoint that fronts every chat model — not a lifecycle slot."
+                    if u.kind == "slot"
+                    else (
+                        "Backed by remote upstream; install a local slot of the "
+                        "same name to take over."
+                    )
                 ),
             }
         )

@@ -1354,6 +1354,31 @@ def agent_peers() -> None:
         console.print("[dim]No agent identity cards published yet.[/dim]")
         return
 
+    def _as_dict(value: object) -> dict[str, Any]:
+        """Coerce a metadata sub-field to a dict.
+
+        #1905: on at least one upgraded box, a card's nested metadata
+        fields (``hal0_state``, seen in the wild; ``endpoint`` shares the
+        same storage path) come back from the memory API as a
+        JSON-encoded *string* rather than an already-parsed object —
+        some write path serialized the nested value before persisting it
+        instead of leaving it as a nested JSON object. ``md.get("hal0_state")
+        or {}`` doesn't catch that: a non-empty string is truthy, so it
+        passes straight through and the next ``.get()`` call blows up with
+        ``AttributeError: 'str' object has no attribute 'get'``. Parse it
+        back into a dict here; any other shape (including malformed JSON)
+        degrades to an empty dict so the row still renders with "—".
+        """
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = _json.loads(value)
+            except _json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
     table = Table(title=f"Agent peers ({len(items)})")
     table.add_column("Agent ID", style="bold")
     table.add_column("Display name")
@@ -1361,9 +1386,9 @@ def agent_peers() -> None:
     table.add_column("Endpoint")
     table.add_column("Registered")
     for item in items:
-        md = item.get("metadata") or {} if isinstance(item, dict) else {}
-        endpoint = md.get("endpoint") or {}
-        hal0_state = md.get("hal0_state") or {}
+        md = _as_dict(item.get("metadata") if isinstance(item, dict) else None)
+        endpoint = _as_dict(md.get("endpoint"))
+        hal0_state = _as_dict(md.get("hal0_state"))
         table.add_row(
             str(md.get("agent_id") or "—"),
             str(md.get("display_name") or "—"),
