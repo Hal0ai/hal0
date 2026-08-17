@@ -22,6 +22,249 @@ breaking/migrations as callouts — from the cosign-verified tarball, before
 applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
+## [1.0.0-rc.7] — 2026-08-17
+
+The rc.6 validation sweep ran the fleet again — fresh installs, in-place
+updates, a CPU-only box and a Vulkan-only box — and filed eighteen findings.
+rc.7 closes fourteen of them. The theme this time is silence: a guard that was
+supposed to stop an unservable model from launching had been disarmed on every
+model hal0 installs itself, a memory write that hal0 accepted could be dropped
+without ever telling you, a relayed stream from an upstream provider could hang
+open forever with no error, a chat request aimed at an embedding model came back
+as a bare upstream 500, and a model load could be abandoned seven seconds into a
+three-minute budget with a blank error message.
+
+The GA blocker from the rc.6 sweep is **not** closed here: the Vulkan backend in
+the shipped runner image still emits invalid tokens for every model while every
+health surface reads green (#1888). Read the Known issues section before
+putting an rc.7 box on a Vulkan-only host.
+
+### Highlights
+
+- **Streams from an upstream provider can no longer hang forever.** A relayed
+  chat stream that stopped producing tokens — a provider that wedged mid-answer,
+  a connection that went quiet without closing — used to leave the client
+  waiting indefinitely with no error and no way to tell a slow answer from a
+  dead one. Two bounds now end it: a total wall-clock ceiling and an
+  idle-between-chunks ceiling, both configurable and both settable to `0` to
+  restore the old unbounded behaviour. Tokens already produced still arrive
+  byte-for-byte; on an SSE stream hal0 appends one final chunk explaining which
+  bound tripped, then closes the stream cleanly so the client sees a finished
+  answer rather than a broken pipe (#1893).
+- **Memory writes are no longer silently lost when the store heals itself.** If
+  the durable memory backend was unreachable at boot, hal0 fell back to a
+  volatile in-process store and healed onto the durable one as soon as it came
+  up — but everything written in between was gone for good, with no error at any
+  point. Those writes are now replayed onto the durable store the moment the
+  heal lands, exactly once, and a replay that cannot be completed is logged
+  loudly instead of disappearing (#1897).
+- **A chat request aimed at an embedding or reranking model gets a real answer.**
+  Asking for a chat completion from a model that can only embed or rerank used
+  to be forwarded anyway and came back as the upstream server's raw HTTP 500.
+  hal0 now recognises the mismatch before it calls anything and returns a typed
+  `409` naming the problem (#1894).
+- **Model loads use their full time budget again.** A container that reset the
+  connection mid-probe made hal0 give up on the load about seven seconds in,
+  instead of polling for the full ~180-second window, and stamped the slot
+  `ERROR` with an empty message. The same unhandled failure could turn a
+  routine dispatch into a `500` where a `503` was correct. Loads that just need
+  time now get it (#1898).
+- **The FPX safety guard actually protects the models hal0 installs.** The
+  rc.4 guard that refuses to launch an FPX-quantised model on a runner that
+  cannot serve it was inert for every model hal0 pulled itself — including the
+  brain model the installer seeds — because pull-registration never recorded
+  the model's quantisation. It is recorded now, and the guard falls back to
+  deriving it from the filename if a registry row is ever missing it again
+  (#1890).
+- **The dashboard's memory figures agree with each other.** On a box with a GPU
+  that hal0 drives through Vulkan rather than ROCm, the footer reported the
+  entire pool as free while models were loaded, contradicting the memory ruler
+  sitting directly above it. The footer and the ruler now read the same
+  reconciled number, and a Vulkan-only box is treated as GPU-backed rather than
+  falling through to a plain-RAM view (#1900).
+
+### Added
+
+- `[dispatcher].stream_total_timeout_s` (default `900`) and
+  `[dispatcher].stream_idle_timeout_s` (default `300`) bound how long a relayed
+  stream may run in total and how long it may go without producing a chunk. Set
+  either to `0` to disable that bound. Both are settable through the settings
+  API and documented with the rest of the dispatcher configuration (#1893).
+
+### Fixed
+
+- Models registered by `hal0 model pull` — including the brain model the
+  installer seeds — now record their quantisation, so the guard that refuses to
+  launch an FPX model on a runner that cannot serve it fires as intended instead
+  of silently passing everything through. A model whose row still carries no
+  quantisation has it derived from the filename rather than skipping the check
+  (#1890).
+- The curated catalogue no longer offers `bge-reranker-base-q4_k_m`, which
+  pointed at a non-mainline conversion the shipped runner cannot load — it
+  appeared in the capability catalogue as a fittable choice and then failed at
+  load time. The default `bge-reranker-v2-m3-q4_k_m` already covers reranking on
+  the same runner image and is unaffected (#1891).
+- The agent picks the slot that is actually serving. Delegation resolved its
+  target by name against a stale idea of which slot states are dispatchable, so
+  a seed slot that had never been wired to a model could shadow a slot that was
+  genuinely serving, and a perfectly usable `idle` slot could be judged not
+  ready. Delegation now uses the same readiness rule as the rest of the system
+  and requires the slot it picks to have a model bound (#1892).
+- Writes made through the volatile memory fallback are replayed onto the durable
+  store when it heals, so a fact added while the durable backend was down is no
+  longer lost. A replay that does not land is retried and, if it still cannot
+  complete, reported as `hal0.memory.heal_replay_abandoned` rather than passing
+  in silence (#1897).
+- A chat-shaped request naming an embedding or reranking model returns a typed
+  `409 dispatch.capability_mismatch` explaining the mismatch, instead of being
+  forwarded to a server that cannot answer it and surfacing that server's raw
+  `500` (#1894).
+- The dashboard footer's service indicators show every service hal0 monitors.
+  ComfyUI was missing because the footer carried a hardcoded list; it now
+  mirrors whatever the health endpoint reports, so a service added later cannot
+  fall out of the footer the same way (#1899).
+- A container that resets the connection while hal0 is probing its health is
+  treated as "not ready yet" rather than as a hard failure. This restores the
+  full model-load wait window (a load that needed time no longer aborts after
+  roughly seven seconds), gives a failed slot a real error message instead of an
+  empty one, and keeps a mid-load dispatch returning `503` rather than `500`
+  (#1898).
+- `POST /api/memory/add` fails fast with a `503` naming the problem when the
+  slot that would perform memory extraction has a context window below the
+  usable floor, instead of accepting the request and producing nothing. A slot
+  whose window cannot be determined is not blocked (#1903).
+- The dashboard footer computes free memory from the same reconciled per-slot
+  figure the memory ruler renders, and a box whose GPU is usable through Vulkan
+  but has no ROCm stack is treated as GPU-backed. Together these stop the footer
+  from reporting the whole pool as free while models are loaded (#1900).
+- `hal0 bench history` prints `no records` when its query matches nothing —
+  an empty store, or a `--model` / `--cell` filter that matched no rows — instead
+  of printing nothing at all and exiting `0`, which read as a broken command.
+  `hal0 bench results` already did this (#1904).
+- `hal0 capabilities list` shows the Status column the API has been returning
+  all along; the synthetic `hal0` entry in the slot list explains what it
+  actually is instead of borrowing another entry's description, and
+  `GET /api/slots/hal0/logs` returns an explanation rather than a `404` that
+  looked like a missing slot (a genuinely unknown slot name still `404`s);
+  `uptime_s` on `/api/hardware` and `/api/stats/hardware` is read fresh on every
+  request instead of being frozen at the moment the hardware probe last wrote its
+  cache; and `hal0 agent peers` no longer crashes with an `AttributeError` on a
+  peer card whose metadata came back as text (#1905, #1897).
+- `hal0 config edit` prints its `sudo` hint when it cannot create a config file,
+  instead of an unhandled traceback. Running it as a user who is not in the
+  `hal0` group, against an unwritable `/etc/hal0`, now says what to do (#1885).
+
+### Docs
+
+- The MCP connection guide points at the working `/mcp/admin/mcp` and
+  `/mcp/memory/mcp` Streamable-HTTP endpoints; the mount roots it previously
+  documented return `405`, so following the guide could not connect a client.
+  The admin and memory tool tables are regenerated from the source registrations
+  and now list every tool (180 admin, 26 memory) grouped by permission tier,
+  rather than an outdated subset. A doc test now fails the build if either drifts
+  from the code again (#1902).
+
+### Audience
+
+Preview-channel operators validating the 1.0 line ahead of GA, and fresh
+installs that want the current build. rc.7 supersedes rc.6 for everyone: rc.6
+can silently drop memory writes after a store heal (#1897), hangs indefinitely
+on a wedged upstream stream (#1893), and can abandon a legitimate model load
+seconds into a three-minute budget (#1898). Boxes on the stable channel are not
+offered this tag. rc.7 is **not** a GA candidate — see Known issues.
+
+### Supported upgrades
+
+- `1.0.0-rc.6` → `1.0.0-rc.7` via `hal0 update` (preview channel). The GitHub
+  release asset URL (`https://github.com/Hal0ai/hal0/releases/download/v1.0.0-rc.7/preview.json`)
+  works end-to-end for install and update, and remains the recommended path.
+- `1.0.0-rc.5` / `1.0.0-rc.4` / `1.0.0-rc.3` / `1.0.0-rc.2` / `1.0.0-rc.1` →
+  `1.0.0-rc.7` directly, same mechanism. The rc.6 operator migrations still
+  apply to any box coming from rc.5 or earlier; see the
+  [1.0.0-rc.6 section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100-rc6--2026-08-12).
+- `0.9.8` → `1.0.0-rc.7` in place — re-run the installer or `hal0 update` on the
+  preview channel; the R5 migration set applies (see the
+  [1.0.0 changelog section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100--2026-08-07)).
+- Older than 0.9.8: step through 0.9.8 first.
+
+### Known issues
+
+**The Vulkan lane produces garbage and every health surface reads green
+(#1888). This is the open GA blocker.** On the shipped runner image the Vulkan
+backend emits invalid tokens for every model tested, while the slot reports
+`ready`, the health endpoints report healthy, and the smoke test passes — so a
+box answers confidently with unusable output and nothing flags it. The
+documentation recommends this lane for boxes without a ROCm stack. Until it is
+fixed, validate any Vulkan-only box by reading an actual completion rather than
+trusting a status surface, and prefer the ROCm lane where the hardware allows.
+
+**Four rc.6 sweep findings remain open and are not fixed here.** The
+image-drift detector is permanently inert — `image_status` always reads
+`missing` and `actual_image` always `null` for a running slot, so a slot running
+an image other than the one it declares is never reported (#1889). A
+root-owned model-pull-jobs directory means pull status does not survive an
+`hal0-api` restart on a freshly installed box (#1895). `hal0 doctor perms`
+exits `1` with `DRIFT` on a box that has just been installed cleanly, and
+`--fix` cannot converge it, so the check cannot currently be used as a gate
+(#1896). Updater journal lines carry `job_id=None` and emit no
+prepare/verify breadcrumbs on a successful update, which makes an update hard
+to reconstruct after the fact (#1901).
+
+**Carried forward from rc.6.** An upgraded box can still refuse to chat if its
+agent slot carries a ceiling below Hermes' 64,000-token floor — `hal0 doctor`
+names the slot and prints the repair command, but the update does not raise the
+ceiling for you (#1867). `hal0 update` does not refresh the `hal0` launcher on
+`PATH`, so after an in-place upgrade a shell can keep running the previous
+release — check `hal0 --version` against the installed tag and re-run the
+installer if they disagree (#1844). The stable channel pointer is still 0.9.8,
+so nothing on the stable channel is offered the 1.0 line yet (#1530). Memory
+retention on CPU-only installs remains unreliable: `hal0 memory status` can
+report `Writes landing` on a store that has never landed a fact, and the
+extraction queue has no concurrency cap (#1833, #1834). The remaining rc.5
+polish items are tracked on #1840 (CLI/API) and #1841 (dashboard); three
+review-time findings remain deferred (#1873, #1862, #1869).
+
+### Operator migrations
+
+- **Nothing is required to take rc.7.** No rc.7 change alters an on-disk state
+  shape, adds a mandatory configuration key, or needs a manual step after
+  `hal0 update`. The items below are optional or conditional.
+- **Streams are now bounded by default (#1893).** A relayed stream that runs
+  longer than 900 seconds in total, or goes 300 seconds without producing a
+  chunk, is ended with an explanatory final chunk. If you deliberately run very
+  long or very bursty streams through hal0, raise
+  `[dispatcher].stream_total_timeout_s` and `[dispatcher].stream_idle_timeout_s`
+  in `hal0.toml`, or set either to `0` to disable that bound. Restart
+  `hal0-api` for a change to take effect.
+- **The FPX guard may now refuse a model it previously launched (#1890).** A
+  model registered by `hal0 model pull` that is FPX-quantised and sitting on a
+  runner image that cannot serve FPX was launching and producing bad output;
+  it will now be refused at launch with an explanatory error. That is the guard
+  working. Move the slot to a runner image that supports the quantisation, or
+  use a non-FPX build of the model.
+- **`bge-reranker-base-q4_k_m` is gone from the curated catalogue (#1891).** A
+  slot already configured with it keeps its configuration — the model is simply
+  no longer offered as a curated choice, because the shipped runner cannot load
+  it. If you have a reranking slot that never came up, point it at
+  `bge-reranker-v2-m3-q4_k_m` instead.
+- **Memory adds can now be refused with a `503` (#1903).** A request to
+  `POST /api/memory/add` is rejected up front when the extraction slot's context
+  window is below the usable floor, where it previously succeeded and produced
+  nothing. Raise that slot's context window — `hal0 doctor` names the slot and
+  the limits — to restore the write path.
+
+### Rollback
+
+Release tarballs are immutable and cosign-signed; roll back by re-installing the
+previous tag (`v1.0.0-rc.6`) from its GitHub release. No rc.7 change writes a
+state shape rc.6 cannot read — every fix is re-derived at launch or read time,
+except the quantisation now stamped on pull-registered models, which rc.6
+ignores. The two new `[dispatcher]` stream-timeout keys are the only
+configuration addition; if you set them, remove them from `hal0.toml` before
+rolling back to a build that does not know them. Rolling back reinstates the
+rc.6 defects listed above, including the silently dropped memory writes
+(#1897) and the unbounded stream relay (#1893).
+
 ## [1.0.0-rc.6] — 2026-08-12
 
 The rc.5 validation sweep ran the whole fleet — fresh installs, in-place
