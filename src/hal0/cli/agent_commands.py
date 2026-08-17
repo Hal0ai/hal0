@@ -1313,6 +1313,7 @@ def agent_peers() -> None:
     shows installed bundled agents on this host); ``peers`` shows
     every card published into the federated registry.
     """
+    import ast as _ast
     import json as _json
     import urllib.error
     import urllib.request
@@ -1361,30 +1362,50 @@ def agent_peers() -> None:
     table.add_column("Endpoint")
     table.add_column("Registered")
 
-    def _as_dict(value: Any) -> dict[str, Any]:
-        """Nested card metadata, tolerant of engine round-trip shapes (#1897).
+    def _unflatten(value: Any) -> Any:
+        """Undo the string flattening cards pick up in the memory engine (#1897).
 
-        Some memory engines return nested metadata objects re-encoded as JSON
-        strings rather than dicts. ``hal0 agent peers`` used to assume a dict
-        and died with ``AttributeError: 'str' object has no attribute 'get'``
-        on the whole listing because one card came back that way.
+        ``HindsightProvider.add`` stores metadata as ``{k: str(v) for ...}``,
+        so a card's nested ``endpoint`` / ``hal0_state`` / ``roles`` come back
+        as Python reprs (``{'url': 'http://…'}``) — as JSON on some other
+        engines. ``hal0 agent peers`` assumed live objects and died with
+        ``AttributeError: 'str' object has no attribute 'get'``, taking the
+        whole listing down. Try JSON first, then a literal-eval for the repr
+        form (literals only — never ``eval``); an unparseable value is handed
+        back as-is for the caller to reject.
         """
-        if isinstance(value, str):
-            try:
-                value = _json.loads(value)
-            except _json.JSONDecodeError:
-                return {}
-        return value if isinstance(value, dict) else {}
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        try:
+            return _json.loads(text)
+        except _json.JSONDecodeError:
+            pass
+        try:
+            return _ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            return value
+
+    def _as_dict(value: Any) -> dict[str, Any]:
+        """One card field as a dict; anything unreadable costs only its own
+        columns, never the listing."""
+        parsed = _unflatten(value)
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _as_list(value: Any) -> list[Any]:
+        """One card field as a list; a bare string is a single-element list."""
+        parsed = _unflatten(value)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, str) and parsed:
+            return [parsed]
+        return []
 
     for item in items:
         md = _as_dict(item.get("metadata")) if isinstance(item, dict) else {}
         endpoint = _as_dict(md.get("endpoint"))
         hal0_state = _as_dict(md.get("hal0_state"))
-        roles = md.get("roles")
-        if isinstance(roles, str):
-            roles = [roles]
-        elif not isinstance(roles, list):
-            roles = []
+        roles = _as_list(md.get("roles"))
         table.add_row(
             str(md.get("agent_id") or "—"),
             str(md.get("display_name") or "—"),

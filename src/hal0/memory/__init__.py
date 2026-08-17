@@ -93,8 +93,9 @@ class SelfHealingMemoryProvider:
         """Register a replay to run once the durable engine is swapped in.
 
         The hook may be sync or return an awaitable; it runs on the event
-        loop in :meth:`run_heal_hooks`, and is dropped after one run (a
-        replay must not re-arm itself).
+        loop in :meth:`run_heal_hooks`. A hook that reports success (any
+        return value other than ``False``) is dropped after one run, so a
+        replay never re-arms itself.
 
         Returns ``False`` — and registers nothing — when the provider has
         ALREADY healed, because that heal's hooks were drained before this
@@ -106,21 +107,36 @@ class SelfHealingMemoryProvider:
         self._heal_hooks.append(hook)
         return True
 
-    async def run_heal_hooks(self) -> None:
-        """Run + clear every hook armed for this heal, best-effort.
+    @property
+    def pending_heal_hooks(self) -> int:
+        """Replays still owed — non-zero after a drain means retry later."""
+        return len(self._heal_hooks)
 
-        A replay that raises is logged and skipped: recovering the agents
-        dataset must never take down the process that just recovered its
-        memory engine.
+    async def run_heal_hooks(self) -> bool:
+        """Run every hook armed for this heal; True when all of them landed.
+
+        A hook that returns ``False`` (its writes did not land — a healthy
+        engine can still fail an individual retain) or raises is KEPT armed
+        so the caller's retry loop drains it again on the next tick;
+        otherwise a transient failure on the first post-heal attempt would
+        leave the data lost until the next restart, which is the very
+        failure this machinery exists to prevent. Never propagates: memory
+        recovery must not take down the process.
         """
         hooks, self._heal_hooks = self._heal_hooks, []
+        ok = True
         for hook in hooks:
             try:
                 result = hook()
                 if inspect.isawaitable(result):
-                    await result
+                    result = await result
             except Exception as exc:
                 log.warning("hal0.memory.heal_hook_failed", error=str(exc))
+                result = False
+            if result is False:
+                ok = False
+                self._heal_hooks.append(hook)
+        return ok
 
     def try_heal(self) -> bool:
         """One re-probe attempt; True once the durable engine is live.

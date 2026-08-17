@@ -1759,7 +1759,9 @@ async def _boot_metrics_state(app: FastAPI, ctx: BootState) -> None:
     app.state.metrics_seam = ctx.metrics_seam
 
 
-async def _memory_reprobe_loop(provider: Any, interval_s: float) -> None:
+async def _memory_reprobe_loop(
+    provider: Any, interval_s: float, *, max_replay_attempts: int = 10
+) -> None:
     """Poll a boot-degraded memory provider until the durable engine answers.
 
     Armed by ``_boot_background_tasks`` only when ``create_app`` wrapped a
@@ -1771,14 +1773,30 @@ async def _memory_reprobe_loop(provider: Any, interval_s: float) -> None:
     the engine that just came up, and the phases that issued them registered a
     replay. Draining here, on the loop, is what makes those writes durable
     without waiting for the next hal0-api restart.
+
+    A drain that reports failure (a healthy engine can still fail an
+    individual retain) keeps its hooks armed, so the loop keeps ticking and
+    retries — up to ``max_replay_attempts``, after which it gives up loudly
+    rather than retrying forever.
     """
+    attempts = 0
     while True:
         await asyncio.sleep(interval_s)
-        if await asyncio.to_thread(provider.try_heal):
-            run_hooks = getattr(provider, "run_heal_hooks", None)
-            if run_hooks is not None:
-                await run_hooks()
+        if not await asyncio.to_thread(provider.try_heal):
+            continue
+        run_hooks = getattr(provider, "run_heal_hooks", None)
+        if run_hooks is None or await run_hooks():
             return
+        attempts += 1
+        if attempts >= max_replay_attempts:
+            log.error(
+                "hal0.memory.heal_replay_abandoned",
+                attempts=attempts,
+                detail="post-heal replay of degraded-window writes kept failing — "
+                "restart hal0-api to re-run the boot writes against the durable engine",
+            )
+            return
+        log.warning("hal0.memory.heal_replay_retry", attempt=attempts)
 
 
 async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
@@ -2027,7 +2045,13 @@ def _boot_mcp_memory_call(
         return {"ok": False, "error": str(exc)}
 
 
-async def _boot_brain_lane(app: FastAPI, ctx: BootState, *, replay: bool = False) -> None:
+async def _boot_brain_lane(
+    app: FastAPI,
+    ctx: BootState,
+    *,
+    only: tuple[str, ...] | None = None,
+    replay: bool = False,
+) -> bool:
     """Phase — RELOCATE(brain-lane): identity-card + self-report memory publishes.
 
     Runs LAST (after ``background_tasks``, the final named phase before this
@@ -2060,12 +2084,18 @@ async def _boot_brain_lane(app: FastAPI, ctx: BootState, *, replay: bool = False
     dropped — the durable ``agents`` bank is never created. The #1613 self-heal
     swaps the engine in later but cannot recover writes the engine never saw,
     so the bank stayed missing until an unrelated hal0-api restart happened to
-    re-run this phase against a healthy provider. When the provider is degraded
-    on entry we therefore arm a one-shot replay of this same phase on the heal
-    path; the publishes are idempotent (each searches + deletes its prior card
-    before rewriting), so replaying is safe whether or not the first pass
-    reached a durable engine. ``replay=True`` marks the re-run so it does not
-    arm another.
+    re-run this phase against a healthy provider. Each publish is therefore run
+    with the fallback's volatile-write counter watched: the ones whose writes
+    the fallback actually swallowed are armed for replay on the heal path
+    (``only=`` re-runs exactly those, ``replay=True`` stops the re-run arming
+    another). Re-running a publish is safe — each searches + deletes its prior
+    card before rewriting — but is not free of consequence, which is why only
+    the lost ones are replayed: a replay of a write that already landed
+    durably races the engine's asynchronous retain and can duplicate the card.
+
+    Returns True when every publish it ran reported success; the heal-hook
+    drain keeps the hook armed on False so a transient post-heal failure is
+    retried rather than losing the data until the next restart.
     """
     import functools
 
@@ -2085,72 +2115,96 @@ async def _boot_brain_lane(app: FastAPI, ctx: BootState, *, replay: bool = False
     loop = asyncio.get_running_loop()
     io = InstallIO(mcp_memory_call=functools.partial(_boot_mcp_memory_call, app, loop))
 
-    try:
-        ns_result = await asyncio.to_thread(_phase_namespace_register, _StepCtx(state=state, io=io))
-        if not ns_result.details.get("registered"):
-            log.info(
-                "brain_lane.namespace_register_degraded",
-                warnings=ns_result.details.get("warnings"),
-            )
-    except Exception as exc:  # pragma: no cover — defensive, must never block boot
-        log.warning("brain_lane.namespace_register_failed", error=str(exc))
-
-    try:
-        brain_result = await asyncio.to_thread(
-            _phase_brain_profile_seed, _StepCtx(state=state, io=io)
-        )
-        if not brain_result.details.get("registered"):
-            log.info(
-                "brain_lane.brain_profile_seed_degraded",
-                warnings=brain_result.details.get("warnings"),
-            )
-    except Exception as exc:  # pragma: no cover — defensive, must never block boot
-        log.warning("brain_lane.brain_profile_seed_failed", error=str(exc))
-
     # self_report MUST run last — see docstring above re: the smoke_tests
     # substitution.
     boot_failures = [p.name for p in ctx.boot_report.phases if p.status == "error"]
-    prior = {"smoke_tests": {"failures": boot_failures}}
-    try:
-        report_result = await asyncio.to_thread(
-            _phase_self_report, _StepCtx(state=state, io=io, _prior=prior)
-        )
-        if not report_result.details.get("published"):
-            log.info(
-                "brain_lane.self_report_degraded",
-                warning=report_result.details.get("warning"),
-            )
-    except Exception as exc:  # pragma: no cover — defensive, must never block boot
-        log.warning("brain_lane.self_report_failed", error=str(exc))
+    steps: tuple[tuple[str, Any, str, dict[str, Any] | None], ...] = (
+        ("namespace_register", _phase_namespace_register, "registered", None),
+        ("brain_profile_seed", _phase_brain_profile_seed, "registered", None),
+        (
+            "self_report",
+            _phase_self_report,
+            "published",
+            {"smoke_tests": {"failures": boot_failures}},
+        ),
+    )
 
-    # #1897: the writes above went to a volatile fallback — owe a replay.
-    if replay or not degraded_on_entry:
-        return
+    # #1897: the volatile fallback counts the writes it swallows, so we can
+    # ask — per step — whether THAT step's writes were lost, instead of
+    # replaying the whole lane on the assumption that they all were. The
+    # counter lives on the fallback object itself, so once the shell rebinds
+    # to the durable engine mid-lane it stops moving and later steps are
+    # (correctly) not replayed. Replaying a step whose writes already landed
+    # durably is what would duplicate cards: the dedupe search that makes a
+    # replay safe races the engine's asynchronous retain of the write it is
+    # meant to supersede.
+    fallback = getattr(provider, "target", provider)
+
+    def _volatile_writes() -> int:
+        return int(getattr(fallback, "volatile_writes", 0) or 0)
+
+    lost: list[str] = []
+    ok = True
+    for name, phase, done_key, prior in steps:
+        if only is not None and name not in only:
+            continue
+        before = _volatile_writes()
+        step_ctx = (
+            _StepCtx(state=state, io=io)
+            if prior is None
+            else _StepCtx(state=state, io=io, _prior=prior)
+        )
+        try:
+            result = await asyncio.to_thread(phase, step_ctx)
+            if not result.details.get(done_key):
+                ok = False
+                log.info(
+                    f"brain_lane.{name}_degraded",
+                    warnings=result.details.get("warnings") or result.details.get("warning"),
+                )
+        except Exception as exc:  # pragma: no cover — defensive, must never block boot
+            ok = False
+            log.warning(f"brain_lane.{name}_failed", error=str(exc))
+        if _volatile_writes() > before:
+            lost.append(name)
+
+    if replay:
+        # Report to the heal-hook drain whether this replay actually landed;
+        # a False keeps the hook armed for the next re-probe tick.
+        return ok
+    if not degraded_on_entry or not lost:
+        return ok
     add_heal_hook = getattr(provider, "add_heal_hook", None)
     if add_heal_hook is None:
         # Deliberate [memory].engine = "pgvector", or memory disabled: no
         # durable engine is ever coming, so there is nothing to replay onto.
         log.warning(
             "brain_lane.degraded_writes_volatile",
+            steps=lost,
             detail="brain-lane publishes accepted by a volatile provider with no self-heal "
             "shell — the agents dataset will not survive a restart",
         )
-        return
-    if add_heal_hook(functools.partial(_boot_brain_lane, app, ctx, replay=True)):
+        return ok
+    hook = functools.partial(_boot_brain_lane, app, ctx, only=tuple(lost), replay=True)
+    if add_heal_hook(hook):
         log.warning(
             "brain_lane.degraded_replay_armed",
+            steps=lost,
             detail="brain-lane publishes landed in the volatile pgvector fallback — "
             "queued for replay once the durable memory engine heals",
         )
     else:
         # The provider healed while this phase was mid-flight, after its heal
-        # hooks were drained: nothing would ever run our replay. Do it inline.
+        # hooks were drained: nothing would ever run our replay. Do it inline,
+        # for the lost steps only.
         log.warning(
             "brain_lane.degraded_replay_inline",
-            detail="memory provider healed mid-phase — replaying the brain-lane "
+            steps=lost,
+            detail="memory provider healed mid-phase — replaying the lost brain-lane "
             "publishes against the durable engine now",
         )
-        await _boot_brain_lane(app, ctx, replay=True)
+        await _boot_brain_lane(app, ctx, only=tuple(lost), replay=True)
+    return ok
 
 
 @asynccontextmanager

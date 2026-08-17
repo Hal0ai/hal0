@@ -69,6 +69,34 @@ def test_peers_renders_json_string_metadata(peers_response: Any) -> None:
     assert "2026-08-15" in result.output
 
 
+def test_peers_renders_hindsight_repr_metadata(peers_response: Any) -> None:
+    """The producer format: ``HindsightProvider.add`` stores metadata values
+    as ``str(v)``, so nested dicts arrive as Python reprs, not JSON."""
+    peers_response(
+        {
+            "items": [
+                {
+                    "id": "card-1",
+                    "metadata": {
+                        "agent_id": "hermes",
+                        "display_name": "Hermes",
+                        "roles": str(["orchestrator"]),
+                        "endpoint": str({"url": "http://10.0.1.142:8080"}),
+                        "hal0_state": str({"registered_at": "2026-08-15T00:00:00Z"}),
+                    },
+                }
+            ]
+        }
+    )
+
+    result = runner.invoke(agent_commands.app, ["peers"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    assert "10.0.1.142" in result.output
+    assert "2026-08-15" in result.output
+    assert "orchestrator" in result.output
+
+
 def test_peers_tolerates_unparseable_metadata(peers_response: Any) -> None:
     peers_response(
         {
