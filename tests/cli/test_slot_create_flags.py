@@ -163,12 +163,19 @@ def test_default_hardware_reads_probe_json(monkeypatch: pytest.MonkeyPatch, tmp_
     assert slot_commands._detect_default_hardware() == "rocm"
 
 
-def test_default_hardware_vulkan_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Missing probe → vulkan (safe default that works on most GPUs)."""
+def test_default_hardware_rocm_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Missing probe → rocm (#1888).
+
+    This used to be ``vulkan`` ("safe default that works on most GPUs"), but
+    llama.cpp slots launch the unified ROCmFPX runner image on both GPU
+    devices and that image's Vulkan backend emits invalid tokens for every
+    model — so the broad default was a broadly-wrong one. A box that cannot
+    run ROCm gets a loud refusal at slot load, not silent garbage.
+    """
     from hal0.config import paths as _paths
 
     monkeypatch.setattr(_paths, "hardware_json", lambda: tmp_path / "missing.json")
-    assert slot_commands._detect_default_hardware() == "vulkan"
+    assert slot_commands._detect_default_hardware() == "rocm"
 
 
 def test_default_hardware_cpu_when_no_gpu(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -210,18 +217,20 @@ def test_invalid_hardware_value_rejected_by_typer(
     assert "body" not in captured_post
 
 
-def test_bare_create_on_strix_halo_resolves_to_vulkan(
+def test_bare_create_on_strix_halo_resolves_to_rocm(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A bare ``slot create primary`` on a Strix Halo fixture auto-resolves
-    ``--hardware vulkan``.
+    ``--hardware rocm`` — even when the probe did not flag compute_capable.
 
-    Strix Halo presents as an AMD iGPU (vendor=amd) that is Vulkan-capable
-    but typically not flagged compute_capable in the probe output — the
-    iGPU runs llama.cpp via Vulkan, not ROCm. The auto-detect path must
-    pick ``vulkan`` so the user doesn't need to know about hardware flags
-    on the platform that hal0 v1 most cares about.
+    Regression for #1888: this used to resolve ``vulkan`` on exactly this
+    fixture, which is how a fresh install was born with slots labelled
+    ``gpu-vulkan``. On a box with ``/dev/kfd`` those slots actually executed
+    on ROCm (the label lied); without it they executed on the runner image's
+    Vulkan backend and emitted invalid tokens for every model. ROCm is the
+    only backend an AMD llama.cpp slot can validly run, so it is what the
+    auto-detect must write.
     """
     probe = tmp_path / "hardware.json"
     probe.write_text(
@@ -267,9 +276,9 @@ def test_bare_create_on_strix_halo_resolves_to_vulkan(
     )
     assert result.exit_code == 0, result.output
     # Bare invocation → provider defaults to llama-server, hardware
-    # auto-resolves to vulkan from the Strix Halo fixture.
+    # auto-resolves to rocm from the Strix Halo fixture.
     assert captured["body"]["provider"] == "llama-server"
-    assert captured["body"]["device"] == "gpu-vulkan"
+    assert captured["body"]["device"] == "gpu-rocm"
 
 
 # ── --profile (#1830) ────────────────────────────────────────────────────────
