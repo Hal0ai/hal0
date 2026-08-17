@@ -22,7 +22,7 @@ import pytest
 
 import hal0.agents.hermes_provision as hp
 import hal0.memory as mem
-from hal0.api import BootState, _boot_brain_lane, _memory_reprobe_loop
+from hal0.api import BootState, _boot_brain_lane, _BrainLaneReplay, _memory_reprobe_loop
 
 _STEPS = (
     ("namespace_register", "registered"),
@@ -102,7 +102,7 @@ async def test_degraded_boot_lane_replays_after_provider_heals(
     shell = mem.SelfHealingMemoryProvider(_FakeDegraded(), _cfg())
     lane = _Lane(shell, monkeypatch)
 
-    assert await _boot_brain_lane(_app(shell), BootState()) is True
+    assert await _boot_brain_lane(_app(shell), BootState()) == ()
     assert lane.calls == ["namespace_register", "brain_profile_seed", "self_report"]
 
     # Engine comes up; the heal path must re-issue the lost lane writes.
@@ -122,7 +122,7 @@ async def test_healthy_boot_lane_arms_no_replay(monkeypatch: pytest.MonkeyPatch)
     provider = _FakeHealthy()
     lane = _Lane(provider, monkeypatch)
 
-    assert await _boot_brain_lane(_app(provider), BootState()) is True
+    assert await _boot_brain_lane(_app(provider), BootState()) == ()
     assert lane.calls == ["namespace_register", "brain_profile_seed", "self_report"]
 
 
@@ -149,12 +149,44 @@ async def test_only_the_steps_that_hit_the_fallback_are_replayed(
     monkeypatch.setattr(hp, "_phase_self_report", _heal_then_write)
 
     await _boot_brain_lane(_app(shell), BootState())
+    assert await shell.run_heal_hooks() is True
 
-    # try_heal() drained (empty) hooks already, so the replay ran inline —
-    # for the two lost steps only.
+    # Only the two publishes the fallback swallowed are re-issued.
     assert lane.count("namespace_register") == 2
     assert lane.count("brain_profile_seed") == 2
     assert lane.count("self_report") == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_is_armed_before_the_publishes_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A heal draining mid-lane must not find an empty, droppable replay."""
+    shell = mem.SelfHealingMemoryProvider(_FakeDegraded(), _cfg())
+    lane = _Lane(shell, monkeypatch)
+    armed: list[int] = []
+
+    def _phase(ctx: Any, *args: Any, **kwargs: Any) -> _Result:
+        armed.append(shell.pending_heal_hooks)
+        lane.calls.append("namespace_register")
+        lane.write()
+        return _Result({"registered": True})
+
+    monkeypatch.setattr(hp, "_phase_namespace_register", _phase)
+
+    await _boot_brain_lane(_app(shell), BootState())
+    assert armed == [1]
+
+
+@pytest.mark.asyncio
+async def test_replay_hook_reports_not_done_until_the_lane_hands_over() -> None:
+    hook = _BrainLaneReplay(_app(None), BootState())
+
+    # Drained while the lane is still running: stays armed, runs nothing.
+    assert await hook() is False
+    # Lane finished with nothing owed: the drain can drop it.
+    hook.finish(())
+    assert await hook() is True
 
 
 @pytest.mark.asyncio
@@ -165,7 +197,7 @@ async def test_failed_replay_stays_armed_for_the_next_tick(
     shell = mem.SelfHealingMemoryProvider(_FakeDegraded(), _cfg())
     lane = _Lane(shell, monkeypatch, failing=frozenset({"self_report"}))
 
-    assert await _boot_brain_lane(_app(shell), BootState()) is False
+    assert await _boot_brain_lane(_app(shell), BootState()) == ("self_report",)
 
     monkeypatch.setattr(mem, "provider_from_config", lambda cfg: _FakeHealthy())
     assert shell.try_heal() is True
@@ -175,7 +207,9 @@ async def test_failed_replay_stays_armed_for_the_next_tick(
     lane.failing = frozenset()
     assert await shell.run_heal_hooks() is True
     assert shell.pending_heal_hooks == 0
+    # The failing step is retried; the two that landed are NOT repeated.
     assert lane.count("self_report") == 3
+    assert lane.count("namespace_register") == 2
 
 
 @pytest.mark.asyncio
