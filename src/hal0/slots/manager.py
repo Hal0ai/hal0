@@ -3603,6 +3603,21 @@ class SlotManager:
 
         registry_dump = model.model_dump() if hasattr(model, "model_dump") else dict(model)
         info.update(registry_dump)
+        # #1890: belt-and-suspenders — the pull registration path now stores
+        # ``quant`` directly (the root fix), but this is also the ONE place
+        # every launch/preview path resolves model_info for
+        # ``_guard_fpx_quant_runner``. A row that somehow still has no quant
+        # (a hand-staged model, a pre-#1890 registry never re-pulled) must
+        # not silently disarm the guard — fall back to the same filename-
+        # token derivation the API list serializer already uses
+        # (``models_service.lazy_quant``) rather than trusting ``quant`` is
+        # always populated.
+        if not info.get("quant"):
+            from hal0.services.models_service import lazy_quant
+
+            derived_quant = lazy_quant(registry_dump)
+            if derived_quant:
+                info["quant"] = derived_quant
         return info
 
     # ── health probe (TIER1 tightened) ───────────────────────────────────────

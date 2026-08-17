@@ -1219,8 +1219,11 @@ def _register_pulled(
     from hal0.registry.detect import detect
 
     ctx_len: int | None = None
+    detected_quant: str | None = None
     try:
-        ctx_len = detect(Path(path)).context_length
+        detection = detect(Path(path))
+        ctx_len = detection.context_length
+        detected_quant = detection.quant
     except Exception:  # header parse must never fail a completed pull
         ctx_len = None
     if not ctx_len and curated is not None and curated.context_length:
@@ -1231,6 +1234,13 @@ def _register_pulled(
         # backfill) so a LATER re-pull can tell it apart from an operator's
         # explicit metadata edit — see the merge below.
         fresh_meta["context_length_detected"] = True
+    # #1890: stamp the detected quant on the row itself (not just metadata),
+    # the same detection ``hal0 model add``/scan already performs — this is
+    # the ONLY registration a pull-installed model (including the installer-
+    # seeded FPX brain model) ever gets. Leaving ``quant`` null here is what
+    # made the #1790 FPX-on-wrong-runner guard inert: it reads
+    # ``model_dump()`` directly, never the API list serializer's
+    # ``lazy_quant`` backfill.
     updates: dict[str, Any] = {
         "path": path,
         "size_bytes": size_bytes,
@@ -1238,6 +1248,8 @@ def _register_pulled(
         "hf_filename": hf_filename,
         "metadata": fresh_meta,
     }
+    if detected_quant:
+        updates["quant"] = detected_quant
     if mmproj is not None:
         updates["mmproj"] = mmproj
     try:
@@ -1265,6 +1277,7 @@ def _register_pulled(
                 size_bytes=size_bytes,
                 hf_repo=hf_repo,
                 hf_filename=hf_filename,
+                quant=detected_quant,
                 capabilities=caps,
                 backends=backends,
                 mmproj=mmproj,
@@ -1474,6 +1487,16 @@ def _register_pulled_fileset(
     fresh_meta: dict[str, Any] = {"pulled_at": int(time.time())}
     if entry_sha:
         fresh_meta["sha256"] = entry_sha
+    # #1890: same quant detection as :func:`_register_pulled` — a file-set
+    # pull (ML-2/3) is registration too, and must not leave ``quant`` null
+    # any more than the single-file path does.
+    from hal0.registry.detect import detect
+
+    detected_quant: str | None = None
+    try:
+        detected_quant = detect(entry_dest).quant
+    except Exception:  # header parse must never fail a completed pull
+        detected_quant = None
     updates: dict[str, Any] = {
         "path": str(entry_dest),
         "size_bytes": total_size,
@@ -1482,6 +1505,8 @@ def _register_pulled_fileset(
     }
     if mmproj_dest is not None:
         updates["mmproj"] = str(mmproj_dest)
+    if detected_quant:
+        updates["quant"] = detected_quant
 
     try:
         existing = registry.get(model_id)
@@ -1494,6 +1519,7 @@ def _register_pulled_fileset(
                 size_bytes=total_size,
                 hf_repo=fileset.repo,
                 hf_filename=Path(fileset.entry_rel).name,
+                quant=detected_quant,
                 capabilities=["chat"],
                 mmproj=str(mmproj_dest) if mmproj_dest else None,
                 metadata=dict(fresh_meta),

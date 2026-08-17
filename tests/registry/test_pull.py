@@ -415,6 +415,82 @@ async def test_run_pull_keeps_operator_tool_calling(tmp_hal0_home: str) -> None:
     assert registry.get("hal0-brain-sft-q8-rocmfpx").capability_flags.tool_calling is False
 
 
+# ── quant stamping at pull time (#1890) ───────────────────────────────────────
+#
+# _register_pulled is the ONLY registration a pull-installed model ever gets
+# (including the installer-seeded FPX brain model). Before this fix it built
+# ``Model(...)`` with no ``quant=``, so every pull-registered row stored
+# ``quant=None`` on the actual registry object — only the API list
+# serializer's ``lazy_quant`` backfilled it for display, which made
+# hal0#1790's ``_guard_fpx_quant_runner`` (fed the raw ``model_dump()``)
+# silently inert for every model hal0 installs itself.
+
+
+@pytest.mark.asyncio
+async def test_run_pull_stamps_rocmfpx_quant_on_fresh_registration(tmp_hal0_home: str) -> None:
+    """The exact hal0#1890 shape: a fresh pull of the FPX brain artifact must
+    store ``quant="ROCmFP8"`` on the ``Model`` row itself, not just leave it
+    for the API serializer to lazily derive."""
+    body = _payload(4096)
+    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    entry = registry.get("hal0-brain-sft-q8-rocmfpx")
+    assert entry.quant == "ROCmFP8"
+    # And the raw model_dump() the guard reads directly must carry it too —
+    # this is the exact shape _guard_fpx_quant_runner is handed.
+    assert entry.model_dump()["quant"] == "ROCmFP8"
+
+
+@pytest.mark.asyncio
+async def test_run_pull_refreshes_quant_on_repull(tmp_hal0_home: str) -> None:
+    """A re-pull that replaces the bytes with a different quant build must
+    update the stored quant, not leave the first pull's value stuck."""
+    job = make_job("some-random-gguf")
+    registry = ModelRegistry()
+
+    client = httpx.AsyncClient(transport=_ok_handler(_payload(4096)))
+    try:
+        await run_pull(
+            job,
+            hf_repo="org/random-GGUF",
+            hf_file="random-Q4_K_M.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert registry.get("some-random-gguf").quant == "Q4_K_M"
+
+    job2 = make_job("some-random-gguf")
+    client2 = httpx.AsyncClient(transport=_ok_handler(_payload(4096)))
+    try:
+        await run_pull(
+            job2,
+            hf_repo="org/random-GGUF",
+            hf_file="random-Q8_0.gguf",
+            registry=registry,
+            client=client2,
+        )
+    finally:
+        await client2.aclose()
+    assert job2.state == "completed", f"got {job2.state}: {job2.error}"
+    assert registry.get("some-random-gguf").quant == "Q8_0"
+
+
 # ── MR-1: run_pull persists a durable snapshot for ALL callers ────────────────
 
 
