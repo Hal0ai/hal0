@@ -15,6 +15,7 @@ path runs them, and a replay that does not land stays armed.
 
 from __future__ import annotations
 
+import asyncio
 import types
 from typing import Any
 
@@ -259,6 +260,32 @@ async def test_reprobe_loop_retries_a_failed_drain_then_gives_up() -> None:
 
     await _memory_reprobe_loop(_NeverLands(), 0.0, max_replay_attempts=4)
     assert drains == 4
+
+
+@pytest.mark.asyncio
+async def test_not_ready_replay_does_not_spend_the_attempt_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short reprobe interval must not exhaust the cap while the lane runs.
+
+    The hook is armed before the lane's publishes and reports not-ready until
+    ``finish()``. Each tick of that state must be free: with a 0s interval the
+    loop ticks far more than ``max_replay_attempts`` times here, and it must
+    still be alive to drain the replay once the lane hands it over.
+    """
+    shell = mem.SelfHealingMemoryProvider(_FakeDegraded(), _cfg())
+    hook = _BrainLaneReplay(_app(None), BootState())
+    assert shell.add_heal_hook(hook) is True
+    monkeypatch.setattr(mem, "provider_from_config", lambda cfg: _FakeHealthy())
+
+    task = asyncio.create_task(_memory_reprobe_loop(shell, 0.0, max_replay_attempts=3))
+    await asyncio.sleep(0.2)
+    assert not task.done()
+    assert shell.pending_heal_hooks == 1
+
+    hook.finish(())  # lane finished with nothing owed
+    await asyncio.wait_for(task, timeout=5.0)
+    assert shell.pending_heal_hooks == 0
 
 
 def test_add_heal_hook_reports_already_healed() -> None:

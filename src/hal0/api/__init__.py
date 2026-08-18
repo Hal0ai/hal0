@@ -1776,10 +1776,11 @@ async def _memory_reprobe_loop(
 
     A drain that reports failure keeps its hooks armed, so the loop keeps
     ticking and retries — up to ``max_replay_attempts``, after which it gives
-    up loudly rather than retrying forever. "Failure" covers both a replay
-    whose writes did not land (a healthy engine can still fail an individual
-    retain) and a replay armed by a lane that has not finished yet, so the
-    budget is generous relative to the interval.
+    up loudly rather than retrying forever. Only a replay that was actually
+    TRIED spends the budget: a drain whose armed hooks were all still waiting
+    on their arming boot phase (``last_drain_attempted`` False) is free, so a
+    short ``HAL0_MEMORY_REPROBE_INTERVAL_S`` cannot exhaust the cap before
+    the brain lane finishes and hands its replay over (#1912 review).
     """
     attempts = 0
     while True:
@@ -1789,6 +1790,10 @@ async def _memory_reprobe_loop(
         run_hooks = getattr(provider, "run_heal_hooks", None)
         if run_hooks is None or await run_hooks():
             return
+        if not getattr(provider, "last_drain_attempted", True):
+            # Every armed replay is still waiting on its boot lane — nothing
+            # was tried, so this tick does not count against the budget.
+            continue
         attempts += 1
         if attempts >= max_replay_attempts:
             log.error(

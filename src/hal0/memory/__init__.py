@@ -78,6 +78,7 @@ class SelfHealingMemoryProvider:
         self._cfg = cfg
         self._heal_hooks: list[Callable[[], Any]] = []
         self._healed = False
+        self._last_drain_attempted = True
 
     @property
     def target(self) -> Any:
@@ -112,6 +113,18 @@ class SelfHealingMemoryProvider:
         """Replays still owed — non-zero after a drain means retry later."""
         return len(self._heal_hooks)
 
+    @property
+    def last_drain_attempted(self) -> bool:
+        """Whether the previous :meth:`run_heal_hooks` actually ran a hook.
+
+        ``False`` means every armed hook was still waiting on its arming boot
+        phase (``hook.ready`` was ``False``), so nothing was tried — the
+        caller's retry budget should not be spent on that drain (#1912
+        review: a short reprobe interval must not exhaust the cap before the
+        boot lane can hand its replay over).
+        """
+        return self._last_drain_attempted
+
     async def run_heal_hooks(self) -> bool:
         """Run every hook armed for this heal; True when all of them landed.
 
@@ -122,10 +135,21 @@ class SelfHealingMemoryProvider:
         leave the data lost until the next restart, which is the very
         failure this machinery exists to prevent. Never propagates: memory
         recovery must not take down the process.
+
+        A hook whose ``ready`` attribute is ``False`` (its arming boot phase
+        has not finished handing it work) is kept armed WITHOUT being run:
+        it has nothing to try yet, and it must not read as a failed replay
+        attempt — see :attr:`last_drain_attempted`.
         """
         hooks, self._heal_hooks = self._heal_hooks, []
         ok = True
+        attempted = False
         for hook in hooks:
+            if getattr(hook, "ready", True) is False:
+                ok = False
+                self._heal_hooks.append(hook)
+                continue
+            attempted = True
             try:
                 result = hook()
                 if inspect.isawaitable(result):
@@ -136,6 +160,7 @@ class SelfHealingMemoryProvider:
             if result is False:
                 ok = False
                 self._heal_hooks.append(hook)
+        self._last_drain_attempted = attempted
         return ok
 
     def try_heal(self) -> bool:
