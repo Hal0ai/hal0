@@ -1339,6 +1339,10 @@ _hal0_seam_probe() {
     case "$1" in
         hal0-systemctl) printf 'help\n' ;;
         hal0-update)    printf 'check\n' ;;
+        # #1889: podman-ro is now the only source of truth for a running
+        # slot's image_status/actual_image, so a silently-missing grant stops
+        # being cosmetic. `help` prints usage and touches nothing.
+        hal0-podman-ro) printf 'help\n' ;;
         *)              return 1 ;;
     esac
 }

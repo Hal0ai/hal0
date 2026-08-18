@@ -74,6 +74,7 @@ from hal0.errors import Hal0Error, UnprocessableEntity
 from hal0.http_client import async_client
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
+from hal0.providers import podman_introspect
 from hal0.providers._gpu import (
     gpu_visibility_env,
     is_nvidia_gpu_device,
@@ -489,6 +490,23 @@ def _container_runtime() -> str:
         if found:
             return found
     raise RuntimeError("no podman runtime found; install podman or set HAL0_CONTAINER_RUNTIME")
+
+
+def _decode_argv_json(raw: str) -> list[str] | None:
+    """Decode a podman ``{{json .Config.Cmd}}`` payload into an argv list.
+
+    Shared by :meth:`ContainerProvider.running_argv`'s two read paths (the
+    ``hal0-podman-ro`` seam and the rootless fallback) so both apply the same
+    shape check. ``None`` on anything that is not a JSON array — status
+    callers treat missing data as "unknown", never as drift.
+    """
+    try:
+        payload = json.loads(raw.strip())
+    except ValueError:
+        return None
+    if not isinstance(payload, list):
+        return None
+    return [str(part) for part in payload]
 
 
 def _slot_publish_host() -> str:
@@ -2558,12 +2576,25 @@ class ContainerProvider(Provider):
         self._run("systemctl", "reset-failed", self._unit_name(_artefact_token(slot)), check=False)
 
     def image_present(self, image: str) -> bool:
-        """Return True if ``image`` is in the local container image store.
+        """Return True if ``image`` is in the container image store slots use.
 
-        Uses ``<runtime> image inspect`` (exit 0 = present, non-zero = missing).
+        #1889: asks ROOT's store first, through the ``hal0-podman-ro``
+        ``image-exists`` seam. Slots run ROOTFUL podman (Quadlet), while
+        hal0-api runs as the unprivileged ``hal0`` user with no subuid ranges,
+        so the bare ``<runtime> image inspect`` below reads hal0's own
+        ROOTLESS store — a different store, which never contains a slot image.
+        That is why ``image_status`` was ``"missing"`` for every running,
+        healthy slot on every standard install. The seam returns ``None`` when
+        it cannot answer (dev/CI box, grant not installed, podman absent), and
+        only then do we fall back to the rootless read, which is still the
+        right answer in a dev checkout where hal0-api runs as the operator.
+
         Runs synchronously — callers must dispatch to a thread executor when
         called from an async context.
         """
+        seam_answer = podman_introspect.image_exists(image)
+        if seam_answer is not None:
+            return seam_answer
         try:
             runtime = _container_runtime()
         except RuntimeError:
@@ -2588,12 +2619,23 @@ class ContainerProvider(Provider):
         when the container is not running or inspect fails. Reads stdout only —
         podman emits benign device warnings to stderr under LXC. Never raises;
         callers dispatch to a thread executor from the async status path.
+
+        #1889: routed through the ``hal0-podman-ro`` ``container-image`` seam
+        first, for the same reason as :meth:`image_present` — the slot's
+        container lives in ROOT's podman store, so hal0-api's own rootless
+        inspect never found it and ``actual_image`` was always ``null``. The
+        seam takes the bare instance TOKEN and builds ``hal0-slot-<token>``
+        root-side; the rootless path below is the dev/CI fallback.
         """
+        token = _artefact_token(slot)
+        seam_ref = podman_introspect.container_image(token)
+        if seam_ref:
+            return seam_ref
         try:
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = slot_container_name(_artefact_token(slot))
+        container_name = slot_container_name(token)
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{.ImageName}}"],
@@ -2617,12 +2659,21 @@ class ContainerProvider(Provider):
         as :meth:`running_image` (#1417). Returns None when the container is
         not running, inspect fails, or the runtime returns an unexpected shape.
         Never raises; status callers treat missing data as "unknown", not drift.
+
+        #1889: routed through the ``hal0-podman-ro`` ``container-argv`` seam
+        first, same rationale as :meth:`running_image`.
         """
+        token = _artefact_token(slot)
+        seam_json = podman_introspect.container_argv(token)
+        if seam_json is not None:
+            parsed = _decode_argv_json(seam_json)
+            if parsed is not None:
+                return parsed
         try:
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = slot_container_name(_artefact_token(slot))
+        container_name = slot_container_name(token)
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{json .Config.Cmd}}"],
@@ -2635,13 +2686,7 @@ class ContainerProvider(Provider):
             return None
         if result.returncode != 0:
             return None
-        try:
-            payload = json.loads(result.stdout.strip())
-        except ValueError:
-            return None
-        if not isinstance(payload, list):
-            return None
-        return [str(part) for part in payload]
+        return _decode_argv_json(result.stdout)
 
     async def pull_image_stream(self, image: str):
         """Async generator that runs ``<runtime> pull <image>`` and yields

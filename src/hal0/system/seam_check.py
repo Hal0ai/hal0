@@ -87,7 +87,15 @@ SEAMS: tuple[SeamSpec, ...] = (
     ),
     SeamSpec("hal0-agentenv", probe=None, required=False, role="bundled-agent env files"),
     SeamSpec("hal0-benchctl", probe=None, required=False, role="benchmark harness"),
-    SeamSpec("hal0-podman-ro", probe=None, required=False, role="podman image introspection"),
+    # #1889: podman-ro is now the ONLY source of truth for a running slot's
+    # image_status/actual_image, so a silently-missing grant is no longer
+    # cosmetic — probe it. `help` prints usage and touches nothing.
+    SeamSpec(
+        "hal0-podman-ro",
+        probe=("help",),
+        required=False,
+        role="podman image introspection (slot image_status / actual_image)",
+    ),
 )
 
 

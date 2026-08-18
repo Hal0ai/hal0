@@ -1735,11 +1735,14 @@ PYEOF
         fi
     fi
 
-    # Privileged seam #5 (O12): hal0-podman-ro covers READ-ONLY podman
-    # introspection (image presence today) against ROOT's podman store — the
-    # store slots actually populate via Quadlet, NOT hal0-api's own rootless
-    # store. Narrow + hardcoded (no shell, no wildcards, no operator-supplied
-    # podman flags) — see the wrapper source.
+    # Privileged seam #5 (O12, extended in #1889): hal0-podman-ro covers
+    # READ-ONLY podman introspection — the local repo set, per-image presence,
+    # and a running slot container's image + argv — against ROOT's podman
+    # store, the store slots actually populate via Quadlet, NOT hal0-api's own
+    # rootless store. Narrow + hardcoded (no shell, no wildcards, no
+    # operator-supplied podman flags or --format); the three verbs that take
+    # an argument validate it root-side against a closed regex before exec.
+    # See the wrapper source for the full argument doctrine.
     PODMAN_RO_SRC="${REPO_ROOT}/installer/wrappers/hal0-podman-ro"
     if [[ -f "${PODMAN_RO_SRC}" ]]; then
         install -d "${LIB_DIR}/bin"
