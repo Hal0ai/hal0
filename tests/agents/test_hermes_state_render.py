@@ -30,6 +30,62 @@ def test_collect_capability_rollup_filters_and_maps_types():
     assert "unused" not in {r.get("model_id") for r in rollup}
 
 
+def test_collect_capability_rollup_skips_modelless_idle_slot():
+    """#1892 review: `idle` is dispatchable, but the modelless_ready_blocked
+    shape (model-requiring provider, nothing bound) must not be advertised —
+    it would render `Capabilities: embed (None/llamacpp)` into STATE.md."""
+    slots = [
+        {
+            "name": "embed",
+            "type": "embedding",
+            "state": "idle",
+            "model_id": None,
+            "backend": "llamacpp",
+        },
+    ]
+    assert hp._collect_capability_rollup(slots) == []
+
+
+def test_collect_capability_rollup_keeps_self_managed_provider_without_model():
+    """Self-managed providers (SELF_MANAGED_PROVIDERS) bake their model in and
+    legitimately report no model_id — the model-less guard must not drop them."""
+    slots = [
+        {"name": "kokoro", "type": "tts", "state": "ready", "provider": "kokoro"},
+    ]
+    rollup = hp._collect_capability_rollup(slots)
+    assert [r["capability"] for r in rollup] == ["voice-tts"]
+
+
+def test_find_slot_rejects_modelless_idle_transcription_slot():
+    """#1892 review: voice_wire must not stamp STT_OPENAI_BASE_URL at a
+    model-requiring backend with nothing loaded (modelless_ready_blocked idle)."""
+    slots = [
+        {
+            "name": "whisper",
+            "type": "transcription",
+            "state": "idle",
+            "model_id": None,
+            "backend": "llamacpp",
+            "backend_url": "http://127.0.0.1:8088/v1",
+        },
+    ]
+    assert hp._find_slot(slots, "stt") is None
+
+
+def test_find_slot_accepts_self_managed_stt_without_model():
+    slots = [
+        {
+            "name": "moonshine",
+            "type": "transcription",
+            "state": "ready",
+            "provider": "moonshine",
+            "backend_url": "http://127.0.0.1:8088/v1",
+        },
+    ]
+    found = hp._find_slot(slots, "stt")
+    assert found is not None and found["name"] == "moonshine"
+
+
 def test_state_template_renders_full_state():
     body = hp._render_template(
         "STATE.md.j2",
@@ -246,6 +302,101 @@ def test_render_live_context_reachable_empty_is_not_degraded(tmp_path, monkeypat
     body = (tmp_path / "STATE.md").read_text()
     assert "reachable" in body
     assert "no chat model loaded" in body.lower()
+
+
+def test_render_live_context_uses_selected_slot_alias_not_name_match(tmp_path, monkeypatch):
+    """#1892 review finding 1: with an unwired `agent` seed next to a serving
+    slot under another name, STATE.md must advertise the SERVING slot's alias
+    (`model_aliases.qwen-coder` — the only alias the config overlay writes),
+    never relabel its model with the seed's `model_aliases.agent`."""
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
+    monkeypatch.setattr(hp, "_igpu_sclk_mhz", lambda: None)
+    home = tmp_path / "home"
+    home.mkdir()
+    slots = [
+        {"name": "agent", "type": "llm", "state": "idle", "model_id": None, "backend": "llamacpp"},
+        {
+            "name": "qwen-coder",
+            "type": "llm",
+            "state": "serving",
+            "model_id": "qwen3-coder:30b",
+            "backend": "vllm",
+            "context_length": 32768,
+        },
+    ]
+    r = hp.render_live_context(
+        hermes_home=home, slots_fetcher=lambda: slots, now_iso="2026-06-04T10:00:00+00:00"
+    )
+    assert r["state_written"] is True
+    body = (tmp_path / "STATE.md").read_text()
+    assert "qwen3-coder:30b" in body
+    assert "model_aliases.qwen-coder" in body
+    assert "model_aliases.agent" not in body
+    assert "llamacpp" not in body  # backend label must come from the serving slot
+    assert "vllm" in body
+
+
+def test_render_live_context_keeps_warming_resident_model(tmp_path, monkeypatch):
+    """#1892 register `expect`: a warming llm slot with a bound model is
+    resident — STATE.md must not claim "no chat model loaded" for the whole
+    duration of a large model load."""
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
+    monkeypatch.setattr(hp, "_igpu_sclk_mhz", lambda: None)
+    home = tmp_path / "home"
+    home.mkdir()
+    slots = [
+        {"name": "agent", "type": "llm", "state": "warming", "model_id": "qwen3:32b"},
+    ]
+    hp.render_live_context(
+        hermes_home=home, slots_fetcher=lambda: slots, now_iso="2026-06-04T10:00:00+00:00"
+    )
+    body = (tmp_path / "STATE.md").read_text()
+    assert "qwen3:32b" in body
+    assert "no chat model loaded" not in body.lower()
+
+
+def test_render_live_context_remediation_names_existing_unwired_slot(tmp_path, monkeypatch):
+    """#1892 register `expect`: the remediation must name a command valid for
+    the box's actual state. With a model-less `agent` seed present, telling
+    the operator to `hal0 slot create` a slot that already exists is wrong —
+    point at loading a model into the existing slot instead."""
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
+    monkeypatch.setattr(hp, "_igpu_sclk_mhz", lambda: None)
+    home = tmp_path / "home"
+    home.mkdir()
+    slots = [
+        {"name": "agent", "type": "llm", "state": "idle", "model_id": None, "backend": "llamacpp"},
+    ]
+    hp.render_live_context(
+        hermes_home=home, slots_fetcher=lambda: slots, now_iso="2026-06-04T10:00:00+00:00"
+    )
+    body = (tmp_path / "STATE.md").read_text()
+    assert "no chat model loaded" in body.lower()
+    assert "hal0 slot load agent" in body
+    assert "hal0 slot create" not in body
+
+
+def test_render_live_context_remediation_slot_create_when_no_llm_slots(tmp_path, monkeypatch):
+    """No llm slot at all -> `hal0 slot create` remains the right command."""
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
+    monkeypatch.setattr(hp, "_igpu_sclk_mhz", lambda: None)
+    monkeypatch.setattr(hp, "_http_get", lambda *a, **k: 200)  # daemon up, no slots
+    home = tmp_path / "home"
+    home.mkdir()
+    hp.render_live_context(
+        hermes_home=home, slots_fetcher=lambda: [], now_iso="2026-06-04T10:00:00+00:00"
+    )
+    body = (tmp_path / "STATE.md").read_text()
+    assert "no chat model loaded" in body.lower()
+    assert "hal0 slot create" in body
 
 
 def test_render_live_context_bumps_mtime_when_unchanged_reachable(tmp_path, monkeypatch):
