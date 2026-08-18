@@ -3040,10 +3040,14 @@ def _image_mismatch(running_image: str | None, declared_image: str | None) -> bo
     shorthand a profile declares compares equal to the fully-qualified name
     podman reports — see that function for why #1889 makes this load-bearing.
 
-    Digest-pinned vs tag-pinned is compared on the REPOSITORY alone: deciding
-    whether ``ghcr.io/x/y:v2`` and ``ghcr.io/x/y@sha256:…`` are the same image
-    needs a registry round-trip this hot path will never make, and guessing
-    "drifted" there is the same cry-wolf failure the docstring above forbids.
+    Digests decide identity whenever both sides carry one: a digest IS the
+    immutable image id, so ``ghcr.io/x/y:v1@sha256:D`` and
+    ``ghcr.io/x/y@sha256:D`` are the same image and the tag text is noise.
+    When only ONE side is digest-pinned the comparison falls back to the
+    REPOSITORY alone — deciding whether ``ghcr.io/x/y:v2`` and
+    ``ghcr.io/x/y@sha256:…`` match needs a registry round-trip this hot path
+    will never make, and guessing "drifted" there is the same cry-wolf
+    failure the docstring above forbids.
     """
     if not running_image or not declared_image:
         return False
@@ -3055,7 +3059,12 @@ def _image_mismatch(running_image: str | None, declared_image: str | None) -> bo
 
     running_repo, _, running_digest = running.partition("@")
     declared_repo, _, declared_digest = declared.partition("@")
-    if bool(running_digest) != bool(declared_digest):
-        return _split_image_tag(running_repo)[0] != _split_image_tag(declared_repo)[0]
+    running_name = _split_image_tag(running_repo)[0]
+    declared_name = _split_image_tag(declared_repo)[0]
+
+    if running_digest and declared_digest:
+        return running_name != declared_name or running_digest != declared_digest
+    if running_digest or declared_digest:
+        return running_name != declared_name
 
     return True

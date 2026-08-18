@@ -89,10 +89,20 @@ SEAMS: tuple[SeamSpec, ...] = (
     SeamSpec("hal0-benchctl", probe=None, required=False, role="benchmark harness"),
     # #1889: podman-ro is now the ONLY source of truth for a running slot's
     # image_status/actual_image, so a silently-missing grant is no longer
-    # cosmetic — probe it. `help` prints usage and touches nothing.
+    # cosmetic — probe it.
+    #
+    # The probe is `check-slot-token`, NOT `help`, deliberately: `help` exists
+    # on the PRE-#1889 wrapper too, so a box whose best-effort wrapper refresh
+    # failed would keep the old one-verb wrapper, pass a `help` probe, and
+    # report the seam healthy from `hal0 doctor` while image_status stayed
+    # "missing" and actual_image stayed null — the exact undiagnosable-green
+    # failure #1465 exists to prevent. `check-slot-token` is release-specific
+    # (the old wrapper rejects it with rc 64) and side-effect-free: it
+    # validates the token and prints the container name it WOULD build,
+    # touching neither podman nor the filesystem.
     SeamSpec(
         "hal0-podman-ro",
-        probe=("help",),
+        probe=("check-slot-token", "hal0probe"),
         required=False,
         role="podman image introspection (slot image_status / actual_image)",
     ),

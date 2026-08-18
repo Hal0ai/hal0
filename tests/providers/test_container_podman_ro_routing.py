@@ -376,3 +376,24 @@ def test_container_reads_still_fall_back_off_the_service_account(
 
     expected = IMAGE if method == "running_image" else ["llama-server"]
     assert getattr(ContainerProvider(), method)(SLOT) == expected
+
+
+def test_both_digest_pinned_compares_digest_not_tag_text() -> None:
+    """A digest IS the immutable image id, so the tag text alongside it is
+    noise — `repo:v1@sha256:D` and `repo@sha256:D` are the same image."""
+    digest = "@sha256:" + "a" * 64
+    other = "@sha256:" + "b" * 64
+    repo = "ghcr.io/team/model"
+
+    assert container_mod._image_mismatch(f"{repo}:v1{digest}", f"{repo}{digest}") is False
+    assert container_mod._image_mismatch(f"{repo}:v1{digest}", f"{repo}:v2{digest}") is False
+    # a genuinely different digest, or a different repository, is real drift
+    assert container_mod._image_mismatch(f"{repo}{digest}", f"{repo}{other}") is True
+    assert container_mod._image_mismatch(f"{repo}{digest}", f"ghcr.io/team/x{digest}") is True
+
+
+def test_ipv6_registry_refs_canonicalise_and_compare() -> None:
+    ref = "[2001:db8::1]:5000/team/model:v1"
+    assert container_mod.canonical_image_ref(ref) == ref
+    assert container_mod._image_mismatch(ref, ref) is False
+    assert container_mod._image_mismatch(ref, "[2001:db8::2]:5000/team/model:v1") is True

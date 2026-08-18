@@ -106,7 +106,13 @@ SLOT_TOKEN_RE='^[A-Za-z0-9_-]{1,64}$'
 # rootless one and #1889 comes straight back for that image. `model__gpu` and
 # `model--gpu` are both legal repository names.
 _REF_SEP='(__|[._]|-+)'
-_REF_HOST="[A-Za-z0-9]+(([.]|-+)[A-Za-z0-9]+)*(:[0-9]{1,5})?"
+# A registry host is a dotted/dashed name OR a bracketed IPv6 literal
+# ([2001:db8::1]:5000/...), which the reference grammar permits and which a
+# rejection here would silently turn back into image_status="missing". The
+# bracket body is hex-and-colons only, so it still cannot carry a path,
+# whitespace, a metacharacter or a second word.
+_REF_IPV6='\[[0-9A-Fa-f:]{2,45}\]'
+_REF_HOST="([A-Za-z0-9]+(([.]|-+)[A-Za-z0-9]+)*|${_REF_IPV6})(:[0-9]{1,5})?"
 _REF_PATH="[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*(/[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*)*"
 _REF_TAG='(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?'
 _REF_DIGEST='(@sha256:[0-9a-f]{64})?'

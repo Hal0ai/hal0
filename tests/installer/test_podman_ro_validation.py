@@ -57,6 +57,9 @@ LEGITIMATE_REFS = [
     "registry.example/team/model__gpu:v1",
     "team/model--gpu:v1",
     "my--registry.example.com/a__b/c.d-e_f:tag",
+    # bracketed IPv6 registry literals are legal reference hosts
+    "[2001:db8::1]:5000/team/model:v1",
+    "[::1]/local/img",
 ]
 
 #: Argv that must never reach podman. Each is a shape that would either run a
@@ -92,6 +95,11 @@ MALICIOUS_REFS = [
     "/etc/passwd",
     # malformed digests
     "alpine@sha256:zzzz",
+    # IPv6 brackets must not become a hole: only hex+colons inside
+    "[2001:db8::1;id]:5000/foo",
+    "[../etc]/foo",
+    "[]/foo",
+    "[2001:db8::1]extra/foo",
     "alpine@sha512:" + _DIGEST,
     "alpine@sha256:" + "a" * 63,
     "alpine@sha256:" + "A" * 64,
