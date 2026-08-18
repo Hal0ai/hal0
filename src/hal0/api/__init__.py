@@ -1759,6 +1759,53 @@ async def _boot_metrics_state(app: FastAPI, ctx: BootState) -> None:
     app.state.metrics_seam = ctx.metrics_seam
 
 
+async def _memory_reprobe_loop(
+    provider: Any, interval_s: float, *, max_replay_attempts: int = 20
+) -> None:
+    """Poll a boot-degraded memory provider until the durable engine answers.
+
+    Armed by ``_boot_background_tasks`` only when ``create_app`` wrapped a
+    degraded boot result in ``SelfHealingMemoryProvider`` (#1613). ``try_heal``
+    is synchronous, probe-bounded I/O, so it runs off-loop via ``to_thread``.
+
+    After the swap, drain the provider's heal hooks (#1897) — the writes hal0-api
+    made through the volatile fallback during the degrade window are gone from
+    the engine that just came up, and the phases that issued them registered a
+    replay. Draining here, on the loop, is what makes those writes durable
+    without waiting for the next hal0-api restart.
+
+    A drain that reports failure keeps its hooks armed, so the loop keeps
+    ticking and retries — up to ``max_replay_attempts``, after which it gives
+    up loudly rather than retrying forever. Only a replay that was actually
+    TRIED spends the budget: a drain whose armed hooks were all still waiting
+    on their arming boot phase (``last_drain_attempted`` False) is free, so a
+    short ``HAL0_MEMORY_REPROBE_INTERVAL_S`` cannot exhaust the cap before
+    the brain lane finishes and hands its replay over (#1912 review).
+    """
+    attempts = 0
+    while True:
+        await asyncio.sleep(interval_s)
+        if not await asyncio.to_thread(provider.try_heal):
+            continue
+        run_hooks = getattr(provider, "run_heal_hooks", None)
+        if run_hooks is None or await run_hooks():
+            return
+        if not getattr(provider, "last_drain_attempted", True):
+            # Every armed replay is still waiting on its boot lane — nothing
+            # was tried, so this tick does not count against the budget.
+            continue
+        attempts += 1
+        if attempts >= max_replay_attempts:
+            log.error(
+                "hal0.memory.heal_replay_abandoned",
+                attempts=attempts,
+                detail="post-heal replay of degraded-window writes kept failing — "
+                "restart hal0-api to re-run the boot writes against the durable engine",
+            )
+            return
+        log.warning("hal0.memory.heal_replay_retry", attempt=attempts)
+
+
 async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     """Phase — MCP session managers + refresh / GPU-arbiter loops + omni & NPU routers.
 
@@ -1826,14 +1873,9 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     _mem_provider = getattr(app.state, "memory_provider", None)
     if hasattr(_mem_provider, "try_heal"):
         _reprobe_interval = float(os.environ.get("HAL0_MEMORY_REPROBE_INTERVAL_S", "30") or "30")
-
-        async def _memory_reprobe_loop(provider: Any = _mem_provider) -> None:
-            while True:
-                await asyncio.sleep(_reprobe_interval)
-                if await asyncio.to_thread(provider.try_heal):
-                    return
-
-        ctx.memory_reprobe_task = asyncio.create_task(_memory_reprobe_loop())
+        ctx.memory_reprobe_task = asyncio.create_task(
+            _memory_reprobe_loop(_mem_provider, _reprobe_interval)
+        )
         log.info("hal0.memory.reprobe_loop_started", interval_s=_reprobe_interval)
 
     async def _stop_memory_reprobe_task() -> None:
@@ -2010,7 +2052,47 @@ def _boot_mcp_memory_call(
         return {"ok": False, "error": str(exc)}
 
 
-async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
+class _BrainLaneReplay:
+    """Heal hook that re-issues the brain-lane publishes lost while degraded (#1897).
+
+    Armed on the self-healing provider BEFORE the lane's publishes run, so a
+    heal that lands mid-lane cannot drain an empty replay and leave the lane
+    with nothing to register onto. Until :meth:`finish` hands over the result,
+    the hook reports "not done" (``False``) so the drain keeps it armed.
+
+    Each run narrows ``pending`` to the publishes that still did not land, so
+    a partially successful retry never repeats one that already succeeded —
+    ``_phase_self_report`` has no dedupe, and re-running it would leave one
+    extra private self-report per tick.
+    """
+
+    def __init__(self, app: FastAPI, ctx: BootState) -> None:
+        self._app = app
+        self._ctx = ctx
+        self.pending: tuple[str, ...] = ()
+        self.ready = False
+
+    def finish(self, owed: tuple[str, ...]) -> None:
+        """Hand over the publishes the degraded window lost (may be empty)."""
+        self.pending = owed
+        self.ready = True
+
+    async def __call__(self) -> bool:
+        if not self.ready:
+            return False
+        if not self.pending:
+            return True
+        self.pending = await _boot_brain_lane(self._app, self._ctx, only=self.pending, replay=True)
+        return not self.pending
+
+
+async def _boot_brain_lane(
+    app: FastAPI,
+    ctx: BootState,
+    *,
+    only: tuple[str, ...] | None = None,
+    replay: bool = False,
+) -> tuple[str, ...]:
     """Phase — RELOCATE(brain-lane): identity-card + self-report memory publishes.
 
     Runs LAST (after ``background_tasks``, the final named phase before this
@@ -2033,8 +2115,47 @@ async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
     self-test of chat/memory/etc. Flagged here and in the relocation
     handoff notes; a future lane could add a lightweight post-boot
     self-check if a closer smoke_tests equivalent is wanted.
+
+    #1897 — degraded-window replay. On a fresh install this phase always runs
+    inside the memory degrade window: the installer starts hal0-api and the
+    hindsight daemon in the same pass, so the engine is still cold-starting
+    (embedded postgres init + model load) and ``create_app`` handed every
+    consumer the volatile in-memory ``PgVectorProvider``. All three publishes
+    below are then accepted, warned about ("VOLATILE and will be LOST"), and
+    dropped — the durable ``agents`` bank is never created. The #1613 self-heal
+    swaps the engine in later but cannot recover writes the engine never saw,
+    so the bank stayed missing until an unrelated hal0-api restart happened to
+    re-run this phase against a healthy provider. Each publish is therefore run
+    with the fallback's volatile-write counter watched: the ones whose writes
+    the fallback actually swallowed are armed for replay on the heal path
+    (``only=`` re-runs exactly those, ``replay=True`` stops the re-run arming
+    another). Re-running a publish is safe — each searches + deletes its prior
+    card before rewriting — but is not free of consequence, which is why only
+    the lost ones are replayed: a replay of a write that already landed
+    durably races the engine's asynchronous retain and can duplicate the card.
+
+    Returns the names of the publishes it ran that did NOT report success —
+    empty means everything landed. :class:`_BrainLaneReplay` narrows its retry
+    set to exactly that, so a retry never repeats a publish that already
+    succeeded (``_phase_self_report`` has no dedupe of its own; repeating it
+    would leave a second private self-report per tick).
     """
     import functools
+
+    provider = getattr(app.state, "memory_provider", None)
+    degraded_on_entry = bool(getattr(provider, "degraded", False))
+
+    # #1897: arm the replay BEFORE the publishes run. The hook reports
+    # "not done" until this lane hands it its result, so a heal that lands
+    # mid-lane cannot drain-and-drop an empty replay and leave the lane with
+    # nothing to register onto afterwards.
+    replay_state: _BrainLaneReplay | None = None
+    if not replay and degraded_on_entry:
+        _add_heal_hook = getattr(provider, "add_heal_hook", None)
+        if _add_heal_hook is not None:
+            replay_state = _BrainLaneReplay(app, ctx)
+            if not _add_heal_hook(replay_state):  # pragma: no cover — heal beat the arm
+                replay_state = None
 
     from hal0.agents.hermes_provision import (
         BootstrapState,
@@ -2049,43 +2170,132 @@ async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
     loop = asyncio.get_running_loop()
     io = InstallIO(mcp_memory_call=functools.partial(_boot_mcp_memory_call, app, loop))
 
-    try:
-        ns_result = await asyncio.to_thread(_phase_namespace_register, _StepCtx(state=state, io=io))
-        if not ns_result.details.get("registered"):
-            log.info(
-                "brain_lane.namespace_register_degraded",
-                warnings=ns_result.details.get("warnings"),
-            )
-    except Exception as exc:  # pragma: no cover — defensive, must never block boot
-        log.warning("brain_lane.namespace_register_failed", error=str(exc))
-
-    try:
-        brain_result = await asyncio.to_thread(
-            _phase_brain_profile_seed, _StepCtx(state=state, io=io)
-        )
-        if not brain_result.details.get("registered"):
-            log.info(
-                "brain_lane.brain_profile_seed_degraded",
-                warnings=brain_result.details.get("warnings"),
-            )
-    except Exception as exc:  # pragma: no cover — defensive, must never block boot
-        log.warning("brain_lane.brain_profile_seed_failed", error=str(exc))
-
     # self_report MUST run last — see docstring above re: the smoke_tests
     # substitution.
     boot_failures = [p.name for p in ctx.boot_report.phases if p.status == "error"]
-    prior = {"smoke_tests": {"failures": boot_failures}}
-    try:
-        report_result = await asyncio.to_thread(
-            _phase_self_report, _StepCtx(state=state, io=io, _prior=prior)
+    steps: tuple[tuple[str, Any, str, dict[str, Any] | None], ...] = (
+        ("namespace_register", _phase_namespace_register, "registered", None),
+        ("brain_profile_seed", _phase_brain_profile_seed, "registered", None),
+        (
+            "self_report",
+            _phase_self_report,
+            "published",
+            {"smoke_tests": {"failures": boot_failures}},
+        ),
+    )
+
+    # #1897: the volatile fallback counts the writes it swallows, so we can
+    # ask — per step — whether THAT step's writes were lost, instead of
+    # replaying the whole lane on the assumption that they all were. The
+    # counter lives on the fallback object itself, so once the shell rebinds
+    # to the durable engine mid-lane it stops moving and later steps are
+    # (correctly) not replayed. Replaying a step whose writes already landed
+    # durably is what would duplicate cards: the dedupe search that makes a
+    # replay safe races the engine's asynchronous retain of the write it is
+    # meant to supersede.
+    #
+    # Known, pre-existing, very narrow window (Codex review on #1912): if the
+    # swap lands between a phase's dedupe search (ran against the empty
+    # fallback) and its add (durable), the counter does not move, the step is
+    # not replayed, and the durable dedupe never ran — a degraded RESTART on a
+    # box whose agents bank already holds a prior card can duplicate it. The
+    # window is one in-process search round-trip against a 30s reprobe tick,
+    # and it predates this replay (the #1613 loop already ran concurrently
+    # with the lane).
+    fallback = getattr(provider, "target", provider)
+
+    def _volatile_writes() -> int:
+        return int(getattr(fallback, "volatile_writes", 0) or 0)
+
+    # ``volatile`` and ``failed`` are DIFFERENT findings and drive different
+    # messaging: "the fallback swallowed this write" (durable data loss unless
+    # replayed) vs "this publish just failed" (a normal warn-as-OK outcome the
+    # per-step log above already covers — including every boot with
+    # [memory].enabled = false, where all three fail). Only their union feeds
+    # the replay set; the degraded-window warnings key off ``volatile`` alone,
+    # so a healthy-provider publish failure can never fire a WARNING claiming
+    # volatile data loss (rc-validate greps the journal for exactly that key).
+    volatile: list[str] = []
+    failed: list[str] = []
+    for name, phase, done_key, prior in steps:
+        if only is not None and name not in only:
+            continue
+        before = _volatile_writes()
+        step_ctx = (
+            _StepCtx(state=state, io=io)
+            if prior is None
+            else _StepCtx(state=state, io=io, _prior=prior)
         )
-        if not report_result.details.get("published"):
-            log.info(
-                "brain_lane.self_report_degraded",
-                warning=report_result.details.get("warning"),
+        try:
+            result = await asyncio.to_thread(phase, step_ctx)
+            if not result.details.get(done_key):
+                failed.append(name)
+                log.info(
+                    f"brain_lane.{name}_degraded",
+                    warnings=result.details.get("warnings") or result.details.get("warning"),
+                )
+        except Exception as exc:  # pragma: no cover — defensive, must never block boot
+            failed.append(name)
+            log.warning(f"brain_lane.{name}_failed", error=str(exc))
+        if _volatile_writes() > before:
+            volatile.append(name)
+
+    # Owed a replay when a step's write was swallowed by the volatile fallback,
+    # or when it did not land at all — in both cases no durable card exists, so
+    # re-running cannot duplicate one.
+    owed = [name for name, *_rest in steps if name in volatile or name in failed]
+
+    if replay:
+        # The drain narrows the retry set to what came back here.
+        return tuple(failed)
+    if replay_state is not None:
+        # Hand the armed hook its work; empty means the drain drops it and
+        # the re-probe loop can exit.
+        replay_state.finish(tuple(owed))
+        if owed:
+            log.warning(
+                "brain_lane.degraded_replay_armed",
+                steps=owed,
+                detail="brain-lane publishes landed in the volatile pgvector fallback — "
+                "queued for replay once the durable memory engine heals",
             )
-    except Exception as exc:  # pragma: no cover — defensive, must never block boot
-        log.warning("brain_lane.self_report_failed", error=str(exc))
+        return tuple(failed)
+    if not volatile:
+        # Nothing was swallowed by a volatile fallback. Any failed steps were
+        # plain publish failures against whatever provider is live (or absent —
+        # every [memory].enabled = false boot lands here with all three
+        # failed), already logged per-step above; no durable data was lost, so
+        # the degraded-window warnings below would be false alarms.
+        return tuple(failed)
+    if getattr(provider, "add_heal_hook", None) is None:
+        # Deliberate [memory].engine = "pgvector": no durable engine is ever
+        # coming, so there is nothing to replay onto.
+        log.warning(
+            "brain_lane.degraded_writes_volatile",
+            steps=volatile,
+            detail="brain-lane publishes accepted by a volatile provider with no self-heal "
+            "shell — the agents dataset will not survive a restart",
+        )
+        return tuple(failed)
+    # Provider healed between the degraded-on-entry check and the arming, so
+    # the shell refused the hook and nothing else will run the replay: do it
+    # inline. A replay that still does not land is out of retries here — say
+    # so loudly rather than pretending the cards are durable.
+    log.warning(
+        "brain_lane.degraded_replay_inline",
+        steps=owed,
+        detail="memory provider healed before the replay could be armed — replaying "
+        "the lost brain-lane publishes against the durable engine now",
+    )
+    still_owed = await _boot_brain_lane(app, ctx, only=tuple(owed), replay=True)
+    if still_owed:
+        log.error(
+            "brain_lane.replay_incomplete",
+            steps=still_owed,
+            detail="inline replay of the degraded-window publishes did not land — "
+            "restart hal0-api to re-run them against the durable engine",
+        )
+    return tuple(failed)
 
 
 @asynccontextmanager

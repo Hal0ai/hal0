@@ -49,6 +49,12 @@ class PgVectorProvider(MemoryProvider):
         # WARNING is visible in the write path even when the provider was
         # constructed outside of our factory (e.g. in tests).
         self._add_warned = False
+        # #1897: monotonic count of writes this volatile store has swallowed.
+        # Callers that must re-issue their writes once a durable engine takes
+        # over (hal0-api's boot phases) read this around a write to learn
+        # whether that particular write was lost, instead of assuming every
+        # write made while degraded was.
+        self._volatile_writes = 0
         log.warning(
             "hal0.memory.degraded_provider_active",
             detail=(
@@ -57,6 +63,11 @@ class PgVectorProvider(MemoryProvider):
                 "Ensure Hindsight is reachable to enable durable storage."
             ),
         )
+
+    @property
+    def volatile_writes(self) -> int:
+        """How many writes this volatile store has accepted (#1897)."""
+        return self._volatile_writes
 
     def _allowed(self, requested: str | list[str] | None, client_id: str | None) -> list[str]:
         # ``None`` = nothing requested → default sweep. ``[]`` = every
@@ -107,6 +118,7 @@ class PgVectorProvider(MemoryProvider):
         # write-path is loud even when the construction-time warning was
         # swallowed by a log filter or the provider was built outside our
         # factory.
+        self._volatile_writes += 1
         if not self._add_warned:
             self._add_warned = True
             log.warning(

@@ -1216,13 +1216,31 @@ def _register_pulled(
     # ~7.3k tokens, so the second turn 400s with exceed_context. The
     # artifact's own GGUF header is authoritative; the curated catalogue
     # window backfills an unreadable header.
-    from hal0.registry.detect import detect
+    from hal0.registry.detect import (
+        detect,
+        quant_from_filename,
+        quant_from_rocmfpx_filename,
+    )
 
     ctx_len: int | None = None
+    detected_quant: str | None = None
     try:
-        ctx_len = detect(Path(path)).context_length
+        detection = detect(Path(path))
+        ctx_len = detection.context_length
+        detected_quant = detection.quant
     except Exception:  # header parse must never fail a completed pull
         ctx_len = None
+    # #1890: capability-grouped installs (``_final_path_for_entry``) rename the
+    # artifact to a canonical ``model.gguf``, so on-disk detection has no
+    # filename token to work with — and the ROCmFPX family's custom
+    # ``general.file_type`` is deliberately unmapped, so the header yields
+    # nothing either. That is exactly the installer-seeded FPX brain model's
+    # shape. Fall back to the quant-bearing HF source filename (the same
+    # signal ``lazy_quant`` and ``write_model_meta`` preserve).
+    if not detected_quant:
+        detected_quant = quant_from_rocmfpx_filename(hf_filename or "") or quant_from_filename(
+            hf_filename or ""
+        )
     if not ctx_len and curated is not None and curated.context_length:
         ctx_len = int(curated.context_length)
     if ctx_len:
@@ -1231,12 +1249,21 @@ def _register_pulled(
         # backfill) so a LATER re-pull can tell it apart from an operator's
         # explicit metadata edit — see the merge below.
         fresh_meta["context_length_detected"] = True
+    # #1890: stamp the detected quant on the row itself — the pull path is the
+    # ONLY registration a pull-installed model ever gets, and a null ``quant``
+    # left the #1790 FPX-on-wrong-runner guard inert (it reads the raw
+    # ``model_dump()``, never the API serializer's ``lazy_quant`` backfill).
+    # Written UNCONDITIONALLY: a re-pull replaces path/hf_filename/bytes, so a
+    # replacement artifact that detection cannot classify must clear the prior
+    # value rather than leave a stale quant attached to new bytes (which would
+    # falsely 422 a non-FPX replacement on a cpu/vulkan runner).
     updates: dict[str, Any] = {
         "path": path,
         "size_bytes": size_bytes,
         "hf_repo": hf_repo,
         "hf_filename": hf_filename,
         "metadata": fresh_meta,
+        "quant": detected_quant,
     }
     if mmproj is not None:
         updates["mmproj"] = mmproj
@@ -1265,6 +1292,7 @@ def _register_pulled(
                 size_bytes=size_bytes,
                 hf_repo=hf_repo,
                 hf_filename=hf_filename,
+                quant=detected_quant,
                 capabilities=caps,
                 backends=backends,
                 mmproj=mmproj,
@@ -1474,11 +1502,32 @@ def _register_pulled_fileset(
     fresh_meta: dict[str, Any] = {"pulled_at": int(time.time())}
     if entry_sha:
         fresh_meta["sha256"] = entry_sha
+    # #1890: same quant detection as :func:`_register_pulled` — a file-set
+    # pull (ML-2/3) is registration too, and must not leave ``quant`` null
+    # any more than the single-file path does. Same source-filename fallback
+    # (an installed name with no token / unmapped file_type still classifies
+    # via the HF entry filename) and same unconditional write (a re-pull that
+    # detection cannot classify clears the stale value with the stale bytes).
+    from hal0.registry.detect import (
+        detect,
+        quant_from_filename,
+        quant_from_rocmfpx_filename,
+    )
+
+    entry_name = Path(fileset.entry_rel).name
+    detected_quant: str | None = None
+    try:
+        detected_quant = detect(entry_dest).quant
+    except Exception:  # header parse must never fail a completed pull
+        detected_quant = None
+    if not detected_quant:
+        detected_quant = quant_from_rocmfpx_filename(entry_name) or quant_from_filename(entry_name)
     updates: dict[str, Any] = {
         "path": str(entry_dest),
         "size_bytes": total_size,
         "hf_repo": fileset.repo,
-        "hf_filename": Path(fileset.entry_rel).name,
+        "hf_filename": entry_name,
+        "quant": detected_quant,
     }
     if mmproj_dest is not None:
         updates["mmproj"] = str(mmproj_dest)
@@ -1494,6 +1543,7 @@ def _register_pulled_fileset(
                 size_bytes=total_size,
                 hf_repo=fileset.repo,
                 hf_filename=Path(fileset.entry_rel).name,
+                quant=detected_quant,
                 capabilities=["chat"],
                 mmproj=str(mmproj_dest) if mmproj_dest else None,
                 metadata=dict(fresh_meta),

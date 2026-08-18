@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 
 from hal0.agents import hermes_provision as hp
+from hal0.slots.state import DISPATCHABLE_STATES, SlotState
 
 from ._hermes_fakes import fake_hermes_run
 
@@ -816,6 +817,94 @@ def test_resolve_primary_slot_fallback_when_no_slots() -> None:
     assert out["base_url"] == "http://127.0.0.1:8080/v1"
 
 
+def test_resolve_primary_slot_skips_modelless_named_seed_for_serving_slot() -> None:
+    """Regression for #1892.
+
+    A fresh install carries an unwired ``agent`` seed slot (no model bound)
+    alongside a genuinely serving llm slot under another name. The name-based
+    match must not shadow the slot that is actually serving traffic.
+    """
+    fake = lambda: [  # noqa: E731
+        {"name": "agent", "type": "llm", "state": "idle", "model_id": None},
+        {
+            "name": "qwen-coder",
+            "type": "llm",
+            "state": "serving",
+            "model_id": "qwen3-coder:30b",
+            "backend": "vllm",
+            "backend_url": "http://127.0.0.1:8001/v1",
+            "context_length": 32768,
+        },
+    ]
+    out = hp._resolve_primary_slot(slots_fetcher=fake)
+    assert out["model"] == "qwen3-coder:30b"
+    assert out["placeholder"] is False
+    # One selection, one answer: the alias/backend the renderers consume must
+    # come from the SAME slot that supplied the model — never re-derived by
+    # name (which would relabel this model `model_aliases.agent`, an alias
+    # _collect_chat_slots never writes for a model-less seed).
+    assert out["alias"] == "qwen-coder"
+    assert out["backend"] == "vllm"
+
+
+def test_resolve_primary_slot_accepts_warming_slot_with_bound_model() -> None:
+    """#1892 register `expect`: a resident (warming) model with a bound
+    model_id must never render as "no chat model loaded" for the whole
+    duration of a large load. `model_aliases.<slot>` for it already exists —
+    the gateway cold-loads/queues on demand."""
+    fake = lambda: [  # noqa: E731
+        {
+            "name": "agent",
+            "type": "llm",
+            "state": "warming",
+            "model_id": "qwen3:32b",
+            "context_length": 16384,
+        },
+    ]
+    out = hp._resolve_primary_slot(slots_fetcher=fake)
+    assert out["model"] == "qwen3:32b"
+    assert out["placeholder"] is False
+    assert out["alias"] == "agent"
+
+
+def test_resolve_primary_slot_prefers_dispatchable_over_warming() -> None:
+    """A dispatchable slot outranks a warming one, even when the warming slot
+    carries the canonical `agent` name — name preference applies only within
+    a residency tier."""
+    fake = lambda: [  # noqa: E731
+        {"name": "agent", "type": "llm", "state": "warming", "model_id": "qwen3:32b"},
+        {"name": "qwen-coder", "type": "llm", "state": "serving", "model_id": "qwen3-coder:30b"},
+    ]
+    out = hp._resolve_primary_slot(slots_fetcher=fake)
+    assert out["model"] == "qwen3-coder:30b"
+    assert out["alias"] == "qwen-coder"
+
+
+def test_resolve_primary_slot_warming_without_model_is_placeholder() -> None:
+    """Warming counts as resident only WITH a bound model — a model-less
+    warming slot still falls through to the placeholder."""
+    fake = lambda: [  # noqa: E731
+        {"name": "agent", "type": "llm", "state": "warming", "model_id": None},
+    ]
+    out = hp._resolve_primary_slot(slots_fetcher=fake)
+    assert out["placeholder"] is True
+
+
+# Derived from the canonical enum, not hardcoded lists: a new SlotState
+# member can never slip through untested (#1892 "closes this permanently").
+@pytest.mark.parametrize("state", sorted(str(s) for s in DISPATCHABLE_STATES))
+def test_is_ready_accepts_every_dispatchable_slot_state(state: str) -> None:
+    """Regression for #1892: _is_ready must agree with the canonical
+    dispatchable-state set in hal0.slots.state, not a stale ad-hoc vocabulary.
+    """
+    assert hp._is_ready({"state": state}) is True
+
+
+@pytest.mark.parametrize("state", sorted(str(s) for s in set(SlotState) - DISPATCHABLE_STATES))
+def test_is_ready_rejects_non_dispatchable_slot_states(state: str) -> None:
+    assert hp._is_ready({"state": state}) is False
+
+
 def _build_overlay_keys(**over):
     """Helper: run _build_config_overlay with sane defaults → ``{key: value}``."""
     base = dict(
@@ -964,9 +1053,13 @@ def test_resolve_delegation_none_when_slot_absent() -> None:
 
 
 def test_resolve_delegation_none_when_slot_not_ready() -> None:
+    # "idle" is a dispatchable state (hal0.slots.state.DISPATCHABLE_STATES) —
+    # a container that's up with a bound model but past its idle timeout is
+    # still safe to route to (#1892). Use "warming" (model still loading,
+    # genuinely not yet dispatchable) as the not-ready fixture instead.
     slots = [
         *_ROLE_SLOTS[:1],
-        {"name": "agent", "type": "llm", "state": "idle", "model_id": "x"},
+        {"name": "agent", "type": "llm", "state": "warming", "model_id": "x"},
     ]
     assert hp._resolve_delegation(slots, hal0_base_url=_HAL0_V1) is None
 

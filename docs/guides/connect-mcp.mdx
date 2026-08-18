@@ -67,11 +67,12 @@ or behind your own reverse proxy — do not expose `/mcp/*` to the internet.
 
 ### Connect
 
-Point your MCP client at the mount URL on the hal0 host:
+Point your MCP client at the Streamable-HTTP endpoint on the hal0 host — the
+mount root itself 405s (no redirect); the working path always ends in `/mcp`:
 
 ```
-http://localhost:8080/mcp/admin
-http://localhost:8080/mcp/memory
+http://localhost:8080/mcp/admin/mcp
+http://localhost:8080/mcp/memory/mcp
 ```
 
 ### Authenticate

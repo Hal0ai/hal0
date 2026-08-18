@@ -1313,6 +1313,7 @@ def agent_peers() -> None:
     shows installed bundled agents on this host); ``peers`` shows
     every card published into the federated registry.
     """
+    import ast as _ast
     import json as _json
     import urllib.error
     import urllib.request
@@ -1354,73 +1355,61 @@ def agent_peers() -> None:
         console.print("[dim]No agent identity cards published yet.[/dim]")
         return
 
-    def _as_dict(value: object) -> dict[str, Any]:
-        """Coerce a metadata sub-field to a dict.
-
-        #1905: on at least one upgraded box, a card's nested metadata
-        fields (``hal0_state``, seen in the wild; ``endpoint`` shares the
-        same storage path) come back from the memory API as a *string*
-        rather than an already-parsed object — the Hindsight retain path
-        used to flatten nested values with ``str(v)``, i.e. a Python repr
-        with single quotes (``"{'registered_at': ...}"``), not JSON.
-        ``md.get("hal0_state") or {}`` doesn't catch that: a non-empty
-        string is truthy, so it passes straight through and the next
-        ``.get()`` call blows up with ``AttributeError: 'str' object has
-        no attribute 'get'``. The write path now emits real JSON, but
-        already-written cards on upgraded boxes still carry the repr
-        shape — try ``json.loads`` first, then ``ast.literal_eval`` as
-        the recovery path for those. Any other shape degrades to an
-        empty dict so the row still renders with "—".
-        """
-        if isinstance(value, dict):
-            return value
-        if isinstance(value, str):
-            parsed = _parse_stringified(value)
-            return parsed if isinstance(parsed, dict) else {}
-        return {}
-
-    def _parse_stringified(value: str) -> object:
-        """Decode a stringified metadata value: JSON first, repr second."""
-        try:
-            return _json.loads(value)
-        except _json.JSONDecodeError:
-            pass
-        import ast as _ast
-
-        try:
-            return _ast.literal_eval(value)
-        except (ValueError, SyntaxError):
-            return None
-
-    def _as_list(value: object) -> list[Any]:
-        """Coerce a metadata sub-field to a list.
-
-        #1905: ``roles`` shares the exact storage path (and therefore the
-        exact stringified-repr failure mode) as ``hal0_state`` above —
-        left uncoerced, ``", ".join(<str>)`` splits the repr into one
-        table cell per character.
-        """
-        if isinstance(value, list):
-            return value
-        if isinstance(value, str):
-            parsed = _parse_stringified(value)
-            return parsed if isinstance(parsed, list) else []
-        return []
-
     table = Table(title=f"Agent peers ({len(items)})")
     table.add_column("Agent ID", style="bold")
     table.add_column("Display name")
     table.add_column("Roles")
     table.add_column("Endpoint")
     table.add_column("Registered")
+
+    def _unflatten(value: Any) -> Any:
+        """Undo the string flattening cards pick up in the memory engine (#1897).
+
+        ``HindsightProvider.add`` stores metadata as ``{k: str(v) for ...}``,
+        so a card's nested ``endpoint`` / ``hal0_state`` / ``roles`` come back
+        as Python reprs (``{'url': 'http://…'}``) — as JSON on some other
+        engines. ``hal0 agent peers`` assumed live objects and died with
+        ``AttributeError: 'str' object has no attribute 'get'``, taking the
+        whole listing down. Try JSON first, then a literal-eval for the repr
+        form (literals only — never ``eval``); an unparseable value is handed
+        back as-is for the caller to reject.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        try:
+            return _json.loads(text)
+        except _json.JSONDecodeError:
+            pass
+        try:
+            return _ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            return value
+
+    def _as_dict(value: Any) -> dict[str, Any]:
+        """One card field as a dict; anything unreadable costs only its own
+        columns, never the listing."""
+        parsed = _unflatten(value)
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _as_list(value: Any) -> list[Any]:
+        """One card field as a list; a bare string is a single-element list."""
+        parsed = _unflatten(value)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, str) and parsed:
+            return [parsed]
+        return []
+
     for item in items:
-        md = _as_dict(item.get("metadata") if isinstance(item, dict) else None)
+        md = _as_dict(item.get("metadata")) if isinstance(item, dict) else {}
         endpoint = _as_dict(md.get("endpoint"))
         hal0_state = _as_dict(md.get("hal0_state"))
+        roles = _as_list(md.get("roles"))
         table.add_row(
             str(md.get("agent_id") or "—"),
             str(md.get("display_name") or "—"),
-            ", ".join(str(r) for r in _as_list(md.get("roles"))) or "—",
+            ", ".join(str(r) for r in roles) or "—",
             str(endpoint.get("url") or "—"),
             str(hal0_state.get("registered_at") or "—"),
         )

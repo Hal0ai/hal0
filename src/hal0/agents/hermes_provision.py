@@ -61,6 +61,7 @@ from hal0.agents.anchor_window import (
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
+from hal0.slots.state import SlotState, is_dispatchable_state, provider_requires_model
 from hal0.system import seam as _seam
 
 log = structlog.get_logger(__name__)
@@ -1279,8 +1280,10 @@ def _resolve_primary_slot(
     Reads ``/api/slots`` (the canonical source post-embed migration) and selects
     the entry named ``primary`` (or the first ready ``type=='llm'``
     slot when no name matches). Returns the keys the config template
-    needs. Falls back to a safe-but-unwired placeholder when no slot
-    is loaded — self_report surfaces that in the bootstrap summary.
+    needs, plus the selected slot's ``alias``/``backend`` so the STATE.md
+    and HERMES.md renderers consume the SAME selection (one selection,
+    one answer — #1892). Falls back to a safe-but-unwired placeholder when
+    no slot is loaded — self_report surfaces that in the bootstrap summary.
 
     Until v0.2 this read the inference daemon's ``/v1/health`` and looked
     for ``loaded``/``slots`` keys, which post-embed migration are absent
@@ -1296,6 +1299,8 @@ def _resolve_primary_slot(
         "base_url": _DEFAULT_PRIMARY_BACKEND_URL,
         "context_length": 32768,
         "placeholder": True,
+        "alias": None,
+        "backend": None,
     }
     fetch = slots_fetcher or _fetch_slots
     slots = fetch() or []
@@ -1307,11 +1312,31 @@ def _resolve_primary_slot(
         return kind in {"llm", "chat"}
 
     candidates = [s for s in slots if isinstance(s, dict) and _chat(s)]
-    # ADR-0023: the canonical primary is the `agent` slot; accept legacy
-    # `chat`/`primary` names for boxes not yet reseeded.
-    primary = next((s for s in candidates if s.get("name") in ("agent", "chat", "primary")), None)
-    if primary is None:
-        primary = next((s for s in candidates if _is_ready(s)), None)
+    # A candidate only counts as "wired" once it is both dispatchable AND
+    # carries a bound model — an `agent` seed slot that hasn't been loaded
+    # yet is neither (#1892: picking it by name alone, unconditionally,
+    # shadowed genuinely serving llm slots under other names and produced
+    # the "primary" sentinel forever).
+    wired = [s for s in candidates if _is_ready(s) and _slot_model_id(s)]
+    # Display residency is WIDER than request-safe dispatchability: a
+    # `warming` slot with a bound model is resident — the model is loading
+    # right now, and `model_aliases.<slot>` for it is already written by
+    # _collect_chat_slots (the gateway cold-loads/queues on demand). The
+    # #1892 register entry requires the "Chat model:" line to never deny a
+    # resident model for the whole duration of a large load, so warming
+    # slots with a bound model are a second-tier fallback here. Delegation
+    # and the capability rollup keep the strict dispatchable predicate —
+    # residency is a display question, dispatchability a routing one.
+    warming = [s for s in candidates if _slot_state(s) == SlotState.WARMING and _slot_model_id(s)]
+
+    def _pick(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
+        # ADR-0023: the canonical primary is the `agent` slot; prefer legacy
+        # `chat`/`primary` names too, but only within a residency tier —
+        # never let the name match override readiness.
+        named = next((s for s in pool if s.get("name") in ("agent", "chat", "primary")), None)
+        return named or next(iter(pool), None)
+
+    primary = _pick(wired) or _pick(warming)
     if primary is None:
         return fallback
 
@@ -1329,7 +1354,19 @@ def _resolve_primary_slot(
         ctx = int(ctx)
     except (TypeError, ValueError):
         ctx = fallback["context_length"]
-    return {"model": model, "base_url": base_url, "context_length": ctx, "placeholder": False}
+    return {
+        "model": model,
+        "base_url": base_url,
+        "context_length": ctx,
+        "placeholder": False,
+        # Renderers must consume the SAME selection: re-deriving the
+        # "primary slot" by bare name match let an unwired `agent` seed
+        # relabel a serving slot's model with an alias that is never
+        # written to `model_aliases` (#1892 review finding 1). One
+        # selection, one answer — alias + backend travel with the model.
+        "alias": _slot_alias(primary),
+        "backend": primary.get("backend"),
+    }
 
 
 def _default_mcp_servers() -> list[dict[str, Any]]:
@@ -2858,23 +2895,14 @@ def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
     chat_slots = _collect_chat_slots(slots_all, contexts=ctx.io.fetch_model_contexts())
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
     primary_for_template: dict[str, Any] | None = None
-    primary_alias = "agent"  # ADR-0023 canonical default anchor
-    primary_slot = next(
-        (
-            s
-            for s in slots_all
-            if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")
-        ),
-        None,
-    )
-    if primary_slot:
-        primary_alias = _slot_alias(primary_slot)
-    # primary_raw["model"] is a real model_id when a slot is live, or
-    # the placeholder string (slot name) when nothing is loaded — treat
-    # the placeholder as "no primary" for template purposes.
-    if primary_raw["model"] and primary_raw["model"] not in ("agent", "utility", "chat", "primary"):
+    # One selection, one answer (#1892 review): the alias comes from the SAME
+    # slot _resolve_primary_slot picked — re-deriving it here by bare name
+    # match let an unwired `agent` seed relabel a serving slot's model with
+    # an alias `model_aliases` never contains. `placeholder` is the explicit
+    # "nothing wired" signal (#702).
+    if not primary_raw.get("placeholder"):
         primary_for_template = {
-            "alias": primary_alias,
+            "alias": primary_raw.get("alias") or "agent",
             "model_id": primary_raw["model"],
             "backend_url": primary_raw["base_url"],
         }
@@ -3913,10 +3941,39 @@ def _slot_backend_url(slot: dict[str, Any]) -> str:
 _DEFAULT_PRIMARY_BACKEND_URL = f"{HAL0_API_URL}/v1"
 
 
+def _slot_state(slot: dict[str, Any]) -> str:
+    """Normalised wire state string for a slot dict (``state`` before ``status``)."""
+    return str(slot.get("state") or slot.get("status") or "").lower()
+
+
 def _is_ready(slot: dict[str, Any]) -> bool:
-    """True iff the slot reports a live/ready state."""
-    state = slot.get("state") or slot.get("status") or ""
-    return str(state).lower() in {"ready", "running", "loaded", "ok", "online"}
+    """True iff the slot reports a dispatchable (request-safe) state.
+
+    Delegates to :func:`hal0.slots.state.is_dispatchable_state`, the ONE
+    canonical definition of "safe to route to" (finding DR-8). Before #1892
+    this re-declared its own vocabulary (``ready``/``running``/``loaded``/
+    ``ok``/``online``) that never matched the real ``SlotState`` wire values
+    (``ready``/``serving``/``idle``) — a serving slot always read as
+    not-ready here.
+    """
+    return is_dispatchable_state(_slot_state(slot))
+
+
+def _slot_missing_required_model(slot: dict[str, Any]) -> bool:
+    """True when this slot's provider needs a bound model but none is bound.
+
+    ``idle`` is in the dispatchable ready-set, but it is ALSO the state
+    SlotManager coerces a model-requiring slot into when it reaches READY
+    with no model (``slot.modelless_ready_blocked``, slots/manager.py) —
+    such a slot cannot fulfil a request, so consumers that advertise or
+    wire capabilities must skip it. Self-managed providers (kokoro,
+    moonshine, …) bake their model in and legitimately report no
+    ``model_id``; this mirrors the manager's own semantics exactly:
+    reject only when the provider is KNOWN and requires a model —
+    permissive when the provider can't be determined.
+    """
+    provider = slot.get("provider") or slot.get("backend")
+    return bool(provider) and provider_requires_model(str(provider)) and not _slot_model_id(slot)
 
 
 def _slot_context_length(slot: dict[str, Any]) -> int | None:
@@ -3962,6 +4019,13 @@ def _collect_capability_rollup(slots: list[dict[str, Any]]) -> list[dict[str, An
         if not label:
             continue
         if not _is_ready(s):
+            continue
+        # `idle` is dispatchable, but a model-requiring slot parked idle by
+        # the modelless_ready_blocked guard has nothing loaded — advertising
+        # it would put `model_id: None` in the very STATE.md line #1892 is
+        # about. Self-managed providers (kokoro, …) pass: their model is
+        # baked in.
+        if _slot_missing_required_model(s):
             continue
         out.append(
             {
@@ -4046,23 +4110,36 @@ def render_live_context(
     chat_slots = _collect_chat_slots(slots_all, contexts=contexts)
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
 
-    primary_slot = next(
-        (
-            s
-            for s in slots_all
-            if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")
-        ),
-        None,
-    )
+    # One selection, one answer (#1892 review): alias + backend come from the
+    # SAME slot _resolve_primary_slot picked. Re-deriving "the primary slot"
+    # here by bare name match let an unwired `agent` seed relabel a serving
+    # slot's model with `model_aliases.agent` — an alias _collect_chat_slots
+    # (which skips model-less slots) never writes.
     primary_for_template: dict[str, Any] | None = None
-    if primary_raw["model"] and primary_raw["model"] not in ("agent", "utility", "chat", "primary"):
+    if not primary_raw.get("placeholder"):
         primary_for_template = {
-            "alias": _slot_alias(primary_slot) if primary_slot else "agent",
+            "alias": primary_raw.get("alias") or "agent",
             "model_id": primary_raw["model"],
             "backend_url": primary_raw["base_url"],
             "context_length": primary_raw["context_length"],
-            "backend": (primary_slot or {}).get("backend"),
+            "backend": primary_raw.get("backend"),
         }
+    # Remediation must name a command valid for the box's actual state
+    # (#1892 register `expect`): when an llm slot already exists but has no
+    # model bound, `hal0 slot create` would collide with it — the right
+    # move is loading a model into the existing slot.
+    unwired_llm_slot: str | None = None
+    if primary_for_template is None:
+        unwired_llm_slot = next(
+            (
+                str(s["name"])
+                for s in slots_all
+                if isinstance(s, dict)
+                and str(s.get("type") or s.get("kind") or "").lower() in {"llm", "chat"}
+                and s.get("name")
+            ),
+            None,
+        )
 
     capabilities = _collect_capability_rollup(slots_all)
 
@@ -4083,6 +4160,7 @@ def render_live_context(
 
     state_vars = {
         "primary": primary_for_template,
+        "unwired_llm_slot": unwired_llm_slot,
         "capabilities": capabilities,
         "npu": npu,
         "igpu_sclk_mhz": _igpu_sclk_mhz(),
@@ -4654,7 +4732,12 @@ def _find_slot(slots: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
     accept = _STT_SLOT_TYPES if kind == "stt" else frozenset({kind})
     for s in slots:
         slot_type = (s.get("type") or s.get("capability") or "").lower()
-        if slot_type in accept and _is_ready(s):
+        # Reject model-requiring slots with nothing bound (the
+        # modelless_ready_blocked `idle` shape) — wiring STT/TTS env vars
+        # at a backend that cannot serve trades #1892 for a worse bug.
+        # Self-managed providers (kokoro, moonshine, …) pass without a
+        # model_id.
+        if slot_type in accept and _is_ready(s) and not _slot_missing_required_model(s):
             return s
     # STT special case: the NPU-trio transcription facade (type=transcription,
     # served_by=<anchor>) always reports state=offline — it has no unit of its
@@ -4662,7 +4745,11 @@ def _find_slot(slots: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
     # stamps served_by on these shadows. Accept the facade when its anchor is
     # ready so voice_wire auto-provisions STT_OPENAI_BASE_URL.
     if kind == "stt":
-        ready_names = {str(s.get("name")) for s in slots if _is_ready(s) and s.get("name")}
+        ready_names = {
+            str(s.get("name"))
+            for s in slots
+            if _is_ready(s) and not _slot_missing_required_model(s) and s.get("name")
+        }
         for s in slots:
             slot_type = (s.get("type") or s.get("capability") or "").lower()
             anchor = s.get("served_by")

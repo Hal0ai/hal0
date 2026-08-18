@@ -18,7 +18,7 @@ def test_seed_rerank_toml_validates() -> None:
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
     assert slot.profile == "reranking"
-    assert slot.device == "gpu-vulkan"
+    assert slot.device == "gpu-rocm"  # #1888
     assert (
         slot.port == 8086
     )  # drifted from 8083 per spec §5.4 (port fix for _SETUP_SLOTS[embed] conflict)
@@ -37,7 +37,7 @@ def test_seed_utility_toml_validates() -> None:
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
     assert slot.profile == "chat"
-    assert slot.device == "gpu-vulkan"
+    assert slot.device == "gpu-rocm"  # #1888
     # 8090: 8081 was reclaimed as the `agent` seed's canonical primary port
     # (ADR-0023 LLM anchor); utility moved off it on new installs.
     assert slot.port == 8090

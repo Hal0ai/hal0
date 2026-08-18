@@ -52,12 +52,14 @@ from hal0.bench.harness import (
     BENCHCTL,
     MAX_ATTEMPTS,
     SYSTEMCTL_SEAM,
+    UNSUPPORTED_LANES,
     CellResult,
     ExclusiveSlots,
     benchctl_exec_argv,
     compose_podman_argv,
     dedupe_flags,
     default_lanes,
+    lane_is_supported,
     lane_specs,
     run_cell,
     telemetry_argv,
@@ -166,11 +168,27 @@ class TestDefaultLanes:
     def test_cpu_tier_defaults_to_the_cpu_lane_only(self) -> None:
         assert default_lanes(TIER_CPU) == ["cpu"]
 
-    def test_amd_tier_defaults_to_rocm_and_vulkan(self) -> None:
-        assert default_lanes(TIER_AMD) == ["rocm", "vulkan_radv"]
+    def test_amd_tier_defaults_to_the_rocm_lane_only(self) -> None:
+        """#1888: vulkan_radv left the GPU default — the ROCmFPX image's
+        Vulkan backend emits invalid tokens, so its throughput numbers
+        measure garbage and must not be published by default."""
+        assert default_lanes(TIER_AMD) == ["rocm"]
 
-    def test_nvidia_tier_defaults_to_rocm_and_vulkan(self) -> None:
-        assert default_lanes(TIER_NVIDIA) == ["rocm", "vulkan_radv"]
+    def test_nvidia_tier_defaults_to_the_rocm_lane_only(self) -> None:
+        assert default_lanes(TIER_NVIDIA) == ["rocm"]
+
+    def test_no_default_lane_is_unsupported(self) -> None:
+        for tier in (TIER_CPU, TIER_AMD, TIER_NVIDIA):
+            for lane in default_lanes(tier):
+                assert lane_is_supported(lane), f"{tier} defaults to unsupported {lane}"
+
+    def test_vulkan_radv_is_flagged_unsupported(self) -> None:
+        """The lane spec is retained so old records resolve, but it must be
+        marked unsupported and stay out of every default sweep (#1888)."""
+        assert "vulkan_radv" in lane_specs()
+        assert "vulkan_radv" in UNSUPPORTED_LANES
+        assert not lane_is_supported("vulkan_radv")
+        assert lane_is_supported("rocm")
 
 
 # ── dedupe_flags ─────────────────────────────────────────────────────────────

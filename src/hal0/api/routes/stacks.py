@@ -167,6 +167,28 @@ def _slot_toml_exists(slot: str) -> bool:
     return resolve_slot_stem(paths.slots_config_dir(), slot) is not None
 
 
+def _default_stack_slot_device() -> str:
+    """Device for a stack entry that names none — resolved from this host.
+
+    #1888: the old constant was ``"gpu-vulkan"``, a lane an llama.cpp slot
+    never validly runs. Swapping it for a ``"gpu-rocm"`` constant would strand
+    Intel/NVIDIA hosts on an AMD-only configuration instead, so the shared
+    install-time derivation decides. Falls back to the canonical
+    ``DEFAULT_DEVICE`` when the probe is unreadable — hal0's reference
+    platform is AMD, and a wrong ROCm label now fails loudly at slot load
+    rather than silently serving garbage.
+    """
+    from hal0.config.loader import load_hardware_info
+    from hal0.install.profile_derive import derive_device
+    from hal0.model_meta import DEFAULT_DEVICE
+
+    try:
+        hw = load_hardware_info()
+    except Exception:
+        return DEFAULT_DEVICE
+    return derive_device("chat", hw, npu_opt_in=False) or DEFAULT_DEVICE
+
+
 def _missing_slot_names(cfg: StackConfig) -> list[str]:
     """Stack slots (with a model) whose TOML doesn't exist yet."""
     return [e.slot for e in cfg.slots if e.model and not _slot_toml_exists(e.slot)]
@@ -190,7 +212,14 @@ async def _create_missing_slots(
     for entry in cfg.slots:
         if not entry.model or _slot_toml_exists(entry.slot):
             continue
-        device = entry.device or "gpu-vulkan"
+        # #1888: an entry with no device is resolved from the HOST, not from a
+        # constant. The old constant was "gpu-vulkan" — a lane llama.cpp slots
+        # never validly run (they launch the ROCmFPX runner on both GPU
+        # devices, and its Vulkan backend emits invalid tokens for every
+        # model). Hardcoding "gpu-rocm" instead would just break the other
+        # direction, materialising an AMD-only slot on an Intel/NVIDIA box, so
+        # the host probe decides and gpu-rocm is only the last-resort default.
+        device = entry.device or _default_stack_slot_device()
         profile = entry.profile or DEVICE_TO_DEFAULT_PROFILE.get(device, "")
         # spec-hw-slot-ownership §1: vision/mtp/enable_thinking are model-owned
         # typed capabilities, so a stack-created slot must not be born carrying

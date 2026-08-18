@@ -38,6 +38,122 @@ log = structlog.get_logger(__name__)
 # see the fallback chain documented there.
 _GPU_GROUP_FALLBACK_GIDS: dict[str, int] = {"render": 993, "video": 44}
 
+#: The ROCm compute device node. Its presence inside the container is what
+#: decides which llama.cpp backend the unified ROCmFPX runner image actually
+#: executes on: ``ggml_rocm_init`` succeeds and the slot runs ROCm, or it
+#: fails and llama.cpp SILENTLY falls back to that image's Vulkan backend.
+KFD_DEVICE_PATH = "/dev/kfd"
+
+#: Escape hatch for the ROCm requirement below (#1888). Set to ``1`` only when
+#: you knowingly want the runner's Vulkan lane despite it emitting invalid
+#: tokens for every model — there is no supported configuration where this is
+#: the right answer; it exists so a box can be inspected, not run.
+ENV_ALLOW_VULKAN_FALLBACK = "HAL0_ALLOW_VULKAN_FALLBACK"
+
+
+class GpuPreflightError(RuntimeError):
+    """A GPU slot cannot be launched on this host as configured.
+
+    Raised loudly at slot-load time rather than letting the launch "succeed"
+    into a silently-degraded lane.
+    """
+
+
+#: sysfs marker for "the amdgpu kernel driver is bound on this host". Used to
+#: scope the ROCm requirement to AMD: an Intel or NVIDIA GPU has no
+#: ``/dev/kfd`` to forward in the first place, and its Vulkan lane is not what
+#: #1888 characterised.
+_AMDGPU_MODULE_DIR = "/sys/module/amdgpu"
+
+
+def kfd_present(kfd_path: str = KFD_DEVICE_PATH) -> bool:
+    """Is the ROCm compute node visible AND usable by this process?
+
+    Existence alone is not enough: an LXC passthrough with a mis-mapped gid
+    leaves ``/dev/kfd`` visible but unopenable, HIP still fails to initialise,
+    and llama.cpp still lands on the invalid Vulkan lane — the exact
+    false-pass shape ``preflight_gpu``'s gid check exists to catch on the
+    render node. So this also requires read+write access.
+
+    Still cheap — no ioctl, no driver probe, never raises. A genuinely
+    functional ROCm probe belongs in the output-sanity readiness gate
+    (#1922), not on the slot-load hot path.
+    """
+    return os.path.exists(kfd_path) and os.access(kfd_path, os.R_OK | os.W_OK)
+
+
+def host_is_amd_gpu(module_dir: str = _AMDGPU_MODULE_DIR) -> bool:
+    """Is the amdgpu kernel driver bound on this host?
+
+    Filesystem sniff only. Used to scope the ROCm requirement: on an Intel or
+    NVIDIA box there is no ``/dev/kfd`` by design, so demanding one there
+    would strand every GPU slot on hardware the defect was never characterised
+    on.
+    """
+    return os.path.isdir(module_dir)
+
+
+def require_kfd_for_gpu_slot(
+    slot_name: str,
+    *,
+    device: str,
+    kfd_path: str = KFD_DEVICE_PATH,
+    env: dict[str, str] | None = None,
+    amd_host: bool | None = None,
+) -> None:
+    """Loud-fail an AMD-GPU llama.cpp slot that has no ROCm compute node.
+
+    The release-pinned ROCmFPX runner (``DEFAULT_ROCMFPX_IMAGE``) is a single
+    HIP+Vulkan build. llama.cpp picks ROCm when ``/dev/kfd`` is visible and
+    silently falls back to that image's **Vulkan** backend when
+    ``ggml_rocm_init`` fails. That Vulkan backend emits invalid tokens for
+    every model it serves, at full nominal speed, while HTTP 200, container
+    health, ``hal0 doctor`` and the SSE ``done`` frame all read green (#1888).
+
+    So ``/dev/kfd`` is a hard requirement for a GPU llama.cpp slot on this
+    image, not an optimisation: without it there is no lane that produces
+    valid output, and the honest answer is to refuse the load and say why.
+
+    Scope, deliberately narrow:
+
+    * ``gpu-rocm`` — always gated. The device name IS the ROCm claim.
+    * ``gpu-vulkan`` — gated only on an **AMD** host (``amdgpu`` bound). An
+      older AMD slot still carrying that label runs the same broken lane; an
+      Intel iGPU or an NVIDIA card without CDI has no ``/dev/kfd`` by design
+      and keeps working.
+    * ``cpu`` / ``npu`` / ``gpu-cuda`` — never gated: none of them can reach
+      the ROCmFPX image's Vulkan fallback.
+
+    An explicit :data:`ENV_ALLOW_VULKAN_FALLBACK` opt-in downgrades the
+    refusal to a warning — a warn, never a silent pass.
+    """
+    if device == "gpu-vulkan":
+        if not (host_is_amd_gpu() if amd_host is None else amd_host):
+            return
+    elif device != "gpu-rocm":
+        return
+    if kfd_present(kfd_path):
+        return
+    environ = os.environ if env is None else env
+    if str(environ.get(ENV_ALLOW_VULKAN_FALLBACK, "")).strip() in ("1", "true", "yes"):
+        log.warning(
+            "gpu_slot_vulkan_fallback_allowed",
+            slot=slot_name,
+            device=device,
+            kfd_path=kfd_path,
+            detail="output will be invalid — see #1888",
+        )
+        return
+    raise GpuPreflightError(
+        f"slot {slot_name!r} (device={device}) needs the ROCm compute node "
+        f"{kfd_path}, which is not visible here. The runner image falls back to "
+        "its Vulkan backend without it, and that backend emits invalid tokens "
+        "for every model (#1888) — refusing to start rather than serve garbage. "
+        "Forward the device from the host (Proxmox LXC: add "
+        f"'dev1: {kfd_path}' to /etc/pve/lxc/<CTID>.conf, then pct stop/start), "
+        "or move this slot to device='cpu'."
+    )
+
 
 def resolve_gpu_device_paths(
     kfd_path: str = "/dev/kfd",

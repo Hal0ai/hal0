@@ -139,6 +139,41 @@ class TestRecordError:
         _, row = writer.rows[0]
         assert row["error_code"] == "RuntimeError"
 
+    def test_attributes_from_upstream_call_on_exception_when_call_is_none(
+        self, seam: RequestSeam, writer: _FakeWriter
+    ) -> None:
+        """#1894 follow-up: a typed error raised AFTER dispatch resolution
+        (the capability-mismatch gate) carries the resolved call on the
+        exception — record_error must attribute slot/model from it instead
+        of writing a null-attributed row.
+        """
+
+        class _TypedError(Exception):
+            code = "dispatch.capability_mismatch"
+
+        exc = _TypedError("mismatch")
+        exc.upstream_call = _FakeCall(upstream_name="embed", resolved_model="nomic-embed-text-v1.5")
+        seam.record_error(exc, call=None, request=_FakeRequest(), t_entry=time.monotonic())
+        _, row = writer.rows[0]
+        assert row["slot_id"] == "embed"
+        assert row["model_id"] == "nomic-embed-text-v1.5"
+        assert row["error_code"] == "dispatch.capability_mismatch"
+
+    def test_explicit_call_wins_over_exception_attribute(
+        self, seam: RequestSeam, writer: _FakeWriter
+    ) -> None:
+        exc = RuntimeError("boom")
+        exc.upstream_call = _FakeCall(upstream_name="wrong", resolved_model="wrong-model")
+        seam.record_error(
+            exc,
+            call=_FakeCall(upstream_name="primary", resolved_model="qwen3-4b"),
+            request=_FakeRequest(),
+            t_entry=time.monotonic(),
+        )
+        _, row = writer.rows[0]
+        assert row["slot_id"] == "primary"
+        assert row["model_id"] == "qwen3-4b"
+
 
 class TestWrapStreaming:
     async def _drain(self, response: StreamingResponse) -> list[bytes]:

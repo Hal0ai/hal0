@@ -202,6 +202,12 @@ class RequestSeam:
     ) -> None:
         if not self.enabled:
             return
+        if call is None:
+            # A typed error raised AFTER resolution completed (e.g. the
+            # #1894 capability-mismatch gate in Dispatcher.dispatch) carries
+            # the resolved UpstreamCall on the exception, so the failed
+            # request is still attributed to its slot/model in metrics.
+            call = getattr(exc, "upstream_call", None)
         now = time.monotonic()
         row = build_request_metric_row(
             ts=now_iso(),

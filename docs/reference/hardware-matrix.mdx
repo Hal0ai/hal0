@@ -41,7 +41,7 @@ across 5 call sites, now unified). `DEFAULT_DEVICE = "gpu-rocm"`.
 | Device id | Label | Recommended | Default profile | Notes |
 |---|---|---|---|---|
 | `gpu-rocm` | GPU (ROCm) | ✅ | `chat` | Best throughput on Strix Halo — the recommended default. |
-| `gpu-vulkan` | GPU (Vulkan) | — | `chat` | Runs anywhere Mesa Vulkan does; slower than ROCm on Strix Halo — fallback. |
+| `gpu-vulkan` | GPU (Vulkan) | ❌ for LLM | `chat` | **Not a supported LLM backend** (#1888) — the unified ROCmFPX runner's Vulkan build emits invalid tokens. Retained for the non-llama.cpp Vulkan runtimes (Kokoro, whisper.cpp, ComfyUI) and for non-AMD GPUs. |
 | `gpu-cuda` | GPU (CUDA) | — | `chat` | NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. |
 | `cpu` | CPU | — | `cpu-chat` | Always available, slow but correct. |
 | `npu` | NPU (FLM) | — | `flm` | AMD XDNA NPU via FastFlowLM — chat/embed/ASR trio on one process. |
@@ -56,15 +56,19 @@ fallback rather than crashing config load.
 `hardware.recommend._backend_for()` — this is the actual logic the installer and
 dashboard use to pick a device for a new slot, given a probed `HardwareInfo`:
 
-1. **AMD**, unified memory ≥ 32 GB, and `vram_mb <= 4096` → **Vulkan** ("AMD UMA /
-   Strix Halo class" — small dedicated VRAM number is a UMA signal, not a real cap).
-2. **AMD**, `compute_capable` (rocm-smi reachable) → **ROCm**.
-3. **AMD**, no ROCm → **Vulkan** (Mesa).
-4. **NVIDIA**, NVIDIA Container Toolkit present (`nvidia-ctk` on `PATH` or a CDI spec
+1. **AMD**, `compute_capable` (rocm-smi reachable) *or* `/dev/kfd` present →
+   **ROCm**. The rationale string still names the "AMD UMA / Strix Halo class"
+   when unified memory ≥ 32 GB and `vram_mb <= 4096` (a small dedicated VRAM
+   number is a UMA signal, not a real cap).
+2. **AMD**, no ROCm compute node → **CPU**. Not Vulkan: LLM slots run the
+   unified ROCmFPX runner image on every AMD GPU device, and that image's
+   Vulkan backend emits invalid tokens for every model (#1888), so CPU is the
+   only lane that produces valid output on such a box.
+3. **NVIDIA**, NVIDIA Container Toolkit present (`nvidia-ctk` on `PATH` or a CDI spec
    under `/etc/cdi`/`/var/run/cdi`) → **CUDA**.
-5. **NVIDIA**, no CDI → **Vulkan** fallback.
-6. **Intel iGPU** / unknown-but-`vulkan_capable` → **Vulkan**.
-7. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
+4. **NVIDIA**, no CDI → **Vulkan** fallback.
+5. **Intel iGPU** / unknown-but-`vulkan_capable` → **Vulkan**.
+6. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
    correct").
 
 VRAM budget (`_vram_budget_gb()`): AMD UMA → half of the unified pool; discrete GPU →

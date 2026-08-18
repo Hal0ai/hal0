@@ -912,10 +912,20 @@ preflight_podman_forward() {
 # like 'clock' instead of 'render') because getent still resolved a name.
 # Test seams (only consulted here, never set in production): HAL0_GPU_DRI_GLOB,
 # HAL0_GPU_CONTAINER_OVERRIDE, HAL0_GPU_RENDER_GID_OVERRIDE,
-# HAL0_GPU_RENDER_GROUP_OVERRIDE, HAL0_GPU_USER_OVERRIDE.
+# HAL0_GPU_RENDER_GROUP_OVERRIDE, HAL0_GPU_USER_OVERRIDE, HAL0_GPU_KFD_PATH,
+# HAL0_GPU_AMD_OVERRIDE.
 # See docs/getting-started/proxmox.mdx for the full walkthrough.
 HAL0_GPU_RC_BROKEN_GID=3
 HAL0_GPU_RC_NO_DEVICE=4
+#       HAL0_GPU_RC_NO_KFD(5)     → an AMD GPU render node is visible but
+#                                    /dev/kfd is NOT: the ROCm compute node is
+#                                    missing, so llama.cpp silently falls back
+#                                    to the runner image's Vulkan backend,
+#                                    which emits INVALID TOKENS for every
+#                                    model while every health surface reads
+#                                    green (#1888). Caller allows an explicit
+#                                    CPU-only opt-in, same as NO_DEVICE.
+HAL0_GPU_RC_NO_KFD=5
 preflight_gpu() {
     local gate="${HAL0_GPU_GATE:-0}"
 
@@ -928,15 +938,16 @@ preflight_gpu() {
     [[ -n "${HAL0_GPU_CONTAINER_OVERRIDE:-}" ]] && in_container="${HAL0_GPU_CONTAINER_OVERRIDE}"
 
     local dri_glob="${HAL0_GPU_DRI_GLOB:-/dev/dri/renderD*}"
+    local kfd_path="${HAL0_GPU_KFD_PATH:-/dev/kfd}"
     local have_render="" have_kfd="" have_accel=""
     compgen -G "${dri_glob}" >/dev/null 2>&1 && have_render=1
-    [[ -e /dev/kfd ]] && have_kfd=1
+    [[ -e "${kfd_path}" ]] && have_kfd=1
     [[ -e /dev/accel/accel0 ]] && have_accel=1
 
     if [[ -n "${have_render}" ]]; then
         info "gpu: $(compgen -G "${dri_glob}" 2>/dev/null | tr '\n' ' ')present"
     fi
-    [[ -n "${have_kfd}"   ]] && info "gpu: /dev/kfd present (ROCm compute)"
+    [[ -n "${have_kfd}"   ]] && info "gpu: ${kfd_path} present (ROCm compute)"
     [[ -n "${have_accel}" ]] && info "npu: /dev/accel/accel0 present (AMD XDNA)"
 
     if [[ -z "${have_render}" ]]; then
@@ -944,7 +955,7 @@ preflight_gpu() {
             warn "gpu: no /dev/dri/renderD* inside this container — GPU slots will run CPU-only"
             warn "  Forward the devices from the Proxmox HOST (/etc/pve/lxc/<CTID>.conf, PVE 8.2+):"
             warn "    dev0: /dev/dri/renderD128,gid=<render gid INSIDE this container>"
-            warn "    dev1: /dev/kfd                    # ROCm compute (optional)"
+            warn "    dev1: /dev/kfd                    # ROCm compute — REQUIRED for GPU LLM slots (#1888)"
             warn "    dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)"
             warn "  then: pct stop <CTID> && pct start <CTID>. Full guide: https://hal0.dev/docs/getting-started/proxmox/"
             # Gated install: no devices in an LXC is the opt-in CPU-only case.
@@ -1022,6 +1033,35 @@ preflight_gpu() {
                 fi
             fi
         fi
+    fi
+
+    # ── ROCm compute node (#1888) ────────────────────────────────────────
+    # A render node without /dev/kfd is NOT a working GPU box for LLM slots.
+    # The release-pinned ROCmFPX runner is one HIP+Vulkan build: llama.cpp
+    # runs ROCm when /dev/kfd is visible and SILENTLY falls back to that
+    # image's Vulkan backend when it is not — and that backend emits invalid
+    # tokens for every model, at full nominal speed, while HTTP 200,
+    # container health, `hal0 doctor` and the SSE done frame all read green.
+    # This is the exact shape a fresh unprivileged LXC install produces, so
+    # the gate refuses it instead of shipping a box that serves garbage.
+    # AMD-only: the defect is characterised on the AMD/HIP build, and a
+    # non-AMD GPU has no /dev/kfd to forward in the first place.
+    local is_amd="${HAL0_GPU_AMD_OVERRIDE:-}"
+    if [[ -z "${is_amd}" ]]; then
+        [[ -d /sys/module/amdgpu ]] && is_amd=1
+    fi
+    if [[ -n "${is_amd}" && "${is_amd}" != "0" && -z "${have_kfd}" ]]; then
+        warn "gpu: AMD GPU visible but /dev/kfd is MISSING — no ROCm compute node"
+        warn "  Every GPU LLM slot would fall back to the runner image's Vulkan backend,"
+        warn "  which emits INVALID TOKENS for every model while all health checks read green (#1888)."
+        if [[ "${in_container}" == "lxc" ]]; then
+            warn "  Forward it from the Proxmox HOST (/etc/pve/lxc/<CTID>.conf):"
+            warn "    dev1: /dev/kfd"
+            warn "  then: pct stop <CTID> && pct start <CTID>"
+        else
+            warn "  Load the amdkfd driver (it ships with amdgpu; check 'dmesg | grep -i kfd')."
+        fi
+        [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_KFD}"
     fi
     return 0
 }
