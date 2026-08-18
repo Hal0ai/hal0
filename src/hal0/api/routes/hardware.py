@@ -218,9 +218,11 @@ def _with_live_uptime(flat: dict[str, Any]) -> dict[str, Any]:
     can be off by weeks (under- or over-reporting). The dashboard renders
     this as if it were live, so every serve of this shape must recompute
     it. The read is a cheap sysfs stat (not the heavy subprocess-fanout
-    probe), so doing it on every request is fine.
+    probe), so doing it on every request is fine. If /proc/uptime is
+    unreadable (``read_uptime_s`` returns 0), keep the cached value —
+    stale-but-plausible degrades better than a hard 0.
     """
-    flat["uptime_s"] = read_uptime_s()
+    flat["uptime_s"] = read_uptime_s() or flat.get("uptime_s", 0)
     return flat
 
 

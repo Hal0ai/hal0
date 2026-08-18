@@ -630,3 +630,21 @@ class TestLiveUptime:
         resp = client.get("/api/stats/hardware")
         assert resp.status_code == 200, resp.text
         assert resp.json()["uptime_s"] == 326305
+
+    def test_unreadable_proc_uptime_keeps_cached_value(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1905 review nit: read_uptime_s() returns 0 when /proc/uptime is
+        unreadable — a stale-but-plausible cached value degrades better
+        than clobbering it with a hard 0."""
+        from hal0.config.loader import save_hardware_info
+        from hal0.config.schema import HardwareInfo
+
+        save_hardware_info(HardwareInfo(hostname="ct150", uptime_s=4110))
+        monkeypatch.setattr(hw_mod, "read_uptime_s", lambda: 0)
+
+        resp = client.get("/api/hardware")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["uptime_s"] == 4110

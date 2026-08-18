@@ -265,6 +265,68 @@ def test_logs_synthetic_hal0_composite_returns_hint_not_404(
     assert r2.json()["error"]["code"] == "slot.not_found"
 
 
+def test_logs_real_slot_config_error_not_masked_as_synthetic(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """#1905 review (Codex, confirmed): the synthetic fall-through must catch
+    ONLY SlotNotFound. Every loaded container slot registers a same-name
+    ``kind="slot"`` upstream, so a broad ``except Exception`` converted a
+    real slot's SlotConfigError (corrupt state.json) into a fake synthetic
+    200 with "composite has no journal" — hiding a precise, actionable
+    config error from the operator.
+    """
+    from hal0.config import paths
+
+    # The same-name upstream _register_container_upstream would create.
+    isolated_app.state.upstreams.upsert(
+        Upstream(
+            name="chat",
+            kind="slot",
+            url="http://127.0.0.1:8081/v1",
+            auth_style="none",
+            slot_name="chat",
+        )
+    )
+    # Corrupt the slot's state.json so sm.status raises SlotConfigError.
+    state_file = paths.slot_data_dir("chat") / "state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text("{'not': json}", encoding="utf-8")
+
+    r = isolated_client.get("/api/slots/chat/logs")
+    assert r.status_code != 200, (
+        f"config error must surface, not turn into a synthetic 200: {r.text}"
+    )
+    assert r.json()["error"]["code"] == "slot.config_error", r.text
+
+
+def test_logs_stream_synthetic_hal0_composite_emits_degraded_frame(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """#1905 review (Codex, confirmed): the dashboard log viewer and
+    ``hal0 slot logs --follow`` drive the STREAM route, which still 404'd
+    for the synthetic ``hal0`` composite after the one-shot route was
+    fixed. It must 200 with a terminal ``event: degraded`` frame (the
+    client already listens for 'degraded' — see B13) instead of feeding
+    EventSource.onerror an endless reconnect loop.
+    """
+    r = isolated_client.get("/api/slots/hal0/logs/stream")
+    assert r.status_code == 200, r.text
+    assert "event: degraded" in r.text
+    assert "journal" in r.text  # the explanatory hint payload
+
+    # A genuinely unknown slot name must still 404 with the typed envelope.
+    r2 = isolated_client.get("/api/slots/definitely-not-a-slot/logs/stream")
+    assert r2.status_code == 404
+    assert r2.json()["error"]["code"] == "slot.not_found"
+
+
 # ── lifespan auto-register ─────────────────────────────────────────────────
 
 

@@ -791,6 +791,30 @@ async def container_enrichment(
 # ── synthetic upstream entries ───────────────────────────────────────────────
 
 
+def _synthetic_reason(u: Any) -> str:
+    """Human-readable reason a synthetic entry exists, per upstream.
+
+    #1905 review nit: the composite string belongs to the reserved
+    ``hal0`` upstream by NAME, not to every ``kind="slot"`` upstream —
+    each loaded container slot registers a same-name slot-kind upstream
+    (``SlotManager._register_container_upstream``), and real-slot-wins
+    only masks that on the happy path (the synthetic fall-throughs in
+    ``get_slot`` and ``/api/status`` can still surface these entries).
+    The composite string must stay verbatim in sync with the UI's copy
+    (``ui/src/dash/data.jsx``).
+    """
+    from hal0.upstreams.registry import RESERVED_UPSTREAM_NAME
+
+    if u.name == RESERVED_UPSTREAM_NAME:
+        return "Composite /v1 endpoint that fronts every chat model — not a lifecycle slot."
+    if u.kind == "slot":
+        return (
+            f"Registered upstream for container slot {getattr(u, 'slot_name', None) or u.name!r}; "
+            "the real slot entry is authoritative."
+        )
+    return "Backed by remote upstream; install a local slot of the same name to take over."
+
+
 def synthesize_upstream_entries(
     upstreams: Any,
     model_cache: dict[str, Any],
@@ -859,14 +883,7 @@ def synthesize_upstream_entries(
                 "advertised_models": len(models),
                 "last_used_model": last_used_model.get(u.name) or None,
                 "_synthetic": True,
-                "_synthetic_reason": (
-                    "Composite /v1 endpoint that fronts every chat model — not a lifecycle slot."
-                    if u.kind == "slot"
-                    else (
-                        "Backed by remote upstream; install a local slot of the "
-                        "same name to take over."
-                    )
-                ),
+                "_synthetic_reason": _synthetic_reason(u),
             }
         )
     return out

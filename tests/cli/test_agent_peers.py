@@ -85,6 +85,49 @@ def test_peers_survives_hal0_state_as_json_string(fake_urlopen) -> None:
     assert "2026-08-10" in result.output
 
 
+def test_peers_recovers_python_repr_shaped_card(fake_urlopen) -> None:
+    """#1905 review: the REAL wire shape on ct150 is ``str(<dict>)`` — a
+    Python repr with single quotes, which ``json.loads`` can never parse
+    (the Hindsight retain path flattened nested metadata with ``str(v)``).
+    The reader must recover these via ``ast.literal_eval`` so the peer
+    registry is readable on exactly the box the issue was filed from, and
+    ``roles`` shares the same storage path and failure mode — left
+    uncoerced, ``", ".join(<str>)`` renders one cell entry per character.
+    """
+    fake_urlopen(
+        {
+            "items": [
+                {
+                    "metadata": {
+                        "agent_id": "hermes-ct150",
+                        # Every nested field in the repr shape str(v) produced.
+                        "roles": str(["chat", "voice"]),
+                        "endpoint": str({"url": "http://h:1"}),
+                        "hal0_state": str(
+                            {
+                                "registered_at": "2026-08-10T00:00:00Z",
+                                "bootstrap_version": 1,
+                            }
+                        ),
+                    }
+                }
+            ]
+        }
+    )
+
+    result = runner.invoke(agent_commands.app, ["peers"])
+
+    assert result.exit_code == 0, result.output
+    assert "hermes-ct150" in result.output
+    # Registered and Endpoint recover their data — not "—".
+    assert "2026-08-10" in result.output
+    assert "http://h:1" in result.output
+    # Roles render whole, not exploded per character.
+    assert "chat" in result.output
+    assert "voice" in result.output
+    assert "c, h, a, t" not in result.output
+
+
 def test_peers_malformed_hal0_state_string_degrades_to_dash(fake_urlopen) -> None:
     """A hal0_state string that isn't even valid JSON still must not crash."""
     fake_urlopen(

@@ -1359,25 +1359,53 @@ def agent_peers() -> None:
 
         #1905: on at least one upgraded box, a card's nested metadata
         fields (``hal0_state``, seen in the wild; ``endpoint`` shares the
-        same storage path) come back from the memory API as a
-        JSON-encoded *string* rather than an already-parsed object —
-        some write path serialized the nested value before persisting it
-        instead of leaving it as a nested JSON object. ``md.get("hal0_state")
-        or {}`` doesn't catch that: a non-empty string is truthy, so it
-        passes straight through and the next ``.get()`` call blows up with
-        ``AttributeError: 'str' object has no attribute 'get'``. Parse it
-        back into a dict here; any other shape (including malformed JSON)
-        degrades to an empty dict so the row still renders with "—".
+        same storage path) come back from the memory API as a *string*
+        rather than an already-parsed object — the Hindsight retain path
+        used to flatten nested values with ``str(v)``, i.e. a Python repr
+        with single quotes (``"{'registered_at': ...}"``), not JSON.
+        ``md.get("hal0_state") or {}`` doesn't catch that: a non-empty
+        string is truthy, so it passes straight through and the next
+        ``.get()`` call blows up with ``AttributeError: 'str' object has
+        no attribute 'get'``. The write path now emits real JSON, but
+        already-written cards on upgraded boxes still carry the repr
+        shape — try ``json.loads`` first, then ``ast.literal_eval`` as
+        the recovery path for those. Any other shape degrades to an
+        empty dict so the row still renders with "—".
         """
         if isinstance(value, dict):
             return value
         if isinstance(value, str):
-            try:
-                parsed = _json.loads(value)
-            except _json.JSONDecodeError:
-                return {}
+            parsed = _parse_stringified(value)
             return parsed if isinstance(parsed, dict) else {}
         return {}
+
+    def _parse_stringified(value: str) -> object:
+        """Decode a stringified metadata value: JSON first, repr second."""
+        try:
+            return _json.loads(value)
+        except _json.JSONDecodeError:
+            pass
+        import ast as _ast
+
+        try:
+            return _ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            return None
+
+    def _as_list(value: object) -> list[Any]:
+        """Coerce a metadata sub-field to a list.
+
+        #1905: ``roles`` shares the exact storage path (and therefore the
+        exact stringified-repr failure mode) as ``hal0_state`` above —
+        left uncoerced, ``", ".join(<str>)`` splits the repr into one
+        table cell per character.
+        """
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            parsed = _parse_stringified(value)
+            return parsed if isinstance(parsed, list) else []
+        return []
 
     table = Table(title=f"Agent peers ({len(items)})")
     table.add_column("Agent ID", style="bold")
@@ -1392,7 +1420,7 @@ def agent_peers() -> None:
         table.add_row(
             str(md.get("agent_id") or "—"),
             str(md.get("display_name") or "—"),
-            ", ".join(md.get("roles") or []) or "—",
+            ", ".join(str(r) for r in _as_list(md.get("roles"))) or "—",
             str(endpoint.get("url") or "—"),
             str(hal0_state.get("registered_at") or "—"),
         )

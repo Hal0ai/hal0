@@ -212,23 +212,16 @@ def _read_hostname() -> str:
 def _read_uptime_s() -> int:
     """Return whole seconds since boot from /proc/uptime, 0 on failure.
 
-    /proc/uptime is "<uptime_seconds> <idle_seconds>"; we take the first
-    float and floor it. The UI formats this into "Nd HH:MM".
-
-    #1905: routes that must re-read uptime live on every request (rather
-    than trust the value cached in ``hardware.json`` at the last ``hal0
-    probe`` write) use :func:`hal0.hardware.uptime.read_uptime_s` instead
-    of this function, to avoid pulling in this module's private GPU/NPU
-    probe internals into the API route layer (#703). This is the same
-    read duplicated locally so this module's own ``_read_text`` test seam
-    keeps working unchanged.
+    #1905: the actual read lives in :mod:`hal0.hardware.uptime` so API
+    routes can re-read a live ``uptime_s`` per request without importing
+    this module's private GPU/NPU probe internals (#703). This alias
+    keeps the probe's call site local; the parse/failure branches are
+    tested against the shared implementation in
+    ``tests/hardware/test_uptime.py``.
     """
-    txt = _read_text(Path("/proc/uptime"))
-    if not txt:
-        return 0
-    with contextlib.suppress(IndexError, ValueError):
-        return int(float(txt.split()[0]))
-    return 0
+    from hal0.hardware.uptime import read_uptime_s
+
+    return read_uptime_s()
 
 
 def _read_distro() -> str:

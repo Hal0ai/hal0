@@ -1057,6 +1057,11 @@ class TestSyntheticEntries:
             [
                 SimpleNamespace(name="hal0", kind="slot", url="http://l"),
                 SimpleNamespace(name="haloai", kind="remote", url="http://r"),
+                # Every loaded container slot registers a same-name
+                # kind="slot" upstream — it must NOT claim to be the
+                # composite (review nit: the composite string belongs to
+                # the reserved name, not the kind).
+                SimpleNamespace(name="chat", kind="slot", url="http://c"),
             ]
         )
         entries = synthesize_upstream_entries(
@@ -1069,6 +1074,8 @@ class TestSyntheticEntries:
         assert "remote upstream" not in by_name["hal0"]["_synthetic_reason"]
         assert "composite" in by_name["hal0"]["_synthetic_reason"].lower()
         assert "remote upstream" in by_name["haloai"]["_synthetic_reason"]
+        assert "composite" not in by_name["chat"]["_synthetic_reason"].lower()
+        assert "remote upstream" not in by_name["chat"]["_synthetic_reason"]
 
 
 class TestSnapshotComposition:

@@ -29,6 +29,7 @@ Maps hal0's engine-neutral MemoryProvider contract onto the shared
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
@@ -953,7 +954,17 @@ class HindsightProvider(MemoryProvider):
                 content=text,
                 document_id=resolved_id,
                 context=context,
-                metadata={k: str(v) for k, v in meta.items()},
+                # #1905: nested structures must round-trip. ``str(v)`` on a
+                # dict/list produced a Python repr (single quotes) that no
+                # JSON reader on the way back out could decode — the peer
+                # registry's ``hal0_state``/``endpoint``/``roles`` cards on
+                # upgraded boxes were written exactly that way. ``json.dumps``
+                # keeps the value machine-readable; scalars stay ``str()``
+                # to preserve the wire shape existing readers expect.
+                metadata={
+                    k: (json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+                    for k, v in meta.items()
+                },
                 tags=out_tags,
                 timestamp=timestamp,
                 **extra,

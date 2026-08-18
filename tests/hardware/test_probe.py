@@ -107,18 +107,21 @@ def test_read_hostname_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert probe_mod._read_hostname() == ""
 
 
-def test_read_uptime_s(monkeypatch: pytest.MonkeyPatch) -> None:
-    # /proc/uptime: "<uptime_seconds> <idle_seconds>"
-    monkeypatch.setattr(
-        probe_mod,
-        "_read_text",
-        lambda p: "123456.78 987654.32\n" if str(p) == "/proc/uptime" else None,
-    )
+def test_read_uptime_s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # /proc/uptime: "<uptime_seconds> <idle_seconds>". _read_uptime_s
+    # delegates to hal0.hardware.uptime (#1905), so patch that seam.
+    from hal0.hardware import uptime as uptime_mod
+
+    fake = tmp_path / "uptime"
+    fake.write_text("123456.78 987654.32\n")
+    monkeypatch.setattr(uptime_mod, "_UPTIME_PATH", fake)
     assert probe_mod._read_uptime_s() == 123456
 
 
-def test_read_uptime_s_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+def test_read_uptime_s_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.hardware import uptime as uptime_mod
+
+    monkeypatch.setattr(uptime_mod, "_UPTIME_PATH", tmp_path / "missing")
     assert probe_mod._read_uptime_s() == 0
 
 
@@ -438,6 +441,13 @@ def test_probe_assembles_hardware_info(monkeypatch: pytest.MonkeyPatch, tmp_path
         return None
 
     monkeypatch.setattr(probe_mod, "_read_text", fake_read_text)
+
+    # Uptime reads through hal0.hardware.uptime (#1905), not _read_text.
+    from hal0.hardware import uptime as uptime_mod
+
+    fake_uptime = tmp_path / "uptime"
+    fake_uptime.write_text("4242.0 9000.0\n")
+    monkeypatch.setattr(uptime_mod, "_UPTIME_PATH", fake_uptime)
 
     info = HardwareProbe().probe()
     assert isinstance(info, HardwareInfo)
