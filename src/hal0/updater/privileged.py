@@ -180,19 +180,27 @@ class UpdateSeam:
         except OSError as exc:
             raise _remediation(f"could not execute `sudo -n {self._seam_bin}`: {exc}") from exc
 
-        stderr = (proc.stderr or "")[-4000:]
+        full_stderr = proc.stderr or ""
         if proc.returncode != 0:
+            # Bounded tail only for the error path — a raised error's details
+            # are a diagnostic breadcrumb, not the audit trail this exists to
+            # protect, so truncation here is fine.
             raise UpdateError(
                 f"privileged update seam failed: {parts[0]} (rc={proc.returncode})",
                 details={
                     "verb": parts[0],
                     "returncode": proc.returncode,
-                    "stderr": stderr,
+                    "stderr": full_stderr[-4000:],
                     "seam_bin": self._seam_bin,
                 },
             )
-        _relay_child_log(stderr, verb=parts[0], job_id=self._job_id)
-        return _parse_result(proc.stdout or "", verb=parts[0], stderr=stderr)
+        # Relay the FULL stderr, not a truncated tail: a successful run can
+        # emit many post-verification cleanup lines (stale quarantine/staging
+        # reaping in `_extract_tarball`) after the sha256/cosign breadcrumbs,
+        # and a 4000-char tail can push those breadcrumbs out of the relayed
+        # data — silently reopening the very audit gap this replay closes.
+        _relay_child_log(full_stderr, verb=parts[0], job_id=self._job_id)
+        return _parse_result(proc.stdout or "", verb=parts[0], stderr=full_stderr[-4000:])
 
     # ── preflight ──────────────────────────────────────────────────────────────
 
