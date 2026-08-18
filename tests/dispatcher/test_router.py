@@ -437,6 +437,10 @@ async def test_warm_cache_passthrough_chat_request_to_embed_slot_raises_typed_mi
     assert exc.value.status == 409
     assert exc.value.details["slot"] == "embed"
     assert exc.value.details["resolution_path"] == "passthrough:embed"
+    # The resolved call rides on the exception so the metrics seam
+    # (RequestSeam.record_error) can attribute the failed request.
+    assert exc.value.upstream_call.upstream_name == "embed"
+    assert exc.value.upstream_call.resolved_model == "nomic-embed-text-v1.5"
 
 
 @pytest.mark.asyncio

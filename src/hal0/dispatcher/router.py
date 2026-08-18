@@ -506,6 +506,11 @@ class Dispatcher:
                 resolution_path=call.resolution_path,
                 error=exc.message,
             )
+            # Resolution DID complete before the gate fired — expose the
+            # resolved call on the exception so the metrics seam
+            # (RequestSeam.record_error) can attribute the failed request
+            # to its slot/model instead of writing a null-attributed row.
+            exc.upstream_call = call  # type: ignore[attr-defined]
             raise
         return call
 
