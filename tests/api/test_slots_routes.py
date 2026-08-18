@@ -303,10 +303,9 @@ def test_logs_real_slot_config_error_not_masked_as_synthetic(
     assert r.json()["error"]["code"] == "slot.config_error", r.text
 
 
-def test_logs_stream_synthetic_hal0_composite_emits_degraded_frame(
+async def test_logs_stream_synthetic_hal0_composite_emits_degraded_frame(
     slot_root: Path,
     container_stub: dict[str, Any],
-    isolated_client: TestClient,
     isolated_app: FastAPI,
 ) -> None:
     """#1905 review (Codex, confirmed): the dashboard log viewer and
@@ -316,15 +315,35 @@ def test_logs_stream_synthetic_hal0_composite_emits_degraded_frame(
     client already listens for 'degraded' — see B13) instead of feeding
     EventSource.onerror an endless reconnect loop.
     """
-    r = isolated_client.get("/api/slots/hal0/logs/stream")
-    assert r.status_code == 200, r.text
-    assert "event: degraded" in r.text
-    assert "journal" in r.text  # the explanatory hint payload
+    # The degraded stream stays OPEN after the frame (keepalives) so the
+    # browser's EventSource doesn't treat stream-end as an error and
+    # reconnect-loop — so consume the generator directly (same pattern as
+    # test_state_stream_emits_transition_event) instead of buffering the
+    # whole response.
+    with TestClient(isolated_app) as client:
+        from hal0.api.routes.slots import slot_logs_stream
 
-    # A genuinely unknown slot name must still 404 with the typed envelope.
-    r2 = isolated_client.get("/api/slots/definitely-not-a-slot/logs/stream")
-    assert r2.status_code == 404
-    assert r2.json()["error"]["code"] == "slot.not_found"
+        class _ReqShim:
+            class _AppShim:
+                state = isolated_app.state
+
+            app = _AppShim()
+
+        response = await slot_logs_stream("hal0", _ReqShim())  # type: ignore[arg-type]
+        assert response.status_code == 200
+        agen = response.body_iterator
+        frame = await asyncio.wait_for(agen.__anext__(), timeout=1.0)
+        if isinstance(frame, bytes):
+            frame = frame.decode("utf-8")
+        await agen.aclose()
+
+        assert frame.startswith("event: degraded\n"), f"bad SSE prefix: {frame!r}"
+        assert "journal" in frame  # the explanatory hint payload
+
+        # A genuinely unknown slot name must still 404, typed envelope.
+        r2 = client.get("/api/slots/definitely-not-a-slot/logs/stream")
+        assert r2.status_code == 404
+        assert r2.json()["error"]["code"] == "slot.not_found"
 
 
 # ── lifespan auto-register ─────────────────────────────────────────────────

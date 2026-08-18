@@ -1588,6 +1588,15 @@ async def slot_logs_stream(
                 + json.dumps({"message": _synthetic_logs_hint(entry)})
                 + "\n\n"
             )
+            # Hold the stream open after the degraded frame: the client's
+            # degraded listener only records the message, while its onerror
+            # closes and RECONNECTS (ui/src/api/hooks/useLogs.ts) — so a
+            # stream that ends here would put the viewer in a silent retry
+            # loop against this endpoint forever. Keepalive cadence matches
+            # the journal streams (#1472) so proxy idle timeouts are covered.
+            while True:
+                await asyncio.sleep(15)
+                yield ": keepalive\n\n"
 
         return StreamingResponse(
             synthetic_source(),

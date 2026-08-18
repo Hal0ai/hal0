@@ -188,3 +188,27 @@ def test_restart_budget_charges_both_lock_acquisitions() -> None:
     # Two lock waits (each capped by a full load) plus the verb's own work.
     floor = 2 * load_phase + terminate + load_phase
     assert slot_lifecycle_timeout_s(loads=1, unloads=1) >= floor
+
+
+def test_slot_logs_one_shot_prints_hint_when_logs_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1905 follow-up (Codex): the one-shot ``hal0 slot logs hal0`` used to
+    print a generic "no logs" even when the response carried the only
+    explanation in ``hint`` (synthetic composite, journalctl missing)."""
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+    monkeypatch.setattr(
+        slot_commands,
+        "api_get",
+        lambda path, **kw: {
+            "name": "hal0",
+            "logs": "",
+            "hint": "synthetic composite slot has no journal of its own",
+        },
+    )
+
+    result = runner.invoke(slot_commands.app, ["logs", "hal0"])
+
+    assert result.exit_code == 0, result.output
+    assert "synthetic composite" in result.output
+    assert "no logs" not in result.output

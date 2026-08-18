@@ -407,7 +407,9 @@ def slot_logs(
         except CliApiError as exc:
             die(str(exc))
             return
-        console.print(data.get("logs") or "[dim]no logs[/dim]")
+        # #1905: an empty-logs response may carry the only explanation in
+        # ``hint`` (synthetic composite, journalctl missing, never started).
+        console.print(data.get("logs") or f"[dim]{data.get('hint') or 'no logs'}[/dim]")
         return
 
     # Stream SSE — line-buffered passthrough.

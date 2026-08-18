@@ -295,6 +295,35 @@ async def test_add_serializes_nested_metadata_as_json_not_repr():
     assert sent["agent_id"] == "hermes-ct150"
 
 
+def test_fact_to_item_decodes_nested_metadata_strings():
+    """#1905 follow-up (Codex): the write path stores nested dict/list
+    metadata as JSON strings, so the general read adapter must inflate
+    them back — otherwise only CLI-specific coercion sees dicts and every
+    other REST/MCP consumer gets strings. Scalars stay strings (that was
+    always this engine's wire shape)."""
+    import json
+
+    item = HindsightProvider._fact_to_item(
+        {
+            "text": "identity card",
+            "metadata": {
+                "hal0_state": json.dumps({"registered_at": "2026-08-10T00:00:00Z"}),
+                "roles": json.dumps(["chat", "voice"]),
+                "agent_id": "hermes-ct150",
+                "count": "1",
+                "not_json": "{broken",
+            },
+        },
+        "shared",
+    )
+    md = item["metadata"]
+    assert md["hal0_state"] == {"registered_at": "2026-08-10T00:00:00Z"}
+    assert md["roles"] == ["chat", "voice"]
+    assert md["agent_id"] == "hermes-ct150"
+    assert md["count"] == "1"
+    assert md["not_json"] == "{broken"  # undecodable passes through
+
+
 class FakeReranker:
     """Reverses input order so we can prove the merge re-ranked the union."""
 
