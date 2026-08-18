@@ -491,6 +491,132 @@ async def test_run_pull_refreshes_quant_on_repull(tmp_hal0_home: str) -> None:
     assert registry.get("some-random-gguf").quant == "Q8_0"
 
 
+@pytest.mark.asyncio
+async def test_run_pull_capability_grouped_install_stamps_quant_from_hf_filename(
+    tmp_hal0_home: str,
+) -> None:
+    """The installer-seeded FPX brain model's exact shape: ``capability=`` routes
+    through ``_final_path_for_entry``, which renames the artifact to a canonical
+    ``model.gguf`` — a basename with NO quant token, and the ROCmFPX custom
+    ``general.file_type`` is deliberately unmapped, so on-disk detection alone
+    yields ``None``. The quant must be derived from the HF source filename."""
+    body = _payload(4096)
+    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
+            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            registry=registry,
+            client=client,
+            capability="chat",
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    entry = registry.get("hal0-brain-sft-q8-rocmfpx")
+    # Prove the on-disk basename really carries no signal — the whole point.
+    assert Path(entry.path).name == "model.gguf"
+    assert entry.quant == "ROCmFP8"
+    assert entry.model_dump()["quant"] == "ROCmFP8"
+
+
+@pytest.mark.asyncio
+async def test_run_pull_repull_clears_quant_when_replacement_unclassifiable(
+    tmp_hal0_home: str,
+) -> None:
+    """A re-pull that swaps in an artifact detection cannot classify must CLEAR
+    the stored quant, not leave the old value attached to the new bytes — a
+    stale ``ROCmFP8`` on a plain gguf would falsely 422 the replacement on a
+    cpu/vulkan runner via ``_guard_fpx_quant_runner``."""
+    job = make_job("swappable-gguf")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(_payload(4096)))
+    try:
+        await run_pull(
+            job,
+            hf_repo="org/swap-GGUF",
+            hf_file="model-Q8_0_ROCMFPX.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert registry.get("swappable-gguf").quant == "ROCmFP8"
+
+    job2 = make_job("swappable-gguf")
+    client2 = httpx.AsyncClient(transport=_ok_handler(_payload(4096)))
+    try:
+        await run_pull(
+            job2,
+            hf_repo="org/swap-GGUF",
+            hf_file="plainmodel.gguf",
+            registry=registry,
+            client=client2,
+        )
+    finally:
+        await client2.aclose()
+    assert job2.state == "completed", f"got {job2.state}: {job2.error}"
+    entry = registry.get("swappable-gguf")
+    assert entry.quant is None
+    assert entry.hf_filename == "plainmodel.gguf"
+
+
+def test_register_pulled_fileset_stamps_and_clears_quant(tmp_hal0_home: str) -> None:
+    """The file-set registration path (ML-2/3) gets the same #1890 treatment as
+    the single-file path: quant from the entry filename when the header carries
+    no signal, and an unclassifiable replacement clears the stale value."""
+    from hal0.registry.fileset import FileSetEntry, FileSetPlan
+    from hal0.registry.pull import _register_pulled_fileset
+
+    registry = ModelRegistry()
+    root = Path(tmp_hal0_home) / "fileset-models"
+    root.mkdir(parents=True, exist_ok=True)
+    entry_dest = root / "model-Q8_0_ROCMFPX.gguf"
+    entry_dest.write_bytes(_payload(2048))
+
+    plan = FileSetPlan(
+        repo="org/fpx-GGUF",
+        revision="deadbeef",
+        entry_rel="model-Q8_0_ROCMFPX.gguf",
+        files=[FileSetEntry(rel="model-Q8_0_ROCMFPX.gguf", role="model")],
+    )
+    _register_pulled_fileset(
+        registry,
+        model_id="fileset-fpx",
+        fileset=plan,
+        installed=[(plan.files[0], entry_dest)],
+        entry_dest=entry_dest,
+        mmproj_dest=None,
+    )
+    assert registry.get("fileset-fpx").quant == "ROCmFP8"
+
+    # Replacement set whose entry has no quant token → stale value cleared.
+    plain_dest = root / "plainmodel.gguf"
+    plain_dest.write_bytes(_payload(2048))
+    plan2 = FileSetPlan(
+        repo="org/fpx-GGUF",
+        revision="deadbeef",
+        entry_rel="plainmodel.gguf",
+        files=[FileSetEntry(rel="plainmodel.gguf", role="model")],
+    )
+    _register_pulled_fileset(
+        registry,
+        model_id="fileset-fpx",
+        fileset=plan2,
+        installed=[(plan2.files[0], plain_dest)],
+        entry_dest=plain_dest,
+        mmproj_dest=None,
+    )
+    entry = registry.get("fileset-fpx")
+    assert entry.quant is None
+    assert entry.hf_filename == "plainmodel.gguf"
+
+
 # ── MR-1: run_pull persists a durable snapshot for ALL callers ────────────────
 
 
