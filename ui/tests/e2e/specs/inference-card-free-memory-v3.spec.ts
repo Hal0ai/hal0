@@ -18,11 +18,30 @@
  *      fell back to plain system RAM and `gttUsedGb` hard-zeroed — the
  *      footer read free == the ENTIRE pool, ignoring every loaded model.
  *
- * The default mock host (mock-data.ts) IS a Vulkan-only box
- * (`compute_capable: false, vulkan_capable: true`) with several loaded
- * models carrying real `mem_mb` — the exact rc-validate repro shape.
+ * Mock plumbing note (why the tests are shaped this way): the γ-suite runs
+ * forced-mock (VITE_MOCK_HAL0=1), and `/api/hardware` is a non-networkFirst
+ * MOCK_ALLOWLIST row (src/api/mock.ts) — it is substituted from
+ * `window.HAL0_DATA.host` (data.jsx seed: compute_capable AND
+ * vulkan_capable both true) BEFORE any fetch is issued, so a plain
+ * `page.route('**' + '/api/hardware')` override never fires. To actually
+ * drive the hardware shape a test must either claim the path via the
+ * `__hal0MockPassthrough` escape hatch (#1498/#1527) and then route it, or
+ * rewrite `window.HAL0_DATA` itself before the app boots. Test 1 uses the
+ * passthrough; test 2 uses a HAL0_DATA setter shim. `/api/stats/hardware`
+ * is NOT allowlisted, so plain routes work for it.
+ *
+ * Once the footer fix is in, footer and `.th-ruler-h` agree BY
+ * CONSTRUCTION (both are pool.totalGb - self.modelUsedGb off one hook), so
+ * an agreement assertion alone can never detect a `hasGpu` regression. The
+ * observable symptom of that half is the POOL BASIS — "GPU pool (GTT)"
+ * framing vs a silent fallback to system RAM — which test 1 asserts
+ * directly.
  */
 import { test, expect, json, type Page } from '../fixtures/apiMock'
+
+// Fixture-derived pool ceiling both tests drive via /api/stats/hardware.
+const GPU_POOL_TOTAL_MB = 107_520
+const GPU_POOL_TOTAL_GB = GPU_POOL_TOTAL_MB / 1024 // 105
 
 const footerFreeGb = async (page: Page) => {
   const status = page.locator('.infer-pane .body-status')
@@ -36,8 +55,11 @@ const footerFreeGb = async (page: Page) => {
   return Number(m![1])
 }
 
+const rulerLocator = (page: Page) =>
+  page.getByTestId('telemetry-header').locator('.th-ruler-h')
+
 const rulerFreeGb = async (page: Page) => {
-  const ruler = page.getByTestId('telemetry-header').locator('.th-ruler-h')
+  const ruler = rulerLocator(page)
   await expect(ruler).toContainText(/free/)
   const text = (await ruler.textContent()) || ''
   const m = text.match(/free\s*([\d.]+)\s*GB/)
@@ -46,44 +68,80 @@ const rulerFreeGb = async (page: Page) => {
 }
 
 test.describe('Inference Engine card footer reconciles with the memory ruler (#1900)', () => {
-  test('vulkan-only box (no rocm-smi): footer free != the whole pool, agrees with the ruler', async ({
+  test('vulkan-only box (no rocm-smi): GTT pool framing survives, footer agrees with the ruler', async ({
     page,
   }) => {
-    // Default mock host is already vulkan-only (compute_capable: false,
-    // vulkan_capable: true) with several loaded models — the rc-validate
-    // repro shape verbatim. No stats/hardware override needed: the bug
-    // reproduces off the plain default mock.
+    // A genuinely Vulkan-only host (compute_capable: false) — the
+    // rc-validate repro shape. The default forced-mock seed is NOT this
+    // box (it is compute+vulkan capable), so claim /api/hardware via the
+    // passthrough escape hatch and drive it ourselves.
+    await page.addInitScript(() => {
+      ;(window as any).__hal0MockPassthrough = ['/api/hardware']
+    })
+    await page.route('**/api/hardware', (route) =>
+      json(route, {
+        ram_total_mb: 96_000,
+        unified_memory_mb: 131_072,
+        gtt_total_mb: GPU_POOL_TOTAL_MB,
+        memory_kind: 'unified',
+        gpus: [
+          {
+            vendor: 'amd',
+            compute_capable: false,
+            vulkan_capable: true,
+            vram_mb: 81_920,
+          },
+        ],
+        npu: { present: false },
+      }),
+    )
+    await page.route('**/api/stats/hardware', (route) =>
+      json(route, {
+        ram_total_mb: 96_000,
+        gpu_vram_total_mb: GPU_POOL_TOTAL_MB,
+        gtt_used_mb: 40_000, // host-wide GTT — real, non-zero on a vulkan box
+        host: { configured: false, detected: false },
+      }),
+    )
     await page.goto('/#slots')
+    // Pool-basis assertion — the ONLY observable that catches a `hasGpu`
+    // regression (see header note). Pre-fix, vulkan-only ⇒ hasGpu false ⇒
+    // pool silently falls back to system RAM and the ruler reads
+    // "memory · system …" with gttUsedGb hard-zeroed.
+    await expect(rulerLocator(page)).toContainText('GPU pool (GTT)')
     const footer = await footerFreeGb(page)
     const ruler = await rulerFreeGb(page)
-    // Must reflect the loaded models, not the whole pool — several are
-    // loaded and mem_mb-attributed (mock-data.ts), so free must be
-    // meaningfully below the pool total (previously footer == total,
-    // ignoring every loaded model entirely).
-    expect(footer).toBeLessThan(120)
+    // Loaded models must be subtracted: free strictly below the pool
+    // ceiling (fixture-derived, not a magic constant).
+    expect(footer).toBeLessThan(GPU_POOL_TOTAL_GB)
     // Same basis → agree within 1 GB (footer rounds to whole GB, ruler to
     // one decimal).
     expect(Math.abs(footer - ruler)).toBeLessThanOrEqual(1)
   })
 
-  test('rocm box: footer free matches the ruler, not the raw host-wide GTT stat', async ({
+  test('rocm-only box: footer free matches the ruler, not the raw host-wide GTT stat', async ({
     page,
   }) => {
-    // ROCm-capable box where the host-wide gtt_used_mb (all GPU processes)
-    // diverges sharply from the reconciled per-slot mem_mb sum the ruler
-    // uses — the ct105-prod ~30 GB mismatch from the issue.
+    // ROCm-only box (vulkan_capable: false — a real contrast to test 1,
+    // not a restatement of the seed) where the host-wide gtt_used_mb (all
+    // GPU processes) diverges sharply from the reconciled per-slot mem_mb
+    // sum the ruler uses — the ct105-prod ~30 GB mismatch from the issue.
+    // /api/stats/hardware is not allowlisted, so this route IS effective.
     await page.route('**/api/stats/hardware', (route) =>
       json(route, {
         ram_total_mb: 131_072,
         ram_used_mb: 100_000,
         ram_available_mb: 31_072,
-        gpu_vram_total_mb: 107_520,
+        gpu_vram_total_mb: GPU_POOL_TOTAL_MB,
         gtt_used_mb: 90_000, // host-wide — far above the loaded-model sum
         vram_used_mb: 0,
         npu_status: { ok: true, model_mb: 1100 },
         host: { configured: false, detected: false },
       }),
     )
+    // /api/hardware IS allowlisted (forced-mock substitutes it from
+    // window.HAL0_DATA before any fetch), so shape the box by shimming the
+    // HAL0_DATA seed itself rather than routing the request.
     await page.addInitScript(() => {
       let stored: any = undefined
       Object.defineProperty(window, 'HAL0_DATA', {
@@ -92,7 +150,13 @@ test.describe('Inference Engine card footer reconciles with the memory ruler (#1
             ...v,
             host: {
               ...v.host,
-              gpus: [{ ...(v.host?.gpus?.[0] || {}), compute_capable: true, vulkan_capable: true }],
+              gpus: [
+                {
+                  ...(v.host?.gpus?.[0] || {}),
+                  compute_capable: true,
+                  vulkan_capable: false,
+                },
+              ],
             },
           }
         },
@@ -103,6 +167,9 @@ test.describe('Inference Engine card footer reconciles with the memory ruler (#1
       })
     })
     await page.goto('/#slots')
+    // ROCm-only must keep the GPU-pool framing too (computeCapable alone
+    // satisfies the widened gate).
+    await expect(rulerLocator(page)).toContainText('GPU pool (GTT)')
     const footer = await footerFreeGb(page)
     const ruler = await rulerFreeGb(page)
     expect(Math.abs(footer - ruler)).toBeLessThanOrEqual(1)

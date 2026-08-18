@@ -1229,6 +1229,12 @@ regressions:
     severity: minor
     tier: mechanical
     lane: ui
+    # Footer-vs-ruler-header basis + the vulkan-only hasGpu gate are covered in CI by the
+    # spec below (red without either half of the #1900 fix, verified by file-level revert).
+    # Entry deliberately RETAINED (not dropped per the usual promoted_to flow): the ruler
+    # BAR's free segment still derives from raw gtt_used (issue #1928), so an eyeball of the
+    # screen can still find two disagreeing "free" figures. Drop this entry when #1928 lands.
+    promoted_to: ui/tests/e2e/specs/inference-card-free-memory-v3.spec.ts
     summary: >-
       The Slots-page Inference Engine card footer computes free memory as
       `pool.totalGb - self.gttUsedGb` (inference-pane.jsx), and memory-map.jsx hard-zeroes
