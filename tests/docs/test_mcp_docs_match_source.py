@@ -69,11 +69,43 @@ def _connect_section(text: str) -> str:
     return rest if nxt == -1 else rest[:nxt]
 
 
-def _backticked_names(text: str) -> set[str]:
-    """Every ``tool_name``-shaped backticked token in the doc."""
-    return {
-        name for name in re.findall(r"`([a-z][a-z_0-9]*)`", text) if "_" in name or name.islower()
-    }
+def _section(text: str, start_marker: str, *end_markers: str) -> str:
+    """Slice ``text`` from ``start_marker`` to the first end marker found after it."""
+    start = text.index(start_marker)
+    rest = text[start:]
+    cut = len(rest)
+    for marker in end_markers:
+        pos = rest.find(marker, len(start_marker))
+        if pos != -1:
+            cut = min(cut, pos)
+    return rest[:cut]
+
+
+def _table_row_names(section: str) -> set[str]:
+    """Backticked tool names from the *first cell* of each markdown table row.
+
+    First-cell-only matters: delegate rows list several names in one cell
+    (all wanted), while Returns/route cells contain backticked payload shapes
+    and cross-references to other tools (not wanted).
+    """
+    names: set[str] = set()
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or stripped.startswith(("|---", "| Tool", "| Method")):
+            continue
+        first_cell = stripped.split("|")[1]
+        names |= set(re.findall(r"`([a-z][a-z_0-9]*)`", first_cell))
+    return names
+
+
+def _assert_tier_matches(tier: str, doc: set[str], src: frozenset[str] | set[str]) -> None:
+    missing = sorted(set(src) - doc)
+    stale = sorted(doc - set(src))
+    assert not missing and not stale, (
+        f"mcp-tools.mdx {tier} table has drifted from source: "
+        f"missing {missing or 'nothing'}, stale/misplaced rows {stale or 'none'} — "
+        "a tool must appear in exactly the table matching its frozenset tier"
+    )
 
 
 def test_connect_section_has_no_bare_mount_urls() -> None:
@@ -98,21 +130,42 @@ def test_connect_section_urls_end_in_mcp() -> None:
         )
 
 
-def test_admin_tool_tables_name_every_classified_tool() -> None:
-    all_admin_tools = AUTONOMOUS_READ_TOOLS | AUTONOMOUS_WRITE_TOOLS | GATED_TOOLS
-    doc_names = _backticked_names(_tools_text())
-    missing = sorted(all_admin_tools - doc_names)
-    assert not missing, (
-        f"mcp-tools.mdx is missing {len(missing)} admin tool(s) that "
-        f"hal0.mcp.admin classifies: {missing}"
-    )
+def test_admin_tool_tables_match_frozensets_per_tier() -> None:
+    """Set equality per gating tier, not "name appears somewhere on the page".
+
+    This is the ratchet #1902 asked to promote: it fails on a deleted or gutted
+    section, on tier drift (a Gated tool row moved to an Autonomous table), and
+    on stale rows for tools that no longer exist in source.
+    """
+    admin = _section(_tools_text(), "## `hal0-admin`", "\n## `hal0-memory`")
+    tiers = {
+        "Autonomous — read": AUTONOMOUS_READ_TOOLS,
+        "Autonomous — write": AUTONOMOUS_WRITE_TOOLS,
+        "Gated": GATED_TOOLS,
+    }
+    for heading, src in tiers.items():
+        table = _section(admin, f"### {heading}", "\n### ")
+        _assert_tier_matches(f"admin '{heading}'", _table_row_names(table), src)
 
 
-def test_memory_tool_table_names_every_registered_tool() -> None:
+def test_memory_tool_tables_match_registrations_per_tier() -> None:
+    """The three hal0-memory sub-tables must name exactly the registered
+    ``@server.tool``s, each in the table matching its admin-frozenset tier."""
     memory_tools = _memory_tool_names()
-    doc_names = _backticked_names(_tools_text())
-    missing = sorted(memory_tools - doc_names)
-    assert not missing, (
-        f"mcp-tools.mdx is missing {len(missing)} memory tool(s) registered "
-        f"in hal0.mcp.memory: {missing}"
+    mem = _section(_tools_text(), "## `hal0-memory`", "\n## ")
+    tiers = {
+        "Autonomous — read": memory_tools & AUTONOMOUS_READ_TOOLS,
+        "Autonomous — write": memory_tools & AUTONOMOUS_WRITE_TOOLS,
+        "Gated": memory_tools & GATED_TOOLS,
+    }
+    documented: set[str] = set()
+    for heading, src in tiers.items():
+        table = _section(mem, f"**{heading}**", "\n**", "\nValidation errors")
+        rows = _table_row_names(table)
+        _assert_tier_matches(f"memory '{heading}'", rows, src)
+        documented |= rows
+    unclassified = sorted(memory_tools - documented)
+    assert not unclassified, (
+        f"hal0.mcp.memory registers tool(s) with no admin-frozenset tier and no "
+        f"doc row: {unclassified} — classify them in hal0.mcp.admin and document them"
     )
