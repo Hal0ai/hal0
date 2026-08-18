@@ -632,32 +632,50 @@ async def _extraction_window(request: Request, wrapper: Any) -> Any | None:
     on it (same "unknown is not a pass, but it is also not a block" rule
     :mod:`hal0.agents.anchor_window` documents for its own callers).
 
-    Resolves fully in-process: the same catalog + by-id virtual-model
-    resolution ``GET /v1/models/{id}`` performs (:mod:`hal0.api.routes.v1`),
-    called directly rather than looped back over HTTP.
+    Resolves fully LOCALLY, on purpose — not via ``_aggregate_models``:
+
+    * ``_aggregate_models`` honours the *caller's* ``owned_by`` query param /
+      ``X-hal0-Model-Filter`` header. Those are discovery-surface curation;
+      applied to an internal safety check they let arbitrary request
+      metadata empty the catalog, degrade the verdict to ``unknown``, and
+      silently disable the preflight.
+    * ``_aggregate_models`` also fans out a live, uncached ``fetch_models``
+      HTTP round-trip to every enabled upstream — several seconds of
+      connect/read timeout per offline remote, on every memory write (a hot
+      path: auto-retain fires on a timer for every agent on the box).
+
+    The preflight needs neither: ``hal0/<slot>`` only ever resolves through
+    the local slot-alias rows (:func:`hal0.api.hal0_slot_alias_models` — a
+    slot_manager/model_registry read, no HTTP), and
+    ``_resolve_virtual_model_entry`` matches the resolver's answer against
+    exactly those rows, the same way chat dispatch does.
     """
     slot = getattr(wrapper, "extraction_slot", None)
     if not slot or getattr(wrapper, "hindsight_client", None) is None:
         return None
 
-    from hal0.api.routes.v1 import _aggregate_models, _resolve_virtual_model_entry
+    from hal0.api import hal0_slot_alias_models
+    from hal0.api.routes.v1 import _resolve_virtual_model_entry
     from hal0.memory.extraction_env import extraction_model_name, resolve_extraction_window
+
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    model_registry = getattr(request.app.state, "model_registry", None)
+    if slot_manager is None or model_registry is None:
+        return None
 
     model_name = extraction_model_name(slot)
     try:
-        catalog = await _aggregate_models(request, show_all=True)
+        catalog = await hal0_slot_alias_models(slot_manager, model_registry)
     except Exception:
         return None
-    entry = next(
-        (row for row in catalog if isinstance(row, dict) and row.get("id") == model_name), None
-    )
-    if entry is None:
-        try:
-            entry = await _resolve_virtual_model_entry(request, model_name, catalog)
-        except Exception:
-            entry = None
+    try:
+        entry = await _resolve_virtual_model_entry(request, model_name, catalog)
+    except Exception:
+        entry = None
 
-    return resolve_extraction_window(slot, entry=entry, catalog=catalog, endpoint="/v1/models")
+    return resolve_extraction_window(
+        slot, entry=entry, catalog=catalog, endpoint="the local slot catalog"
+    )
 
 
 @router.post("/add")

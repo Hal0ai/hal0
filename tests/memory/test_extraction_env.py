@@ -14,9 +14,11 @@ from pathlib import Path
 
 from hal0.memory.extraction_env import (
     DROP_IN_PATH,
+    EXTRACTION_FLOOR_ENV,
     EXTRACTION_MIN_CONTEXT_TOKENS,
     apply_extraction_slot,
     drop_in_matches,
+    extraction_floor,
     extraction_model_name,
     render_drop_in,
     resolve_extraction_window,
@@ -344,7 +346,7 @@ def test_extraction_model_name_matches_the_drop_in_spelling():
 
 
 def test_resolve_extraction_window_below_floor_on_the_repro_shape(tmp_path: Path):
-    """The reported ct150 shape: extraction slot resolves to a live 4096-token
+    """The reported ct151-cpu-fresh shape: extraction slot resolves to a live 4096-token
     window — clearly under the extraction prompt's own footprint."""
     entry = {"id": "hal0/utility", "context_length": 4096}
     catalog = [{"id": "utility", "context_length": 4096}]
@@ -374,7 +376,7 @@ def test_resolve_extraction_window_unknown_when_the_catalog_has_no_evidence(tmp_
     assert window.verdict == "unknown"
 
 
-def test_resolve_extraction_window_uses_a_dedicated_floor_not_hermes():
+def test_resolve_extraction_window_uses_a_dedicated_floor_not_hermes(tmp_path: Path):
     """The extraction floor is the prompt's own footprint, not Hermes' much
     larger MINIMUM_CONTEXT_LENGTH — an extraction slot deliberately sized
     well below 64,000 (typical for a small local utility model) must not be
@@ -382,7 +384,102 @@ def test_resolve_extraction_window_uses_a_dedicated_floor_not_hermes():
     entry = {"id": "hal0/utility", "context_length": 16384}
     catalog = [{"id": "utility", "context_length": 16384}]
 
-    window = resolve_extraction_window("utility", entry=entry, catalog=catalog)
+    window = resolve_extraction_window("utility", entry=entry, catalog=catalog, slots_dir=tmp_path)
 
     assert window.verdict == "ok"
     assert window.floor < 64_000
+
+
+def test_below_floor_message_names_memory_extraction_not_hermes(tmp_path: Path):
+    """Finding 2 on PR #1917: the parent ``AnchorWindow.message`` is
+    hard-coded for Hermes' 64,000-token anchor preflight. The 503 an operator
+    sees for a refused memory write must talk about memory extraction — the
+    right subsystem, the right floor semantics, the right failure scope —
+    while keeping the resolver's numbers, slot, and fix command."""
+    entry = {"id": "hal0/utility", "context_length": 4096}
+    catalog = [{"id": "utility", "context_length": 4096}]
+
+    window = resolve_extraction_window("utility", entry=entry, catalog=catalog, slots_dir=tmp_path)
+    msg = window.message()
+
+    assert window.verdict == "below_floor"
+    assert "Hermes" not in msg
+    assert "EVERY turn" not in msg
+    assert "memory" in msg
+    assert "extraction" in msg
+    assert "4,096" in msg
+    assert f"{EXTRACTION_MIN_CONTEXT_TOKENS:,}" in msg
+    assert "slot 'utility'" in msg
+
+
+def test_below_floor_message_includes_the_fix_command_for_a_binding_ceiling(tmp_path: Path):
+    (tmp_path / "utility.toml").write_text("[model]\ncontext_size = 4096\n")
+    entry = {"id": "hal0/utility", "context_length": 4096}
+    catalog = [{"id": "utility", "context_length": 4096}]
+
+    window = resolve_extraction_window("utility", entry=entry, catalog=catalog, slots_dir=tmp_path)
+    msg = window.message()
+
+    assert "context_size = 4,096" in msg
+    assert "hal0 slot edit utility --ctx-size 8192" in msg
+
+
+def test_unknown_and_ok_messages_are_extraction_specific(tmp_path: Path):
+    unknown = resolve_extraction_window("utility", entry=None, catalog=[], slots_dir=tmp_path)
+    ok = resolve_extraction_window(
+        "utility",
+        entry={"id": "hal0/utility", "context_length": 32768},
+        catalog=[{"id": "utility", "context_length": 32768}],
+        slots_dir=tmp_path,
+    )
+
+    assert "Hermes" not in unknown.message()
+    assert "Hermes" not in ok.message()
+    assert "memory extraction" in unknown.message()
+    assert "memory extraction" in ok.message()
+
+
+# ── HAL0_MEMORY_EXTRACTION_FLOOR override (PR #1917 review, finding 7) ──────
+
+
+def test_extraction_floor_defaults_without_the_env_var(monkeypatch):
+    monkeypatch.delenv(EXTRACTION_FLOOR_ENV, raising=False)
+    assert extraction_floor() == (EXTRACTION_MIN_CONTEXT_TOKENS, "hal0:extraction-prompt-floor")
+
+
+def test_extraction_floor_env_override_is_honoured(monkeypatch, tmp_path: Path):
+    """The floor is a documented estimate hal0 cannot measure; an operator
+    whose engine's prompt is genuinely smaller must have a knob that doesn't
+    require resizing a slot."""
+    monkeypatch.setenv(EXTRACTION_FLOOR_ENV, "4000")
+
+    assert extraction_floor() == (4000, f"env:{EXTRACTION_FLOOR_ENV}")
+
+    entry = {"id": "hal0/utility", "context_length": 4096}
+    catalog = [{"id": "utility", "context_length": 4096}]
+    window = resolve_extraction_window("utility", entry=entry, catalog=catalog, slots_dir=tmp_path)
+
+    assert window.verdict == "ok"
+    assert window.floor == 4000
+
+
+def test_extraction_floor_garbage_override_falls_back(monkeypatch):
+    """A typo'd override must not 500 every write — it is ignored."""
+    for garbage in ("8k", "-1", "0", "  "):
+        monkeypatch.setenv(EXTRACTION_FLOOR_ENV, garbage)
+        floor, source = extraction_floor()
+        assert floor == EXTRACTION_MIN_CONTEXT_TOKENS
+        assert source == "hal0:extraction-prompt-floor"
+
+
+def test_explicit_floor_argument_still_wins_over_the_env(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv(EXTRACTION_FLOOR_ENV, "4000")
+    entry = {"id": "hal0/utility", "context_length": 4096}
+    catalog = [{"id": "utility", "context_length": 4096}]
+
+    window = resolve_extraction_window(
+        "utility", entry=entry, catalog=catalog, floor=8192, slots_dir=tmp_path
+    )
+
+    assert window.verdict == "below_floor"
+    assert window.floor == 8192

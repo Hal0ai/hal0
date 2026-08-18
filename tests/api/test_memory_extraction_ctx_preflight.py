@@ -172,3 +172,151 @@ async def test_extraction_window_helper_no_ops_without_hindsight_client() -> Non
     request = object()  # never touched if the guard fires correctly
     assert await memory_routes._extraction_window(request, NoHindsight()) is None
     assert await memory_routes._extraction_window(request, WithNoneClient()) is None
+
+
+# ── Real-seam coverage (PR #1917 review, findings 1/3/6) ────────────────────
+#
+# Everything below exercises the REAL ``_extraction_window`` — no
+# monkeypatching of the function under test — against fake slot_manager /
+# model_registry / upstreams objects on app state (the
+# ``tests/api/test_virtual_models.py`` fixture shape). This is the seam the
+# review's blocking findings all lived in: the preflight must resolve from
+# the LOCAL slot-alias catalog only, so caller-supplied discovery filters
+# cannot disable it and no live upstream catalog fetch rides every write.
+
+
+class _FakeSlotManager:
+    """One enabled llm slot named ``utility`` with model ``small``."""
+
+    def __init__(self, ctx: int) -> None:
+        self._ctx = ctx
+
+    async def iter_configs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "utility",
+                "type": "llm",
+                "model": {"default": "small"},
+                "ctx_size": self._ctx,
+                "device": "cpu",
+            }
+        ]
+
+
+class _FakeModelEntry:
+    def __init__(self, model_id: str, ctx: int) -> None:
+        self.name = model_id
+        self._ctx = ctx
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"defaults": {"context_size": self._ctx}, "metadata": {}}
+
+
+class _FakeModelRegistry:
+    def __init__(self, ctx: int) -> None:
+        self._ctx = ctx
+
+    def has(self, model_id: str) -> bool:
+        return True
+
+    def get(self, model_id: str) -> _FakeModelEntry:
+        return _FakeModelEntry(model_id, self._ctx)
+
+
+class _RecordingUpstreams:
+    """Fails the test loudly if the preflight ever fans out to upstreams."""
+
+    def __init__(self) -> None:
+        self.fetch_calls: list[str] = []
+
+    def list(self) -> list[Any]:
+        return []
+
+    def get(self, name: str) -> Any | None:
+        return None
+
+    async def fetch_models(self, name: str) -> list[str]:
+        self.fetch_calls.append(name)
+        return []
+
+
+def _real_seam_app(ctx: int) -> tuple[FastAPI, StubHindsightWrapper, _RecordingUpstreams]:
+    stub = StubHindsightWrapper()
+    app = _build_app(stub)
+    app.state.slot_manager = _FakeSlotManager(ctx)
+    app.state.model_registry = _FakeModelRegistry(ctx)
+    upstreams = _RecordingUpstreams()
+    app.state.upstreams = upstreams
+    app.state.upstream_models = {}
+    return app, stub, upstreams
+
+
+def test_real_preflight_blocks_a_below_floor_slot_with_an_extraction_message() -> None:
+    """End-to-end through the real glue: local alias catalog →
+    ``_resolve_virtual_model_entry`` → ``resolve_extraction_window`` →
+    503 whose message talks about memory extraction, not Hermes."""
+    app, stub, _ = _real_seam_app(4096)
+
+    with TestClient(app) as c:
+        r = c.post("/api/memory/add", json={"text": "hello"})
+
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert body["error"]["code"] == "memory.extraction_ctx_too_small"
+    message = body["error"]["message"]
+    assert "Hermes" not in message
+    assert "memory" in message and "extraction" in message
+    assert stub.add_calls == []
+
+
+@pytest.mark.parametrize(
+    ("path", "headers"),
+    [
+        ("/api/memory/add?owned_by=nope", {}),
+        ("/api/memory/add", {"X-hal0-Model-Filter": "openrouter"}),
+        ("/api/memory/add?owned_by=nope", {"X-hal0-Model-Filter": "openrouter"}),
+    ],
+    ids=["owned_by-param", "model-filter-header", "both"],
+)
+def test_real_preflight_is_not_disabled_by_caller_catalog_filters(
+    path: str, headers: dict[str, str]
+) -> None:
+    """Finding 1 on PR #1917: ``owned_by`` / ``X-hal0-Model-Filter`` are
+    discovery-surface curation. Routed through ``_aggregate_models`` they
+    emptied the preflight's catalog, degraded the verdict to ``unknown``,
+    and let arbitrary request metadata silently turn the safety check off.
+    The preflight now builds its catalog locally, so the same below-floor
+    box must 503 regardless of what filters the caller sends."""
+    app, stub, _ = _real_seam_app(4096)
+
+    with TestClient(app) as c:
+        r = c.post(path, json={"text": "hello"}, headers=headers)
+
+    assert r.status_code == 503, r.text
+    assert r.json()["error"]["code"] == "memory.extraction_ctx_too_small"
+    assert stub.add_calls == []
+
+
+def test_real_preflight_never_fetches_upstream_catalogs() -> None:
+    """Finding 3 on PR #1917: the preflight used to ride
+    ``_aggregate_models``'s uncached, sequential ``fetch_models`` HTTP
+    fan-out — up to seconds of connect timeout per offline upstream on
+    EVERY memory write. The resolution is local slot state only; any
+    ``fetch_models`` call here is a regression."""
+    app, _, upstreams = _real_seam_app(4096)
+
+    with TestClient(app) as c:
+        c.post("/api/memory/add", json={"text": "hello"})
+
+    assert upstreams.fetch_calls == []
+
+
+def test_real_preflight_passes_a_healthy_slot_through_to_the_wrapper() -> None:
+    app, stub, upstreams = _real_seam_app(32768)
+
+    with TestClient(app) as c:
+        r = c.post("/api/memory/add", json={"text": "hello"})
+
+    assert r.status_code == 200, r.text
+    assert len(stub.add_calls) == 1
+    assert upstreams.fetch_calls == []

@@ -39,8 +39,10 @@ raising, so the API can surface a partial result instead of 500ing.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +77,7 @@ DEFAULT_LLM_TIMEOUT_S = 300
 #: repo), so this is deliberately a ROUND, DEFENSIBLE floor rather than an
 #: exact token count: rc.6 validation observed the prompt (few-shot examples
 #: + narrator scaffolding + the extraction schema) run ~3-4k tokens on its
-#: own, and the reproduced failure (ct150, `known-issues.yaml:
+#: own, and the reproduced failure (ct151-cpu-fresh, `known-issues.yaml:
 #: memory-extraction-quality-is-anchor-dependent`) sat at ctx=4096 — i.e.
 #: at or below the prompt's own footprint, before a single byte of the
 #: document being retained is added. 8192 doubles that observed prompt cost
@@ -257,46 +259,167 @@ def extraction_model_name(slot: str) -> str:
     return f"{_VIRTUAL_PREFIX}{slot}"
 
 
+#: Operator escape hatch for :data:`EXTRACTION_MIN_CONTEXT_TOKENS`. The floor
+#: is honestly an estimate (hal0 never sees the vendored prompt template), so
+#: a box where the estimate is wrong must not be stuck between "no memory
+#: writes" and "resize a slot": set this on the hal0-api service to any
+#: positive token count and it replaces the default floor. Recorded in
+#: ``floor_source`` so the rendered error says when it was in play.
+EXTRACTION_FLOOR_ENV = "HAL0_MEMORY_EXTRACTION_FLOOR"
+
+
+def extraction_floor() -> tuple[int, str]:
+    """Return ``(floor, floor_source)`` honouring :data:`EXTRACTION_FLOOR_ENV`.
+
+    An unset/blank variable yields the default; a non-integer or non-positive
+    value is *ignored* (with the default returned) rather than raised — a
+    typo'd override must not turn every memory write into a 500.
+    """
+    raw = (os.environ.get(EXTRACTION_FLOOR_ENV) or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return (value, f"env:{EXTRACTION_FLOOR_ENV}")
+        log.warning("hal0.memory.extraction_floor_override_invalid", raw=raw)
+    return (EXTRACTION_MIN_CONTEXT_TOKENS, "hal0:extraction-prompt-floor")
+
+
+@dataclass(frozen=True)
+class ExtractionWindow(AnchorWindow):
+    """An :class:`AnchorWindow` whose rendered message names THIS subsystem.
+
+    The parent's :meth:`~AnchorWindow.message` is hard-coded for Hermes'
+    64,000-token anchor preflight ("Hermes requires", "EVERY turn will
+    fail") — fed the extraction floor it would tell an operator debugging a
+    failed memory write that their agent runtime is broken, against a
+    threshold that contradicts the real Hermes check. Same resolved facts
+    (slot, effective window, binding ceiling, fix command), memory-extraction
+    words.
+    """
+
+    def message(self) -> str:
+        where = f" at {self.endpoint}" if self.endpoint else ""
+        floor_note = (
+            f" (operator override via {EXTRACTION_FLOOR_ENV})"
+            if self.floor_source.startswith("env:")
+            else (
+                f" (a conservative estimate of the prompt's footprint — override with "
+                f"{EXTRACTION_FLOOR_ENV} on the hal0-api service if it is wrong for "
+                f"this engine)"
+            )
+        )
+        if self.verdict == "unknown":
+            return (
+                f"memory extraction model {self.model!r} advertises no context window"
+                f"{where} right now — cannot check it against the {self.floor:,}-token "
+                f"extraction-prompt floor. Not a pass, but memory writes are not "
+                f"blocked on an unproven window; re-check once the extraction slot's "
+                f"model is loaded"
+            )
+        if self.verdict == "ok":
+            return (
+                f"memory extraction model {self.model!r} ({self._slot_note}) resolves "
+                f"to {self.effective:,} tokens ≥ the {self.floor:,}-token "
+                f"extraction-prompt floor"
+            )
+        head = (
+            f"memory write refused: Hindsight's extraction call dispatches to "
+            f"{self.model!r}, which resolves to {self._slot_note} with an effective "
+            f"context window of {self.effective:,} tokens — below the {self.floor:,} "
+            f"tokens the extraction prompt alone needs{floor_note}. A retain would be "
+            f"accepted and then silently dropped (or answered by persisting prompt "
+            f'scaffolding as a "fact"), so /api/memory/add fails fast instead. Chat '
+            f"is unaffected — only memory extraction is gated."
+        )
+        if self.slot is None:
+            return (
+                f"{head} hal0 could not prove which slot is serving it, so it cannot "
+                f"name the ceiling to raise — run `hal0 slot list` and raise the "
+                f"window of the slot behind {self.model!r} to at least {self.floor:,}."
+            )
+        if self.ceiling_is_binding:
+            return (
+                f"{head} The limit is this slot's own configured ceiling: "
+                f"[model].context_size = {self.ceiling:,} in {self.slot_path}. "
+                f"Fix: {self.fix_command}"
+            )
+        ceiling_note = (
+            f"the slot ceiling ({self.ceiling:,} in {self.slot_path}) is not the limit; "
+            if self.ceiling is not None
+            else f"no ceiling is set in {self.slot_path}; "
+        )
+        return (
+            f"{head} The limit is the model behind the slot — {ceiling_note}"
+            f"the model itself only advertises {self.effective:,}. Point slot "
+            f"{self.slot!r} at a model whose window is at least {self.floor:,} "
+            f"(`hal0 slot edit {self.slot} --model <model-id>`), or set "
+            f"defaults.context_size on the current model if it really supports more."
+        )
+
+
 def resolve_extraction_window(
     slot: str,
     *,
     entry: Mapping[str, Any] | None,
     catalog: Sequence[Mapping[str, Any]] | None = None,
-    floor: int = EXTRACTION_MIN_CONTEXT_TOKENS,
+    floor: int | None = None,
     slots_dir: Path = SLOTS_DIR,
     endpoint: str = "",
-) -> AnchorWindow:
+) -> ExtractionWindow:
     """Resolve the extraction slot's effective window against the prompt floor (#1903).
 
     Reuses :func:`hal0.agents.anchor_window.resolve_anchor_window` — the
     #1877 resolver — rather than reimplementing the virtual-model routing
     resolution it already gets right (never trust the ``hal0/<slot>``
     spelling; ask the by-id catalog row the routing fallback chain actually
-    answered with). Only the model handle and the floor differ from the
-    Hermes-anchor call: extraction is checked against
-    :data:`EXTRACTION_MIN_CONTEXT_TOKENS` (the prompt's own footprint), not
-    Hermes' much larger hard floor.
+    answered with). Only the model handle, the floor, and the rendered
+    message differ from the Hermes-anchor call: extraction is checked
+    against :func:`extraction_floor` (the prompt's own footprint, or the
+    operator's :data:`EXTRACTION_FLOOR_ENV` override), not Hermes' much
+    larger hard floor, and the verdict renders through
+    :class:`ExtractionWindow` so a below-floor 503 talks about memory
+    extraction rather than Hermes.
 
-    ``entry``/``catalog`` are the caller's ``GET /v1/models/{id}`` row and
-    ``GET /v1/models`` list for ``hal0/<slot>`` — injected so this stays pure
-    and testable without a running gateway (see :class:`AnchorWindow`).
+    ``entry``/``catalog`` are the resolved virtual-model row and the local
+    slot-alias catalog for ``hal0/<slot>`` — injected so this stays pure and
+    testable without a running gateway (see :class:`AnchorWindow`).
     """
-    return resolve_anchor_window(
+    if floor is None:
+        floor, floor_source = extraction_floor()
+    else:
+        floor_source = "hal0:extraction-prompt-floor"
+    window = resolve_anchor_window(
         extraction_model_name(slot),
         entry=entry,
         catalog=catalog,
         floor=floor,
-        floor_source="hal0:extraction-prompt-floor",
+        floor_source=floor_source,
         slots_dir=slots_dir,
         endpoint=endpoint,
+    )
+    return ExtractionWindow(
+        model=window.model,
+        slot=window.slot,
+        effective=window.effective,
+        ceiling=window.ceiling,
+        floor=window.floor,
+        floor_source=window.floor_source,
+        slots_dir=window.slots_dir,
+        endpoint=window.endpoint,
     )
 
 
 __all__ = [
     "DROP_IN_PATH",
+    "EXTRACTION_FLOOR_ENV",
     "EXTRACTION_MIN_CONTEXT_TOKENS",
+    "ExtractionWindow",
     "apply_extraction_slot",
     "drop_in_matches",
+    "extraction_floor",
     "extraction_model_name",
     "render_drop_in",
     "resolve_extraction_window",
