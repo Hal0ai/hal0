@@ -14,6 +14,15 @@
  * pip + in the ready count) every id GET /api/services/health reports —
  * not a fixed set baked into the component. A down `comfyui` must both
  * appear as its own pip and move the ready count / trip warn styling.
+ * The pips carry `data-service-id`, so the assertion diffs the chip id set
+ * against the fixture's `.services[].id` set (the issue's repro verbatim) —
+ * display-copy renames cannot break or mask the contract.
+ *
+ * The third case pins the same defect's other door: when
+ * /api/services/health itself is unavailable (500/404/network — the hook
+ * fails soft to `pending` + empty list), the group must NOT collapse to the
+ * hal0 self-check's unqualified green "1 / 1 ready" — it renders a
+ * warn-toned "services unknown" placeholder pip and trips the warn styling.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
 
@@ -50,10 +59,10 @@ function servicesHealth(overrides: { comfyui?: boolean; hermes?: boolean; openwe
   }
 }
 
-async function mockServicesHealth(page: Page, body: unknown) {
+async function mockServicesHealth(page: Page, body: unknown, status = 200) {
   await page.route('**/api/services/health', (route) =>
     route.fulfill({
-      status: 200,
+      status,
       contentType: 'application/json',
       body: JSON.stringify(body),
     }),
@@ -62,11 +71,19 @@ async function mockServicesHealth(page: Page, body: unknown) {
 
 const servicesChip = (page: Page) => page.locator('[data-testid="foot-health-services"]')
 
+/** The rendered pip id set, via data-service-id (not display copy). */
+async function chipIds(page: Page): Promise<string[]> {
+  return servicesChip(page)
+    .locator('.pip')
+    .evaluateAll((els) => els.map((el) => el.getAttribute('data-service-id') ?? ''))
+}
+
 test.describe('Footer services group includes comfyui (#1899)', () => {
-  test('all services up: 4 pips, 4/4 ready — comfyui included, not just hal0/hermes/openwebui', async ({
+  test('all services up: 4 pips, 4/4 ready — chip id set matches the payload id set plus hal0', async ({
     page,
   }) => {
-    await mockServicesHealth(page, servicesHealth())
+    const fixture = servicesHealth()
+    await mockServicesHealth(page, fixture)
     await page.goto('/')
     await expect(page.locator('.footer')).toBeVisible()
 
@@ -74,13 +91,15 @@ test.describe('Footer services group includes comfyui (#1899)', () => {
     await expect(chip).toBeVisible()
 
     // hal0 (self) + comfyui + hermes + openwebui = 4 backing services.
-    const pips = chip.locator('.pip')
-    await expect(pips).toHaveCount(4, { timeout: 10_000 })
+    await expect(chip.locator('.pip')).toHaveCount(4, { timeout: 10_000 })
     await expect(chip.locator('.v b')).toHaveText('4 / 4')
     await expect(chip.locator('.v')).not.toHaveClass(/warn/)
 
-    // A pip specifically labelled comfyui must exist.
-    await expect(chip.locator('[aria-label^="ComfyUI:"]')).toHaveCount(1)
+    // Diff the chip id set against the fixture's .services[].id set — the
+    // contract is the id set, not the backend's display names.
+    expect((await chipIds(page)).sort()).toEqual(
+      ['hal0', ...fixture.services.map((s) => s.id)].sort(),
+    )
   })
 
   test('comfyui down: ready count drops and warn styling trips — not silently absorbed', async ({
@@ -98,8 +117,29 @@ test.describe('Footer services group includes comfyui (#1899)', () => {
     await expect(chip.locator('.v b')).toHaveText('3 / 4')
     await expect(chip.locator('.v')).toHaveClass(/warn/)
 
-    const comfyPip = chip.locator('[aria-label^="ComfyUI:"]')
+    const comfyPip = chip.locator('.pip[data-service-id="comfyui"]')
     await expect(comfyPip).toHaveCount(1)
     await expect(comfyPip).toHaveAttribute('aria-label', /err/)
+  })
+
+  test('services health endpoint 500s: group shows a warn "unknown" pip, not unqualified green', async ({
+    page,
+  }) => {
+    await mockServicesHealth(page, { detail: 'boom' }, 500)
+    await page.goto('/')
+    await expect(page.locator('.footer')).toBeVisible()
+
+    const chip = servicesChip(page)
+    await expect(chip).toBeVisible()
+
+    // hal0 self-check + the "services unknown" placeholder — never a bare
+    // all-green "1 / 1 ready" while three real services are unaccounted for.
+    await expect(chip.locator('.pip')).toHaveCount(2, { timeout: 10_000 })
+    await expect(chip.locator('.v b')).toHaveText('1 / 2')
+    await expect(chip.locator('.v')).toHaveClass(/warn/)
+
+    const unknownPip = chip.locator('.pip[data-service-id="services-unknown"]')
+    await expect(unknownPip).toHaveCount(1)
+    await expect(unknownPip).toHaveAttribute('aria-label', /warn/)
   })
 })

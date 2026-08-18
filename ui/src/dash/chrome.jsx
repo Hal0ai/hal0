@@ -824,6 +824,16 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
   // it isn't in the services-health payload (it IS the API answering the
   // request) but every backend-reported id — including comfyui — renders a
   // pip and counts toward the ready total.
+  //
+  // When /api/services/health itself has not answered — first paint, 404
+  // (older API), non-2xx, or network error all surface as `pending` with an
+  // empty `services` list (useServicesHealth fails soft) — the group must NOT
+  // collapse to a green "1 / 1 ready" hal0 self-check: the state of the real
+  // backing services is unknown, which is exactly the unqualified-green defect
+  // #1899 describes. Render a single warn-toned "services unknown" pip so the
+  // count stays honest and the warn styling trips until real data arrives.
+  const servicesUnknown =
+    (serviceHealth.pending || serviceHealth.error) && !(serviceHealth.services || []).length;
   const footerIndicators = [
     {
       id: 'hal0',
@@ -831,12 +841,19 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
       tone: degraded ? 'warn' : health.isError ? 'warn' : 'up',
       title: degraded ? `hal0 degraded — ${failing.join("; ") || "see /api/health/system"}` : 'hal0 api ok',
     },
-    ...(serviceHealth.services || []).map((s) => ({
-      id: s.id,
-      label: s.name || s.id,
-      tone: serviceHealth.pending ? 'warn' : s.up ? 'up' : 'err',
-      title: s.detail || (serviceHealth.pending ? 'service health pending' : `${s.name || s.id} down`),
-    })),
+    ...(servicesUnknown
+      ? [{
+          id: 'services-unknown',
+          label: 'services',
+          tone: 'warn',
+          title: 'service health unknown — /api/services/health not answering',
+        }]
+      : (serviceHealth.services || []).map((s) => ({
+          id: s.id,
+          label: s.name || s.id,
+          tone: s.up ? 'up' : 'err',
+          title: s.detail || `${s.name || s.id} down`,
+        }))),
   ];
   // runtimes group — one LED pip per CONFIGURED slot (a model bound is what
   // makes a slot real, #1369), plus the ready count.
@@ -993,6 +1010,7 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
             {footerIndicators.map((svc) => (
               <span
                 key={svc.id}
+                data-service-id={svc.id}
                 className={"pip " + _svcPip(svc.tone)}
                 title={`${svc.label}: ${svc.title}`}
                 aria-label={`${svc.label}: ${svc.tone}`}
