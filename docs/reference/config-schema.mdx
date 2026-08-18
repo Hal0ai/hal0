@@ -71,7 +71,22 @@ Root model `Hal0Config`, `extra="allow"`.
 |---|---|---|---|
 | `prefetch_timeout_s` | float | `8.0` | `> 0.0` |
 | `direct_read_timeout_s` | float | `300.0` | `30.0-600.0` |
+| `stream_total_timeout_s` | float | `900.0` | `0.0-86400.0` (`0` disables) |
+| `stream_idle_timeout_s` | float | `300.0` | `0.0-86400.0` (`0` disables) |
 | `prefetch_parallel_cap` | int | `4` | `>= 1` |
+
+`stream_total_timeout_s` / `stream_idle_timeout_s` are the streaming **stall
+guard**: a chatty never-terminating upstream resets the transport read timer
+with every chunk, so it would otherwise be relayed forever. While the guard is
+active, streaming requests disable the HTTP client's read timeout per-request so
+the guard owns the body bound; `direct_read_timeout_s` still bounds the wait for
+response headers on those requests, since the guard's own clocks only start once
+headers arrive. With both bounds set to `0` the client read timeout stays on as
+a transport backstop. When a bound trips, hal0 closes the upstream stream and —
+on `text/event-stream` responses — appends one terminal chunk carrying a
+human-readable notice, `finish_reason: "length"`, and an `x_hal0_stall` object
+naming the reason, followed by `data: [DONE]`. Note the total bound is wall
+clock: a healthy long generation on slow hardware that outlives it is also cut.
 
 ### `[telemetry]`
 

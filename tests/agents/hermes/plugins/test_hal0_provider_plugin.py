@@ -337,6 +337,72 @@ def test_assemble_stream_preserves_reasoning_content() -> None:
     assert result["message"]["content"] == "The answer is 42."
 
 
+# ── stall guard (#1893) ────────────────────────────────────────────────────
+
+
+def test_iter_sse_data_stops_at_the_event_ceiling() -> None:
+    """A never-terminating stream must not spin the consumer forever."""
+
+    def endless() -> Any:
+        while True:
+            yield 'data: {"choices": [{"delta": {"content": "!"}}]}'
+
+    payloads = list(iter_sse_data(endless(), max_events=25))
+    assert len(payloads) == 25
+
+
+def test_assemble_stream_flags_a_stream_that_never_finished() -> None:
+    """No ``finish_reason`` anywhere means the turn was cut off, not completed."""
+    lines = [_sse(_delta(role="assistant", content="!")) for _ in range(5)]
+    result = assemble_stream(parse_sse_chunks(lines))
+    assert result["finish_reason"] is None
+    assert result["stalled"] is True
+    assert "stall" not in result  # no gateway diagnostic on this path
+
+
+def test_assemble_stream_surfaces_the_gateway_stall_diagnostic() -> None:
+    """hal0's ``x_hal0_stall`` terminal chunk is carried through to the caller."""
+    lines = [
+        _sse(_delta(role="assistant", content="partial")),
+        _sse(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "\n\n[hal0] stall guard: ..."},
+                        "finish_reason": "length",
+                    }
+                ],
+                "x_hal0_stall": {
+                    "reason": "total",
+                    "elapsed_s": 900.0,
+                    "upstream": "llm",
+                    "detail": "upstream stream exceeded the 900s total budget",
+                },
+            }
+        ),
+        "data: [DONE]",
+    ]
+    result = assemble_stream(parse_sse_chunks(lines))
+    assert result["stalled"] is True
+    assert result["stall"]["reason"] == "total"
+    assert result["stall"]["upstream"] == "llm"
+    # The partial output survives — the operator sees what the model did emit.
+    assert result["message"]["content"].startswith("partial")
+    assert "[hal0] stall guard" in result["message"]["content"]
+
+
+def test_assemble_stream_does_not_flag_a_clean_turn() -> None:
+    lines = [
+        _sse(_delta(role="assistant", content="done")),
+        _sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        "data: [DONE]",
+    ]
+    result = assemble_stream(parse_sse_chunks(lines))
+    assert result["stalled"] is False
+    assert "stall" not in result
+
+
 # ── registration seam ──────────────────────────────────────────────────────
 
 

@@ -1313,6 +1313,8 @@ async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
         model_registry=ctx.model_registry,
         prefetch_timeout_s=ctx.hal0_config.dispatcher.prefetch_timeout_s,
         direct_read_timeout_s=ctx.hal0_config.dispatcher.direct_read_timeout_s,
+        stream_total_timeout_s=ctx.hal0_config.dispatcher.stream_total_timeout_s,
+        stream_idle_timeout_s=ctx.hal0_config.dispatcher.stream_idle_timeout_s,
         prefetch_parallel_cap=ctx.hal0_config.dispatcher.prefetch_parallel_cap,
         cached_models=lambda name: ctx.model_cache.get(name, []),
         fetch_models=ctx.fetch_and_cache,

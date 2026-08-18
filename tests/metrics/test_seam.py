@@ -213,6 +213,75 @@ class TestWrapStreaming:
         assert row["stop_reason"] == "stop"
 
     @pytest.mark.asyncio
+    async def test_stall_guard_frame_recorded_as_failure_not_success(
+        self, seam: RequestSeam, writer: _FakeWriter
+    ) -> None:
+        """The dispatcher's synthetic stall frame (#1893) must not persist the
+        request as a clean success: ok=0, error_code names the stall, and the
+        frame's delta is not counted as a generated token."""
+
+        async def _gen():
+            yield b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+            yield (
+                b'\n\ndata: {"id":"hal0-stall-guard","object":"chat.completion.chunk",'
+                b'"choices":[{"index":0,"delta":{"role":"assistant","content":"[hal0] stall"},'
+                b'"finish_reason":"length"}],'
+                b'"x_hal0_stall":{"reason":"idle","elapsed_s":0.2}}\n\n'
+                b"data: [DONE]\n\n"
+            )
+
+        response = StreamingResponse(_gen(), media_type="text/event-stream")
+        t_entry = time.monotonic()
+        wrapped = seam.wrap_streaming(
+            response,
+            call=_FakeCall(upstream_name="primary", resolved_model="qwen3-4b"),
+            request=_FakeRequest(),
+            t_entry=t_entry,
+            dispatch_started=t_entry,
+        )
+        chunks = await self._drain(wrapped)
+        assert len(chunks) == 2  # passthrough untouched
+
+        assert len(writer.rows) == 1
+        _, row = writer.rows[0]
+        assert row["ok"] == 0
+        assert row["error_code"] == "stream_stall_idle"
+        # Only the real upstream delta counts; the synthetic frame does not.
+        assert row["completion_tokens"] == 1
+
+    @pytest.mark.asyncio
+    async def test_stall_frame_alone_records_no_ttft(
+        self, seam: RequestSeam, writer: _FakeWriter
+    ) -> None:
+        """A completely silent upstream cut by the guard must not record the
+        idle-timeout latency as a bogus TTFT sample."""
+
+        async def _gen():
+            yield (
+                b'\n\ndata: {"id":"hal0-stall-guard","object":"chat.completion.chunk",'
+                b'"choices":[{"index":0,"delta":{"role":"assistant","content":"[hal0] stall"},'
+                b'"finish_reason":"length"}],'
+                b'"x_hal0_stall":{"reason":"total","elapsed_s":900.0}}\n\n'
+                b"data: [DONE]\n\n"
+            )
+
+        response = StreamingResponse(_gen(), media_type="text/event-stream")
+        t_entry = time.monotonic()
+        wrapped = seam.wrap_streaming(
+            response,
+            call=_FakeCall(upstream_name="primary", resolved_model="qwen3-4b"),
+            request=_FakeRequest(),
+            t_entry=t_entry,
+            dispatch_started=t_entry,
+        )
+        await self._drain(wrapped)
+
+        _, row = writer.rows[0]
+        assert row["ok"] == 0
+        assert row["error_code"] == "stream_stall_total"
+        assert row["ttft_ms"] is None
+
+    @pytest.mark.asyncio
     async def test_disabled_seam_returns_response_unwrapped(self, writer: _FakeWriter) -> None:
         seam = RequestSeam(writer, enabled=False)
 
