@@ -683,9 +683,15 @@ export function InferencePane() {
     return k === 'rocm' || k === 'vulkan'
   }).length
 
-  // GTT headroom for the slots status line (the memory map's frame).
+  // Free-memory headroom for the slots status line — MUST share the memory
+  // ruler's basis (telemetry-header.jsx ThRuler) so the two numbers on the
+  // same screen agree. `mm.self.modelUsedGb` is the reconciled per-slot sum
+  // (real mem_mb when the backend reports it) the ruler's "free" is derived
+  // from; `mm.self.gttUsedGb` is a raw host-wide GTT stat that (a) is zeroed
+  // outright on a box with no rocm-smi and (b) counts non-hal0 GPU users the
+  // ruler never counts — either way it disagreed with the ruler (#1900).
   const gttCapGb = mm.pool?.totalGb || 0
-  const gttFreeGb = Math.max(0, Math.round(gttCapGb - (mm.self?.gttUsedGb || 0)))
+  const gttFreeGb = Math.max(0, Math.round(gttCapGb - (mm.self?.modelUsedGb || 0)))
 
   // Fire-and-forget lifecycle action (mirrors SlotsView/PR #781): fire the
   // mutation, toast immediately, and let the slots poll reflect the phase.
