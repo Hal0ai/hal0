@@ -87,6 +87,7 @@ def test_image_present_falls_back_to_rootless_when_seam_silent(
     """Dev checkout / CI / no grant: the seam returns None and the operator's
     own store is the right one to read."""
     monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: None)
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
     monkeypatch.setattr(container_mod, "_container_runtime", lambda: "/usr/bin/podman")
 
     calls: list[list[str]] = []
@@ -108,6 +109,7 @@ def test_image_present_false_when_seam_silent_and_no_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: None)
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
 
     def _no_runtime() -> str:
         raise RuntimeError("no podman runtime found")
@@ -141,6 +143,7 @@ def test_running_image_falls_back_to_rootless_when_seam_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(container_mod.podman_introspect, "container_image", lambda _t: None)
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
     monkeypatch.setattr(container_mod, "_container_runtime", lambda: "/usr/bin/podman")
 
     calls: list[list[str]] = []
@@ -181,6 +184,7 @@ def test_running_argv_falls_back_when_seam_returns_unparseable_json(
     "the slot has no command" — status callers must never read garbage as
     drift."""
     monkeypatch.setattr(container_mod.podman_introspect, "container_argv", lambda _t: "null")
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
     monkeypatch.setattr(container_mod, "_container_runtime", lambda: "/usr/bin/podman")
 
     class _Proc:
@@ -196,6 +200,7 @@ def test_running_argv_none_when_neither_context_answers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(container_mod.podman_introspect, "container_argv", lambda _t: None)
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
 
     def _no_runtime() -> str:
         raise RuntimeError("no podman runtime found")
@@ -245,6 +250,10 @@ def test_slot_view_reports_present_for_a_running_slot(
         ("alpine:3.19", "docker.io/library/alpine:3.19"),
         ("myorg/img", "docker.io/myorg/img:latest"),
         ("docker.io/library/alpine:latest", "docker.io/library/alpine:latest"),
+        # Docker Hub's implicit library/ namespace, however the registry
+        # got there — podman reports the fully-expanded form for all three.
+        ("docker.io/alpine", "docker.io/library/alpine:latest"),
+        ("docker.io/alpine:3.19", "docker.io/library/alpine:3.19"),
         ("ghcr.io/team/model", "ghcr.io/team/model:latest"),
         ("localhost/hal0-toolbox", "localhost/hal0-toolbox:latest"),
         ("localhost:5000/foo:v1", "localhost:5000/foo:v1"),
@@ -264,6 +273,8 @@ def test_canonical_image_ref(ref: str, expected: str) -> None:
         # what podman actually reports vs what a profile actually declares
         ("docker.io/library/alpine:latest", "alpine"),
         ("docker.io/library/alpine:latest", "alpine:latest"),
+        ("docker.io/library/alpine:latest", "docker.io/alpine"),
+        ("docker.io/library/alpine:3.19", "docker.io/alpine:3.19"),
         ("docker.io/myorg/img:latest", "myorg/img"),
         ("ghcr.io/team/model:latest", "ghcr.io/team/model"),
         ("localhost:5000/foo:v1", "localhost:5000/foo:v1"),
@@ -299,3 +310,69 @@ def test_digest_vs_tag_compares_repository_only() -> None:
 def test_unknown_running_image_is_never_drift() -> None:
     assert container_mod._image_mismatch(None, "alpine") is False
     assert container_mod._image_mismatch("alpine", None) is False
+
+
+# ── the rootless store is never consulted ON a provisioned box ─────────────
+#
+# rc 66 ("podman ran but failed") and a missing sudo grant both surface as a
+# None from the seam. Falling through to the rootless store there would
+# collapse that distinction straight back into an authoritative-looking
+# "missing" — #1889 with extra steps — because on a provisioned box that store
+# definitionally cannot hold a slot image.
+
+
+def test_image_present_does_not_consult_rootless_store_as_service_user(
+    monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]]
+) -> None:
+    monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: None)
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: True)
+
+    # `no_rootless` raises if subprocess.run is reached at all.
+    assert ContainerProvider().image_present(IMAGE) is False
+
+
+def test_image_present_logs_when_the_seam_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    no_rootless: list[list[str]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The False above is a bool-contract limitation, not a silent one — an
+    operator must be able to tell it apart from a genuinely absent image."""
+    monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: None)
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: True)
+
+    with caplog.at_level("WARNING"):
+        ContainerProvider().image_present(IMAGE)
+
+    assert "image_present_unanswered" in caplog.text
+
+
+@pytest.mark.parametrize("method", ["running_image", "running_argv"])
+def test_container_reads_do_not_consult_rootless_store_as_service_user(
+    monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]], method: str
+) -> None:
+    monkeypatch.setattr(container_mod.podman_introspect, "container_image", lambda _t: None)
+    monkeypatch.setattr(container_mod.podman_introspect, "container_argv", lambda _t: None)
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: True)
+
+    assert getattr(ContainerProvider(), method)(SLOT) is None
+
+
+@pytest.mark.parametrize("method", ["running_image", "running_argv"])
+def test_container_reads_still_fall_back_off_the_service_account(
+    monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """Dev checkout: the operator's own store IS the store slots use."""
+    monkeypatch.setattr(container_mod.podman_introspect, "container_image", lambda _t: None)
+    monkeypatch.setattr(container_mod.podman_introspect, "container_argv", lambda _t: None)
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
+    monkeypatch.setattr(container_mod, "_container_runtime", lambda: "/usr/bin/podman")
+
+    class _Proc:
+        returncode = 0
+        stdout = IMAGE if method == "running_image" else '["llama-server"]'
+
+    monkeypatch.setattr(container_mod.subprocess, "run", lambda *_a, **_k: _Proc())
+
+    expected = IMAGE if method == "running_image" else ["llama-server"]
+    assert getattr(ContainerProvider(), method)(SLOT) == expected

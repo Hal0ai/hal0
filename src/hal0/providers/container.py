@@ -93,7 +93,7 @@ from hal0.slots.naming import (
     slot_quadlet_name,
     slot_unit_name,
 )
-from hal0.system.seam import SystemCtlSeam
+from hal0.system.seam import SystemCtlSeam, is_hal0_service_user
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
@@ -2585,9 +2585,21 @@ class ContainerProvider(Provider):
         ROOTLESS store — a different store, which never contains a slot image.
         That is why ``image_status`` was ``"missing"`` for every running,
         healthy slot on every standard install. The seam returns ``None`` when
-        it cannot answer (dev/CI box, grant not installed, podman absent), and
-        only then do we fall back to the rootless read, which is still the
-        right answer in a dev checkout where hal0-api runs as the operator.
+        it cannot answer, and only then do we fall back to the rootless read —
+        and only when this process is NOT the hal0 service user. On a
+        provisioned box the rootless store is definitionally the wrong store,
+        so consulting it after a seam failure would collapse "podman is
+        broken / the grant is missing" (wrapper rc 66 / sudo rc 1) back into
+        an authoritative-looking "missing", which is #1889 with extra steps.
+        We log instead, so an operator gets a diagnosable signal.
+
+        (The seam-failed-as-hal0 case still has to answer ``False`` because
+        this method's contract is a bool and ``image_status`` has no
+        "unknown" member. Surfacing a distinct unknown state is an API-schema
+        change, deliberately out of scope here — see the PR notes.)
+
+        In a dev checkout, where hal0-api runs as the operator, the rootless
+        store IS the store slots use, so the fallback is correct there.
 
         Runs synchronously — callers must dispatch to a thread executor when
         called from an async context.
@@ -2595,6 +2607,14 @@ class ContainerProvider(Provider):
         seam_answer = podman_introspect.image_exists(image)
         if seam_answer is not None:
             return seam_answer
+        if is_hal0_service_user():
+            log.warning(
+                "hal0.podman_ro.image_present_unanswered image=%s — the rootful seam "
+                "did not answer (grant missing, podman failure, or rejected ref); "
+                "reporting missing without consulting the unrelated rootless store",
+                image,
+            )
+            return False
         try:
             runtime = _container_runtime()
         except RuntimeError:
@@ -2631,6 +2651,13 @@ class ContainerProvider(Provider):
         seam_ref = podman_introspect.container_image(token)
         if seam_ref:
             return seam_ref
+        if is_hal0_service_user():
+            # Same reasoning as image_present: on a provisioned box the
+            # rootless store cannot hold this container, so asking it is a
+            # wasted spawn in the status hot path that can only ever answer
+            # None — or, worse, answer about a same-named container that is
+            # not this slot's.
+            return None
         try:
             runtime = _container_runtime()
         except RuntimeError:
@@ -2669,6 +2696,8 @@ class ContainerProvider(Provider):
             parsed = _decode_argv_json(seam_json)
             if parsed is not None:
                 return parsed
+        if is_hal0_service_user():
+            return None
         try:
             runtime = _container_runtime()
         except RuntimeError:
@@ -2957,10 +2986,13 @@ def canonical_image_ref(ref: str) -> str:
     Applies exactly the two implicit rules the OCI/distribution reference
     grammar defines, and nothing else:
 
-      * a name with no registry component gets ``docker.io/`` (plus the
-        ``library/`` namespace when it is a single bare component). A first
+      * a name with no registry component gets ``docker.io/``. A first
         component is a registry only if it contains ``.`` or ``:``, or is
         literally ``localhost`` — the standard heuristic;
+      * a Docker Hub name whose repository is a single component gets the
+        implicit ``library/`` namespace. This is applied AFTER the registry
+        rule so it also catches an explicitly-qualified ``docker.io/alpine``,
+        which podman likewise reports as ``docker.io/library/alpine``;
       * a name with neither tag nor digest gets ``:latest``.
 
     Never raises and never invents: anything it cannot parse is returned
@@ -2978,7 +3010,15 @@ def canonical_image_ref(ref: str) -> str:
     first, slash, _rest = name.partition("/")
     has_registry = bool(slash) and ("." in first or ":" in first or first == "localhost")
     if not has_registry:
-        name = f"docker.io/library/{name}" if not slash else f"docker.io/{name}"
+        name = f"docker.io/{name}"
+
+    # Docker Hub's implicit `library/` namespace, applied to the repository
+    # portion regardless of how the registry got there — `alpine`,
+    # `docker.io/alpine` and `docker.io/library/alpine` all name one image,
+    # and podman reports the last form.
+    registry, _, repository = name.partition("/")
+    if registry == "docker.io" and "/" not in repository:
+        name = f"docker.io/library/{repository}"
 
     if not tag and not digest:
         tag = "latest"
