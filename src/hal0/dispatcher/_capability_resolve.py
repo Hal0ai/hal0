@@ -76,6 +76,23 @@ _EMBED_NAME_HINTS = ("embed", "rerank")
 # resolution kicks in.
 _IMAGE_NAME_PREFIXES = ("sdxl", "sd-1.5", "sd15", "flux")
 
+# Capability slots that can never serve a chat/completions-shaped request,
+# mapped to the request-path fragments they DO serve.  Keyed by the slot role
+# name (the ``slot_name`` behind the resolved upstream — same for local
+# ``kind="slot"`` upstreams and container-backed remotes).  Used by
+# :func:`guard_capability_mismatch` at the dispatch choke point (#1894).
+_CAPABILITY_ONLY_SLOT_PATHS: dict[str, tuple[str, ...]] = {
+    "embed": _EMBED_PATHS,
+    "rerank": _RERANK_PATHS,
+    "tts": _TTS_PATHS,
+    "img": _IMAGE_PATHS,
+}
+
+# Chat/completions-shaped request paths.  "/completions" is a substring of
+# both "/v1/completions" and "/v1/chat/completions", so one fragment covers
+# both OpenAI-compat completion shapes.
+_CHAT_SHAPED_PATHS = ("/completions",)
+
 
 # ── Typed error ───────────────────────────────────────────────────────────────
 
@@ -128,12 +145,11 @@ def resolve_by_capability(  # TIER1
     require ``kind="slot"``.
       5. Model id contains ``:`` (FLM tag-style) → ``npu`` slot.
       6. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
-      7. Model id contains ``embed`` or ``rerank`` substring on a non-path-
-         pinned endpoint (i.e. not already matched by rules 1-4) → typed
-         ``CapabilityMismatch`` (409). The request is chat/completions-shaped
-         but names a model that can only ever serve embed/rerank requests, so
-         hal0 rejects it instead of forwarding to guaranteed upstream
-         breakage (#1894).
+      7. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
+         (If no embed slot is registered this fails resolution below and the
+         dispatcher surfaces the documented clean 404; if one IS registered,
+         the dispatch-time :func:`guard_capability_mismatch` choke point
+         raises the typed 409 before any upstream call — #1894.)
       8. Model id exactly matches a registered slot upstream name (other
          than the default ``agent`` anchor) → that slot.  Back-compat alias
          (``agent-hermes`` → ``agent``) is resolved first.
@@ -151,10 +167,6 @@ def resolve_by_capability(  # TIER1
         LegacyResolutionFailed: If the heuristics select a slot name but no
             matching slot Upstream is registered.  Carries a
             ``dispatch.legacy_unresolved`` code via the typed Hal0Error envelope.
-        CapabilityMismatch: If rule 7 fires — the model id looks embed/
-            rerank-only but the request path isn't one of the path-pinned
-            capability endpoints.  Carries a ``dispatch.capability_mismatch``
-            code (409) via the typed Hal0Error envelope (#1894).
     """
     candidate: str | None = None
     # Path-pinned candidates ("route purely by path") may also resolve to a
@@ -206,23 +218,18 @@ def resolve_by_capability(  # TIER1
                 path_pinned = True
             # Rule 7 — name-substring pin (embed/rerank → embed slot).
             #
-            # Reaching this branch means the request path did NOT match any
-            # of the path-pinned capability endpoints (rules 1-4: embeddings/
-            # rerankings/audio/images all short-circuit before this ``elif
-            # body:`` block runs). So a model name matching an embed/rerank
-            # hint here always means: a chat/completions-shaped request named
-            # a model that is embed/rerank-only. Forwarding that to the embed
-            # slot can never succeed — the embed llama-server has no chat
-            # template/logits path — so hal0 raises a typed capability
-            # mismatch instead of silently routing to guaranteed upstream
-            # breakage (#1894: the caller previously just saw the embed
-            # server's raw, confusing HTTP 500).
-            elif matched_hint := next((h for h in _EMBED_NAME_HINTS if h in m), None):
-                raise CapabilityMismatch(
-                    f"model {model!r} looks embed/rerank-only (matched "
-                    f"{matched_hint!r}) and cannot serve requests on {path!r}",
-                    details={"model": model, "path": path, "hint": matched_hint},
-                )
+            # Deliberately still *routes* rather than raising: when no embed
+            # slot is registered (the fresh-install/offline default) this
+            # candidate fails resolution below and ``dispatch()`` wraps it
+            # into the documented clean typed 404 (``dispatch.no_route`` —
+            # the contract recorded in tests/release-validation
+            # regressions.yaml/known-issues.yaml). The #1894 typed-409 gate
+            # lives at the dispatch choke point instead
+            # (:func:`guard_capability_mismatch`), keyed on the *resolved*
+            # slot's role — so it fires only when an embed slot actually
+            # exists to mismatch against, on every resolution path.
+            elif any(hint in m for hint in _EMBED_NAME_HINTS):
+                candidate = "embed"
             else:
                 # Rule 8 — explicit slot-name addressing.
                 # Resolve back-compat aliases (agent-hermes→agent) before the
@@ -262,7 +269,69 @@ def resolve_by_capability(  # TIER1
     return upstream
 
 
+def guard_capability_mismatch(
+    slot: str,
+    path: str,
+    *,
+    model: str = "",
+    resolution_path: str = "",
+) -> None:
+    """Raise a typed 409 when a capability-only slot resolved for a chat path.
+
+    The dispatch-time capability gate for #1894, called by
+    :meth:`Dispatcher.dispatch` at the single choke point every resolution
+    branch (container preemption, registry, warm-cache passthrough,
+    cold-prefetch passthrough, capability/path routing) converges on — so a
+    chat/completions-shaped request that resolves to an embed/rerank/tts/img
+    slot is rejected with a typed hal0 envelope *before* any upstream call,
+    instead of being forwarded to a server that structurally cannot serve it
+    (whose raw, confusing error — e.g. llama-server's "the current context
+    does not logits computation" 500 — would otherwise pass through verbatim
+    per ``Dispatcher.forward()``'s documented contract).
+
+    Keyed on the *resolved* slot's role, not on model-name substrings: it
+    fires only when hal0 itself has already decided the request lands on a
+    capability-only slot.  When no such slot resolves at all (embed offline /
+    fresh install), resolution fails upstream of this gate and the documented
+    clean ``dispatch.no_route`` 404 is preserved untouched.
+
+    Args:
+        slot:            Effective slot role behind the resolved upstream
+                         (``slot_name`` or container slot name; ``""`` for a
+                         genuine remote — always a no-op).
+        path:            Incoming request path (e.g. "/v1/chat/completions").
+        model:           Requested model id, for the error envelope.
+        resolution_path: Dispatch resolution breadcrumb, for the envelope.
+
+    Raises:
+        CapabilityMismatch: 409, code ``dispatch.capability_mismatch``, when
+            ``slot`` is a capability-only role and ``path`` is
+            chat/completions-shaped.
+    """
+    serves = _CAPABILITY_ONLY_SLOT_PATHS.get(slot)
+    if serves is None:
+        # Not a capability-only slot (agent/coding/npu/… or a remote) —
+        # chat-shaped requests are exactly what it is for.
+        return
+    if not any(frag in path for frag in _CHAT_SHAPED_PATHS):
+        # The slot's own endpoints (/embeddings, /rerankings, /audio/speech,
+        # /images/*) and anything else non-chat-shaped stay untouched.
+        return
+    raise CapabilityMismatch(
+        f"model {model!r} resolved to the {slot!r} slot, which serves only "
+        f"{', '.join(serves)} requests and cannot serve {path!r}",
+        details={
+            "model": model,
+            "path": path,
+            "slot": slot,
+            "serves": list(serves),
+            "resolution_path": resolution_path,
+        },
+    )
+
+
 __all__ = [
     "LegacyResolutionFailed",
+    "guard_capability_mismatch",
     "resolve_by_capability",
 ]

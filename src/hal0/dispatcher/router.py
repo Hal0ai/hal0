@@ -49,6 +49,7 @@ from fastapi.responses import Response, StreamingResponse
 from hal0.dispatcher._capability_resolve import (
     _DEFAULT_MODEL,
     LegacyResolutionFailed,
+    guard_capability_mismatch,
     resolve_by_capability,
 )
 from hal0.dispatcher.lane_pin import lane_slot_pin, rank_slot_name
@@ -474,7 +475,46 @@ class Dispatcher:
             NoRouteFound: No upstream could serve the request.
             UnknownUpstream: Registry pointed at a non-existent upstream.
             RegistryLoadFailed: Reading the registry raised.
+            CapabilityMismatch: The request resolved to a capability-only
+                slot (embed/rerank/tts/img) that structurally cannot serve
+                its chat/completions-shaped path (#1894).
         """
+        call = await self._resolve(request, body)
+        # ── Capability-mismatch choke point (#1894) ──────────────────────
+        # Every resolution branch above (container preemption, registry,
+        # warm-cache passthrough, cold-prefetch passthrough, capability/path
+        # routing) converges here, so the gate covers all of them at once: a
+        # chat/completions-shaped request that resolved to an embed/rerank/
+        # tts/img slot gets a typed 409 BEFORE any upstream call, instead of
+        # forward()'s verbatim passthrough leaking that server's raw 500.
+        # When nothing resolves (embed offline / fresh install), _resolve
+        # already raised the documented clean dispatch.no_route 404 — the
+        # gate never sees it, so that contract is preserved untouched.
+        try:
+            guard_capability_mismatch(
+                call.slot_name or call.container_slot_name,
+                request.url.path,
+                model=call.requested_model or call.resolved_model,
+                resolution_path=call.resolution_path,
+            )
+        except Hal0Error as exc:
+            log.warning(
+                "dispatch.capability_mismatch",
+                model=call.requested_model or call.resolved_model,
+                slot=call.slot_name or call.container_slot_name,
+                path=request.url.path,
+                resolution_path=call.resolution_path,
+                error=exc.message,
+            )
+            raise
+        return call
+
+    async def _resolve(
+        self,
+        request: Request,
+        body: dict[str, Any] | None = None,
+    ) -> UpstreamCall:
+        """Run the resolution ladder (Steps 0-4) — see :meth:`dispatch`."""
         t0 = time.monotonic()
         if body is None:
             try:
