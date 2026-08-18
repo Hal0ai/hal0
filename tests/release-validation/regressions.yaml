@@ -1203,7 +1203,7 @@ regressions:
     severity: minor
     tier: mechanical
     lane: ui
-    promote_ready: true
+    promoted_to: ui/tests/e2e/specs/footer-services-omits-comfyui-v3.spec.ts
     summary: >-
       The dashboard footer's `services` LED group is a hardcoded three-member array (hal0,
       hermes, openwebui) in ui/src/dash/chrome.jsx; comfyui is not a member, so on a box where
