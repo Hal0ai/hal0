@@ -2,14 +2,15 @@
    change, injected into every Hermes session by the on_session_start hook.
    Keep it LEAN: this is fed to the model every session. Stable identity
    lives in SOUL.md; structural map lives in HERMES.md.
-   Params: primary (dict|None), capabilities (list), npu (dict),
-   igpu_sclk_mhz (int|None), dashboard_url, inference_base, daemon, as_of. #}
+   Params: primary (dict|None), unwired_llm_slot (str|None), capabilities
+   (list), npu (dict), igpu_sclk_mhz (int|None), dashboard_url,
+   inference_base, daemon, as_of. #}
 # Live system state
 
 {% if primary -%}
 - Chat model: `{{ primary.model_id }}` ({{ primary.context_length | default("?") }} ctx{% if primary.backend %}, {{ primary.backend }}{% endif %}) via `model_aliases.{{ primary.alias | default("primary") }}`
 {%- else -%}
-- Chat model: _no chat model loaded — wire one via `hal0 slot create`._
+- Chat model: _no chat model loaded — {% if unwired_llm_slot %}load one into the existing `{{ unwired_llm_slot }}` slot via `hal0 model pull <id> && hal0 slot load {{ unwired_llm_slot }} --model <id>`{% else %}wire one via `hal0 slot create`{% endif %}._
 {%- endif %}
 {% if capabilities -%}
 - Capabilities: {% for c in capabilities %}{{ c.capability }} (`{{ c.model_id }}`{% if c.backend %}/{{ c.backend }}{% endif %}){% if not loop.last %}, {% endif %}{% endfor %}
