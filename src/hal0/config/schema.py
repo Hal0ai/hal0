@@ -2176,7 +2176,9 @@ class DispatcherConfig(BaseModel):
             "Non-streaming upstream read timeout in seconds. "
             "Large consolidation/extraction prompts can exceed 60s on slow slots. "
             "Streaming requests disable this per-request while the stall guard "
-            "is active (the guard owns the bound); with both stall-guard "
+            "is active so the guard owns the body bound; it still bounds the "
+            "wait for response headers on those requests, since the guard's "
+            "own clocks only start once headers arrive. With both stall-guard "
             "bounds set to 0 it applies per body read as the transport "
             "backstop. Range 30-600."
         ),

@@ -32,9 +32,12 @@ hal0's streaming forward path in the dispatcher (`hal0.dispatcher.router`).
 [Config schema](/docs/reference/config-schema/#dispatcher)) sets the HTTP client's
 `read` timeout, which httpx applies to **every** body read — streaming included.
 While the stall guard is active, streaming requests therefore disable it
-per-request so the guard owns the read bound and a stall always produces the
+per-request so the guard owns the *body* bound and a stall always produces the
 diagnostic frame below (a bare `httpx.ReadTimeout` would tear the stream with no
-terminal frame). Only with **both** stall-guard bounds set to `0` is the client's
+terminal frame). `direct_read_timeout_s` still bounds the wait for response
+headers on those requests — the guard's own clocks only start once headers
+arrive, so a header wait needs its own bound. Only with **both** stall-guard
+bounds set to `0` is the client's
 read timeout kept on the streaming path, as a per-read transport backstop; if it
 trips, the guard still converts it into a diagnostic frame with reason `read`.
 The `connect` (5.0s), `write` (10.0s), and `pool` (5.0s) timeouts constrain the
