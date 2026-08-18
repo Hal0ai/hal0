@@ -31,6 +31,7 @@ from hal0.dispatcher.router import (
     UnknownUpstream,
     UpstreamCall,
 )
+from hal0.errors import CapabilityMismatch
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 # ── test doubles ──────────────────────────────────────────────────────────────
@@ -363,6 +364,187 @@ async def test_legacy_fallback_routes_colon_model_to_npu_slot() -> None:
     )
     assert call.resolution_path == "legacy_slot:flm"
     assert call.upstream_name == "flm"
+
+
+@pytest.mark.asyncio
+async def test_legacy_fallback_chat_request_naming_embed_model_raises_typed_mismatch() -> None:
+    """#1894: a chat/completions request naming an embed/rerank-hinted model
+    must raise a typed ``CapabilityMismatch`` (409) instead of being silently
+    forwarded to the embed slot — which can never serve a chat request and
+    would otherwise leak that slot's raw upstream 500 to the client.
+    """
+    embed = make_slot("embed", "http://127.0.0.1:8082/v1")
+    upstreams = FakeUpstreamRegistry([embed])
+    models = FakeModelRegistry(routes={})
+
+    dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
+    with pytest.raises(CapabilityMismatch) as exc:
+        await dispatcher.dispatch(
+            make_request(path="/v1/chat/completions"),
+            body={"model": "bge-m3-embed", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert exc.value.code == "dispatch.capability_mismatch"
+    assert exc.value.status == 409
+    assert exc.value.details["model"] == "bge-m3-embed"
+    assert exc.value.details["slot"] == "embed"
+
+
+@pytest.mark.asyncio
+async def test_legacy_fallback_chat_request_naming_rerank_model_raises_typed_mismatch() -> None:
+    """Same gate for the ``rerank`` name hint (#1894)."""
+    embed = make_slot("embed", "http://127.0.0.1:8082/v1")
+    upstreams = FakeUpstreamRegistry([embed])
+    models = FakeModelRegistry(routes={})
+
+    dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
+    with pytest.raises(CapabilityMismatch) as exc:
+        await dispatcher.dispatch(
+            make_request(path="/v1/chat/completions"),
+            body={"model": "bge-rerank-v2", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert exc.value.code == "dispatch.capability_mismatch"
+    assert exc.value.details["slot"] == "embed"
+
+
+@pytest.mark.asyncio
+async def test_warm_cache_passthrough_chat_request_to_embed_slot_raises_typed_mismatch() -> None:
+    """#1894's stated repro: the embed slot is LOADED and advertises its model.
+
+    The warm-cache passthrough step resolves the request long before the
+    capability/path heuristics run, so the gate must sit at the dispatch
+    choke point — a chat request naming the slot's own advertised model
+    (the NORMAL prod state per known-issues.yaml) gets the typed 409, not
+    the embed server's raw upstream 500.
+    """
+    embed = make_slot("embed", "http://127.0.0.1:8082/v1")
+    upstreams = FakeUpstreamRegistry([embed])
+    models = FakeModelRegistry(routes={})
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda name: ["nomic-embed-text-v1.5"] if name == "embed" else [],
+    )
+    with pytest.raises(CapabilityMismatch) as exc:
+        await dispatcher.dispatch(
+            make_request(path="/v1/chat/completions"),
+            body={
+                "model": "nomic-embed-text-v1.5",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+    assert exc.value.code == "dispatch.capability_mismatch"
+    assert exc.value.status == 409
+    assert exc.value.details["slot"] == "embed"
+    assert exc.value.details["resolution_path"] == "passthrough:embed"
+    # The resolved call rides on the exception so the metrics seam
+    # (RequestSeam.record_error) can attribute the failed request.
+    assert exc.value.upstream_call.upstream_name == "embed"
+    assert exc.value.upstream_call.resolved_model == "nomic-embed-text-v1.5"
+
+
+@pytest.mark.asyncio
+async def test_registry_bound_chat_request_to_embed_slot_raises_typed_mismatch() -> None:
+    """#1894 via the registry step: an explicit model→embed binding must not
+    smuggle a chat request past the capability gate either.
+    """
+    embed = make_slot("embed", "http://127.0.0.1:8082/v1")
+    upstreams = FakeUpstreamRegistry([embed])
+    models = FakeModelRegistry(routes={"nomic-embed-text-v1.5": "embed"})
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda name: ["nomic-embed-text-v1.5"] if name == "embed" else [],
+    )
+    with pytest.raises(CapabilityMismatch) as exc:
+        await dispatcher.dispatch(
+            make_request(path="/v1/chat/completions"),
+            body={
+                "model": "nomic-embed-text-v1.5",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+    assert exc.value.code == "dispatch.capability_mismatch"
+    assert exc.value.details["resolution_path"] == "registry"
+
+
+@pytest.mark.asyncio
+async def test_container_backed_embed_slot_chat_request_raises_typed_mismatch() -> None:
+    """#1894 via Step 0 container preemption: a container-backed embed slot
+    (kind="remote" with slot_name) advertising the model hits the same gate.
+    """
+    embed_container = Upstream(
+        name="embed",
+        kind="remote",
+        url="http://127.0.0.1:8082/v1",
+        slot_name="embed",
+    )
+    upstreams = FakeUpstreamRegistry([embed_container])
+    models = FakeModelRegistry(routes={})
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda name: ["nomic-embed-text-v1.5"] if name == "embed" else [],
+    )
+    with pytest.raises(CapabilityMismatch) as exc:
+        await dispatcher.dispatch(
+            make_request(path="/v1/chat/completions"),
+            body={
+                "model": "nomic-embed-text-v1.5",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+    assert exc.value.code == "dispatch.capability_mismatch"
+    assert exc.value.details["resolution_path"] == "container:embed"
+
+
+@pytest.mark.asyncio
+async def test_embed_offline_unknown_embed_named_model_keeps_clean_no_route_404() -> None:
+    """Offline contract (regressions.yaml): with NO embed slot registered, an
+    unknown model that merely contains "embed" must keep returning the clean
+    typed ``dispatch.no_route`` 404 — NOT a 409 asserting a capability hal0
+    never disclosed.
+    """
+    upstreams = FakeUpstreamRegistry([])
+    models = FakeModelRegistry(routes={})
+
+    dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
+    with pytest.raises(NoRouteFound) as exc:
+        await dispatcher.dispatch(
+            make_request(path="/v1/chat/completions"),
+            body={
+                "model": "totally-made-up-embedder",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+    assert exc.value.code == "dispatch.no_route"
+    assert exc.value.status == 404
+
+
+@pytest.mark.asyncio
+async def test_embeddings_request_to_loaded_embed_slot_still_routes() -> None:
+    """Non-regression for the gate: the embed slot's OWN endpoint shape is
+    untouched — /v1/embeddings naming the advertised model still resolves and
+    forwards normally.
+    """
+    embed = make_slot("embed", "http://127.0.0.1:8082/v1")
+    upstreams = FakeUpstreamRegistry([embed])
+    models = FakeModelRegistry(routes={})
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda name: ["nomic-embed-text-v1.5"] if name == "embed" else [],
+    )
+    call = await dispatcher.dispatch(
+        make_request(path="/v1/embeddings"),
+        body={"model": "nomic-embed-text-v1.5", "input": "hi"},
+    )
+    assert call.upstream_name == "embed"
+    assert call.resolution_path == "passthrough:embed"
+    assert call.target_url == "http://127.0.0.1:8082/v1/embeddings"
 
 
 @pytest.mark.asyncio
