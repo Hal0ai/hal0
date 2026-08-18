@@ -72,6 +72,17 @@
 
 set -euo pipefail
 
+# LOCALE PIN — load-bearing for the validators below, not a tidiness nit.
+# bash's `[[ =~ ]]` bracket expressions use the CURRENT locale's collation, so
+# under a UTF-8 locale `[A-Za-z0-9]` matches accented letters: `alpiné` was
+# accepted here while the Python mirror rejected it — the wrapper LOOSER than
+# its mirror, the dangerous direction. This is reachable in production because
+# sudo's default `env_keep` passes LANG/LC_* straight through from the calling
+# process. Pinning to C makes every character class below mean exactly the
+# ASCII bytes it spells, in any caller's environment. Set before any validator
+# can run. (Security review of #1889, finding 1.)
+export LC_ALL=C
+
 PODMAN=/usr/bin/podman
 
 die() { echo "hal0-podman-ro: $1" >&2; exit 64; }
@@ -164,8 +175,12 @@ container_read() {
     1) return 0 ;;   # no such container — a real negative answer
     *) podman_failed "podman container exists failed" "$PODMAN_RC" ;;
   esac
-  run_podman inspect --format "$fmt" -- "$name"
-  (( PODMAN_RC == 0 )) || podman_failed "podman inspect failed" "$PODMAN_RC"
+  # `container inspect`, not bare `inspect`: the bare form also resolves
+  # images, volumes, networks and pods, so a name collision could return a
+  # different object's fields entirely. Type-safety by construction, even
+  # though the name is already pinned to the hal0-slot- prefix here.
+  run_podman container inspect --format "$fmt" -- "$name"
+  (( PODMAN_RC == 0 )) || podman_failed "podman container inspect failed" "$PODMAN_RC"
   printf '%s\n' "$PODMAN_OUT"
 }
 

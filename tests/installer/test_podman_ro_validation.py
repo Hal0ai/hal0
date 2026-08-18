@@ -36,6 +36,14 @@ WRAPPER = REPO / "installer" / "wrappers" / "hal0-podman-ro"
 # A minimal PATH: the wrapper must not depend on the caller's environment.
 _ENV = {"PATH": "/usr/bin:/bin"}
 
+#: The env a REAL invocation gets. sudo's default `env_keep` passes LANG and
+#: LC_* straight through, so the wrapper runs under whatever locale the
+#: calling process had — and bash's `[[ =~ ]]` bracket expressions are
+#: locale-sensitive: under a UTF-8 locale `[A-Za-z0-9]` collates accented
+#: letters INTO the range. `_ENV` above strips those vars, so the rest of this
+#: file would never have seen it.
+_UTF8_ENV = {**_ENV, "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
+
 _DIGEST = "a" * 64
 
 #: Refs that MUST be accepted — a false rejection degrades straight back to
@@ -142,13 +150,13 @@ MALICIOUS_TOKENS = [
 ]
 
 
-def _run(*argv: str) -> subprocess.CompletedProcess[str]:
+def _run(*argv: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(WRAPPER), *argv],
         capture_output=True,
         text=True,
         check=False,
-        env=_ENV,
+        env=env or _ENV,
     )
 
 
@@ -293,6 +301,17 @@ def test_presence_probes_use_exists_not_inspect() -> None:
     assert not [ln for ln in code if "image inspect" in ln]
 
 
+def test_inspect_calls_are_type_qualified() -> None:
+    """Bare `podman inspect` also resolves images, volumes, networks and pods,
+    so a name collision could return a different object's fields. Every
+    inspect names its type (security review of #1889, finding 3)."""
+    src = WRAPPER.read_text()
+    code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    for line in code:
+        if "inspect" in line and "run_podman" in line:
+            assert "container inspect" in line or "image inspect" in line, line
+
+
 def test_operational_podman_failure_exits_66() -> None:
     src = WRAPPER.read_text()
     assert "exit 66" in src
@@ -306,3 +325,49 @@ def test_no_caller_supplied_format_string() -> None:
     for line in src.splitlines():
         if "--format" in line and not line.lstrip().startswith("#"):
             assert '"$1"' not in line and '"$2"' not in line, line
+
+
+# ── locale independence (security review, finding 1) ───────────────────────
+#
+# bash's `[[ =~ ]]` uses the current locale's collation, so under a UTF-8
+# locale `[A-Za-z0-9]` matches accented letters and the wrapper accepted refs
+# its Python mirror rejects — a wrapper-LOOSER-than-mirror parity break, the
+# dangerous direction. sudo's default `env_keep` passes LANG/LC_* through, so
+# this was reachable in production; only this file's stripped `_ENV` hid it.
+
+
+@pytest.mark.parametrize("ref", ["alpiné", "alpine\u202eid", "ALPINÉ", "café/img:tag"])
+def test_unicode_refs_rejected_under_a_utf8_locale(ref: str) -> None:
+    proc = _run("check-image-ref", ref, env=_UTF8_ENV)
+    assert proc.returncode == 64, f"ACCEPTED {ref!r} under UTF-8 (rc={proc.returncode})"
+
+
+@pytest.mark.parametrize("token", ["braîn", "tokén"])
+def test_unicode_tokens_rejected_under_a_utf8_locale(token: str) -> None:
+    proc = _run("check-slot-token", token, env=_UTF8_ENV)
+    assert proc.returncode == 64, f"ACCEPTED {token!r} under UTF-8 (rc={proc.returncode})"
+
+
+@pytest.mark.parametrize("ref", [*LEGITIMATE_REFS, *MALICIOUS_REFS])
+def test_validation_is_identical_under_a_utf8_locale(ref: str) -> None:
+    """The whole corpus must decide the same way in any locale, and must still
+    agree with the Python mirror there."""
+    assert (
+        _run("check-image-ref", ref, env=_UTF8_ENV).returncode
+        == _run("check-image-ref", ref, env=_ENV).returncode
+    ), f"locale changed the verdict on {ref!r}"
+    assert is_valid_image_ref(ref) == (
+        _run("check-image-ref", ref, env=_UTF8_ENV).returncode == 0
+    ), f"mirror disagrees with the wrapper under UTF-8 on {ref!r}"
+
+
+def test_wrapper_pins_the_locale_itself() -> None:
+    """Structural backstop: the tests above prove nothing on a box where
+    en_US.UTF-8 is not generated (bash silently falls back to C), so also
+    assert the pin is present and set before any validator can run."""
+    src = WRAPPER.read_text()
+    assert "export LC_ALL=C" in src
+    lines = [ln.strip() for ln in src.splitlines()]
+    assert lines.index("export LC_ALL=C") < lines.index(
+        "validate_slot_token() {  # arg: slot instance token"
+    )
