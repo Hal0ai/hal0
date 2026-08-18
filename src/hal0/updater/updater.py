@@ -2864,7 +2864,7 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
 def relabel_stale_vulkan_slots(
     *, job_id: str | None = None, kfd_present: bool | None = None
 ) -> int:
-    """Relabel legacy ``device = "gpu-vulkan"`` slot TOMLs (upgrade migration).
+    """Relabel retired ``device = "gpu-vulkan"`` slot TOMLs (upgrade migration).
 
     #1888/PR #1923 retired the Vulkan LLM lane and switched ``load_sync`` to
     hard-refuse loading a GPU slot when the ROCm compute node (``/dev/kfd``)
