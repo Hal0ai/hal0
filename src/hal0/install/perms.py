@@ -401,6 +401,64 @@ def ownership_table(
             0o644,
             role="hal0.db-shm (WAL shared-memory index)",
         ),
+        # activity.db — the durable audit trail (``paths.activity_db()`` ->
+        # ``var_lib/"activity.db"``, :class:`hal0.activity.AuditStore`). Same
+        # O13 birth-ownership class as ``hal0.db`` above: no row existed, so a
+        # box where the file's first writer was root (an install-time /
+        # doctor-invoked path) left it unreadable/unwritable to the
+        # User=hal0 daemon with no way for ``doctor perms --fix`` to heal it.
+        # ``AuditStore.__init__`` sets ``PRAGMA journal_mode=WAL``, so the
+        # ``-wal``/``-shm`` siblings need their own rows for the identical
+        # reason the ``hal0.db`` journal siblings do above.
+        PermRow(
+            var_lib / "activity.db",
+            state_owner,
+            service_group,
+            0o644,
+            role="activity.db (durable audit trail)",
+        ),
+        PermRow(
+            var_lib / "activity.db-wal",
+            state_owner,
+            service_group,
+            0o644,
+            role="activity.db-wal (WAL journal)",
+        ),
+        PermRow(
+            var_lib / "activity.db-shm",
+            state_owner,
+            service_group,
+            0o644,
+            role="activity.db-shm (WAL shared-memory index)",
+        ),
+        # model-pull-jobs/ — the durable pull-job snapshot store
+        # (``hal0.registry.pull._pull_jobs_dir()`` -> ``var_lib/"model-pull-jobs"``,
+        # the #626/#MR-1 restart-survival fallback). Same O13 birth-ownership
+        # class as ``models/`` above: the installer's root-run brain-model
+        # pull (bundle-tier auto-pull) calls ``persist_pull_job`` -> lazy
+        # ``path.parent.mkdir(parents=True, exist_ok=True)`` as root on a
+        # fresh install, so the dir is born ``root:root 0755`` with a
+        # root-only ``0600`` snapshot inside. ``hal0-api`` (``User=hal0``)
+        # then fails every pull-job snapshot write
+        # (``model.pull_job_persist_failed``, WARNING-only fail-soft — a
+        # write failure here must never break the pull itself) and cannot
+        # read the existing one, so ``GET /api/models/<id>/pull/status``
+        # 404s after a restart even though the pull succeeded (#1895). No
+        # row meant ``doctor perms --fix`` could not heal it either.
+        # ``persist_pull_job`` writes each snapshot via ``tempfile.mkstemp``
+        # + ``os.replace`` — mkstemp always creates its tempfile ``0600``
+        # regardless of umask, matching the ``registry.toml`` /
+        # ``slots/*/state.json`` convention above.
+        PermRow(
+            var_lib / "model-pull-jobs",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.json",
+            child_mode=0o600,
+            optional=False,
+            role="model-pull-jobs/ (durable pull-job snapshots)",
+        ),
         # registry/ — the model registry, also born root:root from the same
         # install.sh mkdir and also written by the User=hal0 daemon. Same O13
         # birth-ownership class as slots/ above; heal the dir. registry/ is

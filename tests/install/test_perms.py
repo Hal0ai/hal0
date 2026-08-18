@@ -764,3 +764,101 @@ def test_upstreams_toml_is_not_world_readable(tmp_hal0_home: str) -> None:
     assert (row.owner, row.group) == ("hal0", "hal0")
     assert row.mode & 0o007 == 0, f"upstreams.toml is world-readable: {row.mode:o}"
     assert row.mode == 0o640
+
+
+# ── hal0-api write-path coverage (#1895) ───────────────────────────────────────
+#
+# ``hal0-api`` runs ``User=hal0``. Every ``var_lib()``-rooted path it can be
+# the FIRST writer of on a fresh install must carry a row here, or a
+# root-run installer step (a bundle-tier model pull, a schema migration, a
+# health check — anything that touches the path before the daemon's first
+# request) leaves it root-owned with no way for `doctor perms --fix` to
+# heal it (the O13 class: #1546 for hal0.db, #1895 for model-pull-jobs +
+# activity.db). This table is the durable form of that check: add a row
+# HERE whenever a new lazily-created ``var_lib()`` path is wired into
+# ``hal0-api``, matching the row(s) added to ``ownership_table`` in the
+# same change, so a future writer can't be missed the way model-pull-jobs
+# was.
+# Labels only at collection time — the concrete ``Path`` each label resolves
+# to depends on ``HAL0_HOME``, which ``tmp_hal0_home`` sets PER TEST FUNCTION
+# (after collection already ran). Resolving paths here instead of inside the
+# test body would race that fixture: the parametrize list would freeze
+# whatever ``HAL0_HOME`` was active at collection time, while
+# ``ownership_table()`` inside the test resolves against the per-test tmp
+# dir — two different tmp trees that would never compare equal.
+_HAL0_API_WRITE_LABELS = [
+    # primary database + WAL siblings (#1546)
+    "hal0.db",
+    "hal0.db-wal",
+    "hal0.db-shm",
+    # durable audit trail + WAL siblings (#1895)
+    "activity.db",
+    "activity.db-wal",
+    "activity.db-shm",
+    # durable pull-job snapshot store (#1895, the #626/#MR-1 fallback)
+    "model-pull-jobs/",
+    # pre-existing O13-class runtime trees, kept here as regression anchors
+    # so this test is the one place that answers "is hal0-api's write
+    # surface fully covered" rather than one more scattered check.
+    "registry/",
+    "slots/",
+    "models/",
+]
+
+
+def _resolve_hal0_api_write_target(label: str) -> Path:
+    from hal0.registry.pull import _pull_jobs_dir
+
+    var_lib = paths.var_lib()
+    targets = {
+        "hal0.db": paths.db_path(),
+        "hal0.db-wal": paths.db_path().with_name("hal0.db-wal"),
+        "hal0.db-shm": paths.db_path().with_name("hal0.db-shm"),
+        "activity.db": paths.activity_db(),
+        "activity.db-wal": paths.activity_db().with_name("activity.db-wal"),
+        "activity.db-shm": paths.activity_db().with_name("activity.db-shm"),
+        "model-pull-jobs/": _pull_jobs_dir(),
+        "registry/": var_lib / "registry",
+        "slots/": var_lib / "slots",
+        "models/": var_lib / "models",
+    }
+    return targets[label]
+
+
+@pytest.mark.parametrize("label", _HAL0_API_WRITE_LABELS)
+def test_every_hal0_api_write_path_has_an_ownership_row(tmp_hal0_home: str, label: str) -> None:
+    """Every path ``hal0-api`` (``User=hal0``) can write must have a table row.
+
+    A missing row is exactly the #1895 defect: the path is born from
+    whichever process touches it first (often root, during install), the
+    ``hal0`` daemon then can't write it, and ``doctor perms --fix`` has
+    nothing to reconcile because the table never declared an opinion.
+    """
+    target = _resolve_hal0_api_write_target(label)
+    table = perms.ownership_table(service_user="hal0")
+    by_target = {r.target: r for r in table}
+    assert target in by_target, f"no ownership row for {label} ({target}) — see #1895"
+    row = by_target[target]
+    assert row.owner == "hal0", f"{label} row is not hal0-owned: {row.owner}"
+    assert row.group == "hal0", f"{label} row is not hal0-grouped: {row.group}"
+
+
+def test_model_pull_jobs_dir_snapshot_files_get_hal0_owned_child_rows(
+    tmp_hal0_home: str,
+) -> None:
+    """The ``model-pull-jobs/`` dir row must also cover its ``*.json`` children.
+
+    ``persist_pull_job`` writes each snapshot via ``tempfile.mkstemp`` +
+    ``os.replace`` — mkstemp always births its tempfile ``0600`` regardless
+    of umask, so the row's ``child_mode`` must match that birth mode (not
+    fight it), the same convention as ``registry.toml`` /
+    ``slots/*/state.json`` above.
+    """
+    from hal0.registry.pull import _pull_jobs_dir
+
+    table = perms.ownership_table(service_user="hal0")
+    by_target = {r.target: r for r in table}
+    row = by_target[_pull_jobs_dir()]
+    assert row.glob == "*.json"
+    assert row.child_mode == 0o600
+    assert row.optional is False
