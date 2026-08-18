@@ -227,6 +227,29 @@ def test_config_edit_seed_rejects_seed_on_other_oserror(monkeypatch, tmp_path: P
     assert "sudo" in result.output
 
 
+def test_config_edit_seed_hints_sudo_when_mkstemp_denied(monkeypatch, tmp_path: Path) -> None:
+    """/etc/hal0 itself (mode 2775 hal0:hal0) is not writable by an ordinary
+    user outside the ``hal0`` group, so ``tempfile.mkstemp`` raises
+    ``PermissionError`` before ``_fchown_to_service_owner`` is ever reached —
+    a failure point the ownership-focused ``ConfigSeedOwnershipError`` catch
+    doesn't cover. Must abort with the same sudo hint, not an unhandled
+    traceback (#1885).
+    """
+    cfg_dir = _set_home(monkeypatch, tmp_path)
+    _simulate_real_etc_hal0(monkeypatch)
+    monkeypatch.setenv("EDITOR", "true")
+
+    def _denied_mkstemp(*_a, **_k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(config_commands.tempfile, "mkstemp", _denied_mkstemp)
+
+    result = runner.invoke(config_commands.app, ["edit", "hal0"])
+    assert result.exit_code != 0, "a permission-denied seed dir must abort, not traceback"
+    assert not (cfg_dir / "hal0.toml").exists()
+    assert "sudo" in result.output, f"error must point the operator at sudo: {result.output}"
+
+
 def test_config_edit_seed_ignores_host_hal0_account_in_sandbox(monkeypatch, tmp_path: Path) -> None:
     """A HAL0_HOME sandbox seed must succeed regardless of whether the real
     host machine happens to have a system ``hal0`` account.

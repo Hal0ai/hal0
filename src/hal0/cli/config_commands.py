@@ -292,6 +292,21 @@ def config_edit(
                 "a seed owned by you at this file's canonical mode. Re-run "
                 "with [bold]sudo[/bold] so the seed lands hal0-owned."
             )
+        except OSError as exc:
+            # tempfile.mkstemp() itself can fail before _fchown_to_service_owner
+            # is ever reached: /etc/hal0 is mode 2775 hal0:hal0, so an
+            # unprivileged caller who isn't in the hal0 group can't create the
+            # temp file there at all (PermissionError), and a read-only mount
+            # would raise EROFS the same way. Only worth the sudo hint against
+            # the real /etc/hal0 — same gate _fchown_to_service_owner uses — a
+            # HAL0_HOME sandbox failing to seed is a different, unrelated
+            # problem (e.g. a genuinely full or missing filesystem).
+            if _config_paths.etc() == Path("/etc/hal0"):
+                die(
+                    f"cannot seed {path}: {exc}. Re-run with [bold]sudo[/bold] "
+                    "so the seed lands hal0-owned."
+                )
+            die(f"cannot seed {path}: {exc}")
     try:
         subprocess.run([editor, str(path)], check=True)
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
