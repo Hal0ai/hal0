@@ -7,6 +7,8 @@ factory that the one construction site in ``api/__init__.py`` calls.
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -61,16 +63,105 @@ class SelfHealingMemoryProvider:
     polls :meth:`try_heal` until the durable engine answers. The swap is a
     single attribute rebind, so every captured reference — closures
     included — recovers at once.
+
+    Rebinding the delegate does NOT recover the writes that were accepted by
+    the volatile fallback while it was live (#1897): they are gone, and the
+    engine that just came up has never seen them. Callers that issued such
+    writes — hal0-api's own boot phases are the ones that always do, because
+    they run inside the degrade window by construction — register a replay
+    with :meth:`add_heal_hook`; the lifespan's re-probe loop drains them via
+    :meth:`run_heal_hooks` right after a successful swap.
     """
 
     def __init__(self, provider: MemoryProvider, cfg: Any) -> None:
         self._target = provider
         self._cfg = cfg
+        self._heal_hooks: list[Callable[[], Any]] = []
+        self._healed = False
+        self._last_drain_attempted = True
 
     @property
     def target(self) -> Any:
         """The current delegate (tests introspect which side is live)."""
         return self._target
+
+    @property
+    def healed(self) -> bool:
+        """True once the durable engine has been swapped in."""
+        return self._healed
+
+    def add_heal_hook(self, hook: Callable[[], Any]) -> bool:
+        """Register a replay to run once the durable engine is swapped in.
+
+        The hook may be sync or return an awaitable; it runs on the event
+        loop in :meth:`run_heal_hooks`. A hook that reports success (any
+        return value other than ``False``) is dropped after one run, so a
+        replay never re-arms itself.
+
+        Returns ``False`` — and registers nothing — when the provider has
+        ALREADY healed, because that heal's hooks were drained before this
+        call. The caller owns running its own replay in that case; a hook
+        queued after the drain would never fire.
+        """
+        if self._healed:
+            return False
+        self._heal_hooks.append(hook)
+        return True
+
+    @property
+    def pending_heal_hooks(self) -> int:
+        """Replays still owed — non-zero after a drain means retry later."""
+        return len(self._heal_hooks)
+
+    @property
+    def last_drain_attempted(self) -> bool:
+        """Whether the previous :meth:`run_heal_hooks` actually ran a hook.
+
+        ``False`` means every armed hook was still waiting on its arming boot
+        phase (``hook.ready`` was ``False``), so nothing was tried — the
+        caller's retry budget should not be spent on that drain (#1912
+        review: a short reprobe interval must not exhaust the cap before the
+        boot lane can hand its replay over).
+        """
+        return self._last_drain_attempted
+
+    async def run_heal_hooks(self) -> bool:
+        """Run every hook armed for this heal; True when all of them landed.
+
+        A hook that returns ``False`` (its writes did not land — a healthy
+        engine can still fail an individual retain) or raises is KEPT armed
+        so the caller's retry loop drains it again on the next tick;
+        otherwise a transient failure on the first post-heal attempt would
+        leave the data lost until the next restart, which is the very
+        failure this machinery exists to prevent. Never propagates: memory
+        recovery must not take down the process.
+
+        A hook whose ``ready`` attribute is ``False`` (its arming boot phase
+        has not finished handing it work) is kept armed WITHOUT being run:
+        it has nothing to try yet, and it must not read as a failed replay
+        attempt — see :attr:`last_drain_attempted`.
+        """
+        hooks, self._heal_hooks = self._heal_hooks, []
+        ok = True
+        attempted = False
+        for hook in hooks:
+            if getattr(hook, "ready", True) is False:
+                ok = False
+                self._heal_hooks.append(hook)
+                continue
+            attempted = True
+            try:
+                result = hook()
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception as exc:
+                log.warning("hal0.memory.heal_hook_failed", error=str(exc))
+                result = False
+            if result is False:
+                ok = False
+                self._heal_hooks.append(hook)
+        self._last_drain_attempted = attempted
+        return ok
 
     def try_heal(self) -> bool:
         """One re-probe attempt; True once the durable engine is live.
@@ -80,6 +171,7 @@ class SelfHealingMemoryProvider:
         the probe is synchronous I/O.
         """
         if not getattr(self._target, "degraded", False):
+            self._healed = True
             return True
         try:
             candidate = provider_from_config(self._cfg)
@@ -89,6 +181,7 @@ class SelfHealingMemoryProvider:
         if getattr(candidate, "degraded", False):
             return False
         self._target = candidate
+        self._healed = True
         log.warning(
             "hal0.memory.provider_healed",
             detail="hindsight engine recovered — swapped out the degraded pgvector fallback",
