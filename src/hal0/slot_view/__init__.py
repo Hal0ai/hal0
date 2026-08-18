@@ -801,11 +801,14 @@ def _synthetic_reason(u: Any) -> str:
     only masks that on the happy path (the synthetic fall-throughs in
     ``get_slot`` and ``/api/status`` can still surface these entries).
     The composite string must stay verbatim in sync with the UI's copy
-    (``ui/src/dash/data.jsx``).
+    (``ui/src/dash/data.jsx``). The reserved name alone isn't enough
+    either: an operator may define an explicit ``hal0`` entry in
+    ``upstreams.toml`` with ``kind="remote"`` — that one is genuinely
+    remote-backed, so require the local slot-kind stand-in too.
     """
     from hal0.upstreams.registry import RESERVED_UPSTREAM_NAME
 
-    if u.name == RESERVED_UPSTREAM_NAME:
+    if u.name == RESERVED_UPSTREAM_NAME and u.kind == "slot":
         return "Composite /v1 endpoint that fronts every chat model — not a lifecycle slot."
     if u.kind == "slot":
         return (

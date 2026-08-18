@@ -212,3 +212,42 @@ def test_slot_logs_one_shot_prints_hint_when_logs_empty(
     assert result.exit_code == 0, result.output
     assert "synthetic composite" in result.output
     assert "no logs" not in result.output
+
+
+def test_slot_logs_follow_terminates_on_degraded_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1905 follow-up (Codex): the server keeps a synthetic slot's degraded
+    stream open with keepalives (so the browser EventSource doesn't
+    error-reconnect), which would leave ``hal0 slot logs hal0 --follow``
+    hanging until Ctrl-C. The CLI must treat ``event: degraded`` as
+    terminal: print the message and return."""
+    from contextlib import contextmanager
+
+    from hal0.cli import _shared
+
+    class _FakeStream:
+        status_code = 200
+
+        def iter_lines(self):
+            yield "event: degraded"
+            yield 'data: {"message":"synthetic composite slot has no journal of its own"}'
+            yield ""
+            # If the CLI does not stop at the degraded frame it would sit
+            # here forever on a real stream; bound it so the test fails
+            # loudly instead of hanging.
+            for _ in range(5):
+                yield ": keepalive"
+            raise AssertionError("CLI kept reading past the terminal degraded frame")
+
+    @contextmanager
+    def fake_api_stream(method, path, *, timeout=None, params=None):
+        yield _FakeStream()
+
+    monkeypatch.setattr(_shared, "api_stream", fake_api_stream)
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+
+    result = runner.invoke(slot_commands.app, ["logs", "hal0", "--follow"])
+
+    assert result.exit_code == 0, result.output
+    assert "synthetic composite" in result.output

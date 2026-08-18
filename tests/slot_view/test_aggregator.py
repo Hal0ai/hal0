@@ -1077,6 +1077,17 @@ class TestSyntheticEntries:
         assert "composite" not in by_name["chat"]["_synthetic_reason"].lower()
         assert "remote upstream" not in by_name["chat"]["_synthetic_reason"]
 
+    def test_synthetic_reason_explicit_remote_hal0_classified_by_kind(self) -> None:
+        """An operator may define an explicit ``hal0`` upstream with
+        ``kind="remote"`` in upstreams.toml — that entry is genuinely
+        remote-backed, so the reserved name alone must not earn it the
+        local-composite explanation."""
+        from hal0.slot_view import _synthetic_reason
+
+        reason = _synthetic_reason(SimpleNamespace(name="hal0", kind="remote"))
+        assert "remote upstream" in reason
+        assert "composite" not in reason.lower()
+
 
 class TestSnapshotComposition:
     async def test_real_slots_win_over_synthetic_on_name_collision(self, no_mem: None) -> None:

@@ -108,16 +108,28 @@ def api_stream(
         yield resp
 
 
-def _iter_sse_payloads(resp: httpx.Response) -> Iterator[Any]:
-    """Parse an SSE response's ``data: ...`` lines into JSON (or raw text)."""
+def _iter_sse_payloads(resp: httpx.Response) -> Iterator[tuple[str | None, Any]]:
+    """Parse an SSE response into ``(event_name, payload)`` pairs.
+
+    ``event_name`` is the preceding ``event:`` field for named frames
+    (e.g. ``degraded``), ``None`` for plain ``data:`` frames. Payloads are
+    JSON-decoded when possible, raw text otherwise.
+    """
+    event: str | None = None
     for raw in resp.iter_lines():
-        if not raw or not raw.startswith("data:"):
+        if not raw:
+            event = None  # blank line terminates the frame
+            continue
+        if raw.startswith("event:"):
+            event = raw[len("event:") :].strip()
+            continue
+        if not raw.startswith("data:"):
             continue
         payload = raw[len("data:") :].strip()
         try:
-            yield json.loads(payload)
+            yield event, json.loads(payload)
         except ValueError:
-            yield payload
+            yield event, payload
 
 
 def follow_sse_logs(
@@ -132,13 +144,23 @@ def follow_sse_logs(
     stale credentials on an auth-enabled box) prints one actionable line via
     :func:`die` instead of silently echoing the JSON error envelope as if it
     were log output.
+
+    #1905: a ``degraded`` frame is terminal for the CLI. The server keeps
+    the stream open with keepalives after it (so a browser EventSource
+    doesn't error-reconnect), but a follow that can never produce log
+    lines (synthetic slot, journalctl missing) should print the
+    explanation and return rather than hang until Ctrl-C.
     """
     try:
         with api_stream("GET", path, timeout=None, params=params) as r:
             if r.status_code in (401, 403):
                 die(f"not authorized ({r.status_code}) — check HAL0_ADMIN_KEY/HAL0_CLIENT_KEY.")
                 return
-            for item in _iter_sse_payloads(r):
+            for event, item in _iter_sse_payloads(r):
+                if event == "degraded":
+                    message = item.get("message") if isinstance(item, dict) else item
+                    console.print(f"[dim]{message}[/dim]")
+                    return
                 console.print(item)
     except (httpx.HTTPError, KeyboardInterrupt):
         return
