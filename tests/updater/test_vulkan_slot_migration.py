@@ -84,6 +84,110 @@ def test_default_probes_real_amd_host(tmp_hal0_home: str, monkeypatch) -> None:
     assert _device_of("agent") == "gpu-vulkan"
 
 
+# ── runtime scope: only llama.cpp-backed slots, never Kokoro/ComfyUI/etc ── #
+#
+# capabilities/catalog.py:429-431 deliberately KEEPS gpu-vulkan for the
+# non-llama runtimes (Kokoro TTS, whisper.cpp/Moonshine STT, ComfyUI) — they
+# run genuinely-Vulkan images, unlike llama.cpp's unified ROCmFPX runner. A
+# migration that matches on the bare device string alone would relabel those
+# slots too:
+#   - kfd present: gpu-rocm is a label their image can't honor
+#     (gpu_visibility_env swaps GGML_VK_VISIBLE_DEVICES -> HIP_VISIBLE_DEVICES,
+#     dropping any gpu_index pin).
+#   - kfd absent: demoting to cpu strips /dev/dri from a working Vulkan slot.
+# container.py's _spec_provider_for is the authoritative "is this slot
+# llama.cpp-backed" discriminator (None == the default llama-server GPU
+# provider; non-None == Kokoro/Moonshine/ComfyUI/FLM/Qwen3TTS) — this
+# migration must gate on it and leave every non-llama slot COMPLETELY
+# untouched: no relabel, no warning, no log line, on EITHER kfd axis. The
+# kfd-absent non-llama case (require_kfd_for_gpu_slot itself over-firing for
+# non-llama runtimes) is tracked separately as #1941 and must NOT be
+# addressed here.
+
+
+def test_kokoro_slot_survives_untouched_kfd_present(tmp_hal0_home: str) -> None:
+    _write_slot(
+        "voice",
+        'name = "voice"\ntype = "tts"\ndevice = "gpu-vulkan"\nport = 8087\n',
+    )
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert _device_of("voice") == "gpu-vulkan"
+
+
+def test_kokoro_slot_survives_untouched_kfd_absent(tmp_hal0_home: str) -> None:
+    _write_slot(
+        "voice",
+        'name = "voice"\ntype = "tts"\ndevice = "gpu-vulkan"\nport = 8087\n',
+    )
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert _device_of("voice") == "gpu-vulkan"
+
+
+def test_comfyui_slot_survives_untouched_kfd_present(tmp_hal0_home: str) -> None:
+    _write_slot(
+        "imggen",
+        'name = "imggen"\ntype = "image"\ndevice = "gpu-vulkan"\nport = 8188\n',
+    )
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert _device_of("imggen") == "gpu-vulkan"
+
+
+def test_comfyui_slot_survives_untouched_kfd_absent(tmp_hal0_home: str) -> None:
+    _write_slot(
+        "imggen",
+        'name = "imggen"\ntype = "image"\ndevice = "gpu-vulkan"\nport = 8188\n',
+    )
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert _device_of("imggen") == "gpu-vulkan"
+
+
+def test_transcription_slot_survives_untouched(tmp_hal0_home: str) -> None:
+    """type=transcription with no NPU device dispatches to Moonshine
+    (whisper.cpp-shaped), never llama-server."""
+    _write_slot(
+        "stt",
+        'name = "stt"\ntype = "transcription"\ndevice = "gpu-vulkan"\nport = 8085\n',
+    )
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert _device_of("stt") == "gpu-vulkan"
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert _device_of("stt") == "gpu-vulkan"
+
+
+def test_non_llama_slots_log_nothing_on_either_kfd_axis(tmp_hal0_home: str, monkeypatch) -> None:
+    import hal0.updater.updater as updater_mod
+
+    _write_slot("voice", 'name = "voice"\ntype = "tts"\ndevice = "gpu-vulkan"\n')
+    _write_slot("imggen", 'name = "imggen"\ntype = "image"\ndevice = "gpu-vulkan"\n')
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(updater_mod.log, "warning", lambda event, **kw: calls.append((event, kw)))
+
+    relabel_stale_vulkan_slots(amd_host=True, kfd_present=True)
+    relabel_stale_vulkan_slots(amd_host=True, kfd_present=False)
+
+    assert calls == []
+
+
+def test_llama_slot_still_relabels_alongside_untouched_non_llama_slot(
+    tmp_hal0_home: str,
+) -> None:
+    """Sanity check that the runtime gate is scoped correctly: a genuine
+    llama.cpp slot (no profile, plain type=llm) in the SAME directory as a
+    non-llama slot still relabels, while its neighbor does not."""
+    _write_slot("agent", 'name = "agent"\ntype = "llm"\ndevice = "gpu-vulkan"\nport = 8081\n')
+    _write_slot("voice", 'name = "voice"\ntype = "tts"\ndevice = "gpu-vulkan"\nport = 8087\n')
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert _device_of("agent") == "gpu-rocm"
+    assert _device_of("voice") == "gpu-vulkan"
+
+
 # ── kfd present → gpu-rocm (AMD host) ────────────────────────────────────── #
 
 

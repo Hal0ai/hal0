@@ -46,7 +46,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls["mtp"].append(job_id)
         return 0
 
-    def _vulkan_migration(*, job_id=None, kfd_present=None):
+    def _vulkan_migration(*, job_id=None, kfd_present=None, amd_host=None):
         calls["vulkan_migration"].append(job_id)
         return 0
 

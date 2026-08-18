@@ -2417,22 +2417,27 @@ if status["due"]:
 PYEOF
 fi
 
-# ── post-activation migrations (schema + seed-profile/mtp/image-pin/extra-args) ─
+# ── post-activation migrations (schema + seed-profile/mtp/vulkan/image-pin/extra-args) ─
 # One shared sequence with Updater.commit()'s self-update path (GH #1475):
 # hal0.toml schema migrations, profiles.toml virtual-seed pruning (seeds live
 # in code and are overlaid on every load — an older install that materialised
 # them into profiles.toml froze stale definitions; this prunes them so the
 # code definition wins again), stale mtp=true slot-override clearing (a
 # force-on pointing at a model with no MTP heads crashes llama-server at load
-# once the unit re-renders under post-separation code), stale runner-image
-# pin retagging, and defaults.extra_args sanitizing. Every pass after the
-# schema migration is independently best-effort — a single pass failing never
-# aborts the others. Previously this block ran only the seed-profile and
-# stale-MTP passes directly, so a box upgraded by re-running install.sh (the
-# documented repair/upgrade path) kept a stale meta.schema_version, stale
-# runner-image pins, and unsanitised defaults.extra_args that `hal0 update`
-# would have fixed — two boxes on the same version with different on-disk
-# state. Operator edits and non-seed profiles are always left untouched.
+# once the unit re-renders under post-separation code), retired
+# device="gpu-vulkan" slot relabeling (#1924 — llama.cpp-backed GPU slots
+# left over from before #1923 retired the Vulkan LLM lane now refuse to load
+# under the new /dev/kfd preflight guard; relabeled to gpu-rocm/cpu, AMD
+# hosts only, non-llama runtimes like Kokoro/ComfyUI left untouched), stale
+# runner-image pin retagging, and defaults.extra_args sanitizing. Every pass
+# after the schema migration is independently best-effort — a single pass
+# failing never aborts the others. Previously this block ran only the
+# seed-profile and stale-MTP passes directly, so a box upgraded by
+# re-running install.sh (the documented repair/upgrade path) kept a stale
+# meta.schema_version, stale runner-image pins, and unsanitised
+# defaults.extra_args that `hal0 update` would have fixed — two boxes on the
+# same version with different on-disk state. Operator edits and non-seed
+# profiles are always left untouched.
 #
 # Ran through hal0_migration_step (not a bare heredoc): the schema migration
 # used to be able to abort this whole script under set -euo pipefail before
@@ -2445,7 +2450,7 @@ fi
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping post-activation migrations (no system writes)"
 else
-    info "running post-activation migrations (schema + seed-profile/mtp/image-pin/extra-args)"
+    info "running post-activation migrations (schema + seed-profile/mtp/vulkan-slot/image-pin/extra-args)"
     hal0_migration_step "post-activation migrations" <<'PYEOF'
 from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
 from hal0.updater.updater import run_post_activation_migrations
@@ -2459,7 +2464,7 @@ if target != source:
     print(f"  hal0.toml schema migrated {source} -> {target}")
 else:
     print(f"  hal0.toml schema already at {target}")
-print("  seed-profile / stale-MTP / runner-image / extra-args cleanup passes ran (see log for any per-item detail)")
+print("  seed-profile / stale-MTP / vulkan-slot / runner-image / extra-args cleanup passes ran (see log for any per-item detail)")
 PYEOF
 fi
 

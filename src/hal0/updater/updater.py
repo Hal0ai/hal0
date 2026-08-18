@@ -2895,7 +2895,8 @@ def relabel_stale_vulkan_slots(
     On an AMD host, for every slot TOML with a literal ``device =
     "gpu-vulkan"`` (top-level or nested under ``[slot]``, the same two-shape
     handling :func:`retag_stale_slot_images` and
-    :func:`clear_stale_mtp_overrides` use), relabel ``device`` to:
+    :func:`clear_stale_mtp_overrides` use) that is ALSO llama.cpp-backed
+    (see runtime scope below), relabel ``device`` to:
 
     * ``"gpu-rocm"`` — when :func:`hal0.providers._gpu.kfd_present` reports
       the ROCm compute node present and usable. This is the same target PR
@@ -2906,12 +2907,40 @@ def relabel_stale_vulkan_slots(
       explicitly, so this is logged as its own WARNING-level breadcrumb,
       never folded silently into the routine "migrated" line.
 
-    Only the ``device`` key is ever written — narrow scope per the #1867
-    rails (no other field, comment, or slot is touched, and a slot whose
-    ``device`` is not literally ``"gpu-vulkan"`` is skipped entirely).
+    Runtime scope — llama.cpp-backed slots ONLY: ``device = "gpu-vulkan"``
+    is not exclusively an llama.cpp label. ``capabilities/catalog.py``
+    deliberately keeps it for the non-llama runtimes (Kokoro TTS,
+    whisper.cpp/Moonshine STT, ComfyUI), which run genuinely-Vulkan images —
+    #1923's Vulkan-lane retirement and its ``require_kfd_for_gpu_slot`` guard
+    are about llama.cpp's unified ROCmFPX runner specifically, not those.
+    Relabeling a non-llama slot here would be actively wrong on both kfd
+    axes: ``gpu-rocm`` is a label its image can't honor (and
+    ``gpu_visibility_env`` would silently swap
+    ``GGML_VK_VISIBLE_DEVICES`` for ``HIP_VISIBLE_DEVICES``, dropping any
+    ``gpu_index`` pin), and ``cpu`` would strip ``/dev/dri`` from a slot that
+    was working fine. So every candidate slot is resolved through
+    :func:`hal0.providers.container._spec_provider_for` — the same
+    authoritative runtime-family discriminator ``load_sync`` itself uses —
+    and skipped ENTIRELY (no relabel, no warning, no log line, on either kfd
+    axis) unless it resolves to ``None`` (the default llama-server GPU
+    provider). The kfd-absent non-llama case (``require_kfd_for_gpu_slot``
+    itself over-firing for non-llama runtimes) is a separate, already-filed
+    bug (#1941) and is deliberately NOT addressed by this migration.
+
+    Only the ``device`` key is ever changed in VALUE — narrow scope per the
+    #1867 rails (no other field or slot is touched, and a slot whose
+    ``device`` is not literally ``"gpu-vulkan"``, or that isn't
+    llama.cpp-backed, is skipped entirely). Note that "narrow scope" is
+    about which *keys* get new values, not byte-for-byte file preservation:
+    like every other pass in this module, the write goes through
+    :func:`~hal0.config.loader.write_toml_atomic`, which reserializes the
+    whole parsed document via ``tomli_w`` — so any comments in a touched
+    slot's TOML are dropped on that rewrite, exactly as they are for
+    :func:`retag_stale_slot_images` and :func:`clear_stale_mtp_overrides`.
     Idempotent: once a slot's ``device`` reads ``"gpu-rocm"`` or ``"cpu"`` it
     no longer matches the ``"gpu-vulkan"`` guard, so a second run touches
-    nothing and logs nothing new.
+    nothing and logs nothing
+    new.
 
     Args:
         job_id: Optional breadcrumb for structured-log tracing.
@@ -2932,6 +2961,7 @@ def relabel_stale_vulkan_slots(
     from hal0.config.paths import slots_config_dir
     from hal0.providers._gpu import host_is_amd_gpu as _probe_host_is_amd_gpu
     from hal0.providers._gpu import kfd_present as _probe_kfd_present
+    from hal0.providers.container import _spec_provider_for
 
     is_amd = _probe_host_is_amd_gpu() if amd_host is None else amd_host
     if not is_amd:
@@ -2956,6 +2986,22 @@ def relabel_stale_vulkan_slots(
         elif isinstance(raw.get("slot"), dict) and raw["slot"].get("device") == "gpu-vulkan":
             holder = raw["slot"]
         if holder is None:
+            continue
+        try:
+            provider = _spec_provider_for(holder)
+        except Exception as exc:
+            log.warning(
+                "updater.vulkan_migration_slot_runtime_unresolved",
+                slot=slot_name,
+                error=str(exc),
+            )
+            continue
+        if provider is not None:
+            # A non-llama runtime (Kokoro/Moonshine/ComfyUI/FLM/Qwen3TTS)
+            # genuinely runs a Vulkan image on this device string — #1923's
+            # guard is scoped to llama.cpp's unified ROCmFPX runner, not
+            # these. Leave completely untouched (see docstring; #1941 tracks
+            # the separate kfd-absent over-firing issue for this class).
             continue
         new_device = "gpu-rocm" if have_kfd else "cpu"
         holder["device"] = new_device
