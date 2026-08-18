@@ -1483,14 +1483,20 @@ def _find_synthetic_entry(request: Request, name: str) -> dict[str, Any] | None:
 
 
 def _synthetic_logs_hint(entry: dict[str, Any]) -> str:
-    """Explain why a synthetic entry has no journal, worded by kind.
+    """Explain why a synthetic entry has no journal, worded per entry.
 
-    #1905 asked about the ``hal0`` composite, but remote upstreams reach
-    this path too — calling one of those a "composite" would be wrong,
-    so mirror the kind split ``_synthetic_reason`` already makes.
+    #1905 asked about the ``hal0`` composite, but remote upstreams and
+    (in stale-registry states) ordinary container-slot registrations
+    reach this path too — calling those a "composite" would be wrong, so
+    mirror the classification ``slot_view._synthetic_reason`` makes: the
+    composite hint needs BOTH the reserved name and ``kind="slot"``.
     """
+    from hal0.upstreams.registry import RESERVED_UPSTREAM_NAME
+
     if entry.get("kind") == "slot":
-        return "synthetic composite slot has no journal of its own"
+        if entry.get("name") == RESERVED_UPSTREAM_NAME:
+            return "synthetic composite slot has no journal of its own"
+        return "upstream registration without a configured slot; no journal to read"
     return "backed by a remote upstream; no local journal to read"
 
 
