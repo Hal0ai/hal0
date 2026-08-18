@@ -325,3 +325,31 @@ def test_is_valid_image_ref_accepts_real_refs(ref: str) -> None:
 @pytest.mark.parametrize("token", ["brain", "1", "my_slot", "my-slot", "x" * 64])
 def test_is_valid_slot_token_accepts_real_tokens(token: str) -> None:
     assert is_valid_slot_token(token) is True
+
+
+def test_image_exists_none_on_operational_podman_failure() -> None:
+    """rc 66 = podman ran but broke (store corruption, lock contention). That
+    is NOT "the image is missing" — reporting it as such would recreate #1889
+    with extra steps, so it must read as "the seam did not answer"."""
+    _calls, run = _seam_recorder(returncode=66, stdout="")
+    assert image_exists("alpine:3.19", run=run, is_hal0_user=lambda: True) is None
+
+
+def test_container_image_none_on_operational_podman_failure() -> None:
+    _calls, run = _seam_recorder(returncode=66, stdout="")
+    assert container_image("brain", run=run, is_hal0_user=lambda: True) is None
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        # distribution-reference separators: "." | "_" | "__" | "-"+
+        "registry.example/team/model__gpu:v1",
+        "team/model--gpu:v1",
+        "my--registry.example.com/a__b/c.d-e_f:tag",
+    ],
+)
+def test_is_valid_image_ref_accepts_double_separators(ref: str) -> None:
+    """A ref this wrongly rejects never reaches the rootful store, so the
+    caller degrades to the rootless one and #1889 returns for that image."""
+    assert is_valid_image_ref(ref) is True

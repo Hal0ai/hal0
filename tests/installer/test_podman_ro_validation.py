@@ -53,6 +53,10 @@ LEGITIMATE_REFS = [
     f"ghcr.io/x/y@sha256:{_DIGEST}",
     f"ghcr.io/x/y:tag@sha256:{_DIGEST}",
     "rocm/vllm-dev:nightly_main_20260101",
+    # distribution-reference separators: "." | "_" | "__" | "-"+
+    "registry.example/team/model__gpu:v1",
+    "team/model--gpu:v1",
+    "my--registry.example.com/a__b/c.d-e_f:tag",
 ]
 
 #: Argv that must never reach podman. Each is a shape that would either run a
@@ -94,7 +98,6 @@ MALICIOUS_REFS = [
     # separators the OCI grammar does not allow
     "-alpine",
     "alpine-",
-    "alpine__x",
     "foo//bar",
     "foo/",
     "/foo",
@@ -260,3 +263,38 @@ def test_python_slot_token_mirror_agrees_with_the_wrapper(token: str) -> None:
     assert is_valid_slot_token(token) == (_run("check-slot-token", token).returncode == 0), (
         f"mirror disagrees with the wrapper on {token!r}"
     )
+
+
+# ── exit-code contract: operational failure ≠ negative answer ───────────────
+#
+# Podman's own rc cannot be exercised here without injecting a fake podman
+# path, and making PODMAN overridable would be a hole in the very boundary
+# this file defends. These assert the contract structurally instead; the
+# consuming half (rc 66 → "seam did not answer", never "missing") is pinned in
+# tests/providers/test_podman_introspect.py.
+
+
+def test_presence_probes_use_exists_not_inspect() -> None:
+    """`podman inspect` collapses "not found" and every other failure into a
+    single rc 125, so it cannot tell a missing image from a broken store.
+    `image exists` / `container exists` are rc 0 / rc 1 / error."""
+    src = WRAPPER.read_text()
+    assert "run_podman image exists --" in src
+    assert "run_podman container exists --" in src
+    code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    assert not [ln for ln in code if "image inspect" in ln]
+
+
+def test_operational_podman_failure_exits_66() -> None:
+    src = WRAPPER.read_text()
+    assert "exit 66" in src
+    # every podman call site routes its non-{0,1} rc into podman_failed
+    assert src.count("podman_failed") >= 4
+
+
+def test_no_caller_supplied_format_string() -> None:
+    """Every --format is a literal in this file; none is read from argv."""
+    src = WRAPPER.read_text()
+    for line in src.splitlines():
+        if "--format" in line and not line.lstrip().startswith("#"):
+            assert '"$1"' not in line and '"$2"' not in line, line

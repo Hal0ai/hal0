@@ -227,3 +227,75 @@ def test_slot_view_reports_present_for_a_running_slot(
     assert present is True
     assert ("present" if present else "missing") == "present"
     slot_view._image_present_cache.clear()
+
+
+# ── #663 drift comparison, now that running_image is finally reachable ──────
+#
+# Before #1889 running_image() returned None on every deployed box, so
+# _image_mismatch was dead code. Making it live without normalising both sides
+# would trade an inert detector for a LYING one: podman reports the canonical
+# `docker.io/library/alpine:latest` while hal0 profiles declare the shorthand
+# an operator types.
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("alpine", "docker.io/library/alpine:latest"),
+        ("alpine:3.19", "docker.io/library/alpine:3.19"),
+        ("myorg/img", "docker.io/myorg/img:latest"),
+        ("docker.io/library/alpine:latest", "docker.io/library/alpine:latest"),
+        ("ghcr.io/team/model", "ghcr.io/team/model:latest"),
+        ("localhost/hal0-toolbox", "localhost/hal0-toolbox:latest"),
+        ("localhost:5000/foo:v1", "localhost:5000/foo:v1"),
+        ("registry.example.com:443/a/b:t", "registry.example.com:443/a/b:t"),
+        ("alpine@sha256:" + "a" * 64, "docker.io/library/alpine@sha256:" + "a" * 64),
+        ("  alpine:3.19  ", "docker.io/library/alpine:3.19"),
+        ("", ""),
+    ],
+)
+def test_canonical_image_ref(ref: str, expected: str) -> None:
+    assert container_mod.canonical_image_ref(ref) == expected
+
+
+@pytest.mark.parametrize(
+    ("running", "declared"),
+    [
+        # what podman actually reports vs what a profile actually declares
+        ("docker.io/library/alpine:latest", "alpine"),
+        ("docker.io/library/alpine:latest", "alpine:latest"),
+        ("docker.io/myorg/img:latest", "myorg/img"),
+        ("ghcr.io/team/model:latest", "ghcr.io/team/model"),
+        ("localhost:5000/foo:v1", "localhost:5000/foo:v1"),
+    ],
+)
+def test_no_false_drift_on_equivalent_refs(running: str, declared: str) -> None:
+    assert container_mod._image_mismatch(running, declared) is False
+
+
+@pytest.mark.parametrize(
+    ("running", "declared"),
+    [
+        ("docker.io/library/alpine:3.19", "alpine:3.20"),
+        ("ghcr.io/team/model:v1", "ghcr.io/team/other:v1"),
+        ("docker.io/library/alpine:latest", "ghcr.io/team/model:latest"),
+        # a registry port must not be amputated into a false match
+        ("localhost:5000/foo:v1", "localhost:6000/foo:v1"),
+    ],
+)
+def test_real_drift_still_fires(running: str, declared: str) -> None:
+    assert container_mod._image_mismatch(running, declared) is True
+
+
+def test_digest_vs_tag_compares_repository_only() -> None:
+    """Deciding whether a tag and a digest name the same image needs a
+    registry round-trip the status hot path will never make; guessing
+    "drifted" there is the cry-wolf failure #663's contract forbids."""
+    digest = "ghcr.io/team/model@sha256:" + "a" * 64
+    assert container_mod._image_mismatch(digest, "ghcr.io/team/model:v1") is False
+    assert container_mod._image_mismatch(digest, "ghcr.io/team/other:v1") is True
+
+
+def test_unknown_running_image_is_never_drift() -> None:
+    assert container_mod._image_mismatch(None, "alpine") is False
+    assert container_mod._image_mismatch("alpine", None) is False

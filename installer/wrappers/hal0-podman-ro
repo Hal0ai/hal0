@@ -49,12 +49,23 @@
 # answer is negative" from "the seam itself is unusable", because the caller
 # must fall back to its rootless read only in the second case:
 #
-#   * rc 0   — podman ran. `image-exists` printed `present` or `missing`;
-#              `container-image` / `container-argv` printed the value, or
-#              nothing at all when no such container is running. An empty
-#              stdout on rc 0 is a real answer, not an error.
+#   * rc 0   — podman ran and gave a DEFINITIVE answer. `image-exists`
+#              printed `present` or `missing`; `container-image` /
+#              `container-argv` printed the value, or nothing at all when no
+#              such container exists. An empty stdout on rc 0 is a real
+#              answer, not an error.
 #   * rc 64  — this wrapper rejected the argument (validation) or the verb.
 #   * rc 65  — podman is not installed / not executable here.
+#   * rc 66  — podman ran but FAILED operationally (store corruption, lock
+#              contention, permission error, …). NOT a negative answer.
+#
+# rc 66 exists because conflating an operational podman failure with "the
+# image is absent" reproduces #1889 with extra steps: the API would report a
+# locally present image as missing and the caller would never know to
+# degrade. That is why the presence probes below use `podman image exists` /
+# `podman container exists`, whose contract is exactly rc 0 = yes, rc 1 = no,
+# anything else = error — `podman inspect` collapses "not found" and every
+# other failure into a single rc 125 and cannot make this distinction.
 #
 # A caller that gets rc 0 must trust stdout; anything else means "seam did
 # not answer" (including sudo's own rc 1 when the grant is missing).
@@ -88,8 +99,15 @@ SLOT_TOKEN_RE='^[A-Za-z0-9_-]{1,64}$'
 # would only convert a podman error into a wrapper rejection while risking a
 # false reject on a legitimate ref; a false reject is precisely the failure
 # mode #1889 is about (it degrades to image_status="missing" again).
-_REF_HOST='[A-Za-z0-9]+([.-][A-Za-z0-9]+)*(:[0-9]{1,5})?'
-_REF_PATH='[A-Za-z0-9]+([._-][A-Za-z0-9]+)*(/[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)*'
+# The separator set is the distribution-reference grammar's, verbatim:
+#   separator := "." | "_" | "__" | "-"+
+# Getting this wrong is not a hardening nit — a legitimate ref that this
+# rejects never reaches the rootful store, so the caller degrades to the
+# rootless one and #1889 comes straight back for that image. `model__gpu` and
+# `model--gpu` are both legal repository names.
+_REF_SEP='(__|[._]|-+)'
+_REF_HOST="[A-Za-z0-9]+(([.]|-+)[A-Za-z0-9]+)*(:[0-9]{1,5})?"
+_REF_PATH="[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*(/[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*)*"
 _REF_TAG='(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?'
 _REF_DIGEST='(@sha256:[0-9a-f]{64})?'
 IMAGE_REF_RE="^(${_REF_HOST}/)?${_REF_PATH}${_REF_TAG}${_REF_DIGEST}\$"
@@ -113,6 +131,10 @@ require_podman() {
   [[ -x "$PODMAN" ]] || { echo "hal0-podman-ro: podman not found at $PODMAN" >&2; exit 65; }
 }
 
+# An operational podman failure — distinct from a negative answer. See the
+# exit-code contract in the header.
+podman_failed() { echo "hal0-podman-ro: $1 (rc=$2)" >&2; exit 66; }
+
 # Run podman read-only, tolerating a non-zero rc (a missing image/container is
 # a legitimate NEGATIVE answer, not a seam failure). Sets PODMAN_RC/PODMAN_OUT.
 # stderr is dropped: podman emits benign device warnings under LXC.
@@ -120,6 +142,25 @@ run_podman() {
   PODMAN_OUT=""
   PODMAN_RC=0
   PODMAN_OUT="$("$PODMAN" "$@" 2>/dev/null)" || PODMAN_RC=$?
+}
+
+# Read one LITERAL --format field off a hal0 slot container.
+#   $1 = the format string (a literal from the case arm below, never caller
+#        input); $2 = the container name, already assembled from a validated
+#        token on this side of the boundary.
+# Prints the value and exits 0; prints nothing and exits 0 when the container
+# does not exist; exits 66 when podman itself failed.
+container_read() {
+  local fmt="$1" name="$2"
+  run_podman container exists -- "$name"
+  case "$PODMAN_RC" in
+    0) ;;
+    1) return 0 ;;   # no such container — a real negative answer
+    *) podman_failed "podman container exists failed" "$PODMAN_RC" ;;
+  esac
+  run_podman inspect --format "$fmt" -- "$name"
+  (( PODMAN_RC == 0 )) || podman_failed "podman inspect failed" "$PODMAN_RC"
+  printf '%s\n' "$PODMAN_OUT"
 }
 
 cmd="${1:-help}"; shift || true
@@ -133,11 +174,16 @@ case "$cmd" in
     [[ $# -eq 1 ]] || die "image-exists takes exactly one argument"
     validate_image_ref "$1"
     require_podman
-    # --format {{.Id}} is a LITERAL here: it keeps the inspect output to one
-    # short line instead of the full JSON manifest, and the value is
-    # discarded — only podman's rc decides presence.
-    run_podman image inspect --format '{{.Id}}' -- "$1"
-    if (( PODMAN_RC == 0 )); then echo present; else echo missing; fi
+    # `image exists` — NOT `image inspect`. Its contract is rc 0 = present,
+    # rc 1 = absent, anything else = operational failure, which is the only
+    # way to keep "podman is broken" from being reported as "the image is
+    # missing". `inspect` returns 125 for both.
+    run_podman image exists -- "$1"
+    case "$PODMAN_RC" in
+      0) echo present ;;
+      1) echo missing ;;
+      *) podman_failed "podman image exists failed" "$PODMAN_RC" ;;
+    esac
     ;;
 
   container-image)         # arg: slot token -> prints the running image ref
@@ -146,18 +192,19 @@ case "$cmd" in
     require_podman
     # #663 backend-of-record: the running container's image IS the backend.
     # The container NAME is built here from the validated token.
-    run_podman inspect --format '{{.ImageName}}' -- "hal0-slot-$1"
-    # A `(( … )) && printf` one-liner would make the "no such container" case
-    # exit non-zero under `set -e`, which the caller reads as "seam unusable".
-    if (( PODMAN_RC == 0 )); then printf '%s\n' "$PODMAN_OUT"; fi
+    #
+    # Two podman calls in ONE sudo hop: `container exists` first, because it
+    # is the only call that can say "absent" without also meaning "podman
+    # broke", then the inspect whose failure is therefore unambiguously
+    # operational.
+    container_read '{{.ImageName}}' "hal0-slot-$1"
     ;;
 
   container-argv)          # arg: slot token -> prints the live command argv
     [[ $# -eq 1 ]] || die "container-argv takes exactly one argument"
     validate_slot_token "$1"
     require_podman
-    run_podman inspect --format '{{json .Config.Cmd}}' -- "hal0-slot-$1"
-    if (( PODMAN_RC == 0 )); then printf '%s\n' "$PODMAN_OUT"; fi
+    container_read '{{json .Config.Cmd}}' "hal0-slot-$1"
     ;;
 
   check-image-ref)         # arg: image ref — side-effect-free validator probe

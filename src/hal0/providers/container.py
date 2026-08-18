@@ -2927,16 +2927,95 @@ __all__ = [
 ]
 
 
+def _split_image_tag(name: str) -> tuple[str, str]:
+    """Split ``repo[:tag]`` on the tag colon only.
+
+    A registry port (``localhost:5000/foo``) puts a colon BEFORE the last
+    ``/``; a naive ``split(":")`` would amputate the host and silently compare
+    two different repositories as equal.
+    """
+    last_slash = name.rfind("/")
+    last_colon = name.rfind(":")
+    if last_colon > last_slash:
+        return name[:last_colon], name[last_colon + 1 :]
+    return name, ""
+
+
+def canonical_image_ref(ref: str) -> str:
+    """Expand an image ref to its fully-qualified form for comparison (#1889).
+
+    Podman reports a container's ``ImageName`` in canonical form —
+    ``docker.io/library/alpine:latest`` — while hal0 profiles routinely
+    declare the shorthand an operator would type (``alpine``,
+    ``alpine:latest``, ``myorg/img``). Before #1889 that never mattered:
+    :meth:`ContainerProvider.running_image` read the wrong podman store and
+    returned ``None`` on every deployed box, so :func:`_image_mismatch` was
+    unreachable. Making it reachable without this normalisation would have
+    turned a literal string compare into a drift alarm on every correctly
+    running slot — trading an inert detector for a lying one.
+
+    Applies exactly the two implicit rules the OCI/distribution reference
+    grammar defines, and nothing else:
+
+      * a name with no registry component gets ``docker.io/`` (plus the
+        ``library/`` namespace when it is a single bare component). A first
+        component is a registry only if it contains ``.`` or ``:``, or is
+        literally ``localhost`` — the standard heuristic;
+      * a name with neither tag nor digest gets ``:latest``.
+
+    Never raises and never invents: anything it cannot parse is returned
+    stripped but otherwise untouched.
+    """
+    ref = ref.strip()
+    if not ref:
+        return ""
+
+    name, sep, digest = ref.partition("@")
+    digest = f"@{digest}" if sep else ""
+
+    name, tag = _split_image_tag(name)
+
+    first, slash, _rest = name.partition("/")
+    has_registry = bool(slash) and ("." in first or ":" in first or first == "localhost")
+    if not has_registry:
+        name = f"docker.io/library/{name}" if not slash else f"docker.io/{name}"
+
+    if not tag and not digest:
+        tag = "latest"
+
+    return f"{name}{f':{tag}' if tag else ''}{digest}"
+
+
 def _image_mismatch(running_image: str | None, declared_image: str | None) -> bool:
     """Return True iff both image refs are known AND differ (#663).
 
     The deterministic replacement for the /proc ``actual_backend`` sniff on
-    container slots: the running backend IS the image tag, so drift is a plain
-    ref comparison (the running container's image vs the slot profile's
-    declared image). Returns False whenever the running image can't be
-    determined (container down / inspect failed) - never cry wolf on missing
-    data, same omit-don't-guess contract as ``resolve_actual_backend``.
+    container slots: the running backend IS the image tag, so drift is a ref
+    comparison (the running container's image vs the slot profile's declared
+    image). Returns False whenever the running image can't be determined
+    (container down / inspect failed) - never cry wolf on missing data, same
+    omit-don't-guess contract as ``resolve_actual_backend``.
+
+    Both sides are canonicalised first (:func:`canonical_image_ref`) so the
+    shorthand a profile declares compares equal to the fully-qualified name
+    podman reports — see that function for why #1889 makes this load-bearing.
+
+    Digest-pinned vs tag-pinned is compared on the REPOSITORY alone: deciding
+    whether ``ghcr.io/x/y:v2`` and ``ghcr.io/x/y@sha256:…`` are the same image
+    needs a registry round-trip this hot path will never make, and guessing
+    "drifted" there is the same cry-wolf failure the docstring above forbids.
     """
     if not running_image or not declared_image:
         return False
-    return running_image.strip() != declared_image.strip()
+
+    running = canonical_image_ref(running_image)
+    declared = canonical_image_ref(declared_image)
+    if running == declared:
+        return False
+
+    running_repo, _, running_digest = running.partition("@")
+    declared_repo, _, declared_digest = declared.partition("@")
+    if bool(running_digest) != bool(declared_digest):
+        return _split_image_tag(running_repo)[0] != _split_image_tag(declared_repo)[0]
+
+    return True

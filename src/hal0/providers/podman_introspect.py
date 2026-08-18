@@ -98,8 +98,13 @@ SLOT_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 #: (no whitespace, no shell metacharacter, no leading ``-``, no ``..``, no
 #: second word) and case-permissive; see the wrapper header for why case is
 #: not folded here.
-_REF_HOST = r"[A-Za-z0-9]+([.-][A-Za-z0-9]+)*(:[0-9]{1,5})?"
-_REF_PATH = r"[A-Za-z0-9]+([._-][A-Za-z0-9]+)*(/[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)*"
+# Separator set straight from the distribution-reference grammar:
+# ``"." | "_" | "__" | "-"+``. ``__`` is listed FIRST because Python's ``re``
+# is leftmost-FIRST (unlike POSIX ERE's leftmost-longest), so ``_|__`` would
+# match only the first underscore of ``model__gpu`` and then fail.
+_REF_SEP = r"(__|[._]|-+)"
+_REF_HOST = r"[A-Za-z0-9]+(([.]|-+)[A-Za-z0-9]+)*(:[0-9]{1,5})?"
+_REF_PATH = rf"[A-Za-z0-9]+({_REF_SEP}[A-Za-z0-9]+)*(/[A-Za-z0-9]+({_REF_SEP}[A-Za-z0-9]+)*)*"
 _REF_TAG = r"(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?"
 _REF_DIGEST = r"(@sha256:[0-9a-f]{64})?"
 IMAGE_REF_RE = re.compile(rf"^({_REF_HOST}/)?{_REF_PATH}{_REF_TAG}{_REF_DIGEST}$")
