@@ -2188,12 +2188,29 @@ async def _boot_brain_lane(
     # durably is what would duplicate cards: the dedupe search that makes a
     # replay safe races the engine's asynchronous retain of the write it is
     # meant to supersede.
+    #
+    # Known, pre-existing, very narrow window (Codex review on #1912): if the
+    # swap lands between a phase's dedupe search (ran against the empty
+    # fallback) and its add (durable), the counter does not move, the step is
+    # not replayed, and the durable dedupe never ran — a degraded RESTART on a
+    # box whose agents bank already holds a prior card can duplicate it. The
+    # window is one in-process search round-trip against a 30s reprobe tick,
+    # and it predates this replay (the #1613 loop already ran concurrently
+    # with the lane).
     fallback = getattr(provider, "target", provider)
 
     def _volatile_writes() -> int:
         return int(getattr(fallback, "volatile_writes", 0) or 0)
 
-    owed: list[str] = []
+    # ``volatile`` and ``failed`` are DIFFERENT findings and drive different
+    # messaging: "the fallback swallowed this write" (durable data loss unless
+    # replayed) vs "this publish just failed" (a normal warn-as-OK outcome the
+    # per-step log above already covers — including every boot with
+    # [memory].enabled = false, where all three fail). Only their union feeds
+    # the replay set; the degraded-window warnings key off ``volatile`` alone,
+    # so a healthy-provider publish failure can never fire a WARNING claiming
+    # volatile data loss (rc-validate greps the journal for exactly that key).
+    volatile: list[str] = []
     failed: list[str] = []
     for name, phase, done_key, prior in steps:
         if only is not None and name not in only:
@@ -2215,11 +2232,13 @@ async def _boot_brain_lane(
         except Exception as exc:  # pragma: no cover — defensive, must never block boot
             failed.append(name)
             log.warning(f"brain_lane.{name}_failed", error=str(exc))
-        # Owed a replay when this step's write was swallowed by the volatile
-        # fallback, or when it did not land at all — in both cases no durable
-        # card exists, so re-running cannot duplicate one.
-        if _volatile_writes() > before or name in failed:
-            owed.append(name)
+        if _volatile_writes() > before:
+            volatile.append(name)
+
+    # Owed a replay when a step's write was swallowed by the volatile fallback,
+    # or when it did not land at all — in both cases no durable card exists, so
+    # re-running cannot duplicate one.
+    owed = [name for name, *_rest in steps if name in volatile or name in failed]
 
     if replay:
         # The drain narrows the retry set to what came back here.
@@ -2236,14 +2255,19 @@ async def _boot_brain_lane(
                 "queued for replay once the durable memory engine heals",
             )
         return tuple(failed)
-    if not owed:
+    if not volatile:
+        # Nothing was swallowed by a volatile fallback. Any failed steps were
+        # plain publish failures against whatever provider is live (or absent —
+        # every [memory].enabled = false boot lands here with all three
+        # failed), already logged per-step above; no durable data was lost, so
+        # the degraded-window warnings below would be false alarms.
         return tuple(failed)
     if getattr(provider, "add_heal_hook", None) is None:
-        # Deliberate [memory].engine = "pgvector", or memory disabled: no
-        # durable engine is ever coming, so there is nothing to replay onto.
+        # Deliberate [memory].engine = "pgvector": no durable engine is ever
+        # coming, so there is nothing to replay onto.
         log.warning(
             "brain_lane.degraded_writes_volatile",
-            steps=owed,
+            steps=volatile,
             detail="brain-lane publishes accepted by a volatile provider with no self-heal "
             "shell — the agents dataset will not survive a restart",
         )

@@ -288,6 +288,71 @@ async def test_heal_hook_failure_does_not_break_the_drain(
     assert shell.pending_heal_hooks == 1
 
 
+class _LogRecorder:
+    """Captures structlog-style event names so tests can pin what fires."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def _record(self, event: str, **kwargs: Any) -> None:
+        self.events.append(event)
+
+    info = warning = error = _record
+
+
+@pytest.fixture
+def api_log(monkeypatch: pytest.MonkeyPatch) -> _LogRecorder:
+    recorder = _LogRecorder()
+    monkeypatch.setattr("hal0.api.log", recorder)
+    return recorder
+
+
+@pytest.mark.asyncio
+async def test_memory_disabled_boot_emits_no_volatile_warning(
+    monkeypatch: pytest.MonkeyPatch, api_log: _LogRecorder
+) -> None:
+    """[memory].enabled = false: every publish fails, nothing was volatile.
+
+    Firing ``degraded_writes_volatile`` here would be a WARNING claiming
+    durable data loss on EVERY boot of such a box — and #1897's own repro
+    greps the journal for exactly that class of key.
+    """
+    lane = _Lane(None, monkeypatch, failing=frozenset(n for n, _ in _STEPS))
+
+    owed = await _boot_brain_lane(_app(None), BootState())
+    assert owed == ("namespace_register", "brain_profile_seed", "self_report")
+    assert "brain_lane.degraded_writes_volatile" not in api_log.events
+    assert "brain_lane.degraded_replay_inline" not in api_log.events
+    # No inline replay fired: each phase ran exactly once.
+    assert lane.calls == ["namespace_register", "brain_profile_seed", "self_report"]
+
+
+@pytest.mark.asyncio
+async def test_healthy_provider_publish_failure_is_not_called_volatile(
+    monkeypatch: pytest.MonkeyPatch, api_log: _LogRecorder
+) -> None:
+    """A transient publish failure on a durable provider is not data loss."""
+    provider = _FakeHealthy()
+    lane = _Lane(provider, monkeypatch, failing=frozenset({"self_report"}))
+
+    assert await _boot_brain_lane(_app(provider), BootState()) == ("self_report",)
+    assert "brain_lane.degraded_writes_volatile" not in api_log.events
+    assert "brain_lane.degraded_replay_inline" not in api_log.events
+    assert lane.count("self_report") == 1
+
+
+@pytest.mark.asyncio
+async def test_deliberate_pgvector_engine_still_warns_volatile(
+    monkeypatch: pytest.MonkeyPatch, api_log: _LogRecorder
+) -> None:
+    """No self-heal shell and swallowed writes: the loss warning must fire."""
+    provider = _FakeDegraded()
+    _Lane(provider, monkeypatch)
+
+    assert await _boot_brain_lane(_app(provider), BootState()) == ()
+    assert "brain_lane.degraded_writes_volatile" in api_log.events
+
+
 @pytest.mark.asyncio
 async def test_volatile_write_counter_moves_on_the_real_fallback() -> None:
     """The counter the lane reads is the real PgVectorProvider's, not a mock."""
