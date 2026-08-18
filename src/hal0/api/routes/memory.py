@@ -179,6 +179,26 @@ class MemoryGraphSlotInvalid(Hal0Error):
     status = 422
 
 
+class MemoryExtractionCtxTooSmall(Hal0Error):
+    """The resolved extraction slot's effective window can't fit the extraction prompt (#1903).
+
+    Hindsight builds its graph via its own extraction LLM call, dispatched to
+    ``hal0/<extraction_slot>`` regardless of ``[memory.graph].enabled``
+    (reporting-only on this engine — see :meth:`HindsightProvider.graph_status`).
+    Nothing preflighted that dispatch's window before this: an undersized slot
+    used to answer ``/add`` with HTTP 200 + a document id, then either dropped
+    the retain entirely (``retain_extract_facts`` 500 "Context size has been
+    exceeded", the document never actually stored) or — worse — persisted the
+    extraction prompt's own scaffolding as a "fact" with no grounding check.
+    Failing fast here, before the retain is even attempted, means a caller
+    never gets back an id for a document write that was always going to be
+    dropped.
+    """
+
+    code = "memory.extraction_ctx_too_small"
+    status = 503
+
+
 class MemoryUnavailable(Hal0Error):
     """The memory engine failed to initialise at boot.
 
@@ -602,6 +622,62 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
 # the cheapest unblock so identity cards actually get written.
 
 
+async def _extraction_window(request: Request, wrapper: Any) -> Any | None:
+    """Resolve the live extraction slot's effective window, or ``None`` when unprovable/N-A.
+
+    ``None`` covers "this provider doesn't do slot-dispatched extraction at
+    all" (no ``hindsight_client`` — e.g. the in-memory ``PgVectorProvider``
+    fallback) alongside "the catalog lookup itself failed" — both mean the
+    caller cannot make a below-floor call, so ``memory_add`` must not block
+    on it (same "unknown is not a pass, but it is also not a block" rule
+    :mod:`hal0.agents.anchor_window` documents for its own callers).
+
+    Resolves fully LOCALLY, on purpose — not via ``_aggregate_models``:
+
+    * ``_aggregate_models`` honours the *caller's* ``owned_by`` query param /
+      ``X-hal0-Model-Filter`` header. Those are discovery-surface curation;
+      applied to an internal safety check they let arbitrary request
+      metadata empty the catalog, degrade the verdict to ``unknown``, and
+      silently disable the preflight.
+    * ``_aggregate_models`` also fans out a live, uncached ``fetch_models``
+      HTTP round-trip to every enabled upstream — several seconds of
+      connect/read timeout per offline remote, on every memory write (a hot
+      path: auto-retain fires on a timer for every agent on the box).
+
+    The preflight needs neither: ``hal0/<slot>`` only ever resolves through
+    the local slot-alias rows (:func:`hal0.api.hal0_slot_alias_models` — a
+    slot_manager/model_registry read, no HTTP), and
+    ``_resolve_virtual_model_entry`` matches the resolver's answer against
+    exactly those rows, the same way chat dispatch does.
+    """
+    slot = getattr(wrapper, "extraction_slot", None)
+    if not slot or getattr(wrapper, "hindsight_client", None) is None:
+        return None
+
+    from hal0.api import hal0_slot_alias_models
+    from hal0.api.routes.v1 import _resolve_virtual_model_entry
+    from hal0.memory.extraction_env import extraction_model_name, resolve_extraction_window
+
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    model_registry = getattr(request.app.state, "model_registry", None)
+    if slot_manager is None or model_registry is None:
+        return None
+
+    model_name = extraction_model_name(slot)
+    try:
+        catalog = await hal0_slot_alias_models(slot_manager, model_registry)
+    except Exception:
+        return None
+    try:
+        entry = await _resolve_virtual_model_entry(request, model_name, catalog)
+    except Exception:
+        entry = None
+
+    return resolve_extraction_window(
+        slot, entry=entry, catalog=catalog, endpoint="the local slot catalog"
+    )
+
+
 @router.post("/add")
 async def memory_add(request: Request) -> dict[str, Any]:
     """Add a memory item. Body: ``{text, dataset?, tags?, metadata?, document_id?}``.
@@ -666,6 +742,33 @@ async def memory_add(request: Request) -> dict[str, Any]:
         )
 
     wrapper = _wrapper(request)
+
+    # #1903: preflight the extraction slot's effective window against the
+    # extraction prompt's own footprint BEFORE the retain is attempted. A
+    # slot too small to fit the prompt can never complete extraction no
+    # matter what is retained, so failing here — before a document id is
+    # even minted — beats a 200 for a write the engine was always going to
+    # drop (or, worse, one it answers by persisting prompt scaffolding as
+    # a "fact"). ``unknown`` (no evidence either way) does not block: a
+    # preflight that can't prove the slot is broken must not refuse writes
+    # on a healthy box just because the catalog lookup came back thin.
+    window = await _extraction_window(request, wrapper)
+    if window is not None and window.verdict == "below_floor":
+        log.warning(
+            "memory.extraction_ctx_below_floor slot=%r effective=%r floor=%r",
+            window.slot,
+            window.effective,
+            window.floor,
+        )
+        raise MemoryExtractionCtxTooSmall(
+            window.message(),
+            details={
+                "slot": window.slot,
+                "effective_context": window.effective,
+                "required_context": window.floor,
+            },
+        )
+
     return await wrapper.add(
         text=text,
         dataset=dataset,
@@ -921,6 +1024,7 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
 __all__ = [
     "DEFAULT_DATASET",
     "MemoryAgentIdInvalid",
+    "MemoryExtractionCtxTooSmall",
     "MemoryGraphConfig",
     "MemoryGraphConfigInvalid",
     "MemoryGraphSlotInvalid",
