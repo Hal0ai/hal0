@@ -2862,7 +2862,10 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
 
 
 def relabel_stale_vulkan_slots(
-    *, job_id: str | None = None, kfd_present: bool | None = None
+    *,
+    job_id: str | None = None,
+    kfd_present: bool | None = None,
+    amd_host: bool | None = None,
 ) -> int:
     """Relabel retired ``device = "gpu-vulkan"`` slot TOMLs (upgrade migration).
 
@@ -2877,10 +2880,22 @@ def relabel_stale_vulkan_slots(
     updated install doesn't refuse to load slots it was serving fine
     yesterday.
 
-    For every slot TOML with a literal ``device = "gpu-vulkan"`` (top-level or
-    nested under ``[slot]``, the same two-shape handling
-    :func:`retag_stale_slot_images` and :func:`clear_stale_mtp_overrides`
-    use), relabel ``device`` to:
+    AMD-only, exactly matching :func:`~hal0.providers._gpu.require_kfd_for_gpu_slot`'s
+    own scope for a ``gpu-vulkan`` device: that guard only fires when the
+    amdgpu kernel driver is bound on THIS host
+    (:func:`hal0.providers._gpu.host_is_amd_gpu`). An Intel iGPU or an NVIDIA
+    card without CDI has no ``/dev/kfd`` by design, is never gated, and keeps
+    working post-#1923 exactly as it did before — relabeling its
+    ``gpu-vulkan`` slots here (which an unscoped ``kfd_present()`` check
+    would do, since none of those hosts has ``/dev/kfd`` either) would
+    silently downgrade a perfectly working GPU slot to CPU for no reason. On
+    a non-AMD host this function is therefore a full no-op: nothing is
+    inspected or written.
+
+    On an AMD host, for every slot TOML with a literal ``device =
+    "gpu-vulkan"`` (top-level or nested under ``[slot]``, the same two-shape
+    handling :func:`retag_stale_slot_images` and
+    :func:`clear_stale_mtp_overrides` use), relabel ``device`` to:
 
     * ``"gpu-rocm"`` — when :func:`hal0.providers._gpu.kfd_present` reports
       the ROCm compute node present and usable. This is the same target PR
@@ -2903,6 +2918,10 @@ def relabel_stale_vulkan_slots(
         kfd_present: Override for
             :func:`hal0.providers._gpu.kfd_present` — test seam. ``None``
             (the default) probes the real host's ``/dev/kfd``.
+        amd_host: Override for :func:`hal0.providers._gpu.host_is_amd_gpu` —
+            test seam, same shape as
+            :func:`~hal0.providers._gpu.require_kfd_for_gpu_slot`'s own
+            parameter. ``None`` (the default) probes the real host.
 
     Returns:
         Number of slot TOMLs relabeled.
@@ -2911,7 +2930,14 @@ def relabel_stale_vulkan_slots(
 
     from hal0.config.loader import write_toml_atomic
     from hal0.config.paths import slots_config_dir
+    from hal0.providers._gpu import host_is_amd_gpu as _probe_host_is_amd_gpu
     from hal0.providers._gpu import kfd_present as _probe_kfd_present
+
+    is_amd = _probe_host_is_amd_gpu() if amd_host is None else amd_host
+    if not is_amd:
+        # Not the hardware #1923's guard characterised or gates — a
+        # gpu-vulkan slot here was never broken by it. Leave it alone.
+        return 0
 
     have_kfd = _probe_kfd_present() if kfd_present is None else kfd_present
 
