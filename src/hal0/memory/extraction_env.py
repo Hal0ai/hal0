@@ -268,6 +268,14 @@ def extraction_model_name(slot: str) -> str:
 EXTRACTION_FLOOR_ENV = "HAL0_MEMORY_EXTRACTION_FLOOR"
 
 
+#: Invalid override values already warned about, so a persistent typo in the
+#: service environment logs ONCE per value instead of once per memory write —
+#: ``extraction_floor`` runs on the write hot path (auto-retain fires on a
+#: timer for every agent on the box), which would otherwise flood the journal
+#: indefinitely.
+_floor_override_warned: set[str] = set()
+
+
 def extraction_floor() -> tuple[int, str]:
     """Return ``(floor, floor_source)`` honouring :data:`EXTRACTION_FLOOR_ENV`.
 
@@ -283,7 +291,9 @@ def extraction_floor() -> tuple[int, str]:
             value = 0
         if value > 0:
             return (value, f"env:{EXTRACTION_FLOOR_ENV}")
-        log.warning("hal0.memory.extraction_floor_override_invalid", raw=raw)
+        if raw not in _floor_override_warned:
+            _floor_override_warned.add(raw)
+            log.warning("hal0.memory.extraction_floor_override_invalid", raw=raw)
     return (EXTRACTION_MIN_CONTEXT_TOKENS, "hal0:extraction-prompt-floor")
 
 

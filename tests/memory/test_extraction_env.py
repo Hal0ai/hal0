@@ -483,3 +483,20 @@ def test_explicit_floor_argument_still_wins_over_the_env(monkeypatch, tmp_path: 
 
     assert window.verdict == "below_floor"
     assert window.floor == 8192
+
+
+def test_invalid_floor_override_warns_once_not_per_write(monkeypatch):
+    """Codex on PR #1917: extraction_floor() runs on the memory-write hot
+    path, so a persistent typo'd override must not emit a journal warning on
+    every auto-retain — once per distinct value is enough."""
+    from hal0.memory import extraction_env as mod
+
+    monkeypatch.setattr(mod, "_floor_override_warned", set())
+    monkeypatch.setenv(EXTRACTION_FLOOR_ENV, "8k")
+    warnings: list[str] = []
+    monkeypatch.setattr(mod.log, "warning", lambda event, **kw: warnings.append(event))
+
+    for _ in range(3):
+        assert extraction_floor() == (EXTRACTION_MIN_CONTEXT_TOKENS, "hal0:extraction-prompt-floor")
+
+    assert warnings == ["hal0.memory.extraction_floor_override_invalid"]
