@@ -26,11 +26,12 @@ applying. Add those subsections to a version's section to surface them; see
 
 The rc.6 validation sweep ran the fleet again — fresh installs, in-place
 updates, a CPU-only box and a Vulkan-only box — and filed eighteen findings.
-rc.7 closes twelve of them outright and retires the lane behind a thirteenth.
+rc.7 closes thirteen of them outright and retires the lane behind a fourteenth.
 The theme this time is silence: a guard that was
 supposed to stop an unservable model from launching had been disarmed on every
 model hal0 installs itself, a memory write that hal0 accepted could be dropped
-without ever telling you, a chat request aimed at an embedding model came back
+without ever telling you, a relayed stream from an upstream provider could hang
+open forever with no error, a chat request aimed at an embedding model came back
 as a bare upstream 500, and a model load could be abandoned seven seconds into a
 three-minute budget with a blank error message.
 
@@ -55,6 +56,21 @@ carries a `gpu-vulkan` slot.
   loud install-time requirement on AMD GPU boxes, and a `gpu-rocm`/`gpu-vulkan`
   slot refuses to load without it instead of serving garbage. Genuinely-Vulkan
   images (Kokoro, whisper.cpp, ComfyUI) are unaffected (#1923).
+- **Streams from an upstream provider can no longer hang forever.** A relayed
+  chat stream that stopped producing tokens — a provider that wedged
+  mid-answer, a connection that went quiet without closing, or one that never
+  even wrote a response status line — used to leave the client waiting
+  indefinitely with no error and no way to tell a slow answer from a dead one.
+  Two bounds now end it: a total wall-clock ceiling
+  (`stream_total_timeout_s`, default `900`) and an idle-between-chunks
+  ceiling (`stream_idle_timeout_s`, default `300`), both configurable and
+  both settable to `0` to restore the old unbounded behaviour;
+  `direct_read_timeout_s` (default `300`) separately bounds the wait for
+  response headers on a streaming request, since the guard's own clocks only
+  start once headers arrive. Tokens already produced still arrive
+  byte-for-byte; on an SSE stream hal0 appends one final chunk explaining
+  which bound tripped, then closes the stream cleanly so the client sees a
+  finished answer rather than a broken pipe (#1893).
 - **Memory writes are no longer silently lost when the store heals itself.** If
   the durable memory backend was unreachable at boot, hal0 fell back to a
   volatile in-process store and healed onto the durable one as soon as it came
@@ -103,6 +119,19 @@ carries a `gpu-vulkan` slot.
   stack-apply defaults, `--hardware` auto-detect, and the hardware
   recommendation ladder all now resolve AMD GPUs to `rocm` or fall back to
   `cpu`, never to the retired lane.
+
+### Added
+
+- `[dispatcher].stream_total_timeout_s` (default `900`, range `0-86400`) and
+  `[dispatcher].stream_idle_timeout_s` (default `300`, range `0-86400`) bound
+  how long a relayed stream may run in total and how long it may go without
+  producing a chunk; either set to `0` disables that bound. While the guard is
+  active, streaming requests disable the HTTP client's own read timeout so the
+  guard owns the body bound; `[dispatcher].direct_read_timeout_s` (default
+  `300`, range `30-600`, unchanged) still bounds the wait for response headers
+  on those requests, since the guard's clocks only start once headers arrive.
+  All three are settable through the settings API and documented with the
+  rest of the dispatcher configuration (#1893).
 
 ### Fixed
 
@@ -189,11 +218,12 @@ carries a `gpu-vulkan` slot.
 
 Preview-channel operators validating the 1.0 line ahead of GA, and fresh
 installs that want the current build. rc.7 supersedes rc.6 for everyone: rc.6
-can silently drop memory writes after a store heal (#1897), can abandon a
-legitimate model load seconds into a three-minute budget (#1898), and will
-happily seed a Vulkan LLM slot that serves garbage while reading healthy
-(#1888). Boxes on the stable channel are not
-offered this tag. rc.7 is **not** a GA candidate — see Known issues.
+can silently drop memory writes after a store heal (#1897), hangs
+indefinitely on a wedged upstream stream (#1893), can abandon a legitimate
+model load seconds into a three-minute budget (#1898), and will happily seed
+a Vulkan LLM slot that serves garbage while reading healthy (#1888). Boxes on
+the stable channel are not offered this tag. rc.7 is **not** a GA candidate —
+see Known issues.
 
 ### Supported upgrades
 
@@ -224,14 +254,7 @@ A/B against the pinned runner (#1925), and the deeper defect — a slot can read
 output-sanity gate yet (#1922). Until that gate exists, validate a new lane by
 reading an actual completion rather than trusting a status surface.
 
-**A wedged upstream stream still hangs the client forever (#1893).** The
-stall-guard fix — a total wall-clock ceiling and an idle-between-chunks ceiling
-on relayed streams — did not land in this tag: its PR (#1918) is still in
-review with changes requested. A relayed chat stream whose provider stops
-producing tokens without closing the connection still leaves the client waiting
-indefinitely with no error.
-
-**Four more rc.6 sweep findings remain open and are not fixed here.** The
+**Four rc.6 sweep findings remain open and are not fixed here.** The
 image-drift detector is permanently inert — `image_status` always reads
 `missing` and `actual_image` always `null` for a running slot, so a slot running
 an image other than the one it declares is never reported (#1889). A
@@ -263,6 +286,13 @@ review-time findings remain deferred (#1873, #1862, #1869).
   rc.7 change alters an on-disk state shape or adds a mandatory configuration
   key; the one manual step is the `gpu-vulkan` slot edit below, and the other
   items are optional or conditional.
+- **Streams are now bounded by default (#1893).** A relayed stream that runs
+  longer than 900 seconds in total, or goes 300 seconds without producing a
+  chunk, is ended with an explanatory final chunk. If you deliberately run
+  very long or very bursty streams through hal0, raise
+  `[dispatcher].stream_total_timeout_s` and
+  `[dispatcher].stream_idle_timeout_s` in `hal0.toml`, or set either to `0`
+  to disable that bound. Restart `hal0-api` for a change to take effect.
 - **A slot TOML with `device = "gpu-vulkan"` must be moved to `gpu-rocm`
   (#1923, #1924).** After the upgrade such a slot refuses to load — that lane
   no longer exists for llama.cpp. Edit the slot
@@ -299,11 +329,16 @@ Release tarballs are immutable and cosign-signed; roll back by re-installing the
 previous tag (`v1.0.0-rc.6`) from its GitHub release. No rc.7 change writes a
 state shape rc.6 cannot read — every fix is re-derived at launch or read time,
 except the quantisation now stamped on pull-registered models, which rc.6
-ignores. A slot TOML moved from `gpu-vulkan` to `gpu-rocm` for the upgrade
+ignores. The two new `[dispatcher]` stream-timeout keys
+(`stream_total_timeout_s`, `stream_idle_timeout_s`) are the only
+configuration addition; if you set them, remove them from `hal0.toml` before
+rolling back to a build that does not know them. A slot TOML moved from
+`gpu-vulkan` to `gpu-rocm` for the upgrade
 loads fine on rc.6 — both device ids resolve to the same runner image there —
 so no slot edit needs undoing. Rolling back reinstates the rc.6 defects listed
-above, including the silently dropped memory writes (#1897) and the seeding of
-Vulkan LLM slots that serve garbage while reading healthy (#1888).
+above, including the silently dropped memory writes (#1897), the unbounded
+stream relay (#1893), and the seeding of Vulkan LLM slots that serve garbage
+while reading healthy (#1888).
 
 ## [1.0.0-rc.6] — 2026-08-12
 
