@@ -3,19 +3,25 @@
 A pathological upstream — the shape the Vulkan garbage-token defect produces
 (``finish_reason`` forever ``null``, tokens forever) — used to be relayed
 verbatim and forever: ``_forward_streaming`` piped ``aiter_raw()`` to
-exhaustion, and httpx applies no read timeout once a stream is open. Every
-downstream client (Hermes ``--cli`` included) therefore sat on an open socket
-with no output and no diagnostic for as long as the operator waited.
+exhaustion, and httpx's per-read timeout is reset by every chunk, so a chatty
+stream never trips it. Every downstream client (Hermes ``--cli`` included)
+therefore sat on an open socket with no output and no diagnostic for as long
+as the operator waited.
 
 These tests pin the guard: a bounded total duration, a bounded inter-chunk
 gap, and — on an OpenAI-compatible SSE stream — a terminal chunk that names
 the cutoff followed by ``data: [DONE]`` so the client's stream loop ends
 cleanly instead of hanging.
+
+The real-socket tests exist because ``httpx.MockTransport`` ignores client
+timeouts entirely: only a live connection can prove that ``httpx.ReadTimeout``
+(NOT a subclass of builtin ``TimeoutError``) never escapes the guard.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator
 
@@ -56,10 +62,14 @@ class _EndlessStream(httpx.AsyncByteStream):
 _GARBAGE_CHUNK = b'data: {"id":"1","choices":[{"delta":{"content":"!"},"finish_reason":null}]}\n\n'
 
 
-def _call(*, streaming: bool = True) -> UpstreamCall:
+def _call(
+    *,
+    streaming: bool = True,
+    target_url: str = "http://upstream.test/chat/completions",
+) -> UpstreamCall:
     return UpstreamCall(
         upstream_name="test-upstream",
-        target_url="http://upstream.test/chat/completions",
+        target_url=target_url,
         headers={"content-type": "application/json"},
         body=b"",
         streaming=streaming,
@@ -191,3 +201,182 @@ async def test_guard_can_be_disabled_with_zero() -> None:
     # 20 chunks are relayed; only the idle bound ends it.
     assert body.count(_GARBAGE_CHUNK) == 20
     assert _stall_payload(body)["x_hal0_stall"]["reason"] == "idle"
+
+
+# ── real-socket tests: httpx.ReadTimeout must never escape the guard ─────────
+#
+# MockTransport ignores client timeouts entirely, so only a live connection
+# can exercise the httpx read-timeout interaction (review of PR #1918,
+# blocking 1).
+
+
+@contextlib.asynccontextmanager
+async def _silent_sse_upstream(prelude: bytes) -> AsyncIterator[int]:
+    """A real TCP server: sends ``prelude`` as an SSE body, then goes silent."""
+
+    handlers: list[asyncio.Task[None]] = []
+
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        handlers.append(asyncio.current_task())  # type: ignore[arg-type]
+        with contextlib.suppress(Exception):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"content-type: text/event-stream\r\n"
+                b"connection: close\r\n"
+                b"\r\n" + prelude
+            )
+            await writer.drain()
+            await asyncio.sleep(3600)  # opened, then silent forever
+
+    server = await asyncio.start_server(_handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield port
+    finally:
+        server.close()
+        # Python ≥3.12 wait_closed() waits for handler coroutines; ours sleeps
+        # forever by design, so cancel it before waiting.
+        for task in handlers:
+            task.cancel()
+        with contextlib.suppress(Exception):
+            await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_idle_bound_above_read_timeout_still_produces_the_diagnostic() -> None:
+    """``stream_idle_timeout_s > direct_read_timeout_s`` must not hand the
+    cutoff to httpx: ``httpx.ReadTimeout`` is not a ``TimeoutError`` subclass
+    and used to escape after headers were sent — a torn stream with no frame."""
+    async with _silent_sse_upstream(_GARBAGE_CHUNK) as port:
+        dispatcher = Dispatcher(
+            direct_read_timeout_s=0.2,
+            stream_total_timeout_s=60.0,
+            stream_idle_timeout_s=0.8,
+        )
+        try:
+            resp = await dispatcher.forward(
+                _call(target_url=f"http://127.0.0.1:{port}/v1/chat/completions")
+            )
+            body = await _drain(resp)
+        finally:
+            await dispatcher.aclose()
+
+    assert _GARBAGE_CHUNK in body  # the partial output was relayed
+    assert _stall_payload(body)["x_hal0_stall"]["reason"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_idle_zero_disables_the_idle_cutoff_and_total_still_bounds() -> None:
+    """``stream_idle_timeout_s = 0`` genuinely disables the idle bound — it
+    must not silently fall through to httpx's read timeout.  The total bound
+    then ends the stream with the diagnostic."""
+    async with _silent_sse_upstream(_GARBAGE_CHUNK) as port:
+        dispatcher = Dispatcher(
+            direct_read_timeout_s=0.2,
+            stream_total_timeout_s=0.7,
+            stream_idle_timeout_s=0.0,
+        )
+        try:
+            resp = await dispatcher.forward(
+                _call(target_url=f"http://127.0.0.1:{port}/v1/chat/completions")
+            )
+            body = await _drain(resp)
+        finally:
+            await dispatcher.aclose()
+
+    payload = _stall_payload(body)
+    assert payload["x_hal0_stall"]["reason"] == "total"
+    # The stream outlived the 0.2s client read timeout — proof httpx's
+    # ReadTimeout neither cut it early nor escaped.
+    assert payload["x_hal0_stall"]["elapsed_s"] >= 0.7
+
+
+class _ReadTimeoutStream(httpx.AsyncByteStream):
+    """An upstream body that raises a transport-level read timeout."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:  # type: ignore[override]
+        yield _GARBAGE_CHUNK
+        raise httpx.ReadTimeout("simulated transport read timeout")
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_transport_read_timeout_becomes_a_read_stall_frame() -> None:
+    """Even with the guard fully disabled, a transport read timeout ends the
+    stream with a diagnostic frame (reason ``read``), never a bare escape."""
+    dispatcher = _dispatcher(_ReadTimeoutStream(), total=0.0, idle=0.0)
+    try:
+        resp = await dispatcher.forward(_call())
+        body = await _drain(resp)
+    finally:
+        await dispatcher.aclose()
+
+    payload = _stall_payload(body)
+    assert payload["x_hal0_stall"]["reason"] == "read"
+    assert body.count(b"data: [DONE]") == 1
+
+
+# ── SSE event-boundary and endpoint-shape tests ──────────────────────────────
+
+
+class _SplitEventThenSilentStream(httpx.AsyncByteStream):
+    """Emits one clean event, then *half* of the next, then goes silent —
+    ``aiter_raw()`` yields transport chunks, not complete SSE events."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:  # type: ignore[override]
+        yield b'data: {"id":"1","choices":[{"delta":{"content":"word"}}]}\n\n'
+        yield b'data: {"id":"2","cho'
+        await asyncio.sleep(3600)
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_stall_frame_after_a_mid_event_stall_parses_standalone() -> None:
+    """A stall midway through a ``data:`` line must not swallow the diagnostic:
+    the injected frames start on a fresh SSE event boundary (PR #1918
+    review, blocking 2)."""
+    dispatcher = _dispatcher(_SplitEventThenSilentStream(), total=60.0, idle=0.2)
+    try:
+        resp = await dispatcher.forward(_call())
+        body = await _drain(resp)
+    finally:
+        await dispatcher.aclose()
+
+    events = body.split(b"\n\n")
+    # The partial upstream line was terminated as its own (discardable) event…
+    assert b'data: {"id":"2","cho' in events
+    # …and the stall frame is a standalone, parseable event of its own.
+    stall_events = [e for e in events if e.startswith(b'data: {"id":"hal0-stall-guard"')]
+    assert len(stall_events) == 1, f"stall frame not standalone: {events!r}"
+    payload = json.loads(stall_events[0][len(b"data: ") :])
+    assert payload["x_hal0_stall"]["reason"] == "idle"
+    assert b"data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_legacy_completions_stall_frame_is_text_shaped() -> None:
+    """``/v1/completions`` streams get a ``text_completion`` chunk with
+    ``choices[].text`` — not a chat-shaped ``delta`` (PR #1918 review,
+    non-blocking 4)."""
+    upstream = _EndlessStream(
+        b'data: {"id":"1","choices":[{"text":"!","finish_reason":null}]}\n\n', gap=30.0
+    )
+    dispatcher = _dispatcher(upstream, total=60.0, idle=0.2)
+    try:
+        resp = await dispatcher.forward(_call(target_url="http://upstream.test/v1/completions"))
+        body = await _drain(resp)
+    finally:
+        await dispatcher.aclose()
+
+    payload = _stall_payload(body)
+    assert payload["object"] == "text_completion"
+    choice = payload["choices"][0]
+    assert "delta" not in choice
+    assert "stall" in choice["text"].lower()
+    assert choice["finish_reason"] == "length"
+    assert payload["x_hal0_stall"]["reason"] == "idle"

@@ -2175,7 +2175,10 @@ class DispatcherConfig(BaseModel):
         description=(
             "Non-streaming upstream read timeout in seconds. "
             "Large consolidation/extraction prompts can exceed 60s on slow slots. "
-            "Streaming paths are unaffected. Range 30-600."
+            "Streaming requests disable this per-request while the stall guard "
+            "is active (the guard owns the bound); with both stall-guard "
+            "bounds set to 0 it applies per body read as the transport "
+            "backstop. Range 30-600."
         ),
     )
     stream_total_timeout_s: float = Field(
@@ -2185,9 +2188,11 @@ class DispatcherConfig(BaseModel):
         description=(
             "Stall guard: max wall-clock duration of a relayed upstream stream "
             "before hal0 cuts it off and emits a terminal diagnostic chunk. "
-            "httpx applies no read timeout once a stream is open, so without "
-            "this a never-terminating upstream hangs the client forever (#1893). "
-            "0 disables the bound."
+            "Without this a chatty never-terminating upstream is relayed "
+            "forever — each chunk resets the transport read timer (#1893). "
+            "Note this is wall clock: a healthy long generation on slow "
+            "hardware that outlives the budget is also cut. 0 disables the "
+            "bound."
         ),
     )
     stream_idle_timeout_s: float = Field(

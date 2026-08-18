@@ -76,11 +76,16 @@ Root model `Hal0Config`, `extra="allow"`.
 | `prefetch_parallel_cap` | int | `4` | `>= 1` |
 
 `stream_total_timeout_s` / `stream_idle_timeout_s` are the streaming **stall
-guard**: no read timeout applies once a stream is open, so a never-terminating
-upstream would otherwise be relayed forever. When either bound trips, hal0
-closes the upstream stream and — on `text/event-stream` responses — appends one
-terminal chunk carrying a human-readable notice, `finish_reason: "length"`, and
-an `x_hal0_stall` object naming the reason, followed by `data: [DONE]`.
+guard**: a chatty never-terminating upstream resets the transport read timer
+with every chunk, so it would otherwise be relayed forever. While the guard is
+active, streaming requests disable the HTTP client's read timeout per-request so
+the guard owns the bound (`direct_read_timeout_s` then applies to non-streaming
+requests only); with both bounds set to `0` the client read timeout stays on as
+a transport backstop. When a bound trips, hal0 closes the upstream stream and —
+on `text/event-stream` responses — appends one terminal chunk carrying a
+human-readable notice, `finish_reason: "length"`, and an `x_hal0_stall` object
+naming the reason, followed by `data: [DONE]`. Note the total bound is wall
+clock: a healthy long generation on slow hardware that outlives it is also cut.
 
 ### `[telemetry]`
 

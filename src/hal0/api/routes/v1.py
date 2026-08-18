@@ -131,10 +131,16 @@ def _instrument_streaming_throughput(
     async def _counting() -> Any:
         nonlocal ttft_pending
         async for chunk in original:
+            # The dispatcher's stall-guard terminal frame (#1893) is synthetic
+            # — it carries a "delta": but no generated token ever crossed the
+            # wire.  It is always yielded as its own chunk, so a per-chunk
+            # marker check keeps it out of throughput and (crucially) TTFT:
+            # for a silent upstream it would otherwise record a bogus
+            # ~idle-timeout-sized TTFT sample.
             if isinstance(chunk, (bytes, bytearray)):
-                tokens = chunk.count(b'"delta":')
+                tokens = 0 if b'"x_hal0_stall"' in chunk else chunk.count(b'"delta":')
             elif isinstance(chunk, str):
-                tokens = chunk.count('"delta":')
+                tokens = 0 if '"x_hal0_stall"' in chunk else chunk.count('"delta":')
             else:
                 tokens = 0
             if tokens > 0:

@@ -132,16 +132,24 @@ _DISPATCHER_MAX_KEEPALIVE: int = 16
 # Non-streaming (direct) read timeout.  300 s was too generous: a stuck
 # upstream could hold a connection slot for 5 min, rapidly exhausting the
 # pool under even modest sustained load.  60 s is still well above the
-# longest expected non-streaming completion time (and streaming paths are
-# unaffected — the read timeout is not applied once the stream is open).
+# longest expected non-streaming completion time.  Streaming requests
+# override this per-request (see ``_forward_streaming``): while the stall
+# guard is active the httpx read timeout is disabled so the guard owns the
+# bound; with the guard fully disabled this read timeout is the per-read
+# transport backstop (httpx applies ``read`` to every body read, streaming
+# included, and raises ``httpx.ReadTimeout`` — NOT the builtin
+# ``TimeoutError``).
 _DIRECT_READ_TIMEOUT_S: float = 60.0
 
-# Streaming stall guard (#1893).  httpx applies NO read timeout once a stream
-# is open, so a never-terminating upstream — the shape the Vulkan garbage-token
-# defect produces, ``finish_reason`` forever null — used to be relayed forever:
-# the client (Hermes ``--cli``, the dashboard, any OpenAI-compat caller) sat on
-# an open socket with no output and no diagnostic for as long as the operator
-# waited.  Two independent bounds close that:
+# Streaming stall guard (#1893).  Before the guard, the only bound on an open
+# stream was httpx's per-read timeout, which tears the socket with a bare
+# ``httpx.ReadTimeout`` — no terminal frame, no ``[DONE]`` — and does nothing
+# at all against a *chatty* never-terminating upstream (the shape the Vulkan
+# garbage-token defect produces, ``finish_reason`` forever null): each read
+# resets the timer, so the stream was relayed forever.  The client (Hermes
+# ``--cli``, the dashboard, any OpenAI-compat caller) sat on an open socket
+# with no output and no diagnostic for as long as the operator waited.  Two
+# independent bounds close that:
 #
 #   * total   — wall clock from first byte of the response to end of stream.
 #   * idle    — the gap between two consecutive upstream chunks.
@@ -462,9 +470,10 @@ class Dispatcher:
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
-            # Short connect/write/pool; non-streaming read capped at
-            # _direct_read_timeout_s (streaming paths ignore the read timeout
-            # once the first byte arrives — see httpx docs on stream=True).
+            # Short connect/write/pool; read capped at _direct_read_timeout_s.
+            # httpx applies ``read`` to *every* body read, streaming included —
+            # streaming requests therefore override it per-request in
+            # _forward_streaming so the stall guard owns the bound (#1893).
             # Connection limits match registry.py to prevent pool starvation
             # under sustained slow-upstream load (#415).
             self._http_client = httpx.AsyncClient(
@@ -1202,12 +1211,27 @@ class Dispatcher:
         # We open the stream eagerly so connect errors surface as
         # UpstreamUnavailable instead of leaking through StreamingResponse
         # as a generator-time exception that confuses the error middleware.
+        # While the stall guard is active, disable the client's per-read
+        # timeout for this request so the guard owns the bound outright.
+        # httpx applies ``read`` to every body read — streaming included —
+        # and raises ``httpx.ReadTimeout``, which is NOT a subclass of the
+        # builtin ``TimeoutError``; left in place it would race the guard
+        # and tear the stream with no terminal frame.  With the guard fully
+        # disabled (both bounds 0) the client's read timeout is kept as the
+        # transport backstop; _guarded_stream still converts its ReadTimeout
+        # into a diagnostic frame rather than a torn stream.
+        timeout: httpx.Timeout | httpx._client.UseClientDefault
+        if self._stream_total_timeout_s or self._stream_idle_timeout_s:
+            timeout = httpx.Timeout(connect=5.0, read=None, write=10.0, pool=5.0)
+        else:
+            timeout = httpx.USE_CLIENT_DEFAULT
         try:
             req = client.build_request(
                 call.method,
                 call.target_url,
                 content=call.body or None,
                 headers=call.headers,
+                timeout=timeout,
             )
             resp = await client.send(req, stream=True)
         except _DEAD_PORT_TRANSPORT_ERRORS as exc:
@@ -1289,6 +1313,17 @@ class Dispatcher:
                 except TimeoutError:
                     stall = self._stall_reason(started)
                     break
+                except httpx.ReadTimeout:
+                    # Transport-level per-read timeout.  Reached only when the
+                    # guard is fully disabled (both bounds 0, so the client's
+                    # read timeout was kept) or when an injected http_client
+                    # carries its own read bound.  ``httpx.ReadTimeout`` is
+                    # NOT a subclass of builtin ``TimeoutError``; without this
+                    # clause it would escape after response headers are on the
+                    # wire — a torn stream with no diagnostic, the exact
+                    # outcome #1893 is about.
+                    stall = "read"
+                    break
                 yield chunk
         finally:
             await resp.aclose()
@@ -1311,6 +1346,7 @@ class Dispatcher:
                 upstream=call.upstream_name,
                 total_timeout_s=self._stream_total_timeout_s,
                 idle_timeout_s=self._stream_idle_timeout_s,
+                endpoint=call.target_url,
             )
 
     def _next_chunk_budget(self, started: float) -> float | None:
@@ -1634,6 +1670,7 @@ _STALL_MESSAGES = {
         "without terminating (stall guard)"
     ),
     "idle": ("upstream stream sent nothing for {idle_timeout_s:g}s (stall guard)"),
+    "read": ("upstream stream read timed out at the transport (stall guard)"),
 }
 
 
@@ -1644,13 +1681,17 @@ def _stall_sse_frames(
     upstream: str,
     total_timeout_s: float,
     idle_timeout_s: float,
+    endpoint: str = "",
 ) -> bytes:
     """Build the terminal SSE frames for a stall-guard cutoff (#1893).
 
-    Shaped as a normal ``chat.completion.chunk`` so every OpenAI-compatible
-    client handles it without special-casing:
+    Shaped as a normal stream chunk for the endpoint being relayed — a
+    ``chat.completion.chunk`` with ``choices[].delta`` for
+    ``/chat/completions``, a ``text_completion`` chunk with ``choices[].text``
+    for the pre-chat ``/completions`` — so every OpenAI-compatible client
+    handles it without special-casing:
 
-    * ``delta.content`` carries a human-readable line — the operator sees
+    * the content field carries a human-readable line — the operator sees
       *something* rather than a silent terminal, which is the whole point.
     * ``finish_reason`` is ``"length"``, the closest standard enum member for
       "cut off at a limit"; clients that branch on the enum terminate cleanly.
@@ -1658,6 +1699,12 @@ def _stall_sse_frames(
       lost to that approximation.
     * ``data: [DONE]`` ends the stream loop for clients that wait for the
       sentinel rather than for the socket to close.
+
+    The frames start with a blank line: ``aiter_raw()`` yields transport
+    chunks, not complete SSE events, so the upstream may have stalled midway
+    through a ``data:`` line.  The leading separator terminates any such
+    partial event so the diagnostic frame always parses on its own; before a
+    complete event a stray blank line is a no-op for every SSE parser.
     """
     detail = _STALL_MESSAGES.get(reason, _STALL_MESSAGES["total"]).format(
         total_timeout_s=total_timeout_s,
@@ -1667,28 +1714,50 @@ def _stall_sse_frames(
         f"\n\n[hal0] stall guard: {detail} after {elapsed_s:g}s "
         f"(upstream {upstream!r}). Output above is partial."
     )
-    chunk = {
-        "id": "hal0-stall-guard",
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": "",
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"role": "assistant", "content": text},
-                "finish_reason": "length",
-            }
-        ],
-        "x_hal0_stall": {
-            "reason": reason,
-            "elapsed_s": elapsed_s,
-            "upstream": upstream,
-            "total_timeout_s": total_timeout_s,
-            "idle_timeout_s": idle_timeout_s,
-            "detail": detail,
-        },
+    x_hal0_stall = {
+        "reason": reason,
+        "elapsed_s": elapsed_s,
+        "upstream": upstream,
+        "total_timeout_s": total_timeout_s,
+        "idle_timeout_s": idle_timeout_s,
+        "detail": detail,
     }
-    return (f"data: {json.dumps(chunk, separators=(',', ':'))}\n\ndata: [DONE]\n\n").encode()
+    # Legacy /v1/completions streams carry ``choices[].text``; everything else
+    # SSE-shaped through this dispatcher is chat-completions-compatible.
+    legacy_completions = "/completions" in endpoint and "/chat/completions" not in endpoint
+    chunk: dict[str, Any]
+    if legacy_completions:
+        chunk = {
+            "id": "hal0-stall-guard",
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": "",
+            "choices": [
+                {
+                    "index": 0,
+                    "text": text,
+                    "logprobs": None,
+                    "finish_reason": "length",
+                }
+            ],
+            "x_hal0_stall": x_hal0_stall,
+        }
+    else:
+        chunk = {
+            "id": "hal0-stall-guard",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": "",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": text},
+                    "finish_reason": "length",
+                }
+            ],
+            "x_hal0_stall": x_hal0_stall,
+        }
+    return (f"\n\ndata: {json.dumps(chunk, separators=(',', ':'))}\n\ndata: [DONE]\n\n").encode()
 
 
 __all__ = [
