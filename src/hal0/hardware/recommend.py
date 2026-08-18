@@ -27,6 +27,7 @@ from typing import Any
 
 from hal0.config.schema import HardwareInfo
 from hal0.model_meta import DEVICE_TO_DEFAULT_PROFILE, map_backend_to_device
+from hal0.providers._gpu import kfd_present
 from hal0.registry.curated import get_curated
 
 # Curated chat models suitable for the primary slot, ordered from
@@ -150,16 +151,24 @@ def _backend_for(hw: HardwareInfo) -> tuple[str, str]:
     gpus = hw.gpus
     primary = gpus[0] if gpus else None
 
-    # AMD UMA (Strix Halo et al.) — Vulkan is the safest default; ROCm
-    # works on the same parts but requires a kernel + userspace combo
-    # the installer can't easily verify. Vulkan ships in Mesa.
+    # AMD — ROCm is the ONLY supported llama.cpp GPU lane (#1888). The
+    # release-pinned ROCmFPX runner is a single HIP+Vulkan build whose Vulkan
+    # backend emits invalid tokens for every model, so recommending Vulkan
+    # here (which this ladder used to do for the whole Strix Halo class) hands
+    # the operator a lane that reads green and serves garbage. ROCm needs the
+    # /dev/kfd compute node; without it there is no valid GPU lane on this
+    # image and CPU is the honest answer.
     if primary and primary.vendor == "amd":
         unified_gb = hw.unified_memory_mb / 1024
-        if unified_gb >= _UMA_UNIFIED_GB_MIN and primary.vram_mb <= 4096:
-            return "vulkan", f"AMD UMA (Strix Halo class — {unified_gb:.0f} GB unified)"
-        if primary.compute_capable:
-            return "rocm", "AMD discrete GPU with rocm-smi reachable"
-        return "vulkan", "AMD GPU; ROCm not detected, Vulkan via Mesa"
+        if primary.compute_capable or kfd_present():
+            if unified_gb >= _UMA_UNIFIED_GB_MIN and primary.vram_mb <= 4096:
+                return "rocm", f"AMD UMA (Strix Halo class — {unified_gb:.0f} GB unified)"
+            return "rocm", "AMD GPU with ROCm compute reachable"
+        return "cpu", (
+            "AMD GPU but no ROCm compute (/dev/kfd absent, rocm-smi unreachable) — "
+            "the runner image's Vulkan lane is unsupported (#1888); forward /dev/kfd "
+            "for GPU inference"
+        )
 
     # NVIDIA — the CUDA path (gpu-cuda device, upstream llama.cpp CUDA
     # image via CDI) is preferred when the nvidia-container-toolkit is

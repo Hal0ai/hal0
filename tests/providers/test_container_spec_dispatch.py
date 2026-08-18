@@ -252,6 +252,9 @@ def test_gpu_slot_unaffected_still_takes_llama_path(tmp_path: Any) -> None:
 
     with (
         patch("hal0.providers.container._resolve_profile", return_value=profile),
+        # #1888 guard: this test exercises UNIT RENDERING, not host GPU
+        # validity — the box running the suite has no /dev/kfd.
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
         patch(
             "hal0.providers.container.resolve_gpu_device_paths",
             return_value=["/dev/kfd", "/dev/dri/renderD128"],

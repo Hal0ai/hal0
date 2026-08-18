@@ -120,30 +120,37 @@ _HARDWARE_TO_DEVICE: dict[str, str] = {
 def _detect_default_hardware() -> str:
     """Pick a sane default hardware backend from /etc/hal0/hardware.json.
 
-    Falls back to ``"vulkan"`` when the probe file is missing or
-    unreadable — that's the broadest match for AMD/NVIDIA/Intel GPUs and
-    preserves the historical hardcoded default for users without a probe.
+    Falls back to ``"rocm"`` when the probe file is missing or unreadable.
+    That used to be ``"vulkan"`` ("broadest match"), but the Vulkan backend of
+    the runner image llama.cpp slots actually launch emits invalid tokens for
+    every model (#1888) — so the broad default was a broadly-wrong one. ROCm
+    is the supported lane on hal0's reference (AMD) platform, and a box that
+    cannot run it gets a loud refusal at slot load instead of garbage output.
     """
     try:
         from hal0.config import paths as _paths
     except ImportError:
-        return "vulkan"
+        return "rocm"
     try:
         raw = _paths.hardware_json().read_text()
     except OSError:
-        return "vulkan"
+        return "rocm"
     try:
         data = jsonlib.loads(raw)
     except ValueError:
-        return "vulkan"
+        return "rocm"
     gpus = data.get("gpus") or []
     if not gpus:
         return "cpu"
     g = gpus[0] if isinstance(gpus[0], dict) else {}
     vendor = (g.get("vendor") or "").lower()
-    if vendor == "amd" and g.get("compute_capable"):
+    # AMD always defaults to ROCm (#1888): llama.cpp slots run the unified
+    # ROCmFPX runner image on every AMD GPU device, and that image's Vulkan
+    # backend emits invalid tokens for every model. A box without /dev/kfd
+    # gets a loud refusal at slot load rather than a silently-garbage lane.
+    if vendor == "amd":
         return "rocm"
-    if g.get("vulkan_capable") or vendor in ("amd", "nvidia", "intel"):
+    if g.get("vulkan_capable") or vendor in ("nvidia", "intel"):
         return "vulkan"
     return "cpu"
 
@@ -442,7 +449,7 @@ def slot_create(
         "--hardware",
         help=(
             "Hardware backend: vulkan | rocm | cpu. "
-            "Default: auto-detected from /etc/hal0/hardware.json (vulkan if no probe). "
+            "Default: auto-detected from /etc/hal0/hardware.json (rocm if no probe). "
             "The `device` field is derived: vulkan→gpu-vulkan, rocm→gpu-rocm, cpu→cpu."
         ),
         case_sensitive=False,

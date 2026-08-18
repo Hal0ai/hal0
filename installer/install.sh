@@ -361,6 +361,10 @@ HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
 #     inside this container (the #1 broken-install shape). HARD STOP with the
 #     dev0 remedy preflight_gpu just printed; the operator fixes the host dev0
 #     line and re-runs.
+#   HAL0_GPU_RC_NO_KFD     → AMD GPU visible but /dev/kfd (the ROCm compute
+#     node) missing. llama.cpp silently falls back to the runner image's Vulkan
+#     backend, which emits invalid tokens for every model while every health
+#     surface reads green (#1888). Same EXPLICIT CPU-only opt-in as below.
 #   HAL0_GPU_RC_NO_DEVICE  → no GPU devices inside an LXC. Allow an EXPLICIT
 #     CPU-only opt-in: HAL0_ALLOW_CPU_ONLY=1, or a y/N confirm on a real TTY;
 #     otherwise stop with the passthrough remedy.
@@ -433,6 +437,23 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         err "GPU passthrough is broken: the render device is visible but its gid does not map to the render group in this container (no group, or the wrong one)."
         err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
         exit 1
+    elif (( gpu_rc == HAL0_GPU_RC_NO_KFD )); then
+        # AMD GPU visible but no ROCm compute node: every GPU LLM slot would
+        # silently run the runner image's Vulkan backend, which emits invalid
+        # tokens for every model while every health surface reads green
+        # (#1888). Same opt-in shape as NO_DEVICE — a CPU-only install is a
+        # legitimate answer; a GPU install on this box is not.
+        if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
+            warn "No /dev/kfd — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1); GPU LLM slots will refuse to start."
+        elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+            warn "Proceeding with a CPU-only install (confirmed at the prompt)."
+        else
+            err "No /dev/kfd inside this container — the ROCm compute node GPU LLM slots require."
+            err "Without it the runner image falls back to Vulkan, which produces invalid output (#1888)."
+            err "Forward /dev/kfd (remedy above), then re-run install.sh."
+            err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
+            exit 1
+        fi
     elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."

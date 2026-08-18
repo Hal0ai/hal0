@@ -140,6 +140,26 @@ class LaneSpec:
     dev_args: tuple[tuple[str, str], ...]
 
 
+#: Lanes that still resolve to a :class:`LaneSpec` (historical records name
+#: them) but are NOT supported and never enter :func:`default_lanes`.
+#:
+#: ``vulkan_radv`` pins ``-dev Vulkan0`` on the unified ROCmFPX runner image,
+#: whose Vulkan backend emits invalid tokens for every model it serves
+#: (#1888) — a throughput number from it measures how fast the box produces
+#: non-language. Retained rather than deleted so old records/suites parse.
+UNSUPPORTED_LANES: frozenset[str] = frozenset({"vulkan_radv"})
+
+
+def lane_is_supported(lane: str) -> bool:
+    """Is ``lane`` a lane hal0 is willing to publish numbers for?
+
+    False for every entry in :data:`UNSUPPORTED_LANES`. Callers that run one
+    anyway (explicit ``--backends vulkan_radv``) must say so loudly rather
+    than let the record read like any other measurement.
+    """
+    return lane not in UNSUPPORTED_LANES
+
+
 def lane_specs() -> dict[str, LaneSpec]:
     """The fixed backend matrix (``config.sh`` ``BACKENDS``), ported verbatim.
 
@@ -158,6 +178,12 @@ def lane_specs() -> dict[str, LaneSpec]:
             env=("GGML_HIP_ENABLE_UNIFIED_MEMORY=1",),
             dev_args=(("-ngl", "99"), ("-dev", "ROCm0")),
         ),
+        # UNSUPPORTED (#1888) — kept only so historical records and an
+        # explicit `--backends vulkan_radv` still resolve to a spec. This
+        # lane pins ``-dev Vulkan0`` on the unified ROCmFPX image, whose
+        # Vulkan backend emits invalid tokens for every model: the numbers it
+        # produces are throughput measurements of garbage. Never in
+        # ``default_lanes``; callers must opt in and are warned.
         "vulkan_radv": LaneSpec(
             lane="vulkan_radv",
             image=DEFAULT_ROCMFPX_IMAGE,
@@ -181,8 +207,15 @@ def default_lanes(tier: str) -> list[str]:
     """The lanes a suite sweeps when it does not say ``--backends`` itself
     (``config.sh`` ``BACKEND_ORDER``): TIER-SCOPED, so a CPU-only box never
     queues the unrunnable GPU lanes, and a GPU box never silently pays for a
-    CPU lane's hours-long 27B/ctx65k cells by default."""
-    return ["cpu"] if tier == TIER_CPU else ["rocm", "vulkan_radv"]
+    CPU lane's hours-long 27B/ctx65k cells by default.
+
+    ``vulkan_radv`` was dropped from the GPU default in the #1888 wave: the
+    ROCmFPX runner's Vulkan backend emits invalid tokens for every model, so
+    publishing throughput for that lane means publishing tok/s for output
+    that is not language. The lane spec is retained (see
+    :data:`UNSUPPORTED_LANES`) so historical records still resolve, but it is
+    opt-in only and stamped unsupported in the record."""
+    return ["cpu"] if tier == TIER_CPU else ["rocm"]
 
 
 def dedupe_flags(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:

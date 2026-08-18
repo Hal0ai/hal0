@@ -28,6 +28,7 @@ from hal0.config.loader import load_hardware_info
 from hal0.errors import Hal0Error
 from hal0.model_fit import evaluate_model_fit
 from hal0.profiles import ProfileCatalog, ResolvedProfile
+from hal0.providers._gpu import host_is_amd_gpu
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.store import ModelRegistry
 from hal0.runners import RUNNER_IMAGES
@@ -416,8 +417,22 @@ def _backend_variants(entry: Any) -> list[str]:
             # Llama.cpp-compatible — fan out to every GPU/CPU backend
             # the host actually advertises so the picker shows what's
             # really runnable here.
+            #
+            # ROCm FIRST, and gpu-vulkan is SUPPRESSED on any AMD host
+            # (#1888): both GPU devices run the same ROCmFPX runner image for
+            # llama.cpp, and that image's Vulkan backend emits invalid tokens
+            # for every model. Offering it in the picker would let an operator
+            # choose a lane whose slot reads ready, serves HTTP 200 and returns
+            # garbage — including on the no-/dev/kfd box, where the catalog
+            # advertises gpu-vulkan but NOT gpu-rocm, so keying the suppression
+            # off the gpu-rocm row alone would leave the trap in place. On an
+            # AMD box with no valid GPU lane the picker offers CPU only.
+            # gpu-vulkan survives for the non-llama runtimes below (kokoro /
+            # whisper.cpp / ComfyUI), which run genuinely-Vulkan images, and
+            # for non-AMD GPUs.
             host_backends = {b["id"] for b in available_backends()}
-            for candidate in ("gpu-vulkan", "gpu-rocm", "cpu"):
+            candidates = ("gpu-rocm", "cpu") if host_is_amd_gpu() else ("gpu-vulkan", "cpu")
+            for candidate in candidates:
                 if candidate in host_backends and candidate not in out:
                     out.append(candidate)
         elif low in {"rocm", "gpu-rocm"}:

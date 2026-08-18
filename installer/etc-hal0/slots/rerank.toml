@@ -3,7 +3,7 @@
 # Clean seed (WS-E, #1107): no `[model].default` pin, so a model-less box
 # boots a GREY tile (no surprise download, no crash-loop). The operator picks
 # a reranker later; filling in `[model].default` activates it (#1369).
-# device/profile are the widest-compatible GPU-Vulkan tile defaults — the
+# device/profile are the supported GPU-ROCm tile defaults — the
 # guided / answer-file setup path derives them from the up-front preflight
 # (hardware.json, #1097).
 #
@@ -12,7 +12,11 @@
 # Existing installs keep their old port (seeds never overwrite).
 name = "rerank"
 type = "reranking"
-device = "gpu-vulkan"
+# #1888: gpu-rocm, not gpu-vulkan. llama.cpp slots launch the unified
+# ROCmFPX runner on both GPU devices; that image's Vulkan backend emits
+# invalid tokens for every model, so gpu-vulkan named a lane no slot
+# could validly run. Requires /dev/kfd (preflight + load-time guard).
+device = "gpu-rocm"
 runtime = "container"
 profile = "reranking"
 port = 8086
