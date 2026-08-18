@@ -1221,7 +1221,8 @@ class Dispatcher:
         # transport backstop; _guarded_stream still converts its ReadTimeout
         # into a diagnostic frame rather than a torn stream.
         timeout: httpx.Timeout | httpx._client.UseClientDefault
-        if self._stream_total_timeout_s or self._stream_idle_timeout_s:
+        guard_active = bool(self._stream_total_timeout_s or self._stream_idle_timeout_s)
+        if guard_active:
             timeout = httpx.Timeout(connect=5.0, read=None, write=10.0, pool=5.0)
         else:
             timeout = httpx.USE_CLIENT_DEFAULT
@@ -1233,7 +1234,25 @@ class Dispatcher:
                 headers=call.headers,
                 timeout=timeout,
             )
-            resp = await client.send(req, stream=True)
+            # client.send() blocks until response *headers* are on the wire,
+            # even with stream=True — and it's bound by the same ``read``
+            # timeout we just set.  With the guard active that's ``None``
+            # (the guard's own clocks in _guarded_stream own the body bound),
+            # which also disables the bound on *this* header wait.  Those
+            # clocks only start after send() returns, so an upstream that
+            # accepts the TCP connection and then wedges before writing a
+            # status line would hang forward() forever (#1918 review,
+            # blocking).  Bound the header wait explicitly, matching the
+            # pre-guard direct-request timeout — asyncio.TimeoutError is a
+            # builtin TimeoutError, itself an OSError subclass, so it falls
+            # into the same UpstreamUnavailable handling as a transport
+            # error below.
+            if guard_active:
+                resp = await asyncio.wait_for(
+                    client.send(req, stream=True), timeout=self._direct_read_timeout_s
+                )
+            else:
+                resp = await client.send(req, stream=True)
         except _DEAD_PORT_TRANSPORT_ERRORS as exc:
             self._guard_dead_port_image_mode(call)
             log.warning(

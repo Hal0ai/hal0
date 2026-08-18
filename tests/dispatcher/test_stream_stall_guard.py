@@ -28,7 +28,7 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 
-from hal0.dispatcher.router import Dispatcher, UpstreamCall
+from hal0.dispatcher.router import Dispatcher, UpstreamCall, UpstreamUnavailable
 
 
 class _EndlessStream(httpx.AsyncByteStream):
@@ -317,6 +317,60 @@ async def test_transport_read_timeout_becomes_a_read_stall_frame() -> None:
     payload = _stall_payload(body)
     assert payload["x_hal0_stall"]["reason"] == "read"
     assert body.count(b"data: [DONE]") == 1
+
+
+@contextlib.asynccontextmanager
+async def _header_wedge_upstream() -> AsyncIterator[int]:
+    """Real TCP server: accepts the connection, reads the request, then never
+    writes anything back — no status line, no headers, ever.  Models an
+    upstream that accepted the socket and then wedged before producing a
+    response (PR #1918 review, blocking)."""
+
+    handlers: list[asyncio.Task[None]] = []
+
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        handlers.append(asyncio.current_task())  # type: ignore[arg-type]
+        with contextlib.suppress(Exception):
+            await reader.readuntil(b"\r\n\r\n")
+            await asyncio.sleep(3600)  # accepted, then never responds
+
+    server = await asyncio.start_server(_handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield port
+    finally:
+        server.close()
+        for task in handlers:
+            task.cancel()
+        with contextlib.suppress(Exception):
+            await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_header_wedge_with_guard_active_terminates_bounded() -> None:
+    """``_forward_streaming`` sets ``read=None`` for the whole request while
+    the guard is active, so the guard's clocks fully own the body bound —
+    but ``client.send(..., stream=True)`` blocks on response *headers*, and
+    the guard's clocks (``_guarded_stream``) only start after ``send()``
+    returns.  An upstream that accepts the TCP connection and then wedges
+    before writing a status line must not hang ``forward()`` forever; the
+    header wait needs its own bound (PR #1918 review, blocking)."""
+    async with _header_wedge_upstream() as port:
+        dispatcher = Dispatcher(
+            direct_read_timeout_s=0.2,
+            stream_total_timeout_s=60.0,
+            stream_idle_timeout_s=60.0,
+        )
+        try:
+            with pytest.raises(UpstreamUnavailable):
+                await asyncio.wait_for(
+                    dispatcher.forward(
+                        _call(target_url=f"http://127.0.0.1:{port}/v1/chat/completions")
+                    ),
+                    timeout=5.0,
+                )
+        finally:
+            await dispatcher.aclose()
 
 
 # ── SSE event-boundary and endpoint-shape tests ──────────────────────────────
