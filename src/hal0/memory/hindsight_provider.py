@@ -29,6 +29,7 @@ Maps hal0's engine-neutral MemoryProvider contract onto the shared
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
@@ -152,6 +153,32 @@ class Hal0Reranker:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _decode_metadata(md: dict[str, Any]) -> dict[str, Any]:
+    """Re-inflate nested metadata values the write path flattened (#1905).
+
+    ``retain`` stores nested dict/list values as JSON strings (Hindsight's
+    metadata is flat string→string). Callers of the engine-neutral surface
+    handed ``add`` a real dict, so read adapters must hand the same shape
+    back — otherwise every REST/MCP consumer gets ``metadata.x`` as a
+    string and nesting doesn't round-trip (only decoded case-by-case in
+    CLI commands). Only values that LOOK like JSON containers are decoded;
+    scalars were always stringified on this engine and stay strings, so
+    existing consumers see no change.
+    """
+    out: dict[str, Any] = {}
+    for k, v in md.items():
+        if isinstance(v, str) and v[:1] in "{[":
+            try:
+                parsed = json.loads(v)
+            except json.JSONDecodeError:
+                out[k] = v
+                continue
+            out[k] = parsed if isinstance(parsed, (dict, list)) else v
+            continue
+        out[k] = v
+    return out
 
 
 # ── time-window filtering + list cursors (#1471) ─────────────────────────────
@@ -953,7 +980,17 @@ class HindsightProvider(MemoryProvider):
                 content=text,
                 document_id=resolved_id,
                 context=context,
-                metadata={k: str(v) for k, v in meta.items()},
+                # #1905: nested structures must round-trip. ``str(v)`` on a
+                # dict/list produced a Python repr (single quotes) that no
+                # JSON reader on the way back out could decode — the peer
+                # registry's ``hal0_state``/``endpoint``/``roles`` cards on
+                # upgraded boxes were written exactly that way. ``json.dumps``
+                # keeps the value machine-readable; scalars stay ``str()``
+                # to preserve the wire shape existing readers expect.
+                metadata={
+                    k: (json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+                    for k, v in meta.items()
+                },
                 tags=out_tags,
                 timestamp=timestamp,
                 **extra,
@@ -1929,7 +1966,7 @@ class HindsightProvider(MemoryProvider):
             "dataset": bank.replace("__", ":"),
             "tags": list(fact.get("tags") or []),
             "source": (fact.get("metadata") or {}).get("source"),
-            "metadata": dict(fact.get("metadata") or {}),
+            "metadata": _decode_metadata(fact.get("metadata") or {}),
             "score": float(final_score) if isinstance(final_score, (int, float)) else None,
             "type": fact.get("type"),
             "entities": list(fact.get("entities") or []) or None,

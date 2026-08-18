@@ -55,6 +55,7 @@ from hal0.slots import metrics_collect as _metrics_collect
 from hal0.slots import port_alloc as _port_alloc
 from hal0.slots import voices as _voices
 from hal0.slots.manager import Slot, SlotManager
+from hal0.slots.state import SlotNotFound
 
 log = structlog.get_logger(__name__)
 
@@ -1473,6 +1474,32 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
 # the ``StreamingResponse``.
 
 
+def _find_synthetic_entry(request: Request, name: str) -> dict[str, Any] | None:
+    """Return the synthetic upstream-backed entry for ``name``, if any."""
+    for entry in _synthesize_slots_from_upstreams(request):
+        if entry["name"] == name:
+            return entry
+    return None
+
+
+def _synthetic_logs_hint(entry: dict[str, Any]) -> str:
+    """Explain why a synthetic entry has no journal, worded per entry.
+
+    #1905 asked about the ``hal0`` composite, but remote upstreams and
+    (in stale-registry states) ordinary container-slot registrations
+    reach this path too — calling those a "composite" would be wrong, so
+    mirror the classification ``slot_view._synthetic_reason`` makes: the
+    composite hint needs BOTH the reserved name and ``kind="slot"``.
+    """
+    from hal0.upstreams.registry import RESERVED_UPSTREAM_NAME
+
+    if entry.get("kind") == "slot":
+        if entry.get("name") == RESERVED_UPSTREAM_NAME:
+            return "synthetic composite slot has no journal of its own"
+        return "upstream registration without a configured slot; no journal to read"
+    return "backed by a remote upstream; no local journal to read"
+
+
 @router.get("/{name}/logs")
 async def slot_logs(
     name: str, request: Request, lines: int = 200, quiet: bool = True
@@ -1485,11 +1512,33 @@ async def slot_logs(
     never started, returns an empty string with a hint. The UI tolerates
     that (renders "No logs available") rather than treating it as an error.
     The journalctl tail lives in :func:`hal0.slots.logs.read_tail`.
+
+    #1905: a synthetic upstream entry (e.g. the ``hal0`` composite) isn't
+    a real slot and has no ``hal0-slot@{name}.service`` journal of its
+    own, but it also isn't "not found" — it's a legitimate, listable
+    entry. Distinguish the two: a genuinely unknown name still 404s with
+    the typed ``slot.not_found`` envelope, but a synthetic entry gets a
+    200 with an explanatory hint instead, mirroring how :func:`get_slot`
+    already falls through for its detail view.
     """
     sm = _get_slot_manager(request)
     # Validate slot exists so unknown names get the typed slot.not_found
-    # envelope instead of an empty 200.
-    await sm.status(name)
+    # envelope instead of an empty 200. Catch ONLY SlotNotFound: every
+    # loaded container slot registers a same-name ``kind="slot"`` upstream
+    # (SlotManager._register_container_upstream), so a broad except here
+    # would convert a real slot's operational failure (e.g. SlotConfigError
+    # from a corrupt state.json) into a fake synthetic 200.
+    try:
+        await sm.status(name)
+    except SlotNotFound:
+        entry = _find_synthetic_entry(request, name)
+        if entry is not None:
+            return {
+                "name": name,
+                "logs": "",
+                "hint": _synthetic_logs_hint(entry),
+            }
+        raise
 
     text, hint = await _logs.read_tail(f"hal0-slot@{name}.service", lines, quiet)
     if hint is not None:
@@ -1524,7 +1573,42 @@ async def slot_logs_stream(
     import shutil
 
     sm = _get_slot_manager(request)
-    await sm.status(name)  # 404 fast if unknown
+    try:
+        await sm.status(name)  # 404 fast if unknown
+    except SlotNotFound:
+        # #1905: same synthetic fall-through as the one-shot ``/logs`` route
+        # above — the dashboard log viewer and ``hal0 slot logs --follow``
+        # both drive THIS route, so fixing only the one-shot twin left the
+        # user-facing flow 404ing (EventSource.onerror → endless reconnect
+        # loop). Emit a terminal 'degraded' frame with the hint instead; the
+        # client already listens for 'degraded' (see B13 below). Only
+        # SlotNotFound falls through — other failures on a real slot must
+        # keep surfacing as errors.
+        entry = _find_synthetic_entry(request, name)
+        if entry is None:
+            raise
+
+        async def synthetic_source() -> Any:
+            yield (
+                "event: degraded\ndata: "
+                + json.dumps({"message": _synthetic_logs_hint(entry)})
+                + "\n\n"
+            )
+            # Hold the stream open after the degraded frame: the client's
+            # degraded listener only records the message, while its onerror
+            # closes and RECONNECTS (ui/src/api/hooks/useLogs.ts) — so a
+            # stream that ends here would put the viewer in a silent retry
+            # loop against this endpoint forever. Keepalive cadence matches
+            # the journal streams (#1472) so proxy idle timeouts are covered.
+            while True:
+                await asyncio.sleep(15)
+                yield ": keepalive\n\n"
+
+        return StreamingResponse(
+            synthetic_source(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     async def event_source() -> Any:
         if shutil.which("journalctl") is None:
