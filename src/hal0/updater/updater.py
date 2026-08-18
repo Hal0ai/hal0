@@ -2961,6 +2961,11 @@ def relabel_stale_vulkan_slots(
     from hal0.config.paths import slots_config_dir
     from hal0.providers._gpu import host_is_amd_gpu as _probe_host_is_amd_gpu
     from hal0.providers._gpu import kfd_present as _probe_kfd_present
+
+    # Private import, deliberate: this must be the EXACT discriminator
+    # load_sync uses to pick a provider, not a re-implementation of it — do
+    # not "clean this up" into a public wrapper or a local re-derivation,
+    # that would risk drifting from the real dispatch logic it mirrors.
     from hal0.providers.container import _spec_provider_for
 
     is_amd = _probe_host_is_amd_gpu() if amd_host is None else amd_host

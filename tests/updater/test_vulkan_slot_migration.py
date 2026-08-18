@@ -188,6 +188,63 @@ def test_llama_slot_still_relabels_alongside_untouched_non_llama_slot(
     assert _device_of("voice") == "gpu-vulkan"
 
 
+def test_qwen3tts_profile_slot_survives_untouched(tmp_hal0_home: str) -> None:
+    """A slot dispatched to a non-llama runtime via its PROFILE rather than
+    its device/type (qwen3-tts resolves to the qwen3tts runtime_family
+    ahead of the generic type="tts" -> Kokoro fallback in
+    _spec_provider_for) must be left alone too, on both kfd axes. Reviewer
+    manually verified this path on the earlier fix; this pins it as a
+    regression guard."""
+    body = (
+        'name = "voice2"\ntype = "llm"\nprofile = "qwen3-tts"\ndevice = "gpu-vulkan"\nport = 8091\n'
+    )
+    _write_slot("voice2", body)
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert _device_of("voice2") == "gpu-vulkan"
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert _device_of("voice2") == "gpu-vulkan"
+
+
+def test_runtime_resolution_error_leaves_slot_untouched_and_logs(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """If _spec_provider_for itself raises (an unrecognized runtime_family —
+    see UnknownRuntimeFamilyError in container.py), the migration must not
+    optimistically fall through to "must be llama.cpp, relabel it": the
+    slot is left byte-identical, the pass returns cleanly (no crash), and
+    the failure is visible in the log rather than swallowed. This is the
+    one branch none of the other tests exercise — a mutation that turned
+    the except's `continue` into a relabel would pass every other test in
+    this file."""
+    import hal0.updater.updater as updater_mod
+
+    body = 'name = "agent"\ntype = "llm"\ndevice = "gpu-vulkan"\nport = 8081\n'
+    _write_slot("agent", body)
+    toml_path = slots_config_dir() / "agent.toml"
+    before = toml_path.read_bytes()
+
+    def _boom(slot_cfg: dict) -> None:
+        raise RuntimeError("no provider registered for runtime family 'bogus'")
+
+    monkeypatch.setattr("hal0.providers.container._spec_provider_for", _boom)
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(updater_mod.log, "warning", lambda event, **kw: calls.append((event, kw)))
+
+    result = relabel_stale_vulkan_slots(amd_host=True, kfd_present=True)
+
+    assert result == 0
+    assert toml_path.read_bytes() == before  # byte-identical — no write happened
+    assert _device_of("agent") == "gpu-vulkan"  # unchanged
+
+    unresolved = [c for c in calls if c[0] == "updater.vulkan_migration_slot_runtime_unresolved"]
+    assert len(unresolved) == 1
+    _event, fields = unresolved[0]
+    assert fields["slot"] == "agent"
+    assert "bogus" in fields["error"]
+
+
 # ── kfd present → gpu-rocm (AMD host) ────────────────────────────────────── #
 
 
