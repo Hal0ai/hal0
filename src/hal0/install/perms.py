@@ -110,6 +110,15 @@ def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
     a permissions nice-to-have must never break a pull or a slot load.
     """
     path = Path(path)
+    # CodeQL note: the `exists()` probe and the `mkdir` below still carry the
+    # caller's taint (py/path-injection, the rule this repo already carries 71
+    # standing alerts for). They are byte-for-byte the operation each caller
+    # performed on the IDENTICAL path before this helper existed — no new
+    # capability, just relocated. The one genuinely new sink, `chmod`, is
+    # contained by the root check below. Containing the `mkdir` too was
+    # rejected: an operator's model store may sit outside every enumerated
+    # mount, and hard-failing a multi-GB pull to satisfy a static-analysis
+    # rule the tree already tolerates is a worse trade.
     # Deepest-first list of the components that do NOT exist yet.
     missing: list[Path] = []
     probe = path
