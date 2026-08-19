@@ -122,34 +122,55 @@ def test_agentenv_wrapper_and_table_agree_on_the_secrets_mode() -> None:
 
 
 @pytest.mark.parametrize("umask", [0o022, 0o077, 0o002])
-def test_ensure_shared_dir_beats_the_process_umask(tmp_path: Path, umask: int) -> None:
+def test_ensure_shared_dir_beats_the_process_umask(tmp_hal0_home: str, umask: int) -> None:
     """``mkdir`` masks its mode; the helper must not."""
+    var_lib = paths.var_lib()
+    var_lib.mkdir(parents=True, exist_ok=True)
     old = os.umask(umask)
     try:
-        made = perms.ensure_shared_dir(tmp_path / "models" / "org" / "repo")
+        made = perms.ensure_shared_dir(var_lib / "models" / "org" / "repo")
     finally:
         os.umask(old)
     assert made.is_dir()
-    for part in (tmp_path / "models", tmp_path / "models" / "org", made):
+    for part in (var_lib / "models", var_lib / "models" / "org", made):
         assert os.stat(part).st_mode & 0o7777 == perms.SHARED_DIR_MODE, part
 
 
-def test_ensure_shared_dir_never_widens_an_existing_dir(tmp_path: Path) -> None:
+def test_ensure_shared_dir_never_widens_an_existing_dir(tmp_hal0_home: str) -> None:
     """Only components this call CREATES are chmod'ed.
 
     An existing dir may be declared at a deliberately tighter mode elsewhere in
     the table (``secrets/`` 0700, ``agents/`` 0711); a lazy mkdir passing
     through it must never widen it.
     """
-    tight = tmp_path / "secrets"
-    tight.mkdir(mode=0o700)
+    tight = paths.var_lib() / "secrets"
+    tight.mkdir(parents=True, exist_ok=True)
     os.chmod(tight, 0o700)
     perms.ensure_shared_dir(tight / "agents")
     assert os.stat(tight).st_mode & 0o7777 == 0o700
 
 
+def test_ensure_shared_dir_never_chmods_outside_hal0_roots(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    """The chmod sink is contained; the mkdir behaviour is not.
+
+    Callers derive these paths from request-supplied ids. A path that escapes
+    every hal0 root is still created — the caller may legitimately be pointed
+    at an operator's own tree — but it is never re-moded.
+    """
+    outside = tmp_path / "elsewhere" / "not-hal0"
+    old = os.umask(0o022)
+    try:
+        made = perms.ensure_shared_dir(outside)
+    finally:
+        os.umask(old)
+    assert made.is_dir()
+    assert os.stat(made).st_mode & 0o7777 == 0o755  # umask default, untouched
+
+
 def test_ensure_shared_dir_is_fail_soft_on_chmod_refusal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A model store on NFS may refuse chmod — that must never break a pull."""
 
@@ -157,7 +178,7 @@ def test_ensure_shared_dir_is_fail_soft_on_chmod_refusal(
         raise PermissionError("read-only export")
 
     monkeypatch.setattr(perms.os, "chmod", _boom)
-    made = perms.ensure_shared_dir(tmp_path / "nfs" / "models")
+    made = perms.ensure_shared_dir(paths.var_lib() / "nfs" / "models")
     assert made.is_dir()
 
 

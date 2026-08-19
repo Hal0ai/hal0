@@ -95,6 +95,16 @@ def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
     through a deliberately tighter parent (``secrets/`` 0700, ``agents/`` 0711)
     can never widen it.
 
+    The ``chmod`` is CONTAINED: it only ever touches a path that resolves
+    inside one of hal0's own roots (:func:`_shared_dir_roots`). Callers derive
+    these paths from request-supplied ids (``persist_pull_job`` ->
+    ``pull_job_file(job.model_id)``, a slot's state dir, ...), and while each
+    caller sanitises its own component, a mode-changing sink must not depend on
+    that being true forever. Same shape as
+    :func:`hal0.config.store.assert_under_store` with ``severity="warn"``: an
+    out-of-tree path is still created (behaviour preserved for callers pointed
+    at an operator's own store) but never re-moded.
+
     Fail-soft on ``chmod``, like :func:`hal0.config.store.finalize_perms`: an
     operator's model store may live on an NFS export that refuses the call, and
     a permissions nice-to-have must never break a pull or a slot load.
@@ -111,12 +121,48 @@ def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
 
     path.mkdir(parents=True, exist_ok=True)
 
+    roots = _shared_dir_roots()
     for created in reversed(missing):
+        resolved = created.resolve()
+        if not any(_is_within(resolved, root) for root in roots):
+            log.warning(
+                "perms.ensure_shared_dir_outside_hal0_roots path=%s (created, not chmod'ed)",
+                resolved,
+            )
+            continue
         try:
-            os.chmod(created, mode)
+            os.chmod(resolved, mode)
         except OSError as exc:  # pragma: no cover - exercised via monkeypatch
-            log.debug("perms.ensure_shared_dir_chmod_failed path=%s error=%s", created, exc)
+            log.debug("perms.ensure_shared_dir_chmod_failed path=%s error=%s", resolved, exc)
     return path
+
+
+def _is_within(candidate: Path, root: Path) -> bool:
+    """True when ``candidate`` (already resolved) sits at or under ``root``."""
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _shared_dir_roots() -> tuple[Path, ...]:
+    """Resolved roots :func:`ensure_shared_dir` is allowed to ``chmod`` inside.
+
+    hal0's own state + config trees, plus whatever model-store mounts the
+    operator configured (a pull stages and installs weights there). Root
+    discovery is best-effort: a config-load failure must degrade to the two
+    built-in trees, never raise into a pull.
+    """
+    roots: list[Path] = []
+    for probe in (paths.var_lib, paths.etc, paths.var_log):
+        with contextlib.suppress(OSError, ValueError):
+            roots.append(probe().resolve())
+    try:
+        roots.extend(Path(m).resolve() for m in paths.model_mount_roots())
+    except Exception as exc:  # config load is untrusted here; never raise into a pull
+        log.debug("perms.shared_dir_roots_model_mounts_failed error=%s", exc)
+    return tuple(roots)
 
 
 # ── the declarative table ─────────────────────────────────────────────────────
