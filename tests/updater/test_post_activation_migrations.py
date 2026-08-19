@@ -29,6 +29,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "config_migrations": [],
         "seed_profiles": [],
         "mtp": [],
+        "vulkan_migration": [],
         "image_retag": [],
         "extra_args": [],
     }
@@ -45,6 +46,10 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls["mtp"].append(job_id)
         return 0
 
+    def _vulkan_migration(*, job_id=None, kfd_present=None, amd_host=None):
+        calls["vulkan_migration"].append(job_id)
+        return 0
+
     def _image_retag(*, job_id=None):
         calls["image_retag"].append(job_id)
         return 0
@@ -56,17 +61,19 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
     monkeypatch.setattr("hal0.updater.updater.ensure_seed_profiles", _seed_profiles)
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
+    monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
     monkeypatch.setattr("hal0.updater.updater.retag_stale_slot_images", _image_retag)
     monkeypatch.setattr("hal0.updater.updater.sanitize_model_extra_args", _extra_args)
     return calls
 
 
-def test_runs_all_five_passes(_stub_every_pass: dict[str, list[Any]]) -> None:
+def test_runs_all_six_passes(_stub_every_pass: dict[str, list[Any]]) -> None:
     result = run_post_activation_migrations(job_id="j1")
     assert result == (1, 2)
     assert _stub_every_pass["config_migrations"] == [(1, "j1")]
     assert _stub_every_pass["seed_profiles"] == ["j1"]
     assert _stub_every_pass["mtp"] == ["j1"]
+    assert _stub_every_pass["vulkan_migration"] == ["j1"]
     assert _stub_every_pass["image_retag"] == ["j1"]
     assert _stub_every_pass["extra_args"] == ["j1"]
 
@@ -92,6 +99,7 @@ def test_a_failing_non_fatal_pass_does_not_block_the_others(
 
     assert result == (1, 2)  # schema migration still reported
     assert _stub_every_pass["seed_profiles"] == ["j2"]
+    assert _stub_every_pass["vulkan_migration"] == ["j2"]  # ran despite mtp's failure
     assert _stub_every_pass["image_retag"] == ["j2"]  # ran despite mtp's failure
     assert _stub_every_pass["extra_args"] == ["j2"]
 
@@ -99,7 +107,7 @@ def test_a_failing_non_fatal_pass_does_not_block_the_others(
 def test_schema_migration_failure_propagates(
     monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
 ) -> None:
-    """Unlike the four data-cleanup passes, a schema-migration failure is
+    """Unlike the five data-cleanup passes, a schema-migration failure is
     NOT swallowed — the caller (commit()'s install_dir cleanup, or
     install.sh's `set -euo pipefail`) must see it and abort the
     activation rather than proceed on an unmigrated schema."""
@@ -112,8 +120,9 @@ def test_schema_migration_failure_propagates(
     with pytest.raises(Hal0Error):
         run_post_activation_migrations(job_id="j3")
 
-    # None of the four data-cleanup passes ran — the schema must land first.
+    # None of the five data-cleanup passes ran — the schema must land first.
     assert _stub_every_pass["seed_profiles"] == []
     assert _stub_every_pass["mtp"] == []
+    assert _stub_every_pass["vulkan_migration"] == []
     assert _stub_every_pass["image_retag"] == []
     assert _stub_every_pass["extra_args"] == []

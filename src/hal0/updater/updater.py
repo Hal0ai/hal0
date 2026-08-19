@@ -1652,7 +1652,7 @@ def run_post_activation_migrations(
     the running code and the on-disk schema have diverged, which the
     caller must treat as fatal (``commit()`` nukes the staged tree and
     aborts; install.sh's ``set -euo pipefail`` aborts the script on a
-    non-zero exit). The four data-cleanup passes after it are each
+    non-zero exit). The five data-cleanup passes after it are each
     independently best-effort, exactly as before: one pass's exception is
     logged and never blocks the others or the caller's activation.
 
@@ -1679,6 +1679,13 @@ def run_post_activation_migrations(
         log.warning("updater.mtp_migration_failed", job_id=job_id, error=str(exc))
         # Non-fatal: the affected slot simply fails to load until the
         # operator flips MTP to Auto/Off in the drawer.
+
+    try:
+        relabel_stale_vulkan_slots(job_id=job_id)
+    except Exception as exc:
+        log.warning("updater.vulkan_migration_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: an affected slot keeps refusing to load (the #1923
+        # preflight guard) until the operator manually relabels its device.
 
     try:
         retag_stale_slot_images(job_id=job_id)
@@ -2852,6 +2859,191 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
             except Exception as exc:
                 log.warning("updater.image_retag_profiles_write_failed", error=str(exc))
     return retagged
+
+
+def relabel_stale_vulkan_slots(
+    *,
+    job_id: str | None = None,
+    kfd_present: bool | None = None,
+    amd_host: bool | None = None,
+) -> int:
+    """Relabel retired ``device = "gpu-vulkan"`` slot TOMLs (upgrade migration).
+
+    #1888/PR #1923 retired the Vulkan LLM lane and switched ``load_sync`` to
+    hard-refuse loading a GPU slot when the ROCm compute node (``/dev/kfd``)
+    is not visible (:func:`hal0.providers._gpu.require_kfd_for_gpu_slot`). PR
+    #1923 relabeled the SEED slot TOMLs the installer ships
+    (``installer/etc-hal0/slots/*.toml``) from ``gpu-vulkan`` to ``gpu-rocm``,
+    but deliberately did NOT touch slot TOMLs already materialised on an
+    existing install — see #1924. This is that follow-up: every EXISTING
+    on-disk slot TOML carrying the retired label is relabeled here, so an
+    updated install doesn't refuse to load slots it was serving fine
+    yesterday.
+
+    AMD-only, exactly matching :func:`~hal0.providers._gpu.require_kfd_for_gpu_slot`'s
+    own scope for a ``gpu-vulkan`` device: that guard only fires when the
+    amdgpu kernel driver is bound on THIS host
+    (:func:`hal0.providers._gpu.host_is_amd_gpu`). An Intel iGPU or an NVIDIA
+    card without CDI has no ``/dev/kfd`` by design, is never gated, and keeps
+    working post-#1923 exactly as it did before — relabeling its
+    ``gpu-vulkan`` slots here (which an unscoped ``kfd_present()`` check
+    would do, since none of those hosts has ``/dev/kfd`` either) would
+    silently downgrade a perfectly working GPU slot to CPU for no reason. On
+    a non-AMD host this function is therefore a full no-op: nothing is
+    inspected or written.
+
+    On an AMD host, for every slot TOML with a literal ``device =
+    "gpu-vulkan"`` (top-level or nested under ``[slot]``, the same two-shape
+    handling :func:`retag_stale_slot_images` and
+    :func:`clear_stale_mtp_overrides` use) that is ALSO llama.cpp-backed
+    (see runtime scope below), relabel ``device`` to:
+
+    * ``"gpu-rocm"`` — when :func:`hal0.providers._gpu.kfd_present` reports
+      the ROCm compute node present and usable. This is the same target PR
+      #1923 gave the seed TOMLs, and the slot keeps running on the GPU.
+    * ``"cpu"`` — when it is not. This is a genuine, operator-visible
+      behavior change (the slot drops off the GPU entirely and gets much
+      slower) — the #1867 rails require every mutation to be logged
+      explicitly, so this is logged as its own WARNING-level breadcrumb,
+      never folded silently into the routine "migrated" line.
+
+    Runtime scope — llama.cpp-backed slots ONLY: ``device = "gpu-vulkan"``
+    is not exclusively an llama.cpp label. ``capabilities/catalog.py``
+    deliberately keeps it for the non-llama runtimes (Kokoro TTS,
+    whisper.cpp/Moonshine STT, ComfyUI), which run genuinely-Vulkan images —
+    #1923's Vulkan-lane retirement and its ``require_kfd_for_gpu_slot`` guard
+    are about llama.cpp's unified ROCmFPX runner specifically, not those.
+    Relabeling a non-llama slot here would be actively wrong on both kfd
+    axes: ``gpu-rocm`` is a label its image can't honor (and
+    ``gpu_visibility_env`` would silently swap
+    ``GGML_VK_VISIBLE_DEVICES`` for ``HIP_VISIBLE_DEVICES``, dropping any
+    ``gpu_index`` pin), and ``cpu`` would strip ``/dev/dri`` from a slot that
+    was working fine. So every candidate slot is resolved through
+    :func:`hal0.providers.container._spec_provider_for` — the same
+    authoritative runtime-family discriminator ``load_sync`` itself uses —
+    and skipped ENTIRELY (no relabel, no warning, no log line, on either kfd
+    axis) unless it resolves to ``None`` (the default llama-server GPU
+    provider). The kfd-absent non-llama case (``require_kfd_for_gpu_slot``
+    itself over-firing for non-llama runtimes) is a separate, already-filed
+    bug (#1941) and is deliberately NOT addressed by this migration.
+
+    Only the ``device`` key is ever changed in VALUE — narrow scope per the
+    #1867 rails (no other field or slot is touched, and a slot whose
+    ``device`` is not literally ``"gpu-vulkan"``, or that isn't
+    llama.cpp-backed, is skipped entirely). Note that "narrow scope" is
+    about which *keys* get new values, not byte-for-byte file preservation:
+    like every other pass in this module, the write goes through
+    :func:`~hal0.config.loader.write_toml_atomic`, which reserializes the
+    whole parsed document via ``tomli_w`` — so any comments in a touched
+    slot's TOML are dropped on that rewrite, exactly as they are for
+    :func:`retag_stale_slot_images` and :func:`clear_stale_mtp_overrides`.
+    Idempotent: once a slot's ``device`` reads ``"gpu-rocm"`` or ``"cpu"`` it
+    no longer matches the ``"gpu-vulkan"`` guard, so a second run touches
+    nothing and logs nothing
+    new.
+
+    Args:
+        job_id: Optional breadcrumb for structured-log tracing.
+        kfd_present: Override for
+            :func:`hal0.providers._gpu.kfd_present` — test seam. ``None``
+            (the default) probes the real host's ``/dev/kfd``.
+        amd_host: Override for :func:`hal0.providers._gpu.host_is_amd_gpu` —
+            test seam, same shape as
+            :func:`~hal0.providers._gpu.require_kfd_for_gpu_slot`'s own
+            parameter. ``None`` (the default) probes the real host.
+
+    Returns:
+        Number of slot TOMLs relabeled.
+    """
+    import tomllib
+
+    from hal0.config.loader import write_toml_atomic
+    from hal0.config.paths import slots_config_dir
+    from hal0.providers._gpu import host_is_amd_gpu as _probe_host_is_amd_gpu
+    from hal0.providers._gpu import kfd_present as _probe_kfd_present
+
+    # Private import, deliberate: this must be the EXACT discriminator
+    # load_sync uses to pick a provider, not a re-implementation of it — do
+    # not "clean this up" into a public wrapper or a local re-derivation,
+    # that would risk drifting from the real dispatch logic it mirrors.
+    from hal0.providers.container import _spec_provider_for
+
+    is_amd = _probe_host_is_amd_gpu() if amd_host is None else amd_host
+    if not is_amd:
+        # Not the hardware #1923's guard characterised or gates — a
+        # gpu-vulkan slot here was never broken by it. Leave it alone.
+        return 0
+
+    have_kfd = _probe_kfd_present() if kfd_present is None else kfd_present
+
+    relabeled = 0
+    slots_dir = slots_config_dir()
+    for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
+        slot_name = toml_path.stem
+        try:
+            raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("updater.vulkan_migration_slot_unreadable", slot=slot_name, error=str(exc))
+            continue
+        holder: dict | None = None
+        if raw.get("device") == "gpu-vulkan":
+            holder = raw
+        elif isinstance(raw.get("slot"), dict) and raw["slot"].get("device") == "gpu-vulkan":
+            holder = raw["slot"]
+        if holder is None:
+            continue
+        try:
+            provider = _spec_provider_for(holder)
+        except Exception as exc:
+            log.warning(
+                "updater.vulkan_migration_slot_runtime_unresolved",
+                slot=slot_name,
+                error=str(exc),
+            )
+            continue
+        if provider is not None:
+            # A non-llama runtime (Kokoro/Moonshine/ComfyUI/FLM/Qwen3TTS)
+            # genuinely runs a Vulkan image on this device string — #1923's
+            # guard is scoped to llama.cpp's unified ROCmFPX runner, not
+            # these. Leave completely untouched (see docstring; #1941 tracks
+            # the separate kfd-absent over-firing issue for this class).
+            continue
+        new_device = "gpu-rocm" if have_kfd else "cpu"
+        holder["device"] = new_device
+        try:
+            write_toml_atomic(toml_path, raw)
+        except Exception as exc:
+            log.warning("updater.vulkan_migration_write_failed", slot=slot_name, error=str(exc))
+            continue
+        relabeled += 1
+        if have_kfd:
+            log.warning(
+                "updater.slot_vulkan_relabeled_rocm",
+                job_id=job_id,
+                slot=slot_name,
+                old="gpu-vulkan",
+                new=new_device,
+                note=(
+                    "gpu-vulkan is retired for LLM slots (#1888/#1923); relabeled to "
+                    "gpu-rocm — /dev/kfd is present, slot keeps running on GPU"
+                ),
+            )
+        else:
+            log.warning(
+                "updater.slot_vulkan_relabeled_cpu_fallback",
+                job_id=job_id,
+                slot=slot_name,
+                old="gpu-vulkan",
+                new=new_device,
+                note=(
+                    "BEHAVIOR CHANGE: gpu-vulkan is retired for LLM slots (#1888/#1923) "
+                    "and /dev/kfd (the ROCm compute node) is not present on this host — "
+                    "relabeled to cpu. This slot no longer runs on the GPU and will be "
+                    "significantly slower until /dev/kfd is forwarded and the slot is "
+                    "re-pointed at gpu-rocm."
+                ),
+            )
+    return relabeled
 
 
 def rerender_slot_units(*, job_id: str | None = None) -> int:
