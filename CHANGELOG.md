@@ -22,6 +22,352 @@ breaking/migrations as callouts — from the cosign-verified tarball, before
 applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
+## [1.0.0-rc.7] — 2026-08-17
+
+The rc.6 validation sweep ran the fleet again — fresh installs, in-place
+updates, a CPU-only box and a Vulkan-only box — and filed eighteen findings.
+rc.7 closes sixteen of them outright and retires the lane behind a seventeenth.
+The theme this time is silence: a guard that was
+supposed to stop an unservable model from launching had been disarmed on every
+model hal0 installs itself, a memory write that hal0 accepted could be dropped
+without ever telling you, a relayed stream from an upstream provider could hang
+open forever with no error, a chat request aimed at an embedding model came back
+as a bare upstream 500, and a model load could be abandoned seven seconds into a
+three-minute budget with a blank error message.
+
+The GA blocker from the rc.6 sweep — the Vulkan backend in the shipped runner
+image emits invalid tokens for every model while every health surface reads
+green (#1888) — is answered by retiring the Vulkan LLM lane rather than
+repairing it (#1923): ROCm (`/dev/kfd`) is now an explicit requirement for
+llama.cpp GPU slots. That is a release-shape change with a migration; read
+Breaking, Operator migrations, and Known issues before upgrading a box that
+carries a `gpu-vulkan` slot.
+
+### Highlights
+
+- **The Vulkan LLM lane is retired; ROCm is the GPU lane for language models.**
+  On the shipped runner image the Vulkan backend emitted invalid tokens for
+  every model while the slot read `ready` and every health surface read green
+  (#1888). Rather than repair a lane that never actually ran on Vulkan where it
+  worked — both GPU device ids resolve to the same ROCm image, so `gpu-vulkan`
+  was a mislabel wherever `/dev/kfd` existed and garbage wherever it did not —
+  rc.7 removes it from every llama.cpp surface: seeds, stacks, the capability
+  picker, hardware recommendation, and the bench suites. `/dev/kfd` is now a
+  loud install-time requirement on AMD GPU boxes, and a `gpu-rocm`/`gpu-vulkan`
+  slot refuses to load without it instead of serving garbage. Genuinely-Vulkan
+  images (Kokoro, whisper.cpp, ComfyUI) are unaffected (#1923).
+- **Streams from an upstream provider can no longer hang forever.** A relayed
+  chat stream that stopped producing tokens — a provider that wedged
+  mid-answer, a connection that went quiet without closing, or one that never
+  even wrote a response status line — used to leave the client waiting
+  indefinitely with no error and no way to tell a slow answer from a dead one.
+  Two bounds now end it: a total wall-clock ceiling
+  (`stream_total_timeout_s`, default `900`) and an idle-between-chunks
+  ceiling (`stream_idle_timeout_s`, default `300`), both configurable and
+  both settable to `0` to restore the old unbounded behaviour;
+  `direct_read_timeout_s` (default `300`) separately bounds the wait for
+  response headers on a streaming request, since the guard's own clocks only
+  start once headers arrive. Tokens already produced still arrive
+  byte-for-byte; on an SSE stream hal0 appends one final chunk explaining
+  which bound tripped, then closes the stream cleanly so the client sees a
+  finished answer rather than a broken pipe (#1893).
+- **Memory writes are no longer silently lost when the store heals itself.** If
+  the durable memory backend was unreachable at boot, hal0 fell back to a
+  volatile in-process store and healed onto the durable one as soon as it came
+  up — but everything written in between was gone for good, with no error at any
+  point. Those writes are now replayed onto the durable store the moment the
+  heal lands, exactly once, and a replay that cannot be completed is logged
+  loudly instead of disappearing (#1897).
+- **A chat request aimed at an embedding or reranking model gets a real answer.**
+  Asking for a chat completion from a model that can only embed or rerank used
+  to be forwarded anyway and came back as the upstream server's raw HTTP 500.
+  hal0 now recognises the mismatch before it calls anything and returns a typed
+  `409` naming the problem (#1894).
+- **Model loads use their full time budget again.** A container that reset the
+  connection mid-probe made hal0 give up on the load about seven seconds in,
+  instead of polling for the full ~180-second window, and stamped the slot
+  `ERROR` with an empty message. The same unhandled failure could turn a
+  routine dispatch into a `500` where a `503` was correct. Loads that just need
+  time now get it (#1898).
+- **The FPX safety guard actually protects the models hal0 installs.** The
+  rc.4 guard that refuses to launch an FPX-quantised model on a runner that
+  cannot serve it was inert for every model hal0 pulled itself — including the
+  brain model the installer seeds — because pull-registration never recorded
+  the model's quantisation. It is recorded now, and the guard falls back to
+  deriving it from the filename if a registry row is ever missing it again
+  (#1890).
+- **The dashboard's memory figures agree with each other.** On a box with a GPU
+  that hal0 drives through Vulkan rather than ROCm, the footer reported the
+  entire pool as free while models were loaded, contradicting the memory ruler
+  sitting directly above it. The footer and the ruler now read the same
+  reconciled number, and a Vulkan-only box is treated as GPU-backed rather than
+  falling through to a plain-RAM view (#1900).
+
+### Breaking
+
+- **`device = "gpu-vulkan"` is no longer a valid lane for llama.cpp slots, and
+  AMD GPU installs require `/dev/kfd` (#1923).** A fresh install that sees an
+  AMD render node with no ROCm compute node now stops with the remedy (on
+  Proxmox: pass `dev1: /dev/kfd` through to the container) instead of seeding
+  slots that answer with garbage; `HAL0_ALLOW_CPU_ONLY=1` or the interactive
+  confirm opts into a CPU-only install. At runtime a `gpu-rocm` or `gpu-vulkan`
+  llama.cpp slot refuses to load when `/dev/kfd` is absent —
+  `HAL0_ALLOW_VULKAN_FALLBACK=1` is the explicit, warning-loud escape hatch. An
+  existing slot TOML that still says `device = "gpu-vulkan"` refuses to load
+  after the upgrade until it is relabeled to `gpu-rocm`; `hal0 update` now does
+  this for you — a post-activation migration relabels a llama.cpp GPU slot on
+  an AMD host from `gpu-vulkan` to `gpu-rocm` when `/dev/kfd` is present, or to
+  `cpu` (with a loud warning, since that is a real behaviour change) when it is
+  not (#1924). A non-AMD host, or a Vulkan slot belonging to a non-llama.cpp
+  runtime (Kokoro, whisper.cpp, ComfyUI), is left untouched. Seed stacks,
+  stack-apply defaults, `--hardware` auto-detect, and the hardware
+  recommendation ladder all now resolve AMD GPUs to `rocm` or fall back to
+  `cpu`, never to the retired lane.
+
+### Added
+
+- `[dispatcher].stream_total_timeout_s` (default `900`, range `0-86400`) and
+  `[dispatcher].stream_idle_timeout_s` (default `300`, range `0-86400`) bound
+  how long a relayed stream may run in total and how long it may go without
+  producing a chunk; either set to `0` disables that bound. While the guard is
+  active, streaming requests disable the HTTP client's own read timeout so the
+  guard owns the body bound; `[dispatcher].direct_read_timeout_s` (default
+  `300`, range `30-600`, unchanged) still bounds the wait for response headers
+  on those requests, since the guard's clocks only start once headers arrive.
+  All three are settable through the settings API and documented with the
+  rest of the dispatcher configuration (#1893).
+
+### Fixed
+
+- Models registered by `hal0 model pull` — including the brain model the
+  installer seeds — now record their quantisation, so the guard that refuses to
+  launch an FPX model on a runner that cannot serve it fires as intended instead
+  of silently passing everything through. A model whose row still carries no
+  quantisation has it derived from the filename rather than skipping the check
+  (#1890).
+- The curated catalogue no longer offers `bge-reranker-base-q4_k_m`, which
+  pointed at a non-mainline conversion the shipped runner cannot load — it
+  appeared in the capability catalogue as a fittable choice and then failed at
+  load time. The default `bge-reranker-v2-m3-q4_k_m` already covers reranking on
+  the same runner image and is unaffected (#1891).
+- The agent picks the slot that is actually serving. Delegation resolved its
+  target by name against a stale idea of which slot states are dispatchable, so
+  a seed slot that had never been wired to a model could shadow a slot that was
+  genuinely serving, and a perfectly usable `idle` slot could be judged not
+  ready. Delegation now uses the same readiness rule as the rest of the system
+  and requires the slot it picks to have a model bound (#1892).
+- Writes made through the volatile memory fallback are replayed onto the durable
+  store when it heals, so a fact added while the durable backend was down is no
+  longer lost. A replay that does not land is retried and, if it still cannot
+  complete, reported as `hal0.memory.heal_replay_abandoned` rather than passing
+  in silence (#1897).
+- A chat-shaped request naming an embedding or reranking model returns a typed
+  `409 dispatch.capability_mismatch` explaining the mismatch, instead of being
+  forwarded to a server that cannot answer it and surfacing that server's raw
+  `500` (#1894).
+- The dashboard footer's service indicators show every service hal0 monitors.
+  ComfyUI was missing because the footer carried a hardcoded list; it now
+  mirrors whatever the health endpoint reports, so a service added later cannot
+  fall out of the footer the same way (#1899).
+- A container that resets the connection while hal0 is probing its health is
+  treated as "not ready yet" rather than as a hard failure. This restores the
+  full model-load wait window (a load that needed time no longer aborts after
+  roughly seven seconds), gives a failed slot a real error message instead of an
+  empty one, and keeps a mid-load dispatch returning `503` rather than `500`
+  (#1898).
+- `POST /api/memory/add` fails fast with a `503` naming the problem when the
+  slot that would perform memory extraction has a context window below the
+  usable floor, instead of accepting the request and producing nothing. A slot
+  whose window cannot be determined is not blocked (#1903).
+- The dashboard footer computes free memory from the same reconciled per-slot
+  figure the memory ruler renders, and a box whose GPU is usable through Vulkan
+  but has no ROCm stack is treated as GPU-backed. Together these stop the footer
+  from reporting the whole pool as free while models are loaded (#1900).
+- `hal0 bench history` prints `no records` when its query matches nothing —
+  an empty store, or a `--model` / `--cell` filter that matched no rows — instead
+  of printing nothing at all and exiting `0`, which read as a broken command.
+  `hal0 bench results` already did this (#1904).
+- `hal0 capabilities list` shows the Status column the API has been returning
+  all along; the synthetic `hal0` entry in the slot list explains what it
+  actually is instead of borrowing another entry's description, and
+  `GET /api/slots/hal0/logs` returns an explanation rather than a `404` that
+  looked like a missing slot (a genuinely unknown slot name still `404`s);
+  `uptime_s` on `/api/hardware` and `/api/stats/hardware` is read fresh on every
+  request instead of being frozen at the moment the hardware probe last wrote its
+  cache; and `hal0 agent peers` no longer crashes with an `AttributeError` on a
+  peer card whose metadata came back as text (#1905, #1897).
+- `hal0 config edit` prints its `sudo` hint when it cannot create a config file,
+  instead of an unhandled traceback. Running it as a user who is not in the
+  `hal0` group, against an unwritable `/etc/hal0`, now says what to do (#1885).
+- Installing and updating by the documented channel URL works again.
+  `releases.hal0.dev` now proxies the manifest's sibling cosign bundle
+  (`<channel>.json.bundle`), byte-identical to the GitHub asset, so
+  `hal0 update` against `https://releases.hal0.dev/preview.json` no longer
+  fails at mandatory manifest verification. This was an infrastructure fix on
+  the release proxy (hal0-web#107), not a change in this tree — no hal0 upgrade
+  is needed to benefit from it, and older tags that failed with the bundle 404
+  now verify too (#1883).
+- `GET /api/slots` reports the image a slot is actually running instead of
+  always `image_status: "missing"` and `actual_image: null`. Slot containers
+  run under rootful podman (Quadlet units, root's image store), but the image
+  reads shelled out to `podman` as the unprivileged `hal0-api` service user,
+  which has no subuid ranges and so could only ever see its own separate
+  rootless store — a store that by construction never holds a slot image. The
+  #663 image-drift detector could never fire as a result. Reads now go
+  through the rootful `hal0-podman-ro` seam instead, with the requested image
+  reference or slot token validated on the root side before anything runs
+  (#1889).
+- `model-pull-jobs/` and `activity.db` (with its `-wal`/`-shm` siblings) now
+  get an ownership row at install time, so `hal0-api` (running as the `hal0`
+  service user) can create and later read them. Previously the installer's
+  root-run brain-model pull was the first writer, lazily creating
+  `model-pull-jobs/` as `root:root`, which every subsequent pull-job write by
+  `hal0-api` failed against; on a freshly installed box, restarting
+  `hal0-api` lost all in-flight pull status. `hal0 doctor perms --fix` can
+  now heal both paths the same way it heals everything else it owns (#1895).
+- Updater journal lines carry the `job_id` of the job that produced them
+  instead of `job_id=None`, and a successful update now relays the
+  `sha256_ok` / `cosign_verify_ok` / `prepare_ok` breadcrumbs the routed
+  child process already logs — previously that structured log only reached
+  the parent's journal on failure, so a successful update left no trail to
+  reconstruct it from afterward. The `cosign_skipped` job field, which never
+  had a producer and always read `null`, is removed rather than given a fake
+  one (#1901).
+
+### Docs
+
+- The MCP connection guide points at the working `/mcp/admin/mcp` and
+  `/mcp/memory/mcp` Streamable-HTTP endpoints; the mount roots it previously
+  documented return `405`, so following the guide could not connect a client.
+  The admin and memory tool tables are regenerated from the source registrations
+  and now list every tool (180 admin, 26 memory) grouped by permission tier,
+  rather than an outdated subset. A doc test now fails the build if either drifts
+  from the code again (#1902).
+
+### Audience
+
+Preview-channel operators validating the 1.0 line ahead of GA, and fresh
+installs that want the current build. rc.7 supersedes rc.6 for everyone: rc.6
+can silently drop memory writes after a store heal (#1897), hangs
+indefinitely on a wedged upstream stream (#1893), can abandon a legitimate
+model load seconds into a three-minute budget (#1898), and will happily seed
+a Vulkan LLM slot that serves garbage while reading healthy (#1888). Boxes on
+the stable channel are not offered this tag. rc.7 is **not** a GA candidate —
+see Known issues.
+
+### Supported upgrades
+
+- `1.0.0-rc.6` → `1.0.0-rc.7` via `hal0 update` (preview channel). The GitHub
+  release asset URL (`https://github.com/Hal0ai/hal0/releases/download/v1.0.0-rc.7/preview.json`)
+  works end-to-end for install and update. The documented channel URL
+  (`https://releases.hal0.dev/preview.json`) works again as well now that the
+  cosign bundle is proxied (#1883).
+- `1.0.0-rc.5` / `1.0.0-rc.4` / `1.0.0-rc.3` / `1.0.0-rc.2` / `1.0.0-rc.1` →
+  `1.0.0-rc.7` directly, same mechanism. The rc.6 operator migrations still
+  apply to any box coming from rc.5 or earlier; see the
+  [1.0.0-rc.6 section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100-rc6--2026-08-12).
+- `0.9.8` → `1.0.0-rc.7` in place — re-run the installer or `hal0 update` on the
+  preview channel; the R5 migration set applies (see the
+  [1.0.0 changelog section](https://github.com/Hal0ai/hal0/blob/main/CHANGELOG.md#100--2026-08-07)).
+- Older than 0.9.8: step through 0.9.8 first.
+
+### Known issues
+
+**The Vulkan garbage-output blocker (#1888) is answered by retiring the lane
+(#1923), but the issue stays open until that answer is validated on hardware.**
+rc.7 no longer seeds, recommends, or offers a Vulkan llama.cpp slot, and a GPU
+slot without `/dev/kfd` refuses to load instead of serving garbage — see
+Breaking. Still open behind it: the retirement has not yet been swept on the
+fleet, the non-AMD Vulkan paths (NVIDIA without CDI, Intel iGPU) still need an
+A/B against the pinned runner (#1925), and the deeper defect — a slot can read
+`ready` on every health surface while emitting unusable tokens — has no
+output-sanity gate yet (#1922). Until that gate exists, validate a new lane by
+reading an actual completion rather than trusting a status surface.
+
+**One rc.6 sweep finding remains open and is not fixed here.** `hal0 doctor
+perms` exits `1` with `DRIFT` on a box that has just been installed cleanly,
+and `--fix` cannot converge it, so the check cannot currently be used as a
+gate (#1896). A fix is in progress but has not merged as of this section.
+
+**Carried forward from rc.6.** An upgraded box can still refuse to chat if its
+agent slot carries a ceiling below Hermes' 64,000-token floor — `hal0 doctor`
+names the slot and prints the repair command, but the update does not raise the
+ceiling for you (#1867). `hal0 update` does not refresh the `hal0` launcher on
+`PATH`, so after an in-place upgrade a shell can keep running the previous
+release — check `hal0 --version` against the installed tag and re-run the
+installer if they disagree (#1844). The stable channel pointer is still 0.9.8,
+so nothing on the stable channel is offered the 1.0 line yet (#1530). Memory
+retention on CPU-only installs remains unreliable: `hal0 memory status` can
+report `Writes landing` on a store that has never landed a fact, and the
+extraction queue has no concurrency cap (#1833, #1834). The remaining rc.5
+polish items are tracked on #1840 (CLI/API) and #1841 (dashboard); three
+review-time findings remain deferred (#1873, #1862, #1869).
+
+### Operator migrations
+
+- **Nothing is required to take rc.7 unless a slot names the retired lane.** No
+  rc.7 change alters an on-disk state shape or adds a mandatory configuration
+  key; the one manual step is the `gpu-vulkan` slot edit below, and the other
+  items are optional or conditional.
+- **Streams are now bounded by default (#1893).** A relayed stream that runs
+  longer than 900 seconds in total, or goes 300 seconds without producing a
+  chunk, is ended with an explanatory final chunk. If you deliberately run
+  very long or very bursty streams through hal0, raise
+  `[dispatcher].stream_total_timeout_s` and
+  `[dispatcher].stream_idle_timeout_s` in `hal0.toml`, or set either to `0`
+  to disable that bound. Restart `hal0-api` for a change to take effect.
+- **A slot TOML with `device = "gpu-vulkan"` is moved to `gpu-rocm`
+  automatically (#1923, #1924).** After the upgrade such a slot refuses to
+  load — that lane no longer exists for llama.cpp — but `hal0 update`'s
+  post-activation migrations now relabel it for you: a llama.cpp GPU slot on
+  an AMD host goes to `gpu-rocm` when `/dev/kfd` is present, or to `cpu` (with
+  a loud warning, since that is a real behaviour change) when it is not. Only
+  the `device` key is touched, the pass is idempotent, and a Vulkan slot
+  belonging to a non-llama.cpp runtime (Kokoro, whisper.cpp, ComfyUI) or a
+  non-AMD host is left alone. On hardware where the slot actually worked
+  before, nothing else changes: both device ids always resolved to the same
+  ROCm runner image. To relabel by hand instead — or to review the result —
+  use `hal0 slot edit <name> --hardware rocm`, or change `device` in the
+  TOML directly.
+- **An AMD GPU box without `/dev/kfd` now stops at install (#1923).** The
+  installer refuses to proceed when it sees an AMD render node with no ROCm
+  compute node, and prints the remedy (on Proxmox, pass `dev1: /dev/kfd`
+  through). Set `HAL0_ALLOW_CPU_ONLY=1` (or answer the interactive confirm) for
+  a deliberate CPU-only install.
+- **The FPX guard may now refuse a model it previously launched (#1890).** A
+  model registered by `hal0 model pull` that is FPX-quantised and sitting on a
+  runner image that cannot serve FPX was launching and producing bad output;
+  it will now be refused at launch with an explanatory error. That is the guard
+  working. Move the slot to a runner image that supports the quantisation, or
+  use a non-FPX build of the model.
+- **`bge-reranker-base-q4_k_m` is gone from the curated catalogue (#1891).** A
+  slot already configured with it keeps its configuration — the model is simply
+  no longer offered as a curated choice, because the shipped runner cannot load
+  it. If you have a reranking slot that never came up, point it at
+  `bge-reranker-v2-m3-q4_k_m` instead.
+- **Memory adds can now be refused with a `503` (#1903).** A request to
+  `POST /api/memory/add` is rejected up front when the extraction slot's context
+  window is below the usable floor, where it previously succeeded and produced
+  nothing. Raise that slot's context window — `hal0 doctor` names the slot and
+  the limits — to restore the write path.
+
+### Rollback
+
+Release tarballs are immutable and cosign-signed; roll back by re-installing the
+previous tag (`v1.0.0-rc.6`) from its GitHub release. No rc.7 change writes a
+state shape rc.6 cannot read — every fix is re-derived at launch or read time,
+except the quantisation now stamped on pull-registered models, which rc.6
+ignores. The two new `[dispatcher]` stream-timeout keys
+(`stream_total_timeout_s`, `stream_idle_timeout_s`) are the only
+configuration addition; if you set them, remove them from `hal0.toml` before
+rolling back to a build that does not know them. A slot TOML moved from
+`gpu-vulkan` to `gpu-rocm` for the upgrade
+loads fine on rc.6 — both device ids resolve to the same runner image there —
+so no slot edit needs undoing. Rolling back reinstates the rc.6 defects listed
+above, including the silently dropped memory writes (#1897), the unbounded
+stream relay (#1893), and the seeding of Vulkan LLM slots that serve garbage
+while reading healthy (#1888).
+
 ## [1.0.0-rc.6] — 2026-08-12
 
 The rc.5 validation sweep ran the whole fleet — fresh installs, in-place
