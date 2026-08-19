@@ -348,7 +348,7 @@ async def _run_apply_job(
     job["updated_at"] = time.time()
     _persist_job(job)
     try:
-        updater = Updater(channel=channel)
+        updater = Updater(channel=channel, job_id=job_id)
         await updater.apply(version)
     except Exception as exc:
         job["state"] = "failed"
@@ -406,7 +406,7 @@ async def _run_prepare_job(
     job["updated_at"] = time.time()
     _persist_job(job)
     try:
-        updater = Updater(channel=channel)
+        updater = Updater(channel=channel, job_id=job_id)
         result = await updater.prepare(version)
     except Exception as exc:
         job["state"] = "failed"
@@ -415,7 +415,6 @@ async def _run_prepare_job(
     else:
         job["resolved_version"] = result.get("version")
         job["notes"] = result.get("notes")
-        job["cosign_skipped"] = result.get("cosign_skipped")
         # Read-only gate snapshot for the one-shot profile-catalog reset.
         # commit() runs in this daemon, which has no TTY, so the CLI has to be
         # told *here* whether a prompt is owed and what it would destroy.
@@ -454,7 +453,7 @@ async def _run_commit_job(
     job["updated_at"] = time.time()
     _persist_job(job)
     try:
-        updater = Updater(channel=channel)
+        updater = Updater(channel=channel, job_id=job_id)
         result = await updater.commit(version, reset_profiles=reset_profiles)
     except Exception as exc:
         job["state"] = "failed"

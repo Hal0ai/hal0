@@ -156,7 +156,13 @@ class UpdateSeam:
         ``-n`` is load-bearing: a missing or broken grant fails immediately with
         a non-zero exit instead of prompting for a password inside a daemon.
         The child's stderr (its structured log) is folded into the raised error
-        so a failure is diagnosable from the job result alone.
+        so a failure is diagnosable from the job result alone. On success the
+        same stderr is replayed into the parent's own log (see
+        :func:`_relay_child_log`) — the child's structlog output is captured,
+        not inherited, so without this replay every prepare/verify breadcrumb
+        (``sha256_ok``, ``cosign_verify_ok``, ``prepare_ok``, …) the root
+        helper emits is silently discarded on the happy path and never reaches
+        the journal (#1901).
         """
         try:
             proc = self._run(  # nosec B603 — fixed argv; every arg re-validated as root
@@ -174,18 +180,27 @@ class UpdateSeam:
         except OSError as exc:
             raise _remediation(f"could not execute `sudo -n {self._seam_bin}`: {exc}") from exc
 
-        stderr = (proc.stderr or "")[-4000:]
+        full_stderr = proc.stderr or ""
         if proc.returncode != 0:
+            # Bounded tail only for the error path — a raised error's details
+            # are a diagnostic breadcrumb, not the audit trail this exists to
+            # protect, so truncation here is fine.
             raise UpdateError(
                 f"privileged update seam failed: {parts[0]} (rc={proc.returncode})",
                 details={
                     "verb": parts[0],
                     "returncode": proc.returncode,
-                    "stderr": stderr,
+                    "stderr": full_stderr[-4000:],
                     "seam_bin": self._seam_bin,
                 },
             )
-        return _parse_result(proc.stdout or "", verb=parts[0], stderr=stderr)
+        # Relay the FULL stderr, not a truncated tail: a successful run can
+        # emit many post-verification cleanup lines (stale quarantine/staging
+        # reaping in `_extract_tarball`) after the sha256/cosign breadcrumbs,
+        # and a 4000-char tail can push those breadcrumbs out of the relayed
+        # data — silently reopening the very audit gap this replay closes.
+        _relay_child_log(full_stderr, verb=parts[0], job_id=self._job_id)
+        return _parse_result(proc.stdout or "", verb=parts[0], stderr=full_stderr[-4000:])
 
     # ── preflight ──────────────────────────────────────────────────────────────
 
@@ -293,6 +308,26 @@ def _validate_dir_name(dir_name: str) -> str:
         return assert_release_dir_name(dir_name)
     except ValueError as exc:
         raise UpdateError(str(exc), details={"dir_name": dir_name}) from exc
+
+
+def _relay_child_log(stderr: str, *, verb: str, job_id: str | None) -> None:
+    """Replay the root helper's captured stderr into the parent's own log.
+
+    ``_pin_logs_to_stderr`` sends the child's structured log to its stderr so
+    stdout carries nothing but the result envelope (see :data:`_RESULT_KEY`).
+    ``subprocess.run(capture_output=True)`` captures that stderr rather than
+    letting it inherit the parent's fd, so on success it was going nowhere —
+    the child's ``sha256_ok`` / ``cosign_verify_ok`` / ``prepare_ok`` /
+    ``extract_ok`` breadcrumbs never reached the journal (#1901). Each
+    non-empty line is re-emitted as its own parent-side event, tagged with the
+    verb and this seam's ``job_id``, so a durable prepare/verify trail exists
+    on the happy path and not only inside a failure's error details.
+    """
+    for line in stderr.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        log.info("updater.privileged_child_log", verb=verb, job_id=job_id, line=line)
 
 
 def _parse_result(stdout: str, *, verb: str, stderr: str = "") -> dict[str, Any]:

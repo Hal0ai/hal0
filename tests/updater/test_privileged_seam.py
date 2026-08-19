@@ -178,6 +178,90 @@ def test_seam_surfaces_the_root_helpers_stderr_on_failure() -> None:
     assert "cosign verify-blob failed" in exc.value.details["stderr"]
 
 
+def test_successful_stage_relays_the_childs_breadcrumbs_into_the_journal() -> None:
+    """#1901 gap 2: on success the root helper's stderr (its structured log)
+    was captured by ``subprocess.run`` and silently discarded — no
+    ``sha256_ok`` / ``cosign_verify_ok`` / ``prepare_ok`` breadcrumb ever
+    reached the parent's journal. Each captured line must now be replayed
+    into the parent's own log, tagged with the seam's job_id.
+    """
+    from structlog.testing import capture_logs
+
+    child_stderr = (
+        "2026-08-17T00:00:00Z [info] updater.sha256_ok job_id=None digest=abc123\n"
+        "2026-08-17T00:00:01Z [info] updater.cosign_verify_ok job_id=None\n"
+        "2026-08-17T00:00:02Z [info] updater.prepare_ok job_id=None version=1.0.0\n"
+    )
+    run = FakeRun(stdout=_envelope({"version": "1.0.0"}), stderr=child_stderr)
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True, job_id="job-abc123")
+
+    import asyncio
+
+    with capture_logs() as logs:
+        result = asyncio.run(seam.stage("stable", "1.0.0"))
+
+    assert result["version"] == "1.0.0"
+    relayed = [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+    assert len(relayed) == 3
+    assert all(e["job_id"] == "job-abc123" for e in relayed)
+    assert all(e["verb"] == "stage" for e in relayed)
+    assert any("sha256_ok" in e["line"] for e in relayed)
+    assert any("cosign_verify_ok" in e["line"] for e in relayed)
+    assert any("prepare_ok" in e["line"] for e in relayed)
+
+
+def test_successful_stage_relay_survives_a_long_cleanup_tail() -> None:
+    """Codex review on #1901: ``_invoke`` used to truncate stderr to its last
+    4000 chars BEFORE deciding what to relay. A successful extraction can log
+    one cleanup line per stale quarantine/staging directory (see
+    ``_reap_stale_quarantines`` / ``_reap_stale_staging_dirs``) AFTER the
+    sha256/cosign breadcrumbs, so a long enough cleanup tail pushed those
+    breadcrumbs out of the relayed data — reopening the exact audit gap this
+    fix exists to close. The relay must see the full, untruncated stderr.
+    """
+    from structlog.testing import capture_logs
+
+    breadcrumbs = (
+        "2026-08-17T00:00:00Z [info] updater.sha256_ok job_id=None digest=abc123\n"
+        "2026-08-17T00:00:01Z [info] updater.cosign_verify_ok job_id=None\n"
+    )
+    # Pad well past the old 4000-char truncation window with cleanup noise.
+    cleanup_tail = "".join(
+        f"2026-08-17T00:00:{i:02d}Z [info] updater.quarantine_reaped path=/x/{i}\n"
+        for i in range(2, 400)
+    )
+    child_stderr = breadcrumbs + cleanup_tail
+    assert len(child_stderr) > 4000
+
+    run = FakeRun(stdout=_envelope({"version": "1.0.0"}), stderr=child_stderr)
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True, job_id="job-abc123")
+
+    import asyncio
+
+    with capture_logs() as logs:
+        result = asyncio.run(seam.stage("stable", "1.0.0"))
+
+    assert result["version"] == "1.0.0"
+    relayed = [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+    assert any("sha256_ok" in e["line"] for e in relayed)
+    assert any("cosign_verify_ok" in e["line"] for e in relayed)
+
+
+def test_failed_stage_does_not_double_relay_stderr_as_breadcrumbs() -> None:
+    """A failure already folds stderr into the raised error's details — it
+    must not ALSO be replayed as a separate breadcrumb log (that would be a
+    second, redundant recording of the same failure content)."""
+    from structlog.testing import capture_logs
+
+    run = FakeRun(returncode=1, stderr="hal0-update: cosign verify-blob failed")
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True, job_id="job-abc123")
+
+    with capture_logs() as logs, pytest.raises(UpdateError):
+        seam.discard("hal0-1.0.0")
+
+    assert not [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+
+
 # ── preflight: fail fast, with remediation, before any download ────────────────
 
 

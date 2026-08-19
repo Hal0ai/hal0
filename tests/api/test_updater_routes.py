@@ -883,7 +883,6 @@ def test_prepare_job_reaches_prepared_with_notes(
             "version": "0.0.1",
             "install_dir": "/tmp/hal0-0.0.1",
             "cache_dir": "/tmp/cache/0.0.1",
-            "cosign_skipped": True,
             "notes": {
                 "markdown": "# 0.0.1\n- did xyz",
                 "highlights": ["h"],
@@ -908,6 +907,104 @@ def test_prepare_job_reaches_prepared_with_notes(
     assert final.get("state") == "prepared", final
     assert final.get("resolved_version") == "0.0.1"
     assert final.get("notes")
+
+
+def test_prepare_job_never_reports_cosign_skipped(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``cosign_skipped`` is a removed dead field (#1901) — cosign verification
+    is always mandatory (see ``_verify_cosign``'s "no bypass" docstring), so a
+    job must never surface a stale/structurally-null key for it, even if a
+    caller's ``prepare()`` stub still returns one.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    async def fake_prepare(self: object, version: str | None = None) -> dict:
+        return {
+            "version": "0.0.1",
+            "install_dir": "/tmp/hal0-0.0.1",
+            "cache_dir": "/tmp/cache/0.0.1",
+            "cosign_skipped": True,  # a stray value from an old caller shape
+            "notes": {"markdown": "# 0.0.1", "highlights": [], "breaking": [], "migrations": []},
+        }
+
+    monkeypatch.setattr(u_mod.Updater, "prepare", fake_prepare)
+
+    r = isolated_client.post("/api/updates/prepare", json={})
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] in ("prepared", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") == "prepared", final
+    assert "cosign_skipped" not in final
+
+
+@pytest.mark.parametrize(
+    ("route", "phase", "body"),
+    [
+        ("/api/updates/apply", "apply", {}),
+        ("/api/updates/prepare", "prepare", {}),
+        ("/api/updates/commit", "commit", {"version": "0.0.1"}),
+    ],
+)
+def test_job_runners_thread_job_id_into_updater(
+    route: str,
+    phase: str,
+    body: dict,
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """apply/prepare/commit must construct ``Updater`` with the job's own id.
+
+    Regression for #1901 gap 1: every job runner built ``Updater(channel=...)``
+    without the ``job_id`` the parameter exists to thread, so every
+    parent-side ``updater.*`` journal line logged ``job_id=None`` regardless
+    of which job produced it.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    captured: list[str | None] = []
+    real_init = u_mod.Updater.__init__
+
+    def spy_init(self: object, channel: str = "stable", job_id: str | None = None) -> None:
+        captured.append(job_id)
+        real_init(self, channel=channel, job_id=job_id)
+
+    monkeypatch.setattr(u_mod.Updater, "__init__", spy_init)
+
+    async def fake_apply(self: object, version: str | None = None) -> dict:
+        return {"version": "0.0.1"}
+
+    async def fake_prepare(self: object, version: str | None = None) -> dict:
+        return {"version": "0.0.1", "notes": {}}
+
+    async def fake_commit(self: object, version: str, reset_profiles: bool | None = None) -> dict:
+        return {"version": "0.0.1"}
+
+    monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
+    monkeypatch.setattr(u_mod.Updater, "prepare", fake_prepare)
+    monkeypatch.setattr(u_mod.Updater, "commit", fake_commit)
+
+    r = isolated_client.post(route, json=body)
+    assert r.status_code == 202, r.text
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] not in ("queued", "running"):
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") != "failed", final
+    assert job_id in captured, (job_id, captured)
 
 
 def test_commit_route_requires_version(isolated_client: TestClient) -> None:
