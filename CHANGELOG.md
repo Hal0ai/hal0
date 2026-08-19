@@ -26,7 +26,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 The rc.6 validation sweep ran the fleet again — fresh installs, in-place
 updates, a CPU-only box and a Vulkan-only box — and filed eighteen findings.
-rc.7 closes thirteen of them outright and retires the lane behind a fourteenth.
+rc.7 closes sixteen of them outright and retires the lane behind a seventeenth.
 The theme this time is silence: a guard that was
 supposed to stop an unservable model from launching had been disarmed on every
 model hal0 installs itself, a memory write that hal0 accepted could be dropped
@@ -113,9 +113,13 @@ carries a `gpu-vulkan` slot.
   confirm opts into a CPU-only install. At runtime a `gpu-rocm` or `gpu-vulkan`
   llama.cpp slot refuses to load when `/dev/kfd` is absent —
   `HAL0_ALLOW_VULKAN_FALLBACK=1` is the explicit, warning-loud escape hatch. An
-  existing slot TOML that still says `device = "gpu-vulkan"` therefore refuses
-  to load after the upgrade until it is edited to `gpu-rocm`; `hal0 update`
-  does not yet rewrite it for you (#1924 tracks the migration). Seed stacks,
+  existing slot TOML that still says `device = "gpu-vulkan"` refuses to load
+  after the upgrade until it is relabeled to `gpu-rocm`; `hal0 update` now does
+  this for you — a post-activation migration relabels a llama.cpp GPU slot on
+  an AMD host from `gpu-vulkan` to `gpu-rocm` when `/dev/kfd` is present, or to
+  `cpu` (with a loud warning, since that is a real behaviour change) when it is
+  not (#1924). A non-AMD host, or a Vulkan slot belonging to a non-llama.cpp
+  runtime (Kokoro, whisper.cpp, ComfyUI), is left untouched. Seed stacks,
   stack-apply defaults, `--hardware` auto-detect, and the hardware
   recommendation ladder all now resolve AMD GPUs to `rocm` or fall back to
   `cpu`, never to the retired lane.
@@ -203,6 +207,32 @@ carries a `gpu-vulkan` slot.
   the release proxy (hal0-web#107), not a change in this tree — no hal0 upgrade
   is needed to benefit from it, and older tags that failed with the bundle 404
   now verify too (#1883).
+- `GET /api/slots` reports the image a slot is actually running instead of
+  always `image_status: "missing"` and `actual_image: null`. Slot containers
+  run under rootful podman (Quadlet units, root's image store), but the image
+  reads shelled out to `podman` as the unprivileged `hal0-api` service user,
+  which has no subuid ranges and so could only ever see its own separate
+  rootless store — a store that by construction never holds a slot image. The
+  #663 image-drift detector could never fire as a result. Reads now go
+  through the rootful `hal0-podman-ro` seam instead, with the requested image
+  reference or slot token validated on the root side before anything runs
+  (#1889).
+- `model-pull-jobs/` and `activity.db` (with its `-wal`/`-shm` siblings) now
+  get an ownership row at install time, so `hal0-api` (running as the `hal0`
+  service user) can create and later read them. Previously the installer's
+  root-run brain-model pull was the first writer, lazily creating
+  `model-pull-jobs/` as `root:root`, which every subsequent pull-job write by
+  `hal0-api` failed against; on a freshly installed box, restarting
+  `hal0-api` lost all in-flight pull status. `hal0 doctor perms --fix` can
+  now heal both paths the same way it heals everything else it owns (#1895).
+- Updater journal lines carry the `job_id` of the job that produced them
+  instead of `job_id=None`, and a successful update now relays the
+  `sha256_ok` / `cosign_verify_ok` / `prepare_ok` breadcrumbs the routed
+  child process already logs — previously that structured log only reached
+  the parent's journal on failure, so a successful update left no trail to
+  reconstruct it from afterward. The `cosign_skipped` job field, which never
+  had a producer and always read `null`, is removed rather than given a fake
+  one (#1901).
 
 ### Docs
 
@@ -254,17 +284,10 @@ A/B against the pinned runner (#1925), and the deeper defect — a slot can read
 output-sanity gate yet (#1922). Until that gate exists, validate a new lane by
 reading an actual completion rather than trusting a status surface.
 
-**Four rc.6 sweep findings remain open and are not fixed here.** The
-image-drift detector is permanently inert — `image_status` always reads
-`missing` and `actual_image` always `null` for a running slot, so a slot running
-an image other than the one it declares is never reported (#1889). A
-root-owned model-pull-jobs directory means pull status does not survive an
-`hal0-api` restart on a freshly installed box (#1895). `hal0 doctor perms`
-exits `1` with `DRIFT` on a box that has just been installed cleanly, and
-`--fix` cannot converge it, so the check cannot currently be used as a gate
-(#1896). Updater journal lines carry `job_id=None` and emit no
-prepare/verify breadcrumbs on a successful update, which makes an update hard
-to reconstruct after the fact (#1901).
+**One rc.6 sweep finding remains open and is not fixed here.** `hal0 doctor
+perms` exits `1` with `DRIFT` on a box that has just been installed cleanly,
+and `--fix` cannot converge it, so the check cannot currently be used as a
+gate (#1896). A fix is in progress but has not merged as of this section.
 
 **Carried forward from rc.6.** An upgraded box can still refuse to chat if its
 agent slot carries a ceiling below Hermes' 64,000-token floor — `hal0 doctor`
@@ -293,14 +316,19 @@ review-time findings remain deferred (#1873, #1862, #1869).
   `[dispatcher].stream_total_timeout_s` and
   `[dispatcher].stream_idle_timeout_s` in `hal0.toml`, or set either to `0`
   to disable that bound. Restart `hal0-api` for a change to take effect.
-- **A slot TOML with `device = "gpu-vulkan"` must be moved to `gpu-rocm`
-  (#1923, #1924).** After the upgrade such a slot refuses to load — that lane
-  no longer exists for llama.cpp. Edit the slot
-  (`hal0 slot edit <name> --hardware rocm`, or change `device` in its TOML) and
-  reload. On hardware where the slot actually worked before, nothing else
-  changes: both device ids always resolved to the same ROCm runner image.
-  `hal0 update` does not yet perform this rewrite for you; #1924 tracks
-  automating it.
+- **A slot TOML with `device = "gpu-vulkan"` is moved to `gpu-rocm`
+  automatically (#1923, #1924).** After the upgrade such a slot refuses to
+  load — that lane no longer exists for llama.cpp — but `hal0 update`'s
+  post-activation migrations now relabel it for you: a llama.cpp GPU slot on
+  an AMD host goes to `gpu-rocm` when `/dev/kfd` is present, or to `cpu` (with
+  a loud warning, since that is a real behaviour change) when it is not. Only
+  the `device` key is touched, the pass is idempotent, and a Vulkan slot
+  belonging to a non-llama.cpp runtime (Kokoro, whisper.cpp, ComfyUI) or a
+  non-AMD host is left alone. On hardware where the slot actually worked
+  before, nothing else changes: both device ids always resolved to the same
+  ROCm runner image. To relabel by hand instead — or to review the result —
+  use `hal0 slot edit <name> --hardware rocm`, or change `device` in the
+  TOML directly.
 - **An AMD GPU box without `/dev/kfd` now stops at install (#1923).** The
   installer refuses to proceed when it sees an AMD render node with no ROCm
   compute node, and prints the remedy (on Proxmox, pass `dev1: /dev/kfd`
