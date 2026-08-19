@@ -8,19 +8,181 @@
 # store than the one slots actually populate: backends report "installable"
 # even when the image is present, in root's store (halo143/halo150).
 #
-# This script is the ENTIRE privileged surface, modeled exactly on
-# hal0-agentenv / hal0-benchctl / hal0-systemctl: every verb is a single
-# HARDCODED podman invocation (no operator-supplied flags ever reach podman's
-# argv), no shell is ever evaluated, no wildcards. Only read-only
-# introspection is exposed — rm/run/build/exec are never wired in. Add a new
-# verb here (never widen an existing one with caller-supplied args) the day a
-# call site needs one; see src/hal0/providers/podman_introspect.py.
+# ARGUMENT DOCTRINE (#1889). Until #1889 this script accepted exactly one
+# verb (`images`) with zero caller-supplied argv, and the header said no
+# caller args may ever reach podman. That doctrine bought its safety by
+# leaving the #663 image-drift detector permanently inert: `image_present`
+# and `running_image` need a *specific* image ref / container name, so they
+# stayed on a bare rootless `podman` call and answered from the wrong store —
+# `image_status` was "missing" for every running slot and `actual_image` was
+# always null.
+#
+# The doctrine is therefore refined, not abandoned, and lands exactly where
+# hal0-systemctl's slot/agent verbs already put it: a caller-supplied value
+# may reach podman's argv ONLY as a single positional operand that has been
+# validated on the ROOT side of the boundary against a closed regex, and only
+# for a verb whose podman subcommand, flags and --format string are literals
+# written here. Specifically:
+#
+#   * every podman invocation is still a hardcoded exec array — no shell, no
+#     eval, no word splitting, no wildcards, no operator-supplied flags;
+#   * `image-exists` takes an image REFERENCE, matched against the OCI ref
+#     grammar (optional host[:port]/, path segments with single ._-
+#     separators, optional :tag, optional @sha256:<64 hex>) and length-capped.
+#     A validated ref cannot contain whitespace, a shell metacharacter, a
+#     leading '-' (so it can never be read as a flag), '..', or a second argv
+#     word;
+#   * `container-image` / `container-argv` DO NOT take a container name at
+#     all. They take the slot's bare INSTANCE TOKEN, validated with the same
+#     charset hal0-systemctl's validate_slot_id uses, and the container name
+#     `hal0-slot-<token>` is assembled HERE, on the root side. The caller can
+#     therefore only ever name a hal0 slot container — never an arbitrary
+#     container, and never a podman option.
+#
+# Still read-only: rm/run/build/exec/pull are never wired in. Add a new verb
+# here (never widen an existing one with an unvalidated arg, and never accept
+# a caller-supplied --format) the day a call site needs one; see
+# src/hal0/providers/podman_introspect.py, which mirrors every regex below so
+# the unprivileged side fails fast instead of burning a sudo round-trip.
+#
+# EXIT-CODE CONTRACT. The read verbs distinguish "podman answered, and the
+# answer is negative" from "the seam itself is unusable", because the caller
+# must fall back to its rootless read only in the second case:
+#
+#   * rc 0   — podman ran and gave a DEFINITIVE answer. `image-exists`
+#              printed `present` or `missing`; `container-image` /
+#              `container-argv` printed the value, or nothing at all when no
+#              such container exists. An empty stdout on rc 0 is a real
+#              answer, not an error.
+#   * rc 64  — this wrapper rejected the argument (validation) or the verb.
+#   * rc 65  — podman is not installed / not executable here.
+#   * rc 66  — podman ran but FAILED operationally (store corruption, lock
+#              contention, permission error, …). NOT a negative answer.
+#
+# rc 66 exists because conflating an operational podman failure with "the
+# image is absent" reproduces #1889 with extra steps: the API would report a
+# locally present image as missing and the caller would never know to
+# degrade. That is why the presence probes below use `podman image exists` /
+# `podman container exists`, whose contract is exactly rc 0 = yes, rc 1 = no,
+# anything else = error — `podman inspect` collapses "not found" and every
+# other failure into a single rc 125 and cannot make this distinction.
+#
+# A caller that gets rc 0 must trust stdout; anything else means "seam did
+# not answer" (including sudo's own rc 1 when the grant is missing).
 
 set -euo pipefail
+
+# LOCALE PIN — load-bearing for the validators below, not a tidiness nit.
+# bash's `[[ =~ ]]` bracket expressions use the CURRENT locale's collation, so
+# under a UTF-8 locale `[A-Za-z0-9]` matches accented letters: `alpiné` was
+# accepted here while the Python mirror rejected it — the wrapper LOOSER than
+# its mirror, the dangerous direction. This is reachable in production because
+# sudo's default `env_keep` passes LANG/LC_* straight through from the calling
+# process. Pinning to C makes every character class below mean exactly the
+# ASCII bytes it spells, in any caller's environment. Set before any validator
+# can run. (Security review of #1889, finding 1.)
+export LC_ALL=C
 
 PODMAN=/usr/bin/podman
 
 die() { echo "hal0-podman-ro: $1" >&2; exit 64; }
+
+# ── argument validators (root side of the privilege boundary) ──────────────
+#
+# Both are closed allow-lists: they say what IS accepted and reject
+# everything else, rather than trying to enumerate dangerous characters.
+
+# The slot instance token — the "<token>" in hal0-slot@<token>.service and in
+# the container name hal0-slot-<token> (see src/hal0/slots/naming.py).
+# Deliberately byte-identical to hal0-systemctl's validate_slot_id: a bounded
+# identifier charset with NO '.', '/', ':', '@' or whitespace, so a validated
+# token can never carry a path traversal, a second argv word, or an
+# option-looking token ('-x' is a legal token but is only ever concatenated
+# into hal0-slot-<token>, never passed as a bare argv word).
+SLOT_TOKEN_RE='^[A-Za-z0-9_-]{1,64}$'
+
+# An OCI image reference: [host[:port]/]path[/path...][:tag][@sha256:<hex>].
+#
+# Structure-strict, case-permissive. The security properties come from the
+# STRUCTURE — no whitespace, no shell metacharacter, no leading '-', no '..',
+# no second word, bounded length — none of which depend on letter case.
+# Podman itself rejects uppercase repository names, so folding case in here
+# would only convert a podman error into a wrapper rejection while risking a
+# false reject on a legitimate ref; a false reject is precisely the failure
+# mode #1889 is about (it degrades to image_status="missing" again).
+# The separator set is the distribution-reference grammar's, verbatim:
+#   separator := "." | "_" | "__" | "-"+
+# Getting this wrong is not a hardening nit — a legitimate ref that this
+# rejects never reaches the rootful store, so the caller degrades to the
+# rootless one and #1889 comes straight back for that image. `model__gpu` and
+# `model--gpu` are both legal repository names.
+_REF_SEP='(__|[._]|-+)'
+# A registry host is a dotted/dashed name OR a bracketed IPv6 literal
+# ([2001:db8::1]:5000/...), which the reference grammar permits and which a
+# rejection here would silently turn back into image_status="missing". The
+# bracket body is hex-and-colons only, so it still cannot carry a path,
+# whitespace, a metacharacter or a second word.
+_REF_IPV6='\[[0-9A-Fa-f:]{2,45}\]'
+_REF_HOST="([A-Za-z0-9]+(([.]|-+)[A-Za-z0-9]+)*|${_REF_IPV6})(:[0-9]{1,5})?"
+_REF_PATH="[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*(/[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*)*"
+_REF_TAG='(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?'
+_REF_DIGEST='(@sha256:[0-9a-f]{64})?'
+IMAGE_REF_RE="^(${_REF_HOST}/)?${_REF_PATH}${_REF_TAG}${_REF_DIGEST}\$"
+
+validate_slot_token() {  # arg: slot instance token
+  local token="${1-}"
+  [[ -n "$token" ]] || die "missing slot token"
+  [[ "$token" =~ $SLOT_TOKEN_RE ]] || die "bad slot token: $token"
+}
+
+validate_image_ref() {   # arg: image reference
+  local ref="${1-}"
+  [[ -n "$ref" ]] || die "missing image ref"
+  # Length cap first: a pathological input should never be handed to the
+  # regex engine, and no real ref approaches this.
+  (( ${#ref} <= 512 )) || die "image ref too long (${#ref} > 512)"
+  [[ "$ref" =~ $IMAGE_REF_RE ]] || die "bad image ref: $ref"
+}
+
+require_podman() {
+  [[ -x "$PODMAN" ]] || { echo "hal0-podman-ro: podman not found at $PODMAN" >&2; exit 65; }
+}
+
+# An operational podman failure — distinct from a negative answer. See the
+# exit-code contract in the header.
+podman_failed() { echo "hal0-podman-ro: $1 (rc=$2)" >&2; exit 66; }
+
+# Run podman read-only, tolerating a non-zero rc (a missing image/container is
+# a legitimate NEGATIVE answer, not a seam failure). Sets PODMAN_RC/PODMAN_OUT.
+# stderr is dropped: podman emits benign device warnings under LXC.
+run_podman() {
+  PODMAN_OUT=""
+  PODMAN_RC=0
+  PODMAN_OUT="$("$PODMAN" "$@" 2>/dev/null)" || PODMAN_RC=$?
+}
+
+# Read one LITERAL --format field off a hal0 slot container.
+#   $1 = the format string (a literal from the case arm below, never caller
+#        input); $2 = the container name, already assembled from a validated
+#        token on this side of the boundary.
+# Prints the value and exits 0; prints nothing and exits 0 when the container
+# does not exist; exits 66 when podman itself failed.
+container_read() {
+  local fmt="$1" name="$2"
+  run_podman container exists -- "$name"
+  case "$PODMAN_RC" in
+    0) ;;
+    1) return 0 ;;   # no such container — a real negative answer
+    *) podman_failed "podman container exists failed" "$PODMAN_RC" ;;
+  esac
+  # `container inspect`, not bare `inspect`: the bare form also resolves
+  # images, volumes, networks and pods, so a name collision could return a
+  # different object's fields entirely. Type-safety by construction, even
+  # though the name is already pinned to the hal0-slot- prefix here.
+  run_podman container inspect --format "$fmt" -- "$name"
+  (( PODMAN_RC == 0 )) || podman_failed "podman container inspect failed" "$PODMAN_RC"
+  printf '%s\n' "$PODMAN_OUT"
+}
 
 cmd="${1:-help}"; shift || true
 
@@ -29,10 +191,67 @@ case "$cmd" in
     exec "$PODMAN" images --format '{{.Repository}}'
     ;;
 
+  image-exists)            # arg: image ref -> prints "present" | "missing"
+    [[ $# -eq 1 ]] || die "image-exists takes exactly one argument"
+    validate_image_ref "$1"
+    require_podman
+    # `image exists` — NOT `image inspect`. Its contract is rc 0 = present,
+    # rc 1 = absent, anything else = operational failure, which is the only
+    # way to keep "podman is broken" from being reported as "the image is
+    # missing". `inspect` returns 125 for both.
+    run_podman image exists -- "$1"
+    case "$PODMAN_RC" in
+      0) echo present ;;
+      1) echo missing ;;
+      *) podman_failed "podman image exists failed" "$PODMAN_RC" ;;
+    esac
+    ;;
+
+  container-image)         # arg: slot token -> prints the running image ref
+    [[ $# -eq 1 ]] || die "container-image takes exactly one argument"
+    validate_slot_token "$1"
+    require_podman
+    # #663 backend-of-record: the running container's image IS the backend.
+    # The container NAME is built here from the validated token.
+    #
+    # Two podman calls in ONE sudo hop: `container exists` first, because it
+    # is the only call that can say "absent" without also meaning "podman
+    # broke", then the inspect whose failure is therefore unambiguously
+    # operational.
+    container_read '{{.ImageName}}' "hal0-slot-$1"
+    ;;
+
+  container-argv)          # arg: slot token -> prints the live command argv
+    [[ $# -eq 1 ]] || die "container-argv takes exactly one argument"
+    validate_slot_token "$1"
+    require_podman
+    container_read '{{json .Config.Cmd}}' "hal0-slot-$1"
+    ;;
+
+  check-image-ref)         # arg: image ref — side-effect-free validator probe
+    # Exists so the validation regexes can be exercised by the test suite (and
+    # by an operator debugging a rejection) without podman, without root and
+    # without a provisioned box. Never touches podman.
+    [[ $# -eq 1 ]] || die "check-image-ref takes exactly one argument"
+    validate_image_ref "$1"
+    printf '%s\n' "$1"
+    ;;
+
+  check-slot-token)        # arg: slot token — side-effect-free validator probe
+    [[ $# -eq 1 ]] || die "check-slot-token takes exactly one argument"
+    validate_slot_token "$1"
+    printf 'hal0-slot-%s\n' "$1"
+    ;;
+
   help|"")
     cat <<EOF
-usage: hal0-podman-ro <command>
-  images    podman images --format {{.Repository}}   (root's image store)
+usage: hal0-podman-ro <command> [arg]
+  images                     podman images --format {{.Repository}}   (root's image store)
+  image-exists <ref>         "present" | "missing" for a validated image ref
+  container-image <token>    running image of hal0-slot-<token>, or nothing
+  container-argv <token>     live command argv of hal0-slot-<token>, or nothing
+  check-image-ref <ref>      validate an image ref only (no podman call)
+  check-slot-token <token>   validate a slot token only (no podman call)
 EOF
     ;;
 

@@ -74,6 +74,7 @@ from hal0.errors import Hal0Error, UnprocessableEntity
 from hal0.http_client import async_client
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
+from hal0.providers import podman_introspect
 from hal0.providers._gpu import (
     gpu_visibility_env,
     is_nvidia_gpu_device,
@@ -92,7 +93,7 @@ from hal0.slots.naming import (
     slot_quadlet_name,
     slot_unit_name,
 )
-from hal0.system.seam import SystemCtlSeam
+from hal0.system.seam import SystemCtlSeam, is_hal0_service_user
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
@@ -489,6 +490,23 @@ def _container_runtime() -> str:
         if found:
             return found
     raise RuntimeError("no podman runtime found; install podman or set HAL0_CONTAINER_RUNTIME")
+
+
+def _decode_argv_json(raw: str) -> list[str] | None:
+    """Decode a podman ``{{json .Config.Cmd}}`` payload into an argv list.
+
+    Shared by :meth:`ContainerProvider.running_argv`'s two read paths (the
+    ``hal0-podman-ro`` seam and the rootless fallback) so both apply the same
+    shape check. ``None`` on anything that is not a JSON array — status
+    callers treat missing data as "unknown", never as drift.
+    """
+    try:
+        payload = json.loads(raw.strip())
+    except ValueError:
+        return None
+    if not isinstance(payload, list):
+        return None
+    return [str(part) for part in payload]
 
 
 def _slot_publish_host() -> str:
@@ -2558,12 +2576,45 @@ class ContainerProvider(Provider):
         self._run("systemctl", "reset-failed", self._unit_name(_artefact_token(slot)), check=False)
 
     def image_present(self, image: str) -> bool:
-        """Return True if ``image`` is in the local container image store.
+        """Return True if ``image`` is in the container image store slots use.
 
-        Uses ``<runtime> image inspect`` (exit 0 = present, non-zero = missing).
+        #1889: asks ROOT's store first, through the ``hal0-podman-ro``
+        ``image-exists`` seam. Slots run ROOTFUL podman (Quadlet), while
+        hal0-api runs as the unprivileged ``hal0`` user with no subuid ranges,
+        so the bare ``<runtime> image inspect`` below reads hal0's own
+        ROOTLESS store — a different store, which never contains a slot image.
+        That is why ``image_status`` was ``"missing"`` for every running,
+        healthy slot on every standard install. The seam returns ``None`` when
+        it cannot answer, and only then do we fall back to the rootless read —
+        and only when this process is NOT the hal0 service user. On a
+        provisioned box the rootless store is definitionally the wrong store,
+        so consulting it after a seam failure would collapse "podman is
+        broken / the grant is missing" (wrapper rc 66 / sudo rc 1) back into
+        an authoritative-looking "missing", which is #1889 with extra steps.
+        We log instead, so an operator gets a diagnosable signal.
+
+        (The seam-failed-as-hal0 case still has to answer ``False`` because
+        this method's contract is a bool and ``image_status`` has no
+        "unknown" member. Surfacing a distinct unknown state is an API-schema
+        change, deliberately out of scope here — see the PR notes.)
+
+        In a dev checkout, where hal0-api runs as the operator, the rootless
+        store IS the store slots use, so the fallback is correct there.
+
         Runs synchronously — callers must dispatch to a thread executor when
         called from an async context.
         """
+        seam_answer = podman_introspect.image_exists(image)
+        if seam_answer is not None:
+            return seam_answer
+        if is_hal0_service_user():
+            log.warning(
+                "hal0.podman_ro.image_present_unanswered image=%s — the rootful seam "
+                "did not answer (grant missing, podman failure, or rejected ref); "
+                "reporting missing without consulting the unrelated rootless store",
+                image,
+            )
+            return False
         try:
             runtime = _container_runtime()
         except RuntimeError:
@@ -2588,12 +2639,30 @@ class ContainerProvider(Provider):
         when the container is not running or inspect fails. Reads stdout only —
         podman emits benign device warnings to stderr under LXC. Never raises;
         callers dispatch to a thread executor from the async status path.
+
+        #1889: routed through the ``hal0-podman-ro`` ``container-image`` seam
+        first, for the same reason as :meth:`image_present` — the slot's
+        container lives in ROOT's podman store, so hal0-api's own rootless
+        inspect never found it and ``actual_image`` was always ``null``. The
+        seam takes the bare instance TOKEN and builds ``hal0-slot-<token>``
+        root-side; the rootless path below is the dev/CI fallback.
         """
+        token = _artefact_token(slot)
+        seam_ref = podman_introspect.container_image(token)
+        if seam_ref:
+            return seam_ref
+        if is_hal0_service_user():
+            # Same reasoning as image_present: on a provisioned box the
+            # rootless store cannot hold this container, so asking it is a
+            # wasted spawn in the status hot path that can only ever answer
+            # None — or, worse, answer about a same-named container that is
+            # not this slot's.
+            return None
         try:
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = slot_container_name(_artefact_token(slot))
+        container_name = slot_container_name(token)
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{.ImageName}}"],
@@ -2617,12 +2686,23 @@ class ContainerProvider(Provider):
         as :meth:`running_image` (#1417). Returns None when the container is
         not running, inspect fails, or the runtime returns an unexpected shape.
         Never raises; status callers treat missing data as "unknown", not drift.
+
+        #1889: routed through the ``hal0-podman-ro`` ``container-argv`` seam
+        first, same rationale as :meth:`running_image`.
         """
+        token = _artefact_token(slot)
+        seam_json = podman_introspect.container_argv(token)
+        if seam_json is not None:
+            parsed = _decode_argv_json(seam_json)
+            if parsed is not None:
+                return parsed
+        if is_hal0_service_user():
+            return None
         try:
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = slot_container_name(_artefact_token(slot))
+        container_name = slot_container_name(token)
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{json .Config.Cmd}}"],
@@ -2635,13 +2715,7 @@ class ContainerProvider(Provider):
             return None
         if result.returncode != 0:
             return None
-        try:
-            payload = json.loads(result.stdout.strip())
-        except ValueError:
-            return None
-        if not isinstance(payload, list):
-            return None
-        return [str(part) for part in payload]
+        return _decode_argv_json(result.stdout)
 
     async def pull_image_stream(self, image: str):
         """Async generator that runs ``<runtime> pull <image>`` and yields
@@ -2882,16 +2956,115 @@ __all__ = [
 ]
 
 
+def _split_image_tag(name: str) -> tuple[str, str]:
+    """Split ``repo[:tag]`` on the tag colon only.
+
+    A registry port (``localhost:5000/foo``) puts a colon BEFORE the last
+    ``/``; a naive ``split(":")`` would amputate the host and silently compare
+    two different repositories as equal.
+    """
+    last_slash = name.rfind("/")
+    last_colon = name.rfind(":")
+    if last_colon > last_slash:
+        return name[:last_colon], name[last_colon + 1 :]
+    return name, ""
+
+
+def canonical_image_ref(ref: str) -> str:
+    """Expand an image ref to its fully-qualified form for comparison (#1889).
+
+    Podman reports a container's ``ImageName`` in canonical form —
+    ``docker.io/library/alpine:latest`` — while hal0 profiles routinely
+    declare the shorthand an operator would type (``alpine``,
+    ``alpine:latest``, ``myorg/img``). Before #1889 that never mattered:
+    :meth:`ContainerProvider.running_image` read the wrong podman store and
+    returned ``None`` on every deployed box, so :func:`_image_mismatch` was
+    unreachable. Making it reachable without this normalisation would have
+    turned a literal string compare into a drift alarm on every correctly
+    running slot — trading an inert detector for a lying one.
+
+    Applies exactly the two implicit rules the OCI/distribution reference
+    grammar defines, and nothing else:
+
+      * a name with no registry component gets ``docker.io/``. A first
+        component is a registry only if it contains ``.`` or ``:``, or is
+        literally ``localhost`` — the standard heuristic;
+      * a Docker Hub name whose repository is a single component gets the
+        implicit ``library/`` namespace. This is applied AFTER the registry
+        rule so it also catches an explicitly-qualified ``docker.io/alpine``,
+        which podman likewise reports as ``docker.io/library/alpine``;
+      * a name with neither tag nor digest gets ``:latest``.
+
+    Never raises and never invents: anything it cannot parse is returned
+    stripped but otherwise untouched.
+    """
+    ref = ref.strip()
+    if not ref:
+        return ""
+
+    name, sep, digest = ref.partition("@")
+    digest = f"@{digest}" if sep else ""
+
+    name, tag = _split_image_tag(name)
+
+    first, slash, _rest = name.partition("/")
+    has_registry = bool(slash) and ("." in first or ":" in first or first == "localhost")
+    if not has_registry:
+        name = f"docker.io/{name}"
+
+    # Docker Hub's implicit `library/` namespace, applied to the repository
+    # portion regardless of how the registry got there — `alpine`,
+    # `docker.io/alpine` and `docker.io/library/alpine` all name one image,
+    # and podman reports the last form.
+    registry, _, repository = name.partition("/")
+    if registry == "docker.io" and "/" not in repository:
+        name = f"docker.io/library/{repository}"
+
+    if not tag and not digest:
+        tag = "latest"
+
+    return f"{name}{f':{tag}' if tag else ''}{digest}"
+
+
 def _image_mismatch(running_image: str | None, declared_image: str | None) -> bool:
     """Return True iff both image refs are known AND differ (#663).
 
     The deterministic replacement for the /proc ``actual_backend`` sniff on
-    container slots: the running backend IS the image tag, so drift is a plain
-    ref comparison (the running container's image vs the slot profile's
-    declared image). Returns False whenever the running image can't be
-    determined (container down / inspect failed) - never cry wolf on missing
-    data, same omit-don't-guess contract as ``resolve_actual_backend``.
+    container slots: the running backend IS the image tag, so drift is a ref
+    comparison (the running container's image vs the slot profile's declared
+    image). Returns False whenever the running image can't be determined
+    (container down / inspect failed) - never cry wolf on missing data, same
+    omit-don't-guess contract as ``resolve_actual_backend``.
+
+    Both sides are canonicalised first (:func:`canonical_image_ref`) so the
+    shorthand a profile declares compares equal to the fully-qualified name
+    podman reports — see that function for why #1889 makes this load-bearing.
+
+    Digests decide identity whenever both sides carry one: a digest IS the
+    immutable image id, so ``ghcr.io/x/y:v1@sha256:D`` and
+    ``ghcr.io/x/y@sha256:D`` are the same image and the tag text is noise.
+    When only ONE side is digest-pinned the comparison falls back to the
+    REPOSITORY alone — deciding whether ``ghcr.io/x/y:v2`` and
+    ``ghcr.io/x/y@sha256:…`` match needs a registry round-trip this hot path
+    will never make, and guessing "drifted" there is the same cry-wolf
+    failure the docstring above forbids.
     """
     if not running_image or not declared_image:
         return False
-    return running_image.strip() != declared_image.strip()
+
+    running = canonical_image_ref(running_image)
+    declared = canonical_image_ref(declared_image)
+    if running == declared:
+        return False
+
+    running_repo, _, running_digest = running.partition("@")
+    declared_repo, _, declared_digest = declared.partition("@")
+    running_name = _split_image_tag(running_repo)[0]
+    declared_name = _split_image_tag(declared_repo)[0]
+
+    if running_digest and declared_digest:
+        return running_name != declared_name or running_digest != declared_digest
+    if running_digest or declared_digest:
+        return running_name != declared_name
+
+    return True

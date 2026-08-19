@@ -1339,6 +1339,14 @@ _hal0_seam_probe() {
     case "$1" in
         hal0-systemctl) printf 'help\n' ;;
         hal0-update)    printf 'check\n' ;;
+        # #1889: podman-ro is now the only source of truth for a running
+        # slot's image_status/actual_image, so a silently-missing grant stops
+        # being cosmetic. NOT `help` — the pre-#1889 wrapper implements that
+        # too, so a failed wrapper refresh would probe green while every new
+        # verb was rejected. `check-slot-token` is release-specific and
+        # side-effect-free (validates, prints the name it would build, never
+        # calls podman). Keep in lock-step with src/hal0/system/seam_check.py.
+        hal0-podman-ro) printf 'check-slot-token hal0probe\n' ;;
         *)              return 1 ;;
     esac
 }
@@ -1378,11 +1386,17 @@ _preflight_seam() {
 
     local probe
     if probe="$(_hal0_seam_probe "${name}")" && (( rc == 0 )); then
+        # Probes are hardcoded above, never caller input, so splitting the
+        # line into argv words is safe — and #1889 needs a probe that takes an
+        # argument (a verb-only probe cannot tell a stale wrapper from a
+        # current one).
+        local -a probe_argv=()
+        read -r -a probe_argv <<< "${probe}"
         # The grant is written for the hal0 user, so the only honest test runs
         # AS that user. -n keeps it non-interactive: a missing grant fails
         # immediately instead of prompting.
-        if ! sudo -n -u hal0 sudo -n "${bin}" "${probe}" >/dev/null 2>&1; then
-            "${report}" "seam ${name}: 'sudo -n ${name} ${probe}' failed as the hal0 user — the ${grant} grant does not apply"
+        if ! sudo -n -u hal0 sudo -n "${bin}" "${probe_argv[@]}" >/dev/null 2>&1; then
+            "${report}" "seam ${name}: 'sudo -n ${name} ${probe}' failed as the hal0 user — the ${grant} grant does not apply, or the wrapper is stale"
             rc=1
         fi
     fi
