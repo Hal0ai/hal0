@@ -72,6 +72,53 @@ from hal0.config import paths
 log = logging.getLogger(__name__)
 
 
+# ── umask-proof directory creation (#1896) ────────────────────────────────────
+
+#: The mode every SHARED hal0 state directory is declared at below: setgid so
+#: children inherit the ``hal0`` group, group-writable so any hal0-group member
+#: (the daemon, a root-run CLI, the wrapper seams) can write the same tree.
+SHARED_DIR_MODE = 0o2775
+
+
+def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
+    """``mkdir -p`` whose result the process umask cannot narrow (#1896).
+
+    ``Path.mkdir(mode=...)`` masks its mode with the umask, and the setgid bit
+    a parent passes down only carries GROUP OWNERSHIP, not the group-write bit.
+    So a daemon under the shipped ``UMask=0022`` births ``2755`` everywhere the
+    table declares ``2775`` — drift that regenerates after every ``--fix``,
+    once per slot loaded and once per model pulled. Creating the dir and then
+    ``chmod``-ing it is the only way to land the declared mode.
+
+    Only the components THIS call creates are chmod'ed. A dir that already
+    exists is left exactly as it is, so a lazy ``mkdir(parents=True)`` passing
+    through a deliberately tighter parent (``secrets/`` 0700, ``agents/`` 0711)
+    can never widen it.
+
+    Fail-soft on ``chmod``, like :func:`hal0.config.store.finalize_perms`: an
+    operator's model store may live on an NFS export that refuses the call, and
+    a permissions nice-to-have must never break a pull or a slot load.
+    """
+    path = Path(path)
+    # Deepest-first list of the components that do NOT exist yet.
+    missing: list[Path] = []
+    probe = path
+    while not probe.exists():
+        missing.append(probe)
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+
+    path.mkdir(parents=True, exist_ok=True)
+
+    for created in reversed(missing):
+        try:
+            os.chmod(created, mode)
+        except OSError as exc:  # pragma: no cover - exercised via monkeypatch
+            log.debug("perms.ensure_shared_dir_chmod_failed path=%s error=%s", created, exc)
+    return path
+
+
 # ── the declarative table ─────────────────────────────────────────────────────
 
 
@@ -556,16 +603,30 @@ def ownership_table(
         # secrets/ stays root:root even under the flip: systemd reads the
         # EnvironmentFile here AS ROOT before dropping to the service user, so it
         # must not be service-writable (hardened-model decision).
-        PermRow(var_lib / "secrets", "root", "root", 0o755, role="secrets/"),
+        #
+        # 0700, NOT 0755 (#1896). The table used to declare 0755 while the
+        # shipped `hal0-agentenv` seam ran `install -d -m 0700` on the same two
+        # dirs on every merge-secrets — two shipped components asserting
+        # different truths, so the mode oscillated and `doctor perms` could
+        # never be durably green. Reconciled toward the RESTRICTIVE side
+        # because nothing outside root has business here: systemd reads the
+        # EnvironmentFile as root, the agentenv seam runs as root via
+        # /etc/sudoers.d, and every *.env inside is already 0600 root:root, so
+        # 0700 costs no reader any access it actually had. What it removes is
+        # agent-id ENUMERATION by any local user — small, but free (ADR-0002,
+        # agent credential isolation). See known-issues.yaml
+        # `doctor-perms-secrets-dir-0755-is-declared`, now superseded.
+        PermRow(var_lib / "secrets", "root", "root", 0o700, role="secrets/"),
         # secrets/agents/ — per-agent secret .env files (written by the
         # hal0-agentenv seam, never by the service directly). Pinned root:root
-        # like secrets/ itself; the dir mode is 0755 (traverse + list), the
-        # per-agent .env files are 0600 (owner-read-only tokens).
+        # like secrets/ itself; the dir mode is 0700 (root-only traverse+list,
+        # matching the seam — see above), the per-agent .env files are 0600
+        # (owner-read-only tokens), unchanged by the tightening.
         PermRow(
             var_lib / "secrets" / "agents",
             "root",
             "root",
-            0o755,
+            0o700,
             glob="*.env",
             child_mode=0o600,
             role="secrets/agents/ (+ <id>.env)",
@@ -930,12 +991,14 @@ def audit_rows(plan_: OwnershipPlan) -> list[dict[str, str]]:
 
 
 __all__ = [
+    "SHARED_DIR_MODE",
     "OwnershipPlan",
     "PermDiff",
     "PermObservation",
     "PermRow",
     "audit_rows",
     "commit",
+    "ensure_shared_dir",
     "observe",
     "ownership_table",
     "plan",

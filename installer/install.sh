@@ -1233,7 +1233,7 @@ if [[ -n "${HF_TOKEN_VAL}" ]]; then
     # an explicit rotate signal); with no token set, any existing file here is
     # left untouched — never deleted just because the env var was omitted on
     # a later run.
-    mkdir -p "${SECRETS_DIR}"
+    install -d -m 0700 -o root -g root "${SECRETS_DIR}"  # 0700: see #1896
     HF_SECRETS_TMP="$(mktemp "${HF_SECRETS_ENV}.XXXXXX")"
     cat > "${HF_SECRETS_TMP}" <<EOF
 # HuggingFace token for gated / large model pulls — gathered at install time
@@ -2706,7 +2706,14 @@ else
     # whole /etc/hal0 + /var/lib/hal0 tree to an unprivileged service user so a
     # dropped hal0-api could rewrite config — was removed. hal0-api runs as root,
     # so it writes config/state, applies updates, and restarts services directly.
-    mkdir -p "${ETC_DIR}/agents" "${VAR_DIR}/secrets/agents"
+    mkdir -p "${ETC_DIR}/agents"
+    # secrets/ + secrets/agents are born 0700 root:root, matching BOTH the
+    # ownership table (hal0.install.perms) and the hal0-agentenv seam's
+    # `install -d -m 0700`. A plain `mkdir -p` here births them 0755 under the
+    # installer's umask, which the `doctor perms --fix` backstop then had to
+    # tighten on every run — cosmetic drift the audit reported as a defect
+    # (#1896). Explicit mode = born correct, nothing to reconcile.
+    install -d -m 0700 -o root -g root "${VAR_DIR}/secrets" "${VAR_DIR}/secrets/agents"
 
 fi
 

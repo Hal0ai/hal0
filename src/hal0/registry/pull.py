@@ -39,6 +39,7 @@ from hal0.config import paths, store
 from hal0.db import repository
 from hal0.db.connection import connect, tx
 from hal0.errors import Hal0Error
+from hal0.install.perms import ensure_shared_dir
 from hal0.registry.fileset import FileSetEntry, FileSetPlan
 from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
 from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
@@ -448,7 +449,9 @@ def persist_pull_job(job: PullJob) -> None:
     """
     path = pull_job_file(job.model_id)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # model-pull-jobs/ is declared 2775; a bare mkdir under the daemon's
+        # UMask=0022 births 2755 and re-drifts the audit after every pull (#1896).
+        ensure_shared_dir(path.parent)
         fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         tmp_path: Path | None = Path(tmp_str)
         try:
@@ -722,7 +725,7 @@ async def _download_one(
     headers = dict(base_headers)
 
     tmp_dir = _tmp_dir()
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    ensure_shared_dir(tmp_dir)  # 2775, umask-proof (#1896)
     # Deterministic staging name (MR-7) so a prior interrupted pull can be
     # found and resumed. The JSON sidecar next to it records the resume
     # coordinates (url, etag, bytes-on-disk, total). TRADEOFF: this is not
@@ -909,7 +912,7 @@ async def _download_one(
             )
 
         # Atomic install.
-        final.parent.mkdir(parents=True, exist_ok=True)
+        ensure_shared_dir(final.parent)  # 2775, umask-proof (#1896)
         os.replace(part, final)
         _discard_partial(part, sidecar)  # part is renamed away; drop the sidecar
         size_bytes = final.stat().st_size
@@ -1442,7 +1445,7 @@ def _maybe_hardlink_from_blob(sha256: str, dest: Path) -> bool:
         try:
             if not blob_path.is_file():
                 return False
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            ensure_shared_dir(dest.parent)  # 2775, umask-proof (#1896)
             if os.stat(blob_path).st_dev != os.stat(dest.parent).st_dev:
                 # Cross-filesystem — hardlinks are impossible; degrade to a
                 # normal download rather than fail the pull (plan risk:

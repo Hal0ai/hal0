@@ -810,25 +810,26 @@ known_issues:
     review_at: v1.1.0
 
   - id: doctor-perms-secrets-dir-0755-is-declared
-    status: by-design      # partial — covers ONLY the mode value, not the non-convergence
+    status: fixed          # #1896, v1.0.0-rc.7 — the 0755 declaration is gone
     adjudicated: v1.0.0-rc.6
     summary: >-
       `hal0 doctor perms --fix` widens /var/lib/hal0/secrets and secrets/agents from 0700 to
       0755.
     why: >-
-      0755 IS the P3-perms table's declared want (perms.py:496-514): the directory needs
-      traverse+list only, secrecy is enforced one level down by child_mode=0o600 on the *.env
-      glob, and systemd reads the EnvironmentFile as root before dropping privilege. Widening
-      the DIRECTORY exposes agent-id enumeration, not credential content; 0755 is already the
-      live posture on production and ct150. Do not re-file as "doctor --fix leaks secrets". Also
-      never assert a drift ROW COUNT — the set grows with every slot loaded / model pulled. The
-      real unadjudicated defect is that perms.py (0755) and hal0-agentenv (`install -d -m 0700`)
-      DISAGREE, so the mode oscillates — that is regression `doctor-perms-never-converges`.
+      RESOLVED, not by-design any more. The rc.6 adjudication was correct that the widening was
+      not a credential leak (*.env stays 0600 root:root either way), but the underlying defect it
+      named — perms.py (0755) and hal0-agentenv (`install -d -m 0700`) DISAGREEING, so the mode
+      oscillates forever — was fixed in #1896 by moving the TABLE to the restrictive side: both
+      secrets rows now declare 0700, install.sh births them 0700, and the agentenv seam is
+      unchanged. Nothing outside root ever traversed the tree (systemd reads the EnvironmentFile
+      as root; the seam runs as root via /etc/sudoers.d), so 0700 costs no reader any access and
+      removes local agent-id enumeration. Still never assert a drift ROW COUNT — the set grows
+      with every slot loaded / model pulled.
     still_report_if: >-
-      A file under /var/lib/hal0/secrets/ is observed at a mode other than 0600, or owned by
-      anything but root:root, after `doctor perms --fix`; OR secrets/hal0-api.env is not covered
-      by a PermRow and lands group/world-readable; OR a caller other than the agentenv seam
-      tightens the directory.
+      /var/lib/hal0/secrets or secrets/agents is observed at any mode other than 0700 after
+      `doctor perms --fix`; OR a file under secrets/ is observed at a mode other than 0600, or
+      owned by anything but root:root; OR secrets/hal0-api.env is not covered by a PermRow and
+      lands group/world-readable.
     review_at: v1.1.0
 
   - id: pull-job-persist-fail-soft-scope
