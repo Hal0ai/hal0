@@ -32,7 +32,7 @@ import pytest
 
 from hal0.slots import output_sanity
 from hal0.slots.manager import SlotManager
-from hal0.slots.state import SlotOutputSanityFailed, SlotState
+from hal0.slots.state import SlotOutputSanityFailed, SlotState, SlotTerminateTimeout
 from tests.slots.conftest import FakeContainerProvider
 
 # A responder maps (path, request_body) → (status, json_body), or None to
@@ -140,6 +140,30 @@ def _completion(text: str, *, chat_text: str | None = None) -> Responder:
         if path == "/v1/chat/completions":
             answer = text if chat_text is None else chat_text
             return 200, {"choices": [{"message": {"content": answer}}]}
+        return 404, {"error": f"no route {path}"}
+
+    return _respond
+
+
+def _thinking_model(raw_text: str, *, reasoning: str, content: str = "") -> Responder:
+    """A reasoning model: the chat turn answers in ``reasoning_content``.
+
+    Qwen3-class models emit a ``<think>`` block before any visible content;
+    llama-server (and every OpenAI-compatible runner that splits reasoning
+    out) reports it as ``message.reasoning_content`` with ``content`` empty
+    until the block closes. ``raw_text`` is what the same model says on the
+    raw ``/completion`` endpoint — wrong, which is what sends the probe to the
+    chat fallback in the first place.
+    """
+
+    def _respond(path: str, body: dict[str, Any]) -> tuple[int, Any]:
+        if path == "/completion":
+            return 200, {"content": raw_text, "stop": True}
+        if path == "/v1/chat/completions":
+            return (
+                200,
+                {"choices": [{"message": {"content": content, "reasoning_content": reasoning}}]},
+            )
         return 404, {"error": f"no route {path}"}
 
     return _respond
@@ -305,6 +329,120 @@ async def test_probe_falls_back_to_chat_when_only_completion_is_absent(
     assert verdict.status == "ok_via_chat"
 
 
+async def test_probe_accepts_a_thinking_model_answering_in_reasoning_content(
+    slot_server: FakeSlotServer,
+) -> None:
+    """A working reasoning model must not be failed for thinking out loud.
+
+    The chat fallback exists to serve exactly the template-dependent model
+    that wanders on a raw prompt — and a Qwen3-class model spends its budget
+    inside ``reasoning_content`` before emitting any ``content`` at all. Read
+    only ``content`` and this healthy slot is stamped ERROR and its unit
+    stopped: a false FAIL, which is worse than the bug the gate guards
+    (``hermes_provision._smoke_chat_completion`` documents the same trap).
+    """
+    await slot_server.start(
+        _thinking_model(
+            "<|im_start|>assistant",
+            reasoning="Okay, the user is asking about France. Its capital is Paris.",
+        )
+    )
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is True
+    assert verdict.status == "ok_via_chat"
+
+
+async def test_probe_fails_a_thinking_model_that_reasons_in_garbage(
+    slot_server: FakeSlotServer,
+) -> None:
+    """Reading ``reasoning_content`` must not blunt the gate.
+
+    The rc.6 garbage was garbage in every field the runner emits; a backend
+    that mis-computes cannot produce the expected token in its reasoning
+    either. If this ever passes, the fix for the thinking-model false-fail has
+    turned the gate into a no-op.
+    """
+    await slot_server.start(_thinking_model(")))))))))", reasoning=")))))))))))))))))"))
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is False
+
+
+async def test_probe_reads_a_think_block_left_inline_in_content(
+    slot_server: FakeSlotServer,
+) -> None:
+    """Older/non-splitting runners leave the reasoning inside ``content``.
+
+    ``reasoning_content`` is a convention, not a guarantee: llama.cpp builds
+    (and ``--jinja``-less slots) hand back the raw ``<think>…</think>`` text in
+    ``content``. Both shapes have to read as language, or the gate's verdict
+    depends on the runner build rather than on the model.
+    """
+    await slot_server.start(
+        _completion(
+            "<|im_start|>",
+            chat_text="<think>The user wants the capital of France. That is Paris.</think>",
+        )
+    )
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is True
+
+
+async def test_chat_fallback_asks_for_more_tokens_than_the_raw_probe(
+    slot_server: FakeSlotServer,
+) -> None:
+    """A dozen tokens is a raw-completion budget, not a chat one.
+
+    A reasoning model drains a 12-token cap entirely into its ``<think>``
+    block and returns empty ``content`` — the fallback then judges a working
+    model on an answer it was never given room to write.
+    """
+    await slot_server.start(_completion("<|im_start|>", chat_text="Paris"))
+
+    await _probe(slot_server.port, timeout_s=5.0)
+
+    chat_path, chat_body = slot_server.seen[1]
+    assert chat_path == "/v1/chat/completions"
+    assert chat_body["max_tokens"] == output_sanity.SANITY_CHAT_MAX_TOKENS
+    assert chat_body["max_tokens"] > output_sanity.SANITY_N_PREDICT
+    assert chat_body["temperature"] == 0
+
+
+async def test_chat_fallback_gets_its_own_wider_wall_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """More tokens need more seconds, or the budget raise is a new false FAIL.
+
+    Charging a 256-token chat turn against the raw probe's tight bound would
+    just move the false failure from ``empty_output`` to ``probe_timeout`` on
+    any slot that generates slowly (the CPU lane).
+    """
+    seen: list[tuple[str, float]] = []
+
+    async def _fake_post(
+        port: int, path: str, body: dict[str, Any], budget: float
+    ) -> output_sanity.SanityVerdict:
+        seen.append((path, budget))
+        if path == "/completion":
+            return output_sanity.SanityVerdict(ok=False, status="empty_output")
+        return output_sanity.SanityVerdict(ok=True, status="ok", sample="Paris")
+
+    monkeypatch.setattr(output_sanity, "_post", _fake_post)
+
+    await _probe(8080)
+
+    assert seen == [
+        ("/completion", output_sanity.OUTPUT_SANITY_TIMEOUT_S),
+        ("/v1/chat/completions", output_sanity.OUTPUT_SANITY_CHAT_TIMEOUT_S),
+    ]
+    assert output_sanity.OUTPUT_SANITY_CHAT_TIMEOUT_S > output_sanity.OUTPUT_SANITY_TIMEOUT_S
+
+
 async def test_probe_reads_openai_shaped_bodies(slot_server: FakeSlotServer) -> None:
     """A runner that answers /completion with an OpenAI envelope still parses."""
 
@@ -401,6 +539,21 @@ def test_gate_honours_the_per_slot_opt_out() -> None:
     assert output_sanity.skip_reason(nested) == "disabled_by_slot_config"
 
 
+def test_the_per_slot_opt_out_is_writable_through_the_api() -> None:
+    """The advertised escape hatch has to survive the write boundary.
+
+    ``failure_message`` tells the operator to set ``output_sanity = false`` in
+    the slot TOML — but ``POST /api/slots`` and ``PUT /api/slots/{name}/config``
+    reject any key that is neither a ``SlotConfig`` field nor tolerated, so
+    without registration the only way to take the hatch was a hand edit on the
+    box (Codex P2 on this PR).
+    """
+    from hal0.slot_config import unknown_slot_config_keys
+
+    assert unknown_slot_config_keys({output_sanity.SANITY_CFG_KEY: False}) == []
+    assert unknown_slot_config_keys({"slot": {output_sanity.SANITY_CFG_KEY: False}}) == []
+
+
 # ── the gate inside the load path ───────────────────────────────────────────
 
 
@@ -450,6 +603,113 @@ async def test_failed_gate_survives_the_next_status_poll(
 
     assert slot.state is SlotState.ERROR
     assert "Paris" in str(slot.metadata.get("message") or "")
+
+
+async def test_failed_gate_survives_a_teardown_that_does_not_return(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """The verdict must not depend on a stop that can fail (#1224).
+
+    ``terminate()`` raises ``SlotTerminateTimeout`` when ``systemctl stop``
+    does not return inside its bound — documented, observed, and exactly what
+    a wedged podman container does. If stopping the unit is the only thing
+    keeping the gate's verdict, that failure hands the garbage slot straight
+    back to the inverse-drift adopter: unit ACTIVE + record ERROR is precisely
+    the shape it re-publishes as READY.
+    """
+    container_stub.sanity_output = ")))))))"
+    container_stub.fail_unload = SlotTerminateTimeout("stopping slot 'chat' did not return")
+    sm = SlotManager()
+
+    with pytest.raises(SlotOutputSanityFailed):
+        await sm.load("chat")
+
+    # The unit really is still up — this is the durability question, not a
+    # test of the teardown.
+    assert "chat" in container_stub.active
+
+    slot = await sm.status("chat")
+
+    assert slot.state is SlotState.ERROR
+    # ``adopted`` is the flag ``_maybe_adopt_running_slot`` stamps on the way
+    # to READY — its absence is the proof the adopter stood down.
+    assert slot.metadata.get("adopted") is not True
+    assert "Paris" in str(slot.metadata.get("message") or "")
+
+
+async def test_failed_gate_is_not_adopted_by_a_later_api_process(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """The refusal has to live on disk, not in the manager that stamped it.
+
+    A gate failure whose only memory is in-process is undone by the next
+    ``systemctl restart hal0-api``: boot-time upstream reconcile finds an
+    active unit with an ERROR record and adopts it. Same hole as the status
+    poll, one restart later — and it is the pre-upgrade-unit gap too.
+    """
+    container_stub.sanity_output = ")))))))"
+    container_stub.fail_unload = SlotTerminateTimeout("stopping slot 'chat' did not return")
+    with pytest.raises(SlotOutputSanityFailed):
+        await SlotManager().load("chat")
+
+    # A brand-new manager: nothing in memory, state.json and a live unit on
+    # disk — the api-restart shape.
+    fresh = SlotManager()
+
+    slot = await fresh.status("chat")
+
+    assert slot.state is SlotState.ERROR
+    cfg = await fresh._maybe_load_config("chat")
+    assert cfg is not None
+    assert await fresh._maybe_adopt_running_slot("chat", cfg) is None
+
+
+async def test_failed_teardown_is_recorded_not_swallowed(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """ "Stop failed" must be visible, because the unit is still burning VRAM.
+
+    Suppressing the teardown error left an operator with a red slot, an
+    active unit and no hint that the two were related.
+    """
+    container_stub.sanity_output = ")))))))"
+    container_stub.fail_unload = SlotTerminateTimeout("stopping slot 'chat' did not return")
+    sm = SlotManager()
+
+    with pytest.raises(SlotOutputSanityFailed):
+        await sm.load("chat")
+
+    record = sm._states[sm._key("chat")]
+    assert record.extra.get("output_sanity_failed") is True
+    assert record.extra.get("output_sanity_unit_stopped") is False
+    assert "still active" in record.message
+
+
+async def test_a_passing_gate_clears_the_refusal(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """The marker is a verdict, not a tombstone.
+
+    Once a load proves the model produces language, adoption must work again —
+    otherwise a fixed box needs a hand-edited state.json. ``restart`` is the
+    operator's verb here: it clears the crash-loop breaker the failed load
+    armed, and re-enters the same lifecycle (and the same gate).
+    """
+    container_stub.sanity_output = ")))))))"
+    sm = SlotManager()
+    with pytest.raises(SlotOutputSanityFailed):
+        await sm.load("chat")
+
+    container_stub.sanity_output = " Paris."
+    slot = await sm.restart("chat")
+
+    assert slot.state is SlotState.READY
+    record = sm._states[sm._key("chat")]
+    assert "output_sanity_failed" not in record.extra
 
 
 async def test_load_reaches_ready_when_the_slot_answers(

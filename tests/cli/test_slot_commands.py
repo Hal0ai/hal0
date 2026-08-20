@@ -180,14 +180,62 @@ def test_restart_budget_charges_both_lock_acquisitions() -> None:
     """
     from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
-    from hal0.providers.container import _HEALTH_TIMEOUT_S  # isort: skip
     from hal0.slots.manager import SlotManager  # isort: skip
 
     terminate = float(SlotManager._terminate_timeout_s)
-    load_phase = float(_HEALTH_TIMEOUT_S) + _MIN_EVICTION_UNLOADS * terminate
+    load_phase = _server_load_lock_hold_s()
     # Two lock waits (each capped by a full load) plus the verb's own work.
     floor = 2 * load_phase + terminate + load_phase
     assert slot_lifecycle_timeout_s(loads=1, unloads=1) >= floor
+
+
+def _server_load_lock_hold_s() -> float:
+    """Worst wall-clock a single ``load`` can hold the slot lock, server-side.
+
+    Summed from the server modules that actually spend it, not from
+    ``slot_lifecycle_budget``'s own composite — the point is that a phase
+    added to ``load`` without a matching budget edit fails here.
+    """
+    from hal0.providers.container import _HEALTH_TIMEOUT_S
+    from hal0.slot_lifecycle_budget import (
+        OUTPUT_SANITY_CHAT_TIMEOUT_S,
+        OUTPUT_SANITY_TIMEOUT_S,
+    )
+    from hal0.slots.manager import SlotManager
+
+    terminate = float(SlotManager._terminate_timeout_s)
+    return (
+        # Pre-spawn teardown: the drifted re-converge / ERROR-retry / stale
+        # in-flight branches all terminate in place before re-spawning.
+        terminate
+        # preload_evict.admit unloads candidates in series, inside the lock.
+        + _MIN_EVICTION_UNLOADS * terminate
+        # The post-spawn /health poll.
+        + float(_HEALTH_TIMEOUT_S)
+        # The output-sanity gate (#1922): raw probe, then the chat fallback.
+        + float(OUTPUT_SANITY_TIMEOUT_S)
+        + float(OUTPUT_SANITY_CHAT_TIMEOUT_S)
+        # A failed gate stops the unit before the ERROR stamp, still in-lock.
+        + terminate
+    )
+
+
+def test_load_budget_covers_a_contended_load_that_fails_the_gate() -> None:
+    """One contender in front of you, both loads failing the gate (#1922).
+
+    ``POST /api/slots/{name}/load`` charges one lock wait plus its own work,
+    and both are now wider than they were: the output-sanity gate runs inside
+    the lock and its failure path stops the unit before stamping ERROR. If the
+    lock allowance is not recomputed when a phase is added to ``load``, the
+    CLI/MCP client reports a timeout on a load the server is still converging
+    — the #1832 shape, re-introduced from the inside.
+    """
+    from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
+
+    floor = 2 * _server_load_lock_hold_s()
+    assert slot_lifecycle_timeout_s(loads=1, unloads=0) >= floor, (
+        "the load budget no longer covers one queued load plus your own"
+    )
 
 
 def test_slot_logs_one_shot_prints_hint_when_logs_empty(

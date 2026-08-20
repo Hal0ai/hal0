@@ -31,6 +31,12 @@ DESIGN RULES (learned from the FLM gate and from #1888)
 * **A timeout is a FAIL.**  A runner that cannot emit 12 greedy tokens inside
   :data:`OUTPUT_SANITY_TIMEOUT_S` is not ready, and "inconclusive → pass" is
   exactly the lie this gate exists to stop.
+* **Never false-fail a working model.**  The gate stops a unit, so a wrong
+  FAIL is worse than the bug it guards.  Concretely, that means judging the
+  whole of what the model emitted (a reasoning model answers in
+  ``reasoning_content``, or inside a ``<think>`` block left in ``content``,
+  depending on the runner build) and giving the chat fallback a token budget
+  and a wall clock big enough to reach the visible answer.
 * **Scoped to chat-capable slots.**  ``type="llm"`` is the capability signal
   (``hal0.model_meta.modality.slot_type_for`` derives the slot type from the
   model's declared modalities), so an embedding / rerank / TTS / STT / image
@@ -48,7 +54,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from hal0.slot_lifecycle_budget import OUTPUT_SANITY_TIMEOUT_S
+from hal0.slot_lifecycle_budget import OUTPUT_SANITY_CHAT_TIMEOUT_S, OUTPUT_SANITY_TIMEOUT_S
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +66,29 @@ SANITY_PROMPT = "The capital of France is"
 
 #: Greedy decode, a dozen tokens.  Enough for the answer to appear after a
 #: leading space/newline or a short restatement, cheap enough to be invisible
-#: in the slot lifecycle budget.
+#: in the slot lifecycle budget.  Applies to the RAW ``/completion`` probe
+#: only: with no chat template in play there is no reasoning block to drain
+#: the budget, so the answer is the first thing the model writes.
 SANITY_N_PREDICT = 12
+
+#: Token budget for the CHAT fallback, where a dozen tokens is a trap.  A
+#: thinking model (Qwen3 and every fine-tune of it) opens its turn with a
+#: ``<think>`` block and emits no visible ``content`` until it closes: a
+#: 12-token cap drains entirely into reasoning and the fallback would judge a
+#: healthy model on an answer it was never given room to write, then stop its
+#: unit.  This repo has already paid for that lesson once —
+#: ``hal0.agents.hermes_provision._smoke_chat_completion`` raised its own probe
+#: to 256 for exactly this reason; matching it keeps one number to remember.
+#:
+#: NOT solved with ``chat_template_kwargs: {"enable_thinking": false}``, even
+#: though hal0's dispatcher sends that on production traffic
+#: (``hal0.normalize.thinking``): it is a jinja-only lever.  ``jinja`` is a
+#: tri-state model capability here (``registry.model.ModelDefaults.jinja``), so
+#: some llm slots run a llama-server started WITHOUT ``--jinja``, where a
+#: template kwarg is at best ignored and at worst a 4xx — trading this
+#: false-fail for a different one on a lane we cannot probe from CI.  Reading
+#: both output fields and paying for the tokens works on every runner build.
+SANITY_CHAT_MAX_TOKENS = 256
 
 #: Accepted continuations, matched case-insensitively as substrings.  English
 #: first; the transliterations cover the non-English fine-tunes that would
@@ -83,7 +110,35 @@ EXPECTED_TOKENS: tuple[str, ...] = (
 SANITY_ENV_VAR = "HAL0_SLOT_OUTPUT_SANITY"
 
 #: Per-slot opt-out key in the slot TOML (top level or under ``[slot]``).
+#: Registered in ``hal0.slot_config.TOLERATED_SLOT_CONFIG_KEYS`` so the write
+#: boundary accepts it — an escape hatch that only works via a hand edit is
+#: not an escape hatch.
 SANITY_CFG_KEY = "output_sanity"
+
+#: Keys a failed verdict stamps on the slot's state record ``extra``.
+#:
+#: This is what makes the verdict DURABLE.  Stopping the garbage unit is the
+#: obvious remedy, but a teardown is best-effort by nature —
+#: ``SlotManager.terminate`` raises ``SlotTerminateTimeout`` when
+#: ``systemctl stop`` does not return (#1224), and a wedged podman container is
+#: exactly where that happens.  A verdict that survives only as long as the
+#: stop succeeded is not a verdict: ERROR + an active unit is precisely the
+#: shape ``status()``'s inverse-drift branch and the boot-time upstream
+#: reconcile adopt straight back to READY, re-publishing the garbage slot on
+#: the next ``/api/slots`` poll.  Stamped in the record, the refusal outlives
+#: a failed stop AND an api restart (state.json is on disk), which also closes
+#: the "unit still running from before the upgrade" gap.
+#:
+#: Cleared on any transition to READY/IDLE — a load that passes the gate is
+#: the one piece of evidence that retires the verdict.
+SANITY_FAILED_KEY = "output_sanity_failed"
+SANITY_STATUS_KEY = "output_sanity_status"
+SANITY_UNIT_STOPPED_KEY = "output_sanity_unit_stopped"
+SANITY_EXTRA_KEYS: tuple[str, ...] = (
+    SANITY_FAILED_KEY,
+    SANITY_STATUS_KEY,
+    SANITY_UNIT_STOPPED_KEY,
+)
 
 #: Slot types the gate applies to.  Everything else serves a modality a chat
 #: completion cannot probe.
@@ -162,16 +217,49 @@ def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+#: Fields of an OpenAI-shaped ``message`` that carry model output.  Judged
+#: TOGETHER — see :func:`_message_text`.  ``reasoning``/``reasoning_content``
+#: are the two spellings hal0 already reads elsewhere
+#: (``cli.chat_commands``, ``providers.hal0.profile``).
+_MESSAGE_TEXT_FIELDS: tuple[str, ...] = ("content", "reasoning_content", "reasoning")
+
+
+def _message_text(message: Mapping[str, Any]) -> str | None:
+    """Everything the model emitted in one chat message, joined.
+
+    A reasoning model spends its first tokens inside a ``<think>`` block, and
+    where that text lands depends on the runner build, not on the model: a
+    llama-server that parses reasoning splits it into ``reasoning_content``
+    and leaves ``content`` empty until the block closes, while an older or
+    ``--jinja``-less one hands the raw ``<think>…</think>`` back inside
+    ``content``.  Reading only ``content`` therefore fails a *working* model
+    on half the fleet — and this gate stops the unit it fails.
+
+    Judging the union is safe in the other direction too: the assertion is
+    positive (did the known answer appear at all), and #1888's backend
+    produced garbage in every field it filled — a model that computes wrong
+    logits cannot reason its way to "Paris" either.
+
+    ``None`` only when the message carries no text field at all; ``""`` when
+    the fields exist and are empty, which stays a reportable failure.
+    """
+    parts = [message.get(field) for field in _MESSAGE_TEXT_FIELDS]
+    present = [part for part in parts if isinstance(part, str)]
+    if not present:
+        return None
+    return "\n".join(present)
+
+
 def _extract_text(body: Any) -> str | None:
     """Pull the generated text out of a completion response body.
 
     Handles llama-server's native ``/completion`` shape (``content``) and the
     OpenAI-compatible shapes (``choices[0].text`` /
-    ``choices[0].message.content``) so the probe survives a runner that
-    answers ``/completion`` with an OpenAI envelope.  ``None`` means "no text
-    field at all" (unparseable); ``""`` means "the field was there and empty",
-    which is a real, reportable failure shape (#1888: bare ``/completion``
-    emitted empty content while streaming a ``done`` frame).
+    ``choices[0].message``) so the probe survives a runner that answers
+    ``/completion`` with an OpenAI envelope.  ``None`` means "no text field at
+    all" (unparseable); ``""`` means "the field was there and empty", which is
+    a real, reportable failure shape (#1888: bare ``/completion`` emitted
+    empty content while streaming a ``done`` frame).
     """
     if not isinstance(body, Mapping):
         return None
@@ -187,9 +275,7 @@ def _extract_text(body: Any) -> str | None:
                 return text
             message = first.get("message")
             if isinstance(message, Mapping):
-                msg_content = message.get("content")
-                if isinstance(msg_content, str):
-                    return msg_content
+                return _message_text(message)
     return None
 
 
@@ -280,16 +366,28 @@ async def probe(port: int, *, timeout_s: float | None = None) -> SanityVerdict:
     rc.6 garbage reproduced on BOTH endpoints (#1888), which is exactly what
     "the backend mis-computes" means.
 
+    The fallback is deliberately more expensive than the raw probe
+    (:data:`SANITY_CHAT_MAX_TOKENS` tokens inside
+    :data:`OUTPUT_SANITY_CHAT_TIMEOUT_S`): a chat turn is where reasoning
+    models spend their budget before saying anything visible, so a tight cap
+    here fails working slots rather than garbage ones.  It costs nothing on a
+    healthy box, which never reaches this line.
+
     Never raises: every transport failure resolves to a verdict so the caller
     owns the state transition.  Failure is the default for anything that is
     not a clean, on-topic answer — with one exception: a runner that serves
     NEITHER endpoint (404 on both) is not a completion server this gate was
     designed to probe, and "cannot judge" must not read as "judged bad".
+
+    ``timeout_s`` overrides BOTH budgets — a caller imposing its own bound
+    means "spend no more than this per request", not "and also re-tune the
+    fallback".
     """
     if port <= 0:
         return SanityVerdict(ok=False, status="no_port")
 
     budget = float(timeout_s if timeout_s is not None else OUTPUT_SANITY_TIMEOUT_S)
+    chat_budget = float(timeout_s if timeout_s is not None else OUTPUT_SANITY_CHAT_TIMEOUT_S)
     verdict = await _post(
         port,
         "/completion",
@@ -312,11 +410,14 @@ async def probe(port: int, *, timeout_s: float | None = None) -> SanityVerdict:
         "/v1/chat/completions",
         {
             "messages": [{"role": "user", "content": SANITY_PROMPT}],
-            "max_tokens": SANITY_N_PREDICT,
+            # NOT SANITY_N_PREDICT — see SANITY_CHAT_MAX_TOKENS: a dozen
+            # tokens is a raw-completion budget, and a thinking model burns
+            # every one of them inside <think> before writing an answer.
+            "max_tokens": SANITY_CHAT_MAX_TOKENS,
             "temperature": 0,
             "stream": False,
         },
-        budget,
+        chat_budget,
     )
     if chat.ok:
         log.info(
@@ -359,17 +460,69 @@ def failure_message(verdict: SanityVerdict) -> str:
     )
 
 
+def failure_extra(status: str, *, unit_stopped: bool) -> dict[str, Any]:
+    """The state-record ``extra`` a failed gate stamps on the slot.
+
+    ``unit_stopped`` records whether the teardown that follows the verdict
+    actually succeeded, so an operator staring at a red slot can tell "stopped,
+    idle" from "still running and still producing garbage" without reading the
+    journal.  Either way the slot is un-adoptable: see
+    :data:`SANITY_EXTRA_KEYS`.
+    """
+    return {
+        SANITY_FAILED_KEY: True,
+        SANITY_STATUS_KEY: status or "unknown",
+        SANITY_UNIT_STOPPED_KEY: bool(unit_stopped),
+    }
+
+
+def gate_failed(extra: Mapping[str, Any] | None) -> bool:
+    """True when this slot's last verdict was a FAIL that nothing has cleared.
+
+    Consulted by the adoption path: a slot carrying this must never be
+    re-published as READY on the strength of an active unit, which is all
+    adoption ever proves.
+    """
+    if not isinstance(extra, Mapping):
+        return False
+    return bool(extra.get(SANITY_FAILED_KEY))
+
+
+def teardown_failure_note(slot_name: str, error: str) -> str:
+    """Appended to the ERROR message when stopping the garbage unit failed.
+
+    Loud, because the box is now in the one state the operator cannot infer
+    from the dashboard: a red slot whose container is still resident and still
+    holding VRAM.  The verdict itself does not depend on this — the record's
+    :data:`SANITY_FAILED_KEY` keeps the slot un-adoptable regardless.
+    """
+    return (
+        f" Stopping the unit ALSO failed ({error}), so the container for {slot_name!r} is still "
+        "active and still holding VRAM — the slot stays in error and will not be re-adopted, "
+        "but stop it by hand before reloading."
+    )
+
+
 __all__ = [
     "EXPECTED_TOKENS",
+    "OUTPUT_SANITY_CHAT_TIMEOUT_S",
     "OUTPUT_SANITY_TIMEOUT_S",
     "SANITY_CFG_KEY",
+    "SANITY_CHAT_MAX_TOKENS",
     "SANITY_ENV_VAR",
+    "SANITY_EXTRA_KEYS",
+    "SANITY_FAILED_KEY",
     "SANITY_N_PREDICT",
     "SANITY_PROMPT",
+    "SANITY_STATUS_KEY",
+    "SANITY_UNIT_STOPPED_KEY",
     "SanityVerdict",
     "classify",
+    "failure_extra",
     "failure_message",
     "gate_disabled_globally",
+    "gate_failed",
     "probe",
     "skip_reason",
+    "teardown_failure_note",
 ]

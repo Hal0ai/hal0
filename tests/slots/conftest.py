@@ -43,6 +43,10 @@ class FakeContainerProvider:
         ``discard()`` an entry to simulate the unit stopping out-of-band.
       * ``load_calls`` / ``unload_calls`` — recorded dispatches.
       * ``fail_load`` — when set, ``load_sync`` raises it (spawn failure).
+      * ``fail_unload`` — when set, ``unload_sync`` raises it and the unit
+        stays in ``active``: the real "``systemctl stop`` did not return"
+        shape (#1224), where ``SlotManager.terminate`` abandons the wait and
+        raises ``SlotTerminateTimeout`` over a still-running container.
       * ``unit_failure_by_slot`` — systemd's verdict per slot (#1791). A
         non-empty string is the manager's PROOF that systemd gave up on the
         unit (crash loop / ``start-limit-hit`` / unit gone); the default empty
@@ -59,6 +63,7 @@ class FakeContainerProvider:
         self.load_calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
         self.unload_calls: list[dict[str, Any]] = []
         self.fail_load: Exception | None = None
+        self.fail_unload: Exception | None = None
         self.running_argv_by_slot: dict[str, list[str] | None] = {}
         self.expected_argv_by_slot: dict[str, list[str] | None] = {}
         # /health probe result. Default True: an active unit is also ready.
@@ -87,6 +92,10 @@ class FakeContainerProvider:
 
     def unload_sync(self, cfg: dict[str, Any]) -> None:
         self.unload_calls.append(dict(cfg))
+        if self.fail_unload is not None:
+            # The stop never completed, so the unit is still running — leave
+            # it in ``active``, which is the whole point of this shape.
+            raise self.fail_unload
         self.active.discard(str(cfg.get("name")))
 
     # — probes —
