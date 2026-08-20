@@ -30,6 +30,10 @@ jobs:
 
   python:
     runs-on: ubuntu-latest
+    # Full suite runs 22-26 min; the job previously had no bound, so an infra
+    # stall (a 41-minute apt-get hang on #1915, see #1927) would have run to
+    # GitHub's 6-hour default. 45 covers the suite plus slow-runner margin.
+    timeout-minutes: 45
     # 3.14 is experimental until every dep ships 3.14 wheels — surface it
     # without reddening main. No-op on PRs, which run 3.12 only.
     continue-on-error: ${{ matrix.python-version == '3.14' }}
