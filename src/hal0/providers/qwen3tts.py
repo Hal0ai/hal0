@@ -108,6 +108,14 @@ class Qwen3TTSProvider(Provider):
 
     name = "qwen3tts"
 
+    #: ROCm-only image (``RUNNER_IMAGES["qwen3tts"].supported_backends ==
+    #: ("rocm",)``; ``container_spec`` forwards ``resolve_gpu_device_paths()``,
+    #: which includes ``/dev/kfd``). Reachable on a ``gpu-vulkan`` slot too:
+    #: ``tts_profile_for_device`` maps ANY GPU device — including
+    #: ``gpu-vulkan`` — to the ``qwen3-tts`` profile, so the device string
+    #: cannot be trusted to mean "Vulkan image" here (#1941).
+    gpu_runtime_needs_rocm = True
+
     # ── Provider ABC stubs ─────────────────────────────────────────────────────
 
     def build_env(

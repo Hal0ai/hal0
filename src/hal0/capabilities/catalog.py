@@ -428,11 +428,15 @@ def _backend_variants(entry: Any) -> list[str]:
             # off the gpu-rocm row alone would leave the trap in place. On an
             # AMD box with no valid GPU lane the picker offers CPU only.
             # gpu-vulkan survives for the non-llama runtimes below (kokoro /
-            # whisper.cpp / ComfyUI), which run genuinely-Vulkan images, and
-            # for non-AMD GPUs. That survival is only real because the load
-            # path agrees: ``require_kfd_for_gpu_slot``'s gpu-vulkan gate is
-            # scoped to the llama.cpp lane (#1941), so a slot this branch
-            # keeps on gpu-vulkan is not refused at load on a kfd-less box.
+            # whisper.cpp / ComfyUI) and for non-AMD GPUs.
+            #
+            # For those non-llama runtimes "gpu-vulkan" is this picker's GPU
+            # ROW, NOT a claim about the image (#1941). Kokoro and Moonshine
+            # are CPU ONNX images that forward no GPU node at all; ComfyUI's
+            # Strix Halo build and Qwen3-TTS are ROCm images that DO need
+            # /dev/kfd. Nothing derived from this device string can tell them
+            # apart — the load-path guard keys off the provider's own
+            # ``gpu_runtime_needs_rocm`` declaration instead.
             host_backends = {b["id"] for b in available_backends()}
             candidates = ("gpu-rocm", "cpu") if host_is_amd_gpu() else ("gpu-vulkan", "cpu")
             for candidate in candidates:

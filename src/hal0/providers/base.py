@@ -235,6 +235,25 @@ class Provider(ABC):
     """Short backend identifier, e.g. "llama-server".  Used in slot configs
     and structured logs."""
 
+    gpu_runtime_needs_rocm: bool = False
+    """Does this runtime's toolbox image resolve ROCm/HIP at launch, and so
+    need ``/dev/kfd`` forwarded when the slot sits on a GPU device?
+
+    Declared per provider because a slot's ``device`` string does NOT answer
+    it (#1941). ``hal0.capabilities.catalog`` labels every non-llama GPU
+    runtime ``gpu-vulkan`` — that label means "the GPU row in the picker",
+    not "this image runs Vulkan". ComfyUI's Strix Halo image and Qwen3-TTS
+    are ROCm builds that reach the GPU through HIP and forward ``/dev/kfd``
+    in their specs; Kokoro and Moonshine are CPU ONNX images that forward no
+    GPU nodes at all. Only the provider knows which of those its image is, so
+    it says so here and :func:`hal0.providers._gpu.require_kfd_for_gpu_slot`
+    stops having to guess from the device string.
+
+    Default ``False`` covers the CPU/NPU runtimes. The llama.cpp lane is not
+    expressed here: it is the ``spec_provider is None`` default in
+    ``ContainerProvider.load_sync`` and carries its own #1888 refusal wording.
+    """
+
     @abstractmethod
     def build_env(
         self,

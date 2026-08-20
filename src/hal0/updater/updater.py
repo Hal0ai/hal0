@@ -2910,9 +2910,10 @@ def relabel_stale_vulkan_slots(
     Runtime scope — llama.cpp-backed slots ONLY: ``device = "gpu-vulkan"``
     is not exclusively an llama.cpp label. ``capabilities/catalog.py``
     deliberately keeps it for the non-llama runtimes (Kokoro TTS,
-    whisper.cpp/Moonshine STT, ComfyUI), which run genuinely-Vulkan images —
-    #1923's Vulkan-lane retirement and its ``require_kfd_for_gpu_slot`` guard
-    are about llama.cpp's unified ROCmFPX runner specifically, not those.
+    whisper.cpp/Moonshine STT, ComfyUI), where it means "the picker's GPU
+    row", not "this image runs Vulkan" (#1941) — #1923's Vulkan-lane
+    retirement and its ``require_kfd_for_gpu_slot`` guard are about
+    llama.cpp's unified ROCmFPX runner specifically, not those.
     Relabeling a non-llama slot here would be actively wrong on both kfd
     axes: ``gpu-rocm`` is a label its image can't honor (and
     ``gpu_visibility_env`` would silently swap
@@ -2925,9 +2926,14 @@ def relabel_stale_vulkan_slots(
     axis) unless it resolves to ``None`` (the default llama-server GPU
     provider). The kfd-absent non-llama case (``require_kfd_for_gpu_slot``
     itself over-firing for non-llama runtimes) was a separate bug, fixed in
-    the guard itself (#1941): it now takes a ``llama_lane`` flag derived from
-    this same ``_spec_provider_for`` discriminator, so a non-llama
-    ``gpu-vulkan`` slot is neither relabeled here nor refused there.
+    the guard itself (#1941): it now takes a ``runtime_lane`` derived from
+    the resolved provider's own ``gpu_runtime_needs_rocm`` declaration, so a
+    Kokoro/Moonshine ``gpu-vulkan`` slot is neither relabeled here nor
+    refused there — while a ComfyUI or Qwen3-TTS slot, whose image really is
+    ROCm, keeps its refusal. Note the two scopes are deliberately NOT the
+    same predicate: this migration skips every non-llama slot (relabeling
+    one would break its device passthrough regardless of backend), the guard
+    keys on what the image needs at launch.
 
     Only the ``device`` key is ever changed in VALUE — narrow scope per the
     #1867 rails (no other field or slot is touched, and a slot whose

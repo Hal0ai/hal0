@@ -82,6 +82,7 @@ from hal0.providers._gpu import (
     require_kfd_for_gpu_slot,
     resolve_gpu_device_paths,
     resolve_gpu_group_ids,
+    runtime_lane_for_provider,
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
 from hal0.slot_lifecycle_budget import HEALTH_TIMEOUT_S
@@ -2006,6 +2007,13 @@ class ContainerProvider(Provider):
 
     name = "container"
 
+    #: The unified ROCmFPX runner: HIP first, poisoned Vulkan fallback second
+    #: (#1888). ``runtime_lane_for_provider`` never actually sees this class —
+    #: ``_spec_provider_for`` returns ``None`` for the llama-server default and
+    #: that maps to the richer ``"llama"`` lane — but declaring it keeps every
+    #: possible input to that translation fail-CLOSED rather than fail-open.
+    gpu_runtime_needs_rocm = True
+
     # ── Provider ABC stubs (not used in the container path) ──────────────────
 
     def build_env(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> dict[str, str]:
@@ -2359,23 +2367,24 @@ class ContainerProvider(Provider):
         # dispatch). ``None`` means the default llama-server GPU provider.
         spec_provider = _spec_provider_for(slot_cfg)
 
-        # Loud-fail for AMD-GPU llama.cpp slots with no /dev/kfd: the runner
-        # image would silently fall back to its Vulkan backend, which emits
-        # invalid tokens for every model while every health surface reads
-        # green (#1888). Enforced HERE (the load path) rather than in
-        # ``container_spec`` so unit rendering, previews and status renders
-        # stay host-independent.
+        # Loud-fail for AMD-GPU slots with no /dev/kfd whose runtime needs it:
+        # the ROCmFPX runner would silently fall back to its Vulkan backend,
+        # which emits invalid tokens for every model while every health
+        # surface reads green (#1888). Enforced HERE (the load path) rather
+        # than in ``container_spec`` so unit rendering, previews and status
+        # renders stay host-independent.
         #
-        # ``llama_lane`` scopes the gpu-vulkan half of that guard to the
-        # ROCmFPX runner (#1941): Kokoro / whisper.cpp / ComfyUI keep
-        # device="gpu-vulkan" and run genuinely-Vulkan images that never had
-        # the #1888 defect, so demanding /dev/kfd refused working STT/TTS/
-        # image slots on kfd-less AMD boxes. Same discriminator the updater's
-        # ``relabel_stale_vulkan_slots`` migration uses, so the two agree.
+        # The lane — not the device string — decides (#1941). ``device =
+        # "gpu-vulkan"`` is the catalog's GPU-row label for EVERY non-llama
+        # runtime, so it says nothing about the image: Kokoro and Moonshine
+        # are CPU ONNX images that need no compute node, while ComfyUI and
+        # Qwen3-TTS are ROCm builds that do. Each provider declares
+        # ``gpu_runtime_needs_rocm``; ``runtime_lane_for_provider`` turns that
+        # into the lane.
         require_kfd_for_gpu_slot(
             str(slot_cfg.get("name", "") or token),
             device=str(slot_cfg.get("device", "") or ""),
-            llama_lane=spec_provider is None,
+            runtime_lane=runtime_lane_for_provider(spec_provider),
         )
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
