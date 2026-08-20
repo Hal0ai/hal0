@@ -29,6 +29,41 @@ updated: 2026-08-15
 # in the filing PR. An entry with issue: null is still probed every release.
 
 regressions:
+
+  - id: kfd-gid-unprivileged-lxc-unverified
+    issue: 1953
+    from: v1.0.0-rc.7
+    severity: minor
+    tier: judgment
+    lane: gpu
+    summary: >-
+      #1953's repair path for a group-misaligned /dev/kfd has NEVER been exercised on a real
+      UNPRIVILEGED LXC. The fix assumes chgrp returns EPERM there (ownership is host-mapped)
+      and falls back to printing a host-side `dev1: /dev/kfd,gid=<gid>` remedy. Both halves of
+      that assumption are untested: that the refusal actually happens, and that the gid resolved
+      INSIDE the container is the correct value to write on the host once idmap shifting applies.
+    why_unverified: >-
+      The box the defect was found on (CT105) is PRIVILEGED, where chgrp simply succeeds. No
+      unprivileged box on the fleet has /dev/kfd passed through, and adding it is a Proxmox
+      host-level change plus a container restart — an operator decision, not an agent one.
+    covered_by_unit_tests: >-
+      A genuine (non-mocked) EPERM is exercised in
+      tests/providers/test_gpu_kfd_preflight.py::TestConvergeAgainstRealPermissionDenial by
+      chowning to a gid the test user does not belong to. That proves the failure is REPORTED
+      not raised, and that the remedy string carries an actionable gid. It does NOT prove the
+      idmap semantics of a real unprivileged LXC. Do not treat it as if it did.
+    repro: |
+      On an UNPRIVILEGED LXC with /dev/kfd forwarded:
+        stat -c '%n %U:%G %a' /dev/kfd /dev/dri/renderD128   # expect a gid divergence
+        HAL0_GPU_GATE=1 bash -c 'source installer/lib/preflight.sh; preflight_gpu; echo rc=$?'
+        # expect rc=6 (HAL0_GPU_RC_KFD_GID) and a remedy naming the render node's real gid
+        python -m hal0.install.gpu_perms   # expect exit 0, journal 'gpu_perms.refused'
+      Then apply the printed host-side remedy and confirm the gate goes green.
+    expect: >-
+      install.sh WARNS and continues (never exits non-zero); the converge reports "failed" with
+      a remedy carrying a real numeric gid; GPU slots still load, because the #1953 identity fix
+      evaluates the root slot runner rather than the hal0 user.
+    promote_ready: false
   # ── Carried from v1.0.0-rc.4 ────────────────────────────────────────────────
 
   - id: profile-flags-argv

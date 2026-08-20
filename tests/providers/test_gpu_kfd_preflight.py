@@ -609,3 +609,54 @@ class TestGuardRemedyText:
         with pytest.raises(GpuPreflightError) as err:
             require_kfd_for_gpu_slot("brain", device="gpu-rocm", kfd_path=str(tmp_path / "nope"))
         assert "dev1:" in str(err.value)
+
+
+class TestConvergeAgainstRealPermissionDenial:
+    """#1953 gap 2 — exercise a GENUINE chgrp refusal, not a monkeypatched one.
+
+    The unprivileged-LXC path (where ``/dev/kfd``'s ownership is host-mapped and
+    ``chown`` returns EPERM) has NOT been validated on a real unprivileged
+    container — see the regression register entry
+    ``kfd-gid-unprivileged-lxc-unverified``. This gets as close as a unit test
+    honestly can: a real chown against a gid the running user is not a member
+    of, which the kernel refuses for the same reason.
+
+    It proves the failure is reported rather than raised, and that the message
+    carries an actionable gid. It does NOT prove the idmap semantics of a real
+    unprivileged LXC, and must not be read as if it did.
+    """
+
+    def test_a_real_eperm_is_reported_with_an_actionable_remedy(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        if os.geteuid() == 0:
+            pytest.skip("root can chown to any gid — no denial to observe")
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        # A gid this user is certainly not a member of.
+        foreign_gid = 61997
+        assert foreign_gid not in os.getgroups()
+        monkeypatch.setattr(
+            "hal0.providers._gpu.resolve_kfd_target_gid", lambda *a, **k: foreign_gid
+        )
+        status, detail = converge_kfd_device_group(str(kfd))
+        assert status == "failed"
+        # The operator must be able to act on this without reading the source.
+        assert f"gid={foreign_gid}" in detail
+        assert "unprivileged" in detail.lower() or "host" in detail.lower()
+
+    def test_the_node_is_left_untouched_when_the_chgrp_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A refused converge must not half-apply (e.g. chmod without chgrp)."""
+        if os.geteuid() == 0:
+            pytest.skip("root can chown to any gid — no denial to observe")
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        kfd.chmod(0o600)
+        before = os.stat(kfd)
+        monkeypatch.setattr("hal0.providers._gpu.resolve_kfd_target_gid", lambda *a, **k: 61997)
+        converge_kfd_device_group(str(kfd))
+        after = os.stat(kfd)
+        assert after.st_gid == before.st_gid
+        assert after.st_mode == before.st_mode

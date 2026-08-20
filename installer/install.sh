@@ -1414,6 +1414,28 @@ else
     warn "${TARGET_UNIT_SRC} not found — hal0.target not installed; slots will not autostart after reboot"
 fi
 
+# GPU device permissions (#1953). /dev/kfd is recreated every boot, so the
+# install/update-time converge is undone by the next reboot unless the host's
+# LXC `dev` entry carries gid=. This oneshot re-derives the target gid FROM THE
+# RENDER NODE and re-applies it before hal0.target — deliberately a service
+# rather than a tmpfiles.d/udev rule, both of which would have to name a gid,
+# and a baked gid is not portable across hosts (see preflight_gpu).
+GPU_PERMS_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-gpu-perms.service"
+GPU_PERMS_UNIT_DST="${UNIT_DIR}/hal0-gpu-perms.service"
+if [[ -f "${GPU_PERMS_UNIT_SRC}" ]]; then
+    install -m 0644 "${GPU_PERMS_UNIT_SRC}" "${GPU_PERMS_UNIT_DST}"
+    info "wrote ${GPU_PERMS_UNIT_DST}"
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        # WantedBy=hal0.target. Enabling is safe on a non-AMD box: the unit
+        # carries ConditionPathExists=/dev/kfd and the module no-ops without
+        # amdgpu bound.
+        systemctl enable hal0-gpu-perms.service >/dev/null 2>&1 \
+            || warn "could not enable hal0-gpu-perms.service"
+    fi
+else
+    warn "${GPU_PERMS_UNIT_SRC} not found — /dev/kfd group will not be re-applied after a reboot"
+fi
+
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
 OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
 # pin per release (#79) — single source of truth for the OpenWebUI image
