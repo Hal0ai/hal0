@@ -75,16 +75,29 @@ export function TtsPanel({ registry }) {
   const resetAll = () => { sel.reset(); setVoice(origVoice); setSpeed(origSpeed); setFormat(origFormat) }
 
   const liveVoices = ttsVoicesQuery.data?.source === "live" ? (ttsVoicesQuery.data.voices || []) : []
-  const kokoroish = !sel.model || isKokoro
-  const options = liveVoices.length > 0
-    ? liveVoices.map(v => {
-        const seed = KOKORO_VOICES.find(k => k.id === v)
-        return { id: v, label: seed ? seed.label : v }
-      })
-    : (kokoroish ? KOKORO_VOICES : null)
-  const srcNote = liveVoices.length > 0
-    ? "voices reported live by the tts slot"
-    : (kokoroish ? "bundled voices (Kokoro v1) · slot offline — list is the seed pack" : "model-specific voice id")
+  // #1944: `!sel.model` used to stand in for "unconfigured slot", but it is
+  // equally true while GET /api/capabilities is still in flight (or has
+  // failed) — so a qwen3tts box rendered Kokoro's seed pack and its
+  // "(af_bella)" default for the whole load window. That is #1470's defect
+  // (Kokoro facts asserted as engine truth) scoped to the gap before the
+  // probe lands. Claim nothing until the provider is actually known; SttPanel
+  // already keys every string off `resolvedProvider` this way. An
+  // unconfigured slot still gets the seed pack once the probe has answered.
+  const providerKnown = !sel.loading && !sel.errored
+  const kokoroish = providerKnown && (!sel.model || isKokoro)
+  const options = !providerKnown
+    ? []
+    : liveVoices.length > 0
+      ? liveVoices.map(v => {
+          const seed = KOKORO_VOICES.find(k => k.id === v)
+          return { id: v, label: seed ? seed.label : v }
+        })
+      : (kokoroish ? KOKORO_VOICES : null)
+  const srcNote = !providerKnown
+    ? (sel.errored ? "capability probe failed — voice list unavailable" : "loading the tts slot's voice list…")
+    : liveVoices.length > 0
+      ? "voices reported live by the tts slot"
+      : (kokoroish ? "bundled voices (Kokoro v1) · slot offline — list is the seed pack" : "model-specific voice id")
   const defaultVoiceLabel = kokoroish
     ? "— use engine default (af_bella) —"
     : isQwen3 ? "— use engine default (Ryan) —" : "— use engine default —"
