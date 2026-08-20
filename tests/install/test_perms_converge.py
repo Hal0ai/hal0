@@ -298,3 +298,48 @@ def test_stays_green_after_slot_load_model_pull_and_state_render(
         assert _mode_drift(table) == [], "drift after a STATE.md re-render"
     finally:
         os.umask(old_umask)
+
+
+def test_stays_green_after_update_job_image_cache_and_chat_template_writes(
+    tmp_hal0_home: str,
+) -> None:
+    """#1958 review finding 1 (Codex P2): the same #1896 acceptance criterion,
+    for the three newest ``var_lib()``-rooted writers this table declares rows
+    for (``update-jobs/``, ``images/cache/``, ``models/chat-templates/``).
+
+    Each birthed its directory via a bare ``mkdir`` (masked by the daemon's
+    own umask), so the declared ``2775`` mode landed ``2755`` and
+    ``doctor perms`` drifted right after first normal use — on every update
+    job, every image generation, every custom chat-template save. Routing
+    each writer through :func:`hal0.install.perms.ensure_shared_dir` (the
+    same fix ``registry/pull.py``'s ``persist_pull_job`` already uses) is
+    what this test locks down.
+    """
+    import asyncio
+
+    from hal0.api import image_cache
+    from hal0.api.routes import chat_templates
+    from hal0.api.routes.updater import _persist_job
+
+    table = perms.ownership_table(service_user="hal0")
+    _materialise_fresh_install(table)
+
+    old_umask = os.umask(0o022)  # the shipped hal0-api unit's umask
+    try:
+        # 1. update job persist -> update-jobs/<id>.json (dir born by the writer)
+        _persist_job({"id": "job-1", "state": "queued"})
+        assert _mode_drift(table) == [], "drift after an update-job persist"
+
+        # 2. image-gen write -> images/cache/<uuid>.png (dir born by the writer)
+        image_cache.write_png(b"\x89PNG\r\n\x1a\nfake-png-bytes")
+        assert _mode_drift(table) == [], "drift after an image-cache write"
+
+        # 3. custom chat-template write -> models/chat-templates/<id>.jinja
+        asyncio.run(
+            chat_templates.create_chat_template(
+                chat_templates._TemplateBody(id="custom", content="{{ x }}")
+            )
+        )
+        assert _mode_drift(table) == [], "drift after a chat-template write"
+    finally:
+        os.umask(old_umask)

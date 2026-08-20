@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.paths import model_store_root
+from hal0.install.perms import ensure_shared_dir
 
 router = APIRouter()
 
@@ -131,7 +132,11 @@ async def create_chat_template(body: _TemplateBody) -> dict[str, Any]:
 
     store = _templates_dir()
     try:
-        store.mkdir(parents=True, exist_ok=True)
+        # models/chat-templates/ is declared 2775; a bare mkdir under the
+        # daemon's UMask=0022 births 2755 and re-drifts `doctor perms` after
+        # every custom template write (#1896 class, precedent:
+        # registry/pull.py persist_pull_job).
+        ensure_shared_dir(store)
         (store / f"{body.id}.jinja").write_text(body.content)
     except OSError as exc:
         raise Hal0Error(

@@ -998,8 +998,21 @@ def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
     """
     if row.glob is None:
         return [(row.target, row)]
-    if not row.target.is_dir():
-        return [(row.target, row)]  # the dir itself (absent/optional handled in plan)
+    # #1739-class guard (the PR #1743 fix missed this exact spot): ``Path.is_dir()``
+    # FOLLOWS symlinks, so a row whose ``target`` is itself a symlinked
+    # directory (e.g. an operator symlinking
+    # ``models/chat-templates`` to an external store) would otherwise pass
+    # this check, glob the link's REAL children, and hand them to `commit()`
+    # as ordinary plan entries — `_is_or_is_under_symlink` only guards
+    # children reached THROUGH a symlink *below* `row.target`, it never
+    # checks `row.target` itself, so those children are real paths outside
+    # hal0's declared tree that would get chowned/chmodded. Falling through
+    # to the plain (non-glob) return here means `plan()`/`observe_fn` sees
+    # the symlink via `lstat` and reports it via the existing `is_symlink`
+    # path (never dereferenced, never "changed") — exactly like a declared
+    # row whose own target is a symlink.
+    if not row.target.is_dir() or row.target.is_symlink():
+        return [(row.target, row)]  # the dir itself (absent/optional/symlink handled in plan)
     out: list[tuple[Path, PermRow]] = [(row.target, row)]
     matches = row.target.rglob(row.glob) if row.recursive else row.target.glob(row.glob)
     for child in sorted(matches):
