@@ -1620,6 +1620,7 @@ def run_post_activation_migrations(
     *,
     job_id: str | None = None,
     ceiling: int | None = None,
+    skip_image_retag: bool = False,
 ) -> tuple[int, int]:
     """Run every post-activation migration pass hal0 ships, in order.
 
@@ -1661,6 +1662,23 @@ def run_post_activation_migrations(
     profile-catalog reset gate). ``None`` (the default, and what
     install.sh's caller always passes) applies no cap.
 
+    ``skip_image_retag`` (#1960 N2) omits ``retag_stale_slot_images``.
+    Every OTHER pass here is either purely additive (seed profiles, mtp
+    clearing) or corrects a state that actively breaks something (a
+    gpu-vulkan slot that refuses to load, an unsanitised managed flag) —
+    running them outside an update is harmless or actively good.
+    ``retag_stale_slot_images`` is different: it rewrites a slot's image
+    pin whenever that pin exactly matches a KNOWN FORMER default, which is
+    a good bet during an actual release (a new default just shipped) but
+    is not correlated with "a release just shipped" at all when called on
+    every daemon boot — an operator who deliberately re-pinned a slot to
+    an older image that happens to be a listed former default would have
+    that choice silently reverted on every crash-restart or reboot, not
+    just when they run an update. :func:`check_outstanding_migrations`
+    passes ``True`` here for exactly that reason; :meth:`Updater.commit`'s
+    post-swap subprocess (an actual update) always passes the default
+    ``False``, so the pass still gets its shot every time a release ships.
+
     Returns the ``(source, target)`` schema-version tuple for breadcrumb
     logging, the same shape ``commit()`` already returned.
     """
@@ -1687,11 +1705,12 @@ def run_post_activation_migrations(
         # Non-fatal: an affected slot keeps refusing to load (the #1923
         # preflight guard) until the operator manually relabels its device.
 
-    try:
-        retag_stale_slot_images(job_id=job_id)
-    except Exception as exc:
-        log.warning("updater.image_retag_failed", job_id=job_id, error=str(exc))
-        # Non-fatal: a stale pin just keeps the previous runner image.
+    if not skip_image_retag:
+        try:
+            retag_stale_slot_images(job_id=job_id)
+        except Exception as exc:
+            log.warning("updater.image_retag_failed", job_id=job_id, error=str(exc))
+            # Non-fatal: a stale pin just keeps the previous runner image.
 
     try:
         sanitize_model_extra_args(job_id=job_id)
@@ -1701,6 +1720,60 @@ def run_post_activation_migrations(
         # operator removes the managed flag in the model drawer.
 
     return migration_info
+
+
+def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int] | None:
+    """Boot-time safety net for #1960: heal a box that missed its migrations.
+
+    Two boxes need this, not one: (a) any box that upgraded through the
+    pre-#1960 in-process/pre-swap call never got the incoming release's
+    migrations at all, permanently — there is no later ``commit()`` call
+    that will ever re-run them; (b) even post-fix,
+    :func:`_run_post_activation_migrations_after_swap` can itself fail (disk
+    full, a bug in one specific pass), and ``commit()`` deliberately does not
+    retry it inline — see that function's caller for why. Calling this once
+    at every ``hal0-api`` boot heals both: every pass
+    ``run_post_activation_migrations`` runs here is documented as an
+    idempotent "stale? fix it : no-op" sweep (see each pass's own
+    docstring), so a converged box pays for one ``hal0.toml`` read plus a
+    handful of near-instant no-ops.
+
+    ``skip_image_retag=True`` (#1960 N2): unlike every other pass here,
+    ``retag_stale_slot_images``'s heuristic ("this pin exactly matches a
+    known FORMER default") is only actually correlated with staleness right
+    after a release ships a new default — see
+    :func:`run_post_activation_migrations`'s own docstring for the full
+    reasoning. Running it on every boot (crash-restarts and reboots
+    included, not just updates) would silently revert an operator's
+    deliberate re-pin to an old image on every bounce — the same class of
+    bug as #1867 (an automated convergence pass overwriting deliberate
+    operator state), just with a much higher firing frequency. The pass
+    still gets its shot on every actual update, via
+    :meth:`Updater.commit`'s post-swap subprocess, which does not skip it —
+    a box that misses it there only waits until its next real update to
+    converge, same as before this function existed.
+
+    Mirrors :meth:`Updater.commit`'s own ``ceiling`` derivation, using
+    :func:`profile_reset_status` — a pure read — so a box whose one-shot
+    profile-catalog reset is still outstanding does not have this safety net
+    race ``meta.schema_version`` past that gate. No ``reset_profile_catalog``
+    call happens here, only the read: this function never deletes
+    ``profiles.toml``.
+
+    Never raises — a startup safety net that could itself fail startup would
+    be worse than the staleness it exists to fix. Returns the ``(source,
+    target)`` schema tuple on success, ``None`` on any failure (already
+    logged as a warning; this is a background sweep, not a user-initiated
+    update, so it does not warrant the ERROR level
+    :meth:`Updater.commit` uses for the same failure).
+    """
+    try:
+        reset_outstanding = bool(profile_reset_status().get("due"))
+        ceiling = PROFILE_CATALOG_SCHEMA_VERSION - 1 if reset_outstanding else None
+        return run_post_activation_migrations(job_id=job_id, ceiling=ceiling, skip_image_retag=True)
+    except Exception as exc:
+        log.warning("updater.boot_migration_check_failed", job_id=job_id, error=str(exc))
+        return None
 
 
 # ── Filesystem layout (paths-aware) ────────────────────────────────────────────
@@ -3578,6 +3651,183 @@ async def _rerender_units_after_swap(job_id: str | None) -> None:
         )
 
 
+#: Sentinel key on the single JSON stdout line the migration subprocess
+#: emits. Mirrors :data:`hal0.updater.privileged._RESULT_KEY`'s exact
+#: contract: structured logs go to STDERR (see the script built below) so
+#: stdout carries nothing but this envelope, scanned from the end.
+_MIGRATION_RESULT_KEY = "hal0_migration_result"
+
+#: The five non-fatal per-pass failure events ``run_post_activation_migrations``
+#: can log without raising (#1960 B2). A pass that swallows its own
+#: exception still exits the subprocess with rc=0 — by design, see that
+#: function's docstring — so it would otherwise be invisible outside
+#: journalctl. ``_run_post_activation_migrations_after_swap`` scans the
+#: relayed child log for these exact event names so a swallowed failure
+#: still surfaces in commit()'s convergence report.
+_NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
+    "updater.seed_profiles_prune_failed",
+    "updater.mtp_migration_failed",
+    "updater.vulkan_migration_failed",
+    "updater.image_retag_failed",
+    "updater.extra_args_sanitize_failed",
+)
+
+
+async def _run_post_activation_migrations_after_swap(
+    min_data_version: int,
+    *,
+    job_id: str | None,
+    reset_outstanding: bool,
+) -> dict[str, Any]:
+    """Run :func:`run_post_activation_migrations` in a subprocess of the
+    just-repipped venv, AFTER the ``current`` symlink swap (#1960).
+
+    Mirrors :func:`_rerender_units_after_swap`'s exact reasoning: this
+    process is still running the PRE-swap code — Python does not hot-swap
+    already-imported modules — so calling ``run_post_activation_migrations``
+    in-process at this point would run the OUTGOING version's migration set,
+    never the incoming release's. That was the bug: a migration shipped in
+    release N+1 never ran on the N → N+1 upgrade that shipped it, because the
+    old call site (this function's replacement) ran BEFORE the swap. A
+    subprocess of the just-repipped venv imports the NEW module instead.
+
+    ``reset_outstanding`` — a bool, not a pre-computed ``ceiling`` int
+    (#1960 N1): the ceiling is ``PROFILE_CATALOG_SCHEMA_VERSION - 1``, and
+    that constant has to be read from the INCOMING tree's code, not this
+    (still outgoing) process's. Passing an int computed here would bake the
+    OUTGOING tree's watermark into a call that runs the INCOMING tree's
+    migrations — inert today (the constant hasn't moved since it was
+    introduced), a version-skew bug the moment it does. The child script
+    re-derives the ceiling from its own import, exactly like
+    :func:`check_outstanding_migrations` already does for the same reason.
+
+    The child's structured log is pinned to stderr (mirrors
+    :func:`hal0.updater.privileged._pin_logs_to_stderr` exactly) so stdout
+    carries only the JSON result envelope; the parent relays that stderr
+    into its own journal via :func:`hal0.updater.privileged._relay_child_log`
+    (#1960 B2) — without this, every breadcrumb the six passes emit
+    (``updater.slot_vulkan_relabeled_rocm``, ``migrations_applied``, …) dies
+    in ``capture_output`` and #1935's journal-breadcrumb contract silently
+    regresses for this one call site (the release-validation kit's
+    post-upgrade check greps the journal for exactly these lines). The
+    relayed text is also scanned for :data:`_NON_FATAL_MIGRATION_FAILURE_EVENTS`
+    so a pass that swallowed its own exception into a warning (rc=0, by
+    design) still surfaces in the returned ``pass_warnings`` list.
+
+    Unlike ``_rerender_units_after_swap``, this raises :class:`UpdateError`
+    on any hard failure — subprocess launch failure (``OSError``), a
+    timeout, a non-zero exit, or a clean exit with no parsable result are
+    ALL converted to the same typed error, so :meth:`Updater.commit`'s
+    non-fatal-but-loud containment holds for every failure shape the
+    subprocess can produce, not just a non-zero return code.
+
+    Returns ``{"from": int, "to": int, "pass_warnings": list[str]}``.
+    """
+    payload = json.dumps(
+        {
+            "min_data_version": min_data_version,
+            "job_id": job_id,
+            "reset_outstanding": reset_outstanding,
+        }
+    )
+    envelope_line = (
+        "sys.stdout.write(json.dumps({"
+        + repr(_MIGRATION_RESULT_KEY)
+        + ": {'from': result[0], 'to': result[1]}}) + chr(10))\n"
+    )
+    script = (
+        "import json, sys\n"
+        "import structlog\n"
+        # Mirrors hal0.updater.privileged._pin_logs_to_stderr exactly: send
+        # structured logs to stderr so stdout carries only the result line.
+        "structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))\n"
+        "from hal0.updater.updater import (\n"
+        "    PROFILE_CATALOG_SCHEMA_VERSION,\n"
+        "    run_post_activation_migrations,\n"
+        ")\n"
+        "args = json.loads(sys.argv[1])\n"
+        "ceiling = (PROFILE_CATALOG_SCHEMA_VERSION - 1) if args['reset_outstanding'] else None\n"
+        "try:\n"
+        "    result = run_post_activation_migrations(\n"
+        "        args['min_data_version'], job_id=args['job_id'], ceiling=ceiling\n"
+        "    )\n"
+        "except Exception as exc:\n"
+        "    print('hal0-migrate: ' + str(exc), file=sys.stderr)\n"
+        "    raise SystemExit(1)\n" + envelope_line
+    )
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-c", script, payload],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Same containment class as _rerender_units_after_swap and the
+        # privileged seam's own _invoke — subprocess.run itself can raise
+        # rather than return a CompletedProcess, and the old code only
+        # handled the "returns a non-zero CompletedProcess" shape (#1960 B1).
+        raise UpdateError(
+            "post-activation migrations timed out after 300s in the newly activated tree",
+            details={"job_id": job_id, "timeout": 300},
+        ) from exc
+    except OSError as exc:
+        raise UpdateError(
+            f"post-activation migrations subprocess could not be launched: {exc}",
+            details={"job_id": job_id},
+        ) from exc
+
+    stderr = proc.stderr or ""
+    if proc.returncode == 0:
+        from hal0.updater.privileged import _relay_child_log
+
+        # Relay only on success, mirroring UpdateSeam._invoke exactly: a
+        # failure's stderr goes into the raised error's `details` below
+        # instead (a diagnostic breadcrumb, not the audit trail this
+        # replay closes).
+        _relay_child_log(stderr, verb="post_swap_migrations", job_id=job_id)
+        pass_warnings = [event for event in _NON_FATAL_MIGRATION_FAILURE_EVENTS if event in stderr]
+        # Scan stdout from the END, exactly like privileged._parse_result —
+        # an unexpected banner on stdout cannot displace the answer.
+        for line in reversed((proc.stdout or "").splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                envelope = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(envelope, dict) or _MIGRATION_RESULT_KEY not in envelope:
+                continue
+            result = envelope[_MIGRATION_RESULT_KEY]
+            if isinstance(result, dict) and "from" in result and "to" in result:
+                return {
+                    "from": int(result["from"]),
+                    "to": int(result["to"]),
+                    "pass_warnings": pass_warnings,
+                }
+        raise UpdateError(
+            "post-activation migrations subprocess exited 0 but produced no result marker",
+            details={"job_id": job_id, "stdout": (proc.stdout or "")[-2000:]},
+        )
+    # Last non-empty line is almost always the exception's own message (a
+    # traceback's final line, or the "hal0-migrate: ..." line the child
+    # prints itself) — surfaced in the message itself (not just `details`)
+    # so it reaches the operator-facing convergence report in
+    # cli/update_commands.py, not only the journal.
+    reason = next((line.strip() for line in reversed(stderr.splitlines()) if line.strip()), "")
+    raise UpdateError(
+        f"post-activation migrations failed in the newly activated tree (rc={proc.returncode})"
+        + (f": {reason}" if reason else ""),
+        details={
+            "job_id": job_id,
+            "returncode": proc.returncode,
+            "stderr": stderr[-2000:],
+        },
+    )
+
+
 # ── Updater class ──────────────────────────────────────────────────────────────
 
 
@@ -3786,29 +4036,20 @@ class Updater:
             # file in place (the overlay still serves the built-in seeds), and
             # the un-stamped gate re-offers it next update.
 
-        # Step 7: config migrations. Cap the target below the profile-catalog
-        # watermark ONLY while that reset is genuinely outstanding — an already
-        # converged box (or a future v3 migration) must not be held back.
-        migration_info: tuple[int, int]
+        # Step 7's CALL is moved below, to run AFTER seam.activate() (#1960) —
+        # see _run_post_activation_migrations_after_swap for why an in-process
+        # call here (the pre-fix behaviour) executed the OUTGOING version's
+        # migrations, never the incoming release's. What has to stay here,
+        # unchanged, is the `reset_outstanding` derivation: it decides whether
+        # the migration target must be capped below the profile-catalog
+        # watermark — an already converged box (or a future v3 migration)
+        # must not be held back — and it needs `profile_reset` (just computed
+        # above), so it is cheapest to compute right where the old call used
+        # to be. The INT ceiling itself is no longer derived here (#1960 N1) —
+        # only the bool crosses into the subprocess; see that function's
+        # docstring for why turning it into an int on this side would be a
+        # version-skew bug waiting to happen.
         reset_outstanding = bool(profile_reset.get("due")) and not profile_reset.get("stamped")
-        ceiling = PROFILE_CATALOG_SCHEMA_VERSION - 1 if reset_outstanding else None
-        try:
-            migration_info = await asyncio.to_thread(
-                run_post_activation_migrations,
-                manifest.min_data_version,
-                job_id=self.job_id,
-                ceiling=ceiling,
-            )
-        except Hal0Error as exc:
-            # Don't leave the new tree orphaned on a migration failure —
-            # nuke the half-installed dir so a retry starts fresh. Routed
-            # through the seam: /usr/lib/hal0 is root-only (#1464).
-            with contextlib.suppress(Exception):
-                seam.discard(release_dir_name(target_version))
-            raise UpdateError(
-                f"config migration failed during update: {exc.message}",
-                details={**exc.details, "version": target_version},
-            ) from exc
 
         # spec-hw-slot-ownership §6 / spec-flags-ownership §5 one-shot folds are
         # still NOT auto-run here — see detect_pending_ownership_migrations()
@@ -3855,6 +4096,62 @@ class Updater:
         prior_str = activated.get("previous")
         prior = Path(prior_str) if prior_str else None
 
+        # Step 7 (moved here, #1960): post-activation migrations now run in a
+        # subprocess of the just-repipped venv, AFTER the swap above — see
+        # _run_post_activation_migrations_after_swap. Must run BEFORE the
+        # unit re-render below so slot units render from already-migrated
+        # config (e.g. a relabelled device, sanitised extra_args). commit()
+        # already hard-refuses editable installs at its own top
+        # (_raise_if_editable_install), so — unlike _rerender_units_after_swap,
+        # which is shared with rollback() and therefore still guards on it —
+        # no editable-install branch is needed here.
+        migrations_error: str | None = None
+        pass_warnings: list[str] = []
+        try:
+            migration_result = await _run_post_activation_migrations_after_swap(
+                manifest.min_data_version,
+                job_id=self.job_id,
+                reset_outstanding=reset_outstanding,
+            )
+            migration_info = (migration_result["from"], migration_result["to"])
+            pass_warnings = list(migration_result.get("pass_warnings") or [])
+        except Exception as exc:
+            # LOUD, not silent (#1960's failure-mode decision): the tree is
+            # already active by this point — the symlink swap and venv re-pip
+            # above already succeeded — so raising here and reporting the
+            # whole commit() as "failed" would be misleading; the release IS
+            # running. What actually failed is narrower: on-disk data (slot
+            # TOMLs, hal0.toml schema, registry rows) may still reflect the
+            # OUTGOING release's shape — real, user-visible state divergence,
+            # so this logs at ERROR (louder than _rerender_units_after_swap's
+            # own WARNING for its lower-stakes non-fatal failure) and is
+            # threaded into `convergence` below so `hal0 update` refuses to
+            # call the run a clean success (see cli/update_commands.py's
+            # _print_convergence). hal0-api's boot-time
+            # check_outstanding_migrations retries this automatically at the
+            # next restart, so the failure is self-healing, not permanent.
+            #
+            # Bare `except Exception`, not `except UpdateError` (#1960 B1):
+            # the helper converts every failure shape it knows about to
+            # UpdateError, but subprocess.run can raise things outside that
+            # (a bug in the helper's own conversion, a future refactor that
+            # misses a case) — the same containment class
+            # _rerender_units_after_swap uses for its own subprocess call.
+            # This is the one place in commit() a bare except is correct: by
+            # this point the release is already active, so NOTHING may
+            # escape and abort the function — every later step (unit
+            # re-render, the previous-version breadcrumb, the response
+            # itself) still has to run.
+            migrations_error = str(exc)
+            fallback_version = _raw_schema_version(_raw_hal0_toml())
+            migration_info = (fallback_version, fallback_version)
+            log.error(
+                "updater.post_swap_migration_failed",
+                job_id=self.job_id,
+                version=target_version,
+                error=migrations_error,
+            )
+
         # Step 8c: re-render existing slot units through the NEW code. Must
         # run AFTER the 8b venv reinstall (see _rerender_units_after_swap).
         if not _is_editable_install():
@@ -3873,13 +4170,30 @@ class Updater:
         # A commit that swapped the tree but left the box on the pre-v1.0 slot /
         # model shape is not "done" — surface exactly what is outstanding so the
         # CLI can refuse to call it a clean success.
+        #
+        # `pass_warnings` (#1960 B2) does NOT factor into `ok`/`converged`:
+        # those five passes are independently best-effort BY DESIGN (see
+        # run_post_activation_migrations's own docstring — an affected slot
+        # or model just keeps its previous state until the operator acts),
+        # exactly as true before this PR as after it. What changed is only
+        # that a swallowed pass failure used to be invisible outside
+        # journalctl; it is now visible here too, without reclassifying a
+        # long-standing non-fatal outcome as a hard one.
         convergence = {
             "profile_reset": profile_reset,
             "slot_enabled_swept": enabled_swept,
             "ownership_migrations": pending_ownership,
+            "post_activation_migrations": {
+                "ok": migrations_error is None,
+                "from": migration_info[0],
+                "to": migration_info[1],
+                "error": migrations_error,
+                "pass_warnings": pass_warnings,
+            },
             "converged": (
                 not pending_ownership.get("pending")
                 and profile_reset.get("outcome") in {"reset", "already_reset", "no_config"}
+                and migrations_error is None
             ),
         }
         log.info(
@@ -3889,6 +4203,8 @@ class Updater:
             profile_reset=profile_reset.get("outcome"),
             slot_enabled_swept=len(enabled_swept),
             ownership_pending=pending_ownership.get("pending"),
+            post_activation_migrations_ok=migrations_error is None,
+            post_activation_migrations_pass_warnings=pass_warnings,
         )
 
         return {
@@ -4058,6 +4374,7 @@ __all__ = [
     "activate_release",
     "assert_release_dir_name",
     "assert_trusted_release_dir",
+    "check_outstanding_migrations",
     "convergence_report",
     "detect_pending_ownership_migrations",
     "discard_release",

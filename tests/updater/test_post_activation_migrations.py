@@ -78,6 +78,19 @@ def test_runs_all_six_passes(_stub_every_pass: dict[str, list[Any]]) -> None:
     assert _stub_every_pass["extra_args"] == ["j1"]
 
 
+def test_skip_image_retag_omits_only_that_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
+    """#1960 N2: check_outstanding_migrations passes skip_image_retag=True
+    so the boot-time safety net never runs retag_stale_slot_images — every
+    OTHER pass must still run unaffected."""
+    result = run_post_activation_migrations(job_id="j1", skip_image_retag=True)
+    assert result == (1, 2)
+    assert _stub_every_pass["seed_profiles"] == ["j1"]
+    assert _stub_every_pass["mtp"] == ["j1"]
+    assert _stub_every_pass["vulkan_migration"] == ["j1"]
+    assert _stub_every_pass["image_retag"] == []
+    assert _stub_every_pass["extra_args"] == ["j1"]
+
+
 def test_min_data_version_defaults_to_1(_stub_every_pass: dict[str, list[Any]]) -> None:
     """install.sh has no release manifest to read min_data_version from —
     the default must resolve to "migrate to whatever this code's latest

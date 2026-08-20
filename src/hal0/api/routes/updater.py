@@ -460,6 +460,17 @@ async def _run_commit_job(
         job["error"] = str(exc)
         job["error_code"] = type(exc).__name__
     else:
+        # Convergence must land on the job BEFORE the terminal-state persist
+        # below, not after the restart the way it read before (#1960 B3):
+        # the restart a few lines down is the exact #1540 mechanism — it
+        # shells out from inside hal0-api's own cgroup and can SIGTERM this
+        # very process while it's in flight — so anything set only
+        # afterwards may never reach disk. A red (unconverged) post-swap
+        # migration failure has to survive that race, or a CLI that
+        # re-attaches after the restart reads `convergence: None` and
+        # _print_convergence reports a clean success for a run that wasn't.
+        job["convergence"] = (result or {}).get("convergence")
+
         # Terminal state first, then the restart - see the long note in
         # _run_apply_job. commit() is the path #1540 was reported against:
         # the restart kills this process, so "applied" has to already be on
@@ -473,7 +484,6 @@ async def _run_commit_job(
         restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
         job["restarted"] = restarted
         job["restart_error"] = restart_error
-        job["convergence"] = (result or {}).get("convergence")
     finally:
         job["updated_at"] = time.time()
         _persist_job(job)
