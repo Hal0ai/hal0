@@ -79,6 +79,13 @@ log = logging.getLogger(__name__)
 #: (the daemon, a root-run CLI, the wrapper seams) can write the same tree.
 SHARED_DIR_MODE = 0o2775
 
+#: The mode ``secrets/`` and ``secrets/agents/`` are declared at in the
+#: ownership table below (root:root, root-only traverse+list — #1896). NOT
+#: "shared": callers birthing either dir off the umask-proof path (root-run
+#: provisioners, not just install.sh) pass this explicitly to
+#: :func:`ensure_shared_dir` instead of the group-writable default.
+SECRETS_DIR_MODE = 0o700
+
 
 def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
     """``mkdir -p`` whose result the process umask cannot narrow (#1896).
@@ -134,7 +141,14 @@ def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
     for created in reversed(missing):
         resolved = created.resolve()
         if not any(_is_within(resolved, root) for root in roots):
-            log.warning(
+            # #1942 review finding 8: INFO, not WARNING — an operator model
+            # store outside every enumerated mount is a supported, expected
+            # configuration (see the CodeQL note above), and a migration or a
+            # multi-directory pull into one can log this once per component
+            # created. WARNING-per-directory on a routine path trains
+            # operators to ignore the log, same failure mode #1896 itself
+            # names for a self-audit that can never be green.
+            log.info(
                 "perms.ensure_shared_dir_outside_hal0_roots path=%s (created, not chmod'ed)",
                 resolved,
             )
@@ -666,24 +680,40 @@ def ownership_table(
         # never be durably green. Reconciled toward the RESTRICTIVE side
         # because nothing outside root has business here: systemd reads the
         # EnvironmentFile as root, the agentenv seam runs as root via
-        # /etc/sudoers.d, and every *.env inside is already 0600 root:root, so
-        # 0700 costs no reader any access it actually had. What it removes is
-        # agent-id ENUMERATION by any local user — small, but free (ADR-0002,
-        # agent credential isolation). See known-issues.yaml
-        # `doctor-perms-secrets-dir-0755-is-declared`, now superseded.
-        PermRow(var_lib / "secrets", "root", "root", 0o700, role="secrets/"),
+        # /etc/sudoers.d. The one non-root traverser, `installer/wrappers/
+        # hermes` (it re-execs as the unprivileged `hal0` user per the #843
+        # run-as-hal0 guard, then sources secrets/agents/hermes.env), is
+        # already blocked one level down — every *.env inside is 0600
+        # root:root, so `hal0` can `stat` the directory but still can't read
+        # the file. 0700 costs no reader any access it actually had. What it
+        # removes is agent-id ENUMERATION by any local user — small, but free
+        # (ADR-0002, agent credential isolation). See known-issues.yaml
+        # `doctor-perms-secrets-dir-0700-is-declared`.
+        PermRow(
+            var_lib / "secrets",
+            "root",
+            "root",
+            SECRETS_DIR_MODE,
+            optional=False,
+            role="secrets/",
+        ),
         # secrets/agents/ — per-agent secret .env files (written by the
         # hal0-agentenv seam, never by the service directly). Pinned root:root
         # like secrets/ itself; the dir mode is 0700 (root-only traverse+list,
         # matching the seam — see above), the per-agent .env files are 0600
-        # (owner-read-only tokens), unchanged by the tightening.
+        # (owner-read-only tokens), unchanged by the tightening. Non-optional
+        # (#1942 review finding 4): the default `optional=True` meant
+        # `_materialise_fresh_install` never created either secrets row, so
+        # the fresh-install convergence tests never exercised the 0700 change
+        # this PR makes — see test_fresh_install_tree_actually_exercises_the_secrets_mode.
         PermRow(
             var_lib / "secrets" / "agents",
             "root",
             "root",
-            0o700,
+            SECRETS_DIR_MODE,
             glob="*.env",
             child_mode=0o600,
+            optional=False,
             role="secrets/agents/ (+ <id>.env)",
         ),
         # benchmarks/ (+ runs/, logs/, server-ab/) — GPU bench artifacts,

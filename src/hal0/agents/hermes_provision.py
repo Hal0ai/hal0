@@ -61,7 +61,7 @@ from hal0.agents.anchor_window import (
     resolve_anchor_window,
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
-from hal0.install.perms import ensure_shared_dir
+from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 from hal0.slots.state import SlotState, is_dispatchable_state, provider_requires_model
 from hal0.system import seam as _seam
@@ -4822,7 +4822,16 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
 
     import contextlib
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # #1942 review finding 3: a bare `path.parent.mkdir(parents=True,
+    # exist_ok=True)` births an absent parent at the process umask (0755
+    # under UMask=0022) — the sole caller is HERMES_SECRETS_ENV
+    # (secrets/agents/hermes.env), so an absent parent means a fresh box
+    # provisioning before install.sh (or a lost/never-created secrets/agents)
+    # would reintroduce the exact #1896 drift class this PR closed.
+    # `ensure_shared_dir` is umask-proof and only chmod's the components it
+    # creates, so a pre-existing parent (the common case — install.sh seeds
+    # it first) is left untouched.
+    ensure_shared_dir(path.parent, mode=SECRETS_DIR_MODE)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
     os.replace(tmp, path)

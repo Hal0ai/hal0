@@ -234,6 +234,28 @@ def test_fresh_install_tree_is_green(tmp_hal0_home: str) -> None:
     assert _mode_drift(table) == []
 
 
+def test_fresh_install_tree_actually_exercises_the_secrets_mode(tmp_hal0_home: str) -> None:
+    """#1942 review finding 4: the 0700 change must be BOUND by a convergence test.
+
+    ``PermRow.optional`` defaults ``True``, and neither secrets row overrode
+    it, so ``_materialise_fresh_install`` (which skips optional rows) never
+    created ``secrets/`` — the fresh-install green check above passed
+    trivially by never looking at the path the whole PR is about. Both
+    secrets rows are now ``optional=False``; this asserts the fresh-install
+    tree actually contains them, born at the declared 0700, not merely that
+    the declaration table says 0700 (that's :func:`test_secrets_rows_declare_0700`).
+    """
+    table = perms.ownership_table(service_user="hal0")
+    _materialise_fresh_install(table)
+    var_lib = paths.var_lib()
+    secrets = var_lib / "secrets"
+    agents = var_lib / "secrets" / "agents"
+    assert secrets.is_dir(), "_materialise_fresh_install must create secrets/"
+    assert agents.is_dir(), "_materialise_fresh_install must create secrets/agents/"
+    assert os.stat(secrets).st_mode & 0o7777 == 0o700
+    assert os.stat(agents).st_mode & 0o7777 == 0o700
+
+
 def test_stays_green_after_slot_load_model_pull_and_state_render(
     tmp_hal0_home: str,
 ) -> None:
