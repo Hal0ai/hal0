@@ -1624,6 +1624,112 @@ def test_prepare_then_commit_swaps(synthetic_release: dict[str, Any], cosign_ski
     assert Path(os.readlink(link)).resolve() == install.resolve()
 
 
+# ── post-activation migrations run post-swap (#1960) ────────────────────────────
+
+
+def test_commit_runs_post_activation_migrations_after_the_swap(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1960: migrations must execute the INCOMING version's code against the
+    activated tree — a subprocess of the just-repipped venv, run AFTER
+    seam.activate()'s symlink swap, exactly mirroring
+    _rerender_units_after_swap's own reasoning.
+
+    Before the fix, ``run_post_activation_migrations`` ran in-process
+    (``asyncio.to_thread``) BEFORE ``seam.activate()`` — this process's own
+    already-imported modules (the OUTGOING version), never the incoming
+    release's. This test fails against that code two ways: no subprocess
+    call for the migrations exists at all, and even once one exists, it
+    would fire before the symlink pointed at the new tree.
+    """
+    calls: list[list[str]] = []
+    symlink_targets_when_migrations_ran: list[str | None] = []
+
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        cmd = list(cmd)
+        calls.append(cmd)
+        if any("run_post_activation_migrations" in part for part in cmd):
+            link = _current_symlink()
+            symlink_targets_when_migrations_ran.append(
+                Path(os.readlink(link)).name if link.is_symlink() else None
+            )
+            return _Completed(stdout="HAL0_MIGRATION_RESULT=" + json.dumps({"from": 1, "to": 2}))
+        return _Completed()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())
+
+    migration_calls = [
+        c for c in calls if any("run_post_activation_migrations" in part for part in c)
+    ]
+    assert len(migration_calls) == 1, (
+        f"expected exactly one post-activation-migrations subprocess call, got: {calls}"
+    )
+    assert symlink_targets_when_migrations_ran == ["hal0-0.0.1"], (
+        "post-activation migrations ran before the symlink pointed at the incoming "
+        "release — the outgoing version's code would have executed instead (#1960)"
+    )
+    assert result["migrations"] == {"from": 1, "to": 2}
+    assert result["convergence"]["post_activation_migrations"] == {
+        "ok": True,
+        "from": 1,
+        "to": 2,
+        "error": None,
+    }
+
+
+def test_commit_post_activation_migration_failure_is_non_fatal_but_loud(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed post-swap migration subprocess must not abort commit() — the
+    tree is already active by that point (the symlink swap and venv re-pip
+    already succeeded), so raising would misreport a completed activation as
+    a failed update (#1960). It must instead be LOUD: an ERROR-level journal
+    line, plus a ``convergence.post_activation_migrations`` block that makes
+    ``hal0 update`` refuse to call the run a clean success.
+    """
+    from structlog.testing import capture_logs
+
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        cmd = list(cmd)
+        if any("run_post_activation_migrations" in part for part in cmd):
+            return _Completed(returncode=1, stderr="Hal0Error: schema migration exploded")
+        return _Completed()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    with capture_logs() as logs:
+        result = asyncio.run(Updater().apply())
+
+    # The swap itself must stand — the release IS active despite the failure.
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
+
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["ok"] is False
+    assert "schema migration exploded" in post["error"]
+    assert result["convergence"]["converged"] is False
+
+    errors = [e for e in logs if e.get("event") == "updater.post_swap_migration_failed"]
+    assert len(errors) == 1
+    assert errors[0]["log_level"] == "error"
+    assert "schema migration exploded" in errors[0]["error"]
+
+
 def test_prepare_reads_release_notes(
     tmp_hal0_home: str,
     tmp_path: Path,

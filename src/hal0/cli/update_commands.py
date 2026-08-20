@@ -384,6 +384,30 @@ def _print_convergence(convergence: dict | None) -> bool:
     elif outcome == "error":
         console.print(f"[yellow]![/yellow] profile catalog reset failed: {reset.get('error')}")
 
+    # #1960: post-activation migrations (schema + slot/registry cleanup
+    # sweeps) now run in a subprocess AFTER the symlink swap, so a failure
+    # there does NOT abort the update — the release is already active. It
+    # still has to be reported, loudly, or "hal0 update" would silently hand
+    # back a box whose on-disk data still reflects the previous release.
+    post_migrations = convergence.get("post_activation_migrations") or {}
+    if post_migrations.get("ok"):
+        src, dst = post_migrations.get("from"), post_migrations.get("to")
+        if src is not None and dst is not None and src != dst:
+            console.print(f"[green]✓[/green] on-disk schema migrated v{src} → v{dst}")
+    elif post_migrations:
+        console.print(
+            Panel(
+                "[bold red]Post-update data migrations did not apply.[/bold red]\n"
+                f"{post_migrations.get('error') or 'unknown error'}\n\n"
+                "The new code is installed and running, but on-disk data (slot TOMLs,\n"
+                "hal0.toml schema, registry rows) may still reflect the PREVIOUS release's\n"
+                "shape. hal0-api retries this automatically at its next start — restart the\n"
+                "service now to retry immediately, or wait for the next scheduled restart.",
+                title="Migration incomplete",
+                border_style="red",
+            )
+        )
+
     ownership = convergence.get("ownership_migrations") or {}
     pending = list(ownership.get("pending") or [])
     if not pending:

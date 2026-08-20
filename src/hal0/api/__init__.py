@@ -1325,12 +1325,33 @@ async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
 async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
     """Phase — one-shot slot reconciliation passes + idle-monitor start.
 
-    ORDERING: ``migrate_slot_dir`` (#1369) → ``reconcile_unconfigured_slots``
-    → ``reconcile_npu_trio_slots`` → ``fold_identity`` (folds identity for the
-    trio shadows just reconciled) → ``start_idle_monitor``. Otherwise preserved
-    exactly from the monolithic boot.
+    ORDERING: ``check_outstanding_migrations`` (#1960, safety net) →
+    ``migrate_slot_dir`` (#1369) → ``reconcile_unconfigured_slots`` →
+    ``reconcile_npu_trio_slots`` → ``fold_identity`` (folds identity for the
+    trio shadows just reconciled) → ``start_idle_monitor``. Everything from
+    ``migrate_slot_dir`` on is otherwise preserved exactly from the
+    monolithic boot.
     """
-    # #1369 one-shot sweep, FIRST: every pass below reads ``model.default`` to
+    # #1960 safety net, FIRST: heal a box whose post-activation data
+    # migrations (schema, slot-TOML relabels, registry cleanup) never ran —
+    # either because it upgraded before this fix existed, or because
+    # Updater.commit()'s post-swap migration subprocess itself failed (see
+    # that function's docstring). Every pass check_outstanding_migrations
+    # runs is a documented idempotent "stale? fix it : no-op" sweep, so a
+    # converged box pays for one hal0.toml read plus five near-instant
+    # no-ops. Runs before every pass below because those passes read slot
+    # TOMLs / registry rows this can rewrite. Never raises — see its own
+    # docstring — so no try/except is needed here, but exceptions are boxed
+    # anyway (defensive-in-depth, matching every neighbouring pass in this
+    # phase) in case the import itself fails.
+    try:
+        from hal0.updater.updater import check_outstanding_migrations
+
+        check_outstanding_migrations()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("slot.outstanding_migrations_check_failed", error=str(exc))
+
+    # #1369 one-shot sweep, next: every pass below reads ``model.default`` to
     # decide what is configured, so a slot the operator had switched off with
     # ``enabled = false`` (whose model is therefore still bound on disk) would
     # be reconciled as live for one boot. Idempotent — after the first sweep
