@@ -199,6 +199,30 @@ def require_kfd_for_gpu_slot(
         return
     if kfd_present(kfd_path):
         return
+    # Computed once and reused on both the warn and raise paths below, so
+    # neither can drift from the lane it is actually describing (#1952
+    # review): #1888 is llama.cpp's failure mode specifically, and quoting
+    # it at a non-llama operator sends them chasing the wrong defect.
+    if runtime_lane == "llama":
+        why = (
+            "The runner image falls back to its Vulkan backend without it, and "
+            "that backend emits invalid tokens for every model (#1888) — "
+            "refusing to start rather than serve garbage."
+        )
+    elif runtime_lane == "rocm":
+        why = (
+            "This slot's runtime image resolves ROCm at launch and cannot "
+            "initialise HIP without it."
+        )
+    else:
+        # "no-rocm" only reaches this far via device == "gpu-rocm" — the
+        # gpu-vulkan branch above already returned for this lane. The image
+        # never touches HIP, so the actual problem is the device
+        # declaration, not the runtime.
+        why = (
+            "This runtime's image never touches ROCm/HIP — the slot's device "
+            "is declared 'gpu-rocm' but doesn't need to be."
+        )
     environ = os.environ if env is None else env
     if str(environ.get(ENV_ALLOW_VULKAN_FALLBACK, "")).strip() in ("1", "true", "yes"):
         log.warning(
@@ -207,19 +231,9 @@ def require_kfd_for_gpu_slot(
             device=device,
             kfd_path=kfd_path,
             runtime_lane=runtime_lane,
-            detail="output will be invalid — see #1888",
+            detail=why,
         )
         return
-    why = (
-        "The runner image falls back to its Vulkan backend without it, and that "
-        "backend emits invalid tokens for every model (#1888) — refusing to start "
-        "rather than serve garbage."
-        if runtime_lane == "llama"
-        # #1888 is llama.cpp's failure mode; quoting it at a ComfyUI or
-        # Qwen3-TTS operator would send them chasing the wrong defect.
-        else "This slot's runtime image resolves ROCm at launch and cannot "
-        "initialise HIP without it."
-    )
     raise GpuPreflightError(
         f"slot {slot_name!r} (device={device}) needs the ROCm compute node "
         f"{kfd_path}, which is not visible here. {why} "

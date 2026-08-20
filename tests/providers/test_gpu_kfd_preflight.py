@@ -377,6 +377,93 @@ class TestNonRocmRuntimesAreNotGated:
         assert "/kfd" in msg
         assert "pct stop/start" in msg
 
+    def test_the_no_rocm_gpu_rocm_refusal_describes_a_device_mismatch(self, tmp_path) -> None:
+        """A no-rocm runtime (Kokoro/Moonshine) only reaches the raise path via
+        a hand-set ``device="gpu-rocm"``, since the gpu-vulkan branch already
+        exempts this lane. The image never resolves ROCm/HIP, so the refusal
+        must not claim it does (Codex review on PR #1952) — the actual
+        problem is the device declaration, not the runtime."""
+        with pytest.raises(GpuPreflightError) as exc:
+            require_kfd_for_gpu_slot(
+                "voice",
+                device="gpu-rocm",
+                kfd_path=str(tmp_path / "kfd"),
+                env={},
+                amd_host=True,
+                runtime_lane="no-rocm",
+            )
+        msg = str(exc.value)
+        assert "1888" not in msg
+        assert "resolves ROCm at launch" not in msg
+        assert "cannot initialise HIP without it" not in msg
+        assert "never touches ROCm/HIP" in msg
+        assert "declared 'gpu-rocm'" in msg
+        # Still actionable: what is missing and how to forward it.
+        assert "/kfd" in msg
+        assert "pct stop/start" in msg
+
+
+class TestFallbackWarningIsLaneScoped:
+    """PR #1952 review: the ``HAL0_ALLOW_VULKAN_FALLBACK`` warn path
+    hardcoded ``detail="output will be invalid — see #1888"`` for every lane,
+    including ``"rocm"`` — a ComfyUI/Qwen3-TTS operator has no Vulkan
+    fallback to speak of and gets sent to the wrong defect. The warning must
+    reuse the same lane-scoped explanation as the raise path."""
+
+    def test_the_llama_lane_warning_still_names_1888(self, tmp_path) -> None:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            require_kfd_for_gpu_slot(
+                "agent",
+                device="gpu-rocm",
+                kfd_path=str(tmp_path / "kfd"),
+                env={ENV_ALLOW_VULKAN_FALLBACK: "1"},
+                amd_host=True,
+                runtime_lane="llama",
+            )
+        warnings = [e for e in logs if e.get("log_level") == "warning"]
+        assert len(warnings) == 1
+        assert "1888" in warnings[0]["detail"]
+
+    def test_the_rocm_lane_warning_does_not_blame_the_vulkan_fallback(self, tmp_path) -> None:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            require_kfd_for_gpu_slot(
+                "imagegen",
+                device="gpu-vulkan",
+                kfd_path=str(tmp_path / "kfd"),
+                env={ENV_ALLOW_VULKAN_FALLBACK: "1"},
+                amd_host=True,
+                runtime_lane="rocm",
+            )
+        warnings = [e for e in logs if e.get("log_level") == "warning"]
+        assert len(warnings) == 1
+        detail = warnings[0]["detail"]
+        assert "1888" not in detail
+        assert "output will be invalid" not in detail
+        assert "resolves ROCm at launch" in detail
+
+    def test_the_no_rocm_lane_warning_describes_the_device_mismatch(self, tmp_path) -> None:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            require_kfd_for_gpu_slot(
+                "voice",
+                device="gpu-rocm",
+                kfd_path=str(tmp_path / "kfd"),
+                env={ENV_ALLOW_VULKAN_FALLBACK: "1"},
+                amd_host=True,
+                runtime_lane="no-rocm",
+            )
+        warnings = [e for e in logs if e.get("log_level") == "warning"]
+        assert len(warnings) == 1
+        detail = warnings[0]["detail"]
+        assert "1888" not in detail
+        assert "output will be invalid" not in detail
+        assert "never touches ROCm/HIP" in detail
+
 
 def _raiser(*_a: object, **_kw: object) -> None:
     raise GpuPreflightError("no /dev/kfd")
