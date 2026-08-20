@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from hal0.agents import hermes_provision as hp
+from hal0.config import paths
 
 # ── secrets vault ────────────────────────────────────────────────────────────
 
@@ -48,6 +49,27 @@ def test_secrets_env_root_preserves_existing_lines(
     monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
     hp._write_secrets_env({"A": "99", "C": "3"})
     assert vault.read_text() == "# operator note\nA=99\nKEEP=yes\nC=3\n"
+
+
+def test_secrets_env_root_births_absent_parent_at_0700(monkeypatch: pytest.MonkeyPatch) -> None:
+    """euid==0, secrets/agents/ absent (fresh box): the birthed dir is 0700.
+
+    #1942 review finding 3: ``_merge_env_file`` used a bare
+    ``path.parent.mkdir(parents=True, exist_ok=True)`` — no mode — so a
+    root-run provision on a box where ``secrets/agents`` doesn't exist yet
+    births it 0755 under the installer/daemon umask, reintroducing the exact
+    #1896 drift class this PR tightened the table and install.sh to close.
+    """
+    # Must sit under paths.var_lib() (not a bare tmp_path): ensure_shared_dir's
+    # containment check only chmod's paths inside hal0's own declared roots
+    # (see #1739 / #1896 in perms.py) — the autouse _isolate_hal0_home
+    # fixture points paths.var_lib() at tmp_path/var-lib for this test.
+    vault = paths.var_lib() / "secrets" / "agents" / "hermes.env"
+    assert not vault.parent.exists()
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    hp._write_secrets_env({"A": "1"})
+    assert (vault.parent.stat().st_mode & 0o777) == 0o700
 
 
 def test_secrets_env_nonroot_routes_through_seam(monkeypatch: pytest.MonkeyPatch) -> None:

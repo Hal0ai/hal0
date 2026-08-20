@@ -72,6 +72,122 @@ from hal0.config import paths
 log = logging.getLogger(__name__)
 
 
+# ── umask-proof directory creation (#1896) ────────────────────────────────────
+
+#: The mode every SHARED hal0 state directory is declared at below: setgid so
+#: children inherit the ``hal0`` group, group-writable so any hal0-group member
+#: (the daemon, a root-run CLI, the wrapper seams) can write the same tree.
+SHARED_DIR_MODE = 0o2775
+
+#: The mode ``secrets/`` and ``secrets/agents/`` are declared at in the
+#: ownership table below (root:root, root-only traverse+list — #1896). NOT
+#: "shared": callers birthing either dir off the umask-proof path (root-run
+#: provisioners, not just install.sh) pass this explicitly to
+#: :func:`ensure_shared_dir` instead of the group-writable default.
+SECRETS_DIR_MODE = 0o700
+
+
+def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
+    """``mkdir -p`` whose result the process umask cannot narrow (#1896).
+
+    ``Path.mkdir(mode=...)`` masks its mode with the umask, and the setgid bit
+    a parent passes down only carries GROUP OWNERSHIP, not the group-write bit.
+    So a daemon under the shipped ``UMask=0022`` births ``2755`` everywhere the
+    table declares ``2775`` — drift that regenerates after every ``--fix``,
+    once per slot loaded and once per model pulled. Creating the dir and then
+    ``chmod``-ing it is the only way to land the declared mode.
+
+    Only the components THIS call creates are chmod'ed. A dir that already
+    exists is left exactly as it is, so a lazy ``mkdir(parents=True)`` passing
+    through a deliberately tighter parent (``secrets/`` 0700, ``agents/`` 0711)
+    can never widen it.
+
+    The ``chmod`` is CONTAINED: it only ever touches a path that resolves
+    inside one of hal0's own roots (:func:`_shared_dir_roots`). Callers derive
+    these paths from request-supplied ids (``persist_pull_job`` ->
+    ``pull_job_file(job.model_id)``, a slot's state dir, ...), and while each
+    caller sanitises its own component, a mode-changing sink must not depend on
+    that being true forever. Same shape as
+    :func:`hal0.config.store.assert_under_store` with ``severity="warn"``: an
+    out-of-tree path is still created (behaviour preserved for callers pointed
+    at an operator's own store) but never re-moded.
+
+    Fail-soft on ``chmod``, like :func:`hal0.config.store.finalize_perms`: an
+    operator's model store may live on an NFS export that refuses the call, and
+    a permissions nice-to-have must never break a pull or a slot load.
+    """
+    path = Path(path)
+    # CodeQL note: the `exists()` probe and the `mkdir` below still carry the
+    # caller's taint (py/path-injection, the rule this repo already carries 71
+    # standing alerts for). They are byte-for-byte the operation each caller
+    # performed on the IDENTICAL path before this helper existed — no new
+    # capability, just relocated. The one genuinely new sink, `chmod`, is
+    # contained by the root check below. Containing the `mkdir` too was
+    # rejected: an operator's model store may sit outside every enumerated
+    # mount, and hard-failing a multi-GB pull to satisfy a static-analysis
+    # rule the tree already tolerates is a worse trade.
+    # Deepest-first list of the components that do NOT exist yet.
+    missing: list[Path] = []
+    probe = path
+    while not probe.exists():
+        missing.append(probe)
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+
+    path.mkdir(parents=True, exist_ok=True)
+
+    roots = _shared_dir_roots()
+    for created in reversed(missing):
+        resolved = created.resolve()
+        if not any(_is_within(resolved, root) for root in roots):
+            # #1942 review finding 8: INFO, not WARNING — an operator model
+            # store outside every enumerated mount is a supported, expected
+            # configuration (see the CodeQL note above), and a migration or a
+            # multi-directory pull into one can log this once per component
+            # created. WARNING-per-directory on a routine path trains
+            # operators to ignore the log, same failure mode #1896 itself
+            # names for a self-audit that can never be green.
+            log.info(
+                "perms.ensure_shared_dir_outside_hal0_roots path=%s (created, not chmod'ed)",
+                resolved,
+            )
+            continue
+        try:
+            os.chmod(resolved, mode)
+        except OSError as exc:  # pragma: no cover - exercised via monkeypatch
+            log.debug("perms.ensure_shared_dir_chmod_failed path=%s error=%s", resolved, exc)
+    return path
+
+
+def _is_within(candidate: Path, root: Path) -> bool:
+    """True when ``candidate`` (already resolved) sits at or under ``root``."""
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _shared_dir_roots() -> tuple[Path, ...]:
+    """Resolved roots :func:`ensure_shared_dir` is allowed to ``chmod`` inside.
+
+    hal0's own state + config trees, plus whatever model-store mounts the
+    operator configured (a pull stages and installs weights there). Root
+    discovery is best-effort: a config-load failure must degrade to the two
+    built-in trees, never raise into a pull.
+    """
+    roots: list[Path] = []
+    for probe in (paths.var_lib, paths.etc, paths.var_log):
+        with contextlib.suppress(OSError, ValueError):
+            roots.append(probe().resolve())
+    try:
+        roots.extend(Path(m).resolve() for m in paths.model_mount_roots())
+    except Exception as exc:  # config load is untrusted here; never raise into a pull
+        log.debug("perms.shared_dir_roots_model_mounts_failed error=%s", exc)
+    return tuple(roots)
+
+
 # ── the declarative table ─────────────────────────────────────────────────────
 
 
@@ -556,18 +672,48 @@ def ownership_table(
         # secrets/ stays root:root even under the flip: systemd reads the
         # EnvironmentFile here AS ROOT before dropping to the service user, so it
         # must not be service-writable (hardened-model decision).
-        PermRow(var_lib / "secrets", "root", "root", 0o755, role="secrets/"),
+        #
+        # 0700, NOT 0755 (#1896). The table used to declare 0755 while the
+        # shipped `hal0-agentenv` seam ran `install -d -m 0700` on the same two
+        # dirs on every merge-secrets — two shipped components asserting
+        # different truths, so the mode oscillated and `doctor perms` could
+        # never be durably green. Reconciled toward the RESTRICTIVE side
+        # because nothing outside root has business here: systemd reads the
+        # EnvironmentFile as root, the agentenv seam runs as root via
+        # /etc/sudoers.d. The one non-root traverser, `installer/wrappers/
+        # hermes` (it re-execs as the unprivileged `hal0` user per the #843
+        # run-as-hal0 guard, then sources secrets/agents/hermes.env), is
+        # already blocked one level down — every *.env inside is 0600
+        # root:root, so `hal0` can `stat` the directory but still can't read
+        # the file. 0700 costs no reader any access it actually had. What it
+        # removes is agent-id ENUMERATION by any local user — small, but free
+        # (ADR-0002, agent credential isolation). See known-issues.yaml
+        # `doctor-perms-secrets-dir-0700-is-declared`.
+        PermRow(
+            var_lib / "secrets",
+            "root",
+            "root",
+            SECRETS_DIR_MODE,
+            optional=False,
+            role="secrets/",
+        ),
         # secrets/agents/ — per-agent secret .env files (written by the
         # hal0-agentenv seam, never by the service directly). Pinned root:root
-        # like secrets/ itself; the dir mode is 0755 (traverse + list), the
-        # per-agent .env files are 0600 (owner-read-only tokens).
+        # like secrets/ itself; the dir mode is 0700 (root-only traverse+list,
+        # matching the seam — see above), the per-agent .env files are 0600
+        # (owner-read-only tokens), unchanged by the tightening. Non-optional
+        # (#1942 review finding 4): the default `optional=True` meant
+        # `_materialise_fresh_install` never created either secrets row, so
+        # the fresh-install convergence tests never exercised the 0700 change
+        # this PR makes — see test_fresh_install_tree_actually_exercises_the_secrets_mode.
         PermRow(
             var_lib / "secrets" / "agents",
             "root",
             "root",
-            0o755,
+            SECRETS_DIR_MODE,
             glob="*.env",
             child_mode=0o600,
+            optional=False,
             role="secrets/agents/ (+ <id>.env)",
         ),
         # benchmarks/ (+ runs/, logs/, server-ab/) — GPU bench artifacts,
@@ -930,12 +1076,14 @@ def audit_rows(plan_: OwnershipPlan) -> list[dict[str, str]]:
 
 
 __all__ = [
+    "SHARED_DIR_MODE",
     "OwnershipPlan",
     "PermDiff",
     "PermObservation",
     "PermRow",
     "audit_rows",
     "commit",
+    "ensure_shared_dir",
     "observe",
     "ownership_table",
     "plan",

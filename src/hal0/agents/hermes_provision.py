@@ -43,6 +43,7 @@ import pwd
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
 import tempfile
@@ -60,6 +61,7 @@ from hal0.agents.anchor_window import (
     resolve_anchor_window,
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
+from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 from hal0.slots.state import SlotState, is_dispatchable_state, provider_requires_model
 from hal0.system import seam as _seam
@@ -2723,6 +2725,15 @@ ETC_HAL0_AGENT_SKILLS = ETC_HAL0_DIR / "agent-skills"
 # provision time as root.
 RUNTIME_SNAPSHOT_DIR = Path("/var/lib/hal0")
 
+#: Mode for the runtime snapshots rendered into RUNTIME_SNAPSHOT_DIR. This is
+#: the SAME value the ownership table declares for STATE.md
+#: (``hal0.install.perms.ownership_table``); the two are asserted equal by
+#: ``tests/install/test_perms_converge.py`` so they can never drift apart
+#: again (#1896). Group-writable because the file is written by the hal0
+#: daemon AND by a root-run ``hal0 hermes render-context``, and read by the
+#: session-start hook — one shared group, no owner-dependent access.
+RUNTIME_SNAPSHOT_MODE = 0o664
+
 
 def _latest_env_snapshot(hermes_home: Path) -> dict[str, Any]:
     """Load the env snapshot env_probe wrote (stable ``env.json``, or a legacy
@@ -2753,16 +2764,36 @@ def _render_template(name: str, **vars_: Any) -> str:
     return env.get_template(name).render(**vars_)
 
 
-def _atomic_write(path: Path, content: str) -> str:
-    """Tmp-write + rename for atomicity. Returns the sha256 of content."""
+def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> str:
+    """Tmp-write + rename for atomicity. Returns the sha256 of content.
+
+    The replacement file inherits ``mode`` when given, else the mode of the
+    file it replaces, else the process umask (#1896). A tmp-write + ``rename``
+    otherwise silently RE-MODES its target: the new inode is born at the
+    umask, so the daemon's ``UMask=0022`` rewrote ``STATE.md`` back to ``0644``
+    after every render, discarding the ``0664`` the ownership table declares
+    and ``hal0 doctor perms --fix`` had just applied. That made the self-audit
+    unable to converge — a rewrite is a content change, not a posture change.
+
+    The chmod happens on the TMP file, before the rename, so the target is
+    never observable at the wrong mode.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if mode is None:
+        with contextlib.suppress(OSError):
+            mode = stat.S_IMODE(path.stat().st_mode)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
+    if mode is not None:
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, mode)
     os.replace(tmp, path)
     return content_hash(content)
 
 
-def _atomic_write_if_changed(path: Path, content: str) -> tuple[str, bool]:
+def _atomic_write_if_changed(
+    path: Path, content: str, *, mode: int | None = None
+) -> tuple[str, bool]:
     """Atomic write that skips a byte-identical file. Returns ``(sha256, wrote)``.
 
     The convergence signal for the rendered context files: a re-render that
@@ -2774,7 +2805,7 @@ def _atomic_write_if_changed(path: Path, content: str) -> tuple[str, bool]:
                 return content_hash(content), False
         except OSError:
             pass
-    return _atomic_write(path, content), True
+    return _atomic_write(path, content, mode=mode), True
 
 
 def _safe_symlink(target: Path, link: Path) -> bool:
@@ -4185,7 +4216,7 @@ def render_live_context(
     # STATE.md — content-hash gated (ignore the as_of line). Written under the
     # hal0-owned RUNTIME_SNAPSHOT_DIR so render-context works under the User=hal0
     # / ProtectSystem=strict hermes sandbox (#473).
-    RUNTIME_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_shared_dir(RUNTIME_SNAPSHOT_DIR)
     state_path = RUNTIME_SNAPSHOT_DIR / "STATE.md"
     existing = ""
     if state_path.exists():
@@ -4199,7 +4230,7 @@ def render_live_context(
         return out  # state_written=False, hermes_written=False, degraded=True
 
     if _state_body_minus_timestamp(existing) != _state_body_minus_timestamp(new_state):
-        _atomic_write(state_path, new_state)
+        _atomic_write(state_path, new_state, mode=RUNTIME_SNAPSHOT_MODE)
         out["state_written"] = True
     elif reachable:
         # Content unchanged, but we just confirmed it current against a
@@ -4236,7 +4267,7 @@ def render_live_context(
         hpath = RUNTIME_SNAPSHOT_DIR / "HERMES.md"
         out["hermes_path"] = str(hpath)
         if not hpath.exists() or hpath.read_text(encoding="utf-8") != hermes_md:
-            _atomic_write(hpath, hermes_md)
+            _atomic_write(hpath, hermes_md, mode=RUNTIME_SNAPSHOT_MODE)
             out["hermes_written"] = True
     except Exception as exc:  # best-effort; STATE.md already written
         log.warning("hermes_provision.render_live_context_hermes_failed", error=str(exc))
@@ -4791,7 +4822,16 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
 
     import contextlib
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # #1942 review finding 3: a bare `path.parent.mkdir(parents=True,
+    # exist_ok=True)` births an absent parent at the process umask (0755
+    # under UMask=0022) — the sole caller is HERMES_SECRETS_ENV
+    # (secrets/agents/hermes.env), so an absent parent means a fresh box
+    # provisioning before install.sh (or a lost/never-created secrets/agents)
+    # would reintroduce the exact #1896 drift class this PR closed.
+    # `ensure_shared_dir` is umask-proof and only chmod's the components it
+    # creates, so a pre-existing parent (the common case — install.sh seeds
+    # it first) is left untouched.
+    ensure_shared_dir(path.parent, mode=SECRETS_DIR_MODE)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
     os.replace(tmp, path)

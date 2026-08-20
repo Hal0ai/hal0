@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from hal0.errors import Hal0Error
+from hal0.install.perms import ensure_shared_dir
 
 # ── Enum ─────────────────────────────────────────────────────────────────────
 
@@ -381,7 +382,9 @@ def write_state_atomic(path: Path | str, record: SlotStateRecord) -> None:
     truncated state.json.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # 2775, umask-proof: the slots/ row declares the per-slot dir setgid +
+    # group-writable, and a bare mkdir under UMask=0022 births 2755 (#1896).
+    ensure_shared_dir(path.parent)
     payload = json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n"
 
     tmp_path: Path | None = None

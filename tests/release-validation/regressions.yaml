@@ -1124,7 +1124,7 @@ regressions:
       by hermes_provision._atomic_write (tmp-write, no chmod, UMask=0022) vs the table's 0664;
       hal0-agentenv re-tightens secrets/ to 0700 on every merge-secrets vs the table's 0755 (the
       two shipped components disagree — the contradiction is the defect, not a leak: *.env stays
-      0600 either way, see known-issues `doctor-perms-secrets-dir-0755-is-declared`); and every
+      0600 either way, see known-issues `doctor-perms-secrets-dir-0700-is-declared`); and every
       daemon-created dir under recursive rows lands 2755 vs 2775. A self-audit that can never be
       green trains operators to ignore it. Do not assert a drift ROW COUNT — it grows with every
       slot loaded and model pulled.

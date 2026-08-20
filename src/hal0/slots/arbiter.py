@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from hal0.config import paths
 from hal0.errors import Hal0Error, NotFound
+from hal0.install.perms import ensure_shared_dir
 from hal0.slots.state import DISPATCHABLE_STATES, SlotState
 
 if TYPE_CHECKING:  # pragma: no cover — import cycle guard (manager owns us)
@@ -281,7 +282,7 @@ class GpuArbiter:
     def _persist(self) -> None:
         """Atomic same-directory tmpfile + os.replace (state.json pattern)."""
         st = self._load_state()
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_shared_dir(self.state_path.parent)  # 2775, umask-proof (#1896)
         tmp_path: Path | None = None
         try:
             fd, tmp_str = tempfile.mkstemp(

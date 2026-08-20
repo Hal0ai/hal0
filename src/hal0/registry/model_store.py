@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from hal0.config import paths
+from hal0.install.perms import ensure_shared_dir
 
 log = logging.getLogger(__name__)
 
@@ -279,7 +280,7 @@ def execute_migration(plan: MigrationPlan) -> MigrationResult:
 
     src = Path(plan.source or "")
     dst = Path(plan.target)
-    dst.mkdir(parents=True, exist_ok=True)
+    ensure_shared_dir(dst)  # 2775, umask-proof (#1896)
     result = MigrationResult(source=str(src), target=str(dst))
 
     for entry in sorted(src.iterdir()):

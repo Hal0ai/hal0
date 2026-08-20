@@ -33,6 +33,7 @@ from typing import Any
 
 from hal0.config import paths
 from hal0.errors import Hal0Error
+from hal0.install.perms import ensure_shared_dir
 from hal0.registry.runner_image_store import RunnerImageStore
 
 log = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ def persist_pull_job(job: RunnerPullJob) -> None:
     """Atomically mirror a job snapshot to disk (best-effort, fail-soft)."""
     path = pull_job_file(job.image_id)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_shared_dir(path.parent)  # 2775, umask-proof (#1896)
         fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         tmp_path: Path | None = Path(tmp_str)
         try:
@@ -215,7 +216,7 @@ def local_marker_path(image_id: str) -> Path:
 def write_local_marker(image_id: str, image_ref: str) -> Path:
     """Record a completed pull. Returns the marker path (used as local_path)."""
     path = local_marker_path(image_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_shared_dir(path.parent)  # 2775, umask-proof (#1896)
     path.write_text(
         json.dumps(
             {"image_id": image_id, "image": image_ref, "pulled_at": datetime.now(UTC).isoformat()}
