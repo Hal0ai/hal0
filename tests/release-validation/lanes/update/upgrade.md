@@ -14,7 +14,10 @@ Capture a complete "before" snapshot and write it into your report — you canno
 the fact otherwise:
 
 * `hal0 --version`, the release channel, and `HAL0_RELEASES_URL`
-* every slot: name, assigned model, state, port, profile
+* every slot: name, assigned model, state, port, profile — AND each slot TOML's `device`
+  value, read from the config TOMLs under `/etc/hal0/slots/` directly (`hal0 slot list` has
+  no device column, and `/var/lib/hal0/slots/` is per-slot STATE, not config; the
+  post-upgrade migration check diffs against exactly this)
 * `hal0 config` dump, capability bindings, model registry listing
 * memory bank inventory and counts
 * which units are enabled and running
@@ -29,6 +32,26 @@ the fact otherwise:
    ordering? A wrong ranking silently withholds the update. `hal0 update --target <ver>`
    bypasses the gate and is the documented recovery — confirm it still works, and note that
    needing it *is* the finding.
+   * **2b. Channel-URL path (#1883).** Before the main upgrade run, separately verify the
+     documented channel-URL path end-to-end — do not rely on this box's pinned GitHub-asset
+     `HAL0_RELEASES_URL` for it (the pin bypasses exactly the path #1883 fixed). Two halves,
+     and the mechanics matter:
+     - Proxy correctness: `curl -sS -o /dev/null -w '%{http_code}\n'` against
+       `https://releases.hal0.dev/<channel>.json` AND the sibling
+       `https://releases.hal0.dev/<channel>.json.bundle` — both 200, and the bundle
+       byte-matches the GitHub release asset. (Note the daemon's effective URL is not
+       byte-identical to your curl target for non-stable channels on an http override —
+       `releases_url()` appends `?channel=<ch>` — so compare content, not URLs.)
+     - Verified-fetch path: `HAL0_RELEASES_URL` is read by the DAEMON from
+       `/etc/hal0/api.env` — exporting it in your shell does nothing, and `hal0 update
+       --check` uses the unverified manifest fetch, so neither exercises cosign. Instead:
+       copy `/etc/hal0/api.env` aside, point `HAL0_RELEASES_URL` at the channel URL in it,
+       restart `hal0-api`, then `PUT /api/updates/channel` (re-setting the current channel is
+       enough — that route is the one path into the cosign-verified manifest fetch outside a
+       full prepare). Confirm from the journal that verification ran and succeeded against
+       the proxied bundle. Restore api.env byte-for-byte and restart again; say so in the
+       report, and record both the pinned and channel URL values so the distinction doesn't
+       get lost.
 3. **The upgrade itself.** Run it. Capture the full output. Watch for: staged-tree permission
    gates (a box with `UMASK 002` produces a 0775 staged tree that the activate security gate
    refuses — the gate's own hint is the remediation), signature/digest verification, service
@@ -39,17 +62,21 @@ the fact otherwise:
    SUCCESS path (`restart_error`, `error`, `*_skipped`) and cross-check each against the journal
    outcome before reading any as a failure — `restarted: null` + `restart_error: "systemctl
    exited -15"` on a successful upgrade is the designed ambiguous-self-restart representation
-   (`known-issues: update-restart-error-breadcrumb-on-success`). While in the journal, note that
-   parent-side `updater.*` lines log `job_id=None` and a successful prepare leaves NO
-   verification breadcrumbs (regression `update-audit-trail-gaps`) — correlate by request_id and
-   timestamps instead, and confirm the verification evidence that DOES persist:
+   (`known-issues: update-restart-error-breadcrumb-on-success`). While in the journal, verify
+   the audit trail #1935 restored: parent-side `updater.*` lines must carry a populated
+   `job_id` (not `None`) and a successful prepare must leave prepare/verify breadcrumbs —
+   their absence is regression `update-audit-trail-gaps` re-opening, not designed behavior.
+   Also confirm the verification evidence that persists on disk:
    `/var/lib/hal0/cache/<ver>/manifest.json` must exist, post-date the sha256/cosign checks, and
    record the digest and signer identity.
 5. **Migrations.** Which migrations ran? Do they log what they changed? Re-run the upgrade (or
    the activation step) and confirm migrations are idempotent.
 6. **Rollback.** `hal0 update --rollback`. Does it return the box to the previous version with
    its state intact? Then roll forward again. If rollback is not exercised here it is not
-   exercised anywhere.
+   exercised anywhere. (`updater.*` journal lines from the ROLLBACK path legitimately carry
+   `job_id=None` — the rollback route constructs its Updater without a job — so do not
+   re-open `update-audit-trail-gaps` from rollback-window lines; check 4's job_id assertion
+   applies to the upgrade itself.)
 
 ## Leave behind
 

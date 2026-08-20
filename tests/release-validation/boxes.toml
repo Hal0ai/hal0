@@ -33,11 +33,12 @@ This is the BEST fresh box in the fleet — the only one with snapshots. Two res
 (`rc5-installed` no longer exists.) Prefer this box over ct152, which has no snapshot and
 carries residue.
 
-GPU PASSTHROUGH since the rc.5 era (boxes' oldest gotchas predate it): the box exercises the
-vulkan/container path (ghcr.io/hal0ai/hal0-rocmfpx runner in root's podman store). It has NO
-/dev/kfd, so llama.cpp runs the VULKAN lane here — which is precisely what caught the rc.6
-garbage-output defect. Run the coherence canary (_shared.md) before trusting any generated text.
-Do not frame findings as "CPU-only box".
+GPU PASSTHROUGH since the rc.5 era (boxes' oldest gotchas predate it): the box has the
+rocmfpx runner in root's podman store but NO /dev/kfd — and post-#1923 the Vulkan LLM lane is
+RETIRED: gpu-rocm llama.cpp slots refuse to start here (loud preflight), they do not fall
+back. LLM work on this box runs on slots explicitly set to device=cpu; non-llama GPU
+runtimes (TTS/whisper/ComfyUI) may still use Vulkan. Run the coherence canary (_shared.md)
+before trusting any generated text. Do not frame findings as "CPU-only box".
 
 GOTCHAS, in order:
   1. The pristine snapshot has broken DNS — /etc/resolv.conf points at an unreachable
@@ -49,6 +50,9 @@ GOTCHAS, in order:
      model roots, so a staged gguf is invisible until `hal0 model add`.
   4. (stale, retired) "/dev/dri absent in sysfs" predates the dev0/dev3 passthrough. After any
      `pct rollback 151`, confirm dev0/dev3 keep gid=991 or the installer's GPU preflight aborts.
+  5. After a rollback to the `rc6-installed` snapshot, services do not come back on their own —
+     `systemctl start hal0.target` (the hermes unit is `hermes-gateway.service`). Preflight
+     reads "API unreachable" when this was skipped; this is the fix to name in the blocker.
 """
 
 [boxes.ct152-cpu-fresh]
@@ -162,17 +166,20 @@ Use it to answer "is this CPU-only or hardware-independent?", never "does a fres
 work?".
 """
 
-# Fleet coverage note (updated 2026-08-15): ct151 now has iGPU+NPU passthrough and exercises
-# the vulkan/container path on fresh installs, so "no GPU fresh box" is closed for the Vulkan
-# lane specifically. ct152-cpu-fresh (gpu=false, no /dev/dri) still exists and is CPU-only —
+# Fleet coverage note (updated 2026-08-20 for the post-#1923 posture): ct151 has iGPU+NPU
+# passthrough but NO /dev/kfd, and the Vulkan LLM lane is RETIRED — on fresh installs its
+# gpu-rocm llama.cpp slots refuse to start (loud preflight), so ct151's LLM coverage is
+# device=cpu slots; its GPU passthrough still exercises non-llama Vulkan runtimes and the
+# refusal path itself. ct152-cpu-fresh (gpu=false, no /dev/dri) still exists and is CPU-only —
 # do not claim "no CPU-only box remains"; it has no snapshot and carries residue, so treat it
 # as read-only-usable only (stateful lanes must not run there without a fresh install first).
-# The actual remaining gap is a GPU fresh-install box WITH /dev/kfd: ct151 has no /dev/kfd, so
-# it only ever exercises the Vulkan lane, and ct150/ct105 both have /dev/kfd but are not fresh
-# installs (update/prod) — no box in the fleet is both freshly installed and representative of
-# a bare-metal AMD host with amdkfd loaded, which is precisely how the rc.6 Vulkan garbage-output
-# defect survived undetected. Also: only prod (ct105) has host rocm-smi, so compute_capable=true
-# exists on exactly one box — capability-flag findings need that cross-check. Every box class
-# runs the ROCm lane when /dev/kfd is visible and the Vulkan lane otherwise; after rc.6's Vulkan
-# garbage-output finding, record which lane a box actually executes
-# (podman exec <slot ctr> ls /dev/kfd) in every preflight.
+# The actual remaining gap is a GPU fresh-install box WITH /dev/kfd: ct150/ct105 both have
+# /dev/kfd but are not fresh installs (update/prod) — no box in the fleet is both freshly
+# installed and representative of a bare-metal AMD host with amdkfd loaded, which is precisely
+# how the rc.6 Vulkan garbage-output defect survived undetected. Also: only prod (ct105) has
+# host rocm-smi, so compute_capable=true exists on exactly one box — capability-flag findings
+# need that cross-check. LLM slots run the ROCm lane where /dev/kfd is visible and REFUSE
+# elsewhere (no Vulkan fallback since #1923) — by DEFAULT: ENV_ALLOW_VULKAN_FALLBACK
+# downgrades the refusal to a warning, and since that env re-opens the exact #1888 failure
+# mode, its presence on any box is itself a finding. Record what a box's slots actually
+# execute (podman exec <slot ctr> ls /dev/kfd) in every preflight.

@@ -56,6 +56,20 @@ at the ends.
    ~180 s is by-design (`known-issues.yaml: crash-loop-warming-180s-window`) — the finding is a
    state that never converges, an empty message on `error`, or a death nothing surfaces in
    `hal0 status` / `hal0 doctor`. Then swap it to a good model and clean it up.
+   * **8b. Output-sanity gate fires (#1922).** The gate that answers rc.6's #1888 class
+     (garbage output behind green health). First confirm it exists and is wired into the ready
+     path: grep the installed tree for the readiness probe call site (slots/manager.py or
+     wherever it landed) and confirm it runs before a slot is marked `ready`, with the
+     temp-0 "The capital of France is" → "Paris" shape. Then, if a synthetic bad case can be
+     constructed on this box (a degenerate/non-instruct model file, or any still-existing
+     explicit override onto a broken backend), load it and confirm the slot lands in `error`
+     with a message naming the probe and the expected token — never `ready`, never a silent
+     degrade, never an infinite retry. If no bad case can be forced on this box, say so
+     explicitly and record it as a coverage gap rather than a pass — a healthy slot's canary
+     passing does NOT verify the gate. If the grep finds NO gate in the installed tree,
+     first check whether #1922 shipped in the release under test: if it did not, record
+     against the open #1922 rather than filing a duplicate; if it did, the missing call site
+     is its own finding.
 9. **Reject a bad model file.** Feed `hal0 model add` a file with a `.gguf` name and no GGUF
    magic (`head -c 2000000 /dev/urandom`). The registration-with-warning outcome is now
    by-design (`known-issues: model-add-detection-surfacing`) — what you assert is the warning

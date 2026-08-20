@@ -66,11 +66,11 @@ lessons*), and monitors each PR to a conclusion.
 | 1 | Read-only sweep | 1 per read-only lane | sonnet | no (pipelines into triage) |
 | 2 | Stateful lane | 1 per stateful lane, **serialised** | sonnet, effort high | serialised by construction |
 | 2b | Update lane | 1–2 on the update box | sonnet, effort high | runs concurrently with 2 (different box) |
-| 3 | Regression probes | 1 per `regressions.yaml` batch | fable (mechanical) / sonnet (judgment) | no |
+| 3 | Regression probes | 1 per `regressions.yaml` batch | fable (mechanical) / sonnet (judgment) | no — except the `serialize: true` subset, which runs sequentially after the whole sweep (its repros mutate box-wide state) |
 | 4 | Triage + dedup | 1 | opus | yes — needs every finding at once |
 | 5 | Adversarial verify | 1 skeptic per candidate | opus, effort high | no |
 | 6 | Synthesis + report | 1 | opus | yes |
-| 7 | File issues (`mode: file`) | 1 | sonnet | — |
+| 7 | File issues (`mode: file`) | 1 | inherits session tier | — |
 | 8 | Kit curation | 1 | sonnet | — |
 
 Phase 8 is what makes the kit compound: it writes back the new known-issues, promotes every
@@ -79,6 +79,11 @@ brief that should have contained it. Its output is a diff for the operator to re
 silent commit.
 
 A full two-box run is roughly 25–30 agents. Restrict `lanes` for smaller passes.
+
+Tier labels are enforced in the workflow script via explicit `model:` pins (kit v5 — before
+that, only mechanical/triage/verify/report were pinned and every other phase silently inherited
+the invoking session's tier). The one deliberate exception: File issues (phase 7) still
+inherits the session tier.
 
 ## Process lessons (carried forward, do not relearn)
 
@@ -124,6 +129,37 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 `kit_version` it ran under, so an old report can always be read against the rules it ran with.
 
 ### Kit changelog
+
+* **5** (2026-08-20) — pre-rc.7 brief hardening from the GA-plan handoff, applied before the
+  kit's first v-4-era full run. Four new checks close verification gaps for fixes that would
+  otherwise ship CI-verified only: `post-upgrade.md` 2b (the #1934 gpu-vulkan→gpu-rocm slot
+  relabel on the update box, device-key-only, non-llama untouched, journal breadcrumbs,
+  idempotency), `upgrade.md` 2b (the #1883 channel-URL + `.json.bundle` proxy path, which the
+  update box's pinned GitHub-asset `HAL0_RELEASES_URL` otherwise bypasses entirely),
+  `slots.md` 8b (#1922's output-sanity readiness gate must be verified as a product gate, not
+  merely worked around by the coherence canary), and `hermes-e2e.md` 9 (doctor-perms
+  convergence re-probed after all mutation, plus a manual owner/group `stat` — #1942 proved
+  green-after-mutation on the mode axis only). `upgrade.md` check 4 inverted to expect the
+  #1935-restored audit trail (populated `job_id`, prepare/verify breadcrumbs) instead of
+  documenting their absence as designed. Model tiers are now enforced: every phase's `agent()`
+  call carries an explicit `model:` pin matching `[defaults]` (previously preflight, all lanes,
+  judgment regressions, and curation silently inherited the invoking session's tier). The
+  verify prompt's fleet note no longer claims kfd-less fresh boxes "run the Vulkan lane"
+  (stale since #1923) — and neither do `boxes.toml`'s ct151/fleet-coverage notes: post-#1923,
+  gpu-rocm LLM slots REFUSE to start on kfd-less boxes (no CPU fallback); LLM coverage there
+  means device=cpu slots. ct151 gains gotcha 5: post-rollback services need
+  `systemctl start hal0.target`. Adversarial review of this version's PR (#1956) then
+  corrected four of its own checks before first use: the post-mutation stat targets
+  `/var/lib/hal0/STATE.md` (not a `hermes/` subdir); the upgrade "before" snapshot now
+  explicitly captures each slot TOML's `device` value so the migration diff is executable;
+  the #1934 check is gated on **#1960** (filed from that review: the updater runs
+  post-activation migrations pre-swap in the OUTGOING tree, so a release's new migrations
+  never fire on the upgrade that ships them); and the channel-URL check drives the
+  cosign-verified fetch the only way it can be reached — `HAL0_RELEASES_URL` in
+  `/etc/hal0/api.env` plus `PUT /api/updates/channel` — instead of a shell env var and
+  `update --check`, which never verify. `tests/release/test_rc_validate_kit_contract.py`
+  now pins `kit.toml [defaults]` against the script's model pins so the tier contract cannot
+  silently rot.
 
 * **4** (2026-08-15) — curation after the `v1.0.0-rc.6` run. Landed as mode=report, so the 17
   new entries first carried `issue: null`; the filing PR then filed all of them (plus one more

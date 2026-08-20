@@ -29,6 +29,20 @@ did not ask for?**
    operator created historically carry no `profile` key and 501 their own endpoint (#1830), and
    slot TOMLs carrying larger ceilings written by earlier releases widen the advertised-vs-served
    context gap (#1835).
+   * **2b. Vulkan-slot relabel migration (#1934), gated on #1960.** The upgrade stage's
+     "before" snapshot recorded every slot TOML's `device` value — diff against it. The
+     DESIRED end state: every llama.cpp-backed slot that was `gpu-vulkan` now reads `gpu-rocm`
+     on this box (`/dev/kfd` present); only the `device` key changed (flat or nested `[slot]`
+     shape), every other key byte-identical modulo TOML re-serialization; any non-llama GPU
+     slot (Kokoro TTS / whisper.cpp / ComfyUI, if present) untouched — still `gpu-vulkan`;
+     relabel journal breadcrumbs (`updater.slot_vulkan_relabeled_rocm`, or `_cpu_fallback` on
+     a kfd-absent box) present with `job_id` populated (#1935); re-running the activation step
+     adds no new relabel lines (idempotency). **Known gate:** as of kit v5, #1960 means the
+     updater runs migrations pre-swap in the OUTGOING tree, so on an rc.6→rc.7 update the
+     relabel will NOT fire unless #1960's fix landed in the release under test. If TOMLs are
+     unchanged and no relabel breadcrumbs exist, first check whether #1960 is fixed in this
+     release: if not, record the result against #1960 (do not file a duplicate); if it is,
+     the unfired migration is a fresh regression of its own.
 3. **Functional smoke on the upgraded box.** A short version of the fresh-box lanes: chat
    completion, embeddings, a memory retain and recall, a brain steward question, the dashboard
    loading with real data. Anything broken here that works on the freshly installed box is an

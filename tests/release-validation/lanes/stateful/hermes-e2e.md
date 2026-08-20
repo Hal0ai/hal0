@@ -73,6 +73,18 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
    `[Errno 13] Permission denied: '/root/.git'` — the wrapper's cwd-safety guard exists for
    exactly this and its absence on a fresh install is the finding
    (`known-issues: hermes-cwd-eacces-crash`; the raw venv binary failing is by-design).
+9. **Doctor-perms convergence, post-mutation (#1942/#1896).** You are the last stage of the
+   serialized chain — by now the box has seen slot loads, a model pull, and at least one
+   STATE.md render. Re-run `hal0 doctor perms >/dev/null 2>&1; echo rc=$?` — must be `0`, same
+   as the readonly lane saw on the fresh box. Then verify the same facts WITHOUT the tool:
+   `stat -c '%U:%G %a' /var/lib/hal0/secrets /var/lib/hal0/secrets/agents
+   /var/lib/hal0/STATE.md /var/lib/hal0/model-pull-jobs` and confirm owner/group/mode match
+   the perms table (root:root for secrets/, hal0:hal0 for daemon-written paths). doctor perms
+   does audit all three axes (`PermDiff`), but its exit code is a self-report from the same
+   table the installer wrote — the point of the manual stat is independent evidence that the
+   table itself matches what a mutated box actually holds, and it is what proves
+   green-after-mutation on a REAL box rather than the unit-test fixture (#1942's tests cover
+   the mode axis; the live ownership axis is checked nowhere else).
 
 ## Leave behind
 
