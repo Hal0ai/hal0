@@ -575,6 +575,27 @@ def ownership_table(
             optional=False,
             role="model-pull-jobs/ (durable pull-job snapshots)",
         ),
+        # update-jobs/ — the durable update-job snapshot store
+        # (``api/routes/updater.py`` ``_jobs_dir``/``_persist_job``), which
+        # mirrors the process-local ``app.state.update_jobs`` dict to disk so
+        # a ``hal0-api`` restart mid-apply doesn't 404 the CLI's status poll.
+        # Same O13 birth-ownership class as ``model-pull-jobs/`` immediately
+        # above — surfaced during #1895's write-path enumeration but left out
+        # of that PR to keep its diff minimal (#1938). Optional, unlike
+        # ``model-pull-jobs/``: nothing touches this path during install, so
+        # it is only ever born once an update actually runs. ``_persist_job``
+        # writes each snapshot via ``tempfile.mkstemp`` + ``os.replace``,
+        # which always births the tempfile ``0600`` regardless of umask —
+        # the same convention as ``model-pull-jobs/*.json`` above.
+        PermRow(
+            var_lib / "update-jobs",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.json",
+            child_mode=0o600,
+            role="update-jobs/ (durable update-job snapshots)",
+        ),
         # registry/ — the model registry, also born root:root from the same
         # install.sh mkdir and also written by the User=hal0 daemon. Same O13
         # birth-ownership class as slots/ above; heal the dir. registry/ is
@@ -656,6 +677,73 @@ def ownership_table(
             recursive=True,
             optional=False,
             role="models/ (default model store, recursive)",
+        ),
+        # models/chat-templates/ — the custom chat-template store
+        # (``api/routes/chat_templates.py`` ``_templates_dir``), nested one
+        # level under the DEFAULT model store above. Declared as its own row
+        # rather than left to the ``models/`` recursive glob alone, for the
+        # same reason ``registry.toml`` gets its own row next to
+        # ``registry/``: `doctor perms`'s coverage check and audit table work
+        # off concrete declared rows, and the earlier omission was exactly
+        # the #1938 gap (surfaced during #1895's enumeration, left out of
+        # that PR to keep its diff minimal). Files are written via a plain
+        # ``Path.write_text`` (birth mode ``0666 & ~umask``), so the child
+        # mode matches ``models/``'s own file convention (0644) rather than
+        # fighting it.
+        #
+        # NOTE, matching the ``models/`` comment above: an operator who
+        # points ``[models].store`` at an external mount (the common
+        # production case) puts chat-templates OUTSIDE this fixed path
+        # entirely, and this row — like every other model-store row in this
+        # table — does not follow it there. That is an accepted, pre-existing
+        # limitation of this table (the table only ever declares opinions
+        # about hal0's own FHS roots), not a regression #1938 introduces.
+        PermRow(
+            var_lib / "models" / "chat-templates",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.jinja",
+            child_mode=0o644,
+            role="models/chat-templates/ (custom chat-template store)",
+        ),
+        # images/cache/ — the on-disk PNG cache for
+        # ``/v1/images/generations`` (``response_format: "url"``) responses
+        # (``api/image_cache.py`` ``cache_dir``/``write_png``). Same O13
+        # birth-ownership class as the durable-snapshot rows above: no row
+        # existed, so a root-run process that happens to touch the tree
+        # first (or a future migration walking ``var_lib``) could leave it
+        # root-owned with no ``doctor perms --fix`` remedy, even though the
+        # ``User=hal0`` daemon is the only real writer (#1938). PNGs are
+        # served straight back to the client over HTTP — no secrecy
+        # requirement — so child files get 0644, matching ``write_png``'s
+        # plain ``open(..., "wb")`` birth mode (``0666 & ~umask``) rather
+        # than fighting it.
+        PermRow(
+            var_lib / "images" / "cache",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.png",
+            child_mode=0o644,
+            role="images/cache/ (image-gen PNG cache)",
+        ),
+        # dashboard-layout.json — the operator's persisted dashboard layout
+        # (``dashboard/layout_store.py`` ``save``/``load``); single-writer
+        # (``hal0-api``), single-operator LAN device (no auth, no per-user
+        # keys). Same O13 birth-ownership class as the rows above: no row
+        # existed, so a root-run process touching ``var_lib`` before the
+        # daemon's first save leaves it un-writable to ``hal0`` with no
+        # ``doctor perms --fix`` remedy (#1938). Written via
+        # ``tempfile.mkstemp`` + ``os.replace`` (the same atomic-write shape
+        # as ``hal0.toml``/``registry.toml`` above), which always births the
+        # tempfile ``0600`` regardless of umask.
+        PermRow(
+            var_lib / "dashboard-layout.json",
+            state_owner,
+            service_group,
+            0o600,
+            role="dashboard-layout.json",
         ),
         # agents/ (var_lib) — per-agent sub-homes. 0711 (not 2775): the
         # User=hal0 unit needs to traverse INTO its own home without being able

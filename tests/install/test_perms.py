@@ -803,6 +803,15 @@ _HAL0_API_WRITE_LABELS = [
     "registry/",
     "slots/",
     "models/",
+    # four more write paths surfaced during #1895's enumeration but
+    # deliberately left out of that PR to keep its diff minimal (#1938):
+    # image-gen PNG cache, the dashboard layout file, the durable
+    # update-job snapshot store, and the custom chat-template store nested
+    # under the default model store.
+    "images/cache/",
+    "dashboard-layout.json",
+    "update-jobs/",
+    "models/chat-templates/",
 ]
 
 
@@ -821,6 +830,10 @@ def _resolve_hal0_api_write_target(label: str) -> Path:
         "registry/": var_lib / "registry",
         "slots/": var_lib / "slots",
         "models/": var_lib / "models",
+        "images/cache/": var_lib / "images" / "cache",
+        "dashboard-layout.json": var_lib / "dashboard-layout.json",
+        "update-jobs/": var_lib / "update-jobs",
+        "models/chat-templates/": var_lib / "models" / "chat-templates",
     }
     return targets[label]
 
