@@ -155,14 +155,19 @@ class UpdateSeam:
 
         ``-n`` is load-bearing: a missing or broken grant fails immediately with
         a non-zero exit instead of prompting for a password inside a daemon.
-        The child's stderr (its structured log) is folded into the raised error
-        so a failure is diagnosable from the job result alone. On success the
-        same stderr is replayed into the parent's own log (see
-        :func:`_relay_child_log`) — the child's structlog output is captured,
-        not inherited, so without this replay every prepare/verify breadcrumb
-        (``sha256_ok``, ``cosign_verify_ok``, ``prepare_ok``, …) the root
-        helper emits is silently discarded on the happy path and never reaches
-        the journal (#1901).
+        The child's stderr (its structured log) is captured, not inherited, so
+        on BOTH the success and failure paths it is replayed in full into the
+        parent's own log (see :func:`_relay_child_log`) — without this replay
+        every prepare/verify breadcrumb (``sha256_ok``, ``cosign_verify_ok``,
+        ``prepare_ok``, …) the root helper emits is silently discarded and
+        never reaches the journal (#1901). A failure occurring AFTER those
+        breadcrumbs (e.g. during ``activate``, after a long cleanup/reaping
+        tail) still needs them in the durable journal, not just in a raised
+        error's details (#1940). The failure path additionally folds a
+        *bounded* stderr tail into the raised error so a failure is
+        diagnosable from the job result alone — that tail is a separate,
+        truncated sink for quick triage, not a substitute for the full
+        journal relay.
         """
         try:
             proc = self._run(  # nosec B603 — fixed argv; every arg re-validated as root
@@ -181,10 +186,20 @@ class UpdateSeam:
             raise _remediation(f"could not execute `sudo -n {self._seam_bin}`: {exc}") from exc
 
         full_stderr = proc.stderr or ""
+        # Relay the FULL stderr to the journal on EVERY outcome, not a
+        # truncated tail and not success-only: a run (successful or not) can
+        # emit many post-verification cleanup lines (stale quarantine/staging
+        # reaping in `_extract_tarball`) after the sha256/cosign breadcrumbs,
+        # and a 4000-char tail can push those breadcrumbs out of the relayed
+        # data — silently reopening the very audit gap this replay closes. A
+        # failure occurring after those breadcrumbs (e.g. during `activate`)
+        # is exactly the run where the evidence matters most (#1940).
+        _relay_child_log(full_stderr, verb=parts[0], job_id=self._job_id)
         if proc.returncode != 0:
-            # Bounded tail only for the error path — a raised error's details
-            # are a diagnostic breadcrumb, not the audit trail this exists to
-            # protect, so truncation here is fine.
+            # The bounded tail here is a SEPARATE sink from the journal relay
+            # above: a quick-triage breadcrumb folded into the raised error
+            # itself, not the durable audit trail. Truncating it is fine
+            # because the full record already reached the journal.
             raise UpdateError(
                 f"privileged update seam failed: {parts[0]} (rc={proc.returncode})",
                 details={
@@ -194,12 +209,6 @@ class UpdateSeam:
                     "seam_bin": self._seam_bin,
                 },
             )
-        # Relay the FULL stderr, not a truncated tail: a successful run can
-        # emit many post-verification cleanup lines (stale quarantine/staging
-        # reaping in `_extract_tarball`) after the sha256/cosign breadcrumbs,
-        # and a 4000-char tail can push those breadcrumbs out of the relayed
-        # data — silently reopening the very audit gap this replay closes.
-        _relay_child_log(full_stderr, verb=parts[0], job_id=self._job_id)
         return _parse_result(proc.stdout or "", verb=parts[0], stderr=full_stderr[-4000:])
 
     # ── preflight ──────────────────────────────────────────────────────────────
