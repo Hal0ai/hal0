@@ -1233,7 +1233,15 @@ if [[ -n "${HF_TOKEN_VAL}" ]]; then
     # an explicit rotate signal); with no token set, any existing file here is
     # left untouched — never deleted just because the env var was omitted on
     # a later run.
-    install -d -m 0700 -o root -g root "${SECRETS_DIR}"  # 0700: see #1896
+    # -o/-g dropped from this `install -d`: in --dev this runs as an ordinary
+    # user (dev mode never elevates), so `install -o root -g root` would fail
+    # under `set -euo pipefail` and abort the install whenever HF_TOKEN /
+    # HUGGING_FACE_HUB_TOKEN is exported — the prod-only twin at the
+    # "hal0 system user" follow-up below stays root:root because it sits in
+    # the DEV_MODE=0 branch. Tolerant chown mirrors the HF_SECRETS_TMP idiom
+    # a few lines down: best-effort in --dev, real in a root prod install.
+    install -d -m 0700 "${SECRETS_DIR}"  # 0700: see #1896
+    chown root:root "${SECRETS_DIR}" 2>/dev/null || true
     HF_SECRETS_TMP="$(mktemp "${HF_SECRETS_ENV}.XXXXXX")"
     cat > "${HF_SECRETS_TMP}" <<EOF
 # HuggingFace token for gated / large model pulls — gathered at install time

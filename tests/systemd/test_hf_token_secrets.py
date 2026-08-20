@@ -163,6 +163,25 @@ class TestPersistence:
         assert re.search(r"mktemp \"\$\{HF_SECRETS_ENV\}", persist_block)
         assert "mv -f" in persist_block
 
+    def test_secrets_dir_birth_is_dev_mode_safe(self, persist_block: str) -> None:
+        # #1942 review finding 1: `install -d -m 0700 -o root -g root
+        # "${SECRETS_DIR}"` is NOT inside a DEV_MODE guard (unlike its prod
+        # twin in the "hal0 system user" follow-up). In `--dev`, this block
+        # runs as an ordinary user whenever HF_TOKEN/HUGGING_FACE_HUB_TOKEN is
+        # exported; `install -o root -g root` as non-root exits 1, and
+        # install.sh runs under `set -euo pipefail` (line 17) — a hard
+        # mid-install abort. The birth must drop -o/-g and chown tolerantly,
+        # like the HF_SECRETS_TMP idiom a few lines below.
+        assert re.search(r'install -d -m 0700 "\$\{SECRETS_DIR\}"', persist_block), (
+            "SECRETS_DIR must be created without -o/-g root — `install -o root` "
+            "as an unprivileged --dev user aborts the installer"
+        )
+        assert re.search(
+            r'chown root:root "\$\{SECRETS_DIR\}" 2>/dev/null \|\| true', persist_block
+        ), (
+            "the SECRETS_DIR chown must be the tolerant (best-effort) idiom, not baked into install -d"
+        )
+
     def test_token_value_written_to_secrets_file_only(self, persist_block: str) -> None:
         # HF_TOKEN=${HF_TOKEN_VAL} must appear inside the persistence
         # heredoc (targeting HF_SECRETS_TMP), not assigned anywhere that
