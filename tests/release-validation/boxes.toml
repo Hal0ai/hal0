@@ -49,6 +49,9 @@ GOTCHAS, in order:
      model roots, so a staged gguf is invisible until `hal0 model add`.
   4. (stale, retired) "/dev/dri absent in sysfs" predates the dev0/dev3 passthrough. After any
      `pct rollback 151`, confirm dev0/dev3 keep gid=991 or the installer's GPU preflight aborts.
+  5. After a rollback to the `rc6-installed` snapshot, services do not come back on their own —
+     `systemctl start hal0.target` (the hermes unit is `hermes-gateway.service`). Preflight
+     reads "API unreachable" when this was skipped; this is the fix to name in the blocker.
 """
 
 [boxes.ct152-cpu-fresh]

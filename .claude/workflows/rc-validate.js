@@ -227,7 +227,7 @@ own CONTEXT file.
    Write it for an agent that knows nothing about this fleet. Every later agent depends on it.
 
 Return the schema. Set ready=false only for something that genuinely invalidates the run.
-`, { label: `preflight:${boxId}`, phase: 'Preflight', schema: PREFLIGHT })))
+`, { label: `preflight:${boxId}`, phase: 'Preflight', schema: PREFLIGHT, model: 'sonnet' })))
 
 const ok = preflights.filter(Boolean)
 const blocked = ok.filter((p) => !p.ready)
@@ -267,7 +267,7 @@ YOUR LANE: ${key} (${kind}) on box ${box}
 YOUR BRIEF: ${briefPath(kind, key)} — read it now and work through it.
 ${extra || ''}
 Write your raw notes to ${RUN}/lanes/${box}-${key}.md as you go, then return the schema.
-Set box="${box}" and lane="${key}".`, Object.assign({ label: `${kind}:${key}`, phase: 'Sweep', schema: LANE_RESULT }, opts || {}))
+Set box="${box}" and lane="${key}".`, Object.assign({ label: `${kind}:${key}`, phase: 'Sweep', schema: LANE_RESULT, model: 'sonnet' }, opts || {}))
 }
 
 // serialised chain: each stage is handed the previous stage's box_state_on_exit verbatim
@@ -302,7 +302,7 @@ if (updateBox) {
 // intent judgement stays on the workhorse tier.
 const REG_BATCHES = [
   { tier: 'mechanical', model: 'fable', desc: 'entries with tier: mechanical' },
-  { tier: 'judgment', desc: 'entries with tier: judgment' },  // no model override: inherit session tier
+  { tier: 'judgment', model: 'sonnet', desc: 'entries with tier: judgment' },  // kit.toml regression_judgment tier
 ]
 if (freshBox && wanted('regressions')) {
   for (const b of REG_BATCHES) {
@@ -393,7 +393,7 @@ Rules:
   - If an entry's repro no longer matches the current CLI or API surface, say so.
 
 Return one result object per entry you ran.`,
-    { label: 'regressions:serialized', phase: 'Sweep', schema: REGRESSION_RESULT })
+    { label: 'regressions:serialized', phase: 'Sweep', schema: REGRESSION_RESULT, model: 'sonnet' })
   serializedRegressionResults = (serialResult && serialResult.results) || []
 }
 const laneResults = swept.filter(Boolean).flatMap((r) => (Array.isArray(r) ? r : (r.results ? [] : [r])))
@@ -479,8 +479,9 @@ relitigates it.
 
 Also judge \`other_hardware_applicability\`: would a GPU box, a privileged container, or an
 upgraded (rather than freshly installed) box hit this? No box in the fleet is BOTH a fresh
-install AND has /dev/kfd visible (the fresh boxes lack /dev/kfd and run the Vulkan lane only;
-the boxes with /dev/kfd — update and prod — are not fresh installs), so a read-only cross-check
+install AND has /dev/kfd visible (the fresh boxes lack /dev/kfd, so post-#1923 their LLM slots
+run the CPU lane — the Vulkan LLM lane is retired; the boxes with /dev/kfd — update and prod —
+are not fresh installs), so a read-only cross-check
 against the production box is the best available evidence — use it when the finding touches
 backend selection, profile flags, hardware probing, or native tool calling.
 
@@ -594,7 +595,7 @@ written. Moving work out of this kit and into CI is a success, not a loss.
 
 Return a summary of every file you changed and what you changed in it, plus the promotion list.
 Do not commit — the operator reviews the diff.`,
-  { label: 'curate', phase: 'Curate' })
+  { label: 'curate', phase: 'Curate', model: 'sonnet' })
 
 return {
   version: VERSION,

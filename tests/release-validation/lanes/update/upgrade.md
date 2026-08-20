@@ -29,6 +29,16 @@ the fact otherwise:
    ordering? A wrong ranking silently withholds the update. `hal0 update --target <ver>`
    bypasses the gate and is the documented recovery — confirm it still works, and note that
    needing it *is* the finding.
+   * **2b. Channel-URL path (#1883).** Before the main upgrade run, separately verify the
+     documented channel-URL path end-to-end — do not rely on this box's pinned GitHub-asset
+     `HAL0_RELEASES_URL` for it (the pin bypasses exactly the path #1883 fixed).
+     `curl -sS -o /dev/null -w '%{http_code}\n'` against
+     `https://releases.hal0.dev/<channel>.json` AND the sibling
+     `https://releases.hal0.dev/<channel>.json.bundle` — both must be 200, and the bundle must
+     byte-match the GitHub release asset. Then drive one `hal0 update --check` (or `--target`)
+     with `HAL0_RELEASES_URL` pointed at the channel URL and confirm cosign verification
+     succeeds against the proxied bundle. Record the box's live `HAL0_RELEASES_URL` in your
+     report so the pinned-vs-channel distinction doesn't get lost.
 3. **The upgrade itself.** Run it. Capture the full output. Watch for: staged-tree permission
    gates (a box with `UMASK 002` produces a 0775 staged tree that the activate security gate
    refuses — the gate's own hint is the remediation), signature/digest verification, service
@@ -39,10 +49,11 @@ the fact otherwise:
    SUCCESS path (`restart_error`, `error`, `*_skipped`) and cross-check each against the journal
    outcome before reading any as a failure — `restarted: null` + `restart_error: "systemctl
    exited -15"` on a successful upgrade is the designed ambiguous-self-restart representation
-   (`known-issues: update-restart-error-breadcrumb-on-success`). While in the journal, note that
-   parent-side `updater.*` lines log `job_id=None` and a successful prepare leaves NO
-   verification breadcrumbs (regression `update-audit-trail-gaps`) — correlate by request_id and
-   timestamps instead, and confirm the verification evidence that DOES persist:
+   (`known-issues: update-restart-error-breadcrumb-on-success`). While in the journal, verify
+   the audit trail #1935 restored: parent-side `updater.*` lines must carry a populated
+   `job_id` (not `None`) and a successful prepare must leave prepare/verify breadcrumbs —
+   their absence is regression `update-audit-trail-gaps` re-opening, not designed behavior.
+   Also confirm the verification evidence that persists on disk:
    `/var/lib/hal0/cache/<ver>/manifest.json` must exist, post-date the sha256/cosign checks, and
    record the digest and signer identity.
 5. **Migrations.** Which migrations ran? Do they log what they changed? Re-run the upgrade (or

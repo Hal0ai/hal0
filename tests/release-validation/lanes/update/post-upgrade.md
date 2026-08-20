@@ -29,6 +29,15 @@ did not ask for?**
    operator created historically carry no `profile` key and 501 their own endpoint (#1830), and
    slot TOMLs carrying larger ceilings written by earlier releases widen the advertised-vs-served
    context gap (#1835).
+   * **2b. Vulkan-slot relabel migration (#1934).** The upgrade stage's "before" snapshot
+     recorded every slot TOML's `device` value — diff against it. For every llama.cpp-backed
+     slot that was `gpu-vulkan`: on this box (`/dev/kfd` present) it must now read `gpu-rocm`;
+     confirm only the `device` key changed (flat or nested `[slot]` shape) and every other key
+     is byte-identical modulo TOML re-serialization. Confirm any non-llama GPU slot (Kokoro
+     TTS / whisper.cpp / ComfyUI, if present) is untouched — still `gpu-vulkan`. Grep the
+     upgrade journal for `updater.slot_vulkan_relabeled_rocm` (or `_cpu_fallback` on a
+     kfd-absent box) and confirm `job_id` is populated, not `None` (ties to #1935). Re-run the
+     activation step and confirm no new relabel log lines appear — idempotency.
 3. **Functional smoke on the upgraded box.** A short version of the fresh-box lanes: chat
    completion, embeddings, a memory retain and recall, a brain steward question, the dashboard
    loading with real data. Anything broken here that works on the freshly installed box is an
