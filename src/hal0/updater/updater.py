@@ -1681,6 +1681,13 @@ def run_post_activation_migrations(
         # operator flips MTP to Auto/Off in the drawer.
 
     try:
+        converge_kfd_group(job_id=job_id)
+    except Exception as exc:
+        log.warning("updater.kfd_group_converge_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: the box keeps whatever /dev/kfd ownership it had; the
+        # #1923 guard's message now names the gid remedy explicitly (#1953).
+
+    try:
         relabel_stale_vulkan_slots(job_id=job_id)
     except Exception as exc:
         log.warning("updater.vulkan_migration_failed", job_id=job_id, error=str(exc))
@@ -2859,6 +2866,38 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
             except Exception as exc:
                 log.warning("updater.image_retag_profiles_write_failed", error=str(exc))
     return retagged
+
+
+def converge_kfd_group(*, job_id: str | None = None) -> str:
+    """Align ``/dev/kfd``'s group with the render node's, once, on every update.
+
+    #1953. A plain LXC passthrough leaves the compute node ``root:root 0660``
+    while ``/dev/dri/renderD128`` lands ``root:render 0660``. Slot containers
+    run rootful so ROCm works fine, but every hal0-user probe reports the GPU
+    unusable — and the operator is told to re-forward a device that is already
+    forwarded. Converging the two nodes makes both identities agree.
+
+    Runs BEFORE :func:`relabel_stale_vulkan_slots` deliberately: that pass
+    branches on the compute node's state to decide ``gpu-rocm`` vs ``cpu``, so
+    it must see the converged answer rather than race the repair.
+
+    Best-effort by construction. On an unprivileged LXC the node's ownership is
+    host-mapped and ``chown`` raises ``EPERM``; the remedy there is a ``gid=``
+    on the host's ``dev`` entry, which the guard's own error text now spells
+    out. Never raises, never blocks an update.
+    """
+    from hal0.providers._gpu import converge_kfd_device_group, host_is_amd_gpu
+
+    if not host_is_amd_gpu():
+        return "skipped"
+    status, detail = converge_kfd_device_group()
+    if status == "changed":
+        log.warning("updater.kfd_group_converged", job_id=job_id, detail=detail)
+    elif status == "failed":
+        log.warning("updater.kfd_group_converge_refused", job_id=job_id, detail=detail)
+    else:
+        log.info("updater.kfd_group_noop", job_id=job_id, status=status, detail=detail)
+    return status
 
 
 def relabel_stale_vulkan_slots(
