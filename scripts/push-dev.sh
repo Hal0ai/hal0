@@ -11,7 +11,7 @@
 # no service restart at all (--ui-only).
 #
 # Usage (from anywhere inside the checkout):
-#   HAL0_DEV_HOST=root@10.0.1.142 bash scripts/push-dev.sh [options]
+#   HAL0_DEV_HOST=root@<dev-box> bash scripts/push-dev.sh [options]
 #
 # Options:
 #   --host <ssh-host>   SSH target (or HAL0_DEV_HOST). Required.
