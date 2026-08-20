@@ -9,7 +9,7 @@ back-patched.
 | Version        | Supported          |
 | -------------- | ------------------ |
 | `main` (latest)| :white_check_mark: |
-| tagged alphas  | latest only        |
+| tagged release candidates | latest only |
 
 ## Bundled agent trust boundary
 
