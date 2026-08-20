@@ -2924,8 +2924,10 @@ def relabel_stale_vulkan_slots(
     and skipped ENTIRELY (no relabel, no warning, no log line, on either kfd
     axis) unless it resolves to ``None`` (the default llama-server GPU
     provider). The kfd-absent non-llama case (``require_kfd_for_gpu_slot``
-    itself over-firing for non-llama runtimes) is a separate, already-filed
-    bug (#1941) and is deliberately NOT addressed by this migration.
+    itself over-firing for non-llama runtimes) was a separate bug, fixed in
+    the guard itself (#1941): it now takes a ``llama_lane`` flag derived from
+    this same ``_spec_provider_for`` discriminator, so a non-llama
+    ``gpu-vulkan`` slot is neither relabeled here nor refused there.
 
     Only the ``device`` key is ever changed in VALUE — narrow scope per the
     #1867 rails (no other field or slot is touched, and a slot whose

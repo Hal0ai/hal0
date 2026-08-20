@@ -97,11 +97,12 @@ def require_kfd_for_gpu_slot(
     slot_name: str,
     *,
     device: str,
+    llama_lane: bool = True,
     kfd_path: str = KFD_DEVICE_PATH,
     env: dict[str, str] | None = None,
     amd_host: bool | None = None,
 ) -> None:
-    """Loud-fail an AMD-GPU llama.cpp slot that has no ROCm compute node.
+    """Loud-fail a GPU slot that claims ROCm but has no ROCm compute node.
 
     The release-pinned ROCmFPX runner (``DEFAULT_ROCMFPX_IMAGE``) is a single
     HIP+Vulkan build. llama.cpp picks ROCm when ``/dev/kfd`` is visible and
@@ -116,18 +117,43 @@ def require_kfd_for_gpu_slot(
 
     Scope, deliberately narrow:
 
-    * ``gpu-rocm`` — always gated. The device name IS the ROCm claim.
-    * ``gpu-vulkan`` — gated only on an **AMD** host (``amdgpu`` bound). An
-      older AMD slot still carrying that label runs the same broken lane; an
-      Intel iGPU or an NVIDIA card without CDI has no ``/dev/kfd`` by design
-      and keeps working.
+    * ``gpu-rocm`` — always gated, in every runtime. The device name IS the
+      ROCm claim: llama.cpp lands on the poisoned Vulkan fallback without the
+      node, and a genuinely-ROCm non-llama image (Qwen3-TTS) cannot
+      initialise HIP without it either. Only the *explanation* in the refusal
+      differs by lane — #1888's silent-garbage story is llama.cpp's alone.
+    * ``gpu-vulkan`` — gated only on an **AMD** host (``amdgpu`` bound) AND
+      only for the llama.cpp lane (``llama_lane``). An older AMD llama slot
+      still carrying that label runs the same broken ROCmFPX lane; an Intel
+      iGPU or an NVIDIA card without CDI has no ``/dev/kfd`` by design and
+      keeps working.
     * ``cpu`` / ``npu`` / ``gpu-cuda`` — never gated: none of them can reach
       the ROCmFPX image's Vulkan fallback.
+
+    ``llama_lane`` (#1941) is the caller's answer to "does this slot actually
+    launch the unified ROCmFPX llama.cpp runner?", because ``gpu-vulkan`` is
+    not an llama.cpp-only label. :mod:`hal0.capabilities.catalog` deliberately
+    keeps that device for the non-llama runtimes — Kokoro TTS,
+    whisper.cpp/Moonshine STT, ComfyUI — which run genuinely-Vulkan images and
+    never had the #1888 defect; gating them here refused working STT/TTS/image
+    slots at load on every AMD box without the compute node. The one authority
+    on the question is
+    :func:`hal0.providers.container._spec_provider_for` (``None`` == the
+    default llama-server GPU provider), which is what the sole call site
+    passes and what
+    :func:`hal0.updater.updater.relabel_stale_vulkan_slots` uses for the same
+    split. Defaults to ``True`` on purpose: a caller that forgets gets the
+    fail-closed pre-#1941 behaviour, never a silent pass into the poisoned
+    lane.
 
     An explicit :data:`ENV_ALLOW_VULKAN_FALLBACK` opt-in downgrades the
     refusal to a warning — a warn, never a silent pass.
     """
     if device == "gpu-vulkan":
+        if not llama_lane:
+            # A genuinely-Vulkan image (Kokoro / whisper.cpp / ComfyUI). It
+            # never touches HIP, so /dev/kfd is irrelevant to it (#1941).
+            return
         if not (host_is_amd_gpu() if amd_host is None else amd_host):
             return
     elif device != "gpu-rocm":
@@ -141,14 +167,22 @@ def require_kfd_for_gpu_slot(
             slot=slot_name,
             device=device,
             kfd_path=kfd_path,
+            llama_lane=llama_lane,
             detail="output will be invalid — see #1888",
         )
         return
+    why = (
+        "The runner image falls back to its Vulkan backend without it, and that "
+        "backend emits invalid tokens for every model (#1888) — refusing to start "
+        "rather than serve garbage."
+        if llama_lane
+        # #1888 is llama.cpp's failure mode; quoting it at a Qwen3-TTS operator
+        # would send them chasing the wrong defect.
+        else "This slot's runtime image cannot initialise ROCm without it."
+    )
     raise GpuPreflightError(
         f"slot {slot_name!r} (device={device}) needs the ROCm compute node "
-        f"{kfd_path}, which is not visible here. The runner image falls back to "
-        "its Vulkan backend without it, and that backend emits invalid tokens "
-        "for every model (#1888) — refusing to start rather than serve garbage. "
+        f"{kfd_path}, which is not visible here. {why} "
         "Forward the device from the host (Proxmox LXC: add "
         f"'dev1: {kfd_path}' to /etc/pve/lxc/<CTID>.conf, then pct stop/start), "
         "or move this slot to device='cpu'."

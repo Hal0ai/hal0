@@ -429,7 +429,10 @@ def _backend_variants(entry: Any) -> list[str]:
             # AMD box with no valid GPU lane the picker offers CPU only.
             # gpu-vulkan survives for the non-llama runtimes below (kokoro /
             # whisper.cpp / ComfyUI), which run genuinely-Vulkan images, and
-            # for non-AMD GPUs.
+            # for non-AMD GPUs. That survival is only real because the load
+            # path agrees: ``require_kfd_for_gpu_slot``'s gpu-vulkan gate is
+            # scoped to the llama.cpp lane (#1941), so a slot this branch
+            # keeps on gpu-vulkan is not refused at load on a kfd-less box.
             host_backends = {b["id"] for b in available_backends()}
             candidates = ("gpu-rocm", "cpu") if host_is_amd_gpu() else ("gpu-vulkan", "cpu")
             for candidate in candidates:

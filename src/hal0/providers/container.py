@@ -2354,22 +2354,35 @@ class ContainerProvider(Provider):
         """
         token = slot_instance_token(slot_cfg)
 
+        # The slot's runtime family, resolved ONCE for both loud-fail guards
+        # below (and re-resolved inside _render_quadlet_text, which owns the
+        # dispatch). ``None`` means the default llama-server GPU provider.
+        spec_provider = _spec_provider_for(slot_cfg)
+
         # Loud-fail for AMD-GPU llama.cpp slots with no /dev/kfd: the runner
         # image would silently fall back to its Vulkan backend, which emits
         # invalid tokens for every model while every health surface reads
         # green (#1888). Enforced HERE (the load path) rather than in
         # ``container_spec`` so unit rendering, previews and status renders
         # stay host-independent.
+        #
+        # ``llama_lane`` scopes the gpu-vulkan half of that guard to the
+        # ROCmFPX runner (#1941): Kokoro / whisper.cpp / ComfyUI keep
+        # device="gpu-vulkan" and run genuinely-Vulkan images that never had
+        # the #1888 defect, so demanding /dev/kfd refused working STT/TTS/
+        # image slots on kfd-less AMD boxes. Same discriminator the updater's
+        # ``relabel_stale_vulkan_slots`` migration uses, so the two agree.
         require_kfd_for_gpu_slot(
             str(slot_cfg.get("name", "") or token),
             device=str(slot_cfg.get("device", "") or ""),
+            llama_lane=spec_provider is None,
         )
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
         # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are
         # self-managed and need no registry tag — the check fires ONLY when
         # device == "npu" and the slot resolves to a spec provider.
-        if str(slot_cfg.get("device", "")) == "npu" and _spec_provider_for(slot_cfg) is not None:
+        if str(slot_cfg.get("device", "")) == "npu" and spec_provider is not None:
             model_table = slot_cfg.get("model") or {}
             tag = (
                 model_info.get("flm_tag")

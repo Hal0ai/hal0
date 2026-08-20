@@ -146,18 +146,131 @@ class TestLoadSyncGuard:
     def test_load_sync_calls_the_guard_with_the_slots_device(self, monkeypatch) -> None:
         from hal0.providers import container as container_mod
 
-        seen: dict[str, str] = {}
+        seen: dict[str, object] = {}
 
-        def _spy(slot_name: str, *, device: str, **_kw: object) -> None:
+        def _spy(slot_name: str, *, device: str, llama_lane: bool = True, **_kw: object) -> None:
             seen["slot"] = slot_name
             seen["device"] = device
+            seen["llama_lane"] = llama_lane
             raise GpuPreflightError("stop here — the rest of load_sync writes units")
 
         monkeypatch.setattr(container_mod, "require_kfd_for_gpu_slot", _spy)
         provider = container_mod.ContainerProvider()
         with pytest.raises(GpuPreflightError):
             provider.load_sync({"name": "utility", "device": "gpu-vulkan", "port": 8082}, {})
-        assert seen == {"slot": "utility", "device": "gpu-vulkan"}
+        assert seen == {"slot": "utility", "device": "gpu-vulkan", "llama_lane": True}
+
+
+class TestNonLlamaVulkanRuntimesAreNotGated:
+    """#1941 — the guard is about llama.cpp's unified ROCmFPX runner, not the
+    device string on its own.
+
+    ``device = "gpu-vulkan"`` is NOT an llama.cpp-only label: ``capabilities/
+    catalog.py`` deliberately keeps it for Kokoro TTS, whisper.cpp/Moonshine
+    STT and ComfyUI, which run genuinely-Vulkan images and never had #1888's
+    silent-fallback defect. Gating those on ``/dev/kfd`` refused working
+    STT/TTS/image slots at load on every AMD box without the compute node.
+    """
+
+    @staticmethod
+    def _amd_box_without_kfd(monkeypatch) -> None:
+        """An AMD host (amdgpu bound) that has no usable /dev/kfd — the exact
+        shape of the box #1941 was reported from."""
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr(gpu_mod, "host_is_amd_gpu", lambda *_a, **_k: True)
+        monkeypatch.setattr(gpu_mod, "kfd_present", lambda *_a, **_k: False)
+
+    @staticmethod
+    def _stub_unit_write(monkeypatch) -> list[str]:
+        """Stop load_sync after the guard: record the unit write, do none."""
+        from hal0.providers import container as container_mod
+
+        written: list[str] = []
+        monkeypatch.setattr(
+            container_mod.ContainerProvider,
+            "_render_quadlet_text",
+            lambda self, slot_cfg, model_info: "[Container]\n",
+        )
+        monkeypatch.setattr(
+            container_mod.ContainerProvider,
+            "_write_and_start_unit",
+            lambda self, token, unit_text: written.append(token),
+        )
+        return written
+
+    @pytest.mark.parametrize(
+        "slot_cfg",
+        [
+            pytest.param(
+                {"name": "imagegen", "type": "image", "device": "gpu-vulkan", "port": 8188},
+                id="comfyui",
+            ),
+            pytest.param(
+                {"name": "stt", "type": "transcription", "device": "gpu-vulkan", "port": 8092},
+                id="whispercpp-stt",
+            ),
+            pytest.param(
+                {"name": "voice", "type": "tts", "device": "gpu-vulkan", "port": 8090},
+                id="kokoro-tts",
+            ),
+        ],
+    )
+    def test_load_sync_loads_a_non_llama_vulkan_slot(self, monkeypatch, slot_cfg) -> None:
+        from hal0.providers import container as container_mod
+
+        self._amd_box_without_kfd(monkeypatch)
+        written = self._stub_unit_write(monkeypatch)
+
+        container_mod.ContainerProvider().load_sync(dict(slot_cfg), {})
+
+        assert written == [slot_cfg["name"]]
+
+    def test_load_sync_still_refuses_the_llama_lane(self, monkeypatch) -> None:
+        """The #1888 refusal must survive the scoping: a profile-less
+        ``gpu-vulkan`` slot resolves to the default llama-server provider and
+        still runs the poisoned ROCmFPX Vulkan lane."""
+        from hal0.providers import container as container_mod
+
+        self._amd_box_without_kfd(monkeypatch)
+        self._stub_unit_write(monkeypatch)
+
+        with pytest.raises(GpuPreflightError):
+            container_mod.ContainerProvider().load_sync(
+                {"name": "utility", "device": "gpu-vulkan", "port": 8082}, {}
+            )
+
+    def test_a_non_llama_gpu_rocm_slot_is_still_gated(self, tmp_path) -> None:
+        """Scoping relaxes ``gpu-vulkan`` only. ``gpu-rocm`` stays gated for
+        every runtime: the device name IS the ROCm claim, and a ROCm image
+        (Qwen3-TTS) cannot initialise HIP without the compute node either."""
+        with pytest.raises(GpuPreflightError):
+            require_kfd_for_gpu_slot(
+                "voice",
+                device="gpu-rocm",
+                kfd_path=str(tmp_path / "kfd"),
+                env={},
+                amd_host=True,
+                llama_lane=False,
+            )
+
+    def test_the_non_llama_refusal_does_not_blame_the_vulkan_fallback(self, tmp_path) -> None:
+        """#1888's silent-Vulkan-fallback story is llama.cpp's alone — quoting
+        it at a Qwen3-TTS operator sends them chasing the wrong defect."""
+        with pytest.raises(GpuPreflightError) as exc:
+            require_kfd_for_gpu_slot(
+                "voice",
+                device="gpu-rocm",
+                kfd_path=str(tmp_path / "kfd"),
+                env={},
+                amd_host=True,
+                llama_lane=False,
+            )
+        msg = str(exc.value)
+        assert "1888" not in msg
+        # Still actionable: what is missing and how to forward it.
+        assert "/kfd" in msg
+        assert "pct stop/start" in msg
 
 
 def _raiser(*_a: object, **_kw: object) -> None:
