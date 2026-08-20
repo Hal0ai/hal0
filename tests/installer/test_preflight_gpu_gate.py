@@ -345,12 +345,12 @@ class TestKfdGroupGate:
                 "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
                 "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
                 "HAL0_GPU_KFD_PATH": str(kfd),
-                "HAL0_GPU_KFD_GID_OVERRIDE": "61998",
+                "HAL0_GPU_KFD_GID_OVERRIDE": "0",
                 "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
             }
         )
-        # The compute node reports a gid the render node does not use — the
-        # exact divergence a plain LXC dev passthrough produces.
+        # The compute node is ROOT-owned while the render node is not — the
+        # exact inaccessible shape a plain LXC dev passthrough produces.
         assert rc == RC_KFD_GID
 
     def test_aligned_gids_pass(self, tmp_path: Path) -> None:
@@ -388,7 +388,7 @@ class TestKfdGroupGate:
             "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
             "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
             "HAL0_GPU_KFD_PATH": str(kfd),
-            "HAL0_GPU_KFD_GID_OVERRIDE": "61998",
+            "HAL0_GPU_KFD_GID_OVERRIDE": "0",
             "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
         }
         out = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True).stdout
@@ -398,3 +398,31 @@ class TestKfdGroupGate:
         assert f"gid={render_gid}" in out
         # And it must never send the operator to re-forward a present device.
         assert "dev1: /dev/kfd\n" not in out
+
+    def test_a_non_root_gid_divergence_is_left_alone(self, tmp_path: Path) -> None:
+        """#1953 review: a differing gid is NOT itself a fault.
+
+        A valid box can put /dev/kfd on `video` and the render nodes on
+        `render` — install.sh adds hal0 to BOTH. Rewriting that to the render
+        group would strip access from video-only users, and on an unprivileged
+        LXC the failed chgrp would abort a fresh install over a working config.
+        Only the root-owned, no-world-access shape is repaired.
+        """
+        (tmp_path / "renderD128").touch()
+        kfd = tmp_path / "kfd"
+        kfd.touch()
+        rc = _run_gpu_gate(
+            {
+                "HAL0_GPU_GATE": "1",
+                "HAL0_GPU_AMD_OVERRIDE": "1",
+                "HAL0_GPU_DRI_GLOB": str(tmp_path / "renderD*"),
+                "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+                "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+                "HAL0_GPU_KFD_PATH": str(kfd),
+                # Differs from the render node, but is a REAL group the service
+                # user can be added to — not the root-owned passthrough shape.
+                "HAL0_GPU_KFD_GID_OVERRIDE": "61996",
+                "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            }
+        )
+        assert rc == RC_OK

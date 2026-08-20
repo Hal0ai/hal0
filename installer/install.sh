@@ -1424,6 +1424,23 @@ GPU_PERMS_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-gpu-perms.service"
 GPU_PERMS_UNIT_DST="${UNIT_DIR}/hal0-gpu-perms.service"
 if [[ -f "${GPU_PERMS_UNIT_SRC}" ]]; then
     install -m 0644 "${GPU_PERMS_UNIT_SRC}" "${GPU_PERMS_UNIT_DST}"
+    # A non-default HAL0_PREFIX moves the venv, and the shipped unit hardcodes
+    # the FHS path — without this rewrite ExecStart points at a nonexistent
+    # interpreter and the unit dies 203/EXEC, so the compute node is never
+    # converged after a reboot. Same treatment the bench units get; done in
+    # Python, not sed, so a prefix containing sed metacharacters is safe.
+    if [[ "${VENV_DIR}" != "/usr/lib/hal0/venv" ]]; then
+        "${PY}" - "${GPU_PERMS_UNIT_DST}" "${VENV_DIR}" <<'PYEOF'
+import sys
+from pathlib import Path
+
+dst, venv = Path(sys.argv[1]), sys.argv[2]
+dst.write_text(
+    dst.read_text(encoding="utf-8").replace("/usr/lib/hal0/venv", venv),
+    encoding="utf-8",
+)
+PYEOF
+    fi
     info "wrote ${GPU_PERMS_UNIT_DST}"
     if [[ "${DEV_MODE}" -eq 0 ]]; then
         # WantedBy=hal0.target. Enabling is safe on a non-AMD box: the unit

@@ -45,16 +45,36 @@ class TestConvergeKfdGroup:
         assert updater_mod.converge_kfd_group() == "failed"
 
 
-class TestMigrationOrdering:
-    def test_kfd_converge_runs_before_the_vulkan_relabel(self) -> None:
-        """Ordering is load-bearing, not cosmetic.
+class TestConvergeIsNotInTheMigrationChain:
+    """#1953 review: the converge must NOT run from run_post_activation_migrations.
 
-        ``relabel_stale_vulkan_slots`` branches on the compute node's state to
-        pick ``gpu-rocm`` vs ``cpu``. If the converge ran after it, the relabel
-        would decide from the un-repaired device and the two passes could reach
-        different conclusions about the same box.
-        """
+    That chain runs in an asyncio.to_thread inside hal0-api (User=hal0) and
+    BEFORE seam.activate(). Calling the converge from there was wrong twice
+    over: chown hit EPERM as an unprivileged user and reported "failed" for
+    exactly the boxes it was meant to fix, and on the FIRST update delivering
+    the code the running daemon is still the PREVIOUS release, where the
+    function does not exist at all.
+
+    It now runs root-side in refresh_gpu_perms_unit during activate.
+    """
+
+    def test_migrations_do_not_call_the_converge(self) -> None:
         import inspect
 
         src = inspect.getsource(updater_mod.run_post_activation_migrations)
-        assert src.index("converge_kfd_group(") < src.index("relabel_stale_vulkan_slots(")
+        assert "converge_kfd_group(" not in src
+
+    def test_the_privileged_unit_refresh_starts_the_unit(self) -> None:
+        """Starting it is what converges an updated box without a reboot."""
+        import inspect
+
+        src = inspect.getsource(updater_mod.refresh_gpu_perms_unit)
+        assert '"start", "hal0-gpu-perms.service"' in src.replace("'", '"')
+
+    def test_a_failed_enable_is_reported_not_swallowed(self) -> None:
+        """Otherwise the next update sees identical content and never retries."""
+        import inspect
+
+        src = inspect.getsource(updater_mod.refresh_gpu_perms_unit)
+        assert "gpu_perms_unit_enable_failed" in src
+        assert "up_to_date" in src  # no early return that skips the enable retry

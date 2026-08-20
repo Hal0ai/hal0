@@ -111,6 +111,53 @@ KFD_MISSING = "missing"
 KFD_NOT_OPENABLE = "not-openable"
 
 
+def resolve_image_runtime_uid(image_ref: str | None) -> int:
+    """UID the container process will actually run as, best-effort.
+
+    Rootful podman does NOT imply the process is root: an image declaring
+    ``USER`` runs as that user unless the unit overrides it, and this repo ships
+    exactly that pattern (``packaging/toolbox/cpu.Dockerfile`` ends ``USER
+    hal0``). Equating "rootful podman" with uid 0 would let :func:`kfd_status`
+    pass a ``0660 root:root`` node that the real process cannot open — waving
+    through the invalid Vulkan fallback the guard exists to stop (#1953 review).
+
+    Best-effort by design: an unreadable image falls back to
+    :data:`SLOT_RUNNER_UID`, which is the correct answer for every GPU runner
+    hal0 currently ships (none declare ``USER``). A DECLARED non-root user is
+    honoured, which is the conservative direction — it can only make the guard
+    refuse more, never less.
+    """
+    if not image_ref:
+        return SLOT_RUNNER_UID
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["podman", "image", "inspect", "--format", "{{.Config.User}}", image_ref],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:  # pragma: no cover - podman absent / hung
+        return SLOT_RUNNER_UID
+    if out.returncode != 0:
+        return SLOT_RUNNER_UID
+    user = (out.stdout or b"").decode(errors="replace").strip().split(":")[0]
+    if not user or user == "root" or user == "0":
+        return SLOT_RUNNER_UID
+    if user.isdigit():
+        return int(user)
+    try:
+        import pwd
+
+        return pwd.getpwnam(user).pw_uid
+    except Exception:
+        # A name we cannot resolve on the HOST may still resolve inside the
+        # image. Assume non-root and let the mode check decide, rather than
+        # silently falling back to the permissive root answer.
+        return -1
+
+
 def kfd_status(
     kfd_path: str = KFD_DEVICE_PATH,
     *,

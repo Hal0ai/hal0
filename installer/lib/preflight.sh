@@ -1097,8 +1097,24 @@ preflight_gpu() {
         # seam, so divergence can be forced without needing two real groups.
         kfd_gid="${HAL0_GPU_KFD_GID_OVERRIDE:-$(stat -c '%g' "${kfd_path}" 2>/dev/null || true)}"
         render_gid="$(stat -c '%g' "${node}" 2>/dev/null || true)"
-        if [[ -n "${kfd_gid}" && -n "${render_gid}" && "${kfd_gid}" != "${render_gid}" ]]; then
-            warn "gpu: ${kfd_path} is owned by gid ${kfd_gid}, but ${node} uses gid ${render_gid}"
+        # Gate on the INACCESSIBLE shape, not on gid inequality. A differing gid
+        # is not itself a fault: a valid box can put /dev/kfd on `video` and the
+        # render nodes on `render`, and install.sh adds hal0 to BOTH; world bits
+        # or an ACL can grant access independently too. Rewriting those to the
+        # render group would remove access from video-only users and, on an
+        # unprivileged LXC, abort a fresh install over a working config.
+        #
+        # The shape that actually breaks is the plain-passthrough default:
+        # root-owned with no group the service user can ever be in (gid 0) and
+        # no world access. Only that is repaired.
+        local kfd_mode kfd_world_rw=0
+        kfd_mode="$(stat -c '%a' "${kfd_path}" 2>/dev/null || echo 000)"
+        case "${kfd_mode}" in *[67]) kfd_world_rw=1 ;; esac
+        if [[ -n "${kfd_gid}" && -n "${render_gid}" \
+            && "${kfd_gid}" != "${render_gid}" \
+            && "${kfd_gid}" == "0" \
+            && "${kfd_world_rw}" == "0" ]]; then
+            warn "gpu: ${kfd_path} is root-owned (gid ${kfd_gid}, mode ${kfd_mode}) while ${node} uses gid ${render_gid}"
             warn "  The compute node is forwarded and the rootful slot containers can use it,"
             warn "  but the hal0 service user cannot — so GPU slots get refused on a working box (#1953)."
             warn "  Fix IN PLACE (no re-forward, no reboot):"

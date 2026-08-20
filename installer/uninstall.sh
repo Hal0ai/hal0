@@ -441,6 +441,13 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     rm_path "/etc/systemd/system/hal0-bench.timer"
     rm_path "/etc/systemd/system/hal0-bench.service"
     rm_path "/etc/systemd/system/hal0-bench-worker.service"
+    # GPU device-permissions oneshot (#1953). Must be disabled as well as
+    # removed: leaving it behind strands a hal0.target.wants symlink pointing
+    # at a unit whose ExecStart is the deleted venv, and a later re-creation of
+    # hal0.target would resurrect the orphan.
+    systemctl disable --now hal0-gpu-perms.service >/dev/null 2>&1 || true
+    rm_path "/etc/systemd/system/hal0-gpu-perms.service"
+    rm_path "/etc/systemd/system/hal0.target.wants/hal0-gpu-perms.service"
 fi
 
 # The install PREFIX (default /opt/hal0). install.sh rsyncs the source
