@@ -454,6 +454,27 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
             err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
             exit 1
         fi
+    elif (( gpu_rc == HAL0_GPU_RC_KFD_GID )); then
+        # #1953: /dev/kfd IS forwarded, its group is just wrong. We are root
+        # here, so repair it in place rather than making the operator do it —
+        # and rather than the old behaviour of sending them to re-forward a
+        # device that is already present. The gid comes from the render node
+        # (never from `getent group render`; see preflight_gpu for why).
+        _kfd_path="${HAL0_GPU_KFD_PATH:-/dev/kfd}"
+        _render_node="$(compgen -G '/dev/dri/renderD*' 2>/dev/null | head -1)"
+        _render_gid="$(stat -c '%g' "${_render_node}" 2>/dev/null || true)"
+        if [[ -n "${_render_gid}" ]] \
+            && chgrp "${_render_gid}" "${_kfd_path}" 2>/dev/null \
+            && chmod 0660 "${_kfd_path}" 2>/dev/null; then
+            info "gpu: aligned ${_kfd_path} to gid ${_render_gid} (matches ${_render_node})"
+        else
+            # Unprivileged LXC: the node's ownership is host-mapped, so chgrp
+            # is EPERM and the only real fix is on the host's dev entry.
+            err "GPU compute node ${_kfd_path} has the wrong group and it could not be fixed from inside this container."
+            err "Set it on the Proxmox host: dev1: ${_kfd_path},gid=${_render_gid:-<render gid inside the container>}"
+            err "then: pct stop <CTID> && pct start <CTID>. See hal0 issue #1953."
+            exit 1
+        fi
     elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."
