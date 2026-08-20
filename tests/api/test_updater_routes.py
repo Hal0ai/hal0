@@ -1187,3 +1187,81 @@ def test_apply_reaches_applied_on_disk_even_if_the_restart_never_returns(
         time.sleep(0.05)
 
     assert on_disk.get("state") == "applied", on_disk
+
+
+def test_commit_convergence_is_durable_before_the_restart_that_can_kill_us(
+    isolated_client: TestClient, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1960 B3: convergence must be on disk BEFORE the restart subprocess
+    runs, not after — that call is systemd bouncing hal0-api's own unit
+    from inside its own cgroup, so it can SIGTERM this very process while
+    it's still in flight (#1540's exact mechanism, same file's own
+    ``_try_restart_hal0_api`` docstring). The old code set
+    ``job["convergence"]`` AFTER ``_try_restart_hal0_api()`` returned, so a
+    same-cgroup SIGTERM landing during the restart could strand a completed
+    commit with no convergence key on disk at all — and
+    ``_print_convergence(None)`` reports a clean success for what may have
+    been a red (unconverged) post-swap migration failure.
+
+    Mirrors ``test_apply_persists_applied_before_attempting_the_restart``'s
+    exact technique: read what has actually been persisted to disk AT THE
+    MOMENT the restart's subprocess is invoked, not after the fact.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    convergence_payload = {
+        "converged": False,
+        "post_activation_migrations": {
+            "ok": False,
+            "from": 1,
+            "to": 1,
+            "error": "boom",
+            "pass_warnings": [],
+        },
+    }
+
+    async def fake_commit(self: object, version: str, reset_profiles: bool | None = None) -> dict:
+        return {
+            "version": "0.0.9",
+            "installed_at": time.time(),
+            "convergence": convergence_payload,
+        }
+
+    monkeypatch.setattr(u_mod.Updater, "commit", fake_commit)
+
+    convergence_at_restart_time: list[Any] = []
+
+    def fake_run(cmd: list[str], *a: object, **k: object) -> object:
+        # At the instant the restart's subprocess is invoked, read what has
+        # actually been committed to disk so far — exactly the snapshot a
+        # same-cgroup SIGTERM landing right here would leave behind.
+        job_id = job_id_holder.get("id")
+        on_disk = u_mod._load_persisted_job(job_id) if job_id else None
+        convergence_at_restart_time.append((on_disk or {}).get("convergence"))
+
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(u_mod.subprocess, "run", fake_run)
+
+    job_id_holder: dict[str, str] = {}
+    r = isolated_client.post("/api/updates/commit", json={"version": "0.0.9"})
+    job_id_holder["id"] = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id_holder['id']}").json()
+        if final["state"] == "failed" or final.get("restarted") is not None:
+            break
+        time.sleep(0.05)
+
+    assert convergence_at_restart_time, "the restart ran without any job state persisted first"
+    assert convergence_at_restart_time[-1] == convergence_payload, (
+        "convergence was not durable on disk before the restart that can kill this "
+        f"process; convergence persisted by then was {convergence_at_restart_time!r}"
+    )

@@ -1659,7 +1659,8 @@ def test_commit_runs_post_activation_migrations_after_the_swap(
             symlink_targets_when_migrations_ran.append(
                 Path(os.readlink(link)).name if link.is_symlink() else None
             )
-            return _Completed(stdout="HAL0_MIGRATION_RESULT=" + json.dumps({"from": 1, "to": 2}))
+            envelope = json.dumps({updater_module._MIGRATION_RESULT_KEY: {"from": 1, "to": 2}})
+            return _Completed(stdout=envelope)
         return _Completed()
 
     monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
@@ -1683,6 +1684,7 @@ def test_commit_runs_post_activation_migrations_after_the_swap(
         "from": 1,
         "to": 2,
         "error": None,
+        "pass_warnings": [],
     }
 
 
@@ -1728,6 +1730,74 @@ def test_commit_post_activation_migration_failure_is_non_fatal_but_loud(
     assert len(errors) == 1
     assert errors[0]["log_level"] == "error"
     assert "schema migration exploded" in errors[0]["error"]
+
+
+def test_commit_survives_a_migration_subprocess_timeout(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1960 B1 (reviewer-reproduced): subprocess.run can raise
+    TimeoutExpired rather than return a non-zero CompletedProcess. The old
+    call site only caught UpdateError, so this propagated straight out of
+    commit() — the symlink was already swapped, but the whole update was
+    reported as failed and _try_restart_hal0_api was never reached. The
+    non-fatal-but-loud design has to hold for this failure shape too, the
+    same way _rerender_units_after_swap contains its own subprocess call.
+    """
+    import subprocess as subprocess_mod
+
+    def _fake_run(cmd, *a, **k):
+        cmd = list(cmd)
+        if any("run_post_activation_migrations" in part for part in cmd):
+            raise subprocess_mod.TimeoutExpired(cmd=cmd, timeout=300)
+
+        class _OK:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _OK()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())  # must NOT raise
+
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["ok"] is False
+    assert "timed out" in post["error"]
+    assert result["convergence"]["converged"] is False
+
+
+def test_commit_survives_a_migration_subprocess_launch_failure(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1960 B1 (reviewer-reproduced): subprocess.run can raise OSError
+    (the child interpreter could not even be launched) — same containment
+    gap as the TimeoutExpired case, different exception type."""
+
+    def _fake_run(cmd, *a, **k):
+        cmd = list(cmd)
+        if any("run_post_activation_migrations" in part for part in cmd):
+            raise OSError("Cannot allocate memory")
+
+        class _OK:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _OK()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())  # must NOT raise
+
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["ok"] is False
+    assert "could not be launched" in post["error"]
+    assert result["convergence"]["converged"] is False
 
 
 def test_prepare_reads_release_notes(
