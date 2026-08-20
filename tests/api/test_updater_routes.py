@@ -1235,9 +1235,29 @@ def test_commit_convergence_is_durable_before_the_restart_that_can_kill_us(
         # At the instant the restart's subprocess is invoked, read what has
         # actually been committed to disk so far — exactly the snapshot a
         # same-cgroup SIGTERM landing right here would leave behind.
-        job_id = job_id_holder.get("id")
-        on_disk = u_mod._load_persisted_job(job_id) if job_id else None
-        convergence_at_restart_time.append((on_disk or {}).get("convergence"))
+        #
+        # Resolved from the jobs directory itself, NOT from a job id
+        # captured by the test's own main thread after the POST returns
+        # (the original version of this test did that, and was flaky on
+        # loaded CI runners — see #1966). TestClient runs the app on its
+        # own portal event loop; once the request handler returns, that
+        # loop is free to run the background commit task it just
+        # scheduled, and that task can reach this call before the test's
+        # main thread finishes crossing back over the transport and
+        # executing `r.json()["id"] = ...` — on a contended runner it
+        # reliably did, so the captured id was still None and this
+        # assertion raced to a false negative regardless of what was
+        # actually on disk. The jobs directory has no such race: the route
+        # handler (`commit_update`) persists the job SYNCHRONOUSLY —
+        # `_persist_job(jobs[job_id])` — before it ever spawns the
+        # background task, so by the time that task could possibly reach
+        # the restart, the (single) job file this test creates already
+        # exists on disk.
+        job_files = list(u_mod._jobs_dir().glob("*.json"))
+        on_disk: dict[str, Any] = {}
+        if job_files:
+            on_disk = json.loads(job_files[0].read_text(encoding="utf-8"))
+        convergence_at_restart_time.append(on_disk.get("convergence"))
 
         class _R:
             returncode = 0
@@ -1248,14 +1268,13 @@ def test_commit_convergence_is_durable_before_the_restart_that_can_kill_us(
 
     monkeypatch.setattr(u_mod.subprocess, "run", fake_run)
 
-    job_id_holder: dict[str, str] = {}
     r = isolated_client.post("/api/updates/commit", json={"version": "0.0.9"})
-    job_id_holder["id"] = r.json()["id"]
+    job_id = r.json()["id"]
 
     deadline = time.monotonic() + 6.0
     final: dict = {}
     while time.monotonic() < deadline:
-        final = isolated_client.get(f"/api/updates/status/{job_id_holder['id']}").json()
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
         if final["state"] == "failed" or final.get("restarted") is not None:
             break
         time.sleep(0.05)
