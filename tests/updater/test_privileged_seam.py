@@ -247,19 +247,71 @@ def test_successful_stage_relay_survives_a_long_cleanup_tail() -> None:
     assert any("cosign_verify_ok" in e["line"] for e in relayed)
 
 
-def test_failed_stage_does_not_double_relay_stderr_as_breadcrumbs() -> None:
-    """A failure already folds stderr into the raised error's details — it
-    must not ALSO be replayed as a separate breadcrumb log (that would be a
-    second, redundant recording of the same failure content)."""
+def test_failed_stage_also_relays_full_stderr_to_the_journal() -> None:
+    """#1940: the failure path used to relay nothing, keeping only
+    ``full_stderr[-4000:]`` in the raised error's details — a diagnostic
+    breadcrumb, not the durable audit trail. Relaying to the journal and
+    folding a bounded tail into the error are different sinks, not a double
+    record of the same thing, so the failure path must do both: the full
+    stderr reaches the journal via ``_relay_child_log`` AND the raised
+    error still carries its own bounded tail for quick triage.
+    """
     from structlog.testing import capture_logs
 
     run = FakeRun(returncode=1, stderr="hal0-update: cosign verify-blob failed")
     seam = UpdateSeam(run=run, is_hal0_user=lambda: True, job_id="job-abc123")
 
-    with capture_logs() as logs, pytest.raises(UpdateError):
+    with capture_logs() as logs, pytest.raises(UpdateError) as exc:
         seam.discard("hal0-1.0.0")
 
-    assert not [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+    relayed = [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+    assert len(relayed) == 1
+    assert relayed[0]["job_id"] == "job-abc123"
+    assert relayed[0]["verb"] == "discard"
+    assert "cosign verify-blob failed" in relayed[0]["line"]
+    assert "cosign verify-blob failed" in exc.value.details["stderr"]
+
+
+def test_failed_activate_relay_survives_a_long_cleanup_tail_after_cosign() -> None:
+    """#1940: a failure occurring AFTER cosign passed (e.g. during activate)
+    with a long reaping tail must not push the sha256_ok/cosign_verify_ok
+    breadcrumbs out of the retained evidence — this is the run where that
+    evidence matters most. The bounded 4000-char tail kept in the raised
+    error's details can legitimately drop the early breadcrumbs; the journal
+    relay must not, because it sees the full, untruncated stderr.
+    """
+    from structlog.testing import capture_logs
+
+    breadcrumbs = (
+        "2026-08-17T00:00:00Z [info] updater.sha256_ok job_id=None digest=abc123\n"
+        "2026-08-17T00:00:01Z [info] updater.cosign_verify_ok job_id=None\n"
+    )
+    # Pad well past the old 4000-char truncation window with cleanup noise
+    # that runs AFTER the breadcrumbs and before the eventual failure.
+    cleanup_tail = "".join(
+        f"2026-08-17T00:00:{i:02d}Z [info] updater.quarantine_reaped path=/x/{i}\n"
+        for i in range(2, 400)
+    )
+    failure_line = "2026-08-17T00:07:00Z [error] updater.activate_failed reason=disk_full\n"
+    child_stderr = breadcrumbs + cleanup_tail + failure_line
+    assert len(child_stderr) > 4000
+    assert "sha256_ok" not in child_stderr[-4000:]
+
+    run = FakeRun(returncode=1, stderr=child_stderr)
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True, job_id="job-abc123")
+
+    import asyncio
+
+    with capture_logs() as logs, pytest.raises(UpdateError) as exc:
+        asyncio.run(seam.activate("hal0-1.0.0"))
+
+    relayed = [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+    assert any("sha256_ok" in e["line"] for e in relayed)
+    assert any("cosign_verify_ok" in e["line"] for e in relayed)
+    # The bounded error detail is allowed to have lost the early breadcrumbs
+    # — that's exactly why the full relay above is the fix.
+    assert "sha256_ok" not in exc.value.details["stderr"]
+    assert "activate_failed" in exc.value.details["stderr"]
 
 
 # ── preflight: fail fast, with remediation, before any download ────────────────
