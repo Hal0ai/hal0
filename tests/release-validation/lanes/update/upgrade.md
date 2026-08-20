@@ -14,7 +14,9 @@ Capture a complete "before" snapshot and write it into your report — you canno
 the fact otherwise:
 
 * `hal0 --version`, the release channel, and `HAL0_RELEASES_URL`
-* every slot: name, assigned model, state, port, profile
+* every slot: name, assigned model, state, port, profile — AND each slot TOML's `device`
+  value, read from the TOMLs under `/var/lib/hal0/slots/` directly (`hal0 slot list` has no
+  device column; the post-upgrade migration check diffs against exactly this)
 * `hal0 config` dump, capability bindings, model registry listing
 * memory bank inventory and counts
 * which units are enabled and running
@@ -31,14 +33,22 @@ the fact otherwise:
    needing it *is* the finding.
    * **2b. Channel-URL path (#1883).** Before the main upgrade run, separately verify the
      documented channel-URL path end-to-end — do not rely on this box's pinned GitHub-asset
-     `HAL0_RELEASES_URL` for it (the pin bypasses exactly the path #1883 fixed).
-     `curl -sS -o /dev/null -w '%{http_code}\n'` against
-     `https://releases.hal0.dev/<channel>.json` AND the sibling
-     `https://releases.hal0.dev/<channel>.json.bundle` — both must be 200, and the bundle must
-     byte-match the GitHub release asset. Then drive one `hal0 update --check` (or `--target`)
-     with `HAL0_RELEASES_URL` pointed at the channel URL and confirm cosign verification
-     succeeds against the proxied bundle. Record the box's live `HAL0_RELEASES_URL` in your
-     report so the pinned-vs-channel distinction doesn't get lost.
+     `HAL0_RELEASES_URL` for it (the pin bypasses exactly the path #1883 fixed). Two halves,
+     and the mechanics matter:
+     - Proxy correctness: `curl -sS -o /dev/null -w '%{http_code}\n'` against
+       `https://releases.hal0.dev/<channel>.json` AND the sibling
+       `https://releases.hal0.dev/<channel>.json.bundle` — both 200, and the bundle
+       byte-matches the GitHub release asset.
+     - Verified-fetch path: `HAL0_RELEASES_URL` is read by the DAEMON from
+       `/etc/hal0/api.env` — exporting it in your shell does nothing, and `hal0 update
+       --check` uses the unverified manifest fetch, so neither exercises cosign. Instead:
+       copy `/etc/hal0/api.env` aside, point `HAL0_RELEASES_URL` at the channel URL in it,
+       restart `hal0-api`, then `PUT /api/updates/channel` (re-setting the current channel is
+       enough — that route is the one path into the cosign-verified manifest fetch outside a
+       full prepare). Confirm from the journal that verification ran and succeeded against
+       the proxied bundle. Restore api.env byte-for-byte and restart again; say so in the
+       report, and record both the pinned and channel URL values so the distinction doesn't
+       get lost.
 3. **The upgrade itself.** Run it. Capture the full output. Watch for: staged-tree permission
    gates (a box with `UMASK 002` produces a 0775 staged tree that the activate security gate
    refuses — the gate's own hint is the remediation), signature/digest verification, service

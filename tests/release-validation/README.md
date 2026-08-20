@@ -70,7 +70,7 @@ lessons*), and monitors each PR to a conclusion.
 | 4 | Triage + dedup | 1 | opus | yes — needs every finding at once |
 | 5 | Adversarial verify | 1 skeptic per candidate | opus, effort high | no |
 | 6 | Synthesis + report | 1 | opus | yes |
-| 7 | File issues (`mode: file`) | 1 | sonnet | — |
+| 7 | File issues (`mode: file`) | 1 | inherits session tier | — |
 | 8 | Kit curation | 1 | sonnet | — |
 
 Phase 8 is what makes the kit compound: it writes back the new known-issues, promotes every
@@ -145,8 +145,21 @@ known-issues, or regressions, and add a line to the changelog below. A report re
   call carries an explicit `model:` pin matching `[defaults]` (previously preflight, all lanes,
   judgment regressions, and curation silently inherited the invoking session's tier). The
   verify prompt's fleet note no longer claims kfd-less fresh boxes "run the Vulkan lane"
-  (stale since #1923). ct151 gains gotcha 5: post-rollback services need
-  `systemctl start hal0.target`.
+  (stale since #1923) — and neither do `boxes.toml`'s ct151/fleet-coverage notes: post-#1923,
+  gpu-rocm LLM slots REFUSE to start on kfd-less boxes (no CPU fallback); LLM coverage there
+  means device=cpu slots. ct151 gains gotcha 5: post-rollback services need
+  `systemctl start hal0.target`. Adversarial review of this version's PR (#1956) then
+  corrected four of its own checks before first use: the post-mutation stat targets
+  `/var/lib/hal0/STATE.md` (not a `hermes/` subdir); the upgrade "before" snapshot now
+  explicitly captures each slot TOML's `device` value so the migration diff is executable;
+  the #1934 check is gated on **#1960** (filed from that review: the updater runs
+  post-activation migrations pre-swap in the OUTGOING tree, so a release's new migrations
+  never fire on the upgrade that ships them); and the channel-URL check drives the
+  cosign-verified fetch the only way it can be reached — `HAL0_RELEASES_URL` in
+  `/etc/hal0/api.env` plus `PUT /api/updates/channel` — instead of a shell env var and
+  `update --check`, which never verify. `tests/release/test_rc_validate_kit_contract.py`
+  now pins `kit.toml [defaults]` against the script's model pins so the tier contract cannot
+  silently rot.
 
 * **4** (2026-08-15) — curation after the `v1.0.0-rc.6` run. Landed as mode=report, so the 17
   new entries first carried `issue: null`; the filing PR then filed all of them (plus one more

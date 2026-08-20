@@ -479,9 +479,11 @@ relitigates it.
 
 Also judge \`other_hardware_applicability\`: would a GPU box, a privileged container, or an
 upgraded (rather than freshly installed) box hit this? No box in the fleet is BOTH a fresh
-install AND has /dev/kfd visible (the fresh boxes lack /dev/kfd, so post-#1923 their LLM slots
-run the CPU lane — the Vulkan LLM lane is retired; the boxes with /dev/kfd — update and prod —
-are not fresh installs), so a read-only cross-check
+install AND has /dev/kfd visible (the fresh boxes lack /dev/kfd, so post-#1923 their
+gpu-rocm LLM slots REFUSE to start — the Vulkan LLM lane is retired and there is no CPU
+fallback for a gpu-device slot; LLM coverage on those boxes means slots explicitly set to
+device=cpu. The boxes with /dev/kfd — update and prod — are not fresh installs), so a
+read-only cross-check
 against the production box is the best available evidence — use it when the finding touches
 backend selection, profile flags, hardware probing, or native tool calling.
 
