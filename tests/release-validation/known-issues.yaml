@@ -809,7 +809,7 @@ known_issues:
       limit); OR `capabilities set --disabled` no longer recovers the box.
     review_at: v1.1.0
 
-  - id: doctor-perms-secrets-dir-0755-is-declared
+  - id: doctor-perms-secrets-dir-0700-is-declared
     status: fixed          # #1896, v1.0.0-rc.7 — the 0755 declaration is gone
     adjudicated: v1.0.0-rc.6
     summary: >-
@@ -821,10 +821,11 @@ known_issues:
       named — perms.py (0755) and hal0-agentenv (`install -d -m 0700`) DISAGREEING, so the mode
       oscillates forever — was fixed in #1896 by moving the TABLE to the restrictive side: both
       secrets rows now declare 0700, install.sh births them 0700, and the agentenv seam is
-      unchanged. Nothing outside root ever traversed the tree (systemd reads the EnvironmentFile
-      as root; the seam runs as root via /etc/sudoers.d), so 0700 costs no reader any access and
-      removes local agent-id enumeration. Still never assert a drift ROW COUNT — the set grows
-      with every slot loaded / model pulled.
+      unchanged. The one non-root traverser, `installer/wrappers/hermes` (it re-execs as the
+      unprivileged `hal0` user per the #843 run-as-hal0 guard, then sources
+      secrets/agents/hermes.env), is already blocked one level down — every *.env inside is 0600
+      root:root — so 0700 costs no reader any access and removes local agent-id enumeration.
+      Still never assert a drift ROW COUNT — the set grows with every slot loaded / model pulled.
     still_report_if: >-
       /var/lib/hal0/secrets or secrets/agents is observed at any mode other than 0700 after
       `doctor perms --fix`; OR a file under secrets/ is observed at a mode other than 0600, or

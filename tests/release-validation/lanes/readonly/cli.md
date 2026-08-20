@@ -51,8 +51,8 @@ command group is unfamiliar, run `--help` first and only run the verbs that clea
    not (regression `doctor-perms-never-converges`). Date any DRIFT row against the installer's
    own `--fix` backstop by **ctime** (chmod bumps ctime, not mtime) so install-time drift is
    distinguishable from lane damage. Never assert a drift row COUNT — it grows with every slot
-   load and model pull. The secrets-dir 0755 want is declared
-   (`known-issues: doctor-perms-secrets-dir-0755-is-declared`).
+   load and model pull. The secrets-dir mode is declared 0700 (#1896; was 0755, now fixed —
+   `known-issues: doctor-perms-secrets-dir-0700-is-declared`).
 8. **Service-user writability of state the daemon writes.** For each dir/db under
    /var/lib/hal0 that hal0-api writes (model-pull-jobs, activity.db, hal0.db, slots/, ...):
    `sudo -u hal0 test -w <path>` plus one journal grep for `persist_failed|init_failed`. A
