@@ -24,6 +24,7 @@ from hal0.providers._gpu import (
     host_is_amd_gpu,
     kfd_present,
     require_kfd_for_gpu_slot,
+    runtime_lane_for_provider,
 )
 
 
@@ -146,18 +147,322 @@ class TestLoadSyncGuard:
     def test_load_sync_calls_the_guard_with_the_slots_device(self, monkeypatch) -> None:
         from hal0.providers import container as container_mod
 
-        seen: dict[str, str] = {}
+        seen: dict[str, object] = {}
 
-        def _spy(slot_name: str, *, device: str, **_kw: object) -> None:
+        def _spy(
+            slot_name: str, *, device: str, runtime_lane: str = "llama", **_kw: object
+        ) -> None:
             seen["slot"] = slot_name
             seen["device"] = device
+            seen["runtime_lane"] = runtime_lane
             raise GpuPreflightError("stop here — the rest of load_sync writes units")
 
         monkeypatch.setattr(container_mod, "require_kfd_for_gpu_slot", _spy)
         provider = container_mod.ContainerProvider()
         with pytest.raises(GpuPreflightError):
             provider.load_sync({"name": "utility", "device": "gpu-vulkan", "port": 8082}, {})
-        assert seen == {"slot": "utility", "device": "gpu-vulkan"}
+        assert seen == {"slot": "utility", "device": "gpu-vulkan", "runtime_lane": "llama"}
+
+
+class TestRuntimeLaneForProvider:
+    """#1941 — the lane comes from the PROVIDER's declared image backend, not
+    from the slot's device string.
+
+    ``capabilities/catalog.py`` labels every non-llama GPU runtime
+    ``gpu-vulkan``; that is the picker's GPU row, not a statement about the
+    image. Two of those runtimes are ROCm builds and two are CPU ONNX images,
+    so the device string cannot answer "does this need /dev/kfd".
+    """
+
+    def test_none_is_the_llama_lane(self) -> None:
+        """``_spec_provider_for`` returns None for the default llama-server
+        GPU provider — #1888's lane."""
+        assert runtime_lane_for_provider(None) == "llama"
+
+    @pytest.mark.parametrize(
+        ("module", "cls_name"),
+        [
+            ("hal0.providers.comfyui", "ComfyUIProvider"),
+            ("hal0.providers.qwen3tts", "Qwen3TTSProvider"),
+        ],
+    )
+    def test_rocm_image_runtimes_declare_the_rocm_lane(self, module, cls_name) -> None:
+        """Both forward ``resolve_gpu_device_paths()`` (which includes
+        /dev/kfd) and are registered ``supported_backends=("rocm",)`` — they
+        genuinely cannot initialise HIP without the compute node."""
+        import importlib
+
+        provider = getattr(importlib.import_module(module), cls_name)()
+        assert provider.gpu_runtime_needs_rocm is True
+        assert runtime_lane_for_provider(provider) == "rocm"
+
+    @pytest.mark.parametrize(
+        ("module", "cls_name"),
+        [
+            ("hal0.providers.kokoro", "KokoroProvider"),
+            ("hal0.providers.moonshine", "MoonshineProvider"),
+            ("hal0.providers.flm", "FLMProvider"),
+        ],
+    )
+    def test_non_rocm_runtimes_declare_the_no_rocm_lane(self, module, cls_name) -> None:
+        """CPU ONNX / NPU images: they forward no GPU device node at all, so
+        /dev/kfd is irrelevant to them."""
+        import importlib
+
+        provider = getattr(importlib.import_module(module), cls_name)()
+        assert provider.gpu_runtime_needs_rocm is False
+        assert runtime_lane_for_provider(provider) == "no-rocm"
+
+    def test_the_declaration_matches_the_runner_registry(self) -> None:
+        """Cross-check the per-provider flag against the OTHER place that
+        records the same fact (``RUNNER_IMAGES[...].supported_backends``), so
+        the two cannot drift apart silently."""
+        import importlib
+
+        from hal0.runners import RUNNER_IMAGES
+
+        for runner_key, module, cls_name in (
+            ("comfyui", "hal0.providers.comfyui", "ComfyUIProvider"),
+            ("qwen3tts", "hal0.providers.qwen3tts", "Qwen3TTSProvider"),
+            ("kokoro", "hal0.providers.kokoro", "KokoroProvider"),
+            ("moonshine", "hal0.providers.moonshine", "MoonshineProvider"),
+            ("flm", "hal0.providers.flm", "FLMProvider"),
+        ):
+            runner = RUNNER_IMAGES[runner_key]
+            registry_says_rocm = "rocm" in runner.supported_backends or runner.backend == "rocm"
+            provider = getattr(importlib.import_module(module), cls_name)()
+            assert provider.gpu_runtime_needs_rocm is registry_says_rocm, runner_key
+
+
+class TestNonRocmRuntimesAreNotGated:
+    """#1941 — a ``gpu-vulkan`` slot whose runtime never touches HIP must load
+    on a kfd-less AMD box, exactly as it did before #1923.
+
+    Kokoro TTS and Moonshine STT run CPU ONNX images and forward no GPU node,
+    so ``/dev/kfd`` is irrelevant to them — but the pre-fix guard saw only
+    ``device == "gpu-vulkan"`` and refused them with a llama.cpp error.
+    """
+
+    @staticmethod
+    def _amd_box_without_kfd(monkeypatch) -> None:
+        """An AMD host (amdgpu bound) that has no usable /dev/kfd — the exact
+        shape of the box #1941 was reported from."""
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr(gpu_mod, "host_is_amd_gpu", lambda *_a, **_k: True)
+        monkeypatch.setattr(gpu_mod, "kfd_present", lambda *_a, **_k: False)
+
+    @staticmethod
+    def _stub_unit_write(monkeypatch) -> list[str]:
+        """Stop load_sync after the guard: record the unit write, do none."""
+        from hal0.providers import container as container_mod
+
+        written: list[str] = []
+        monkeypatch.setattr(
+            container_mod.ContainerProvider,
+            "_render_quadlet_text",
+            lambda self, slot_cfg, model_info: "[Container]\n",
+        )
+        monkeypatch.setattr(
+            container_mod.ContainerProvider,
+            "_write_and_start_unit",
+            lambda self, token, unit_text: written.append(token),
+        )
+        return written
+
+    @pytest.mark.parametrize(
+        "slot_cfg",
+        [
+            pytest.param(
+                {"name": "stt", "type": "transcription", "device": "gpu-vulkan", "port": 8092},
+                id="moonshine-stt",
+            ),
+            pytest.param(
+                {"name": "voice", "type": "tts", "device": "gpu-vulkan", "port": 8090},
+                id="kokoro-tts",
+            ),
+        ],
+    )
+    def test_load_sync_loads_a_non_rocm_vulkan_slot(self, monkeypatch, slot_cfg) -> None:
+        from hal0.providers import container as container_mod
+
+        self._amd_box_without_kfd(monkeypatch)
+        written = self._stub_unit_write(monkeypatch)
+
+        container_mod.ContainerProvider().load_sync(dict(slot_cfg), {})
+
+        assert written == [slot_cfg["name"]]
+
+    def test_load_sync_still_refuses_the_llama_lane(self, monkeypatch) -> None:
+        """The #1888 refusal must survive the scoping: a profile-less
+        ``gpu-vulkan`` slot resolves to the default llama-server provider and
+        still runs the poisoned ROCmFPX Vulkan lane."""
+        from hal0.providers import container as container_mod
+
+        self._amd_box_without_kfd(monkeypatch)
+        self._stub_unit_write(monkeypatch)
+
+        with pytest.raises(GpuPreflightError):
+            container_mod.ContainerProvider().load_sync(
+                {"name": "utility", "device": "gpu-vulkan", "port": 8082}, {}
+            )
+
+    @pytest.mark.parametrize(
+        "slot_cfg",
+        [
+            pytest.param(
+                {"name": "imagegen", "type": "image", "device": "gpu-vulkan", "port": 8188},
+                id="comfyui-on-the-vulkan-label",
+            ),
+            pytest.param(
+                {
+                    "name": "voice",
+                    "type": "tts",
+                    "profile": "qwen3-tts",
+                    "device": "gpu-vulkan",
+                    "port": 8095,
+                },
+                id="qwen3tts-on-the-vulkan-label",
+            ),
+        ],
+    )
+    def test_load_sync_still_refuses_a_rocm_image_on_the_vulkan_label(
+        self, monkeypatch, slot_cfg
+    ) -> None:
+        """The half the naive "non-llama ⇒ safe" scoping would have broken.
+
+        ComfyUI's Strix Halo image is a PyTorch-ROCm build, and
+        ``tts_profile_for_device`` maps ANY GPU device — ``gpu-vulkan``
+        included — to the ROCm-only ``qwen3-tts`` profile. Both forward
+        ``/dev/kfd`` in their specs, so both must keep the refusal even though
+        neither is llama.cpp.
+        """
+        from hal0.providers import container as container_mod
+
+        self._amd_box_without_kfd(monkeypatch)
+        self._stub_unit_write(monkeypatch)
+
+        with pytest.raises(GpuPreflightError):
+            container_mod.ContainerProvider().load_sync(dict(slot_cfg), {})
+
+    def test_a_non_llama_gpu_rocm_slot_is_still_gated(self, tmp_path) -> None:
+        """Scoping relaxes ``gpu-vulkan`` only. ``gpu-rocm`` stays gated in
+        every lane: the device name IS the ROCm claim, whatever the runtime
+        does with it."""
+        with pytest.raises(GpuPreflightError):
+            require_kfd_for_gpu_slot(
+                "voice",
+                device="gpu-rocm",
+                kfd_path=str(tmp_path / "kfd"),
+                env={},
+                amd_host=True,
+                runtime_lane="no-rocm",
+            )
+
+    def test_the_non_llama_refusal_does_not_blame_the_vulkan_fallback(self, tmp_path) -> None:
+        """#1888's silent-Vulkan-fallback story is llama.cpp's alone — quoting
+        it at a ComfyUI operator sends them chasing the wrong defect."""
+        with pytest.raises(GpuPreflightError) as exc:
+            require_kfd_for_gpu_slot(
+                "imagegen",
+                device="gpu-vulkan",
+                kfd_path=str(tmp_path / "kfd"),
+                env={},
+                amd_host=True,
+                runtime_lane="rocm",
+            )
+        msg = str(exc.value)
+        assert "1888" not in msg
+        # Still actionable: what is missing and how to forward it.
+        assert "/kfd" in msg
+        assert "pct stop/start" in msg
+
+    def test_the_no_rocm_gpu_rocm_refusal_describes_a_device_mismatch(self, tmp_path) -> None:
+        """A no-rocm runtime (Kokoro/Moonshine) only reaches the raise path via
+        a hand-set ``device="gpu-rocm"``, since the gpu-vulkan branch already
+        exempts this lane. The image never resolves ROCm/HIP, so the refusal
+        must not claim it does (Codex review on PR #1952) — the actual
+        problem is the device declaration, not the runtime."""
+        with pytest.raises(GpuPreflightError) as exc:
+            require_kfd_for_gpu_slot(
+                "voice",
+                device="gpu-rocm",
+                kfd_path=str(tmp_path / "kfd"),
+                env={},
+                amd_host=True,
+                runtime_lane="no-rocm",
+            )
+        msg = str(exc.value)
+        assert "1888" not in msg
+        assert "resolves ROCm at launch" not in msg
+        assert "cannot initialise HIP without it" not in msg
+        assert "never touches ROCm/HIP" in msg
+        assert "declared 'gpu-rocm'" in msg
+        # Still actionable: what is missing and how to forward it.
+        assert "/kfd" in msg
+        assert "pct stop/start" in msg
+
+
+class TestFallbackWarningIsLaneScoped:
+    """PR #1952 review: the ``HAL0_ALLOW_VULKAN_FALLBACK`` warn path
+    hardcoded ``detail="output will be invalid — see #1888"`` for every lane,
+    including ``"rocm"`` — a ComfyUI/Qwen3-TTS operator has no Vulkan
+    fallback to speak of and gets sent to the wrong defect. The warning must
+    reuse the same lane-scoped explanation as the raise path."""
+
+    def test_the_llama_lane_warning_still_names_1888(self, tmp_path) -> None:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            require_kfd_for_gpu_slot(
+                "agent",
+                device="gpu-rocm",
+                kfd_path=str(tmp_path / "kfd"),
+                env={ENV_ALLOW_VULKAN_FALLBACK: "1"},
+                amd_host=True,
+                runtime_lane="llama",
+            )
+        warnings = [e for e in logs if e.get("log_level") == "warning"]
+        assert len(warnings) == 1
+        assert "1888" in warnings[0]["detail"]
+
+    def test_the_rocm_lane_warning_does_not_blame_the_vulkan_fallback(self, tmp_path) -> None:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            require_kfd_for_gpu_slot(
+                "imagegen",
+                device="gpu-vulkan",
+                kfd_path=str(tmp_path / "kfd"),
+                env={ENV_ALLOW_VULKAN_FALLBACK: "1"},
+                amd_host=True,
+                runtime_lane="rocm",
+            )
+        warnings = [e for e in logs if e.get("log_level") == "warning"]
+        assert len(warnings) == 1
+        detail = warnings[0]["detail"]
+        assert "1888" not in detail
+        assert "output will be invalid" not in detail
+        assert "resolves ROCm at launch" in detail
+
+    def test_the_no_rocm_lane_warning_describes_the_device_mismatch(self, tmp_path) -> None:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            require_kfd_for_gpu_slot(
+                "voice",
+                device="gpu-rocm",
+                kfd_path=str(tmp_path / "kfd"),
+                env={ENV_ALLOW_VULKAN_FALLBACK: "1"},
+                amd_host=True,
+                runtime_lane="no-rocm",
+            )
+        warnings = [e for e in logs if e.get("log_level") == "warning"]
+        assert len(warnings) == 1
+        detail = warnings[0]["detail"]
+        assert "1888" not in detail
+        assert "output will be invalid" not in detail
+        assert "never touches ROCm/HIP" in detail
 
 
 def _raiser(*_a: object, **_kw: object) -> None:

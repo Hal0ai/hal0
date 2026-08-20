@@ -28,10 +28,43 @@ from __future__ import annotations
 import json
 import os
 import stat
+from typing import Any, Literal
 
 import structlog
 
 log = structlog.get_logger(__name__)
+
+#: What a slot's runtime does with a GPU device, for
+#: :func:`require_kfd_for_gpu_slot`. Deliberately NOT the slot's ``device``
+#: string, which cannot answer the question — see that function's docstring
+#: and :func:`runtime_lane_for_provider` (#1941).
+#:
+#: * ``"llama"``   — the unified ROCmFPX llama.cpp runner (#1888's lane).
+#: * ``"rocm"``    — a non-llama runtime whose image resolves ROCm/HIP.
+#: * ``"no-rocm"`` — a runtime that never touches HIP.
+RuntimeLane = Literal["llama", "rocm", "no-rocm"]
+
+
+def runtime_lane_for_provider(spec_provider: Any | None) -> RuntimeLane:
+    """Translate a resolved spec provider into a :data:`RuntimeLane`.
+
+    ``spec_provider`` is exactly what
+    :func:`hal0.providers.container._spec_provider_for` returns: ``None`` for
+    the default llama-server GPU provider, else the single-purpose runtime's
+    provider. The ROCm question is answered by the provider's own
+    :attr:`~hal0.providers.base.Provider.gpu_runtime_needs_rocm` declaration
+    rather than by anything derived from the device string, because the
+    catalog labels every non-llama GPU runtime ``gpu-vulkan`` regardless of
+    what its image actually runs (#1941).
+
+    Reads the attribute defensively (``getattr``) so a duck-typed test double
+    standing in for a provider is treated as a plain non-ROCm runtime instead
+    of raising on the load path.
+    """
+    if spec_provider is None:
+        return "llama"
+    return "rocm" if getattr(spec_provider, "gpu_runtime_needs_rocm", False) else "no-rocm"
+
 
 # Linux-convention GID fallbacks (Strix Halo LXC values; also the historical
 # hal0 defaults). Used only as the LAST resort in resolve_gpu_group_ids —
@@ -97,11 +130,12 @@ def require_kfd_for_gpu_slot(
     slot_name: str,
     *,
     device: str,
+    runtime_lane: RuntimeLane = "llama",
     kfd_path: str = KFD_DEVICE_PATH,
     env: dict[str, str] | None = None,
     amd_host: bool | None = None,
 ) -> None:
-    """Loud-fail an AMD-GPU llama.cpp slot that has no ROCm compute node.
+    """Loud-fail a GPU slot whose runtime needs ROCm but has no compute node.
 
     The release-pinned ROCmFPX runner (``DEFAULT_ROCMFPX_IMAGE``) is a single
     HIP+Vulkan build. llama.cpp picks ROCm when ``/dev/kfd`` is visible and
@@ -114,26 +148,81 @@ def require_kfd_for_gpu_slot(
     image, not an optimisation: without it there is no lane that produces
     valid output, and the honest answer is to refuse the load and say why.
 
-    Scope, deliberately narrow:
+    ``runtime_lane`` is what makes that decision correct for the OTHER
+    runtimes (#1941). The slot's ``device`` string cannot answer it:
+    :mod:`hal0.capabilities.catalog` labels every non-llama GPU runtime
+    ``gpu-vulkan``, and that label means "the GPU row in the picker", not
+    "this image runs Vulkan". Two of those runtimes are ROCm builds
+    (``ComfyUI``'s Strix Halo image and ``Qwen3-TTS`` — the latter reachable
+    on a ``gpu-vulkan`` slot because ``tts_profile_for_device`` maps ANY GPU
+    device to the ``qwen3-tts`` profile), and two are CPU ONNX images that
+    forward no GPU node at all (Kokoro, Moonshine). Only the provider knows
+    which, so it declares
+    :attr:`~hal0.providers.base.Provider.gpu_runtime_needs_rocm` and the sole
+    call site (``ContainerProvider.load_sync``) translates:
 
-    * ``gpu-rocm`` — always gated. The device name IS the ROCm claim.
-    * ``gpu-vulkan`` — gated only on an **AMD** host (``amdgpu`` bound). An
-      older AMD slot still carrying that label runs the same broken lane; an
-      Intel iGPU or an NVIDIA card without CDI has no ``/dev/kfd`` by design
-      and keeps working.
+    * ``"llama"`` — the default llama-server provider, i.e. the unified
+      ROCmFPX runner. Gated, with #1888's silent-garbage explanation.
+    * ``"rocm"`` — a non-llama runtime whose image resolves ROCm/HIP.
+      Gated, but the refusal does not blame llama.cpp's fallback: quoting
+      #1888 at a ComfyUI operator sends them chasing the wrong defect.
+    * ``"no-rocm"`` — a runtime that never touches HIP (Kokoro / Moonshine,
+      and any genuinely-Vulkan image). Its ``gpu-vulkan`` slots are NOT
+      gated; this is the class #1941 was filed for.
+
+    Scope by device, given that lane:
+
+    * ``gpu-rocm`` — always gated, in every lane. The device name IS the ROCm
+      claim, whatever the runtime does with it.
+    * ``gpu-vulkan`` — gated only on an **AMD** host (``amdgpu`` bound) and
+      only when the lane needs ROCm. An Intel iGPU or an NVIDIA card without
+      CDI has no ``/dev/kfd`` by design and keeps working.
     * ``cpu`` / ``npu`` / ``gpu-cuda`` — never gated: none of them can reach
       the ROCmFPX image's Vulkan fallback.
+
+    ``runtime_lane`` defaults to ``"llama"`` on purpose: a caller that forgets
+    gets the fail-closed pre-#1941 behaviour, never a silent pass into the
+    poisoned lane.
 
     An explicit :data:`ENV_ALLOW_VULKAN_FALLBACK` opt-in downgrades the
     refusal to a warning — a warn, never a silent pass.
     """
     if device == "gpu-vulkan":
+        if runtime_lane == "no-rocm":
+            # A runtime that never touches HIP (Kokoro / Moonshine). The
+            # gpu-vulkan label is the picker's GPU row, not a ROCm claim, so
+            # /dev/kfd is irrelevant to it (#1941).
+            return
         if not (host_is_amd_gpu() if amd_host is None else amd_host):
             return
     elif device != "gpu-rocm":
         return
     if kfd_present(kfd_path):
         return
+    # Computed once and reused on both the warn and raise paths below, so
+    # neither can drift from the lane it is actually describing (#1952
+    # review): #1888 is llama.cpp's failure mode specifically, and quoting
+    # it at a non-llama operator sends them chasing the wrong defect.
+    if runtime_lane == "llama":
+        why = (
+            "The runner image falls back to its Vulkan backend without it, and "
+            "that backend emits invalid tokens for every model (#1888) — "
+            "refusing to start rather than serve garbage."
+        )
+    elif runtime_lane == "rocm":
+        why = (
+            "This slot's runtime image resolves ROCm at launch and cannot "
+            "initialise HIP without it."
+        )
+    else:
+        # "no-rocm" only reaches this far via device == "gpu-rocm" — the
+        # gpu-vulkan branch above already returned for this lane. The image
+        # never touches HIP, so the actual problem is the device
+        # declaration, not the runtime.
+        why = (
+            "This runtime's image never touches ROCm/HIP — the slot's device "
+            "is declared 'gpu-rocm' but doesn't need to be."
+        )
     environ = os.environ if env is None else env
     if str(environ.get(ENV_ALLOW_VULKAN_FALLBACK, "")).strip() in ("1", "true", "yes"):
         log.warning(
@@ -141,14 +230,13 @@ def require_kfd_for_gpu_slot(
             slot=slot_name,
             device=device,
             kfd_path=kfd_path,
-            detail="output will be invalid — see #1888",
+            runtime_lane=runtime_lane,
+            detail=why,
         )
         return
     raise GpuPreflightError(
         f"slot {slot_name!r} (device={device}) needs the ROCm compute node "
-        f"{kfd_path}, which is not visible here. The runner image falls back to "
-        "its Vulkan backend without it, and that backend emits invalid tokens "
-        "for every model (#1888) — refusing to start rather than serve garbage. "
+        f"{kfd_path}, which is not visible here. {why} "
         "Forward the device from the host (Proxmox LXC: add "
         f"'dev1: {kfd_path}' to /etc/pve/lxc/<CTID>.conf, then pct stop/start), "
         "or move this slot to device='cpu'."
