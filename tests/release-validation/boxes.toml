@@ -179,5 +179,7 @@ work?".
 # how the rc.6 Vulkan garbage-output defect survived undetected. Also: only prod (ct105) has
 # host rocm-smi, so compute_capable=true exists on exactly one box — capability-flag findings
 # need that cross-check. LLM slots run the ROCm lane where /dev/kfd is visible and REFUSE
-# elsewhere (no Vulkan fallback since #1923); record what a box's slots actually execute
-# (podman exec <slot ctr> ls /dev/kfd) in every preflight.
+# elsewhere (no Vulkan fallback since #1923) — by DEFAULT: ENV_ALLOW_VULKAN_FALLBACK
+# downgrades the refusal to a warning, and since that env re-opens the exact #1888 failure
+# mode, its presence on any box is itself a finding. Record what a box's slots actually
+# execute (podman exec <slot ctr> ls /dev/kfd) in every preflight.

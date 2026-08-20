@@ -15,8 +15,9 @@ the fact otherwise:
 
 * `hal0 --version`, the release channel, and `HAL0_RELEASES_URL`
 * every slot: name, assigned model, state, port, profile — AND each slot TOML's `device`
-  value, read from the TOMLs under `/var/lib/hal0/slots/` directly (`hal0 slot list` has no
-  device column; the post-upgrade migration check diffs against exactly this)
+  value, read from the config TOMLs under `/etc/hal0/slots/` directly (`hal0 slot list` has
+  no device column, and `/var/lib/hal0/slots/` is per-slot STATE, not config; the
+  post-upgrade migration check diffs against exactly this)
 * `hal0 config` dump, capability bindings, model registry listing
 * memory bank inventory and counts
 * which units are enabled and running
@@ -38,7 +39,9 @@ the fact otherwise:
      - Proxy correctness: `curl -sS -o /dev/null -w '%{http_code}\n'` against
        `https://releases.hal0.dev/<channel>.json` AND the sibling
        `https://releases.hal0.dev/<channel>.json.bundle` — both 200, and the bundle
-       byte-matches the GitHub release asset.
+       byte-matches the GitHub release asset. (Note the daemon's effective URL is not
+       byte-identical to your curl target for non-stable channels on an http override —
+       `releases_url()` appends `?channel=<ch>` — so compare content, not URLs.)
      - Verified-fetch path: `HAL0_RELEASES_URL` is read by the DAEMON from
        `/etc/hal0/api.env` — exporting it in your shell does nothing, and `hal0 update
        --check` uses the unverified manifest fetch, so neither exercises cosign. Instead:
@@ -70,7 +73,10 @@ the fact otherwise:
    the activation step) and confirm migrations are idempotent.
 6. **Rollback.** `hal0 update --rollback`. Does it return the box to the previous version with
    its state intact? Then roll forward again. If rollback is not exercised here it is not
-   exercised anywhere.
+   exercised anywhere. (`updater.*` journal lines from the ROLLBACK path legitimately carry
+   `job_id=None` — the rollback route constructs its Updater without a job — so do not
+   re-open `update-audit-trail-gaps` from rollback-window lines; check 4's job_id assertion
+   applies to the upgrade itself.)
 
 ## Leave behind
 

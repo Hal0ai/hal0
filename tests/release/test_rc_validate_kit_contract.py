@@ -81,3 +81,21 @@ def test_synthesis_phase_pins_match_kit_defaults() -> None:
     verify = re.search(r"label: `verify:\$\{c\.key\}`[^}]*model: '([a-z]+)'", script)
     assert verify is not None, "verify agent() call has no model pin"
     assert verify.group(1) == defaults["verify"]
+
+
+def test_every_labelled_agent_call_is_model_pinned_or_whitelisted() -> None:
+    """Completeness: a NEWLY added agent() call without a model pin should fail
+    here, not silently inherit the invoking session's tier. The regression
+    batches build their opts dynamically and are asserted separately above;
+    file-issues is the one documented inherit-the-session-tier exception."""
+    inherit_ok = {"file-issues"}
+    dynamic = {"regressions:"}  # label built via `regressions:${b.tier}...`, opts via Object.assign
+    opts_literals = re.findall(r"\{ label: (?:[^{}]|\$\{[^}]*\})*\}", _script())
+    assert len(opts_literals) >= 8, "opts-literal extraction broke — update this test"
+    for literal in opts_literals:
+        label = re.search(r"label: [`']([^`']+)[`']", literal)
+        assert label is not None, f"unparseable opts literal: {literal}"
+        name = label.group(1)
+        if any(name.startswith(d) for d in dynamic) or name.split(":")[0] in inherit_ok:
+            continue
+        assert "model:" in literal, f"agent() call '{name}' has no model pin and no whitelist entry"
