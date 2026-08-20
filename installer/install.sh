@@ -470,10 +470,17 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         else
             # Unprivileged LXC: the node's ownership is host-mapped, so chgrp
             # is EPERM and the only real fix is on the host's dev entry.
-            err "GPU compute node ${_kfd_path} has the wrong group and it could not be fixed from inside this container."
-            err "Set it on the Proxmox host: dev1: ${_kfd_path},gid=${_render_gid:-<render gid inside the container>}"
-            err "then: pct stop <CTID> && pct start <CTID>. See hal0 issue #1953."
-            exit 1
+            #
+            # WARN, never block. Since the slot containers run rootful, they
+            # open a root:root compute node perfectly well — a mismatched gid
+            # costs hal0-user probes and diagnostics their GPU visibility, not
+            # inference. Hard-stopping here would newly refuse installation on
+            # every unprivileged LXC for a condition that no longer breaks
+            # serving (the identity fix in #1953 is what changed this).
+            warn "gpu: ${_kfd_path} has a different group (${_render_gid:-?} expected) and could not be changed from inside this container."
+            warn "  GPU slots still work — they run rootful — but hal0-user probes and diagnostics cannot read the compute node."
+            warn "  To fix, set it on the Proxmox host: dev1: ${_kfd_path},gid=${_render_gid:-<render gid inside the container>}"
+            warn "  (the gid INSIDE the container), then: pct stop <CTID> && pct start <CTID>. See hal0 issue #1953."
         fi
     elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
