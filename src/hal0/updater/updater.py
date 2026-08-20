@@ -3327,6 +3327,50 @@ def _restore_service_ownership(root: Path, *, job_id: str | None = None) -> None
         log.warning("updater.cache_chown_failed", job_id=job_id, path=str(root), error=str(exc))
 
 
+def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
+    """Install/refresh ``hal0-gpu-perms.service`` from the activated release (#1953).
+
+    Same #1689 shape as :func:`refresh_privileged_wrappers`: ``install.sh`` was
+    about to become the only installer of this unit, so a box that only ever
+    runs ``hal0 update`` would never receive it and its ``/dev/kfd`` group would
+    silently revert on the next reboot with nothing to re-apply it.
+
+    Privileged-side ONLY — a no-op unless ``os.geteuid() == 0``, matching
+    :func:`refresh_privileged_wrappers`. The unprivileged daemon must never
+    write ``/etc/systemd/system``.
+
+    Best-effort: a release tree without the unit source is skipped, and a
+    failed ``systemctl enable`` is logged rather than raised. A missing
+    permissions tidy-up must never fail an otherwise-successful activate.
+
+    Returns one of ``"installed"``, ``"unchanged"``, ``"skipped"``, ``"failed"``.
+    """
+    if os.geteuid() != 0:
+        return "skipped"
+    src = target / "installer" / "systemd" / "hal0-gpu-perms.service"
+    if not src.is_file():
+        log.info("updater.gpu_perms_unit_absent", job_id=job_id, src=str(src))
+        return "skipped"
+    dst = Path("/etc/systemd/system/hal0-gpu-perms.service")
+    try:
+        desired = src.read_text(encoding="utf-8")
+        if dst.is_file() and dst.read_text(encoding="utf-8") == desired:
+            return "unchanged"
+        dst.write_text(desired, encoding="utf-8")
+        os.chmod(dst, 0o644)
+        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True)
+        subprocess.run(
+            ["systemctl", "enable", "hal0-gpu-perms.service"],
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        log.warning("updater.gpu_perms_unit_failed", job_id=job_id, error=str(exc))
+        return "failed"
+    log.info("updater.gpu_perms_unit_installed", job_id=job_id, path=str(dst))
+    return "installed"
+
+
 def refresh_privileged_wrappers(target: Path, *, job_id: str | None = None) -> dict[str, Any]:
     """Re-install the privileged sudo wrappers from the just-activated release (#1689).
 
@@ -3528,6 +3572,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     # activate (a wrapper that fails to refresh keeps the OLD one in place,
     # same class of degradation as before this fix, not a new failure mode).
     wrappers = refresh_privileged_wrappers(target, job_id=job_id)
+    gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
 
     log.info(
         "updater.activate_ok",
@@ -3539,6 +3584,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
         "previous": str(prior) if prior else None,
         "target": str(target),
         "wrappers_refreshed": wrappers["refreshed"],
+        "gpu_perms_unit": gpu_perms_unit,
     }
 
 
@@ -4103,6 +4149,7 @@ __all__ = [
     "ensure_seed_profiles",
     "fetch_release_manifest",
     "profile_reset_status",
+    "refresh_gpu_perms_unit",
     "refresh_privileged_wrappers",
     "release_dir_name",
     "releases_url",
