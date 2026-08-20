@@ -34,6 +34,21 @@ HEALTH_TIMEOUT_S = 180.0
 #: ``hal0.slots.manager.SlotManager._terminate_timeout_s``.
 TERMINATE_TIMEOUT_S = 30.0
 
+#: Wall-clock bound on ONE output-sanity completion — the probe a ``type=llm``
+#: load runs after ``/health`` converges (#1922 — the gate that turns "the
+#: port answers" into "the model produces language"). Consumed by
+#: ``hal0.slots.output_sanity.probe``; deliberately small, because the probe
+#: asks for a dozen greedy tokens from an already-warm server, so anything
+#: near this bound is itself the failure the gate reports.
+OUTPUT_SANITY_TIMEOUT_S = 20.0
+
+#: Probes a single load can pay for in the worst case. A wrong answer on the
+#: raw ``/completion`` endpoint buys one retry through
+#: ``/v1/chat/completions`` (a template-dependent instruct model can answer
+#: one well and the other poorly), so the failing path costs two budgets. The
+#: happy path costs one.
+OUTPUT_SANITY_PROBES_PER_LOAD = 2
+
 #: Sequential unloads a single ``load`` may perform before it spawns
 #: anything: ``preload_evict.admit`` awaits ``host.unload(candidate)`` once per
 #: evicted candidate, in series, inside the load path. The true count is
@@ -94,13 +109,19 @@ def slot_lifecycle_timeout_s(*, loads: int = 1, unloads: int = 1, slots: int = 1
     (``/api/updates/restart-slots`` loops ``sm.restart`` over every drifted
     slot). Clamped to at least 1.
 
-    A load charges the health poll plus :data:`EVICTION_UNLOAD_ALLOWANCE`
-    terminates for the evictions ``preload_evict.admit`` may run before the
-    spawn; an unload charges one terminate; the whole request additionally
-    charges one :data:`LOCK_WAIT_ALLOWANCE_S` for queueing behind an in-flight
-    op on the same slot.
+    A load charges the health poll, the output-sanity probes that follow it
+    (:data:`OUTPUT_SANITY_PROBES_PER_LOAD` x :data:`OUTPUT_SANITY_TIMEOUT_S`), plus
+    :data:`EVICTION_UNLOAD_ALLOWANCE` terminates for the evictions
+    ``preload_evict.admit`` may run before the spawn; an unload charges one
+    terminate; the whole request additionally charges one
+    :data:`LOCK_WAIT_ALLOWANCE_S` for queueing behind an in-flight op on the
+    same slot.
     """
-    per_slot = loads * (HEALTH_TIMEOUT_S + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S)
+    per_slot = loads * (
+        HEALTH_TIMEOUT_S
+        + OUTPUT_SANITY_PROBES_PER_LOAD * OUTPUT_SANITY_TIMEOUT_S
+        + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S
+    )
     per_slot += unloads * TERMINATE_TIMEOUT_S
     # The lock allowance is charged per lock-acquiring phase, per slot. A
     # compound verb does NOT hold one lock: ``SlotManager.restart`` releases

@@ -1,0 +1,530 @@
+"""Output-sanity gate: a slot may not reach READY on transport proof alone.
+
+Regression for #1922 / #1888. On ct151 during rc.6 a box read green on every
+surface hal0 owns — slot ``ready``, ``/api/health`` green, ``hal0 doctor`` "OK
+gpu", an SSE ``done`` frame, 60-120 tok/s — while producing two hours of
+garbage (runs of ``)`` with ``--jinja``, empty content on a bare
+``/completion``). Every one of those surfaces proves the *port answers*; none
+proves the *model produces language*.
+
+The tests below pin both halves of the fix:
+
+* the probe itself, against a REAL loopback HTTP server that plays each of the
+  four failure shapes from the issue (``Paris`` / ``)))))`` / empty content /
+  never terminating), so the httpx call, the JSON parse and the timeout are
+  exercised rather than mocked away;
+* the gate's placement in ``SlotManager._await_ready``, so a garbage slot ends
+  in ERROR with an actionable message instead of a lying READY — and an
+  embedding slot, or an operator who opted out, is never blocked on a chat
+  completion.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from collections.abc import AsyncIterator, Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from hal0.slots import output_sanity
+from hal0.slots.manager import SlotManager
+from hal0.slots.state import SlotOutputSanityFailed, SlotState
+from tests.slots.conftest import FakeContainerProvider
+
+# A responder maps (path, request_body) → (status, json_body), or None to
+# model a server that accepts the request and never answers.
+Responder = Callable[[str, dict[str, Any]], tuple[int, Any] | None]
+
+_REASONS = {200: "OK", 404: "Not Found", 500: "Internal Server Error"}
+
+#: The REAL probe, bound at import — before the suite-wide autouse stub in
+#: ``tests/conftest.py`` (which answers the gate for every OTHER test, none of
+#: which has a model server) can replace the module attribute. The probe tests
+#: below are the one place the actual httpx round-trip must run.
+_probe = output_sanity.probe
+
+
+class FakeSlotServer:
+    """A minimal loopback HTTP server standing in for llama-server.
+
+    Deliberately not an httpx mock transport: the never-terminating case (the
+    fourth shape the issue asks for) is only a real test if a real socket is
+    open with nothing coming back on it.
+    """
+
+    def __init__(self) -> None:
+        self.port = 0
+        self.seen: list[tuple[str, dict[str, Any]]] = []
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._server: asyncio.AbstractServer | None = None
+
+    async def start(self, responder: Responder) -> None:
+        async def _client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            task = asyncio.current_task()
+            if task is not None:
+                self._tasks.add(task)
+            try:
+                request_line = await reader.readline()
+                if not request_line:
+                    return
+                path = request_line.decode("latin-1").split(" ")[1]
+                length = 0
+                while True:
+                    line = await reader.readline()
+                    if line in (b"\r\n", b"\n", b""):
+                        break
+                    name, _, value = line.decode("latin-1").partition(":")
+                    if name.strip().lower() == "content-length":
+                        length = int(value.strip())
+                raw = await reader.readexactly(length) if length else b""
+                body = json.loads(raw) if raw else {}
+                self.seen.append((path, body))
+                reply = responder(path, body)
+                if reply is None:
+                    # Never-terminating server: hold the connection open with
+                    # no response until the test tears the fixture down.
+                    await asyncio.sleep(300)
+                    return
+                status, payload = reply
+                encoded = json.dumps(payload).encode()
+                head = (
+                    f"HTTP/1.1 {status} {_REASONS.get(status, 'OK')}\r\n"
+                    "Content-Type: application/json\r\n"
+                    f"Content-Length: {len(encoded)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode()
+                writer.write(head + encoded)
+                await writer.drain()
+            except (asyncio.CancelledError, ConnectionError):
+                raise
+            finally:
+                with contextlib.suppress(Exception):
+                    writer.close()
+
+        self._server = await asyncio.start_server(_client, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+
+    async def stop(self) -> None:
+        for task in self._tasks:
+            task.cancel()
+        if self._server is not None:
+            self._server.close()
+            with contextlib.suppress(Exception):
+                await self._server.wait_closed()
+
+
+@pytest.fixture
+async def slot_server() -> AsyncIterator[FakeSlotServer]:
+    server = FakeSlotServer()
+    try:
+        yield server
+    finally:
+        await server.stop()
+
+
+def _completion(text: str, *, chat_text: str | None = None) -> Responder:
+    """A server whose model emits ``text`` on ``/completion``.
+
+    ``chat_text`` is what the same model emits on ``/v1/chat/completions``,
+    which the probe only asks when the raw endpoint's answer was wrong; it
+    defaults to the same text (one model, one opinion).
+    """
+
+    def _respond(path: str, body: dict[str, Any]) -> tuple[int, Any]:
+        if path == "/completion":
+            return 200, {"content": text, "stop": True}
+        if path == "/v1/chat/completions":
+            answer = text if chat_text is None else chat_text
+            return 200, {"choices": [{"message": {"content": answer}}]}
+        return 404, {"error": f"no route {path}"}
+
+    return _respond
+
+
+# ── the probe, against a real server ────────────────────────────────────────
+
+
+async def test_probe_passes_on_paris(slot_server: FakeSlotServer) -> None:
+    """A working slot answers the prompt with the expected token → ok."""
+    await slot_server.start(_completion(" Paris, and it has been since 987."))
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is True
+    assert verdict.status == "ok"
+
+
+async def test_probe_sends_the_prescribed_greedy_request(
+    slot_server: FakeSlotServer,
+) -> None:
+    """The probe must be greedy and bounded, or its verdict means nothing.
+
+    Temperature 0 makes the answer deterministic (a sampled model can produce
+    a correct-looking token by luck); ``n_predict`` keeps the gate inside the
+    slot lifecycle budget.
+    """
+    await slot_server.start(_completion(" Paris"))
+
+    await _probe(slot_server.port, timeout_s=5.0)
+
+    path, body = slot_server.seen[0]
+    assert path == "/completion"
+    assert body["prompt"] == "The capital of France is"
+    assert body["temperature"] == 0
+    assert body["n_predict"] == output_sanity.SANITY_N_PREDICT
+    assert body["stream"] is False
+
+
+async def test_probe_fails_on_paren_garbage(slot_server: FakeSlotServer) -> None:
+    """The rc.6 ``--jinja`` failure shape: fluent-looking, meaningless.
+
+    The rc.6 garbage reproduced on both endpoints, so the second opinion
+    agrees and the slot still fails.
+    """
+    await slot_server.start(_completion(")))))))))))"))
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is False
+    assert verdict.status == "incoherent_output"
+    # The operator has to be able to SEE the garbage, not just be told "failed".
+    assert ")))" in verdict.sample
+    assert [p for p, _ in slot_server.seen] == ["/completion", "/v1/chat/completions"]
+
+
+async def test_probe_fails_on_empty_content(slot_server: FakeSlotServer) -> None:
+    """The rc.6 bare-``/completion`` failure shape: 200 with nothing in it."""
+    await slot_server.start(_completion(""))
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is False
+    assert verdict.status == "empty_output"
+
+
+async def test_probe_accepts_a_model_that_only_answers_through_its_template(
+    slot_server: FakeSlotServer,
+) -> None:
+    """A working slot must never be failed on one endpoint's opinion.
+
+    A heavily template-dependent instruct model can wander on a raw prompt and
+    answer correctly through its chat template. Parking THAT slot in ERROR
+    would make the gate worse than the bug it guards against, so a wrong raw
+    answer buys exactly one retry through ``/v1/chat/completions``.
+    """
+    await slot_server.start(_completion("<|im_start|>assistant", chat_text="Paris."))
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is True
+    assert verdict.status == "ok_via_chat"
+
+
+async def test_probe_fails_on_never_terminating_server(
+    slot_server: FakeSlotServer,
+) -> None:
+    """A timeout is a FAIL, not a pass.
+
+    "The probe was inconclusive so let the slot through" is precisely the
+    silent degrade this gate exists to remove — a runner that cannot emit a
+    dozen greedy tokens is not ready by any definition.
+    """
+    await slot_server.start(lambda path, body: None)
+
+    verdict = await _probe(slot_server.port, timeout_s=0.5)
+
+    assert verdict.ok is False
+    assert verdict.status == "probe_timeout"
+    # No second opinion on a timeout: a wedged runner must not cost the load
+    # path two full probe budgets.
+    assert len(slot_server.seen) == 1
+
+
+async def test_probe_fails_on_dead_port() -> None:
+    """Nothing listening → a fail verdict, never an exception."""
+    server = FakeSlotServer()
+    await server.start(_completion(" Paris"))
+    port = server.port
+    await server.stop()
+    # Give the listener a beat to actually go away.
+    await asyncio.sleep(0.05)
+
+    verdict = await _probe(port, timeout_s=2.0)
+
+    assert verdict.ok is False
+    assert verdict.status in ("probe_transport_error", "probe_timeout")
+
+
+async def test_probe_fails_on_http_error(slot_server: FakeSlotServer) -> None:
+    """A 500 from the runner is a failure, not an inconclusive pass."""
+    await slot_server.start(lambda path, body: (500, {"error": "context shift failed"}))
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is False
+    assert verdict.status == "probe_http_500"
+    assert len(slot_server.seen) == 1, "a 5xx is a round-trip fact — no second opinion"
+
+
+async def test_probe_passes_when_neither_endpoint_exists(
+    slot_server: FakeSlotServer,
+) -> None:
+    """404 on both = not a completion server at all → cannot judge.
+
+    The ONE inconclusive-passes branch, and it is narrow on purpose: a runtime
+    family that serves neither endpoint was never in this gate's scope, and
+    failing it would break slots the gate was not designed to probe.
+    """
+    await slot_server.start(lambda path, body: (404, {"error": "not found"}))
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is True
+    assert verdict.status == "probe_unsupported"
+
+
+async def test_probe_falls_back_to_chat_when_only_completion_is_absent(
+    slot_server: FakeSlotServer,
+) -> None:
+    """An OpenAI-only runner is judged on the endpoint it does serve."""
+
+    def _respond(path: str, body: dict[str, Any]) -> tuple[int, Any]:
+        if path == "/completion":
+            return 404, {"error": "not found"}
+        return 200, {"choices": [{"message": {"content": "Paris"}}]}
+
+    await slot_server.start(_respond)
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is True
+    assert verdict.status == "ok_via_chat"
+
+
+async def test_probe_reads_openai_shaped_bodies(slot_server: FakeSlotServer) -> None:
+    """A runner that answers /completion with an OpenAI envelope still parses."""
+
+    def _respond(path: str, body: dict[str, Any]) -> tuple[int, Any]:
+        return 200, {"choices": [{"text": " Paris."}]}
+
+    await slot_server.start(_respond)
+
+    verdict = await _probe(slot_server.port, timeout_s=5.0)
+
+    assert verdict.ok is True
+
+
+# ── classification (pure) ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [" Paris", "PARIS", "paris, France", "The capital of France is Paris."],
+)
+def test_classify_accepts_the_answer_in_any_casing(text: str) -> None:
+    assert output_sanity.classify(text).ok is True
+
+
+@pytest.mark.parametrize("text", ["París", "Parigi", "巴黎", "Париж"])
+def test_classify_accepts_non_english_spellings(text: str) -> None:
+    """False-failing a correct answer in another language would be worse than
+    the bug: it would park a working slot in ERROR."""
+    assert output_sanity.classify(text).ok is True
+
+
+def test_classify_rejects_missing_content_field() -> None:
+    """No text field at all is distinct from an empty one — both fail."""
+    assert output_sanity.classify(None).status == "no_content"
+    assert output_sanity.classify("   ").status == "empty_output"
+
+
+def test_classify_never_keys_on_the_garbage_shape() -> None:
+    """Any off-topic text fails, whatever shape the garbage takes.
+
+    #1888: the garbage varies with argv, so a blocklist of known-bad strings
+    would have caught one lane and missed the others. Only the positive
+    assertion is stable.
+    """
+    for garbage in (")))))))", "!!!!!!", "的的的的的", "London", "���"):
+        assert output_sanity.classify(garbage).ok is False
+
+
+def test_failure_message_names_probe_expected_and_actual() -> None:
+    """An ERROR that says "health check failed" is what cost two hours."""
+    verdict = output_sanity.classify(")))))))")
+
+    message = output_sanity.failure_message(verdict)
+
+    assert "The capital of France is" in message
+    assert "Paris" in message
+    assert ")))" in message
+    assert output_sanity.SANITY_ENV_VAR in message
+
+
+# ── scoping / escape hatches ────────────────────────────────────────────────
+
+
+def test_gate_applies_to_llm_slots() -> None:
+    assert output_sanity.skip_reason({"type": "llm"}) is None
+
+
+@pytest.mark.parametrize(
+    "slot_type", ["embedding", "reranking", "tts", "transcription", "image", ""]
+)
+def test_gate_skips_non_chat_slot_types(slot_type: str) -> None:
+    """An embedding slot cannot serve a chat completion — gating it on one
+    would take out every embed/rerank/TTS/STT/image slot on the box."""
+    assert output_sanity.skip_reason({"type": slot_type}) is not None
+
+
+def test_gate_honours_the_env_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(output_sanity.SANITY_ENV_VAR, "0")
+    assert output_sanity.skip_reason({"type": "llm"}) == "disabled_by_env"
+
+
+def test_gate_is_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(output_sanity.SANITY_ENV_VAR, raising=False)
+    assert output_sanity.gate_disabled_globally() is False
+
+
+def test_gate_honours_the_per_slot_opt_out() -> None:
+    """One weird model on a box must not force the operator to disable the
+    gate for every other slot."""
+    flat = {"type": "llm", output_sanity.SANITY_CFG_KEY: False}
+    nested = {"type": "llm", "slot": {output_sanity.SANITY_CFG_KEY: "off"}}
+
+    assert output_sanity.skip_reason(flat) == "disabled_by_slot_config"
+    assert output_sanity.skip_reason(nested) == "disabled_by_slot_config"
+
+
+# ── the gate inside the load path ───────────────────────────────────────────
+
+
+async def test_load_errors_when_the_slot_emits_garbage(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """THE regression. Unit active, /health 200, tokens flowing — and the
+    output is garbage. The slot must NOT be published as READY."""
+    container_stub.sanity_output = ")))))))))))))"
+    sm = SlotManager()
+
+    with pytest.raises(SlotOutputSanityFailed) as excinfo:
+        await sm.load("chat")
+
+    assert sm._current_state("chat") is SlotState.ERROR
+    record = sm._states[sm._key("chat")]
+    # Actionable: names the probe, the expected token, and what came back.
+    assert "The capital of France is" in record.message
+    assert "Paris" in record.message
+    assert ")))" in record.message
+    assert excinfo.value.code == "slot.output_sanity_failed"
+
+
+async def test_failed_gate_survives_the_next_status_poll(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A gate verdict that one dashboard poll can undo is not a gate.
+
+    ``status()``'s inverse-drift branch adopts any ERROR/OFFLINE slot whose
+    unit is ACTIVE straight to READY — and a slot that fails the sanity gate
+    is exactly that shape (healthy unit, healthy /health, garbage output). So
+    the failing load must also stop the unit; otherwise the very next
+    ``/api/slots`` poll re-publishes the garbage slot as dispatchable and the
+    box is back to reading green.
+    """
+    container_stub.sanity_output = ")))))))"
+    sm = SlotManager()
+
+    with pytest.raises(SlotOutputSanityFailed):
+        await sm.load("chat")
+
+    assert "chat" not in container_stub.active, "the garbage unit must be stopped"
+
+    slot = await sm.status("chat")
+
+    assert slot.state is SlotState.ERROR
+    assert "Paris" in str(slot.metadata.get("message") or "")
+
+
+async def test_load_reaches_ready_when_the_slot_answers(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """The gate must not cost a working box its slot."""
+    container_stub.sanity_output = " Paris."
+    sm = SlotManager()
+
+    slot = await sm.load("chat")
+
+    assert slot.state is SlotState.READY
+    assert container_stub.sanity_probes == [8081], "the gate runs exactly once per load"
+
+
+async def test_load_errors_when_the_probe_times_out(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe timeout must fail the load, not fall through to READY."""
+
+    async def _timeout(port: int, **_kw: Any) -> output_sanity.SanityVerdict:
+        return output_sanity.SanityVerdict(ok=False, status="probe_timeout")
+
+    monkeypatch.setattr("hal0.slots.output_sanity.probe", _timeout)
+    sm = SlotManager()
+
+    with pytest.raises(SlotOutputSanityFailed):
+        await sm.load("chat")
+
+    assert sm._current_state("chat") is SlotState.ERROR
+
+
+async def test_load_skips_the_gate_for_non_llm_slots(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """An embedding slot loads without ever being asked to chat."""
+    (slot_root / "embed.toml").write_text(
+        "\n".join(
+            [
+                'name = "embed"',
+                "port = 8093",
+                'type = "embedding"',
+                'provider = "llama-server"',
+                "[model]",
+                'default = "nomic-embed-text"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    # A model that would fail the chat probe outright.
+    container_stub.sanity_output = ""
+    sm = SlotManager()
+
+    slot = await sm.load("embed")
+
+    assert slot.state is SlotState.READY
+    assert container_stub.sanity_probes == []
+
+
+async def test_load_skips_the_gate_when_disabled_by_env(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escape hatch has to actually reach the load path."""
+    monkeypatch.setenv(output_sanity.SANITY_ENV_VAR, "0")
+    container_stub.sanity_output = ")))))))"
+    sm = SlotManager()
+
+    slot = await sm.load("chat")
+
+    assert slot.state is SlotState.READY
+    assert container_stub.sanity_probes == []

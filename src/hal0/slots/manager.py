@@ -105,6 +105,7 @@ from hal0.slots.state import (
     SlotConfigError,
     SlotCrashLooping,
     SlotNotFound,
+    SlotOutputSanityFailed,
     SlotPinned,
     SlotSpawnFailed,
     SlotState,
@@ -1757,6 +1758,19 @@ class SlotManager:
                             },
                         )
             except Exception as exc:
+                if isinstance(exc, SlotOutputSanityFailed):
+                    # The gate failed on a unit that is ACTIVE and healthy — it
+                    # just talks nonsense. Stamping ERROR is not enough: the
+                    # inverse-drift branch in ``status()`` (and the boot-time
+                    # upstream reconcile) adopt any ERROR/OFFLINE slot whose
+                    # unit is active straight back to READY, so the very next
+                    # /api/slots poll would undo the gate and re-publish the
+                    # garbage slot as dispatchable. Stop the unit, which also
+                    # stops it burning VRAM producing text nobody can use. A
+                    # later ``load`` re-enters the lifecycle and re-runs the
+                    # gate; recovery is never silent.
+                    with contextlib.suppress(Exception):
+                        await self.terminate(slot_name)
                 # Crash-loop bookkeeping: consecutive failures drive the
                 # backoff/park gate above. ``parked`` rides ``extra`` (not a
                 # new enum value — wire/state-machine compatible) so the UI
@@ -3625,7 +3639,9 @@ class SlotManager:
     async def _await_ready(self, slot_name: str, port: int) -> SlotState:
         """Resolve the slot's final readiness state after spawning.
 
-        Polls GET /health on the slot's container port until 200.
+        Polls GET /health on the slot's container port until 200, then — for a
+        chat-capable (``type=llm``) slot — proves the server can actually
+        produce language before it is published as READY (#1922).
 
         Returns:
             SlotState.READY when the container is serving. On a health-wait
@@ -3633,6 +3649,15 @@ class SlotManager:
             than a lying READY: WARMING keeps the slot retryable so the fail
             watcher / next-request reload governs recovery, instead of live
             traffic being forwarded to a wedged server on a false READY.
+
+        Raises:
+            SlotOutputSanityFailed: the server is healthy but its output is
+                not language (garbage/empty/off-topic, or no completion inside
+                the probe budget). Unlike the health-wait timeout this is NOT
+                ambiguous — retrying cannot fix a backend that mis-computes —
+                so it raises into ``load``'s ERROR branch (red dot, actionable
+                message, crash-loop bookkeeping) instead of parking the slot
+                in a retryable WARMING.
         """
         cfg = await self._maybe_load_config(slot_name)
         if not cfg:
@@ -3722,6 +3747,72 @@ class SlotManager:
                     },
                 )
                 return SlotState.WARMING
+            return SlotState.READY
+
+        # ── output-sanity gate (#1922) ───────────────────────────────────────
+        #
+        # The container/llama-server lane's readiness proof stopped at /health
+        # 200 — a TRANSPORT proof. A GPU backend that loads weights and then
+        # mis-computes answers /health, streams at 60-120 tok/s and closes with
+        # a `done` frame while emitting runs of `)` or nothing at all (#1888,
+        # ct151/rc.6: two hours of garbage behind five green surfaces). The FLM
+        # lane already had a one-shot inference gate here; this is the same
+        # promise for every other llm slot — one greedy completion whose answer
+        # is known, run exactly once, where the FLM gate runs and for the same
+        # reasons (slot lock held, not yet dispatchable, warming fail-watcher
+        # skips /health, so there is no contention and no repetition).
+        #
+        # Scoped by ``skip_reason``: llm slots only (an embed/rerank/TTS/STT/
+        # image slot cannot serve a chat completion), and escapable per box or
+        # per slot. A failure RAISES rather than returning WARMING: a wedged
+        # loader may converge on a retry, a backend that computes wrong answers
+        # never will, so this is a red dot with an actionable message — not a
+        # slot that quietly re-loads at request cadence and burns the GPU.
+        if provider is None:
+            from hal0.slots import output_sanity
+
+            # A portless slot cannot be probed at all — that is a config
+            # fault for the health path to report, not something to
+            # mis-attribute to the model's output.
+            skip = output_sanity.skip_reason(cfg) if slot_port > 0 else "no_port"
+            if skip is not None:
+                log.debug(
+                    "slot.output_sanity_skipped",
+                    extra={"slot": slot_name, "reason": skip},
+                )
+            else:
+                sanity = await output_sanity.probe(slot_port)
+                log.info(
+                    "slot.output_sanity",
+                    extra={
+                        "slot": slot_name,
+                        "port": slot_port,
+                        "ok": sanity.ok,
+                        "status": sanity.status,
+                        "sample": sanity.sample,
+                    },
+                )
+                if not sanity.ok:
+                    message = output_sanity.failure_message(sanity)
+                    log.error(
+                        "slot.output_sanity_failed",
+                        extra={
+                            "slot": slot_name,
+                            "port": slot_port,
+                            "status": sanity.status,
+                            "sample": sanity.sample,
+                            "detail": sanity.detail,
+                        },
+                    )
+                    raise SlotOutputSanityFailed(
+                        message,
+                        details={
+                            "slot": slot_name,
+                            "port": slot_port,
+                            "probe_status": sanity.status,
+                            "sample": sanity.sample,
+                        },
+                    )
         return SlotState.READY
 
     # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────

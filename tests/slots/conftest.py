@@ -48,6 +48,10 @@ class FakeContainerProvider:
         unit (crash loop / ``start-limit-hit`` / unit gone); the default empty
         string is the "unit is fine or the probe was inconclusive" answer that
         every pre-#1791 test implicitly relied on.
+      * ``sanity_output`` — what the fake slot server's model emits for the
+        output-sanity probe (#1922). The default is the correct answer, i.e.
+        "this fake box works"; set it to garbage / ``""`` / ``None`` to drive
+        the gate's failure paths through ``load()``.
     """
 
     def __init__(self) -> None:
@@ -66,6 +70,12 @@ class FakeContainerProvider:
         # test keeps the old "nothing is wrong with the unit" behaviour.
         self.unit_failure_by_slot: dict[str, str] = {}
         self.reset_failed_calls: list[str] = []
+        # #1922 — the fake slot server's completion output. "Paris" is the
+        # right answer to the gate's prompt, so the default double models a
+        # box whose model actually works, exactly as ``healthy = True`` models
+        # a unit that actually serves. ``None`` = no content field at all.
+        self.sanity_output: str | None = "Paris"
+        self.sanity_probes: list[int] = []
 
     # — SlotManager._spawn_locked / terminate (sync, executor-run) —
 
@@ -101,6 +111,20 @@ class FakeContainerProvider:
         # real-inference probe in production.
         return {"ok": self.healthy}
 
+    async def output_sanity_probe(self, port: int, **_kw: Any) -> Any:
+        """Stand in for ``hal0.slots.output_sanity.probe`` (#1922).
+
+        The real gate POSTs ``/completion`` to the slot's port; with no server
+        behind the fake provider that would be a connection error, i.e. every
+        load in this suite would fail the gate. The double answers with
+        ``sanity_output`` through the REAL classifier, so the pass/fail
+        decision under test is production code — only the transport is faked.
+        """
+        from hal0.slots.output_sanity import classify
+
+        self.sanity_probes.append(port)
+        return classify(self.sanity_output)
+
     # — slot_view container_enrichment extras —
 
     def running_image(self, slot: Any) -> str | None:
@@ -125,11 +149,20 @@ def container_stub(monkeypatch: pytest.MonkeyPatch) -> FakeContainerProvider:
     SlotManager imports ``container_provider`` lazily from
     ``hal0.providers.container`` inside each method, so patching the
     module attribute covers every dispatch site.
+
+    Also redirects the output-sanity gate's HTTP probe (#1922) at the same
+    double: a faked container has no model server to complete against, so
+    without this every ``load()`` in this suite would fail the gate on a
+    connection error. Tests drive the gate via ``container_stub.sanity_output``.
     """
     fake = FakeContainerProvider()
     monkeypatch.setattr(
         "hal0.providers.container.container_provider",
         lambda: fake,
+    )
+    monkeypatch.setattr(
+        "hal0.slots.output_sanity.probe",
+        fake.output_sanity_probe,
     )
     return fake
 

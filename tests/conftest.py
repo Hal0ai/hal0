@@ -213,6 +213,31 @@ def _no_static_slot_seed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _slot_output_sanity_passes_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the slot output-sanity gate (#1922) without a model server.
+
+    Every ``load()`` of a ``type=llm`` slot now ends with one real completion
+    against the slot's port — the gate that stops a garbage backend from being
+    published as READY (#1888). No unit test has a llama-server behind that
+    port: the probe would resolve to a connection error and fail every load in
+    the suite, which is a fact about the test environment, not about the code
+    under test. Default the verdict to "the model answered correctly", the
+    same claim every container-provider double already makes about its unit.
+
+    Tests that exercise the gate override this: ``tests/slots/conftest.py``'s
+    ``container_stub`` routes the probe at the fake provider's ``sanity_output``,
+    and ``tests/slots/test_output_sanity_gate.py`` drives the real probe
+    against a real loopback server.
+    """
+    from hal0.slots.output_sanity import SanityVerdict
+
+    async def _passing_probe(port: int, **_kw: object) -> SanityVerdict:
+        return SanityVerdict(ok=True, status="ok", sample="Paris")
+
+    monkeypatch.setattr("hal0.slots.output_sanity.probe", _passing_probe)
+
+
+@pytest.fixture(autouse=True)
 def _store_not_nfs_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force ``hal0.config.store.is_nfs_path`` to False for the whole suite.
 
