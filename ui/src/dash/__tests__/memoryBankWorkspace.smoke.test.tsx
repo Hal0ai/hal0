@@ -73,3 +73,40 @@ describe('MemV2Workspace (smoke)', () => {
     expect(html).not.toContain('mv-filter-card')
   })
 })
+
+describe('MemV2EgoGraph (smoke)', () => {
+  it('mounts under QueryClientProvider with the real hook globals without throwing', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const MemV2EgoGraph = (globalThis as unknown as { MemV2EgoGraph: React.ComponentType<any> })
+      .MemV2EgoGraph
+    expect(typeof MemV2EgoGraph).toBe('function')
+
+    const html = renderToStaticMarkup(
+      React.createElement(
+        QueryClientProvider,
+        { client: qc },
+        React.createElement(MemV2EgoGraph, { bank: 'primary', centerId: 'f1', onGo: () => {} }),
+      ),
+    )
+
+    expect(html).toContain('mv-ego')
+    expect(html).toContain('mv-ego-depth')
+  })
+
+  it('renders a select-a-fact empty state with no centerId, without a depth slider', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const MemV2EgoGraph = (globalThis as unknown as { MemV2EgoGraph: React.ComponentType<any> })
+      .MemV2EgoGraph
+
+    const html = renderToStaticMarkup(
+      React.createElement(
+        QueryClientProvider,
+        { client: qc },
+        React.createElement(MemV2EgoGraph, { bank: 'primary', centerId: null, onGo: () => {} }),
+      ),
+    )
+
+    expect(html).toContain('mv-ego')
+    expect(html).not.toContain('mv-ego-depth')
+  })
+})
