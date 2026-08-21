@@ -50,6 +50,10 @@ describe('MemV2Workspace (smoke)', () => {
     expect(typeof html).toBe('string')
     expect(html).toContain('mv-workspace')
     expect(html).toContain('mv-filter-card')
+    // fix round (post C4-review, #2): the "show invalidated" affordance —
+    // the only way to browse/recover an archived fact once Inspector's
+    // local override state is gone.
+    expect(html).toContain('mv-state-invalidated')
   })
 
   it('renders the Inspector instead of the filter card when a fact is selected', () => {
