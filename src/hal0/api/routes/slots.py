@@ -916,7 +916,11 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
     from hal0.api.routes.hardware import stats_slots
 
     merged = await stats_slots(request)
-    for name, tps in _per_slot_local_tps(request).items():
+    # 30s lookback (not the 5s streaming default): non-streaming callers
+    # land one event per completed request, often tens of seconds apart —
+    # a 5s window made their tok/s flash briefly then read 0 between
+    # requests even while the slot was visibly working.
+    for name, tps in _per_slot_local_tps(request, window_s=30.0).items():
         if tps <= 0:
             continue
         entry = merged.get(name)

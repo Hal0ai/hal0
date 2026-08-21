@@ -1544,6 +1544,72 @@ async def test_scrape_llama_metrics_clamps_overrun(
 
 
 @pytest.mark.asyncio
+async def test_scrape_llama_metrics_surfaces_ctx_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fullest sub-slot's used tokens surface as ``ctx`` so the card's
+    "used / max" context readout gets a live numerator (it read '—'
+    forever because nothing produced the key)."""
+    from hal0.api.routes.slots import _scrape_llama_metrics
+
+    metrics_text = "llamacpp:requests_processing 1\n"
+    slots_json = [
+        {"id": 0, "n_ctx": 4096, "n_prompt_tokens": 512},
+        {"id": 1, "n_ctx": 4096, "n_prompt_tokens": 2048},
+    ]
+    _patch_httpx(
+        monkeypatch,
+        _StubResponse(text=metrics_text),
+        _StubResponse(json_data=slots_json),
+    )
+
+    out = await _scrape_llama_metrics(8081)
+    assert out["ctx"] == 2048
+
+
+@pytest.mark.asyncio
+async def test_scrape_llama_metrics_omits_ctx_when_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle /slots payload leaves ``ctx`` absent — the UI renders '—',
+    not a fabricated 0."""
+    from hal0.api.routes.slots import _scrape_llama_metrics
+
+    metrics_text = "llamacpp:requests_processing 0\n"
+    slots_json = [{"id": 0, "n_ctx": 4096, "is_processing": False}]
+    _patch_httpx(
+        monkeypatch,
+        _StubResponse(text=metrics_text),
+        _StubResponse(json_data=slots_json),
+    )
+
+    out = await _scrape_llama_metrics(8081)
+    assert "ctx" not in out
+
+
+def test_tps_from_events_single_event_smears_over_window() -> None:
+    """One in-window event (a non-streaming completion's whole token count)
+    yields tokens/window_s instead of 0 — steady non-streaming traffic
+    used to read 0 tok/s forever while the history endpoint showed real
+    throughput from the same store."""
+    import time
+
+    from hal0.slots.metrics_collect import tps_from_events
+
+    now = time.monotonic()
+    assert tps_from_events([(now - 1.0, 600)], window_s=30.0) == pytest.approx(20.0)
+
+
+def test_tps_from_events_all_aged_out_decays_to_zero() -> None:
+    import time
+
+    from hal0.slots.metrics_collect import tps_from_events
+
+    now = time.monotonic()
+    assert tps_from_events([(now - 120.0, 600)], window_s=30.0) == 0.0
+
+
+@pytest.mark.asyncio
 async def test_scrape_llama_metrics_501_returns_empty_and_warns_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
