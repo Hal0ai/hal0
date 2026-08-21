@@ -878,9 +878,16 @@ function MemoryView({ param } = {}) {
       ) : (
         <>
           {engineVolatile && (
+            // task C8: the pgvector-only fallback (memory_admin.py's 501
+            // memory.engine_unsupported path has no Hindsight client to talk
+            // to) keeps facts in an in-process/ephemeral store, not
+            // Hindsight's durable persistence — a restart of the fallback
+            // provider loses them. Say so plainly rather than just "data is
+            // stored".
             <div className="empty mono" data-testid="mem-engine-volatile" style={{ marginBottom: 14 }}>
-              Memory is running on a non-Hindsight fallback engine ({engine.engine}) — data is
-              stored, but graph extraction, reflect, and directives aren't available.
+              Memory is running on a non-Hindsight fallback engine ({engine.engine}) — volatile,
+              writes don't survive restart. Graph extraction, reflect, and directives aren't
+              available either.
             </div>
           )}
           {section === 'overview' ? (
