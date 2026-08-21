@@ -233,7 +233,12 @@ def test_bare_create_on_a_compute_less_strix_halo_resolves_to_vulkan(
     name rather than serving nonsense.
 
     ``compute_capable: true`` still resolves ``rocm``; see the sibling test.
+    The image half is forced ON here (review B2): whether this ladder reaches
+    ``vulkan`` at all depends on the pinned runner, and a test that does not
+    say which pin it means is testing a moving target. The other direction is
+    pinned in ``tests/providers/test_vulkan_lane_perimeter.py``.
     """
+    monkeypatch.setattr("hal0.providers._gpu.default_image_serves_vulkan_lane", lambda: True)
     probe = tmp_path / "hardware.json"
     probe.write_text(
         json.dumps(
@@ -316,7 +321,42 @@ def test_detect_default_hardware_prefers_rocm_when_compute_is_reachable(
         )
     )
     monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
+    # See the note above: the Vulkan branch is gated on the pinned image, so
+    # the pin is stated rather than inherited from the checkout.
+    monkeypatch.setattr("hal0.providers._gpu.default_image_serves_vulkan_lane", lambda: True)
     assert _detect_default_hardware() == expected
+
+
+def test_detect_default_hardware_falls_to_cpu_when_the_vulkan_lane_is_not_real(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review B2: an AMD box with no ROCm compute and an unvalidated runner
+    image has no GPU lane — writing ``vulkan`` there would create a slot the
+    load-time gate refuses."""
+    from hal0.cli.slot_commands import _detect_default_hardware
+    from hal0.config import paths as _paths
+
+    probe = tmp_path / "hardware.json"
+    probe.write_text(
+        json.dumps(
+            {
+                "gpus": [
+                    {
+                        "vendor": "amd",
+                        "name": "Strix Halo",
+                        "vram_mb": 512,
+                        "compute_capable": False,
+                        "vulkan_capable": True,
+                    }
+                ],
+                "unified_memory_mb": 102400,
+            }
+        )
+    )
+    monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
+    monkeypatch.setattr("hal0.providers._gpu.default_image_serves_vulkan_lane", lambda: False)
+    assert _detect_default_hardware() == "cpu"
 
 
 # ── --profile (#1830) ────────────────────────────────────────────────────────

@@ -52,9 +52,24 @@ def test_chat_on_amd_box_without_rocm_picks_the_vulkan_lane(monkeypatch):
     gets a named refusal at slot load, not silent garbage.
     """
     monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: True
+    )
     hw = _hw(compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
     assert derive_profile("chat", "cpu") == "cpu-chat"
+
+
+def test_chat_on_amd_box_without_rocm_picks_cpu_when_the_image_cannot_serve_vulkan(
+    monkeypatch,
+):
+    """Review B2: deriving a lane the load-time gate then refuses is worse
+    than deriving CPU — it turns "slow but working" into "no loadable slot"."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: False
+    )
+    assert derive_device("chat", _hw(compute=False, vulkan=True), npu_opt_in=False) == "cpu"
 
 
 def test_chat_on_amd_box_with_neither_rocm_nor_vulkan_still_picks_cpu(monkeypatch):
@@ -173,6 +188,9 @@ def test_strix_platform_without_kfd_derives_vulkan_not_rocm(monkeypatch):
     untouched by #1948. What changed is the alternative: ``gpu-vulkan``
     rather than ``cpu``, because the box does have a usable GPU."""
     monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: True
+    )
     hw = _hw(platform="strix-halo", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
 

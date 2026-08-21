@@ -438,19 +438,28 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
         exit 1
     elif (( gpu_rc == HAL0_GPU_RC_NO_KFD )); then
-        # AMD GPU visible but no ROCm compute node: every GPU LLM slot would
-        # silently run the runner image's Vulkan backend, which emits invalid
-        # tokens for every model while every health surface reads green
-        # (#1888). Same opt-in shape as NO_DEVICE — a CPU-only install is a
-        # legitimate answer; a GPU install on this box is not.
+        # AMD GPU with NO usable GPU lane at all. preflight_gpu only returns
+        # this code once it has established BOTH that /dev/kfd is missing (no
+        # ROCm lane) and that Vulkan is not an option either — because there
+        # is no render node, or because this install's runner image is not
+        # validated for the Vulkan lane, whose backend emits invalid tokens
+        # for every model on the ade07ba lineage (#1888).
+        #
+        # A kfd-less box WITH a render node and a validated runner no longer
+        # reaches here at all: that is a supported Vulkan-lane install and
+        # preflight reports it as one (#1948). So the messages below can
+        # honestly say "no GPU lane" — the derivation ladders agree, and will
+        # write device=cpu for every seeded slot on exactly this box.
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
-            warn "No /dev/kfd — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1); GPU LLM slots will refuse to start."
+            warn "No usable GPU lane on this box — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1); slots will be created with device=cpu."
         elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
-            warn "Proceeding with a CPU-only install (confirmed at the prompt)."
+            warn "Proceeding with a CPU-only install (confirmed at the prompt); slots will be created with device=cpu."
         else
-            err "No /dev/kfd inside this container — the ROCm compute node GPU LLM slots require."
-            err "Without it the runner image falls back to Vulkan, which produces invalid output (#1888)."
-            err "Forward /dev/kfd (remedy above), then re-run install.sh."
+            err "No usable GPU lane inside this container."
+            err "  ROCm needs /dev/kfd, which is not present (remedy above)."
+            err "  Vulkan needs a render node AND a runner image validated for that lane (#1888/#1948);"
+            err "  this box has neither combination available."
+            err "Forward /dev/kfd, or update to a runner whose Vulkan backend is validated, then re-run install.sh."
             err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
             exit 1
         fi

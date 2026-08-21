@@ -168,41 +168,49 @@ class TestDefaultLanes:
     def test_cpu_tier_defaults_to_the_cpu_lane_only(self) -> None:
         assert default_lanes(TIER_CPU) == ["cpu"]
 
-    def test_amd_tier_sweeps_both_gpu_lanes_rocm_first(self) -> None:
+    def test_rocm_always_leads_the_gpu_default(self) -> None:
         """#1888 pulled vulkan_radv out of the GPU default (the ROCmFPX
         image's Vulkan backend emitted invalid tokens, so its throughput
-        numbers measured garbage); #1948 restored it on the fixed image.
+        numbers measured garbage); #1948 restores it — but only when the
+        pinned runner image can actually serve the lane, which is checked
+        both ways in ``tests/providers/test_vulkan_lane_perimeter.py``.
 
-        ROCm stays FIRST: it is the recommended lane and carries the longer
-        trend history, so an interrupted sweep should have produced its
-        numbers before it stopped."""
-        assert default_lanes(TIER_AMD) == ["rocm", "vulkan_radv"]
-
-    def test_nvidia_tier_sweeps_both_gpu_lanes_rocm_first(self) -> None:
-        assert default_lanes(TIER_NVIDIA) == ["rocm", "vulkan_radv"]
+        What is invariant either way, and is what this pins: the GPU default
+        always starts with ``rocm``, and never contains anything else. Not a
+        speed ranking (the §3-C matrix has Vulkan ahead on both metrics) —
+        rocm is the series with the trend history, so an interrupted sweep
+        should have produced its numbers before it stopped.
+        """
+        for tier in (TIER_AMD, TIER_NVIDIA):
+            lanes = default_lanes(tier)
+            assert lanes[0] == "rocm"
+            assert set(lanes) <= {"rocm", "vulkan_radv"}
 
     def test_no_default_lane_is_unsupported(self) -> None:
         for tier in (TIER_CPU, TIER_AMD, TIER_NVIDIA):
             for lane in default_lanes(tier):
                 assert lane_is_supported(lane), f"{tier} defaults to unsupported {lane}"
 
-    def test_vulkan_radv_is_supported_again(self) -> None:
-        """#1948: the lane is no longer retired. The retirement MECHANISM
-        stays armed (empty, not deleted) so the next lane that has to go can
-        be retired without breaking historical records."""
+    def test_vulkan_radv_is_no_longer_statically_retired(self) -> None:
+        """#1948: the lane left the static retirement list. Whether it is
+        SUPPORTED is now a question about the pinned runner image, asked per
+        call — see ``IMAGE_GATED_LANES``, with both directions pinned in
+        ``tests/providers/test_vulkan_lane_perimeter.py``."""
+        from hal0.bench.harness import IMAGE_GATED_LANES
+
         assert "vulkan_radv" in lane_specs()
         assert "vulkan_radv" not in UNSUPPORTED_LANES
-        assert lane_is_supported("vulkan_radv")
+        assert "vulkan_radv" in IMAGE_GATED_LANES
         assert lane_is_supported("rocm")
 
-    def test_the_retirement_mechanism_still_works(self, monkeypatch) -> None:
-        """Guard the empty set against being "simplified" into a hardcoded
-        ``return True`` — the warn-don't-vanish behaviour is the point."""
+    def test_the_static_retirement_mechanism_still_works(self, monkeypatch) -> None:
+        """Guard the now-empty ``UNSUPPORTED_LANES`` against being
+        "simplified" away. It stays armed so the next lane that genuinely has
+        to be retired can be, without breaking historical records."""
         from hal0.bench import harness as harness_mod
 
         monkeypatch.setattr(harness_mod, "UNSUPPORTED_LANES", frozenset({"rocm"}))
         assert harness_mod.lane_is_supported("rocm") is False
-        assert harness_mod.lane_is_supported("vulkan_radv") is True
 
 
 # ── dedupe_flags ─────────────────────────────────────────────────────────────

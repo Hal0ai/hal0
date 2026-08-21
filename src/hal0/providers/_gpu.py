@@ -366,9 +366,25 @@ def render_node_present(dri_dir: str = DRI_DEVICE_DIR) -> bool:
     device, not a compute one; a container that gets only ``card0`` has no
     Vulkan device.
 
+    And only a CHARACTER DEVICE counts. :func:`resolve_gpu_device_paths`
+    forwards exactly the character devices under ``dri_dir``, so a regular
+    file or a stale bind-mount target that merely happens to be *named*
+    ``renderD128`` would pass this check and then never be forwarded into the
+    container — a preflight that says yes to a device the launch then omits
+    (review N3).
+
     Cheap and total: no ioctl, no driver probe, never raises. Whether the
     backend then produces valid tokens is the output-sanity readiness gate's
     question (#1922), not this one's.
+
+    KNOWN GAP — #1981: the accessibility check is against the CALLING process
+    (``hal0-api``, running as ``hal0``), while the slot container runs rootful
+    and is additionally handed the node's numeric gid via
+    :func:`resolve_gpu_group_ids` → ``--group-add``. On a host where ``hal0``
+    is not in the render node's owning group this refuses a slot the container
+    would have opened fine — #1953's shape, on the render node. Tracked
+    separately rather than guessed at here, because the correct fix is the
+    identity-aware evaluation #1954 introduces for ``/dev/kfd``.
     """
     try:
         entries = sorted(os.listdir(dri_dir))
@@ -378,6 +394,11 @@ def render_node_present(dri_dir: str = DRI_DEVICE_DIR) -> bool:
         if not name.startswith("renderD"):
             continue
         node = os.path.join(dri_dir, name)
+        try:
+            if not stat.S_ISCHR(os.stat(node).st_mode):
+                continue
+        except OSError:
+            continue
         if os.access(node, os.R_OK | os.W_OK):
             return True
     return False
@@ -402,6 +423,124 @@ def image_serves_vulkan_lane(image: str | None) -> bool:
     from hal0.config.schema import VULKAN_CAPABLE_IMAGE_REFS
 
     return (image or "").strip() in VULKAN_CAPABLE_IMAGE_REFS
+
+
+def effective_runner_image(slot_cfg: Any | None = None) -> str | None:
+    """What image will this slot ACTUALLY end up running?
+
+    The one question every pre-launch decision needs answered, asked once so
+    the answers cannot disagree (review B5). ``None`` means "a slot that does
+    not exist yet and pins nothing" — the case the derivation ladders and the
+    bench harness are deciding for.
+
+    For a real slot config it is deliberately NOT just
+    :func:`~hal0.providers.container._resolve_image_ref`. That returns the
+    ref the TOML names *right now*, and on an upgrade the upgrade itself moves
+    it: :func:`hal0.updater.updater.retag_stale_slot_images` rewrites any pin
+    that is exactly a known former default
+    (:data:`~hal0.config.schema.STALE_ROCMFPX_IMAGE_REFS`) to the current one.
+    A decision made against the pre-retag ref is a decision about an image the
+    slot is about to stop using.
+
+    That distinction is not academic — it is the #1888 re-admission the review
+    found. On a kfd-less box, ``relabel_stale_vulkan_slots`` runs BEFORE the
+    retag. Judging a stale-pinned ``gpu-vulkan`` slot on its stale pin says
+    "cannot serve Vulkan", so the relabel rewrites ``device`` to ``cpu``; the
+    retag then runs, and because it computes the replacement from the
+    *freshly rewritten* TOML it now reads ``device = "cpu"`` and installs the
+    CPU toolbox image. Net effect: the GPU is stranded, and the slot's pin
+    looks like a deliberate CPU choice nobody made. Looking through the retag
+    first makes the relabel see the image the slot will really have, skip it,
+    and leave the retag to do its job.
+
+    Fixing it here rather than by reordering the passes is deliberate: #1954's
+    ``converge_kfd_group`` pins itself before the relabel pass in its own
+    docstring contract, and swapping the sequence mid-chain would re-open that.
+
+    Resolution:
+
+    1. ``None`` → :func:`~hal0.config.schema.resolve_default_image` for the
+       AMD GPU lane, i.e. the image a new GPU slot gets with no pin.
+    2. otherwise the slot's resolved ref, and if that ref is a stale former
+       default, what the retag will replace it with — computed from the slot's
+       CURRENT backend/device class, which is what the retag would read if it
+       ran first.
+    """
+    from hal0.config.schema import STALE_ROCMFPX_IMAGE_REFS, resolve_default_image
+
+    if slot_cfg is None:
+        return resolve_default_image("vulkan", "gpu")
+
+    # Local import: hal0.providers.container imports THIS module at its top
+    # level, so the dependency has to be inverted lazily here.
+    from hal0.providers.container import (
+        _effective_backend_and_device_class,
+        _resolve_image_ref,
+    )
+
+    resolved = _resolve_image_ref(slot_cfg, None)
+    if resolved in STALE_ROCMFPX_IMAGE_REFS:
+        backend, device_class = _effective_backend_and_device_class(slot_cfg, None)
+        return resolve_default_image(backend, device_class)
+    return resolved
+
+
+def vulkan_lane_serves(slot_cfg: Any | None = None) -> bool:
+    """Will this slot's real runner image serve the Vulkan LLM lane?
+
+    :func:`image_serves_vulkan_lane` composed with
+    :func:`effective_runner_image` — the single predicate shared by the
+    derivation ladders, the bench harness, the installer preflight (mirrored
+    in shell) and the updater's Vulkan-slot migration, so no two of them can
+    reach different conclusions about the same box.
+
+    Fails closed on any error: an image that cannot be resolved has not been
+    established safe, and #1888's failure mode is silent garbage at full
+    speed — the expensive direction to guess wrong in.
+    """
+    try:
+        return image_serves_vulkan_lane(effective_runner_image(slot_cfg))
+    except Exception:
+        return False
+
+
+def default_image_serves_vulkan_lane() -> bool:
+    """Can THIS install's default runner image serve the Vulkan LLM lane?
+
+    ``vulkan_lane_serves(None)`` under a name that reads correctly at the call
+    sites deciding a lane for a slot that does not exist yet.
+
+    The perimeter predicate. :func:`image_serves_vulkan_lane` answers the
+    question for one slot's resolved image on the load path; this answers it
+    for the image a slot would get if nobody pinned anything — which is what
+    every path that decides a lane BEFORE a slot exists needs to know:
+
+    * the bench harness, choosing which lanes to sweep
+      (:func:`hal0.bench.harness.lane_is_supported`);
+    * the three device-derivation ladders
+      (:func:`hal0.install.profile_derive.derive_device`,
+      :func:`hal0.hardware.recommend._backend_for`,
+      :func:`hal0.cli.slot_commands._detect_default_hardware`);
+    * the installer's GPU preflight (mirrored in shell — see
+      ``_hal0_vulkan_lane_serves_default_image`` in ``installer/lib/
+      preflight.sh``).
+
+    Routing all of them through one predicate is what makes the lane re-enable
+    (#1948) independent of the repin (#1959) in BOTH directions. Without it,
+    an install carrying the re-enable but not the repin derives ``gpu-vulkan``
+    for a kfd-less AMD box and then refuses every slot it just created — a
+    regression from "slow but working on CPU" to "no loadable LLM slot at
+    all" — and benches ``-dev Vulkan0`` on the known-garbage backend
+    meanwhile. With it, the derivation, the bench lane and the load-time gate
+    all flip at the same instant the pin does, and there is no state of main
+    where they disagree.
+
+    Resolved through :func:`~hal0.config.schema.resolve_default_image`, so the
+    ``HAL0_TOOLBOX_IMAGE_*`` env overrides and the release manifest's digest
+    pin are honoured exactly as they are at launch. Fails closed if that
+    resolution raises at all.
+    """
+    return vulkan_lane_serves(None)
 
 
 def host_is_amd_gpu(module_dir: str = _AMDGPU_MODULE_DIR) -> bool:
@@ -883,6 +1022,8 @@ def gpu_visibility_env(device: str | None, gpu_index: int | None) -> dict[str, s
 
 
 __all__ = [
+    "default_image_serves_vulkan_lane",
+    "effective_runner_image",
     "gpu_visibility_env",
     "image_serves_vulkan_lane",
     "is_nvidia_gpu_device",
@@ -890,4 +1031,5 @@ __all__ = [
     "render_node_present",
     "resolve_gpu_device_paths",
     "resolve_gpu_group_ids",
+    "vulkan_lane_serves",
 ]

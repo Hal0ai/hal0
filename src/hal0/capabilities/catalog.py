@@ -433,11 +433,16 @@ def _backend_variants(entry: Any) -> list[str]:
             # refuses the ade07ba lineage by name) and then the output-sanity
             # readiness probe (#1922) before it can serve a single token.
             #
-            # Ordering matters and is deliberate: ROCm stays first on any host
-            # that advertises it, because it is the faster lane on the
-            # reference hardware (prefill in particular). On the no-/dev/kfd
-            # box the catalog advertises gpu-vulkan but NOT gpu-rocm, so that
-            # box now gets a GPU row again instead of falling to CPU-only.
+            # Ordering is deliberate but is NOT a speed ranking: on the
+            # reference hardware Vulkan measures faster on both metrics (#1948
+            # §3-C: +13.96% prefill, +20.45% decode). ROCm is offered first
+            # because it is the lane with the validation history and the one
+            # MTP/speculative decode is tuned on, so it is the safer thing to
+            # put under an operator's cursor by default. Vulkan sits directly
+            # beside it, one click away, and the docs say why one might take
+            # it. On the no-/dev/kfd box the catalog advertises gpu-vulkan but
+            # NOT gpu-rocm, so that box now gets a GPU row again instead of
+            # falling to CPU-only.
             #
             # For the non-llama runtimes below, "gpu-vulkan" is this picker's
             # GPU ROW, NOT a claim about the image (#1941). Kokoro and

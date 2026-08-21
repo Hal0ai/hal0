@@ -157,14 +157,46 @@ class LaneSpec:
 UNSUPPORTED_LANES: frozenset[str] = frozenset()
 
 
+#: Lanes whose validity is a property of the PINNED RUNNER IMAGE rather than
+#: of the lane itself, checked per call by :func:`lane_is_supported`.
+#:
+#: ``vulkan_radv`` pins ``-dev Vulkan0`` on whatever image the GPU lanes
+#: resolve. On the ade07ba lineage that backend emits invalid tokens for every
+#: model (#1888) and ``llama-bench`` cannot tell — it counts tokens without
+#: reading them, so the sweep publishes a throughput number for non-language,
+#: silently, indistinguishable from a real measurement.
+#:
+#: Bench does NOT go through ``require_kfd_for_gpu_slot`` — it runs podman
+#: directly — so the slot-load image gate never reaches it. This set is how
+#: the same question gets asked here (review B1).
+IMAGE_GATED_LANES: frozenset[str] = frozenset({"vulkan_radv"})
+
+
 def lane_is_supported(lane: str) -> bool:
     """Is ``lane`` a lane hal0 is willing to publish numbers for?
 
-    False for every entry in :data:`UNSUPPORTED_LANES`. Callers that run one
-    anyway (explicit ``--backends vulkan_radv``) must say so loudly rather
-    than let the record read like any other measurement.
+    False for every entry in :data:`UNSUPPORTED_LANES` (the static
+    retirement list), and false for a member of :data:`IMAGE_GATED_LANES`
+    whose validity the currently-pinned runner image cannot support
+    (:func:`hal0.providers._gpu.default_image_serves_vulkan_lane`).
+
+    The image half is deliberately dynamic. Pinning the ``vulkan_radv``
+    :class:`LaneSpec` to a known-good image instead would make the sweep
+    "succeed" on a box whose slots run a different image entirely — a
+    perfectly precise measurement of something nobody is serving. The lane
+    keeps tracking the default runner, and is refused when that runner cannot
+    produce language.
+
+    Callers that run an unsupported lane anyway must say so loudly rather than
+    let the record read like any other measurement.
     """
-    return lane not in UNSUPPORTED_LANES
+    if lane in UNSUPPORTED_LANES:
+        return False
+    if lane in IMAGE_GATED_LANES:
+        from hal0.providers._gpu import default_image_serves_vulkan_lane
+
+        return default_image_serves_vulkan_lane()
+    return True
 
 
 def lane_specs() -> dict[str, LaneSpec]:
@@ -222,10 +254,19 @@ def default_lanes(tier: str) -> list[str]:
     ``vulkan_radv`` was dropped from the GPU default in the #1888 wave (the
     ROCmFPX runner's Vulkan backend emitted invalid tokens for every model, so
     publishing throughput for it meant publishing tok/s for output that is not
-    language) and is RESTORED by #1948 on the fixed image. It sweeps after
-    ``rocm`` so the ROCm numbers — the recommended lane, and the trend line
-    with the longest history — land first if a sweep is interrupted."""
-    return ["cpu"] if tier == TIER_CPU else ["rocm", "vulkan_radv"]
+    language) and is RESTORED by #1948 — but only when the currently-pinned
+    runner image can actually serve it (:func:`lane_is_supported`). On an
+    install still carrying the ade07ba lineage the GPU default stays
+    ROCm-only, so there is no window in which a routine sweep publishes
+    numbers for non-language.
+
+    It sweeps AFTER ``rocm``. Not a throughput claim — the §3-C matrix
+    measures Vulkan ahead of ROCm on both metrics on the reference hardware.
+    ROCm goes first because it is the lane with the long trend history, so an
+    interrupted sweep leaves the continuous series intact."""
+    if tier == TIER_CPU:
+        return ["cpu"]
+    return ["rocm", "vulkan_radv"] if lane_is_supported("vulkan_radv") else ["rocm"]
 
 
 def dedupe_flags(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:

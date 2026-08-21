@@ -124,8 +124,17 @@ def _detect_default_hardware() -> str:
     That used to be ``"vulkan"`` ("broadest match"), but the Vulkan backend of
     the runner image llama.cpp slots actually launch emits invalid tokens for
     every model (#1888) — so the broad default was a broadly-wrong one. ROCm
-    is the supported lane on hal0's reference (AMD) platform, and a box that
-    cannot run it gets a loud refusal at slot load instead of garbage output.
+    is hal0's reference (AMD) lane, and a box that cannot run it gets a loud
+    refusal at slot load instead of garbage output.
+
+    Same ladder as :func:`hal0.install.profile_derive.derive_device` and
+    :func:`hal0.hardware.recommend._backend_for`, and deliberately the same
+    THREE questions in the same order (review N2 — these had drifted into two
+    different conventions): is ROCm compute reachable → is there a Vulkan
+    device → can the pinned runner image serve the Vulkan lane. Before this,
+    the ``vulkan_capable`` question was skipped here entirely, so an AMD box
+    with neither compute nor a render node got ``device=gpu-vulkan`` written
+    by a bare ``hal0 slot create`` — guaranteed to be refused at load.
     """
     try:
         from hal0.config import paths as _paths
@@ -144,16 +153,21 @@ def _detect_default_hardware() -> str:
         return "cpu"
     g = gpus[0] if isinstance(gpus[0], dict) else {}
     vendor = (g.get("vendor") or "").lower()
-    # AMD prefers ROCm when the box can actually run it — it is the faster
-    # lane, notably on prefill. #1923 made AMD default to ROCm UNCONDITIONALLY
-    # because the pinned runner's Vulkan backend emitted invalid tokens for
-    # every model (#1888), so a kfd-less box got a loud refusal rather than a
-    # silently-garbage lane. #1948 fixed the image, so a compute-less AMD GPU
-    # falls back to Vulkan again instead of to a guaranteed refusal; if the
-    # slot's resolved runner image is not Vulkan-validated, slot load still
-    # says so by name.
+    # AMD: ROCm where the box can run it, else Vulkan where that lane is real,
+    # else CPU. #1923 made AMD default to ROCm UNCONDITIONALLY because the
+    # pinned runner's Vulkan backend emitted invalid tokens for every model
+    # (#1888), so a kfd-less box got a loud refusal rather than a
+    # silently-garbage lane. #1948 fixed the image, so the fallback is a lane
+    # again — but only when the pinned runner can actually serve it, or this
+    # would just be writing a device the load-time gate refuses.
     if vendor == "amd":
-        return "rocm" if g.get("compute_capable") else "vulkan"
+        if g.get("compute_capable"):
+            return "rocm"
+        from hal0.providers._gpu import default_image_serves_vulkan_lane
+
+        if g.get("vulkan_capable") and default_image_serves_vulkan_lane():
+            return "vulkan"
+        return "cpu"
     if g.get("vulkan_capable") or vendor in ("nvidia", "intel"):
         return "vulkan"
     return "cpu"

@@ -51,10 +51,18 @@ ADE07BA_REF = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
 
 
 def _render_node(tmp_path):
-    """A ``/dev/dri``-shaped directory holding one openable render node."""
+    """A ``/dev/dri``-shaped directory holding one openable render node.
+
+    ``renderD128`` is a symlink to ``/dev/null`` because a real render node is
+    a CHARACTER DEVICE and ``render_node_present`` requires one (review N3):
+    ``resolve_gpu_device_paths`` forwards only character devices, so a regular
+    file here would be a fixture that passes a check the real launch then
+    contradicts. ``card0`` stays a plain file — it must be ignored regardless
+    of what it is.
+    """
     dri = tmp_path / "dri"
     dri.mkdir()
-    (dri / "renderD128").write_text("")
+    (dri / "renderD128").symlink_to("/dev/null")
     (dri / "card0").write_text("")
     return str(dri)
 
@@ -112,21 +120,30 @@ class TestRenderNodePresent:
     def test_false_when_the_directory_is_absent(self, tmp_path) -> None:
         assert render_node_present(str(tmp_path / "nope")) is False
 
-    def test_false_when_the_node_exists_but_is_not_openable(self, tmp_path) -> None:
+    def test_false_when_the_node_exists_but_is_not_openable(self, monkeypatch, tmp_path) -> None:
         """Same false-pass shape ``kfd_present`` guards against: an LXC
         passthrough with a mis-mapped gid leaves the node visible but
-        unopenable by the runner identity."""
+        unopenable by the runner identity.
+
+        ``os.access`` is patched rather than the node chmod'd: the node has to
+        stay a real character device to get past the type check, and a
+        character device's permissions cannot be varied inside a tmpdir
+        without root. Patching the exact call the function makes keeps the
+        test about the permission branch and nothing else.
+        """
         dri = tmp_path / "dri"
         dri.mkdir()
-        node = dri / "renderD128"
-        node.write_text("")
-        node.chmod(0o000)
-        try:
-            if os.access(str(node), os.R_OK):  # running as root — chmod is advisory
-                pytest.skip("root bypasses file permissions")
-            assert render_node_present(str(dri)) is False
-        finally:
-            node.chmod(0o600)
+        (dri / "renderD128").symlink_to("/dev/null")
+
+        real_access = os.access
+        monkeypatch.setattr(
+            os,
+            "access",
+            lambda path, mode: (
+                False if str(path).endswith("renderD128") else real_access(path, mode)
+            ),
+        )
+        assert render_node_present(str(dri)) is False
 
 
 class TestVulkanLaneGuard:
@@ -419,6 +436,69 @@ class TestPreflightDoesNotDisplaceTheSanityGate:
                 f"output_sanity references {token!r} — the readiness gate must stay "
                 "lane-blind so a re-enabled Vulkan slot is probed like any other"
             )
+
+    def test_switching_a_rocm_slot_onto_the_vulkan_lane_clears_both_gates(self, tmp_path) -> None:
+        """The documented switch path, end to end at the two gates it crosses.
+
+        An operator moving a slot from ROCm to Vulkan (dashboard Device
+        picker, or ``hal0 slot edit <slot> --hardware vulkan``) is the
+        first-class path now that the §3-C perf row measures Vulkan ahead on
+        both metrics. What that switch must NOT do is buy speed by skipping a
+        check: the switched slot passes preflight on a validated image, and is
+        then held to exactly the same output-sanity verdict as before.
+        """
+        from hal0.slots.output_sanity import classify
+
+        before = dict(name="agent", device="gpu-rocm", port=8081)
+        after = {**before, "device": "gpu-vulkan"}
+
+        # ROCm side: gated on the compute node, indifferent to the image.
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        require_kfd_for_gpu_slot(
+            before["name"],
+            device=before["device"],
+            runtime_lane="llama",
+            kfd_path=str(kfd),
+            image=ADE07BA_REF,
+            env={},
+            amd_host=True,
+        )
+
+        # Vulkan side after the switch: no kfd needed, render node + a
+        # validated image instead.
+        require_kfd_for_gpu_slot(
+            after["name"],
+            device=after["device"],
+            runtime_lane="llama",
+            kfd_path=str(tmp_path / "gone"),
+            dri_dir=_render_node(tmp_path),
+            image=VULKAN_FIXED_IMAGE,
+            env={},
+            amd_host=True,
+        )
+
+        # And the readiness gate is unchanged by the switch — same verdicts on
+        # the same text, because it never learns which lane it is probing.
+        assert classify("Paris.").ok is True
+        assert classify("根ovol主义的oksagoon相ufenroh隔抽取ynaaud").ok is False
+
+    def test_switching_onto_the_vulkan_lane_is_refused_on_a_stale_image(self, tmp_path) -> None:
+        """The other half of the documented path: the switch is not a way
+        around the image gate. On an install still carrying the ade07ba
+        lineage the operator is told so, by name, at the moment they try."""
+        with pytest.raises(GpuPreflightError) as exc:
+            require_kfd_for_gpu_slot(
+                "agent",
+                device="gpu-vulkan",
+                runtime_lane="llama",
+                kfd_path=str(tmp_path / "gone"),
+                dri_dir=_render_node(tmp_path),
+                image=ADE07BA_REF,
+                env={},
+                amd_host=True,
+            )
+        assert "1888" in str(exc.value)
 
     def test_a_preflight_pass_still_leaves_a_garbage_verdict_terminal(self, tmp_path) -> None:
         """Compose the two directly: the fixed image clears preflight, and the

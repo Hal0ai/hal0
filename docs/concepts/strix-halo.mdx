@@ -49,14 +49,20 @@ The iGPU can run LLM slots through two backends. hal0 treats them as distinct
 devices, and a slot always names one explicitly — the runner is launched with
 an explicit device pin, never "whatever llama.cpp picks":
 
-- **ROCm** (`gpu-rocm`) — AMD's compute stack, and the recommended LLM lane
-  where the box can run it: it leads Vulkan substantially on prefill. It needs
-  the `/dev/kfd` compute node visible to hal0 and to the slot containers. A
-  `gpu-rocm` slot without it refuses to load.
+- **ROCm** (`gpu-rocm`) — AMD's compute stack, and the lane hal0 seeds where
+  the box can run it. It needs the `/dev/kfd` compute node visible to hal0 and
+  to the slot containers; a `gpu-rocm` slot without it refuses to load.
 - **Vulkan** (`gpu-vulkan`) — the Mesa/RADV path. It needs only a DRM render
   node (`/dev/dri/renderD*`), which makes it the lane for boxes where `/dev/kfd`
   was never forwarded — an unprivileged LXC, for instance. It is also the lane
   the non-llama.cpp Vulkan runtimes use (Kokoro TTS, whisper.cpp, ComfyUI).
+
+On the current validated runner, **Vulkan is the faster of the two on this
+hardware** — +13.96% prefill and +20.45% decode on a Strix Halo box, with much
+tighter variance ([full numbers](/docs/reference/hardware-matrix)). ROCm is
+seeded anyway, because it carries hal0's validation history and is the lane
+MTP/speculative decode is tuned against. That choice is revisited at GA; in the
+meantime switching is a supported, one-command operation — see below.
 
 <Aside type="caution">
 **The Vulkan LLM lane is gated on the runner image, by design.**
@@ -79,6 +85,34 @@ The image was fixed, and the lane came back with two permanent guards:
 If you pin a slot to your own runner image, expect the Vulkan lane to refuse
 it until that image is added to the validated set. That refusal is the feature.
 </Aside>
+
+### Switching a slot to the Vulkan lane
+
+Both lanes are first-class, and moving between them is a normal operation —
+not a workaround:
+
+```sh
+hal0 slot edit agent --hardware vulkan     # gpu-rocm -> gpu-vulkan
+hal0 slot edit agent --hardware rocm       # and back
+```
+
+In the dashboard, open the slot's drawer and change **Device** in the same
+place. Either way the slot is re-rendered and restarted on the new lane.
+
+Two checks stand between the switch and serving traffic, and both are the
+point rather than an obstacle:
+
+1. **Preflight** — the target lane's devices must be present (`/dev/kfd` for
+   ROCm, a render node for Vulkan) and, for Vulkan, the slot's runner image
+   must be one whose Vulkan backend is validated. A refusal here names the
+   image and the reason.
+2. **Output sanity** — the slot answers a fixed prompt before it is marked
+   ready. A lane that emits nonsense fails in about a second instead of
+   serving it.
+
+Why you might switch: the measured prefill/decode advantage above. Why you
+might not: MTP / speculative-decode profiles are tuned on the ROCm lane, so a
+slot leaning on those may do better where it is.
 
 ## Unified memory is the tuning target
 

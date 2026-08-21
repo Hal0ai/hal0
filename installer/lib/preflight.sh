@@ -1045,15 +1045,23 @@ preflight_gpu() {
         fi
     fi
 
-    # ── ROCm compute node (#1888) ────────────────────────────────────────
-    # A render node without /dev/kfd is NOT a working GPU box for LLM slots.
-    # The release-pinned ROCmFPX runner is one HIP+Vulkan build: llama.cpp
-    # runs ROCm when /dev/kfd is visible and SILENTLY falls back to that
-    # image's Vulkan backend when it is not — and that backend emits invalid
-    # tokens for every model, at full nominal speed, while HTTP 200,
-    # container health, `hal0 doctor` and the SSE done frame all read green.
-    # This is the exact shape a fresh unprivileged LXC install produces, so
-    # the gate refuses it instead of shipping a box that serves garbage.
+    # ── AMD GPU lane availability (#1888 / #1948) ────────────────────────
+    # No /dev/kfd means no ROCm lane. Whether that is fatal depends entirely
+    # on whether the OTHER AMD GPU lane is real on this install.
+    #
+    # Under #1923 it never was: the pinned runner was one HIP+Vulkan build
+    # whose Vulkan backend emitted invalid tokens for every model, at full
+    # nominal speed, while HTTP 200, container health, `hal0 doctor` and the
+    # SSE done frame all read green — so a kfd-less AMD box had no lane that
+    # produced language, and the gate refused the install outright.
+    #
+    # #1948 fixed the image. A runner whose Vulkan backend is validated serves
+    # this box correctly on the render node alone — proven on the very box the
+    # defect was found on — so refusing here would now be refusing a working
+    # configuration. The gate therefore asks the same question the slot-load
+    # guard and the three device-derivation ladders ask, via the shell mirror
+    # above, and only refuses when the answer is no.
+    #
     # AMD-only: the defect is characterised on the AMD/HIP build, and a
     # non-AMD GPU has no /dev/kfd to forward in the first place.
     local is_amd="${HAL0_GPU_AMD_OVERRIDE:-}"
@@ -1061,17 +1069,35 @@ preflight_gpu() {
         [[ -d /sys/module/amdgpu ]] && is_amd=1
     fi
     if [[ -n "${is_amd}" && "${is_amd}" != "0" && -z "${have_kfd}" ]]; then
-        warn "gpu: AMD GPU visible but /dev/kfd is MISSING — no ROCm compute node"
-        warn "  Every GPU LLM slot would fall back to the runner image's Vulkan backend,"
-        warn "  which emits INVALID TOKENS for every model while all health checks read green (#1888)."
-        if [[ "${in_container}" == "lxc" ]]; then
-            warn "  Forward it from the Proxmox HOST (/etc/pve/lxc/<CTID>.conf):"
-            warn "    dev1: /dev/kfd"
-            warn "  then: pct stop <CTID> && pct start <CTID>"
+        if [[ -n "${have_render}" ]] && _hal0_vulkan_lane_serves_default_image; then
+            # Vulkan is this box's GPU lane. Not a warning about a broken
+            # install — a description of a supported one.
+            info "gpu: no /dev/kfd (no ROCm compute node) — LLM slots will use the Vulkan lane"
+            info "  This install's runner image is validated for that lane (#1948), and every"
+            info "  slot must still pass the output-sanity readiness probe before serving (#1922)."
+            if [[ "${in_container}" == "lxc" ]]; then
+                info "  To ALSO enable the ROCm lane, forward it from the Proxmox HOST"
+                info "  (/etc/pve/lxc/<CTID>.conf):  dev1: /dev/kfd   then pct stop/start."
+            fi
         else
-            warn "  Load the amdkfd driver (it ships with amdgpu; check 'dmesg | grep -i kfd')."
+            warn "gpu: AMD GPU visible but /dev/kfd is MISSING — no ROCm compute node"
+            if [[ -z "${have_render}" ]]; then
+                warn "  and no render node either, so there is no Vulkan lane to fall back to."
+            else
+                warn "  and this install's runner image is not validated for the Vulkan lane,"
+                warn "  whose backend emits INVALID TOKENS for every model on the ade07ba"
+                warn "  lineage while all health checks read green (#1888)."
+            fi
+            warn "  Every GPU LLM slot would therefore refuse to start."
+            if [[ "${in_container}" == "lxc" ]]; then
+                warn "  Forward it from the Proxmox HOST (/etc/pve/lxc/<CTID>.conf):"
+                warn "    dev1: /dev/kfd"
+                warn "  then: pct stop <CTID> && pct start <CTID>"
+            else
+                warn "  Load the amdkfd driver (it ships with amdgpu; check 'dmesg | grep -i kfd')."
+            fi
+            [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_KFD}"
         fi
-        [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_KFD}"
     fi
 
     # ── ROCm compute-node group wiring (#1953) ───────────────────────────
@@ -1125,6 +1151,47 @@ preflight_gpu() {
         fi
     fi
     return 0
+}
+
+# -- Vulkan-lane image gate (shell mirror of providers/_gpu, #1948) ---------
+# Answers the SAME question `default_image_serves_vulkan_lane()` answers in
+# Python: can this install's default runner image serve the Vulkan LLM lane?
+#
+# Why a mirror and not a call: preflight_gpu runs in Stage 1, BEFORE hal0 is
+# pip-installed, so `python3 -c "from hal0.config.schema import ..."` is not
+# available yet -- but the source tree it is about to install IS on disk next
+# to this script. So the two literals are read straight out of schema.py.
+#
+# CONSERVATIVE BY CONSTRUCTION. It recognises the single-member shape of
+# VULKAN_CAPABLE_IMAGE_REFS (a default equal to VULKAN_FIXED_IMAGE) and
+# answers "no" to everything else, including anything it cannot parse. A false
+# "no" costs an operator a CPU-only install they could have avoided; a false
+# "yes" ships a box that serves invalid tokens (#1888). That asymmetry decides
+# the direction. tests/installer/test_preflight_gpu_gate.py pins agreement
+# with the Python predicate, and trips if the capable set ever grows past one
+# member without this mirror being taught about it.
+#
+# Test seams: HAL0_GPU_VULKAN_LANE_OVERRIDE (1/0, decides outright),
+# HAL0_SCHEMA_PY_OVERRIDE (path to the schema.py to read).
+_hal0_vulkan_lane_serves_default_image() {
+    local override="${HAL0_GPU_VULKAN_LANE_OVERRIDE:-}"
+    if [[ -n "${override}" ]]; then
+        [[ "${override}" != "0" ]]
+        return
+    fi
+
+    local schema="${HAL0_SCHEMA_PY_OVERRIDE:-}"
+    if [[ -z "${schema}" ]]; then
+        local here
+        here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+        schema="${here}/../../src/hal0/config/schema.py"
+    fi
+    [[ -r "${schema}" ]] || return 1
+
+    local default_ref fixed_ref
+    default_ref="$(sed -n 's/^DEFAULT_ROCMFPX_IMAGE = "\(.*\)"$/\1/p' "${schema}" | head -n1)"
+    fixed_ref="$(sed -n 's/^VULKAN_FIXED_IMAGE = "\(.*\)"$/\1/p' "${schema}" | head -n1)"
+    [[ -n "${default_ref}" && -n "${fixed_ref}" && "${default_ref}" == "${fixed_ref}" ]]
 }
 
 # ── Bootstrap-prereq parity (#1098) ────────────────────────────────────────

@@ -366,6 +366,14 @@ class TestNonRocmRuntimesAreNotGated:
         these tests then passed only because the CI runner happens to lack
         /dev/kfd, and went RED on any box that has one (CT105, ct151, dev
         workstations), taking the #1888/#1941 regression cover with them.
+
+        Note for the next person to widen this helper: only ONE caller still
+        depends on the kfd patch (``…refuses_a_rocm_image_on_the_vulkan_label``,
+        which reaches the kfd branch via the ``rocm`` lane). The two
+        ``gpu-vulkan``/llama callers stopped consulting ``/dev/kfd`` at all in
+        #1948 — they are gated on the render node and the image — so they would
+        keep passing even if this patch went dead again, which is exactly how
+        the last dead stub survived unnoticed.
         """
         from hal0.providers import _gpu as gpu_mod
 

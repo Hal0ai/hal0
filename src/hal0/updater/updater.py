@@ -2992,19 +2992,25 @@ def _vulkan_lane_is_loadable(holder: dict) -> bool:
     a reverse migration of a working configuration, and on a kfd-less box it
     would push a functioning GPU slot onto the CPU.
 
-    Resolves the image through the same ``_resolve_image_ref`` the load path
-    uses (``image_pin`` first, then the runner default), so a deliberate pin
-    is honoured here exactly as it is at launch. Fails CLOSED on any error:
-    an unresolvable image is not an established-safe one, and the migration's
-    relabel is the conservative outcome.
-    """
-    try:
-        from hal0.providers._gpu import image_serves_vulkan_lane
-        from hal0.providers.container import _resolve_image_ref
+    Delegates to :func:`hal0.providers._gpu.vulkan_lane_serves`, the one
+    predicate the derivation ladders, the bench harness and the installer
+    preflight also use — so no two of them can reach different conclusions
+    about the same box.
 
-        return image_serves_vulkan_lane(_resolve_image_ref(holder, None))
-    except Exception:
-        return False
+    Critically, that predicate looks through the retag (review B5). This pass
+    runs BEFORE :func:`retag_stale_slot_images`, so a slot carrying a stale
+    former-default pin is about to have that pin rewritten. Judging it on the
+    pin it has *right now* rewrote ``device`` to ``cpu`` first, and the retag —
+    which computes its replacement from the freshly-rewritten TOML — then read
+    ``device = "cpu"`` and installed the CPU toolbox image: the GPU stranded,
+    and a pin that looks like a deliberate CPU choice nobody made.
+
+    Fails CLOSED on any error: an unresolvable image is not an
+    established-safe one, and the relabel is the conservative outcome.
+    """
+    from hal0.providers._gpu import vulkan_lane_serves
+
+    return vulkan_lane_serves(holder)
 
 
 def relabel_stale_vulkan_slots(
