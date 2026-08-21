@@ -304,34 +304,59 @@ def test_presence_probes_use_exists_not_inspect() -> None:
     assert "run_podman image exists --" in src
     assert "run_podman container exists --" in src
 
-    # The PRESENCE probe itself must never be an inspect.
-    exists_arm = src.split("image-exists)", 1)[1].split(";;", 1)[0]
-    exists_code = "\n".join(ln for ln in exists_arm.splitlines() if not ln.lstrip().startswith("#"))
-    assert "image exists" in exists_code
-    assert "image inspect" not in exists_code
-
     # Reading a FIELD needs inspect — there is no other podman verb for it —
     # but only after presence has already been established, so "missing" and
     # "broken store" stay distinguishable. Exactly the shape container_read
     # uses (container exists -> container inspect), which this file has always
     # permitted.
     #
-    # ARM-SCOPED, not a positional lookback. A fixed-line window over
-    # comment-stripped source reaches straight across a `;;` into the
-    # neighbouring arm, so deleting an arm's entire exists guard left the
-    # check green — it did not police the regression it was rewritten to
-    # permit. Slice each arm by its case label, the same way exists_arm above
-    # is taken, and require the guard to precede the inspect WITHIN that arm.
-    arm_labels = re.findall(r"^\s{2}([a-z][a-z-]*)\)", src, re.MULTILINE)
-    assert "image-user" in arm_labels, "arm discovery broke; the scan below is vacuous"
-    for label in arm_labels:
-        arm = src.split(f"{label})", 1)[1].split(";;", 1)[0]
-        arm_code = "\n".join(ln for ln in arm.splitlines() if not ln.lstrip().startswith("#"))
+    # ARM-SCOPED BY THE NEXT CASE LABEL, not by `;;`. Two prior shapes of this
+    # check were falsified by execution: a fixed-line positional lookback read
+    # across a `;;` into the neighbouring arm, and a `.split(";;", 1)` slice
+    # terminated at the NESTED `;;` of an arm's own rc dispatch — three lines
+    # above the inspect it existed to police — so deleting only the exists
+    # guard left the suite green both times. Top-level arms are exactly
+    # two-space indented (nested dispatches are deeper), which is what bounds
+    # the slice here.
+    labels = [
+        (m.start(), m.group(1))
+        for m in re.finditer(r"^\s{2}([a-z][a-z-]*\)|\*\))", src, re.MULTILINE)
+    ]
+    label_names = [name for _, name in labels]
+    assert "image-user)" in label_names, "arm discovery broke; the scan below is vacuous"
+    assert "image-exists)" in label_names, "arm discovery broke; the scan below is vacuous"
+    arms: dict[str, str] = {}
+    for i, (pos, name) in enumerate(labels):
+        end = labels[i + 1][0] if i + 1 < len(labels) else len(src)
+        arms[name] = src[pos:end]
+
+    def _code(arm: str) -> str:
+        return "\n".join(ln for ln in arm.splitlines() if not ln.lstrip().startswith("#"))
+
+    # The PRESENCE probe itself must never be an inspect.
+    exists_code = _code(arms["image-exists)"])
+    assert "image exists" in exists_code
+    assert "image inspect" not in exists_code
+
+    # Vacuity guard, one level down from label discovery: image-user READS a
+    # field, so its slice MUST contain the inspect. If it does not, the
+    # slicing regressed again and the loop below would silently skip the one
+    # arm it exists to police — "no match" must never read as "clean".
+    assert "image inspect" in _code(arms["image-user)"]), (
+        "image-user's arm slice lost its inspect — the arm scan is vacuous"
+    )
+    # Match the INVOCATION (`run_podman image exists`), not the bare phrase —
+    # the rc-dispatch's own failure message contains "image exists" as prose,
+    # which satisfied a substring check even with the guard deleted (found by
+    # re-running the surgical falsification against the first version of this
+    # rewrite).
+    for name, arm in arms.items():
+        arm_code = _code(arm)
         if "image inspect" not in arm_code:
             continue
-        assert "image exists" in arm_code, f"unguarded image inspect in {label})"
-        assert arm_code.index("image exists") < arm_code.index("image inspect"), (
-            f"{label}) inspects before establishing presence"
+        assert "run_podman image exists" in arm_code, f"unguarded image inspect in {name}"
+        assert arm_code.index("run_podman image exists") < arm_code.index("image inspect"), (
+            f"{name} inspects before establishing presence"
         )
 
 
