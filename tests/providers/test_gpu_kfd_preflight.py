@@ -412,9 +412,24 @@ class TestNonRocmRuntimesAreNotGated:
         unexercised on this path.
 
         A forwarded-but-unopenable node is just as poisoned as a missing one:
-        HIP still fails to initialise and llama.cpp still lands on the invalid
-        Vulkan lane. The refusal must fire, and its remedy must be the group
-        fix rather than a re-forward (#1953).
+        HIP still fails to initialise and the slot cannot run ROCm. The
+        refusal must fire, and its remedy must be the group fix rather than a
+        re-forward (#1953).
+
+        DEVICE CHANGED FROM ``gpu-vulkan`` TO ``gpu-rocm`` IN #1948 — a real
+        semantic interaction, not a cosmetic edit. #1954 wrote this against
+        ``gpu-vulkan`` because at that time every AMD ``gpu-vulkan`` llama slot
+        was gated on ``/dev/kfd``. #1948 moved that device onto its own gates
+        (a render node plus a Vulkan-validated image) precisely because Vulkan
+        does not use the compute node — so on ``gpu-vulkan`` this fixture no
+        longer reaches the kfd branch at all, and the test would have been
+        asserting the kfd remedy against an image-gate refusal.
+
+        ``gpu-rocm`` is the device that still asks the kfd question in every
+        lane, so it is where #1953's third status belongs. The
+        ``gpu-vulkan``-with-unopenable-kfd case is covered from the other side
+        in ``test_gpu_vulkan_lane_gate.py``: that slot is indifferent to the
+        compute node and is judged on its image and render node instead.
         """
         from hal0.providers import container as container_mod
 
@@ -423,7 +438,7 @@ class TestNonRocmRuntimesAreNotGated:
 
         with pytest.raises(GpuPreflightError) as err:
             container_mod.ContainerProvider().load_sync(
-                {"name": "utility", "device": "gpu-vulkan", "port": 8082}, {}
+                {"name": "utility", "device": "gpu-rocm", "port": 8082}, {}
             )
         msg = str(err.value)
         assert "IS forwarded" in msg

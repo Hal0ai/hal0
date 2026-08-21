@@ -120,10 +120,13 @@ class TestRenderNodePresent:
     def test_false_when_the_directory_is_absent(self, tmp_path) -> None:
         assert render_node_present(str(tmp_path / "nope")) is False
 
-    def test_false_when_the_node_exists_but_is_not_openable(self, monkeypatch, tmp_path) -> None:
-        """Same false-pass shape ``kfd_present`` guards against: an LXC
-        passthrough with a mis-mapped gid leaves the node visible but
-        unopenable by the runner identity.
+    def test_false_when_this_process_cannot_open_the_node(self, monkeypatch, tmp_path) -> None:
+        """The permission branch, asked about THIS process (``for_uid=None``).
+
+        ``for_uid`` is explicit here because #1981 made the DEFAULT the slot
+        container's identity rather than the caller's — a bare call now
+        answers on existence, which is the entire point of that change. The
+        identity contract itself is pinned in ``TestRenderNodeIdentityRules``.
 
         ``os.access`` is patched rather than the node chmod'd: the node has to
         stay a real character device to get past the type check, and a
@@ -143,7 +146,192 @@ class TestRenderNodePresent:
                 False if str(path).endswith("renderD128") else real_access(path, mode)
             ),
         )
-        assert render_node_present(str(dri)) is False
+        assert render_node_present(str(dri), for_uid=None) is False
+
+
+class TestRenderNodeIdentityRules:
+    """#1981 — which identity the render-node probe answers for.
+
+    The render-node twin of #1953, and it is pinned here for the same reason
+    that one is: the process that OPENS the node is the rootful slot
+    container, not ``hal0-api``. A caller-identity probe refuses a Vulkan slot
+    the container would open fine on any host where ``hal0`` is not in the
+    node's owning group — the halo143 shape, where ``renderD128``'s gid 993 is
+    named ``clock`` rather than ``render``.
+
+    Mirrors ``TestKfdStatusIdentityRules`` case for case, deliberately: two
+    probes answering the same class of question must not develop two different
+    identity contracts.
+    """
+
+    @staticmethod
+    def _unopenable_node(tmp_path):
+        """A real character device that THIS process cannot open.
+
+        ``os.access`` is patched rather than the node chmod'd — it must stay a
+        character device to get past the type check, and a char device's
+        permissions cannot be varied inside a tmpdir without root.
+        """
+        dri = tmp_path / "dri"
+        dri.mkdir()
+        (dri / "renderD128").symlink_to("/dev/null")
+        return str(dri)
+
+    def test_asking_about_this_process_consults_the_os_even_when_root(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """No uid-0 short-circuit for the CURRENT process: ask ``os.access``.
+
+        Root bypasses DAC only with ``CAP_DAC_OVERRIDE``, which a hardened
+        container drops — CI runs in exactly such a container. A blanket "root
+        is fine" would report a genuinely unopenable node as usable, failing
+        OPEN into the lane this gate exists to police.
+        """
+        dri = self._unopenable_node(tmp_path)
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.setattr(os, "access", lambda *a, **k: False)
+
+        assert render_node_present(dri, for_uid=None) is False
+        # for_uid=0 is NOT the same question, even from a root caller: it names
+        # the rootful slot container, whose CAP_DAC_OVERRIDE this process's
+        # denial says nothing about. Answering False here would collapse the
+        # parameter for root callers (install.sh, install/profile_derive.py) —
+        # the exact harm the parameter exists to fix.
+        assert render_node_present(dri, for_uid=0) is True
+
+    def test_asking_about_a_different_root_identity_still_assumes_override(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The slot container's root is not this process — it cannot be probed
+        from here, so the usual DAC override is assumed. That is the whole
+        point of the runner-identity parameter."""
+        dri = self._unopenable_node(tmp_path)
+        monkeypatch.setattr(os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(os, "access", lambda *a, **k: False)
+
+        assert render_node_present(dri, for_uid=0) is True
+
+    def test_the_default_identity_is_the_slot_runner_not_the_caller(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """#1981's actual fix: the DEFAULT must be the container's identity.
+
+        Before this, the default was an implicit "this process", so a slot was
+        refused on exactly the boxes where the container would have worked.
+        """
+        from hal0.providers._gpu import SLOT_RUNNER_UID
+
+        dri = self._unopenable_node(tmp_path)
+        monkeypatch.setattr(os, "access", lambda *a, **k: False)
+
+        assert SLOT_RUNNER_UID == 0
+        assert render_node_present(dri) is True
+        assert render_node_present(dri, for_uid=None) is False
+
+    def test_a_non_root_identity_is_judged_on_the_mode_bits(self, tmp_path, monkeypatch) -> None:
+        """A USER-declaring image runs as a non-root uid that cannot be probed
+        with ``os.access`` either, so the mode bits decide — the same fallback
+        ``kfd_status`` uses."""
+        from hal0.providers import _gpu as gpu_mod
+
+        dri = self._unopenable_node(tmp_path)
+        seen: list[int] = []
+
+        def _fake_mode_grants_rw(path: str, uid: int) -> bool:
+            seen.append(uid)
+            return uid == 1000
+
+        monkeypatch.setattr(gpu_mod, "_mode_grants_rw", _fake_mode_grants_rw)
+
+        assert render_node_present(dri, for_uid=1000) is True
+        assert render_node_present(dri, for_uid=1001) is False
+        assert seen == [1000, 1001]
+
+    def test_existence_is_still_required_for_the_container_identity(self, tmp_path) -> None:
+        """Failing open on permissions is not failing open on presence: an
+        absent node is absent for every identity, and the two gates behind
+        this one (image allowlist, #1922 sanity probe) cannot conjure a
+        device either."""
+        assert render_node_present(str(tmp_path / "nope"), for_uid=0) is False
+
+        dri = tmp_path / "dri"
+        dri.mkdir()
+        (dri / "renderD128").write_text("")  # named right, not a char device
+        assert render_node_present(str(dri), for_uid=0) is False
+
+
+class TestTheGuardUsesTheRunnerIdentity:
+    """The contract has to reach the guard, not just the probe."""
+
+    def test_the_render_check_is_made_for_the_runner_uid(self, tmp_path, monkeypatch) -> None:
+        from hal0.providers import _gpu as gpu_mod
+
+        seen: dict[str, object] = {}
+
+        def _spy(dri_dir: str, *, for_uid: int | None = 0) -> bool:
+            seen["for_uid"] = for_uid
+            return True
+
+        monkeypatch.setattr(gpu_mod, "render_node_present", _spy)
+
+        require_kfd_for_gpu_slot(
+            "utility",
+            device="gpu-vulkan",
+            runtime_lane="llama",
+            kfd_path=str(tmp_path / "gone"),
+            dri_dir=str(tmp_path),
+            image=VULKAN_FIXED_IMAGE,
+            env={},
+            amd_host=True,
+            runner_uid=1234,
+        )
+        assert seen == {"for_uid": 1234}
+
+    def test_the_uid_probe_is_not_paid_for_when_the_image_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Laziness contract, matching the kfd path: ``runner_uid`` may be a
+        sudo round-trip plus two podman calls, and a slot rejected for its
+        image never needs to know which uid would have opened the node."""
+        calls: list[int] = []
+
+        def _expensive() -> int:
+            calls.append(1)
+            return 0
+
+        with pytest.raises(GpuPreflightError):
+            require_kfd_for_gpu_slot(
+                "utility",
+                device="gpu-vulkan",
+                runtime_lane="llama",
+                kfd_path=str(tmp_path / "gone"),
+                dri_dir=_render_node(tmp_path),
+                image=ADE07BA_REF,
+                env={},
+                amd_host=True,
+                runner_uid=_expensive,
+            )
+        assert calls == []
+
+    def test_the_uid_probe_is_resolved_when_the_image_passes(self, tmp_path) -> None:
+        calls: list[int] = []
+
+        def _expensive() -> int:
+            calls.append(1)
+            return 0
+
+        require_kfd_for_gpu_slot(
+            "utility",
+            device="gpu-vulkan",
+            runtime_lane="llama",
+            kfd_path=str(tmp_path / "gone"),
+            dri_dir=_render_node(tmp_path),
+            image=VULKAN_FIXED_IMAGE,
+            env={},
+            amd_host=True,
+            runner_uid=_expensive,
+        )
+        assert calls == [1]
 
 
 class TestVulkanLaneGuard:

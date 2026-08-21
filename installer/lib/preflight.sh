@@ -1162,14 +1162,26 @@ preflight_gpu() {
 # available yet -- but the source tree it is about to install IS on disk next
 # to this script. So the two literals are read straight out of schema.py.
 #
-# CONSERVATIVE BY CONSTRUCTION. It recognises the single-member shape of
-# VULKAN_CAPABLE_IMAGE_REFS (a default equal to VULKAN_FIXED_IMAGE) and
-# answers "no" to everything else, including anything it cannot parse. A false
-# "no" costs an operator a CPU-only install they could have avoided; a false
-# "yes" ships a box that serves invalid tokens (#1888). That asymmetry decides
-# the direction. tests/installer/test_preflight_gpu_gate.py pins agreement
-# with the Python predicate, and trips if the capable set ever grows past one
-# member without this mirror being taught about it.
+# CONSERVATIVE BY CONSTRUCTION, and blind in three specific ways. It reads the
+# two literals out of schema.py, so it sees neither the HAL0_TOOLBOX_IMAGE_*
+# env overrides nor the release manifest's digest pin that
+# resolve_runner_image() consults ahead of them, and it has no notion of the
+# runner IDENTITY that render_node_present() now evaluates (#1981) -- it only
+# asks whether a render node exists at all. Every one of those blindnesses
+# errs the same way: toward answering "no" or toward accepting a box the
+# load-time guard will re-examine anyway with better information. A false "no"
+# costs an operator a CPU-only install they could have avoided; a false "yes"
+# would ship a box that serves invalid tokens (#1888), and the real gate still
+# stands behind this one. That asymmetry is why the mirror is allowed to be
+# this crude rather than growing a uid model in bash -- the least testable
+# layer in the system is the wrong place to re-derive logic that already has a
+# tested implementation twenty seconds later in the install.
+#
+# It recognises only the single-member shape of VULKAN_CAPABLE_IMAGE_REFS (a
+# default equal to VULKAN_FIXED_IMAGE) and answers "no" to everything else,
+# including anything it cannot parse. tests/installer/test_preflight_gpu_gate.py
+# pins agreement with the Python predicate, and trips if the capable set ever
+# grows past one member without this mirror being taught about it.
 #
 # Test seams: HAL0_GPU_VULKAN_LANE_OVERRIDE (1/0, decides outright),
 # HAL0_SCHEMA_PY_OVERRIDE (path to the schema.py to read).

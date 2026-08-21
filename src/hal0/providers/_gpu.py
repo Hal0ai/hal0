@@ -353,14 +353,46 @@ def converge_kfd_device_group(
     return "changed", f"{kfd_path}: gid {st.st_gid} -> {target}, mode 0660"
 
 
-def render_node_present(dri_dir: str = DRI_DEVICE_DIR) -> bool:
-    """Is a DRM render node visible AND usable by this process?
+def render_node_present(
+    dri_dir: str = DRI_DEVICE_DIR,
+    *,
+    for_uid: int | None = SLOT_RUNNER_UID,
+) -> bool:
+    """Is a DRM render node visible AND usable by ``for_uid``?
 
-    The Vulkan analogue of :func:`kfd_present`, and gated the same way for the
-    same reason: a ``renderD*`` node that exists but cannot be opened by the
-    runner identity (the mis-mapped-gid LXC passthrough shape) is not a device
-    the slot can use, and treating existence as sufficient reproduces exactly
-    the false pass that made #1888 expensive.
+    The Vulkan analogue of :func:`kfd_present`, and identity-aware for the same
+    reason (#1981, the render-node twin of #1953): the process that OPENS the
+    node is the rootful slot container, not ``hal0-api``. On a host where
+    ``hal0`` is not in the render node's owning group — the halo143 shape,
+    where ``renderD128``'s gid 993 is named ``clock`` rather than ``render`` —
+    a caller-identity probe refuses a Vulkan slot the container would open
+    perfectly well. That is exactly #1953's harm, and it would have landed on
+    the lane #1948 exists to restore.
+
+    ``for_uid`` follows :func:`kfd_status`'s contract EXACTLY, and for the same
+    reasons — branch on the QUESTION, not on who is asking:
+
+    * ``None`` — THIS process. The only identity a DAC probe can honestly
+      answer for, so the only one that consults ``os.access``. No uid-0
+      short-circuit: root bypasses DAC only with ``CAP_DAC_OVERRIDE``, which a
+      hardened container drops.
+    * ``0`` (the default, :data:`SLOT_RUNNER_UID`) — the rootful slot
+      container, always a DIFFERENT process. Podman grants it
+      ``CAP_DAC_OVERRIDE`` by default and its capability set is not the
+      caller's, so this answers on EXISTENCE regardless of who is asking.
+      Branching on whether the caller happens to be root would collapse the
+      parameter for root callers (``install.sh``, ``install.profile_derive``)
+      — the same harm the parameter exists to fix.
+    * any other uid — evaluated against that uid's group set via the mode bits
+      (:func:`_mode_grants_rw`), because ``os.access`` can only answer about
+      the current process.
+
+    Failing open on ``for_uid=0`` is deliberate and is not a hole: the node
+    still has to EXIST and be a character device, and two independent gates
+    stand behind this one — the runner-image allowlist, and #1922's
+    output-sanity readiness probe, which fails a lane that emits nonsense in
+    about a second. Refusing a working configuration on an unprovable
+    permission guess is the more expensive error here.
 
     Only ``renderD*`` counts. ``card*`` is the KMS/master node — a display
     device, not a compute one; a container that gets only ``card0`` has no
@@ -376,15 +408,6 @@ def render_node_present(dri_dir: str = DRI_DEVICE_DIR) -> bool:
     Cheap and total: no ioctl, no driver probe, never raises. Whether the
     backend then produces valid tokens is the output-sanity readiness gate's
     question (#1922), not this one's.
-
-    KNOWN GAP — #1981: the accessibility check is against the CALLING process
-    (``hal0-api``, running as ``hal0``), while the slot container runs rootful
-    and is additionally handed the node's numeric gid via
-    :func:`resolve_gpu_group_ids` → ``--group-add``. On a host where ``hal0``
-    is not in the render node's owning group this refuses a slot the container
-    would have opened fine — #1953's shape, on the render node. Tracked
-    separately rather than guessed at here, because the correct fix is the
-    identity-aware evaluation #1954 introduces for ``/dev/kfd``.
     """
     try:
         entries = sorted(os.listdir(dri_dir))
@@ -399,9 +422,18 @@ def render_node_present(dri_dir: str = DRI_DEVICE_DIR) -> bool:
                 continue
         except OSError:
             continue
-        if os.access(node, os.R_OK | os.W_OK):
+        if _uid_can_open(node, for_uid):
             return True
     return False
+
+
+def _uid_can_open(node: str, for_uid: int | None) -> bool:
+    """Would ``for_uid`` get read+write on ``node``? See the contract above."""
+    if for_uid is None:
+        return os.access(node, os.R_OK | os.W_OK)
+    if for_uid == 0:
+        return True
+    return _mode_grants_rw(node, for_uid)
 
 
 def image_serves_vulkan_lane(image: str | None) -> bool:
@@ -465,6 +497,19 @@ def effective_runner_image(slot_cfg: Any | None = None) -> str | None:
        default, what the retag will replace it with — computed from the slot's
        CURRENT backend/device class, which is what the retag would read if it
        ran first.
+
+    NOT used by the load path, deliberately. ``load_sync`` passes the RAW
+    ``_resolve_image_ref`` result to :func:`require_kfd_for_gpu_slot`, and that
+    is correct: a launch happening right now runs the image the TOML names
+    right now, not the one a migration would install later. Looking ahead there
+    would refuse — or worse, admit — a slot on the strength of an image that is
+    not on the box yet.
+
+    The two callers differ because they are asking about different moments. A
+    migration is deciding what a slot should look like AFTER the upgrade
+    converges, so it must see past a rewrite that is about to happen; a launch
+    is deciding what will run in the next second. Conflating them is what
+    produced the #1948 B5 bug in the first place, from the other direction.
     """
     from hal0.config.schema import STALE_ROCMFPX_IMAGE_REFS, resolve_default_image
 
@@ -560,6 +605,7 @@ def _require_vulkan_lane_prerequisites(
     dri_dir: str,
     image: str | None,
     env: dict[str, str] | None,
+    runner_uid: int | Callable[[], int] = SLOT_RUNNER_UID,
 ) -> None:
     """Admission check for a ``gpu-vulkan`` llama.cpp slot on an AMD host.
 
@@ -575,7 +621,9 @@ def _require_vulkan_lane_prerequisites(
        instead of two hours of garbage.
     2. **Render node.** Vulkan runs on ``/dev/dri/renderD*``. Without one the
        container has no device at all — a forwarding problem, described as
-       such, with no mention of #1888.
+       such, with no mention of #1888. Evaluated for ``runner_uid``, the
+       identity that will actually open the node, not for whoever called this
+       (#1981 — the render-node twin of #1953).
 
     Split out of :func:`require_kfd_for_gpu_slot` rather than inlined so the
     ROCm path's control flow stays readable, and so the Vulkan lane's
@@ -611,7 +659,12 @@ def _require_vulkan_lane_prerequisites(
                 "device='gpu-rocm' on a host with /dev/kfd."
             )
 
-    if not render_node_present(dri_dir):
+    # Resolved HERE, after the image gate has already had its chance to refuse:
+    # ``runner_uid`` may be a `sudo -n` round-trip plus two podman calls, and a
+    # slot rejected for its image never needs to know which uid would have
+    # opened the node. Same laziness contract as the kfd path below (#1953 N2).
+    uid = runner_uid() if callable(runner_uid) else runner_uid
+    if not render_node_present(dri_dir, for_uid=uid):
         raise GpuPreflightError(
             f"slot {slot_name!r} (device=gpu-vulkan) needs a DRM render node "
             f"({dri_dir}/renderD*) that the hal0 runner identity can open, and "
@@ -723,7 +776,13 @@ def require_kfd_for_gpu_slot(
         if runtime_lane == "llama":
             # The re-enabled lane (#1948 Phase D). It has its own two gates and
             # deliberately does NOT fall through to the kfd requirement below.
-            _require_vulkan_lane_prerequisites(slot_name, dri_dir=dri_dir, image=image, env=env)
+            _require_vulkan_lane_prerequisites(
+                slot_name,
+                dri_dir=dri_dir,
+                image=image,
+                env=env,
+                runner_uid=runner_uid,
+            )
             return
     elif device != "gpu-rocm":
         return
