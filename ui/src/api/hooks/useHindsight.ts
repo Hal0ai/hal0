@@ -5,7 +5,13 @@
 // One hook per resource; mutations invalidate the bank-scoped keys so
 // cards/panels refresh without manual plumbing.
 
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  keepPreviousData,
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
@@ -539,5 +545,133 @@ export function useDirectiveDelete() {
     onSuccess: (_d, vars) => {
       void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'directives'] })
     },
+  })
+}
+
+// ── Memory v2 (Bank workspace UI) — tags, curatable unit list, curate,
+// history ───────────────────────────────────────────────────────────────
+// Data plumbing for the new Bank workspace: the tag-usage sidebar, the
+// paged/filterable unit list, the curate mutation (invalidate = reversible,
+// no approval gate — delete stays on the existing gated directive-style
+// routes), and per-unit audit history. Response shapes per the backend
+// team's Interfaces spec (task A1/A3).
+
+export interface BankTag {
+  tag: string
+  count: number
+}
+
+export function useBankTags(bank: string | null) {
+  return useQuery<{ items: BankTag[] }>({
+    queryKey: ['memory', 'banks', bank, 'tags'],
+    queryFn: () => apiGet<{ items: BankTag[] }>(ENDPOINTS.memoryBankTags(bank as string)),
+    enabled: !!bank,
+    staleTime: 30_000,
+  })
+}
+
+export interface BankUnitsParams {
+  q?: string
+  tags?: string[]
+  type?: string
+  from?: string
+  to?: string
+  documentId?: string
+  sort?: string
+  limit?: number
+  offset?: number
+}
+
+// Pure query-string serializer, exported so it's unit-testable without
+// mounting the hook (useHindsight.ts has no existing hook-level tests).
+// camelCase `documentId` -> snake_case `document_id` to match the backend
+// query param; every other key round-trips as-is. Falsy-but-meaningful
+// values (`offset: 0`, `limit: 0`) are kept — only `undefined`/empty
+// string/empty array are omitted.
+export function serializeBankUnitsParams(params: BankUnitsParams = {}): string {
+  const sp = new URLSearchParams()
+  if (params.q) sp.set('q', params.q)
+  if (params.tags && params.tags.length) sp.set('tags', params.tags.join(','))
+  if (params.type) sp.set('type', params.type)
+  if (params.from) sp.set('from', params.from)
+  if (params.to) sp.set('to', params.to)
+  if (params.documentId) sp.set('document_id', params.documentId)
+  if (params.sort) sp.set('sort', params.sort)
+  if (params.limit !== undefined) sp.set('limit', String(params.limit))
+  if (params.offset !== undefined) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return qs ? `?${qs}` : ''
+}
+
+export interface BankUnitRow {
+  id: string
+  text: string
+  context?: string | null
+  occurred_start: string
+  occurred_end?: string | null
+  fact_type: 'world' | 'experience' | 'observation' | string
+  entities: string[]
+  tags?: string[]
+  document_id?: string | null
+  state: 'valid' | 'invalidated' | string
+  salience: number
+  link_counts_by_type: Record<string, number>
+}
+
+export interface BankUnitsPage {
+  items: BankUnitRow[]
+  total_matched: number
+  next_offset: number | null
+}
+
+export function useBankUnits(bank: string | null, params: BankUnitsParams = {}) {
+  return useQuery<BankUnitsPage>({
+    queryKey: ['memory', 'banks', bank, 'units', params],
+    queryFn: () =>
+      apiGet<BankUnitsPage>(
+        `${ENDPOINTS.memoryBankUnits(bank as string)}${serializeBankUnitsParams(params)}`,
+      ),
+    enabled: !!bank,
+    staleTime: 30_000,
+    placeholderData: keepPreviousData,
+  })
+}
+
+export interface UnitCurateBody {
+  text?: string
+  context?: string
+  occurred_start?: string
+  occurred_end?: string
+  fact_type?: string
+  entities?: string[]
+  state?: 'invalidated' | 'valid'
+  reason?: string
+}
+
+// Curate is reversible (invalidate/edit) and carries no approval gate,
+// unlike delete — see the Global Constraints in the task brief.
+export function useUnitCurate(bank: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: UnitCurateBody }) =>
+      apiPatch<BankUnitRow>(ENDPOINTS.memoryUnit(bank, id), body as Record<string, unknown>),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', bank] })
+    },
+  })
+}
+
+export function useUnitHistory(
+  bank: string | null,
+  id: string | null,
+  opts: { enabled?: boolean } = {},
+) {
+  const enabled = (opts.enabled ?? true) && !!bank && !!id
+  return useQuery<Record<string, unknown>>({
+    queryKey: ['memory', 'banks', bank, 'unit', id, 'history'],
+    queryFn: () =>
+      apiGet<Record<string, unknown>>(ENDPOINTS.memoryUnitHistory(bank as string, id as string)),
+    enabled,
+    staleTime: 30_000,
   })
 }
