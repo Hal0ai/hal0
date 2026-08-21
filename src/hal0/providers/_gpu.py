@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+from collections.abc import Callable
 from typing import Any, Literal
 
 import structlog
@@ -174,27 +175,46 @@ def kfd_status(
     * :data:`KFD_NOT_OPENABLE` — forwarded, but its owning gid grants nothing
       to ``for_uid``. Remedy is a group fix on the node; no reboot involved.
 
-    ``for_uid`` names the identity that will actually open the device. ``None``
-    means "this process". uid 0 short-circuits to a pure existence test: root
-    opens a ``0660 root:root`` device fine, and every DAC-based probe run as a
-    non-root user would wrongly call that node unusable.
+    ``for_uid`` names the identity that will actually open the device:
+
+    * ``None`` — THIS process. The only form that can be probed directly, so
+      the only one that consults ``os.access``. No uid-0 short-circuit: root
+      bypasses DAC only with ``CAP_DAC_OVERRIDE``, which a hardened container
+      drops.
+    * ``0`` — the rootful slot container, always a DIFFERENT process. Podman
+      grants it ``CAP_DAC_OVERRIDE`` by default and its capability set is not
+      the caller's, so this answers :data:`KFD_OK` on existence regardless of
+      who is asking. Branching on whether the CALLER happens to be root would
+      make the parameter collapse for root callers (``install.sh``,
+      ``install.profile_derive``) — the same harm this parameter exists to fix.
+    * any other uid — evaluated against that uid's group set via the mode bits,
+      because ``os.access`` can only answer about the current process.
     """
     if not os.path.exists(kfd_path):
         return KFD_MISSING
-    uid = os.geteuid() if for_uid is None else for_uid
-    if uid == os.geteuid():
-        # Ask the OS about ourselves. Do NOT special-case uid 0 here: root
-        # bypasses DAC only with CAP_DAC_OVERRIDE, and a hardened container
-        # (CI runs in one) drops it — a blanket "root is fine" short-circuit
-        # reports a genuinely unopenable node as usable, failing OPEN.
+    # Branch on the QUESTION, not on who is asking. ``for_uid=None`` is the
+    # only form that names THIS process, and therefore the only one that can
+    # be probed directly. Branching on ``uid == os.geteuid()`` instead made the
+    # identity parameter silently collapse whenever the caller happened to
+    # share the uid it was asking about — so a root caller (install.sh,
+    # install/profile_derive.py) on a box whose root lacks CAP_DAC_OVERRIDE
+    # got "unopenable" for a node the rootful slot container opens perfectly
+    # well. That is #1953's original harm wearing a different hat.
+    if for_uid is None:
+        # Root gets NO short-circuit here: it bypasses DAC only with
+        # CAP_DAC_OVERRIDE, and a hardened container (CI runs in one) drops
+        # it, so a blanket "root is fine" reports a genuinely unopenable node
+        # as usable — failing OPEN, into the poisoned lane.
         return KFD_OK if os.access(kfd_path, os.R_OK | os.W_OK) else KFD_NOT_OPENABLE
-    if uid == 0:
-        # Asking about a DIFFERENT root identity (the rootful slot container).
-        # We cannot probe it directly; assume the usual DAC override.
+    if for_uid == 0:
+        # Always ANOTHER process: the rootful slot container, which podman
+        # grants CAP_DAC_OVERRIDE by default. Its capability set is not the
+        # caller's and cannot be probed from here, so the assumed-override
+        # answer is right regardless of who is asking.
         return KFD_OK
     # Some other uid — evaluate the mode bits against its group set rather
     # than silently answering for the wrong identity.
-    return KFD_OK if _mode_grants_rw(kfd_path, uid) else KFD_NOT_OPENABLE
+    return KFD_OK if _mode_grants_rw(kfd_path, for_uid) else KFD_NOT_OPENABLE
 
 
 def _mode_grants_rw(path: str, uid: int) -> bool:
@@ -345,7 +365,7 @@ def require_kfd_for_gpu_slot(
     kfd_path: str = KFD_DEVICE_PATH,
     env: dict[str, str] | None = None,
     amd_host: bool | None = None,
-    runner_uid: int = SLOT_RUNNER_UID,
+    runner_uid: int | Callable[[], int] = SLOT_RUNNER_UID,
 ) -> None:
     """Loud-fail a GPU slot whose runtime needs ROCm but has no compute node.
 
@@ -415,7 +435,12 @@ def require_kfd_for_gpu_slot(
             return
     elif device != "gpu-rocm":
         return
-    status = kfd_status(kfd_path, for_uid=runner_uid)
+    # Resolved HERE, not at the call site: every early return above has already
+    # happened, so a cpu/npu/gpu-cuda slot never pays for it. It is a `sudo -n`
+    # round-trip plus two podman calls now, so an eager argument expression put
+    # that on the load path of every slot on the box (#1953 N2).
+    uid = runner_uid() if callable(runner_uid) else runner_uid
+    status = kfd_status(kfd_path, for_uid=uid)
     if status == KFD_OK:
         return
     # Computed once and reused on both the warn and raise paths below, so
@@ -474,7 +499,7 @@ def require_kfd_for_gpu_slot(
             fix = f"give it the same gid as /dev/dri/renderD*, then chmod 0660 {kfd_path}"
             host_fix = f"'{kfd_path},gid=<the render node's gid in this container>'"
         remedy = (
-            f"It IS forwarded, but uid {runner_uid} cannot open it.{owner} Do NOT "
+            f"It IS forwarded, but uid {uid} cannot open it.{owner} Do NOT "
             f"re-forward the device — fix its group instead: {fix}. On an "
             f"unprivileged LXC apply it to the host's dev entry ({host_fix}) and "
             "pct stop/start. See #1953."

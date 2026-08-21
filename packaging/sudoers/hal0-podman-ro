@@ -7,11 +7,12 @@
 # states (halo143/halo150) and — until #1889 — an `image_status` of "missing"
 # for every running, healthy slot. It delegates exactly the read-only
 # introspection ops to /usr/lib/hal0/bin/hal0-podman-ro, which is the entire
-# privileged surface: `images`, `image-exists <ref>`, `container-image
-# <slot-token>`, `container-argv <slot-token>` plus two side-effect-free
-# validator probes. Every podman subcommand, flag and --format string is a
-# literal in the wrapper; no shell is ever evaluated. The three verbs that
-# take an argument accept exactly ONE positional operand, validated ROOT-side
+# privileged surface: `images`, `image-exists <ref>`, `image-user <ref>`,
+# `container-image <slot-token>`, `container-argv <slot-token>` plus two
+# side-effect-free validator probes. Every podman subcommand, flag and
+# --format string is a literal in the wrapper; no shell is ever evaluated.
+# The four verbs that take an argument accept exactly ONE positional operand,
+# validated ROOT-side
 # against a closed regex before exec (#1889) — the container verbs take the
 # bare slot token and build `hal0-slot-<token>` themselves, so the caller can
 # never name a non-hal0 container. rm/run/build/exec/pull are never exposed.

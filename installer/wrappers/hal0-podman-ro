@@ -270,7 +270,9 @@ case "$cmd" in
 usage: hal0-podman-ro <command> [arg]
   images                     podman images --format {{.Repository}}   (root's image store)
   image-exists <ref>         "present" | "missing" for a validated image ref
-  image-user <ref>           the image's configured USER ("" when it runs as root)
+  image-user <ref>           the image's configured USER; EMPTY means either
+                             "no USER declared" (runs as root) or "not in
+                             root's store yet" — both map to root caller-side
   container-image <token>    running image of hal0-slot-<token>, or nothing
   container-argv <token>     live command argv of hal0-slot-<token>, or nothing
   check-image-ref <ref>      validate an image ref only (no podman call)

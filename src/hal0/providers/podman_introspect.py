@@ -370,8 +370,12 @@ def image_user(
 ) -> str | None:
     """The image's configured ``USER`` from ROOT's store; ``None`` if unanswerable.
 
-    ``""`` is a real answer meaning "no USER declared", i.e. the container
-    process runs as root. ``None`` means the seam did not answer at all.
+    ``""`` is a real answer, but it covers TWO facts: "no USER declared" (the
+    container process runs as root) and "the image is not in root's store yet".
+    Both map to root caller-side, so behaviour is correct — but note the
+    consequence: on a slot's FIRST load the image is often not yet pulled into
+    root's store, so a non-root-``USER`` image is assumed root exactly once.
+    ``None`` means the seam did not answer at all.
 
     Same #1889 reasoning as :func:`image_exists`, and the reason
     :func:`hal0.providers._gpu.resolve_image_runtime_uid` must not shell a bare

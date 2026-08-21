@@ -23,6 +23,7 @@ re-creates #1889 for the refs it wrongly rejects.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -302,7 +303,6 @@ def test_presence_probes_use_exists_not_inspect() -> None:
     src = WRAPPER.read_text()
     assert "run_podman image exists --" in src
     assert "run_podman container exists --" in src
-    code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
 
     # The PRESENCE probe itself must never be an inspect.
     exists_arm = src.split("image-exists)", 1)[1].split(";;", 1)[0]
@@ -314,12 +314,25 @@ def test_presence_probes_use_exists_not_inspect() -> None:
     # but only after presence has already been established, so "missing" and
     # "broken store" stay distinguishable. Exactly the shape container_read
     # uses (container exists -> container inspect), which this file has always
-    # permitted. Every such line must sit in an arm that guards with `exists`.
-    for idx, line in enumerate(code):
-        if "image inspect" not in line:
+    # permitted.
+    #
+    # ARM-SCOPED, not a positional lookback. A fixed-line window over
+    # comment-stripped source reaches straight across a `;;` into the
+    # neighbouring arm, so deleting an arm's entire exists guard left the
+    # check green — it did not police the regression it was rewritten to
+    # permit. Slice each arm by its case label, the same way exists_arm above
+    # is taken, and require the guard to precede the inspect WITHIN that arm.
+    arm_labels = re.findall(r"^\s{2}([a-z][a-z-]*)\)", src, re.MULTILINE)
+    assert "image-user" in arm_labels, "arm discovery broke; the scan below is vacuous"
+    for label in arm_labels:
+        arm = src.split(f"{label})", 1)[1].split(";;", 1)[0]
+        arm_code = "\n".join(ln for ln in arm.splitlines() if not ln.lstrip().startswith("#"))
+        if "image inspect" not in arm_code:
             continue
-        preceding = "\n".join(code[max(0, idx - 12) : idx])
-        assert "image exists" in preceding, f"unguarded image inspect: {line}"
+        assert "image exists" in arm_code, f"unguarded image inspect in {label})"
+        assert arm_code.index("image exists") < arm_code.index("image inspect"), (
+            f"{label}) inspects before establishing presence"
+        )
 
 
 def test_inspect_calls_are_type_qualified() -> None:

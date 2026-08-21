@@ -124,7 +124,12 @@ class TestKfdStatusIdentityRules:
         monkeypatch.setattr(os, "geteuid", lambda: 0)
         monkeypatch.setattr(os, "access", lambda *a, **k: False)
         assert kfd_status(str(node), for_uid=None) == KFD_NOT_OPENABLE
-        assert kfd_status(str(node), for_uid=0) == KFD_NOT_OPENABLE
+        # for_uid=0 is NOT the same question, even from a root caller: it names
+        # the rootful slot container, whose CAP_DAC_OVERRIDE this process's
+        # denial says nothing about. Asserting NOT_OPENABLE here contradicted
+        # test_asking_about_a_different_root_identity_still_assumes_override
+        # for identical input, and collapsed the parameter for root callers.
+        assert kfd_status(str(node), for_uid=0) == KFD_OK
 
     def test_asking_about_a_different_root_identity_still_assumes_override(
         self, tmp_path, monkeypatch
@@ -821,3 +826,66 @@ class TestResolveImageRuntimeUidUsesTheRootStore:
             "hal0.providers.podman_introspect.image_user", lambda *a, **k: "1000:1000"
         )
         assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == 1000
+
+
+class TestTheUidProbeIsLazy:
+    """#1953 N2 — resolving the runner uid is a sudo round-trip plus two podman
+    calls. An eager argument expression charged EVERY slot for a probe only the
+    gated ones need."""
+
+    def _never(self):
+        def _boom() -> int:  # pragma: no cover - only runs if laziness breaks
+            raise AssertionError("uid probe ran for an ungated slot")
+
+        return _boom
+
+    @pytest.mark.parametrize("device", ["cpu", "npu", "gpu-cuda", ""])
+    def test_ungated_devices_never_resolve_the_uid(self, device, tmp_path) -> None:
+        require_kfd_for_gpu_slot(
+            "x",
+            device=device,
+            kfd_path=str(tmp_path / "kfd"),
+            env={},
+            amd_host=True,
+            runner_uid=self._never(),
+        )
+
+    def test_a_non_rocm_lane_never_resolves_the_uid(self, tmp_path) -> None:
+        """Kokoro/Moonshine forward no compute node, so the identity that would
+        open it is irrelevant (#1941 scoping runs before the probe)."""
+        require_kfd_for_gpu_slot(
+            "voice",
+            device="gpu-vulkan",
+            runtime_lane="no-rocm",
+            kfd_path=str(tmp_path / "kfd"),
+            env={},
+            amd_host=True,
+            runner_uid=self._never(),
+        )
+
+    def test_a_gated_lane_does_resolve_the_uid(self, tmp_path) -> None:
+        """...and the lazy form must still actually be consulted when it counts."""
+        node = tmp_path / "kfd"
+        node.write_text("")
+        calls: list[int] = []
+
+        def _probe() -> int:
+            calls.append(1)
+            return 0
+
+        require_kfd_for_gpu_slot(
+            "brain",
+            device="gpu-rocm",
+            kfd_path=str(node),
+            env={},
+            amd_host=True,
+            runner_uid=_probe,
+        )
+        assert calls == [1]
+
+    def test_a_plain_int_still_works(self, tmp_path) -> None:
+        node = tmp_path / "kfd"
+        node.write_text("")
+        require_kfd_for_gpu_slot(
+            "brain", device="gpu-rocm", kfd_path=str(node), env={}, amd_host=True, runner_uid=0
+        )

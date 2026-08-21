@@ -2392,7 +2392,11 @@ class ContainerProvider(Provider):
             str(slot_cfg.get("name", "") or token),
             device=str(slot_cfg.get("device", "") or ""),
             runtime_lane=runtime_lane_for_provider(spec_provider),
-            runner_uid=resolve_image_runtime_uid(_resolve_image_ref(slot_cfg, model_info)),
+            # Lazy: the guard returns early for cpu/npu/gpu-cuda and for
+            # non-ROCm lanes, and this is a sudo round-trip plus two podman
+            # calls. Passing it eagerly charged every slot on the box for a
+            # probe only the gated ones need.
+            runner_uid=lambda: resolve_image_runtime_uid(_resolve_image_ref(slot_cfg, model_info)),
         )
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
