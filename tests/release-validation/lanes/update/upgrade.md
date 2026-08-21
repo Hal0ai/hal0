@@ -71,6 +71,27 @@ the fact otherwise:
    record the digest and signer identity.
 5. **Migrations.** Which migrations ran? Do they log what they changed? Re-run the upgrade (or
    the activation step) and confirm migrations are idempotent.
+   * **5b. The rc.7 image-pin retag (#1959 B1).** Before upgrading, record every slot's image
+     pin under BOTH the legacy `image` key AND the newer `image_pin` key
+     (`grep -n 'image_pin\|^image\b' /var/lib/hal0/slots/*.toml`, plus any custom entry in
+     `profiles.toml`) — `hal0 slot migrate-hw --apply` folds an old `image` pin into `image_pin`
+     and drops the bare key, so a box that ran that migration carries `image_pin` only. After
+     the upgrade, every SERVED pin (`image_pin` if present, else `image`) that exactly equalled
+     a known former default must read `ghcr.io/hal0ai/hal0-combined:0822`, with a matching
+     `updater.slot_image_retagged` journal line. On any slot carrying BOTH keys, confirm
+     `image_pin` — not `image` — is the one actually judged and rewritten (`_resolve_image_ref`
+     reads `image_pin` first and no longer reads the bare key at all; the retag sweep binds in
+     the same order after the B1 review's precedence fix). A pin that was a deliberate operator
+     override (not an exact former default, under either key) must be byte-identical before and
+     after. See `regressions.yaml: updater-image-pin-retag-blind-spot`.
+   * **5c. Perf-row reference envelope, now inverted.** If bench numbers are captured for this
+     upgrade (`hal0 bench` or the #1948 §3-C matrix commands), record decode/prefill for BOTH
+     `gpu-rocm` and `gpu-vulkan` on this box (kfd present, so both lanes are reachable — Vulkan
+     via `hal0 slot edit <slot> --hardware vulkan`). The reference envelope as of `:0822` is
+     Vulkan AHEAD of ROCm on both metrics (+13.96% prefill, +20.45% decode per #1948's matrix on
+     this box) — this REPLACES the old ade07ba-era expectation ("Vulkan ~-10% decode vs ROCm")
+     carried by earlier kit versions. A >20% variance from the new envelope, in either
+     direction, needs explanation; do not flag "Vulkan is faster than ROCm" as a regression.
 6. **Rollback.** `hal0 update --rollback`. Does it return the box to the previous version with
    its state intact? Then roll forward again. If rollback is not exercised here it is not
    exercised anywhere. (`updater.*` journal lines from the ROLLBACK path legitimately carry

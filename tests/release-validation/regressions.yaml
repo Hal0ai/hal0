@@ -947,39 +947,65 @@ regressions:
   # ── Filed from v1.0.0-rc.6 (mode=report — issue numbers pending) ────────────
 
   - id: brain-vulkan-backend-garbage-output
-    issue: 1888   # GA-blocker — filed by rc.6 fix wave
+    issue: 1888   # GA-blocker — filed by rc.6 fix wave; folded into the rc.7 Vulkan restoration
     from: v1.0.0-rc.6
     severity: ga-blocker
     tier: judgment
     lane: brain
+    rc7_note: >-
+      SUPERSEDED, not simply fixed. Between rc.6 and rc.7 the lane went RETIRED (#1923/#1934 —
+      gpu-rocm llama.cpp slots refuse to start without /dev/kfd, no CPU fallback, no Vulkan
+      lane offered at all) and is now RESTORED behind an explicit image allowlist (#1948,
+      operator decision 2026-08-21 "HOLD FOR FOLD", landed as three PRs: #1954 kfd identity by
+      runner uid + device gid `e5e5925a`, #1973 the lane re-enable itself `3474ec03`, #1959 the
+      repin to `ghcr.io/hal0ai/hal0-combined:0822` `8f23afba`). The image was bisected on real
+      hardware to a `ciru-ai/ROCmFPX` port-onto-newer-upstream defect (not hal0's build, driver,
+      gfx1151, or llama.cpp mainline — see #1948's evidence table), and #1922's output-sanity
+      readiness gate (merged PR #1962) now stands permanently under BOTH backends regardless of
+      which image is installed. The expectation below is REWRITTEN accordingly — it no longer
+      describes "the lane is retired, stay off it" but "the lane is back, serves coherent output
+      on the signed pin, and anything that reaches a stale/broken image is convicted by the gate
+      before READY, never silently." Also confirmed post-fold: seeded slots still derive
+      `gpu-rocm` first wherever `/dev/kfd` is usable (operator ruling — ROCm stays the picker's
+      default row despite the §3-C matrix measuring Vulkan faster, +13.96% prefill / +20.45%
+      decode); Vulkan is reached by explicit choice (`hal0 slot edit <slot> --hardware vulkan`)
+      or because no ROCm compute node exists at all.
     summary: >-
-      The Vulkan backend of the release-pinned runner image ghcr.io/hal0ai/hal0-rocmfpx:ade07ba
-      emits invalid tokens for EVERY model it serves, at full speed, while HTTP 200, container
+      The Vulkan backend of the then-pinned runner image ghcr.io/hal0ai/hal0-rocmfpx:ade07ba
+      emitted invalid tokens for EVERY model it served, at full speed, while HTTP 200, container
       health, `hal0 doctor` and tok/s all read green. llama.cpp picks ROCm when /dev/kfd is
       visible in the container and falls back to Vulkan otherwise; hal0 passes /dev/kfd only if
       it exists on the host (providers/_gpu.resolve_gpu_device_paths), so every box without
-      /dev/kfd runs the broken Vulkan lane. Consequences: slots seeded `device="gpu-vulkan"`
-      actually execute on ROCm wherever /dev/kfd exists (the advertised Vulkan lane has never
-      been exercised by validation), the install guide RECOMMENDS the broken lane for Strix
-      Halo, bench harness lane `vulkan_radv` pins `-dev Vulkan0` and benchmarks garbage, and no
-      layer between "container healthy" and "slot ready" validates output sanity. Workaround:
-      expose /dev/kfd to the box/container. Separately observed: the blessed FPX brain model has
-      no working CPU fallback (`-ngl 0` segfaults, exit 139).
+      /dev/kfd ran the broken Vulkan lane. Consequences at the time: slots seeded
+      `device="gpu-vulkan"` actually executed on ROCm wherever /dev/kfd existed (the advertised
+      Vulkan lane had never been exercised by validation), the install guide RECOMMENDED the
+      broken lane for Strix Halo, bench harness lane `vulkan_radv` pinned `-dev Vulkan0` and
+      benchmarked garbage, and no layer between "container healthy" and "slot ready" validated
+      output sanity. The FPX brain model's CPU fallback bug (`-ngl 0` segfaults, exit 139) is
+      unrelated and still open — do not fold it into this entry's verdict.
     repro: |
       # Coherence canary — run on every box, every release, against each serving llm slot port:
       curl -s -X POST http://127.0.0.1:<port>/completion \
         -d '{"prompt":"The capital of France is","n_predict":12,"temperature":0}'
-      # 'Paris' must appear. Do NOT key on the ')' garbage string — the garbage form varies
+      # 'Paris' must appear. Do NOT key on the ')' garbage string — the garbage form varied
       # with argv (--jinja slots emit ')' runs; bare /completion emits empty content).
       # A/B the backend on one box, identical argv except -dev:
-      #   -dev ROCm0   -> correct text        -dev Vulkan0 -> garbage
-      # /dev/kfd present in the slot container decides which lane actually runs:
+      #   -dev ROCm0   -> correct text        -dev Vulkan0 -> now also correct on :0822+
+      # /dev/kfd present in the slot container still decides which lane actually runs on a
+      # kfd-visible box; on a render-node-only box (ct151) Vulkan is now the only llama.cpp
+      # lane and must itself pass:
       podman exec hal0-slot-brain ls /dev/kfd
+      # Resolved runner image, to confirm which side of the version gate is being tested:
+      systemctl cat hal0-slot@brain | grep '^Image='
     expect: >-
       Temp-0 "The capital of France is" contains "Paris" on BOTH the ROCm and Vulkan lanes of
-      the pinned runner image, with an unrelated non-FPX gguf as a second sample. Until this is
-      fixed, every text-generation result from a box whose only llama.cpp device is Vulkan0 is
-      untrusted — gate every lane that elicits a completion on this canary first.
+      the signed `:0822`-or-later runner image, with an unrelated non-FPX gguf as a second
+      sample. A slot on an image BEFORE `:0822` (the outgoing `ade07ba` pin is the concrete
+      case) must be refused at preflight before it ever reaches a completion request — see
+      `lanes/stateful/slots.md` 8d. And the #1922 output-sanity gate must convict a slot that
+      somehow still reaches a broken backend (stale image + `ENV_ALLOW_VULKAN_FALLBACK`): a
+      terminal `error`, never `ready` — see `lanes/stateful/slots.md` 8e, the single most
+      important check of this release.
 
   - id: hermes-stream-no-stall-guard
     issue: 1893   # filed by rc.6 fix wave — residue of the hermes-cannot-chat candidate (dup of the garbage finding, merged into #1888)
@@ -1458,3 +1484,89 @@ regressions:
       leaking the upstream's raw 500. Still by-design (do not re-file) unless a CHAT-capable
       model is routed to a non-chat slot, the 500 occurs with embed OFFLINE, or /v1/models stops
       disclosing per-model labels/recipe — those clauses escalate per the known-issues entry.
+
+  # ── Filed from the rc.7 Vulkan-restoration fold (#1948, kit v8) ──────────────
+
+  - id: updater-image-pin-retag-blind-spot
+    issue: 1959   # repin PR (8f23afba) — includes the B1 image_pin retag fix + precedence fix
+    from: v1.0.0-rc.7
+    severity: major
+    tier: mechanical
+    lane: upgrade
+    promote_ready: true
+    summary: >-
+      `retag_stale_slot_images` (updater.py) rewrites a slot's stale former-default runner pin
+      on upgrade, but as of the rc.6 fix wave it only ever checked the legacy `image` /
+      `[slot].image` string. Slot TOMLs and custom `profiles.toml` entries can carry the SAME
+      pin under the newer, TYPED `image_pin` key (config/schema.py) instead — `hal0 slot
+      migrate-hw --apply` folds an old `image` pin into `image_pin` and drops the bare key
+      entirely — and that key was completely invisible to the retag: a folded slot pinned via
+      `image_pin` to a known former default (e.g. the outgoing `ade07ba` ref) survived an
+      rc.6 -> rc.7 upgrade untouched and kept running the broken pre-fold Vulkan backend after
+      the upgrade claimed to have fixed it. #1959's B1 fix (commit `8f23afba`) extends
+      `retag_stale_slot_images` to check both keys AND fixes a precedence bug the fix's own
+      review found: the sweep originally bound the bare `image` key first while
+      `_resolve_image_ref` (the function that decides what actually RUNS) reads `image_pin`
+      first and no longer reads the bare key at all — so on a slot carrying both, the sweep
+      could judge and clear a value the runtime never serves while the served pin stayed stale.
+      Precedence is now `image_pin` first, matching the resolver. A deliberate per-slot override
+      (a pin that is NOT exactly equal to a known former default) must still survive untouched
+      under either key — the escape hatch is not the bug.
+    repro: |
+      # On the update box, BEFORE upgrading: record every slot's pin under both keys.
+      grep -n 'image_pin\|^image\b' /var/lib/hal0/slots/*.toml
+      grep -n 'image_pin\|^image\b' /var/lib/hal0/profiles.toml 2>/dev/null
+      # Upgrade rc.6 -> rc.7, then re-check the same files:
+      grep -n 'image_pin\|^image\b' /var/lib/hal0/slots/*.toml
+      journalctl -u hal0-api --since <upgrade-start> | grep updater.slot_image_retagged
+      # On any slot carrying BOTH keys, confirm image_pin (not image) is the one the retag
+      # actually judged and rewrote — that is the precedence fix under test.
+    expect: >-
+      Every SERVED pin (image_pin if present, else image) that exactly equalled a known former
+      default before the upgrade reads the new `ghcr.io/hal0ai/hal0-combined:0822` ref after it,
+      with a matching `updater.slot_image_retagged` journal line. A pin that was a deliberate
+      override (not a known former default, under either key) is byte-identical before and
+      after. A pin held only in `image_pin` that matched a stale former default and did NOT get
+      retagged — or one where `image` got rewritten while a stale `image_pin` was left behind —
+      is the regression this entry exists to catch.
+
+  - id: vulkan-lane-stale-image-preflight-refusal
+    issue: 1973   # lane re-enable PR (3474ec03) — implements the checked gate
+    from: v1.0.0-rc.7
+    severity: ga-blocker
+    tier: judgment
+    lane: slots
+    summary: >-
+      Phase D of the rc.7 Vulkan restoration (#1948, landed as #1973) re-enables `gpu-vulkan`
+      llama.cpp slots on kfd-less AMD render nodes, gated on an EXPLICIT ALLOWLIST of runner
+      images: `VULKAN_CAPABLE_IMAGE_REFS` (config/schema.py), earned per-image by the #1948 §3-C
+      matrix, currently containing only `VULKAN_FIXED_IMAGE`
+      (`ghcr.io/hal0ai/hal0-combined:0822`). Deliberately NOT a version/tag ordering comparison
+      — the tags have no total order and Vulkan correctness was empirically NOT monotonic in
+      build recency during the bisect (an older tree was correct, a newer one broken). This
+      entry exists to catch the failure mode where that gate is missing, mis-scoped, or silently
+      bypassable — i.e. a stale/broken image (the outgoing `ade07ba` pin, a member of
+      `STALE_ROCMFPX_IMAGE_REFS`, is the concrete case, #1888) reaches a `gpu-vulkan` slot load
+      with no refusal at all, or the refusal fires on the wrong predicate (device class alone,
+      or a tag/date comparison that would wrongly refuse a later-added allowlist member or
+      wrongly admit a rolled-back one).
+    repro: |
+      # Force (or simulate, if the box cannot hold two runner images at once — record which)
+      # a gpu-vulkan slot's resolved image onto a ref NOT in VULKAN_CAPABLE_IMAGE_REFS:
+      hal0 slot edit <throwaway> --hardware vulkan --model <small chat model>
+      # ... with the slot's image_pin forced to a known-stale ref (e.g. ade07ba) ...
+      hal0 slot load <throwaway>
+      # Expect a preflight refusal (GpuPreflightError) naming #1888 and VULKAN_FIXED_IMAGE,
+      # raised from _require_vulkan_lane_prerequisites's image gate — BEFORE the render-node
+      # check, so it fires even on a box with no render node at all:
+      grep -n '_require_vulkan_lane_prerequisites\|image_serves_vulkan_lane\|VULKAN_CAPABLE_IMAGE_REFS' \
+        /usr/lib/hal0/venv/lib/python3*/site-packages/hal0/providers/_gpu.py \
+        /usr/lib/hal0/venv/lib/python3*/site-packages/hal0/config/schema.py
+    expect: >-
+      Loading a `gpu-vulkan` llama.cpp slot whose resolved image is not in
+      `VULKAN_CAPABLE_IMAGE_REFS` is refused at preflight, loudly, naming #1888 and
+      `VULKAN_FIXED_IMAGE` as the repin target — never a silent load onto the broken backend,
+      and never merely a warning unless `ENV_ALLOW_VULKAN_FALLBACK`
+      (`HAL0_ALLOW_VULKAN_FALLBACK`) is explicitly set (in which case the #1922 output-sanity
+      gate, not this preflight check, is what must convict the resulting garbage — see
+      `brain-vulkan-backend-garbage-output` and `lanes/stateful/slots.md` 8e).

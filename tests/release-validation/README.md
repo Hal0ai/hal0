@@ -131,6 +131,77 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **8** (2026-08-21) — Vulkan-restoration coverage for the rc.7 fold (#1948), FINALIZED against
+  the landed fold chain: #1954 (kfd identity by runner uid + device gid, `e5e5925a`), #1973 (the
+  `gpu-vulkan` lane re-enable behind an explicit image allowlist, `3474ec03`), #1959 (repin to
+  `ghcr.io/hal0ai/hal0-combined:0822`, `8f23afba`). Composed with v6/v7's `image_status`
+  tri-state work rather than duplicated — the api.md/slots.md tri-state checks stay exactly as
+  v6/v7 wrote them; this version only adds the Vulkan-specific checks and resolves the five
+  `FINALIZE-AFTER-PHASE-D` markers a v6 draft (written in parallel with the lane re-enable PR)
+  had left open, against the actual merged mechanics rather than a guess:
+    1. **The gate is an explicit allowlist, not a version comparison.**
+       `VULKAN_CAPABLE_IMAGE_REFS` (`config/schema.py`) is a `frozenset` earned per-image by the
+       #1948 §3-C matrix — deliberately NOT "the pin or later", because the tags have no total
+       order (git shortrefs, date stamps, names) and Vulkan correctness was empirically NOT
+       monotonic in build recency (the bisect found an OLDER tree correct and a NEWER one
+       broken). `image_serves_vulkan_lane()` checks membership; `effective_runner_image()` looks
+       THROUGH a pending retag so a migration decision and a live-load decision can never
+       disagree; `vulkan_lane_serves()` composes the two and is the one predicate the
+       derivation ladders, the bench harness, the installer's shell-mirrored preflight, and the
+       updater's migration all share.
+    2. **Preflight refusal is `require_kfd_for_gpu_slot`'s `gpu-vulkan` branch**
+       (`providers/_gpu.py`), which on the `llama` runtime lane on an AMD host now delegates to
+       `_require_vulkan_lane_prerequisites`: gate 1 is the image allowlist above (refuses by
+       name, cites #1888, names `VULKAN_FIXED_IMAGE` as the fix), gate 2 is
+       `render_node_present()` for the runner identity (uid 0, the rootful slot container — not
+       whoever calls the function). `/dev/kfd` is NOT consulted on this path at all — Vulkan
+       needs no compute node, which is the whole point of the kfd-less-box restoration.
+    3. **The capabilities catalog OFFERS the lane without gating on image** — confirmed
+       `capabilities/catalog.py`'s llama.cpp fan-out: `gpu-vulkan` is offered whenever the host
+       advertises that backend (a render node exists), independent of which image is installed.
+       "The picker is an OFFER, not a promise" is the source's own comment; a slot created on
+       that row still has to clear the load-time image gate and then #1922's readiness probe.
+       api.md 6c rewritten to state this as fact, not a maybe.
+    4. **`ENV_ALLOW_VULKAN_FALLBACK` survives unchanged** and now downgrades TWO correctness
+       refusals to a warning — missing `/dev/kfd` on the ROCm path, and an unvalidated Vulkan
+       image on the restored path — never the render-node check, which is a passthrough fact no
+       env var can change. `boxes.toml` wording finalized accordingly.
+    5. **Seeds stay `gpu-rocm` by operator ruling.** `install/profile_derive.derive_device`
+       still derives ROCm first whenever `/dev/kfd` is usable, even though the §3-C matrix shows
+       Vulkan is FASTER on the reference hardware (+13.96% prefill, +20.45% decode — the
+       corrected direction from the old ade07ba-era "Vulkan ~-10%" expectation kit v5 carried;
+       drop that stale expectation everywhere it appears). ROCm is offered first in the picker
+       because it has the longer validation history and is what MTP/speculative decode is tuned
+       on. The documented way to run Vulkan deliberately is `hal0 slot edit <slot> --hardware
+       vulkan` — a manual opt-in, not a new default. Kit checks must not flag "seeded slot is
+       still gpu-rocm on a box that could run Vulkan" as a defect.
+
+  `boxes.toml`: `[boxes.ct152-cpu-fresh]` REMOVED — the box was destroyed 2026-08-21. There is
+  now no CPU-only fresh box in the fleet at all; the fleet-coverage note says so plainly instead
+  of the old "do not claim no CPU-only box remains" hedge, since that claim is now simply true.
+  ct151's note and the fleet-coverage note both drop their `FINALIZE-AFTER-PHASE-D` HTML
+  comments and state the real gate: an explicit `VULKAN_CAPABLE_IMAGE_REFS` allowlist, not a
+  version/tag comparison.
+  `lanes/stateful/slots.md` 8c/8d finalized: 8c names `_require_vulkan_lane_prerequisites`'s two
+  gates explicitly instead of hedging on the wording; 8d's repro now greps
+  `_require_vulkan_lane_prerequisites` and `image_serves_vulkan_lane` by name and expects the
+  `GpuPreflightError` naming both #1888 and `VULKAN_FIXED_IMAGE`.
+  `lanes/readonly/api.md` 6c finalized per point 3 above; the speculative 6b from the v6 draft
+  (written before #1968 merged, hedging on whether it would) is DROPPED — v6/v7's check 6 and
+  the `image-status-wrong-podman-store` expect clause already cover the tri-state fully and a
+  second check saying the same thing would duplicate rather than compose.
+  `lanes/update/upgrade.md` gains a check verifying the rc.6 -> rc.7 retag on ct150 actually
+  lands `image_pin = ghcr.io/hal0ai/hal0-combined:0822` (both the legacy `image` key and the
+  newer `image_pin` key are checked, with `image_pin` taking precedence per #1959's final
+  commit, and the perf-row numbers are recorded as the new reference envelope — Vulkan ahead of
+  ROCm, not behind).
+  `regressions.yaml`'s two new entries keep their `from: v1.0.0-rc.7` (that is when the fold
+  landed) even though this kit version is 8; `updater-image-pin-retag-blind-spot` gets its issue
+  number confirmed against #1959's merged commit, and `vulkan-lane-stale-image-preflight-refusal`
+  gets `issue: 1973` (the lane re-enable PR that actually implemented the check it describes).
+  `.claude/workflows/rc-validate.js`'s verify-prompt fleet note is unchanged from the v6 draft —
+  it was written to be correct once the fold landed and still is.
+
 * **7** (2026-08-21) — follow-up to 6, landed before its first run. `readonly/api.md` check 6
   now names both `reason=` values on `slot_view.image_probe_failed` (`probe-error` when the
   probe raised, `probe-timeout` when the slot probe blew its deadline first). v6 promised that

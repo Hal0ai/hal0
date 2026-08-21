@@ -33,9 +33,9 @@ const KIT = `${REPO}/tests/release-validation`
 const RUN = `/mnt/mintdev/artifacts/hal0-release-validation/${VERSION}`
 
 // Box id -> role. Mirrors tests/release-validation/boxes.toml.
+// ct152-cpu-fresh was destroyed 2026-08-21 (kit v8) — there is no CPU-only fresh box left.
 const BOX_ROLES = {
   'ct151-cpu-fresh': 'fresh',
-  'ct152-cpu-fresh': 'fresh',
   'ct163-cpu-fresh': 'fresh-alt',
   'ct150-update': 'update',
   'ct105-prod': 'prod',
@@ -479,13 +479,16 @@ relitigates it.
 
 Also judge \`other_hardware_applicability\`: would a GPU box, a privileged container, or an
 upgraded (rather than freshly installed) box hit this? No box in the fleet is BOTH a fresh
-install AND has /dev/kfd visible (the fresh boxes lack /dev/kfd, so post-#1923 their
-gpu-rocm LLM slots REFUSE to start — the Vulkan LLM lane is retired and there is no CPU
-fallback for a gpu-device slot; LLM coverage on those boxes means slots explicitly set to
-device=cpu. The boxes with /dev/kfd — update and prod — are not fresh installs), so a
-read-only cross-check
-against the production box is the best available evidence — use it when the finding touches
-backend selection, profile flags, hardware probing, or native tool calling.
+install AND has /dev/kfd visible (the fresh boxes lack /dev/kfd, so their gpu-rocm LLM slots
+REFUSE to start — no ROCm compute node, no CPU fallback for a gpu-device slot). As of the rc.7
+Vulkan-restoration fold (#1948), that is no longer the whole story for the Vulkan LLM lane: a
+fresh box WITHOUT /dev/kfd (ct151) now DOES run gpu-vulkan LLM slots, gated on the runner image
+being at or after the signed :0822 pin rather than refused outright — so a fresh-install
+Vulkan-lane finding CAN be reproduced fleet-side, on ct151, and does not automatically need the
+production cross-check. gpu-rocm LLM slots remain fresh-install-untestable (still no fresh box
+with /dev/kfd) — use the production box or the update box (both have /dev/kfd but are not
+fresh installs) for anything that is specifically about the ROCm lane, backend selection,
+profile flags, hardware probing, or native tool calling on a kfd-visible box.
 
 Non-destructive repro only. If you load a slot, restore what you found. Set key="${c.key}".`,
   { label: `verify:${c.key}`, phase: 'Verify', schema: VERDICT, model: 'opus', effort: 'high' })))).filter(Boolean)

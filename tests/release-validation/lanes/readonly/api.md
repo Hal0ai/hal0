@@ -55,6 +55,22 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
    a finding. A whole fleet reading `unknown` is a broken install
    even though no field is lying. Conversely, `unknown` where the seam is demonstrably healthy
    is itself a defect — the probe should have gotten an answer.
+   * **6c. Vulkan capabilities fan-out, restored (#1948, landed as #1973).** On an AMD box
+     (ct151, ct150), `GET /api/capabilities` must offer `gpu-vulkan` again as a valid device for
+     LLM/llama runtimes, not just the non-llama runtimes it was never removed for — cross-check
+     against `/api/hardware`'s `vulkan_capable` flag for the same box. This is confirmed
+     offer-not-promise, by source (`capabilities/catalog.py`'s llama.cpp fan-out): the picker
+     offers `gpu-vulkan` whenever the host advertises that backend at all (a usable render node
+     exists), with NO dependency on which runner image is installed. So a box that lacks the
+     signed `:0822`-or-later image (`VULKAN_CAPABLE_IMAGE_REFS` in `config/schema.py`) still
+     shows the row — the load-time gate (`slots.md` 8d) is what refuses, not the catalog. That
+     split (offered-but-refusable) is the shipped design, not a bug; only flag it if the
+     capability is offered nowhere at all on a box that should support it, or if it silently
+     drops to a different device with no error. Also confirm ordering: `gpu-rocm` is offered
+     BEFORE `gpu-vulkan` on a kfd-present AMD box (operator ruling — ROCm keeps the longer
+     validation history and MTP tuning as the default row, even though the §3-C matrix measured
+     Vulkan faster on both prefill and decode); a kfd-less box shows `gpu-vulkan` with no
+     `gpu-rocm` row at all.
 7. **Error shape.** Probe malformed requests: unknown slot name, bad query params, unknown model
    in a GET. Expect clean structured 4xx JSON. A 200 with zeroed data for a nonexistent resource
    is a finding.
