@@ -193,10 +193,11 @@ test.describe('Memory view — Hindsight surface', () => {
     await expect(primary).toContainText('world')
     await expect(primary).toContainText('experience')
     await expect(primary).toContainText('observation')
-    // primary has a pending op in flight → live spinner "working" badge + a
-    // pending activity chip (driven by /operations, not stats).
-    await expect(primary.locator('.mem-act-badge.working')).toBeVisible()
-    await expect(primary.locator('.mem-act-chip.pend')).toContainText('pending')
+    // primary has a pending op in flight → compact spinner + in-flight count
+    // beside the bank name (driven by /operations, not stats); the full
+    // breakdown lives in the graph-extraction card's active-tasks list.
+    await expect(primary.locator('.mem-act-inline .mem-spin')).toBeVisible()
+    await expect(primary.locator('.mem-act-inline-n')).toContainText('1')
 
     // ingest bank carries a failed op → a red failed affordance that reveals
     // the failed operation type(s) on click.

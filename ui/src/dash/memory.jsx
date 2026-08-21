@@ -327,10 +327,12 @@ function MemTimeseries({ bank, period, setPeriod }) {
 //
 // Polls GET /api/memory/banks/{bank}/operations via the shared, adaptive
 // useBankOperations query (fast while work is in flight, backing off when
-// idle) so the operator can SEE what's happening and WHERE. Renders a spinner
-// "N working" badge while pending+processing > 0, plus pending/processing/
-// completed/failed counts. Failed count is a button that reveals the failed
-// operation types (affordance for "extraction failed, roughly why").
+// idle) so the operator can SEE what's happening and WHERE. Full mode renders
+// a spinner "N working" badge while pending+processing > 0, plus pending/
+// processing/completed/failed counts; compact mode (bank cards) collapses to
+// a spinner + in-flight count with the breakdown in the tooltip. In both, the
+// failed count is a button that reveals the failed operation types
+// (affordance for "extraction failed, roughly why").
 function MemBankActivity({ bank, active = true, compact = false }) {
   const useBankOperations = window.__hal0UseBankOperations;
   const summarize = window.__hal0MemSummarizeOps;
@@ -351,6 +353,51 @@ function MemBankActivity({ bank, active = true, compact = false }) {
     setShowFailed(v => !v);
   }
 
+  // Compact (bank-card) mode: one small spinner + in-flight count beside the
+  // bank name. The full pending/processing breakdown lives in the tooltip and
+  // in the graph-extraction sidebar's active-tasks list; failed ops keep
+  // their clickable red affordance — they need attention even at a glance.
+  if (compact) {
+    if (a.inFlight === 0 && a.failed === 0) return null;
+    const parts = [];
+    if (a.processing > 0) parts.push(`${a.processing} processing`);
+    if (a.pending > 0) parts.push(`${a.pending} pending`);
+    if (a.failed > 0) parts.push(`${a.failed} failed`);
+    return (
+      <span className="mem-activity mem-act-inline mono" data-testid={`mem-activity-${bank}`} title={parts.join(' · ')}>
+        {a.inFlight > 0 && (
+          <>
+            <span className="mem-spin" aria-hidden="true" />
+            <span className="mem-act-inline-n num">{a.inFlight}</span>
+          </>
+        )}
+        {a.failed > 0 && (
+          <button
+            type="button"
+            className={'mem-act-chip failed' + (showFailed ? ' open' : '')}
+            onClick={toggleFailed}
+            title="failed operations — click to see which"
+            data-testid={`mem-failed-${bank}`}
+          >
+            {a.failed} failed
+          </button>
+        )}
+        {showFailed && a.failed > 0 && (
+          <span
+            className="mem-failed-pop mono"
+            data-testid={`mem-failed-pop-${bank}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <span className="mem-failed-h">failed operations</span>
+            {a.failedTypes.map((t, i) => (
+              <span key={i} className="mem-failed-row">{t}</span>
+            ))}
+          </span>
+        )}
+      </span>
+    );
+  }
+
   return (
     <span className="mem-activity mono" data-testid={`mem-activity-${bank}`}>
       {a.inFlight > 0 && (
@@ -361,7 +408,7 @@ function MemBankActivity({ bank, active = true, compact = false }) {
       )}
       {a.processing > 0 && <span className="mem-act-chip proc" title="processing">{a.processing} proc</span>}
       {a.pending > 0 && <span className="mem-act-chip pend" title="queued / pending">{a.pending} pending</span>}
-      {!compact && a.completed > 0 && (
+      {a.completed > 0 && (
         <span className="mem-act-chip done" title="completed">{a.completed} done</span>
       )}
       {a.failed > 0 && (
