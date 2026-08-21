@@ -1240,17 +1240,18 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
       if (b.salience == null) return -1
       return b.salience - a.salience
     }
-    if (sort === 'oldest') {
-      return new Date(a.occurred_start).getTime() - new Date(b.occurred_start).getTime()
-    }
-    // 'recency' (default): newest first
+    // 'recency' (default, and the fallback for any sort value the server
+    // would 422 on — the mock never pretends to support a third mode):
+    // newest first
     return new Date(b.occurred_start).getTime() - new Date(a.occurred_start).getTime()
   })
 
   const totalMatched = sorted.length
   const items = sorted.slice(offset, offset + limit)
   const nextOffset = offset + limit < totalMatched ? offset + limit : null
-  return { items, total_matched: totalMatched, next_offset: nextOffset }
+  // `truncated` mirrors the real endpoint's slab flag; the mock dataset is
+  // far below the 2000-row slab cap, so it is always false here.
+  return { items, total_matched: totalMatched, next_offset: nextOffset, truncated: false }
 }
 
 // GET /api/memory/banks/:bank/tags — usage counts over the same unit set
