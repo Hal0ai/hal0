@@ -10,11 +10,16 @@
 // Data: window.__hal0UseBankGraph(bank, {type, q}) for the node/edge slab,
 // capped client-side at 120 nodes by salience (degree×type_weight — same
 // math as the backend's degree_by_node: sum of MemV2.LINK_WEIGHT over each
-// node's incident edges). Real memory-graph link types are
-// temporal/semantic/entity; causal/cooccurrence never fire here (they only
-// ever appeared in the prototype's own mock graph) — the lens button row is
-// derived from the types actually present in the loaded slab, not a fixed
-// set, so no dead lens buttons render.
+// node's incident edges). Real memory-graph link types verified live
+// (Playwright + curl against a production bank, 2026-08-21):
+// temporal/semantic/entity/caused_by — CORRECTION of the prior claim that
+// causal-family links "never fire here": `caused_by` is the real wire name
+// for that relationship and does appear in real payloads (see
+// memory-v2-shared.jsx's LINK_COLORS/LINK_LABEL/LINK_WEIGHT). `causal` and
+// `cooccurrence` (the prototype's own spellings/extra type) still haven't
+// been seen in any live payload so far. The lens button row is derived from
+// the types actually present in the loaded slab, not a fixed set, so no
+// dead lens buttons render regardless of which of these actually show up.
 //
 // Window-globals contract: reads window.MemV2 (C1) at render time;
 // publishes window.MemV2WebGraph the same way.
@@ -163,7 +168,10 @@ function WebGraph({ bank, sel, setSel, filters }) {
     })
     const ns = shown.map((n) => ({ id: _nidWeb(n), topic: n.data.topic }))
     const ls = links.map((l) => ({ source: l.s, target: l.d, t: l.t }))
-    const strengthOf = (t) => (t === 'causal' ? 0.9 : t === 'cooccurrence' ? 0.25 : t === 'temporal' ? 0.6 : 0.5)
+    // caused_by is the real wire spelling of the causal relationship
+    // (post-smoke correction, see the file header) — same pull strength.
+    const strengthOf = (t) =>
+      t === 'causal' || t === 'caused_by' ? 0.9 : t === 'cooccurrence' ? 0.25 : t === 'temporal' ? 0.6 : 0.5
     const sim = d3
       .forceSimulation(ns)
       .force('link', d3.forceLink(ls).id((n) => n.id).distance(46).strength((l) => strengthOf(l.t)))
