@@ -90,6 +90,45 @@ class TestKfdPresent:
             node.chmod(0o600)
 
 
+class TestKfdStatusIdentityRules:
+    """#1953 — which identity the probe answers for, pinned explicitly.
+
+    The first cut short-circuited ``uid == 0 -> KFD_OK`` on the theory that
+    root always bypasses DAC. It does not: root bypasses only with
+    CAP_DAC_OVERRIDE, and a hardened container drops it. CI runs in exactly
+    such a container, so an unopenable node was reported usable — failing
+    OPEN, into the poisoned Vulkan lane this guard exists to block.
+    """
+
+    def test_asking_about_this_process_consults_the_os_even_when_root(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """No uid-0 short-circuit for the CURRENT process: ask os.access.
+
+        Simulated rather than requiring a root test runner: pretend to be uid
+        0 while os.access reports the denial a capability-dropped container
+        would produce.
+        """
+        node = tmp_path / "kfd"
+        node.write_text("")
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.setattr(os, "access", lambda *a, **k: False)
+        assert kfd_status(str(node), for_uid=None) == KFD_NOT_OPENABLE
+        assert kfd_status(str(node), for_uid=0) == KFD_NOT_OPENABLE
+
+    def test_asking_about_a_different_root_identity_still_assumes_override(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The slot container's root is not this process — we cannot probe it,
+        so the usual DAC override is assumed. That is the whole point of the
+        runner-identity parameter."""
+        node = tmp_path / "kfd"
+        node.write_text("")
+        monkeypatch.setattr(os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(os, "access", lambda *a, **k: False)
+        assert kfd_status(str(node), for_uid=0) == KFD_OK
+
+
 class TestHostIsAmdGpu:
     def test_true_when_the_amdgpu_module_dir_exists(self, tmp_path) -> None:
         assert host_is_amd_gpu(str(tmp_path)) is True

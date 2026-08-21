@@ -454,8 +454,7 @@ def require_kfd_for_gpu_slot(
         )
         return
     preamble = (
-        f"slot {slot_name!r} (device={device}) needs the ROCm compute node "
-        f"{kfd_path}. {why} "
+        f"slot {slot_name!r} (device={device}) needs the ROCm compute node {kfd_path}. {why} "
     )
     if status == KFD_NOT_OPENABLE:
         target = resolve_kfd_target_gid()
