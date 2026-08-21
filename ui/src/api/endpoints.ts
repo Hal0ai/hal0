@@ -187,6 +187,10 @@ export const ENDPOINTS = {
   // to write into; `source` is REJECTED by the server (stamped from the
   // X-hal0-Agent header instead, so callers can't impersonate).
   memoryAdd: '/api/memory/add',
+  // Audited, gated delete — routes/memory.py's memory_delete. Body:
+  // {ids: [...], dataset?}; a per-fact id is accepted as an alias for its
+  // owning document.
+  memoryDelete: '/api/memory/delete',
   // ── Hindsight engine admin surface (memory_admin routes) ─────────
   // Fail-soft engine card + allowlisted bank-scoped passthrough.
   memoryEngine: '/api/memory/engine',

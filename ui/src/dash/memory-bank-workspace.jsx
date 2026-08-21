@@ -4,8 +4,8 @@
 //
 // Ported from the design handoff's prototype/app-b.jsx (BankWorkspace,
 // SourcesPanel, TopicChips) + prototype/explore.jsx (DensityStrip,
-// FactList, AtlasPanel — EgoGraph/LocalGraph/Inspector land in later
-// commits of this same task). Server-side filtering replaces the
+// FactList, AtlasPanel, Inspector — EgoGraph/LocalGraph land in the last
+// commit of this same task). Server-side filtering replaces the
 // prototype's client-side `facts.filter(...)`: every filter (search, type,
 // tag, when-brush, source focus, sort, paging) is driven through
 // `useBankUnits`'s params instead of filtering a fully-loaded mock array.
@@ -13,10 +13,30 @@
 // Window-globals contract: no ES imports across dash/*.jsx — reads
 // window.MemV2 (C1), window.MemV2BankBar (C3) at render time; publishes
 // window.MemV2Workspace the same way.
+//
+// Curation constraints (expert-verified, hindsight-api 0.8.4 — binding):
+//   - observations are NOT curatable — Inspector hides Edit/Invalidate for
+//     fact_type === 'observation' (Delete still applies to any fact_type).
+//   - no per-fact tag editing exists upstream — no tag editor anywhere here.
+//   - never send an empty PATCH body (422) — Curate's Save button requires
+//     the draft to actually differ from the current text.
+//   - the revert flow lists archived facts via `state=invalidated` on
+//     useBankUnits (they vanish from the default listing) — Inspector
+//     doesn't need a fallback fetch for this: useUnitCurate's PATCH
+//     response IS the updated unit, so invalidate/revert just replace the
+//     locally-held fact with that response instead of waiting on a refetch.
+//   - the history endpoint 404s for non-observation facts (already
+//     normalized to an empty history by B1's useUnitHistory) — the History
+//     toggle button only renders for observation facts, so it's never
+//     offered where it can't answer.
 
 const { useState: useStateWorkspace, useEffect: useEffectWorkspace, useRef: useRefWorkspace } = React
 
 const PAGE_SIZE = 10
+
+function memToastWs(msg, kind = 'info') {
+  if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind)
+}
 
 // ── when-filter: readable histogram + presets + drag handles ──────────────
 // Ported near-verbatim from the prototype; `ts` is the real
@@ -363,6 +383,315 @@ function FactList({ units, sel, setSel, footer }) {
   )
 }
 
+// ── inspector ─────────────────────────────────────────────────────────────
+// `unitsPage` is the currently-displayed page of units (from BankWorkspace's
+// own useBankUnits fetch) — used to resolve the selected fact's data without
+// a second "get unit by id" endpoint (none exists). After any curate
+// mutation, `useUnitCurate`'s PATCH response IS the updated unit, so it
+// replaces the resolved fact locally instead of waiting on a refetch — this
+// is also how a just-invalidated fact (which vanishes from the default
+// valid-only listing) stays viewable/revertable without a fallback fetch.
+function Inspector({ bank, sel, setSel, unitsPage }) {
+  const { FACT_COLORS, Icon } = window.MemV2
+  const useUnitCurate = window.__hal0UseUnitCurate
+  const useUnitHistory = window.__hal0UseUnitHistory
+  const useMemoryDelete = window.__hal0UseMemoryDelete
+
+  const [override, setOverride] = useStateWorkspace(null)
+  const [mode, setMode] = useStateWorkspace(null) // 'curate' | 'invalidate' | 'delete' | null
+  const [draft, setDraft] = useStateWorkspace('')
+  const [reason, setReason] = useStateWorkspace('')
+  const [showHistory, setShowHistory] = useStateWorkspace(false)
+  useEffectWorkspace(() => {
+    setOverride(null)
+    setMode(null)
+    setReason('')
+    setShowHistory(false)
+  }, [sel])
+
+  const fromPage = (unitsPage || []).find((u) => u.id === sel)
+  const f = override || fromPage
+
+  const curate = useUnitCurate ? useUnitCurate(bank) : { mutate: () => {}, isPending: false }
+  const del = useMemoryDelete ? useMemoryDelete() : { mutate: () => {}, isPending: false }
+  const isObservation = f?.fact_type === 'observation'
+  // History 404s for non-observation facts (normalized to an empty history
+  // by B1's useUnitHistory) — only fetch/offer it where it can answer.
+  const history = useUnitHistory
+    ? useUnitHistory(bank, sel, { enabled: isObservation && showHistory })
+    : { data: null, isLoading: false }
+
+  if (!f) {
+    return (
+      <div className="mv-card mv-insp" data-testid="mv-inspector">
+        <div className="mv-empty" style={{ padding: 48 }}>
+          fact not found — it may have left the current page
+        </div>
+      </div>
+    )
+  }
+
+  const isInvalidated = f.state === 'invalidated'
+
+  const submitCurate = () => {
+    const text = draft.trim()
+    // Never send an empty PATCH body — require ≥1 changed field.
+    if (!text || text === f.text) {
+      memToastWs('Nothing changed', 'warn')
+      return
+    }
+    curate.mutate(
+      { id: f.id, body: { text } },
+      {
+        onSuccess: (updated) => {
+          setOverride(updated)
+          setMode(null)
+          memToastWs('Fact updated', 'ok')
+        },
+        onError: (err) => memToastWs(`Update failed: ${err.message}`, 'err'),
+      },
+    )
+  }
+  const submitInvalidate = () => {
+    curate.mutate(
+      { id: f.id, body: { state: 'invalidated', reason: reason || undefined } },
+      {
+        onSuccess: (updated) => {
+          setOverride(updated)
+          setMode(null)
+          memToastWs('Fact invalidated — excluded from recall', 'warn')
+        },
+        onError: (err) => memToastWs(`Invalidate failed: ${err.message}`, 'err'),
+      },
+    )
+  }
+  const submitRevert = () => {
+    curate.mutate(
+      { id: f.id, body: { state: 'valid' } },
+      {
+        onSuccess: (updated) => {
+          setOverride(updated)
+          memToastWs('Fact restored to recall', 'ok')
+        },
+        onError: (err) => memToastWs(`Revert failed: ${err.message}`, 'err'),
+      },
+    )
+  }
+  const submitDelete = () => {
+    del.mutate(
+      { ids: [f.id], dataset: bank },
+      {
+        onSuccess: () => {
+          memToastWs('Fact deleted — audited', 'ok')
+          setSel(null)
+        },
+        onError: (err) => memToastWs(`Delete failed: ${err.message}`, 'err'),
+      },
+    )
+  }
+
+  return (
+    <div className="mv-card mv-insp" data-testid="mv-inspector">
+      {isInvalidated && (
+        <div className="mvi-banner warn">
+          <span>invalidated — excluded from recall · reversible</span>
+          <span style={{ flex: 1 }} />
+          <button
+            className="mv-btn"
+            data-testid="mv-insp-revert"
+            style={{ padding: '1px 9px', fontSize: 10.5 }}
+            onClick={submitRevert}
+            disabled={curate.isPending}
+          >
+            Revert
+          </button>
+        </div>
+      )}
+      <div className="mvi-sec">
+        <div className="mvi-top">
+          <span
+            className="mv-tag"
+            style={{ color: FACT_COLORS[f.fact_type], border: `1px solid color-mix(in srgb, ${FACT_COLORS[f.fact_type]} 35%, transparent)` }}
+          >
+            ● {f.fact_type}
+          </span>
+          {(f.tags || []).map((t) => (
+            <span key={t} className="mv-tag" style={{ color: 'var(--fg-3)', border: '1px solid var(--line)' }}>
+              {t}
+            </span>
+          ))}
+          {isObservation && (
+            <button
+              className="mv-btn"
+              data-testid="mv-insp-history"
+              style={{ padding: '0 7px', fontSize: 10 }}
+              onClick={() => setShowHistory((v) => !v)}
+            >
+              <Icon name="clock" size={11} /> History
+            </button>
+          )}
+          <span className="sp" />
+          <button className="mvi-x" onClick={() => setSel(null)} aria-label="close">
+            <Icon name="close" size={13} />
+          </button>
+        </div>
+        {mode === 'curate' ? (
+          <div className="mvi-form">
+            <textarea
+              className="mv-input"
+              style={{ minHeight: 84, fontFamily: 'var(--geist,sans-serif)', resize: 'vertical', lineHeight: 1.5 }}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+            />
+            <input className="mv-input" placeholder="why? — recorded in history" value={reason} onChange={(e) => setReason(e.target.value)} />
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span className="mini">creates a new revision · original stays in history</span>
+              <span style={{ flex: 1 }} />
+              <button className="mv-btn" onClick={() => setMode(null)}>
+                Cancel
+              </button>
+              <button className="mv-btn primary" onClick={submitCurate} disabled={curate.isPending}>
+                {curate.isPending ? 'Saving…' : 'Save revision'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p
+            className="fulltxt"
+            style={isInvalidated ? { color: 'var(--fg-4)', textDecoration: 'line-through', textDecorationColor: 'var(--fg-5)' } : undefined}
+          >
+            {f.text}
+          </p>
+        )}
+      </div>
+      <div className="mvi-sec">
+        <div className="mv-kv num">
+          <span className="k">when</span>
+          <span className="v">{String(f.occurred_start || '').replace('T', ' · ')}</span>
+          <span className="k">unit id</span>
+          <span className="v" style={{ color: 'var(--fg-4)' }}>
+            {f.id}
+          </span>
+          <span className="k">entities</span>
+          <span className="v">{(f.entities || []).length ? f.entities.join(' · ') : '—'}</span>
+          <span className="k">salience</span>
+          <span className="v">
+            {f.salience} <span style={{ color: 'var(--fg-4)' }}>weighted degree</span>
+          </span>
+        </div>
+      </div>
+      <div className="mvi-sec">
+        <div className="mvi-h">
+          Neighbourhood
+          <span className="ct num"> · {Object.values(f.link_counts_by_type || {}).reduce((a, b) => a + b, 0)} links</span>
+        </div>
+        <div className="mv-empty" style={{ padding: 24 }}>
+          renders in the ego focus view (final commit of this task)
+        </div>
+      </div>
+      {isObservation && showHistory && (
+        <div className="mvi-sec">
+          <div className="mvi-hist">
+            {history.isLoading ? (
+              <div className="mv-empty" style={{ padding: 14 }}>
+                loading…
+              </div>
+            ) : (
+              <>
+                {(history.data?.events || []).map((h, i) => (
+                  <div key={i} className="mvi-ev">
+                    <span className={'nd ' + (h.state || '')} />
+                    <div className="body">
+                      <div className="top">
+                        <b>{h.state || 'event'}</b>
+                        <span className="at num">{String(h.at || '').replace('T', ' · ')}</span>
+                      </div>
+                      {h.reason && <div className="note">{h.reason}</div>}
+                    </div>
+                  </div>
+                ))}
+                {(history.data?.events || []).length === 0 && (
+                  <div className="mv-empty" style={{ padding: 14 }}>
+                    no history yet
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+      {mode === 'invalidate' && (
+        <div className="mvi-sec mvi-confirm">
+          <p>
+            Soft-invalidate — the fact stops being recalled or injected but stays in the bank. Reversible from here; no
+            approval gate.
+          </p>
+          <input className="mv-input" placeholder="why? — recorded in history" value={reason} onChange={(e) => setReason(e.target.value)} />
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button className="mv-btn" onClick={() => setMode(null)}>
+              Cancel
+            </button>
+            <button
+              className="mv-btn"
+              style={{ color: 'var(--warn)', borderColor: 'color-mix(in srgb, var(--warn) 35%, transparent)' }}
+              onClick={submitInvalidate}
+              disabled={curate.isPending}
+            >
+              Invalidate
+            </button>
+          </div>
+        </div>
+      )}
+      {mode === 'delete' && (
+        <div className="mvi-sec mvi-confirm danger">
+          <p>
+            Permanent — removed from recall and the graph, with a durable audit row (actor, target, outcome). Prefer
+            Invalidate if the fact is merely wrong.
+          </p>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button className="mv-btn" onClick={() => setMode(null)}>
+              Cancel
+            </button>
+            <button className="mv-btn danger" onClick={submitDelete} disabled={del.isPending}>
+              Delete fact
+            </button>
+          </div>
+        </div>
+      )}
+      {!mode && (
+        <div className="mvi-sec mvi-actions">
+          {!isObservation && (
+            <button
+              className="mv-btn"
+              data-testid="mv-insp-edit"
+              onClick={() => {
+                setDraft(f.text)
+                setMode('curate')
+              }}
+            >
+              <Icon name="edit" size={12} /> Curate
+            </button>
+          )}
+          {!isObservation && !isInvalidated && (
+            <button className="mv-btn" data-testid="mv-insp-invalidate" style={{ color: 'var(--warn)' }} onClick={() => setMode('invalidate')}>
+              Invalidate
+            </button>
+          )}
+          {isObservation && (
+            <span className="mini" style={{ color: 'var(--fg-4)' }}>
+              observations aren't curatable — derived patterns, not operator-editable
+            </span>
+          )}
+          <span className="sp" />
+          <button className="mv-btn danger" data-testid="mv-insp-delete" onClick={() => setMode('delete')}>
+            Delete
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function BankWorkspace({ bank, setBank, sel, setSel }) {
   const { FACT_COLORS } = window.MemV2
 
@@ -437,6 +766,28 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
     setQ('')
     setSrc(null)
   }
+
+  // Keyboard (spec'd, not in the prototype): ↑/↓ moves list selection
+  // (only meaningful in the list view — a no-op elsewhere since there's no
+  // ordered row set to move through), Esc closes the inspector.
+  useEffectWorkspace(() => {
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (sel) setSel(null)
+        return
+      }
+      if (view !== 'list' || pageUnits.length === 0) return
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        const idx = pageUnits.findIndex((u) => u.id === sel)
+        const delta = e.key === 'ArrowDown' ? 1 : -1
+        const next = idx === -1 ? 0 : Math.max(0, Math.min(pageUnits.length - 1, idx + delta))
+        setSel(pageUnits[next].id)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [sel, view, pageUnits.map((u) => u.id).join(',')])
 
   const anyFilter = q || topic || src || brush || !types.world || !types.experience || !types.observation
   const clearAll = () => {
@@ -545,45 +896,55 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
             ))}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
-          <div className="mv-card mv-fside" data-testid="mv-filter-card">
-            <div className="hd">
-              <span className="mv-eyebrow">Filters</span>
-              <span className="sp" />
-              {anyFilter && (
-                <button className="mv-btn" style={{ padding: '1px 8px', fontSize: 10.5 }} onClick={clearAll}>
-                  clear all
-                </button>
-              )}
-            </div>
-            <div className="fline">
-              <div className="mv-search">
-                <window.MemV2.Icon name="search" size={13} />
-                <input data-testid="mv-search" placeholder="search facts…" value={q} onChange={(e) => setQ(e.target.value)} />
+          {sel ? (
+            <Inspector bank={bank} sel={sel} setSel={setSel} unitsPage={pageUnits} />
+          ) : (
+            <div className="mv-card mv-fside" data-testid="mv-filter-card">
+              <div className="hd">
+                <span className="mv-eyebrow">Filters</span>
+                <span className="sp" />
+                {anyFilter && (
+                  <button className="mv-btn" style={{ padding: '1px 8px', fontSize: 10.5 }} onClick={clearAll}>
+                    clear all
+                  </button>
+                )}
               </div>
+              <div className="fline">
+                <div className="mv-search">
+                  <window.MemV2.Icon name="search" size={13} />
+                  <input data-testid="mv-search" placeholder="search facts…" value={q} onChange={(e) => setQ(e.target.value)} />
+                </div>
+              </div>
+              <div className="fline sec-div" style={{ flexWrap: 'wrap' }}>
+                {['world', 'experience', 'observation'].map((t) => (
+                  <button
+                    key={t}
+                    className={'mv-tf ' + (types[t] ? 'on' : 'off')}
+                    data-testid={`mv-type-${t}`}
+                    onClick={() => setTypes({ ...types, [t]: !types[t] })}
+                  >
+                    <span className="dot" style={{ background: FACT_COLORS[t] }} />
+                    {t} <span className="num" style={{ color: 'var(--fg-4)' }}>{typeCounts[t] ?? 0}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="fline sec-div" style={{ alignItems: 'flex-start' }}>
+                <DensityStrip ts={buckets} brush={brush} setBrush={setBrush} />
+              </div>
+              <AtlasPanel tags={tags} totalFacts={stats?.total_nodes ?? 0} onTag={setTopic} embed />
+              <TopicChips tags={tags} topic={topic} setTopic={setTopic} />
             </div>
-            <div className="fline sec-div" style={{ flexWrap: 'wrap' }}>
-              {['world', 'experience', 'observation'].map((t) => (
-                <button
-                  key={t}
-                  className={'mv-tf ' + (types[t] ? 'on' : 'off')}
-                  data-testid={`mv-type-${t}`}
-                  onClick={() => setTypes({ ...types, [t]: !types[t] })}
-                >
-                  <span className="dot" style={{ background: FACT_COLORS[t] }} />
-                  {t} <span className="num" style={{ color: 'var(--fg-4)' }}>{typeCounts[t] ?? 0}</span>
-                </button>
-              ))}
-            </div>
-            <div className="fline sec-div" style={{ alignItems: 'flex-start' }}>
-              <DensityStrip ts={buckets} brush={brush} setBrush={setBrush} />
-            </div>
-            <AtlasPanel tags={tags} totalFacts={stats?.total_nodes ?? 0} onTag={setTopic} embed />
-            <TopicChips tags={tags} topic={topic} setTopic={setTopic} />
-          </div>
+          )}
         </div>
       </div>
     </div>
   )
 }
 
-Object.assign(window, { MemV2Workspace: BankWorkspace, MemV2AtlasPanel: AtlasPanel, MemV2FactList: FactList, MemV2DensityStrip: DensityStrip })
+Object.assign(window, {
+  MemV2Workspace: BankWorkspace,
+  MemV2AtlasPanel: AtlasPanel,
+  MemV2FactList: FactList,
+  MemV2DensityStrip: DensityStrip,
+  MemV2Inspector: Inspector,
+})

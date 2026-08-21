@@ -10,6 +10,10 @@
 //   useMemoryAdd       — POST /api/memory/add (task C3 — Bank workspace Add-fact
 //                        modal; no pre-existing add-memory hook was found when
 //                        this was added, per the task brief's fallback)
+//   useMemoryDelete    — POST /api/memory/delete (task C4 — Inspector's audited
+//                        delete action; same situation as useMemoryAdd, no
+//                        pre-existing per-fact delete hook was found — only a
+//                        whole-bank useBankDelete existed)
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPost, apiPut } from '../client'
@@ -44,6 +48,37 @@ export function useMemoryAdd() {
       // Refresh the written bank's unit/stats/tag caches (falls back to a
       // broad memory invalidate if no dataset was given, matching the
       // server's own dataset-resolution fallback).
+      void qc.invalidateQueries({
+        queryKey: vars.dataset ? ['memory', 'banks', vars.dataset] : ['memory'],
+      })
+    },
+  })
+}
+
+// ── Delete memory item(s) ───────────────────────────────────────────────────
+//
+// routes/memory.py's memory_delete: body {ids: [...], dataset?}. `ids` are
+// document ids, but a per-fact id (metadata.fact_id — which is what a
+// Bank workspace unit id already is) is accepted as an alias and resolved
+// to its owning document (#1456). Audited — the backend wraps the call in
+// `record_action`, so this is the "audited + gated" delete the curation
+// constraints call for (as opposed to the reversible, no-gate invalidate,
+// which goes through useUnitCurate's PATCH instead).
+export interface MemoryDeleteBody {
+  ids: string[]
+  dataset?: string
+}
+
+export interface MemoryDeleteResponse {
+  deleted: number
+}
+
+export function useMemoryDelete() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: MemoryDeleteBody) =>
+      apiPost<MemoryDeleteResponse>(ENDPOINTS.memoryDelete, body as unknown as Record<string, unknown>),
+    onSuccess: (_d, vars) => {
       void qc.invalidateQueries({
         queryKey: vars.dataset ? ['memory', 'banks', vars.dataset] : ['memory'],
       })
