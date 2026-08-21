@@ -748,6 +748,54 @@ def test_regular_files_are_still_reconciled_alongside_symlinks(tmp_path: Path) -
     assert oct(outside.stat().st_mode & 0o7777) == oct(0o600)
 
 
+def test_glob_row_target_itself_a_symlinked_directory_is_never_dereferenced(
+    tmp_path: Path,
+) -> None:
+    """#1958 review finding 2 (Codex P1): the glob ROW'S OWN TARGET can be a link.
+
+    ``_is_or_is_under_symlink`` only guards children reached THROUGH a symlink
+    *below* ``row.target`` — it never checks ``row.target`` itself. But
+    ``Path.is_dir()`` FOLLOWS symlinks, so a row whose declared directory (e.g.
+    ``models/chat-templates``) is itself a symlink to an operator-managed tree
+    used to pass the ``is_dir()`` gate in ``_expand_row``, glob the link's REAL
+    children, and hand them to ``plan()``/``commit()`` as ordinary entries —
+    chowning/chmodding files that live outside hal0's declared tree entirely,
+    the exact thing the module docstring (#1739) promises never happens. The
+    symlinked directory itself must be reported (and skipped) exactly like a
+    non-glob row whose target is a symlink; nothing under it may enter the plan.
+    """
+    owner, group = _me()
+    real_dir = tmp_path / "external-templates"
+    real_dir.mkdir()
+    real_file = real_dir / "custom.jinja"
+    real_file.write_text("{{ x }}")
+    os.chmod(real_file, 0o600)
+    os.chmod(real_dir, 0o700)
+
+    linked_target = tmp_path / "models" / "chat-templates"
+    linked_target.parent.mkdir(parents=True)
+    linked_target.symlink_to(real_dir)
+
+    row = perms.PermRow(
+        linked_target, owner, group, 0o2775, glob="*.jinja", child_mode=0o644, role="chat-templates"
+    )
+    pl = perms.plan([row])
+
+    # Only the (symlinked) target itself is planned — no child of the real
+    # directory it points at ever entered the plan.
+    assert [d.path for d in pl.diffs] == [linked_target]
+    assert pl.diffs[0].before.is_symlink is True
+    assert pl.changed is False
+
+    rows = perms.audit_rows(pl)
+    assert rows[0]["status"] == "symlink"
+
+    applied = perms.commit(pl)
+    assert applied == []
+    assert oct(real_dir.stat().st_mode & 0o7777) == oct(0o700), "symlink target dir was chmod'd"
+    assert oct(real_file.stat().st_mode & 0o7777) == oct(0o600), "symlinked dir's child was chmod'd"
+
+
 def test_upstreams_toml_is_not_world_readable(tmp_hal0_home: str) -> None:
     """upstreams.toml drops the world bit (ADR-0002, Option C item 3).
 
@@ -803,6 +851,15 @@ _HAL0_API_WRITE_LABELS = [
     "registry/",
     "slots/",
     "models/",
+    # four more write paths surfaced during #1895's enumeration but
+    # deliberately left out of that PR to keep its diff minimal (#1938):
+    # image-gen PNG cache, the dashboard layout file, the durable
+    # update-job snapshot store, and the custom chat-template store nested
+    # under the default model store.
+    "images/cache/",
+    "dashboard-layout.json",
+    "update-jobs/",
+    "models/chat-templates/",
 ]
 
 
@@ -821,6 +878,10 @@ def _resolve_hal0_api_write_target(label: str) -> Path:
         "registry/": var_lib / "registry",
         "slots/": var_lib / "slots",
         "models/": var_lib / "models",
+        "images/cache/": var_lib / "images" / "cache",
+        "dashboard-layout.json": var_lib / "dashboard-layout.json",
+        "update-jobs/": var_lib / "update-jobs",
+        "models/chat-templates/": var_lib / "models" / "chat-templates",
     }
     return targets[label]
 

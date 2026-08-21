@@ -47,6 +47,7 @@ from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config import paths
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import Hal0Config
+from hal0.install.perms import ensure_shared_dir
 from hal0.release.policy import ReleaseKind
 from hal0.updater import (
     Updater,
@@ -236,7 +237,10 @@ def _persist_job(job: dict[str, Any]) -> None:
         return
     path = _job_file(str(job_id))
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # update-jobs/ is declared 2775; a bare mkdir under the daemon's
+        # UMask=0022 births 2755 and re-drifts `doctor perms` after every
+        # update job (#1896 class, precedent: registry/pull.py persist_pull_job).
+        ensure_shared_dir(path.parent)
         fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         tmp_path = Path(tmp_str)
         try:

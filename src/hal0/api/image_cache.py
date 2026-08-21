@@ -33,6 +33,7 @@ import uuid
 from pathlib import Path
 
 from hal0.config import paths
+from hal0.install.perms import ensure_shared_dir
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +56,10 @@ _UUID_RE = re.compile(r"^[0-9a-fA-F-]{8,40}$")
 def cache_dir() -> Path:
     """Return ``/var/lib/hal0/images/cache``, creating it on demand."""
     p = paths.var_lib() / "images" / "cache"
-    p.mkdir(parents=True, exist_ok=True)
+    # images/cache/ is declared 2775; a bare mkdir under the daemon's
+    # UMask=0022 births 2755 and re-drifts `doctor perms` after every image
+    # generation (#1896 class, precedent: registry/pull.py persist_pull_job).
+    ensure_shared_dir(p)
     return p
 
 
