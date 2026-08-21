@@ -488,12 +488,21 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
         r["salience"] = salience_by_node.get(rid, (0, 0.0))[1]
 
     if sort == "salience":
-        # Scored rows first (highest salience first, ties by recency);
-        # unscored (out-of-slab, salience is None) rows after, stable by
-        # recency among themselves rather than an arbitrary/false ranking.
+        # Scored rows first (highest salience first, ties newest-first);
+        # unscored (out-of-slab, salience is None) rows after, also
+        # newest-first among themselves rather than an arbitrary/false
+        # ranking. final-review M2: the scored half used to tie-break
+        # oldest-first (`_unit_ts(r)` ascending, unnegated) while the
+        # unscored half two lines down used `reverse=True` — the two
+        # disagreed with each other and with this docstring. `_unit_ts`
+        # returns an ISO string, which can't be negated for a single-key
+        # sort, so tie-break via two stable sorts instead: sort newest-first
+        # by timestamp, then a second stable sort by -salience preserves
+        # that newest-first order among any rows tied on salience.
         scored = [r for r in kept if r["salience"] is not None]
         unscored = [r for r in kept if r["salience"] is None]
-        scored.sort(key=lambda r: (-r["salience"], _unit_ts(r)))
+        scored.sort(key=lambda r: _unit_ts(r), reverse=True)
+        scored.sort(key=lambda r: -r["salience"])
         unscored.sort(key=lambda r: _unit_ts(r), reverse=True)
         kept = scored + unscored
     else:

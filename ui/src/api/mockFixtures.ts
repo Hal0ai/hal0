@@ -1164,10 +1164,16 @@ function parseUnitsQuery(url: string): URLSearchParams {
 }
 
 // GET /api/memory/banks/:bank/units — q/tags/type/from/to/documentId filter,
-// sort (default: recency desc; 'salience' or 'oldest'), limit/offset paging.
+// sort (default: recency desc; 'salience' — the mock only ever supports
+// those two, per the fallback comment at the sort call site below), limit/
+// offset paging.
 function buildBankUnits(url: string, match: RegExpMatchArray) {
   const bank = bankFrom(match)
-  if (bank === 'empty') return { items: [], total_matched: 0, next_offset: null }
+  // final-review M3: match the main return's shape exactly (including
+  // `truncated`) rather than a hand-trimmed subset — a genuinely empty bank
+  // is never truncated, but the field still needs to exist so callers don't
+  // have to special-case "empty bank" vs. "no truncation".
+  if (bank === 'empty') return { items: [], total_matched: 0, next_offset: null, truncated: false }
 
   const params = parseUnitsQuery(url)
   const q = (params.get('q') ?? '').trim().toLowerCase()
@@ -1202,7 +1208,10 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
   // work as an explicit override.
   const state = params.get('state')
   const sort = params.get('sort') ?? 'recency'
-  const limit = Math.min(Math.max(Number(params.get('limit') ?? 20) || 20, 1), 100)
+  // final-review M5: match the server's clamp exactly (memory_admin.py's
+  // bank_units route: `max(1, min(limit, 200))`) — moot today since
+  // PAGE_SIZE is 10, but a latent drift otherwise.
+  const limit = Math.min(Math.max(Number(params.get('limit') ?? 20) || 20, 1), 200)
   const offset = Math.max(Number(params.get('offset') ?? 0) || 0, 0)
 
   let rows: UnitRow[] = buildUnitRows(MEM_FACTS)
