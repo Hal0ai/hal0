@@ -115,8 +115,29 @@ describe('buildBankUnits (mock fixture)', () => {
 
   it('sorts by salience descending when requested', () => {
     const page = unitsFor('primary', 'sort=salience&limit=100')
-    const saliences = page.items.map((r) => r.salience as number)
+    // Scored units only — out-of-slab (salience: null) units are covered by
+    // their own dedicated test below (they sort after every scored unit,
+    // not by a numeric comparison).
+    const saliences = page.items.map((r) => r.salience).filter((s): s is number => s != null)
     for (let i = 1; i < saliences.length; i++) expect(saliences[i]).toBeLessThanOrEqual(saliences[i - 1])
+  })
+
+  it('out-of-slab units (salience: null) render null, not a score, and sort after every scored unit (task C7, backend A3b)', () => {
+    const page = unitsFor('primary', 'limit=100')
+    const f2 = page.items.find((r) => r.id === 'f2')
+    const f3 = page.items.find((r) => r.id === 'f3')
+    expect(f2?.salience).toBeNull()
+    expect(f3?.salience).toBeNull()
+    // empty link_counts_by_type too — no scored edges for an out-of-slab unit.
+    expect(f2?.link_counts_by_type).toEqual({})
+    expect(f3?.link_counts_by_type).toEqual({})
+
+    const sorted = unitsFor('primary', 'sort=salience&limit=100')
+    const saliences = sorted.items.map((r) => r.salience)
+    const firstNullIdx = saliences.findIndex((s) => s == null)
+    expect(firstNullIdx).toBeGreaterThan(-1)
+    // every null comes after every non-null — no scored unit trails a null.
+    expect(saliences.slice(firstNullIdx).every((s) => s == null)).toBe(true)
   })
 
   it('paginates with limit/offset and a correct next_offset', () => {

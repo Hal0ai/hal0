@@ -628,7 +628,10 @@ export interface BankUnitRow {
   tags?: string[]
   document_id?: string | null
   state: 'valid' | 'invalidated' | string
-  salience: number
+  // task C7 (backend A3b): null for a unit that fell outside the
+  // salience-scored slab (e.g. a large bank's capped graph) — no ranking
+  // to offer, not a zero score.
+  salience: number | null
   link_counts_by_type: Record<string, number>
 }
 
