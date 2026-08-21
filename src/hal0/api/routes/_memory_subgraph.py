@@ -168,3 +168,14 @@ class GraphCache:
     def put(self, key: str, value: Any) -> None:
         self._evict_if_full(key)
         self._store[key] = (self._clock(), value)
+
+    def clear_bank(self, bank_id: str) -> None:
+        """Drop every cached slab for ``bank_id`` (cache keys are ``f"{bank_id}:..."``).
+
+        Called after a mutation that changes what the next ``peek`` should
+        return (e.g. a curate PATCH) — otherwise a caller within the TTL
+        window keeps seeing the pre-mutation slab. See PR #1987 review M5.
+        """
+        prefix = f"{bank_id}:"
+        for key in [k for k in self._store if k.startswith(prefix)]:
+            self._store.pop(key, None)

@@ -592,7 +592,7 @@ const MEM_ENTITIES: { id: string; label: string; kind: string }[] = [
   { id: 'igpu', label: 'Radeon 8060S', kind: 'device' },
 ]
 
-const MEM_FACTS: MemFact[] = [
+export const MEM_FACTS: MemFact[] = [
   // setup
   { id: 'f1', date: '2026-04-28T10:12', topic: 'setup', type: 'experience', label: 'Installed hal0 on Debian 13', text: 'Installed hal0 on Debian 13 via the one-line installer; lemond came up first try.', ents: ['box', 'lemond'] },
   { id: 'f2', date: '2026-04-28T11:40', topic: 'setup', type: 'world', label: 'Proxmox iGPU passthrough', text: 'Configured Proxmox LXC privileged passthrough for the Radeon 8060S iGPU and XDNA NPU.', ents: ['proxmox', 'igpu', 'npu', 'box'] },
@@ -1152,10 +1152,13 @@ function parseUnitsQuery(url: string): URLSearchParams {
 }
 
 // GET /api/memory/banks/:bank/units — q/tags/type/from/to/documentId filter,
-// sort (default: recency desc; 'salience' or 'oldest'), limit/offset paging.
+// sort (default: recency desc; 'salience' — the only other value the server
+// accepts, memory_admin.bank_units 422s on anything else), limit/offset
+// paging. `truncated` is always false here: the mock dataset never reaches
+// the server's 2000-row slab cap (see PR #1987 review B2/M10).
 function buildBankUnits(url: string, match: RegExpMatchArray) {
   const bank = bankFrom(match)
-  if (bank === 'empty') return { items: [], total_matched: 0, next_offset: null }
+  if (bank === 'empty') return { items: [], total_matched: 0, next_offset: null, truncated: false }
 
   const params = parseUnitsQuery(url)
   const q = (params.get('q') ?? '').trim().toLowerCase()
@@ -1204,17 +1207,14 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
 
   const sorted = [...rows].sort((a, b) => {
     if (sort === 'salience') return b.salience - a.salience
-    if (sort === 'oldest') {
-      return new Date(a.occurred_start).getTime() - new Date(b.occurred_start).getTime()
-    }
-    // 'recency' (default): newest first
+    // 'recency' (default, and the fallback for any other value): newest first
     return new Date(b.occurred_start).getTime() - new Date(a.occurred_start).getTime()
   })
 
   const totalMatched = sorted.length
   const items = sorted.slice(offset, offset + limit)
   const nextOffset = offset + limit < totalMatched ? offset + limit : null
-  return { items, total_matched: totalMatched, next_offset: nextOffset }
+  return { items, total_matched: totalMatched, next_offset: nextOffset, truncated: false }
 }
 
 // GET /api/memory/banks/:bank/tags — usage counts over the same unit set

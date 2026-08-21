@@ -210,3 +210,91 @@ def test_units_transport_failure_503():
         r = c.get("/api/memory/banks/shared/units")
         assert r.status_code == 503
         assert r.json()["error"]["code"] == "memory.engine_unreachable"
+
+
+# ── PR #1987 review B3: limit=0 / limit<0 pagination clamp ─────────────────────
+
+
+def test_units_limit_zero_does_not_loop_forever():
+    """limit=0 used to make next_offset == offset, so a client following
+
+    next_offset would loop forever. max(1, ...) means limit=0 behaves like
+    limit=1: a real page is returned and next_offset advances past offset.
+    """
+    _reset_cache()
+    app, _rec = _app_with()
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"limit": 0, "offset": 0})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert len(body["items"]) == 1
+        assert body["next_offset"] != 0
+        assert body["next_offset"] == 1
+
+
+def test_units_negative_limit_does_not_drop_last_row():
+    """limit=-1 used to slice kept[offset : offset - 1], silently dropping
+
+    the last matching row via negative-index slicing. Clamped to 1.
+    """
+    _reset_cache()
+    app, _rec = _app_with()
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"limit": -1, "offset": 0})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert len(body["items"]) == 1
+
+
+def test_units_limit_clamped_to_200_ceiling():
+    _reset_cache()
+    app, _rec = _app_with()
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"limit": 99999})
+        assert r.status_code == 200, r.text
+        # only 4 rows exist upstream, but this pins the clamp doesn't reject
+        # the request outright — total_matched proves the full slab was kept.
+        assert r.json()["total_matched"] == 4
+
+
+# ── PR #1987 review B2: truncated slab signal ───────────────────────────────────
+
+
+def test_units_truncated_false_under_the_2000_row_slab():
+    _reset_cache()
+    app, _rec = _app_with()
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units")
+        assert r.status_code == 200, r.text
+        assert r.json()["truncated"] is False
+
+
+def test_units_truncated_true_at_the_2000_row_slab():
+    _reset_cache()
+    big_rows = [{"id": f"u{i}", "fact_type": "episodic", "date": "2026-01-01"} for i in range(2000)]
+    app, _rec = _app_with(rows=big_rows, graph={"nodes": [], "edges": []})
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"limit": 5})
+        assert r.status_code == 200, r.text
+        assert r.json()["truncated"] is True
+
+
+# ── PR #1987 review M4: malformed int query params 422, not 500 ────────────────
+
+
+def test_units_limit_abc_422_not_500():
+    _reset_cache()
+    app, _rec = _app_with()
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"limit": "abc"})
+        assert r.status_code == 422
+        assert r.json()["error"]["code"] == "memory.invalid_query"
+
+
+def test_units_offset_abc_422_not_500():
+    _reset_cache()
+    app, _rec = _app_with()
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"offset": "abc"})
+        assert r.status_code == 422
+        assert r.json()["error"]["code"] == "memory.invalid_query"

@@ -582,7 +582,9 @@ export interface BankUnitsParams {
   // curation inspector's revert flow passes `state=invalidated` to list
   // them back in.
   state?: string
-  sort?: string
+  // Server (memory_admin.bank_units) only accepts these two — anything else
+  // 422s with memory.invalid_query. See PR #1987 review M10.
+  sort?: 'recency' | 'salience'
   limit?: number
   offset?: number
 }
@@ -628,6 +630,11 @@ export interface BankUnitsPage {
   items: BankUnitRow[]
   total_matched: number
   next_offset: number | null
+  // True when the server's 2000-row upstream slab clipped the match set —
+  // total_matched/paging are only accurate within that slab, and under
+  // sort=salience the ranking is against a partial graph too. See PR #1987
+  // review B2.
+  truncated: boolean
 }
 
 export function useBankUnits(bank: string | null, params: BankUnitsParams = {}) {

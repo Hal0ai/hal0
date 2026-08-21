@@ -115,6 +115,22 @@ def test_graph_cache_peek_put():
     assert cache.peek("k") is None  # expired
 
 
+def test_graph_cache_clear_bank_drops_only_that_banks_keys():
+    """PR #1987 review M5: clear_bank is what the curate PATCH handler calls
+
+    post-forward so a units/subgraph GET within the TTL never serves a
+    pre-mutation slab for the bank that was just edited.
+    """
+    cache = sg.GraphCache()
+    cache.put("shared:memories::", {"nodes": [1]})
+    cache.put("shared:entities::", {"nodes": [2]})
+    cache.put("other:memories::", {"nodes": [3]})
+    cache.clear_bank("shared")
+    assert cache.peek("shared:memories::") is None
+    assert cache.peek("shared:entities::") is None
+    assert cache.peek("other:memories::") == {"nodes": [3]}
+
+
 # ── Task 3: composed route ───────────────────────────────────────────────────
 
 BIG = {
@@ -181,6 +197,22 @@ def test_subgraph_bad_kind_and_mode_422():
         assert r.json()["error"]["code"] == "memory.invalid_query"
         r2 = c.get("/api/memory/banks/shared/graph/subgraph", params={"mode": "bogus"})
         assert r2.status_code == 422
+
+
+def test_subgraph_limit_abc_422_not_500():
+    """PR #1987 review M4: a malformed int param used to escape as an
+
+    unhandled ValueError -> 500 instead of the same 422 every other invalid
+    query on this endpoint already gets.
+    """
+    _reset_cache()
+    rec = _Recorder()
+    rec.respond("GET", "/v1/default/banks/shared/graph", 200, BIG)
+    app = _build_app(_HindsightStubProvider(_client_for(rec)))
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/graph/subgraph", params={"limit": "abc"})
+        assert r.status_code == 422
+        assert r.json()["error"]["code"] == "memory.invalid_query"
 
 
 def test_subgraph_ego_returns_connected_slice():

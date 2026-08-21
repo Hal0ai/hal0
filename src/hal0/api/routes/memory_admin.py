@@ -124,6 +124,25 @@ async def _read_body(request: Request) -> Any | None:
         raise BadRequest("request body must be valid JSON") from exc
 
 
+def _int_param(qp: Any, name: str, default: int) -> int:
+    """Parse an int query param, 422ing (not 500ing) on garbage input.
+
+    ``int(qp.get(name, default))`` lets a malformed value (``?limit=abc``)
+    escape as an unhandled ``ValueError`` all the way to
+    ``ServerErrorMiddleware`` → 500. Every other invalid-input path on these
+    composed endpoints (``sort=bogus``, ``kind=bogus``, ...) 422s with
+    ``memory.invalid_query``; this keeps int params on the same contract.
+    See PR #1987 review M4.
+    """
+    raw = qp.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise UnprocessableEntity(f"invalid {name}: {raw!r}", code="memory.invalid_query") from None
+
+
 async def _forward(
     client: Any,
     method: str,
@@ -271,7 +290,7 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
         raise UnprocessableEntity(f"invalid kind: {kind!r}", code="memory.invalid_query")
     if mode not in ("ego", "top"):
         raise UnprocessableEntity(f"invalid mode: {mode!r}", code="memory.invalid_query")
-    limit = min(int(qp.get("limit", 240)), 500)
+    limit = min(_int_param(qp, "limit", 240), 500)
 
     upstream = (
         f"/v1/default/banks/{bank_id}/entities/graph"
@@ -294,14 +313,14 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
         node = qp.get("node")
         if not node:
             raise UnprocessableEntity("ego mode requires ?node=", code="memory.invalid_query")
-        depth = min(int(qp.get("depth", 1)), 10)
+        depth = min(_int_param(qp, "depth", 1), 10)
         keep = _sg.ego_bfs(graph, node, depth=depth, limit=limit)
         if not keep:
             raise NotFound(f"node {node!r} not in bank graph", code="memory.node_not_found")
     else:
         by = qp.get("by") or ("degree" if kind == "entities" else "recency")
         ranked = _sg.rank_by_degree(graph) if by == "degree" else _sg.rank_by_recency(graph)
-        top_k = min(int(qp.get("top_k", 200)), 500)
+        top_k = min(_int_param(qp, "top_k", 200), 500)
         keep = set(ranked[: min(top_k, limit)])
 
     sub = _sg.induce_subgraph(graph, keep)
@@ -349,6 +368,16 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
     invalidated facts live in a separate archive excluded from the default
     listing, so the inspector's revert flow needs ``state=invalidated`` to
     have anything to list).
+
+    Both the unit listing and the salience graph are pulled as a single
+    ``limit=2000``-row slab (see ``src_params``/``graph_params`` below); a
+    bank with more than 2000 matching units or more than 2000 graph nodes is
+    silently clipped at that slab boundary. The response's ``truncated`` flag
+    covers the unit-listing slab (``total_matched``/paging are only accurate
+    within it); when it is set, ``salience``/``link_counts_by_type`` under
+    ``sort=salience`` are also ranked against a partial graph — units outside
+    the 2000-node graph slab read back as ``salience: 0.0`` even though they
+    may legitimately rank higher. See PR #1987 review B2.
     """
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
@@ -356,8 +385,11 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
     sort = qp.get("sort", "recency")
     if sort not in ("recency", "salience"):
         raise UnprocessableEntity(f"invalid sort: {sort!r}", code="memory.invalid_query")
-    limit = min(int(qp.get("limit", 20)), 200)
-    offset = max(int(qp.get("offset", 0)), 0)
+    # max(1, ...) closes #1987/B3: limit=0 made next_offset==offset (infinite
+    # client-side pagination loop) and limit<0 dropped the last row via
+    # negative-index slicing (kept[0:-1]).
+    limit = max(1, min(_int_param(qp, "limit", 20), 200))
+    offset = max(_int_param(qp, "offset", 0), 0)
 
     # NOTE: build upstream params explicitly, one at a time — the generic
     # forward's dict(request.query_params) collapses repeated params to the
@@ -375,6 +407,10 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
     rows = listing.get("items") if isinstance(listing, dict) else listing
     if not isinstance(rows, list):
         raise MemoryEngineShape("memories/list returned no item list")
+    # B2: the src_params slab is capped at limit=2000 above — surface that
+    # cap instead of letting total_matched/next_offset silently describe only
+    # the slab. Mirrors bank_subgraph's own ``truncated`` (line ~313).
+    truncated = len(rows) >= 2000
 
     tags = {t for t in (qp.get("tags") or "").split(",") if t}
     lo, hi = qp.get("from"), qp.get("to")
@@ -418,7 +454,12 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
     )
     page = kept[offset : offset + limit]
     nxt = offset + limit if offset + limit < len(kept) else None
-    return {"items": page, "total_matched": len(kept), "next_offset": nxt}
+    return {
+        "items": page,
+        "total_matched": len(kept),
+        "next_offset": nxt,
+        "truncated": truncated,
+    }
 
 
 # ── DELETE /banks/{bank_id} — guarded (NOT a passthrough) ──────────────────────
@@ -853,10 +894,28 @@ _DELETE_ACTIONS: dict[str, str] = {
     "/v1/default/banks/{bank_id}/mental-models/{model_id}": "memory.mental_model.delete",
 }
 
+#: #1987/M7: curate (memory_curate MCP parity) is a soft-delete-capable edit
+#: (state="invalidated" invalidates a unit) but rode _FORWARDS with no audit
+#: trail at all — unlike every DELETE above. It stays out of
+#: DESTRUCTIVE_MEMORY_ROUTES / CONFIRM_GUARDED_MEMORY_ROUTES (reversible, no
+#: confirm gate needed) but still gets a record_action row so "who
+#: invalidated this, when" is answerable.
+_CURATE_TEMPLATE = ("PATCH", "/v1/default/banks/{bank_id}/memories/{memory_id}")
+_CURATE_AUDIT_ACTION = "memory.memory.curate"
+
+#: #1987/M5: forwards whose bank-scoped _GRAPH_CACHE slab (salience,
+#: link_counts_by_type) goes stale the moment they succeed. Cleared
+#: post-forward so a curate → units/subgraph GET within the 45s TTL never
+#: serves the pre-mutation slab.
+_CACHE_CLEARING_FORWARDS: set[tuple[str, str]] = {_CURATE_TEMPLATE}
+
 
 def _make_handler(method: str, template: str):
     guard = _SHAPE_GUARDS.get((method, template))
     audit_action = _DELETE_ACTIONS.get(template) if method == "DELETE" else None
+    if (method, template) == _CURATE_TEMPLATE:
+        audit_action = _CURATE_AUDIT_ACTION
+    clears_cache = (method, template) in _CACHE_CLEARING_FORWARDS
 
     async def handler(request: Request) -> Any:
         client = _client(request)
@@ -870,8 +929,13 @@ def _make_handler(method: str, template: str):
             async with record_action(
                 request, category="memory", action=audit_action, target=upstream
             ):
-                return await _forward(client, method, upstream, params=params, json_body=body)
-        result = await _forward(client, method, upstream, params=params, json_body=body)
+                result = await _forward(client, method, upstream, params=params, json_body=body)
+        else:
+            result = await _forward(client, method, upstream, params=params, json_body=body)
+        if clears_cache:
+            bank_id = segments.get("bank_id")
+            if bank_id:
+                _GRAPH_CACHE.clear_bank(bank_id)
         if guard is not None:
             guard(result)
         return result

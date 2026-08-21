@@ -19,6 +19,7 @@ function unitsFor(bank: string, query = '') {
     items: Array<Record<string, unknown>>
     total_matched: number
     next_offset: number | null
+    truncated: boolean
   }
 }
 
@@ -28,6 +29,23 @@ describe('buildBankUnits (mock fixture)', () => {
     expect(page.total_matched).toBeGreaterThanOrEqual(24)
     expect(page.total_matched).toBeLessThanOrEqual(30)
     expect(page.items.length).toBeGreaterThan(0)
+  })
+
+  it('never reports truncated — the mock dataset is far under the server slab cap', () => {
+    // PR #1987 review B2/M10: the real endpoint's `truncated` signals its
+    // 2000-row upstream slab cap; the mock always returns false since it
+    // never gets close to that.
+    expect(unitsFor('primary').truncated).toBe(false)
+  })
+
+  it('falls back to recency for a sort value the server does not accept', () => {
+    // PR #1987 review M10: the mock used to have its own 'oldest' sort the
+    // server 422s on; it now only understands 'recency'/'salience' like the
+    // real endpoint, defaulting anything else to 'recency' rather than
+    // pretending to support a third mode.
+    const recency = unitsFor('primary', 'sort=recency').items.map((r) => r.id)
+    const unknown = unitsFor('primary', 'sort=oldest').items.map((r) => r.id)
+    expect(unknown).toEqual(recency)
   })
 
   it('every row carries salience and link_counts_by_type', () => {

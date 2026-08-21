@@ -1,9 +1,13 @@
-/* hal0 memory v2 (Bank workspace UI, task C1) — view styles, ported verbatim
-   from the design handoff's prototype/v2.css. Already mv-*/mvi-* namespaced
-   and written entirely against hal0 tokens (--bg-*, --fg-*, --line*,
-   --accent, --ok/--warn/--err/--info, --jbm/--geist) — every one of those
-   is already defined in dashboard.css, and the prototype file defines no
-   :root block of its own, so nothing needed stripping or remapping here. */
+/* hal0 memory v2 (Bank workspace UI, task C1) -- view styles, ported from
+   the design handoff prototype/v2.css and written entirely against hal0
+   tokens (--bg-*, --fg-*, --line*, --accent, --ok/--warn/--err/--info,
+   --jbm/--geist) -- every one of those is already defined in dashboard.css,
+   and the prototype file defines no :root block of its own, so nothing
+   needed remapping there. It is NOT fully mv-*/mvi-* namespaced, though:
+   this file is imported unconditionally (main.tsx, after dashboard.css), so
+   any bare-element or un-prefixed-class rule here wins app-wide, not just
+   on the memory-v2 page. Every such rule below is scoped under .mv-page,
+   the stylesheet own root container class -- see PR 1987 review M8. */
 .mv-page{display:flex;flex-direction:column;gap:14px;max-width:1600px}
 .mv-head{display:flex;align-items:baseline;gap:12px}
 .mv-head h1{font:600 22px var(--jbm);margin:0;letter-spacing:-0.02em}
@@ -261,13 +265,13 @@
 .mv-listrow{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--line-soft,#1C1C1C);font:400 12px var(--jbm);color:var(--fg-2)}
 .mv-listrow:last-child{border-bottom:0}
 .mv-listrow .sp{flex:1}
-a{color:var(--accent);text-decoration:none}a:hover{color:#FFC533}
+.mv-page a{color:var(--accent);text-decoration:none}.mv-page a:hover{color:var(--hal0-accent-hover)}
 
 /* sidebar sub-nav */
-.sb-sublist{display:flex;flex-direction:column;gap:1px;margin:1px 0 3px 0;padding-left:8px}
-.sb-subrow{display:flex;align-items:center;gap:9px;padding:5px 10px 5px 22px;margin-left:8px;border-left:1px solid var(--line);color:var(--fg-3);font-family:var(--jbm);font-size:12px;cursor:pointer;transition:color .12s,background .12s}
-.sb-subrow:hover{color:var(--fg);background:var(--bg-2)}
-.sb-subrow.active{color:var(--accent);border-left-color:var(--accent)}
+.mv-page .sb-sublist{display:flex;flex-direction:column;gap:1px;margin:1px 0 3px 0;padding-left:8px}
+.mv-page .sb-subrow{display:flex;align-items:center;gap:9px;padding:5px 10px 5px 22px;margin-left:8px;border-left:1px solid var(--line);color:var(--fg-3);font-family:var(--jbm);font-size:12px;cursor:pointer;transition:color .12s,background .12s}
+.mv-page .sb-subrow:hover{color:var(--fg);background:var(--bg-2)}
+.mv-page .sb-subrow.active{color:var(--accent);border-left-color:var(--accent)}
 
 /* extraction row (merged into engine panel) */
 .mv-xrow{display:flex;align-items:center;gap:10px;padding:9px 14px;flex-wrap:wrap;font:500 12px var(--jbm)}
@@ -275,16 +279,22 @@ a{color:var(--accent);text-decoration:none}a:hover{color:#FFC533}
 .mv-xslot{display:flex;align-items:center;gap:8px;font:500 12px var(--jbm);color:var(--fg);min-width:0}
 
 /* v0.5 chrome: agent tab bar + memory sub-tab pills */
-html,body{height:auto;overflow:visible}
+/* NOTE: the prototype own html,body{height:auto;overflow:visible} reset is
+   dropped, not scoped -- html/body are ancestors of .mv-page, not
+   descendants, so it cannot be namespaced under it, and dashboard.css:125
+   already owns html,body{height:100%} for every view. Keeping it here
+   applied that override app-wide (PR 1987 review M8). body{background} is
+   kept unscoped (not flagged by the review) -- it just restates --bg, the
+   app existing default background, so it is a no-op everywhere else. */
 body{background:var(--bg,#0A0A0A)}
 .agent-tabs{display:flex;gap:0;border-bottom:1px solid var(--line);margin-bottom:16px}
 .agent-tabs button{padding:10px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--fg-3);font:500 12.5px var(--jbm);cursor:pointer}
 .agent-tabs button:hover{color:var(--fg-2)}
 .agent-tabs button.on{color:var(--accent);border-bottom-color:var(--accent)}
-.mem-tabs{display:flex;gap:6px;margin-bottom:14px}
-.mem-tabs .btn{font:500 12px var(--jbm);color:var(--fg-2);background:var(--bg-1,#111);border:1px solid var(--line);border-radius:6px;padding:6px 14px;cursor:pointer;transition:border-color .12s,color .12s}
-.mem-tabs .btn:hover{border-color:var(--line-strong,#3A3A3A)}
-.mem-tabs .btn.active{color:var(--accent);border-color:var(--accent)}
+.mv-page .mem-tabs{display:flex;gap:6px;margin-bottom:14px}
+.mv-page .mem-tabs .btn{font:500 12px var(--jbm);color:var(--fg-2);background:var(--bg-1,#111);border:1px solid var(--line);border-radius:6px;padding:6px 14px;cursor:pointer;transition:border-color .12s,color .12s}
+.mv-page .mem-tabs .btn:hover{border-color:var(--line-strong,#3A3A3A)}
+.mv-page .mem-tabs .btn.active{color:var(--accent);border-color:var(--accent)}
 @media (max-width:1000px){.mv-rail{grid-column:1 / -1;position:static;display:grid;grid-template-columns:1fr 1fr;gap:14px}}
 
 /* overview split + engine stat grid */
