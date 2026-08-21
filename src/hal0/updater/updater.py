@@ -2873,16 +2873,21 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
         # retired runner forever — behind the release that replaces it.
         # Matching against the stale set is what keeps this safe: a genuine
         # operator pin is never an exact former default.
+        # PRECEDENCE MATCHES THE RESOLVER (#1959 review nit): ``image_pin``
+        # binds first, because ``_resolve_image_ref`` reads it first and no
+        # longer reads the bare key at all. Binding ``image`` first here made
+        # the sweep retag (or skip on) a value the runtime never serves while
+        # the pin that IS served stayed stale.
         holder: dict | None = None
-        key = "image"
-        if isinstance(raw.get("image"), str):
+        key = "image_pin"
+        if isinstance(raw.get("image_pin"), str):
             holder = raw
-        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image"), str):
-            holder = raw["slot"]
-        elif isinstance(raw.get("image_pin"), str):
-            holder, key = raw, "image_pin"
         elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image_pin"), str):
-            holder, key = raw["slot"], "image_pin"
+            holder = raw["slot"]
+        elif isinstance(raw.get("image"), str):
+            holder, key = raw, "image"
+        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image"), str):
+            holder, key = raw["slot"], "image"
         if holder is None or holder[key] not in STALE_RUNNER_IMAGE_REFS:
             continue
         old_ref = holder[key]

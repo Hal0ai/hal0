@@ -69,3 +69,34 @@ def test_it_is_idempotent(slots_dir) -> None:
     )
     assert retag_stale_slot_images() == 1
     assert retag_stale_slot_images() == 0
+
+
+def test_both_keys_present_the_pin_wins_like_the_resolver(slots_dir) -> None:
+    """With BOTH key shapes on one slot, the sweep must judge the key the
+    runtime serves. ``_resolve_image_ref`` reads ``image_pin`` first and no
+    longer reads the bare key at all — so a stale pin behind a current-looking
+    bare ``image`` was invisible to a bare-key-first sweep, and the slot kept
+    serving the retired runner behind the release replacing it (#1959 review
+    nit; the inverse ordering also logged retags of a value nothing reads)."""
+    (slots_dir / "agent.toml").write_text(
+        f'device = "gpu-rocm"\nimage = "{DEFAULT_ROCMFPX_IMAGE}"\nimage_pin = "{RETIRED}"\n',
+        encoding="utf-8",
+    )
+    assert retag_stale_slot_images() == 1
+    after = (slots_dir / "agent.toml").read_text(encoding="utf-8")
+    assert RETIRED not in after
+    assert f'image_pin = "{DEFAULT_ROCMFPX_IMAGE}"' in after
+
+
+def test_both_keys_with_a_deliberate_pin_is_untouched(slots_dir) -> None:
+    """The mirror case: a deliberate (non-stale) pin with stale bare-key
+    debris behind it. The runtime serves the pin, which is fine — retagging
+    the inert bare key would log a retag that changes nothing served."""
+    (slots_dir / "code.toml").write_text(
+        f'device = "gpu-rocm"\nimage = "{RETIRED}"\n'
+        'image_pin = "ghcr.io/example/my-debug-build:v9"\n',
+        encoding="utf-8",
+    )
+    before = (slots_dir / "code.toml").read_text(encoding="utf-8")
+    assert retag_stale_slot_images() == 0
+    assert (slots_dir / "code.toml").read_text(encoding="utf-8") == before
