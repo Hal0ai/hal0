@@ -50,6 +50,10 @@ import './dash/comfyui-pane.css'
 import './dash/engine-panes.css'
 import './dash/npu.css'
 import './dash/memory-overhaul.css'
+// Memory v2 (Bank workspace UI, task C1) — mv-*/mvi-* namespaced view
+// styles for the new units/tags/curate surface Phase C builds on top of
+// the memory-overhaul.css shell.
+import './dash/memory-v2.css'
 import './dash/activity-log.css'
 import './dash/overhaul.css'
 import './dash/redesign.css'
@@ -139,6 +143,11 @@ import './dash/agents/agent-view.jsx'
 // Hindsight Memory view (#memory) — bridge installs the TanStack-Query
 // hooks on window.__hal0Use* BEFORE memory.jsx evaluates.
 import './dash/memory-hook-bridge'
+// Memory v2 (Bank workspace UI, task C1) — self-contained shared
+// constants/Icon (window.MemV2), no dependency on chrome.jsx or the hook
+// bridge above. Must load before any Phase C view module that reads
+// window.MemV2.
+import './dash/memory-v2-shared.jsx'
 import './dash/memory-graph-engine.jsx'
 import './dash/memory-graph-structured.jsx'
 import './dash/memory-graph-ego.jsx'
