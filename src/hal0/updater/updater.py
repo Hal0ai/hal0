@@ -2861,21 +2861,38 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
         # An image REF is a top-level or [slot]-nested STRING. The ``[image]``
         # TOML table (image-gen settings, #599) shares the key and must be
         # ignored — same trap as providers.container._resolve_image_ref.
+        #
+        # BOTH key shapes, deliberately (#1948 B1). The bare ``image`` string is
+        # only half the population: ``_resolve_image_ref`` now resolves the
+        # TYPED ``image_pin`` field, and ``hal0 slot migrate-hw --apply`` folds
+        # ``image`` into it — recording the then-current default as a
+        # "deliberate pin" (it was not in STALE_RUNNER_IMAGE_REFS at the time)
+        # and dropping the older key. A folded box therefore carries
+        # ``image_pin = <old default>``, honoured verbatim and INVISIBLE to a
+        # sweep that reads only the bare key, so it would keep serving a
+        # retired runner forever — behind the release that replaces it.
+        # Matching against the stale set is what keeps this safe: a genuine
+        # operator pin is never an exact former default.
         holder: dict | None = None
+        key = "image"
         if isinstance(raw.get("image"), str):
             holder = raw
         elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image"), str):
             holder = raw["slot"]
-        if holder is None or holder["image"] not in STALE_RUNNER_IMAGE_REFS:
+        elif isinstance(raw.get("image_pin"), str):
+            holder, key = raw, "image_pin"
+        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image_pin"), str):
+            holder, key = raw["slot"], "image_pin"
+        if holder is None or holder[key] not in STALE_RUNNER_IMAGE_REFS:
             continue
-        old_ref = holder["image"]
+        old_ref = holder[key]
         # HW-gated target: rocmfpx on a Strix GPU lane, the lean toolbox
         # elsewhere. When the host/lane default already equals the pin (e.g. a
         # non-Strix box on the vulkan toolbox), it's a no-op — leave it be.
         new_ref = resolve_default_image(_backend_of(raw), _device_class_of(raw))
         if new_ref == old_ref:
             continue
-        holder["image"] = new_ref
+        holder[key] = new_ref
         try:
             write_toml_atomic(toml_path, raw)
         except Exception as exc:
@@ -2886,6 +2903,7 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
             "updater.slot_image_retagged",
             job_id=job_id,
             slot=slot_name,
+            field=key,
             old=old_ref,
             new=new_ref,
             note=(
