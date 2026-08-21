@@ -148,6 +148,33 @@ test.describe('Memory Bank workspace — engine outage (#1539, v2 DOM)', () => {
     await expect(page.locator('[data-testid^="mv-rule-row-"]')).toHaveCount(0)
   })
 
+  test('units list: a 404 (deploy-skew — route missing from this install) gets its own copy, not "unreachable"', async ({
+    page,
+  }) => {
+    // Live-verified 2026-08-21 (post-smoke report): CT105's deployed backend
+    // predated the /units route entirely, so it 404'd — a plain 404 is not
+    // an engine outage, it's a stale-deploy symptom, and saying "unreachable"
+    // was actively misleading (the engine answered fine).
+    await page.addInitScript(() => {
+      ;(window as unknown as { __hal0MockPassthrough?: unknown }).__hal0MockPassthrough = [
+        '/api/memory/banks/',
+      ]
+    })
+    await page.route('**/api/memory/banks/*/units**', (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'Not Found' }),
+      }),
+    )
+    await gotoBank(page)
+
+    const err = page.getByTestId('mv-units-error')
+    await expect(err).toBeVisible({ timeout: 15_000 })
+    await expect(err).toContainText("This install's API doesn't serve this view yet")
+    await expect(err).not.toContainText('Memory engine unreachable')
+  })
+
   test('a healthy bank workspace still renders its normal states, not errors', async ({ page }) => {
     await gotoBank(page)
     await expect(page.getByTestId('mv-units-error')).toHaveCount(0)

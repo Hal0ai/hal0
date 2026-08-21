@@ -18,16 +18,23 @@ const FACT_DESC = {
   observation: 'a noticed pattern',
 }
 
-// Link palette — amended per the Hindsight (hindsight-api 0.8.4) upstream
-// audit: the real memory-graph link types are temporal / semantic / entity.
-// causal / cooccurrence only ever appear in the design prototype's mock
-// graph data, not in any live payload, but are kept here for backward
-// compat with anything still rendering the prototype's mocks. `entity`
-// uses Okabe–Ito magenta (#CC79A7, colourblind-safe, same accessible set as
-// TOPIC_COLORS below) — distinct from causal's red, temporal/cooccurrence's
-// amber, and semantic's blue.
+// Link palette. CORRECTION (post-smoke live check, 2026-08-21 — supersedes
+// the prior "causal never appears in real payloads" claim below): a live
+// production bank's memory graph was verified via Playwright + curl to emit
+// {temporal, semantic, entity, caused_by} — `caused_by` is the real wire
+// name for the causal relationship, not `causal`, and it DOES appear in real
+// payloads (this bank's Web view rendered a working "caused_by" lens with
+// real edges). `causal` itself and `cooccurrence` still only ever appear in
+// the design prototype's mock graph data, not in any live payload seen so
+// far, and are kept for backward compat with anything still rendering the
+// prototype's mocks. `caused_by` shares `causal`'s color/label/weight family
+// (same relationship, real wire spelling) rather than getting its own
+// entry. `entity` uses Okabe–Ito magenta (#CC79A7, colourblind-safe, same
+// accessible set as TOPIC_COLORS below) — distinct from causal's red,
+// temporal/cooccurrence's amber, and semantic's blue.
 const LINK_COLORS = {
   causal: '#EF6B6B',
+  caused_by: '#EF6B6B',
   temporal: '#E8B94E',
   cooccurrence: '#FFB000',
   semantic: '#7FB8FF',
@@ -35,12 +42,13 @@ const LINK_COLORS = {
 }
 const LINK_LABEL = {
   causal: 'led to',
+  caused_by: 'led to',
   temporal: 'near in time',
   cooccurrence: 'mentioned together',
   semantic: 'related meaning',
   entity: 'shared entity',
 }
-const LINK_WEIGHT = { causal: 4, temporal: 3, cooccurrence: 2, semantic: 1, entity: 1 }
+const LINK_WEIGHT = { causal: 4, caused_by: 4, temporal: 3, cooccurrence: 2, semantic: 1, entity: 1 }
 
 // Okabe–Ito, colourblind-safe (same set as the memory map)
 const TOPIC_COLORS = [
@@ -242,11 +250,29 @@ const Icon = ({ name, size = 16, sw = 1.5 }) => (
 // outage, don't render an empty-state" treatment instead of re-implementing
 // it per file. `query` is any TanStack Query result exposing `isError` /
 // `error` / (optionally) `refetch`.
+// Post-smoke fix: the live 404 hit against CT105 (units route missing from
+// the currently-deployed backend — a deploy-skew case, not an outage) was
+// rendering "Memory engine unreachable", which is wrong — the engine
+// answered fine, this install's API just doesn't have the route yet.
+// Branch the headline by the error's actual HTTP status (Hal0Error.status,
+// client.ts) rather than one blanket message for every failure:
+//   - 404                 → deploy-skew ("doesn't serve this view yet")
+//   - other 4xx (incl 422)→ a rejected request, not an outage
+//   - everything else     → the original "unreachable" copy (503/network/
+//                            501/no status at all)
+function mvErrorHeadline(error, what) {
+  const status = error?.status
+  const detail = error?.message || `could not load ${what}`
+  if (status === 404) return "This install's API doesn't serve this view yet"
+  if (typeof status === 'number' && status >= 400 && status < 500) return `Request rejected — ${detail}`
+  return `Memory engine unreachable — ${detail}`
+}
+
 const MvError = ({ query, what, testid }) => {
   if (!query?.isError) return null
   return (
     <div className="empty mono" data-testid={testid}>
-      <div>Memory engine unreachable — {query.error?.message || `could not load ${what}`}</div>
+      <div>{mvErrorHeadline(query.error, what)}</div>
       {query.refetch && (
         <button
           className="mv-btn"
@@ -280,7 +306,7 @@ const MemV2 = {
 // contract, not a module import, is how Phase C views are meant to consume
 // MemV2). Guard the window write so importing this module under vitest's
 // node test environment (no `window` global) doesn't throw.
-export { fmtN, dayKey }
+export { fmtN, dayKey, mvErrorHeadline }
 
 if (typeof window !== 'undefined') {
   Object.assign(window, { MemV2 })
