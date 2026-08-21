@@ -23,7 +23,10 @@ at the ends.
    journal for `pull_job_persist_failed` after the installer's own pull — regression
    `model-pull-jobs-root-owned`. And spot the API's image view: any slot with
    `container_status: running` must not read `image_status: missing`
-   (regression `image-status-wrong-podman-store`).
+   (regression `image-status-wrong-podman-store`). `image_status: unknown` (#1939) is a
+   different result — the API could not read the image store rather than reading it wrongly;
+   record it as a seam finding with the `reason=` from the journal's
+   `podman_ro.image_present_unanswered` line, not as this regression.
 2. **Assign + load.** Take the embed slot: `hal0 slot edit embed --model <embedding model>
    --hardware <backend>`, then `hal0 slot load embed`. **Time the load and record the CLI exit
    code** (`out=$(...); rc=$?`) — regression `slot-verbs-10s-client-timeout` (#1832): the client

@@ -39,6 +39,18 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
    actually run from (root's, on a standard install) and note which user the API's probe
    executes as — the rc.6 defect was a wrong-store probe, self-contradicted by
    `/api/system-info` in the same second.
+
+   Since #1939 the field has a fifth member, `unknown`, and the two failures are **different
+   findings**. `missing` on a running slot is the wrong-store defect above. `unknown` means the
+   API is telling you honestly that it could not read the image store at all — the
+   `hal0-podman-ro` seam failed (wrapper rc 66), its sudoers grant is absent, or the probe
+   timed out. That is not a self-contradiction and must not be filed as one; it is a **seam
+   finding**. Follow it up rather than passing it: grep the journal for
+   `podman_ro.image_present_unanswered`, which carries a `reason=` naming which case fired
+   (`grant-denied` / `podman-failed` / `podman-absent` / `invalid-argument` / `seam-error`),
+   and cross-check `hal0 doctor seams`. A whole fleet reading `unknown` is a broken install
+   even though no field is lying. Conversely, `unknown` where the seam is demonstrably healthy
+   is itself a defect — the probe should have gotten an answer.
 7. **Error shape.** Probe malformed requests: unknown slot name, bad query params, unknown model
    in a GET. Expect clean structured 4xx JSON. A 200 with zeroed data for a nonexistent resource
    is a finding.

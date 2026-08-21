@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from hal0 import slot_view as sv_mod
 from hal0.config.schema import ProfileConfig
 from hal0.profiles import ProfileCatalog
 from hal0.slot_view import (
@@ -65,7 +66,7 @@ class FakeContainerProvider:
         active: bool = True,
         healthy: bool = True,
         running_image: str | None = None,
-        present: bool = True,
+        present: bool | None = True,
         raise_exc: bool = False,
     ) -> None:
         self._active = active
@@ -85,7 +86,8 @@ class FakeContainerProvider:
     def running_image(self, slot: Any) -> str | None:
         return self._running_image
 
-    def image_present(self, image: str) -> bool:
+    def image_present(self, image: str) -> bool | None:
+        # Tri-state since #1939: None == "the image store could not be asked".
         return self._present
 
 
@@ -561,6 +563,12 @@ class TestLoadedModelNamesFromSlots:
 # ── concern 3: container probe ──────────────────────────────────────────────
 
 
+#: A slot-owned pinned image ref (spec-hw-slot-ownership §3) — the shortest
+#: way to give a test slot a declared ``image`` so the image_status branch is
+#: reachable at all.
+_PINNED_IMAGE = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-server"
+
+
 def _container_cfg(name: str = "gpu-chat", **over: Any) -> dict[str, Any]:
     cfg: dict[str, Any] = {
         "name": name,
@@ -695,6 +703,67 @@ class TestContainerEnrichment:
             provider=FakeContainerProvider(active=False),
         )
         assert out["gpu-chat"]["image_status"] == "not-configured"
+
+    # ── #1939: the four-state block is a five-state block ──────────────────
+    #
+    # `missing` is reserved for "podman was asked and said no". Every way of
+    # NOT getting an answer — the seam is unusable, the provider raised, the
+    # whole probe timed out — is `unknown`. Each of these three assertions
+    # pins one site that used to answer with a confident lie.
+
+    async def test_unanswerable_image_probe_reports_unknown_not_missing(
+        self, tmp_hal0_home: str
+    ) -> None:
+        ProfileCatalog().create("imgprof", ProfileConfig(flags=""))
+        out = await container_enrichment(
+            [_container_cfg(profile="imgprof", image_pin=_PINNED_IMAGE)],
+            pull_jobs={},
+            provider=FakeContainerProvider(active=False, present=None),
+        )
+        e = out["gpu-chat"]
+        assert e["image"] == _PINNED_IMAGE
+        assert e["image_status"] == "unknown"
+
+    async def test_declared_image_still_reports_present_and_missing(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """The tri-state must not swallow the two definitive answers — in
+        particular ``missing`` has to stay reachable, or the #1937 regression
+        check (``image_status: missing`` on a running slot is a defect) would
+        be pinning a state nothing can ever emit."""
+        ProfileCatalog().create("imgprof", ProfileConfig(flags=""))
+        cfg = _container_cfg(profile="imgprof", image_pin=_PINNED_IMAGE)
+
+        present = await container_enrichment(
+            [cfg], pull_jobs={}, provider=FakeContainerProvider(active=False, present=True)
+        )
+        # The TTL cache is keyed by image ref and lives for 15 s, so the second
+        # probe would otherwise be served the first one's answer.
+        sv_mod._image_present_cache.clear()
+        missing = await container_enrichment(
+            [cfg], pull_jobs={}, provider=FakeContainerProvider(active=False, present=False)
+        )
+
+        assert present["gpu-chat"]["image_status"] == "present"
+        assert missing["gpu-chat"]["image_status"] == "missing"
+
+    async def test_probe_exception_reports_unknown_not_missing(
+        self, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The except-branch around the image probe defaulted to ``missing``,
+        so a provider that blew up looked exactly like an absent image."""
+        ProfileCatalog().create("imgprof", ProfileConfig(flags=""))
+
+        class _Exploding(FakeContainerProvider):
+            def image_present(self, image: str) -> bool:
+                raise RuntimeError("podman store is on fire")
+
+        out = await container_enrichment(
+            [_container_cfg(profile="imgprof", image_pin=_PINNED_IMAGE)],
+            pull_jobs={},
+            provider=_Exploding(active=False),
+        )
+        assert out["gpu-chat"]["image_status"] == "unknown"
 
     async def test_npu_table_surfaced(self) -> None:
         out = await container_enrichment(

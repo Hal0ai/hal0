@@ -1,10 +1,12 @@
 """Tests for container image-pull progress (Issue #659).
 
 Verifies:
-  - ``image_status`` (present | pulling | missing) appears on container slots.
+  - ``image_status`` (present | pulling | missing | unknown) appears on container slots.
   - ``image_status=pulling`` is set when a slot_pull_job is active.
   - ``image_status=present`` is set when image_present() returns True.
   - ``image_status=missing`` is set when image_present() returns False.
+  - ``image_status=unknown`` is set when image_present() returns None — the image store
+    could not be READ (#1939), which is not the same claim as "the image is absent".
   - POST /api/slots/{name}/pull returns 202 with job snapshot.
   - POST /api/slots/{name}/pull is idempotent when already in-flight.
   - GET /api/slots/{name}/pull/stream emits terminal frame when no pull is active.
@@ -113,6 +115,50 @@ def test_image_status_missing(container_client: TestClient) -> None:
     assert r.status_code == 200, r.text
     by_name = {e["name"]: e for e in r.json()}
     assert by_name["gpu-chat"]["image_status"] == "missing"
+
+
+def test_image_status_unknown_when_the_probe_cannot_answer(
+    container_client: TestClient,
+) -> None:
+    """#1939, at the API boundary: ``image_present`` returning ``None`` (the
+    rootful seam was unusable — wrapper rc 66, no sudoers grant, wrapper
+    drift) must surface as ``image_status: "unknown"``.
+
+    This is the assertion that gives the whole chain its point: an operator or
+    an agent reading /api/slots can now tell "hal0 asked podman and the image
+    is not there" from "hal0 could not ask".
+    """
+    fake_catalog, _ = _fake_profile_catalog()
+    with (
+        patch("hal0.providers.container.ContainerProvider.is_active", return_value=False),
+        patch(
+            "hal0.providers.container.ContainerProvider.health",
+            new_callable=AsyncMock,
+            return_value={"ok": False},
+        ),
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.providers.container.ContainerProvider.image_present", return_value=None),
+    ):
+        r = container_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    assert by_name["gpu-chat"]["image_status"] == "unknown"
+
+
+def test_pull_status_route_reports_unknown_rather_than_missing(
+    container_client: TestClient,
+) -> None:
+    """The poll/SSE surface carries the same lie and gets the same fix: a slot
+    whose image cannot be probed reads ``unknown``, not ``missing`` (which a
+    client renders as "you need to pull this")."""
+    fake_catalog, _ = _fake_profile_catalog()
+    with (
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.providers.container.ContainerProvider.image_present", return_value=None),
+    ):
+        r = container_client.get("/api/slots/gpu-chat/pull/status")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "unknown"
 
 
 def test_image_status_pulling_when_job_active(

@@ -23,12 +23,13 @@ import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
   InferencePane,
   SlotScard,
+  SlotImageUnknownChip,
   ModelPicker,
   SlotControls,
   slotCtrlPhase,
 } from './inference-pane.jsx'
 import { TelemetryHeader } from './telemetry-header.jsx'
-import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive } from './slot-status.js'
+import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive, imageStatusChip } from './slot-status.js'
 import { prettyProfile } from './profile-names.js'
 import { slotModelRow } from './slots/slot-shared.js'
 
@@ -72,7 +73,15 @@ function IndicatorDot({ slot }) {
 
 // Expose for window-scope JSX (legacy pattern in this codebase) + tests.
 if (typeof window !== "undefined") {
-  Object.assign(window, { slotIndicator, IndicatorDot, RECENTLY_LIVE_MS, isSlotLive });
+  Object.assign(window, {
+    slotIndicator,
+    IndicatorDot,
+    RECENTLY_LIVE_MS,
+    isSlotLive,
+    // #1939 — the γ-suite drives the indeterminate-image classifier the same
+    // way it drives slotIndicator: through the real helper, not a copy of it.
+    imageStatusChip,
+  });
 }
 
 // ─── Mini sparkline for slot card ───
@@ -361,6 +370,10 @@ function SlotCard({
             </span>
           );
         })()}
+        {/* #1939: the container image store could not be READ for this slot
+            (seam rc 66 / missing grant / probe timeout). Neutral + dashed —
+            an indeterminate answer, not a fault and not a missing image. */}
+        <SlotImageUnknownChip s={slot} />
         {/* Backend mismatch: amber chip surfaces the ACTUAL runtime backend
             when it differs from the declared one. Backend identity is owned by
             the slot's profile, so clicking opens the slot editor's profile

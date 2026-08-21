@@ -114,15 +114,27 @@ async def resolve_slot_image(sm: Any, name: str) -> str | None:
 
 
 async def inspect_image_state(image: str | None) -> str:
-    """Return "present" | "missing" for ``image`` (fail-soft → "missing")."""
+    """Return "present" | "missing" | "unknown" for ``image``.
+
+    #1939: the poll/SSE surface carried the same conflation ``image_status``
+    did — an unusable rootful seam (wrapper rc 66, absent sudoers grant) read
+    as ``missing``, which a client renders as "you need to pull this". It now
+    degrades to ``unknown``, sharing the aggregator's mapping so the two
+    surfaces cannot drift.
+
+    The no-image case stays ``missing``: that is a resolution failure, not a
+    store read, and it is the state the pull routes have always used to mean
+    "there is nothing here to report as present".
+    """
     if not image:
         return "missing"
     try:
         from hal0.providers.container import container_provider
+        from hal0.slot_view import image_status_for
 
         present = await asyncio.get_event_loop().run_in_executor(
             None, container_provider().image_present, image
         )
-        return "present" if present else "missing"
+        return image_status_for(present)
     except Exception:
-        return "missing"
+        return "unknown"

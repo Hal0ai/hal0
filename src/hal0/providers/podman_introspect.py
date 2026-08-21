@@ -63,13 +63,32 @@ instead of burning a sudo round-trip — exactly the role
 the two in lock-step; ``tests/installer/test_podman_ro_validation.py``
 asserts they agree by running the real wrapper.
 
-The three read helpers (:func:`image_exists`, :func:`container_image`,
+The three read helpers (:func:`image_presence`, :func:`container_image`,
 :func:`container_argv`) are TRI-STATE and deliberately do NOT fall back to a
-rootless call themselves: they return ``None`` for "the rootful seam did not
-answer" and let the caller decide, because a rootless answer for a *named*
-image or container is not merely stale, it is an answer about a different
-object. ``images()`` keeps its original fall-back behaviour (a repo *set* is
-still useful, and it self-labels via ``context``).
+rootless call themselves: they report "the rootful seam did not answer" and
+let the caller decide, because a rootless answer for a *named* image or
+container is not merely stale, it is an answer about a different object.
+``images()`` keeps its original fall-back behaviour (a repo *set* is still
+useful, and it self-labels via ``context``).
+
+#1939 — the exit-code contract reaches the caller
+=================================================
+
+The wrapper spends four distinct exit codes distinguishing "podman answered,
+negatively" from three flavours of "the seam is unusable" (see its EXIT-CODE
+CONTRACT header). Until #1939 all of them collapsed into a single ``None``
+here, which :meth:`hal0.providers.container.ContainerProvider.image_present`
+then had to flatten into ``False`` because its contract was a bool — so an
+operational podman failure on the service account surfaced to ``GET
+/api/slots`` as ``image_status: "missing"``: an authoritative-looking answer
+to a question nobody managed to ask.
+
+:func:`image_presence` therefore returns an :class:`ImageProbe`, whose
+``presence`` is the same tri-state vocabulary the API now publishes
+(``present`` / ``missing`` / ``unknown``) and whose ``reason`` names WHICH
+unanswerable case occurred. Only the reason stays private to the process (it
+is logged, not published): the payload's job is to stop lying, the journal's
+job is to say why.
 """
 
 from __future__ import annotations
@@ -121,6 +140,51 @@ IMAGE_REF_MAX_LEN = 512
 #: reached only as a fallback when the seam isn't usable.
 PodmanContext = Literal["rootful", "rootless"]
 
+#: Is a named image in the store slots actually use? ``unknown`` is NOT a
+#: hedge — it is the load-bearing member (#1939). ``missing`` is reserved for
+#: "podman was asked and said no"; anything that prevented the question from
+#: being asked at all is ``unknown``, so a consumer (the dashboard, an agent,
+#: the release-validation kit) can keep treating ``missing`` on a running slot
+#: as the real defect it is.
+ImagePresence = Literal["present", "missing", "unknown"]
+
+#: WHY the rootful seam could not give a definitive answer. One name per
+#: distinguishable failure, mirroring the wrapper's EXIT-CODE CONTRACT:
+#:
+#:   ``not-service-user``  the gate declined to try sudo at all — this process
+#:                         is not the ``hal0`` service account, so no grant
+#:                         exists to use (dev checkout, CI, unit test).
+#:   ``invalid-argument``  wrapper rc 64, or our own mirror rejecting the
+#:                         operand before spending a sudo round-trip.
+#:   ``podman-absent``     wrapper rc 65 — no podman on the box.
+#:   ``podman-failed``     wrapper rc 66 — podman RAN and broke (store
+#:                         corruption, lock contention, EPERM). The case
+#:                         #1889's security review called out by name.
+#:   ``grant-denied``      sudo's own rc 1: the sudoers grant is not installed,
+#:                         or we are mid-upgrade between wrapper and policy.
+#:   ``seam-error``        exec failure, an rc the contract does not define, or
+#:                         stdout the contract does not define — i.e. the
+#:                         wrapper and this mirror have drifted apart.
+SeamUnanswered = Literal[
+    "not-service-user",
+    "invalid-argument",
+    "podman-absent",
+    "podman-failed",
+    "grant-denied",
+    "seam-error",
+]
+
+#: Wrapper/sudo exit code → :data:`SeamUnanswered`. Keep in lock-step with the
+#: EXIT-CODE CONTRACT block in ``installer/wrappers/hal0-podman-ro``; an rc
+#: absent from this map is ``seam-error`` by construction, which is the right
+#: answer for a code neither side has agreed on.
+_RC_REASON: dict[int, SeamUnanswered] = {
+    1: "grant-denied",
+    64: "invalid-argument",
+    65: "podman-absent",
+    66: "podman-failed",
+}
+
 _RunFn = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
@@ -130,6 +194,31 @@ class PodmanImagesResult:
 
     repos: set[str]
     context: PodmanContext
+
+
+@dataclass(frozen=True)
+class ImageProbe:
+    """One image-presence question and what came back.
+
+    ``reason`` is set if and only if ``presence == "unknown"``; a definitive
+    answer has nothing to explain.
+    """
+
+    presence: ImagePresence
+    reason: SeamUnanswered | None = None
+
+
+@dataclass(frozen=True)
+class _SeamRead:
+    """One argument-taking read verb's raw outcome.
+
+    Exactly one of the two fields is set: ``stdout`` when the wrapper exited 0
+    (an EMPTY stdout on rc 0 is a real negative answer, hence ``""`` rather
+    than ``None``), ``reason`` otherwise.
+    """
+
+    stdout: str | None = None
+    reason: SeamUnanswered | None = None
 
 
 def _seam_argv(*verb: str) -> list[str]:
@@ -216,50 +305,60 @@ def _seam_read(
     run: _RunFn,
     is_hal0_user: Callable[[], bool],
     timeout: float,
-) -> str | None:
-    """Run one argument-taking read verb; ``None`` when the seam didn't answer.
+) -> _SeamRead:
+    """Run one argument-taking read verb.
 
-    "Didn't answer" covers every non-``rc 0`` outcome: the gate said this
-    process is not the ``hal0`` service account, ``sudo -n`` was denied (grant
-    not installed / mid-upgrade race), the wrapper rejected the argument
-    (rc 64), podman is absent on the box (rc 65), or the call raised. Only
-    ``rc 0`` is an answer — and on ``rc 0`` an EMPTY stdout is a real negative
-    answer (no such container), not a failure, which is why this returns
-    ``""`` rather than ``None`` in that case.
+    Only ``rc 0`` is an answer — and on ``rc 0`` an EMPTY stdout is a real
+    negative answer (no such container), not a failure, which is why that case
+    yields ``stdout=""`` rather than a reason. Every other outcome is named
+    (#1939): the gate declining to try sudo, ``sudo -n`` denied, the wrapper's
+    rc 64/65/66, an rc nobody has agreed on, or the call raising.
     """
     if not is_hal0_user():
-        return None
+        return _SeamRead(reason="not-service-user")
     proc = _run(run, _seam_argv(verb, arg), timeout=timeout)
-    if proc is None or proc.returncode != 0:
-        return None
-    return proc.stdout.strip()
+    if proc is None:
+        # OSError / SubprocessError from exec — the seam binary is not there,
+        # is not executable, or the call timed out.
+        return _SeamRead(reason="seam-error")
+    if proc.returncode != 0:
+        return _SeamRead(reason=_RC_REASON.get(proc.returncode, "seam-error"))
+    return _SeamRead(stdout=proc.stdout.strip())
 
 
-def image_exists(
+def image_presence(
     image: str,
     *,
     run: _RunFn = subprocess.run,
     is_hal0_user: Callable[[], bool] = is_hal0_service_user,
     timeout: float = 10.0,
-) -> bool | None:
-    """Is ``image`` present in ROOT's image store? ``None`` if unanswerable.
+) -> ImageProbe:
+    """Is ``image`` present in ROOT's image store, and if we can't tell, why?
 
-    ``True``/``False`` mean the rootful seam actually answered. ``None`` means
-    it did not (not the hal0 service user, no grant, podman absent, or the ref
-    was rejected) — the caller must then decide, and deliberately is NOT given
-    a silent rootless fallback here: hal0-api's own rootless store is a
-    different store, so a "missing" from it about a *named* image is not a
-    stale answer but an answer about a different object. That conflation is
-    exactly #1889.
+    ``present``/``missing`` mean the rootful seam actually answered.
+    ``unknown`` means it did not, and :attr:`ImageProbe.reason` names which
+    way. The caller must then decide, and deliberately is NOT given a silent
+    rootless fallback here: hal0-api's own rootless store is a different
+    store, so a "missing" from it about a *named* image is not a stale answer
+    but an answer about a different object. That conflation is exactly #1889;
+    reporting the unanswerable cases as ``missing`` anyway is #1939.
     """
     if not is_valid_image_ref(image):
-        return None
-    answer = _seam_read("image-exists", image, run=run, is_hal0_user=is_hal0_user, timeout=timeout)
-    if answer == "present":
-        return True
-    if answer == "missing":
-        return False
-    return None
+        # Our mirror of the wrapper's validator said no, so no sudo hop was
+        # spent. Same *class* of failure as the wrapper's own rc 64, and
+        # reported under the same name — what matters to every caller is that
+        # podman was never consulted about this ref.
+        return ImageProbe("unknown", "invalid-argument")
+    read = _seam_read("image-exists", image, run=run, is_hal0_user=is_hal0_user, timeout=timeout)
+    if read.reason is not None:
+        return ImageProbe("unknown", read.reason)
+    if read.stdout == "present":
+        return ImageProbe("present")
+    if read.stdout == "missing":
+        return ImageProbe("missing")
+    # rc 0 with a word the contract does not define: the wrapper and this
+    # mirror have drifted. Not an answer, and emphatically not "missing".
+    return ImageProbe("unknown", "seam-error")
 
 
 def container_image(
@@ -279,10 +378,8 @@ def container_image(
     """
     if not is_valid_slot_token(token):
         return None
-    answer = _seam_read(
-        "container-image", token, run=run, is_hal0_user=is_hal0_user, timeout=timeout
-    )
-    return answer or None
+    read = _seam_read("container-image", token, run=run, is_hal0_user=is_hal0_user, timeout=timeout)
+    return read.stdout or None
 
 
 def container_argv(
@@ -299,10 +396,8 @@ def container_argv(
     """
     if not is_valid_slot_token(token):
         return None
-    answer = _seam_read(
-        "container-argv", token, run=run, is_hal0_user=is_hal0_user, timeout=timeout
-    )
-    return answer or None
+    read = _seam_read("container-argv", token, run=run, is_hal0_user=is_hal0_user, timeout=timeout)
+    return read.stdout or None
 
 
 __all__ = [
@@ -310,11 +405,14 @@ __all__ = [
     "IMAGE_REF_RE",
     "SEAM_BIN",
     "SLOT_TOKEN_RE",
+    "ImagePresence",
+    "ImageProbe",
     "PodmanContext",
     "PodmanImagesResult",
+    "SeamUnanswered",
     "container_argv",
     "container_image",
-    "image_exists",
+    "image_presence",
     "images",
     "is_valid_image_ref",
     "is_valid_slot_token",

@@ -69,6 +69,7 @@ __all__ = [
     "SlotViewAggregator",
     "config_enrichment",
     "container_enrichment",
+    "image_status_for",
     "loaded_model_names_from_slots",
     "resolve_ctx_max",
     "serialize_slot",
@@ -499,18 +500,44 @@ _PROBE_CONCURRENCY = 8
 #: pays 3 inspects per TTL window instead of 20 per poll. Kept short enough
 #: that a just-finished pull flips missing→present within one refresh.
 _IMAGE_PRESENT_TTL_S = 15.0
-_image_present_cache: dict[str, tuple[float, bool]] = {}
+_image_present_cache: dict[str, tuple[float, bool | None]] = {}
 
 
-def _image_present_cached(cp: Any, image: str) -> bool:
-    """TTL-cached ``cp.image_present`` (subprocess-backed, executor-called)."""
+def _image_present_cached(cp: Any, image: str) -> bool | None:
+    """TTL-cached ``cp.image_present`` (subprocess-backed, executor-called).
+
+    Tri-state since #1939: ``None`` is "the image store could not be asked",
+    and it is cached exactly like a real answer — a box with a broken seam
+    would otherwise pay a sudo round-trip per image per poll to be told the
+    same thing. Note the deliberate absence of a ``bool()`` here: coercing on
+    the way in (or out) of the cache would restore the collapse this issue is
+    about one poll later, silently.
+    """
     now = time.monotonic()
     hit = _image_present_cache.get(image)
     if hit is not None and now - hit[0] < _IMAGE_PRESENT_TTL_S:
         return hit[1]
-    present = bool(cp.image_present(image))
+    answer = cp.image_present(image)
+    present = None if answer is None else bool(answer)
     _image_present_cache[image] = (time.monotonic(), present)
     return present
+
+
+def image_status_for(present: bool | None) -> str:
+    """Project a tri-state presence answer onto the ``image_status`` payload.
+
+    The single place the mapping lives, so the aggregator, the pull-status
+    route and the tests cannot disagree about what ``None`` means.
+
+    ``unknown`` is the whole point (#1939): ``missing`` is a claim that podman
+    was asked and the image is not there, which is what makes ``missing`` on a
+    ``running`` slot a meaningful defect signal (regression
+    ``image-status-wrong-podman-store``). Reporting an unanswerable probe as
+    ``missing`` both lies and blunts that signal.
+    """
+    if present is None:
+        return "unknown"
+    return "present" if present else "missing"
 
 
 async def container_enrichment(
@@ -528,9 +555,11 @@ async def container_enrichment(
 
     plus image facts: ``actual_image`` (podman inspect, #663),
     ``image_mismatch`` against the declared profile image, and
-    ``image_status`` (present | pulling | missing | not-configured — an
-    in-flight job in ``pull_jobs`` wins without an inspect syscall;
-    ``not-configured`` marks a slot with no declared profile/image, #1226).
+    ``image_status`` (present | pulling | missing | unknown | not-configured —
+    an in-flight job in ``pull_jobs`` wins without an inspect syscall;
+    ``not-configured`` marks a slot with no declared profile/image, #1226;
+    ``unknown`` marks a probe that could not be MADE, #1939, which is a
+    different claim from ``missing``).
 
     ``provider`` is injectable for unit tests; ``None`` resolves the real
     ContainerProvider lazily so route-level patches on the class keep
@@ -715,7 +744,7 @@ async def container_enrichment(
             if image:
                 entry["image_mismatch"] = _image_mismatch(running_image, image)
 
-        # image_status: present | pulling | missing | not-configured
+        # image_status: present | pulling | missing | unknown | not-configured
         # Check the pull-jobs registry first so an in-flight pull
         # surfaces as "pulling" without an extra inspect syscall.
         active_job = jobs.get(name)
@@ -725,9 +754,13 @@ async def container_enrichment(
             try:
                 cp = _resolve_container_provider(provider)
                 present = await loop.run_in_executor(None, _image_present_cached, cp, image)
-                entry["image_status"] = "present" if present else "missing"
+                entry["image_status"] = image_status_for(present)
             except Exception:
-                entry["image_status"] = "missing"
+                # #1939: this branch used to answer "missing". Whatever went
+                # wrong here — resolving the provider, the executor, the probe
+                # itself — the one thing we did NOT learn is whether the image
+                # is on disk, so that is what we say.
+                entry["image_status"] = "unknown"
         else:
             # No profile/image declared — the slot runs on the default toolbox.
             # "No expected image" is NOT a missing-image fault (#1226): report
@@ -752,7 +785,11 @@ async def container_enrichment(
                     "profile": str(cfg.get("profile") or ""),
                     "image": None,
                     "resolved_command": None,
-                    "image_status": "not-configured",
+                    # #1939: a probe that timed out never got as far as
+                    # resolving the profile, so it cannot know whether an image
+                    # is even declared — "not-configured" was a claim ABOUT
+                    # CONFIG made by a probe that read none.
+                    "image_status": "unknown",
                 }
 
     out: dict[str, dict[str, Any]] = {}

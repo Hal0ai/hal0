@@ -121,6 +121,11 @@ async def test_one_wedged_slot_cannot_hold_the_list(
     assert out["s3"]["container_status"] == "stopped"
     assert out["s3"]["container_health"] is False
     assert out["s2"]["container_status"] == "running"
+    # #1939: a probe that timed out never resolved the slot's profile, so it
+    # cannot know whether an image is declared, let alone whether it is on
+    # disk. The old fallback asserted "not-configured" — a claim about config
+    # made by a probe that read no config. "unknown" is the only honest answer.
+    assert out["s3"]["image_status"] == "unknown"
 
 
 # ── the whole GET /api/slots path ────────────────────────────────────────────

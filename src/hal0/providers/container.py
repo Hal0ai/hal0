@@ -2597,8 +2597,12 @@ class ContainerProvider(Provider):
         """
         self._run("systemctl", "reset-failed", self._unit_name(_artefact_token(slot)), check=False)
 
-    def image_present(self, image: str) -> bool:
-        """Return True if ``image`` is in the container image store slots use.
+    def image_present(self, image: str) -> bool | None:
+        """Is ``image`` in the container image store slots use? Tri-state.
+
+        ``True`` / ``False`` are answers: something actually looked in the
+        right store. ``None`` means **nobody could look** — the rootful seam
+        was unusable and this process has no other store worth asking.
 
         #1889: asks ROOT's store first, through the ``hal0-podman-ro``
         ``image-exists`` seam. Slots run ROOTFUL podman (Quadlet), while
@@ -2606,46 +2610,52 @@ class ContainerProvider(Provider):
         so the bare ``<runtime> image inspect`` below reads hal0's own
         ROOTLESS store — a different store, which never contains a slot image.
         That is why ``image_status`` was ``"missing"`` for every running,
-        healthy slot on every standard install. The seam returns ``None`` when
-        it cannot answer, and only then do we fall back to the rootless read —
-        and only when this process is NOT the hal0 service user. On a
+        healthy slot on every standard install. The seam reports ``unknown``
+        when it cannot answer, and only then do we fall back to the rootless
+        read — and only when this process is NOT the hal0 service user. On a
         provisioned box the rootless store is definitionally the wrong store,
         so consulting it after a seam failure would collapse "podman is
         broken / the grant is missing" (wrapper rc 66 / sudo rc 1) back into
         an authoritative-looking "missing", which is #1889 with extra steps.
-        We log instead, so an operator gets a diagnosable signal.
 
-        (The seam-failed-as-hal0 case still has to answer ``False`` because
-        this method's contract is a bool and ``image_status`` has no
-        "unknown" member. Surfacing a distinct unknown state is an API-schema
-        change, deliberately out of scope here — see the PR notes.)
+        #1939: and so is answering ``False`` there, which is what this method
+        used to do because its contract was a bool. It is now a tri-state, and
+        every ``None`` is logged at WARNING with the seam's own reason —
+        ``image_status: "unknown"`` tells a reader the answer is untrustworthy,
+        the journal line tells an operator which grant or store to go fix.
 
         In a dev checkout, where hal0-api runs as the operator, the rootless
-        store IS the store slots use, so the fallback is correct there.
+        store IS the store slots use, so the fallback is correct there — but
+        even there, a box with no container runtime at all, or one whose
+        podman will not exec, has not answered the question either.
 
         Runs synchronously — callers must dispatch to a thread executor when
         called from an async context.
         """
-        seam_answer = podman_introspect.image_exists(image)
-        if seam_answer is not None:
-            return seam_answer
+        probe = podman_introspect.image_presence(image)
+        if probe.presence != "unknown":
+            return probe.presence == "present"
         if is_hal0_service_user():
             log.warning(
-                "hal0.podman_ro.image_present_unanswered image=%s — the rootful seam "
-                "did not answer (grant missing, podman failure, or rejected ref); "
-                "reporting missing without consulting the unrelated rootless store",
+                "hal0.podman_ro.image_present_unanswered image=%s reason=%s — the rootful "
+                "seam did not answer; reporting image_status=unknown rather than consulting "
+                "the unrelated rootless store (see `hal0 doctor seams`)",
                 image,
+                probe.reason,
             )
-            return False
+            return None
         try:
             runtime = _container_runtime()
         except RuntimeError:
-            return False
-        result = subprocess.run(
-            [runtime, "image", "inspect", image],
-            capture_output=True,
-            check=False,
-        )
+            return None
+        try:
+            result = subprocess.run(
+                [runtime, "image", "inspect", image],
+                capture_output=True,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
         return result.returncode == 0
 
     def running_image(self, slot: Mapping[str, Any] | str) -> str | None:

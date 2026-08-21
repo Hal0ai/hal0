@@ -23,10 +23,11 @@ import pytest
 
 from hal0.providers.podman_introspect import (
     SEAM_BIN,
+    ImageProbe,
     PodmanImagesResult,
     container_argv,
     container_image,
-    image_exists,
+    image_presence,
     images,
     is_valid_image_ref,
     is_valid_slot_token,
@@ -175,10 +176,12 @@ def _seam_recorder(*, returncode: int = 0, stdout: str = ""):
 # ── the gate: still never touches sudo off the hal0 service account ─────────
 
 
-def test_image_exists_skips_seam_when_not_hal0_user() -> None:
+def test_image_presence_skips_seam_when_not_hal0_user() -> None:
     calls, run = _seam_recorder(stdout="present\n")
 
-    assert image_exists("alpine:3.19", run=run, is_hal0_user=lambda: False) is None
+    probe = image_presence("alpine:3.19", run=run, is_hal0_user=lambda: False)
+
+    assert probe == ImageProbe("unknown", "not-service-user")
     # Crucially NO rootless fallback here either: a "missing" from hal0's own
     # store about a NAMED image is not a stale answer, it is an answer about a
     # different object. container.py owns that fallback decision.
@@ -195,10 +198,12 @@ def test_container_image_skips_seam_when_not_hal0_user() -> None:
 # ── exact argv (the operand is positional, never a flag) ────────────────────
 
 
-def test_image_exists_seam_argv() -> None:
+def test_image_presence_seam_argv() -> None:
     calls, run = _seam_recorder(stdout="present\n")
 
-    assert image_exists("ghcr.io/hal0/runner:rc6", run=run, is_hal0_user=lambda: True) is True
+    probe = image_presence("ghcr.io/hal0/runner:rc6", run=run, is_hal0_user=lambda: True)
+
+    assert probe == ImageProbe("present")
     assert calls == [["sudo", "-n", SEAM_BIN, "image-exists", "ghcr.io/hal0/runner:rc6"]]
 
 
@@ -225,47 +230,78 @@ def test_container_argv_seam_argv() -> None:
 # ── the actual #1889 fix: "present" is reachable ────────────────────────────
 
 
-def test_image_exists_true_on_present() -> None:
+def test_image_presence_present() -> None:
     _calls, run = _seam_recorder(stdout="present\n")
-    assert image_exists("alpine:3.19", run=run, is_hal0_user=lambda: True) is True
+    assert image_presence("alpine:3.19", run=run, is_hal0_user=lambda: True) == ImageProbe(
+        "present"
+    )
 
 
-def test_image_exists_false_on_missing() -> None:
+def test_image_presence_missing_is_authoritative_and_carries_no_reason() -> None:
+    """rc 0 + "missing" is the ONLY thing that may read as ``missing``: podman
+    was asked and said no. Every other outcome is ``unknown`` (#1939), which is
+    what keeps ``missing`` + a running container a meaningful defect signal
+    (regression ``image-status-wrong-podman-store``)."""
     _calls, run = _seam_recorder(stdout="missing\n")
-    assert image_exists("alpine:3.19", run=run, is_hal0_user=lambda: True) is False
+    probe = image_presence("alpine:3.19", run=run, is_hal0_user=lambda: True)
+
+    assert probe == ImageProbe("missing")
+    assert probe.reason is None
 
 
-# ── tri-state: "seam did not answer" is never confused with a real answer ───
+# ── #1939: the wrapper's exit-code contract reaches the caller ──────────────
+#
+# hal0-podman-ro distinguishes "podman answered no" (rc 0 + "missing") from
+# four flavours of "the seam is unusable" (rc 64/65/66, plus sudo's own rc 1
+# when the grant is absent). Before #1939 every one of those collapsed into a
+# bare ``None`` and then into an authoritative-looking ``image_status:
+# "missing"``. Each now maps to a NAMED unknown so the journal line an
+# operator reads names the actual failure.
 
 
-def test_image_exists_none_when_seam_denied() -> None:
-    """sudo -n rc 1 (grant not installed / mid-upgrade race) is NOT 'missing'."""
-    _calls, run = _seam_recorder(returncode=1, stdout="")
-    assert image_exists("alpine:3.19", run=run, is_hal0_user=lambda: True) is None
+@pytest.mark.parametrize(
+    ("returncode", "reason"),
+    [
+        # sudo -n itself refused: the sudoers grant is not installed, or we are
+        # mid-upgrade between the wrapper and its policy file.
+        (1, "grant-denied"),
+        # the wrapper rejected the operand or the verb (root-side validation)
+        (64, "invalid-argument"),
+        # podman is not installed / not executable on the box
+        (65, "podman-absent"),
+        # podman RAN and broke — store corruption, lock contention, EPERM.
+        # THE case from #1889's review: emphatically not "the image is absent".
+        (66, "podman-failed"),
+        # an rc the contract does not define at all
+        (125, "seam-error"),
+    ],
+)
+def test_image_presence_maps_every_wrapper_rc_to_a_named_unknown(
+    returncode: int, reason: str
+) -> None:
+    _calls, run = _seam_recorder(returncode=returncode, stdout="")
+
+    assert image_presence("alpine:3.19", run=run, is_hal0_user=lambda: True) == ImageProbe(
+        "unknown", reason
+    )
 
 
-def test_image_exists_none_when_wrapper_rejects_the_ref() -> None:
-    """rc 64 (root-side validation) must not read as 'the image is missing'."""
-    _calls, run = _seam_recorder(returncode=64, stdout="")
-    assert image_exists("alpine:3.19", run=run, is_hal0_user=lambda: True) is None
-
-
-def test_image_exists_none_when_podman_absent_on_the_box() -> None:
-    """rc 65 (no podman) is not an answer about the image."""
-    _calls, run = _seam_recorder(returncode=65, stdout="")
-    assert image_exists("alpine:3.19", run=run, is_hal0_user=lambda: True) is None
-
-
-def test_image_exists_none_on_unexpected_stdout() -> None:
+def test_image_presence_unknown_on_unexpected_stdout() -> None:
+    """rc 0 with a word the contract never defines is wrapper drift, not an
+    answer — the seam and its Python mirror have gone out of lock-step."""
     _calls, run = _seam_recorder(stdout="yes\n")
-    assert image_exists("alpine:3.19", run=run, is_hal0_user=lambda: True) is None
+    assert image_presence("alpine:3.19", run=run, is_hal0_user=lambda: True) == ImageProbe(
+        "unknown", "seam-error"
+    )
 
 
-def test_image_exists_none_on_subprocess_error() -> None:
+def test_image_presence_unknown_on_subprocess_error() -> None:
     def _run(argv: object, **kwargs: object) -> MagicMock:
         raise OSError("boom")
 
-    assert image_exists("alpine:3.19", run=_run, is_hal0_user=lambda: True) is None
+    assert image_presence("alpine:3.19", run=_run, is_hal0_user=lambda: True) == ImageProbe(
+        "unknown", "seam-error"
+    )
 
 
 def test_container_image_none_when_no_such_container() -> None:
@@ -286,10 +322,14 @@ def test_container_argv_none_when_no_such_container() -> None:
     "ref",
     ["alpine; rm -rf /", "--rm", "-v/:/host", "../../etc/passwd", "", "a" * 513, "foo bar"],
 )
-def test_image_exists_rejects_bad_ref_without_calling_sudo(ref: str) -> None:
+def test_image_presence_rejects_bad_ref_without_calling_sudo(ref: str) -> None:
     calls, run = _seam_recorder(stdout="present\n")
 
-    assert image_exists(ref, run=run, is_hal0_user=lambda: True) is None
+    # A ref this side rejects was never ASKED about, so it is unknown — never
+    # "missing". Same reason as rc 64, reported with the same name.
+    assert image_presence(ref, run=run, is_hal0_user=lambda: True) == ImageProbe(
+        "unknown", "invalid-argument"
+    )
     assert calls == []
 
 
@@ -325,14 +365,6 @@ def test_is_valid_image_ref_accepts_real_refs(ref: str) -> None:
 @pytest.mark.parametrize("token", ["brain", "1", "my_slot", "my-slot", "x" * 64])
 def test_is_valid_slot_token_accepts_real_tokens(token: str) -> None:
     assert is_valid_slot_token(token) is True
-
-
-def test_image_exists_none_on_operational_podman_failure() -> None:
-    """rc 66 = podman ran but broke (store corruption, lock contention). That
-    is NOT "the image is missing" — reporting it as such would recreate #1889
-    with extra steps, so it must read as "the seam did not answer"."""
-    _calls, run = _seam_recorder(returncode=66, stdout="")
-    assert image_exists("alpine:3.19", run=run, is_hal0_user=lambda: True) is None
 
 
 def test_container_image_none_on_operational_podman_failure() -> None:

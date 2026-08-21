@@ -56,6 +56,15 @@ const CONTAINER_SLOT_STARTING = {
   metrics: { toks: 0, ttft: null, ctx: 0, kv: null },
 }
 
+// #1939: the container image store could not be ASKED about this slot's image
+// (wrapper rc 66 / no sudoers grant / probe timeout). Distinct from 'missing',
+// which is podman answering "no".
+const CONTAINER_SLOT_SEAM_BLIND = {
+  ...CONTAINER_SLOT_RUNNING,
+  name: 'seam-blind-container',
+  image_status: 'unknown',
+}
+
 test.describe('SlotCard container variant (#657)', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/#slots')
@@ -282,6 +291,56 @@ test.describe('SlotCard container variant (#657)', () => {
   // SlotCard grids (Chat + Capabilities). The InferencePane slot cards surface
   // the runtime via the device chip; lifecycle dot classification stays covered
   // by the slotIndicator() unit-style tests above.
+
+  // ── #1939: image_status: 'unknown' renders as honest indeterminate ──────
+  //
+  // The seam-blind state must never be painted like a fault or like an absent
+  // image. These run through window.imageStatusChip — the same pure helper the
+  // cards call — for the same reason the dot tests use window.slotIndicator:
+  // it is the real code path, and it does not depend on the (unmounted) grid.
+
+  test('unknown image_status yields an indeterminate chip, not an error one', async ({ page }) => {
+    const chip = await page.evaluate(
+      (slot) => (window as any).imageStatusChip(slot),
+      CONTAINER_SLOT_SEAM_BLIND,
+    )
+    expect(chip).not.toBeNull()
+    expect(chip.label).toBe('image ?')
+    expect(chip.cls).toContain('image-unknown')
+    // Never the error/warn vocabulary — those mean "something is wrong with
+    // this slot", and "we couldn't read the image store" is not that claim.
+    expect(chip.cls).not.toMatch(/\b(err|error|warn)\b/)
+    expect(chip.tooltip).not.toMatch(/missing/i)
+  })
+
+  test('a definitively answered image_status renders no chip at all', async ({ page }) => {
+    const chips = await page.evaluate(
+      (slots) => slots.map((s: any) => (window as any).imageStatusChip(s)),
+      [
+        CONTAINER_SLOT_RUNNING, // present
+        { ...CONTAINER_SLOT_RUNNING, image_status: 'missing' },
+        { ...CONTAINER_SLOT_RUNNING, image_status: 'pulling' },
+        { ...CONTAINER_SLOT_RUNNING, image_status: 'not-configured' },
+      ],
+    )
+    expect(chips).toEqual([null, null, null, null])
+  })
+
+  test('the seam-blind chip renders on a real card in the inference pane', async ({ page }) => {
+    // The forced-mock seed (dash/data.jsx) gives `legacy` image_status:
+    // 'unknown', so the LIVE card surface — inference-pane's SlotScard, not
+    // the retired grid — must render the chip. This is the only assertion
+    // here that goes through real JSX rather than the classifier alone.
+    const card = page.getByTestId('infer-slot-legacy')
+    await expect(card).toBeVisible()
+    const chip = card.getByTestId('slot-image-unknown')
+    await expect(chip).toBeVisible()
+    await expect(chip).toHaveText(/image \?/)
+    // The neighbouring card, whose image_status is definitive, carries none.
+    await expect(
+      page.getByTestId('infer-slot-primary').getByTestId('slot-image-unknown'),
+    ).toHaveCount(0)
+  })
 
   test('starting container card renders warming dot via slotIndicator', async ({ page }) => {
     // Verify warming dot for a starting container slot

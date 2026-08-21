@@ -1787,7 +1787,8 @@ async def pull_slot_image_stream(name: str, request: Request) -> StreamingRespon
         data: {"slot_name": "...", "image": "...", "state": "pulling",
                "layer": N, "total_layers": M}
 
-    Terminal states: ``completed`` | ``failed`` | ``present`` | ``missing``.
+    Terminal states: ``completed`` | ``failed`` | ``present`` | ``missing`` |
+    ``unknown`` (#1939 — the image store could not be read).
     """
 
     async def _gen() -> Any:
@@ -1795,7 +1796,8 @@ async def pull_slot_image_stream(name: str, request: Request) -> StreamingRespon
         job = slot_pull_jobs.get(name)
 
         if job is None:
-            # No active pull — inspect the image to surface present|missing.
+            # No active pull — inspect the image to surface
+            # present|missing|unknown.
             sm = _get_slot_manager(request)
             image = await _image_pull.resolve_slot_image(sm, name)
             state = await _image_pull.inspect_image_state(image)
@@ -1828,8 +1830,9 @@ async def pull_slot_image_status(name: str, request: Request) -> dict[str, objec
     one-shot poll equivalent for clients that can't hold an EventSource
     open. Returns the in-flight job snapshot when a pull is active,
     otherwise inspects the slot's image and reports ``present`` |
-    ``missing`` — the same terminal vocabulary the stream's no-job branch
-    emits, so a poller and a streamer converge on the same states.
+    ``missing`` | ``unknown`` — the same terminal vocabulary the stream's
+    no-job branch emits, so a poller and a streamer converge on the same
+    states.
 
     Frame shape::
 
@@ -1837,7 +1840,8 @@ async def pull_slot_image_status(name: str, request: Request) -> dict[str, objec
          "layer": N, "total_layers": M, "error": null}
 
     States: ``pulling`` | ``completed`` | ``failed`` | ``present`` |
-    ``missing``.
+    ``missing`` | ``unknown`` (#1939 — the image store could not be read; NOT
+    a report that the image is absent).
     """
     slot_pull_jobs: dict[str, Any] = getattr(request.app.state, "slot_pull_jobs", {})
     job = slot_pull_jobs.get(name)

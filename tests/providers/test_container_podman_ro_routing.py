@@ -28,9 +28,15 @@ import pytest
 
 from hal0.providers import container as container_mod
 from hal0.providers.container import ContainerProvider
+from hal0.providers.podman_introspect import ImageProbe
 
 SLOT: dict[str, Any] = {"id": 7, "name": "gpu-chat"}
 IMAGE = "ghcr.io/thinmintdev/hal0-runner:v1.0.0-rc.6"
+
+
+def _probe(presence: str, reason: str | None = None):
+    """A canned ``podman_introspect.image_presence`` for monkeypatching."""
+    return lambda _image: ImageProbe(presence, reason)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -61,11 +67,11 @@ def test_image_present_true_from_rootful_seam(
     reports present, so slot_view renders image_status="present"."""
     seen: list[str] = []
 
-    def _exists(image: str) -> bool:
+    def _presence(image: str) -> ImageProbe:
         seen.append(image)
-        return True
+        return ImageProbe("present")
 
-    monkeypatch.setattr(container_mod.podman_introspect, "image_exists", _exists)
+    monkeypatch.setattr(container_mod.podman_introspect, "image_presence", _presence)
 
     assert ContainerProvider().image_present(IMAGE) is True
     assert seen == [IMAGE]
@@ -76,7 +82,7 @@ def test_image_present_false_is_an_honest_rootful_negative(
 ) -> None:
     """A seam that answered "missing" is authoritative — we must NOT then
     re-ask the rootless store and let its (also wrong) answer stand in."""
-    monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: False)
+    monkeypatch.setattr(container_mod.podman_introspect, "image_presence", _probe("missing"))
 
     assert ContainerProvider().image_present(IMAGE) is False
 
@@ -84,9 +90,11 @@ def test_image_present_false_is_an_honest_rootful_negative(
 def test_image_present_falls_back_to_rootless_when_seam_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dev checkout / CI / no grant: the seam returns None and the operator's
+    """Dev checkout / CI / no grant: the seam cannot answer and the operator's
     own store is the right one to read."""
-    monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: None)
+    monkeypatch.setattr(
+        container_mod.podman_introspect, "image_presence", _probe("unknown", "not-service-user")
+    )
     monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
     monkeypatch.setattr(container_mod, "_container_runtime", lambda: "/usr/bin/podman")
 
@@ -105,10 +113,16 @@ def test_image_present_falls_back_to_rootless_when_seam_silent(
     assert calls == [["/usr/bin/podman", "image", "inspect", IMAGE]]
 
 
-def test_image_present_false_when_seam_silent_and_no_runtime(
+def test_image_present_unknown_when_seam_silent_and_no_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: None)
+    """#1939: no seam AND no podman binary means nothing on this box can be
+    asked about the image. That is ``unknown``, not ``False`` — a box with no
+    container runtime at all was previously reporting every slot image as
+    authoritatively absent."""
+    monkeypatch.setattr(
+        container_mod.podman_introspect, "image_presence", _probe("unknown", "not-service-user")
+    )
     monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
 
     def _no_runtime() -> str:
@@ -116,7 +130,25 @@ def test_image_present_false_when_seam_silent_and_no_runtime(
 
     monkeypatch.setattr(container_mod, "_container_runtime", _no_runtime)
 
-    assert ContainerProvider().image_present(IMAGE) is False
+    assert ContainerProvider().image_present(IMAGE) is None
+
+
+def test_image_present_unknown_when_the_rootless_call_itself_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dev box whose podman binary blows up on exec has not answered either."""
+    monkeypatch.setattr(
+        container_mod.podman_introspect, "image_presence", _probe("unknown", "not-service-user")
+    )
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
+    monkeypatch.setattr(container_mod, "_container_runtime", lambda: "/usr/bin/podman")
+
+    def _boom(argv: list[str], **_kw: object) -> None:
+        raise OSError("exec format error")
+
+    monkeypatch.setattr(container_mod.subprocess, "run", _boom)
+
+    assert ContainerProvider().image_present(IMAGE) is None
 
 
 # ── running_image: the "actual_image is always null" bug ───────────────────
@@ -225,12 +257,58 @@ def test_slot_view_reports_present_for_a_running_slot(
     from hal0 import slot_view
 
     slot_view._image_present_cache.clear()
-    monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: True)
+    monkeypatch.setattr(container_mod.podman_introspect, "image_presence", _probe("present"))
 
     present = slot_view._image_present_cached(ContainerProvider(), IMAGE)
 
     assert present is True
-    assert ("present" if present else "missing") == "present"
+    assert slot_view.image_status_for(present) == "present"
+    slot_view._image_present_cache.clear()
+
+
+def test_slot_view_reports_unknown_for_an_unanswerable_seam(
+    monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]]
+) -> None:
+    """The same end-to-end walk for #1939: wrapper rc 66 on the service
+    account must reach ``image_status`` as ``unknown``, through the real
+    provider and the real TTL cache — never as ``missing``."""
+    from hal0 import slot_view
+
+    slot_view._image_present_cache.clear()
+    monkeypatch.setattr(
+        container_mod.podman_introspect, "image_presence", _probe("unknown", "podman-failed")
+    )
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: True)
+
+    present = slot_view._image_present_cached(ContainerProvider(), IMAGE)
+
+    assert present is None
+    assert slot_view.image_status_for(present) == "unknown"
+    slot_view._image_present_cache.clear()
+
+
+def test_image_present_cache_round_trips_unknown_without_flattening_it(
+    monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]]
+) -> None:
+    """A cached ``unknown`` must come back out of the TTL cache as ``unknown``.
+    ``bool()``-ing the cached value on the way in or out would silently restore
+    the exact collapse #1939 is about, one poll later."""
+    from hal0 import slot_view
+
+    slot_view._image_present_cache.clear()
+    calls: list[str] = []
+
+    def _presence(image: str) -> ImageProbe:
+        calls.append(image)
+        return ImageProbe("unknown", "grant-denied")
+
+    monkeypatch.setattr(container_mod.podman_introspect, "image_presence", _presence)
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: True)
+
+    cp = ContainerProvider()
+    assert slot_view._image_present_cached(cp, IMAGE) is None
+    assert slot_view._image_present_cached(cp, IMAGE) is None
+    assert calls == [IMAGE], "the second read must come from the cache"
     slot_view._image_present_cache.clear()
 
 
@@ -321,30 +399,47 @@ def test_unknown_running_image_is_never_drift() -> None:
 # definitionally cannot hold a slot image.
 
 
-def test_image_present_does_not_consult_rootless_store_as_service_user(
-    monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]]
+@pytest.mark.parametrize(
+    "reason", ["grant-denied", "invalid-argument", "podman-absent", "podman-failed", "seam-error"]
+)
+def test_image_present_is_unknown_not_false_when_the_seam_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]], reason: str
 ) -> None:
-    monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: None)
+    """#1939, the heart of it. Every unanswerable outcome — wrapper rc 66,
+    a missing sudoers grant, wrapper drift — used to return ``False`` and
+    surface as an authoritative ``image_status: "missing"``. The bool contract
+    is now a tri-state and ``None`` means "could not ask".
+
+    ``no_rootless`` raises if subprocess.run is reached at all, so this also
+    pins that we still never consult the (wrong) rootless store here.
+    """
+    monkeypatch.setattr(
+        container_mod.podman_introspect, "image_presence", _probe("unknown", reason)
+    )
     monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: True)
 
-    # `no_rootless` raises if subprocess.run is reached at all.
-    assert ContainerProvider().image_present(IMAGE) is False
+    assert ContainerProvider().image_present(IMAGE) is None
 
 
-def test_image_present_logs_when_the_seam_does_not_answer(
+def test_image_present_logs_the_seam_reason_when_it_does_not_answer(
     monkeypatch: pytest.MonkeyPatch,
     no_rootless: list[list[str]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The False above is a bool-contract limitation, not a silent one — an
-    operator must be able to tell it apart from a genuinely absent image."""
-    monkeypatch.setattr(container_mod.podman_introspect, "image_exists", lambda _i: None)
+    """The payload says ``unknown``; the journal says WHICH unknown. The
+    wrapper spends four exit codes distinguishing these — an operator
+    debugging a box needs the distinction, and ``unknown`` alone doesn't
+    carry it."""
+    monkeypatch.setattr(
+        container_mod.podman_introspect, "image_presence", _probe("unknown", "podman-failed")
+    )
     monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: True)
 
     with caplog.at_level("WARNING"):
         ContainerProvider().image_present(IMAGE)
 
     assert "image_present_unanswered" in caplog.text
+    assert "podman-failed" in caplog.text
 
 
 @pytest.mark.parametrize("method", ["running_image", "running_argv"])
