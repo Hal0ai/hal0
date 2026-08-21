@@ -37,25 +37,64 @@ three-minute budget with a blank error message.
 
 The GA blocker from the rc.6 sweep — the Vulkan backend in the shipped runner
 image emits invalid tokens for every model while every health surface reads
-green (#1888) — is answered by retiring the Vulkan LLM lane rather than
-repairing it (#1923): ROCm (`/dev/kfd`) is now an explicit requirement for
-llama.cpp GPU slots. That is a release-shape change with a migration; read
-Breaking, Operator migrations, and Known issues before upgrading a box that
-carries a `gpu-vulkan` slot.
+green (#1888) — is answered in two steps. rc.7 first retired the Vulkan LLM
+lane outright as a safety floor, requiring ROCm (`/dev/kfd`) for every
+llama.cpp GPU slot (#1923); once the defect was bisected to the old runner
+image's own upstream tree rather than to hal0's build, the hardware, or
+llama.cpp itself, rc.7 restores the lane on a corrected runner image behind an
+explicit image gate, so an unvalidated pin can never serve it again (#1948).
+That is a release-shape change with a migration either way; read Breaking,
+Operator migrations, and Known issues before upgrading a box that carries a
+`gpu-vulkan` slot.
+
+rc.7 also closes the hole that let that blocker survive a whole release. Every
+readiness surface hal0 had proved *transport* — the port answers, the weights
+mapped — and none of them proved *output*. A language-model slot now has to
+answer one short prompt correctly before hal0 calls it ready, so a backend that
+loads cleanly and then produces nonsense fails its load loudly instead of
+serving for hours behind a wall of green (#1922).
 
 ### Highlights
 
-- **The Vulkan LLM lane is retired; ROCm is the GPU lane for language models.**
-  On the shipped runner image the Vulkan backend emitted invalid tokens for
-  every model while the slot read `ready` and every health surface read green
-  (#1888). Rather than repair a lane that never actually ran on Vulkan where it
-  worked — both GPU device ids resolve to the same ROCm image, so `gpu-vulkan`
-  was a mislabel wherever `/dev/kfd` existed and garbage wherever it did not —
-  rc.7 removes it from every llama.cpp surface: seeds, stacks, the capability
-  picker, hardware recommendation, and the bench suites. `/dev/kfd` is now a
-  loud install-time requirement on AMD GPU boxes, and a `gpu-rocm`/`gpu-vulkan`
-  slot refuses to load without it instead of serving garbage. Genuinely-Vulkan
-  images (Kokoro, whisper.cpp, ComfyUI) are unaffected (#1923).
+- **The Vulkan LLM lane is restored — and, on the reference box, now beats
+  ROCm.** On the runner image rc.6 shipped, the Vulkan backend emitted invalid
+  tokens for every model while the slot read `ready` and every health surface
+  read green (#1888). rc.7 first retired the lane outright as a safety floor,
+  requiring `/dev/kfd` for every llama.cpp GPU slot (#1923); bisection then
+  isolated the defect to the old runner image's own upstream tree
+  (`ciru-ai/ROCmFPX`'s port onto newer llama.cpp) rather than hal0's build,
+  gfx1151, RADV, or llama.cpp mainline itself, each of which was independently
+  exonerated (#1948). The default AMD runner image moves to
+  `ghcr.io/hal0ai/hal0-combined:0822`, which restores a correct Vulkan backend
+  and the MiniCPM5 native tool-call parser the retired image also carried, so
+  it is a strict superset rather than a tradeoff. The Vulkan LLM lane returns
+  as a first-class `gpu-vulkan` lane behind an explicit image gate — a runner
+  image has to clear the validation matrix before the lane will use it, so an
+  older or unvalidated pin is refused at preflight by name instead of serving
+  garbage again — and the rc.7 output-sanity readiness gate (#1922) stands
+  underneath it either way as the permanent net. Measured on the reference box:
+  the restored Vulkan lane now outperforms ROCm by +14% prefill and +20%
+  decode on the control model, inverting the earlier ROCm-first guidance
+  (#1948, #1959, #1973).
+- **Voice and speech runtimes that never touch ROCm keep working without
+  `/dev/kfd`.** Kokoro TTS and Moonshine STT are gated on their own device
+  needs, not llama.cpp's; ComfyUI and Qwen3-TTS ship ROCm builds and do need
+  the compute node, and each explains its own refusal instead of borrowing
+  llama.cpp's (#1923, #1941).
+- **A model that cannot produce language no longer reports itself ready.** Slot
+  readiness was proved by transport alone: `/health` answering `200` meant the
+  runner had bound its port and mapped its weights, and said nothing about
+  whether it could turn those weights into words. That is how a box served two
+  hours of garbage while the slot read `ready`, `/api/health` was green,
+  `hal0 doctor` said `OK gpu` and tokens streamed at 60-120 a second (#1888).
+  Every `type = "llm"` slot now has to finish one short prompt correctly —
+  `The capital of France is` → `Paris`, greedy, twelve tokens, once per load —
+  before it goes ready. A slot that answers with nonsense, with nothing, or not
+  at all inside twenty seconds fails its load with a red dot naming the probe,
+  the expected word and what the model actually said, and its unit is stopped
+  so it cannot quietly be re-adopted as healthy. Embedding, reranking, speech
+  and image slots are never asked to chat, and the gate can be switched off per
+  box or per slot (#1922).
 - **Streams from an upstream provider can no longer hang forever.** A relayed
   chat stream that stopped producing tokens — a provider that wedged
   mid-answer, a connection that went quiet without closing, or one that never
@@ -105,24 +144,40 @@ carries a `gpu-vulkan` slot.
 
 ### Breaking
 
-- **`device = "gpu-vulkan"` is no longer a valid lane for llama.cpp slots, and
-  AMD GPU installs require `/dev/kfd` (#1923).** A fresh install that sees an
-  AMD render node with no ROCm compute node now stops with the remedy (on
-  Proxmox: pass `dev1: /dev/kfd` through to the container) instead of seeding
-  slots that answer with garbage; `HAL0_ALLOW_CPU_ONLY=1` or the interactive
-  confirm opts into a CPU-only install. At runtime a `gpu-rocm` or `gpu-vulkan`
-  llama.cpp slot refuses to load when `/dev/kfd` is absent —
-  `HAL0_ALLOW_VULKAN_FALLBACK=1` is the explicit, warning-loud escape hatch. An
-  existing slot TOML that still says `device = "gpu-vulkan"` refuses to load
-  after the upgrade until it is relabeled to `gpu-rocm`; `hal0 update` now does
-  this for you — a post-activation migration relabels a llama.cpp GPU slot on
-  an AMD host from `gpu-vulkan` to `gpu-rocm` when `/dev/kfd` is present, or to
-  `cpu` (with a loud warning, since that is a real behaviour change) when it is
-  not (#1924). A non-AMD host, or a Vulkan slot belonging to a non-llama.cpp
-  runtime (Kokoro, whisper.cpp, ComfyUI), is left untouched. Seed stacks,
-  stack-apply defaults, `--hardware` auto-detect, and the hardware
-  recommendation ladder all now resolve AMD GPUs to `rocm` or fall back to
-  `cpu`, never to the retired lane.
+- **`device = "gpu-vulkan"` is a valid llama.cpp lane again, gated on a
+  validated runner image; a fresh AMD GPU install no longer requires
+  `/dev/kfd` (#1923, #1948, #1973).** rc.7's mid-cycle retirement of the
+  Vulkan LLM lane (#1923) is superseded by its restoration behind an explicit
+  image allowlist, `VULKAN_CAPABLE_IMAGE_REFS`: a `gpu-vulkan` llama.cpp slot
+  on an AMD host now needs a render node the runner identity can open **and**
+  a runner image that has earned membership through the §3-C validation
+  matrix (`ghcr.io/hal0ai/hal0-combined:0822` or later) — an image outside
+  that set is refused at load time by name, quoting #1888, rather than
+  silently serving garbage again; `HAL0_ALLOW_VULKAN_FALLBACK=1` downgrades
+  that refusal to a warning but cannot substitute for a missing render node.
+  `gpu-rocm` keeps the unconditional `/dev/kfd` requirement rc.7 always had
+  for it — that lane's device name IS the ROCm claim. **The install-time
+  preflight changed too**: it previously stopped a fresh install on any AMD
+  render node with no ROCm compute node, telling the operator to forward
+  `/dev/kfd` even on hardware (like the ct151-class box #1888 was reproduced
+  on) that has no compute node to forward and never will; it now accepts
+  render-node-only AMD when the runner image is Vulkan-validated, and the
+  `HAL0_ALLOW_CPU_ONLY=1` messaging was corrected to stop implying a GPU
+  install was impossible there. The hardware recommendation ladder,
+  `--hardware` auto-detect, and post-install device derivation all resolve a
+  compute-less AMD GPU to the gated `gpu-vulkan` lane instead of `cpu`. A box
+  with no usable GPU at all still needs an explicit CPU-only install
+  (`HAL0_ALLOW_CPU_ONLY=1` or the interactive confirm). ComfyUI and Qwen3-TTS
+  still need `/dev/kfd` for their own ROCm builds regardless of the llama.cpp
+  lane (#1941). **No slot already relabeled by the earlier retirement
+  migration is reverted**: a slot the #1924 migration moved from
+  `gpu-vulkan` to `gpu-rocm` or `cpu` on an rc.6 → rc.7 upgrade keeps that
+  device — only the capability picker's Vulkan *offer* returns, for new slot
+  creation and for boxes that never carried the retired label; the picker
+  offers the lane without gating on image version — refusal happens at slot
+  load, not at offer time. Seed stacks still default to `gpu-rocm` where
+  `/dev/kfd` is reachable — ROCm leads on prefill; switch a slot to the
+  restored lane by hand with `hal0 slot edit <slot> --hardware vulkan`.
 
 ### Added
 
@@ -136,6 +191,42 @@ carries a `gpu-vulkan` slot.
   on those requests, since the guard's clocks only start once headers arrive.
   All three are settable through the settings API and documented with the
   rest of the dispatcher configuration (#1893).
+- The output-sanity gate can be switched off where it does not suit the model:
+  `HAL0_SLOT_OUTPUT_SANITY=0` in `hal0-api`'s environment disables it for every
+  slot on the box, and `output_sanity = false` in a slot's TOML
+  (`/etc/hal0/slots/<name>.toml`) disables it for that slot alone. It is on by
+  default, applies only to `type = "llm"` slots, and costs a successful load one
+  short completion with a twenty-second ceiling (#1922).
+- `image_status` gains a fifth member, `unknown`, on `GET /api/slots`,
+  `/pull/status`, and `/pull/stream`: podman was asked whether an image
+  exists and could not answer — a broken rootful-seam grant, an unusable
+  wrapper, no container runtime at all — as distinct from `missing`, which now
+  means only "podman was asked and the image is not there." This is an
+  additive enum member on an existing field, not a removal or rename; a
+  consumer that switches on `image_status` exhaustively needs a case for it.
+  It ships pre-GA, in rc.7, on the reasoning that a schema break is cheap now
+  and expensive after the vocabulary is frozen (#1968, #1939).
+- **The Bank memory workspace is redesigned as "memory v2"**: new tokens,
+  shared primitives and stylesheet underpin ported tag/unit/curate/history
+  data plumbing, with an archive-aware units filter — an invalidated fact
+  drops out of the default listing the same way the upstream store already
+  excludes it, and the curation inspector's revert flow re-lists it
+  explicitly rather than assuming it is still there. Two backend additions
+  make the new surface honest rather than decorative: curate is exposed as
+  an audited REST `PATCH /api/memory/banks/{bank_id}/memories/{memory_id}`
+  (forwarded verbatim to the store, reversible — it invalidates, it does not
+  delete — and recorded through the same `record_action` audit path every
+  other mutating memory route uses), and a new composed
+  `GET /api/memory/banks/{bank_id}/units` endpoint adds tag and time-window
+  filtering with salience ranking computed over the same cached graph slab
+  `bank_subgraph` already pays for. That ranking is deliberately honest about
+  its own limits: a unit outside the slab's ~2000-row cap scores
+  `salience: null` and empty `link_counts_by_type` rather than a false `0.0`,
+  sorts after every row the slab could actually score, and the response
+  carries a `truncated` flag when the slab itself clipped — the same signal
+  `bank_subgraph` gives for the identical tradeoff. The ego subgraph's depth
+  ceiling rises from 2 to 10 to match the workspace's depth slider, which the
+  backend was silently clamping under before (#1987).
 
 ### Fixed
 
@@ -150,6 +241,18 @@ carries a `gpu-vulkan` slot.
   appeared in the capability catalogue as a fittable choice and then failed at
   load time. The default `bge-reranker-v2-m3-q4_k_m` already covers reranking on
   the same runner image and is unaffected (#1891).
+- `/dev/kfd` accessibility is judged by the identity that actually opens it —
+  the rootful slot-container runner — instead of the calling process, which
+  on `hal0-api` is the unprivileged `hal0` user (#1953, #1954). A plain LXC
+  `dev1: /dev/kfd` passthrough leaves the compute node owned `root:root`
+  while the render node is group-readable, so ROCm worked perfectly inside
+  the container while the API-side preflight reported the compute node
+  unusable and refused every AMD GPU llama.cpp slot on an otherwise healthy
+  box — and told the operator to forward a device that was already forwarded.
+  The target group id is now read from the render node itself rather than
+  guessed from a group name that is not portable across boxes, and both
+  `install.sh` and `hal0 update` converge an existing box's `/dev/kfd`
+  ownership to match.
 - The agent picks the slot that is actually serving. Delegation resolved its
   target by name against a stale idea of which slot states are dispatchable, so
   a seed slot that had never been wired to a model could shadow a slot that was
@@ -226,13 +329,125 @@ carries a `gpu-vulkan` slot.
   `hal0-api` lost all in-flight pull status. `hal0 doctor perms --fix` can
   now heal both paths the same way it heals everything else it owns (#1895).
 - Updater journal lines carry the `job_id` of the job that produced them
-  instead of `job_id=None`, and a successful update now relays the
-  `sha256_ok` / `cosign_verify_ok` / `prepare_ok` breadcrumbs the routed
-  child process already logs — previously that structured log only reached
-  the parent's journal on failure, so a successful update left no trail to
-  reconstruct it from afterward. The `cosign_skipped` job field, which never
-  had a producer and always read `null`, is removed rather than given a fake
-  one (#1901).
+  instead of `job_id=None`, and every update — successful or failed — now
+  relays the `sha256_ok` / `cosign_verify_ok` / `prepare_ok` breadcrumbs the
+  routed child process logs into the journal in full. A successful update
+  previously left no trail to reconstruct it from at all, and a failed one kept
+  only the last 4,000 characters of the child's log attached to the error:
+  enough for a failure that happens early, but a failure after cosign passed —
+  during `activate`, say, with a long cleanup tail behind it — pushed exactly
+  the verification evidence an operator needs out of that window. The bounded
+  tail is still attached to the error for quick triage; it is no longer the only
+  copy. The `cosign_skipped` job field, which never had a producer and always
+  read `null`, is removed rather than given a fake one (#1901, #1940).
+- A Kokoro voice slot or a Moonshine speech-to-text slot on
+  `device = "gpu-vulkan"` loads again on an AMD box that has no `/dev/kfd`. The
+  new ROCm requirement read the slot's device string alone, but `gpu-vulkan` is
+  simply what the capability picker calls "the GPU" for every runtime that is
+  not llama.cpp — so it refused runtimes that never touch ROCm at all, and told
+  them it was because of a llama.cpp Vulkan fallback they do not use. Each
+  runtime now states for itself whether its image needs the ROCm compute node:
+  ComfyUI and Qwen3-TTS do, and are still refused without it in their own terms;
+  Kokoro, Moonshine and the CPU/NPU runtimes do not, and are no longer gated
+  (#1941).
+- The voice settings page stops attributing Kokoro's voices to a slot that is
+  not Kokoro. While the capability probe was still in flight — or had failed —
+  the page filled the voice picker with Kokoro's bundled pack and offered
+  `af_bella` as the engine default even on a box whose TTS slot runs Qwen3-TTS.
+  It now says the list is loading (or that the probe failed) and claims nothing
+  about the engine until it knows which one is configured; a slot with no TTS
+  model still gets the seed pack once the probe answers (#1944).
+- Four more paths `hal0-api` writes get an ownership row at install time, so a
+  root-run process that touches one of them first cannot leave it unwritable to
+  the service user: the image-generation PNG cache (`images/cache/`), the saved
+  dashboard layout (`dashboard-layout.json`), the durable update-job snapshots
+  (`update-jobs/`) and the custom chat-template store (`models/chat-templates/`).
+  `hal0 doctor perms --fix` now heals all four the same way it heals everything
+  else it owns (#1938).
+- **A release's own migrations now run on the update that ships them.**
+  `Updater.commit()` was running `run_post_activation_migrations` in-process
+  before the symlink swap, so it executed the *outgoing* version's migration
+  code — a release's new migration never fired on the upgrade that shipped it,
+  only on whichever later upgrade happened to run next. It now runs in a
+  subprocess of the just-activated tree, after the swap, mirroring the
+  existing unit re-render seam; a boot-time safety net re-runs the same
+  idempotent passes on every `hal0-api` start so a box that upgraded before
+  this fix, or whose post-swap subprocess itself failed, still heals. A
+  migration failure no longer aborts the commit — the swap has already
+  succeeded by the time migrations run — but it is loud: an ERROR journal
+  line, a `convergence.post_activation_migrations` block that flips
+  `converged` to `false`, and a red panel in `hal0 update`'s CLI output
+  naming what failed and that it self-heals on the next `hal0-api` restart
+  (#1961, closes #1960).
+- `GET /api/slots`, `/pull/status`, and `/pull/stream` no longer report an
+  authoritative-looking `image_status: "missing"` when the rootful podman seam
+  simply could not be asked — a broken sudoers grant, an unusable wrapper, a
+  timed-out probe, or no container runtime at all. Those cases now report
+  `unknown`; `missing` means podman was asked and answered no. The dashboard's
+  slot cards render a neutral dashed "image ?" chip for `unknown` rather than
+  nothing, with a tooltip that names `hal0 doctor` instead of claiming the
+  image is absent — covering embedding, reranking, speech and image slots as
+  well as language-model ones, and with a `reason=` journal breadcrumb on the
+  probe-timeout path too, closing two gaps the initial change left behind
+  (#1968, closes #1939; #1980).
+- `hal0 doctor perms` is durably green on a freshly installed box, and stays
+  green after a slot load, a model pull, and a Hermes `STATE.md` render — the
+  three shipped components that declare a path's mode (the ownership table,
+  the privileged `hal0-agentenv` wrapper, and each writer's own directory
+  creation) previously disagreed with each other, so a `--fix` repair was
+  undone by the very next write it was fixing. `secrets/` and
+  `secrets/agents/` are now declared and born `0700` (narrowed from a stale
+  `0755` the table carried but no writer actually produced), atomic-write
+  helpers preserve a file's existing mode across a rewrite instead of
+  resetting it to the process umask, and daemon-created state directories are
+  born `2775` rather than a umask-masked `2755` (closes #1896).
+- The footer's runtime indicator strip is relabelled **Slots** and renders a
+  pip only for a slot that is actually active, coloured from the same
+  serving/ready/warming/error palette as the slot-card indicator dots instead
+  of its own separate one; a mostly-stopped fleet no longer reads as a wall of
+  identical grey dots (#1976).
+- Memory bank cards on the dashboard collapse their working/pending/error pill
+  cluster into a single spinner and in-flight count next to the bank name; the
+  per-task breakdown moves into a new **Active tasks** list on the graph
+  extraction sidebar card, grouped by task type with active/queued totals
+  (#1975).
+- Slot cards show live tokens-per-second and context-usage figures for
+  non-streaming traffic (graph extraction, embedding callers, scripts) instead
+  of a permanent `—`. A single non-streaming completion carries its whole
+  token count in one event, which the tok/s calculation required at least two
+  events to smear across a window to read at all; the context figure had no
+  producer at all and now reads the fullest sub-slot's used tokens from the
+  runner's own `/slots` payload (#1977).
+- The dashboard's memory hero bar and the health strip's unified-memory figure
+  now size themselves against the same shared GTT pool total the Slots page
+  already reads, instead of `ram_total_mb` — on a box where the operator had
+  raised `ttm.pages_limit`, the two dashboard surfaces kept reporting the
+  smaller RAM figure while the Slots page correctly showed the raised pool
+  (#1978).
+- Deliberately stopped slots and services no longer paint red as if crashed.
+  A bounded `systemctl stop` that escalates to SIGKILL leaves a unit's
+  `is-active` reading `failed` even though the stop was clean and intentional,
+  which `unload_sync` now clears with a best-effort `systemctl reset-failed`
+  after teardown — a unit that fails on its own still never passes through
+  that path and stays red. `GET /api/services/health` gains a `state` field
+  (`up` / `stopped` / `down`) so a merely-stopped service, like ComfyUI parked
+  intentionally, reads as a grey "stopped" pip rather than the same red
+  "down" a genuine HTTP failure gets (#1979).
+- The AMD GPU runner image build is a tracked, reproducible, digest-pinned
+  recipe (`packaging/runner/rocmfpx/`) rather than a hand-build that only
+  existed as a pushed tag — the same gap that made bisecting #1888 to its
+  root cause expensive in the first place. The manifest pins the base image
+  by content digest in both build stages — verified to be the exact base
+  `:0822` was built from — and the upstream source repo by a full (not
+  abbreviated) commit sha, and records each carried patch with its own
+  rationale; `build.sh --check` reproduces the patch series against a clean
+  checkout without a container runtime and without building anything, and
+  runs as part of CI. A provenance note under
+  `tests/release-validation/provenance/runner-images.md` states plainly that
+  the published `:0822` itself predates this recipe and carries none of its
+  labels — it is reconstructed provenance, not a build record, and this
+  recipe governs the next build rather than retroactively documenting this
+  one (#1986, review record #1972, closes #1970).
 
 ### Docs
 
@@ -273,21 +488,34 @@ see Known issues.
 
 ### Known issues
 
-**The Vulkan garbage-output blocker (#1888) is answered by retiring the lane
-(#1923), but the issue stays open until that answer is validated on hardware.**
-rc.7 no longer seeds, recommends, or offers a Vulkan llama.cpp slot, and a GPU
-slot without `/dev/kfd` refuses to load instead of serving garbage — see
-Breaking. Still open behind it: the retirement has not yet been swept on the
-fleet, the non-AMD Vulkan paths (NVIDIA without CDI, Intel iGPU) still need an
-A/B against the pinned runner (#1925), and the deeper defect — a slot can read
-`ready` on every health surface while emitting unusable tokens — has no
-output-sanity gate yet (#1922). Until that gate exists, validate a new lane by
-reading an actual completion rather than trusting a status surface.
+**The Vulkan garbage-output blocker (#1888) is answered at the source, and the
+issue stays open only until the fix is swept on the fleet.** rc.7 restores the
+Vulkan LLM lane on a corrected runner image behind an explicit image gate
+rather than shipping the mid-cycle retirement permanently — see Highlights and
+Breaking. The deeper defect the original bug exposed — a slot reading `ready`
+on every health surface while emitting unusable tokens — is what the new
+output-sanity gate (#1922) exists to stop, independent of which lane or image
+a slot runs. Still open: the restored image and the gate have not yet been
+swept on the fleet by `rc-validate`, and the non-AMD Vulkan paths (NVIDIA
+without CDI, Intel iGPU) remain uncharacterised and ungated by the new image
+allowlist, which is AMD-specific (#1925).
 
-**One rc.6 sweep finding remains open and is not fixed here.** `hal0 doctor
-perms` exits `1` with `DRIFT` on a box that has just been installed cleanly,
-and `--fix` cannot converge it, so the check cannot currently be used as a
-gate (#1896). A fix is in progress but has not merged as of this section.
+**The Vulkan runner-image gate is a static allowlist, not an ordering
+comparison, by design (#1948).** Build tags in this lineage carry no total
+order — a git shortref, a date stamp, and a name coexist — and correctness was
+found not to be monotonic in build recency (an older upstream tree was
+correct; a newer one was broken). A future fix to the same class of defect
+still has to earn its way into the allowlist by evidence, the same way
+`ghcr.io/hal0ai/hal0-combined:0822` did; there is no shortcut where a later
+tag is trusted automatically.
+
+**The output-sanity gate does not cover every path (#1922).** It runs on a
+`type = "llm"` slot's own load, which is where a bad backend is caught before
+anything is dispatched to it. It does not run when hal0 adopts a slot whose unit
+was already running — that reconcile happens inside the `/api/slots` poll, where
+a real completion per slot would be a hot-path cost — and the NPU/FLM lane's
+existing inference check still only asks that the runner returned something, not
+that the answer is right. Neither gap has been exercised on hardware yet.
 
 **Carried forward from rc.6.** An upgraded box can still refuse to chat if its
 agent slot carries a ceiling below Hermes' 64,000-token floor — `hal0 doctor`
@@ -305,10 +533,11 @@ review-time findings remain deferred (#1873, #1862, #1869).
 
 ### Operator migrations
 
-- **Nothing is required to take rc.7 unless a slot names the retired lane.** No
-  rc.7 change alters an on-disk state shape or adds a mandatory configuration
-  key; the one manual step is the `gpu-vulkan` slot edit below, and the other
-  items are optional or conditional.
+- **Nothing is required to take rc.7 unless a slot still names an unvalidated
+  Vulkan image.** No rc.7 change alters an on-disk state shape or adds a
+  mandatory configuration key; `hal0 update`'s own migrations handle the
+  runner-image transition below automatically, and the other items are
+  optional or conditional.
 - **Streams are now bounded by default (#1893).** A relayed stream that runs
   longer than 900 seconds in total, or goes 300 seconds without producing a
   chunk, is ended with an explanatory final chunk. If you deliberately run
@@ -316,30 +545,63 @@ review-time findings remain deferred (#1873, #1862, #1869).
   `[dispatcher].stream_total_timeout_s` and
   `[dispatcher].stream_idle_timeout_s` in `hal0.toml`, or set either to `0`
   to disable that bound. Restart `hal0-api` for a change to take effect.
-- **A slot TOML with `device = "gpu-vulkan"` is moved to `gpu-rocm`
-  automatically (#1923, #1924).** After the upgrade such a slot refuses to
-  load — that lane no longer exists for llama.cpp — but `hal0 update`'s
-  post-activation migrations now relabel it for you: a llama.cpp GPU slot on
-  an AMD host goes to `gpu-rocm` when `/dev/kfd` is present, or to `cpu` (with
-  a loud warning, since that is a real behaviour change) when it is not. Only
-  the `device` key is touched, the pass is idempotent, and a Vulkan slot
-  belonging to a non-llama.cpp runtime (Kokoro, whisper.cpp, ComfyUI) or a
-  non-AMD host is left alone. On hardware where the slot actually worked
-  before, nothing else changes: both device ids always resolved to the same
-  ROCm runner image. To relabel by hand instead — or to review the result —
-  use `hal0 slot edit <name> --hardware rocm`, or change `device` in the
-  TOML directly.
-- **An AMD GPU box without `/dev/kfd` now stops at install (#1923).** The
-  installer refuses to proceed when it sees an AMD render node with no ROCm
-  compute node, and prints the remedy (on Proxmox, pass `dev1: /dev/kfd`
-  through). Set `HAL0_ALLOW_CPU_ONLY=1` (or answer the interactive confirm) for
-  a deliberate CPU-only install.
+- **A slot TOML with `device = "gpu-vulkan"` is relabeled only when its
+  resolved runner image cannot serve the lane; it is left alone once the lane
+  is restored (#1923, #1924, #1948, #1973).** `hal0 update`'s post-activation
+  migration that moved a `gpu-vulkan` slot to `gpu-rocm` (or, with no
+  `/dev/kfd`, to `cpu` with a loud warning) still runs on every update, but it
+  is now image-aware: a `gpu-vulkan` slot whose resolved image has cleared the
+  §3-C validation matrix (`ghcr.io/hal0ai/hal0-combined:0822` or later) is
+  skipped rather than relabeled, since the lane genuinely works on that image;
+  a slot still pinned to an unvalidated image, including the retired
+  `ade07ba`, is still rescued exactly as before. **This migration never runs
+  in reverse** — a slot an earlier upgrade already moved to `gpu-rocm` or
+  `cpu` keeps that device; nothing relabels it back to `gpu-vulkan`
+  automatically. Only the `device` key is touched, the pass is idempotent, and
+  a Vulkan slot belonging to a non-llama.cpp runtime (Kokoro, whisper.cpp,
+  ComfyUI) or a non-AMD host is left alone regardless — a ComfyUI or
+  Qwen3-TTS slot still needs `/dev/kfd` because its own image is a ROCm build
+  (#1941). Separately, `hal0 update`'s migrations also retag any slot still
+  pointed at a stale runner-image reference — `ade07ba` and its predecessors
+  — to the current default, including a deliberate `ade07ba`-era pin that the
+  rc.6 `hal0 slot migrate-hw --apply` convergence fold recorded under
+  `image_pin` (previously invisible to the retag; #1959). The retag judges a
+  slot on `image_pin` before the bare `image` key when both are present,
+  matching the precedence the runtime itself resolves the launch image with,
+  so the two can never disagree about which image a slot is judged against.
+  To relabel a slot back onto `gpu-vulkan` by hand, or to review the result
+  either way, use `hal0 slot edit <name> --hardware vulkan` (or
+  `--hardware rocm`), or change `device` in the TOML directly.
+- **An AMD GPU box with a render node but no `/dev/kfd` now installs on the
+  restored `gpu-vulkan` lane instead of stopping (#1923, #1948, #1973).** The
+  install-time preflight previously refused any AMD render node with no ROCm
+  compute node outright, telling the operator to forward `/dev/kfd` — the
+  wrong remedy on hardware, like the ct151-class box #1888 was reproduced on,
+  that has no compute node to forward. It now accepts render-node-only AMD
+  when the resolved runner image is Vulkan-validated; the hardware
+  recommendation ladder and `--hardware` auto-detect then derive
+  `gpu-vulkan` for that box rather than stopping or falling back to `cpu`. A
+  box with no usable GPU device at all still needs an explicit CPU-only
+  install: `HAL0_ALLOW_CPU_ONLY=1` (or the interactive confirm).
 - **The FPX guard may now refuse a model it previously launched (#1890).** A
   model registered by `hal0 model pull` that is FPX-quantised and sitting on a
   runner image that cannot serve FPX was launching and producing bad output;
   it will now be refused at launch with an explanatory error. That is the guard
   working. Move the slot to a runner image that supports the quantisation, or
   use a non-FPX build of the model.
+- **A language-model slot must pass an output check before it goes ready
+  (#1922).** On every `type = "llm"` load, once `/health` has converged, hal0
+  asks the slot to complete `The capital of France is` and expects `Paris`
+  (greedy, twelve tokens, twenty-second ceiling, once per load). A slot that
+  fails is stamped `error` with the probe, the expected word and the model's
+  actual output in its message, and its unit is stopped rather than left
+  running. That is the gate working — the usual cause is a backend that cannot
+  serve the model it just loaded. Answers in other languages (`Parigi`,
+  `Париж`, `巴黎`, …) already count as correct. If you run a model this prompt is
+  unfair to, add `output_sanity = false` to that slot's TOML
+  (`/etc/hal0/slots/<name>.toml`), or set `HAL0_SLOT_OUTPUT_SANITY=0` in
+  `hal0-api`'s environment to disable the gate box-wide, then restart
+  `hal0-api`.
 - **`bge-reranker-base-q4_k_m` is gone from the curated catalogue (#1891).** A
   slot already configured with it keeps its configuration — the model is simply
   no longer offered as a curated choice, because the shipped runner cannot load
@@ -358,15 +620,23 @@ previous tag (`v1.0.0-rc.6`) from its GitHub release. No rc.7 change writes a
 state shape rc.6 cannot read — every fix is re-derived at launch or read time,
 except the quantisation now stamped on pull-registered models, which rc.6
 ignores. The two new `[dispatcher]` stream-timeout keys
-(`stream_total_timeout_s`, `stream_idle_timeout_s`) are the only
-configuration addition; if you set them, remove them from `hal0.toml` before
-rolling back to a build that does not know them. A slot TOML moved from
-`gpu-vulkan` to `gpu-rocm` for the upgrade
+(`stream_total_timeout_s`, `stream_idle_timeout_s`) are the only configuration
+addition you must undo; if you set them, remove them from `hal0.toml` before
+rolling back to a build that does not know them. The output-sanity opt-outs need
+no undoing — rc.6 ignores an unknown `output_sanity` key in a slot TOML, and
+`HAL0_SLOT_OUTPUT_SANITY` is simply unread there. A slot TOML moved
+from `gpu-vulkan` to `gpu-rocm` for the upgrade
 loads fine on rc.6 — both device ids resolve to the same runner image there —
-so no slot edit needs undoing. Rolling back reinstates the rc.6 defects listed
+so no slot edit needs undoing; a slot left on `gpu-vulkan` because its image
+had already cleared the rc.7 gate keeps whatever image reference its
+`image_pin` records and rc.6 launches it directly, unaware of the gate that
+admitted it. The `image_status: "unknown"` API value is new to rc.7; rc.6
+simply does not emit it, so no client-side undoing is needed either. Rolling
+back reinstates the rc.6 defects listed
 above, including the silently dropped memory writes (#1897), the unbounded
-stream relay (#1893), and the seeding of Vulkan LLM slots that serve garbage
-while reading healthy (#1888).
+stream relay (#1893), the seeding of Vulkan LLM slots that serve garbage while
+reading healthy (#1888), and readiness proved by a health check alone, so a slot
+that produces nothing usable reads `ready` again (#1922).
 
 ## [1.0.0-rc.6] — 2026-08-12
 
