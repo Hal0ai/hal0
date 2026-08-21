@@ -918,7 +918,10 @@ function buildBankSubgraphRoute(url: string, match: RegExpMatchArray) {
   let keep: Set<string>
   if (mode === 'ego') {
     const node = params.get('node') ?? ''
-    const depth = Math.min(Number(params.get('depth') ?? 1) || 1, 2)
+    // Widened from the original FU2 cap of 2 for task C4's ego focus view
+    // (Global Constraints: depth slider 1–10; the server already honours
+    // depth <= 10, task A2).
+    const depth = Math.min(Number(params.get('depth') ?? 1) || 1, 10)
     keep = _subEgoBfs(graph, node, depth, limit)
   } else {
     const by = params.get('by') || (kind === 'entities' ? 'degree' : 'recency')

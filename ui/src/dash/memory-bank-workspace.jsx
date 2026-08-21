@@ -383,6 +383,255 @@ function FactList({ units, sel, setSel, footer }) {
   )
 }
 
+// ── ego / local graph — server-bounded neighbourhood (never the whole bank) ─
+// The server already does the BFS + depth/limit bounding
+// (useBankSubgraph(mode:'ego', node, depth, limit)) — these helpers only
+// figure out radial ring placement for the already-small returned
+// nodes/edges list, replacing the prototype's client-side BFS over mock
+// ENTITIES/FACTS.
+const trunc = (s, n = 20) => (String(s).length > n ? String(s).slice(0, n - 1) + '…' : String(s))
+const _nid = (n) => n.data.id
+
+function _egoAdjacency(edges) {
+  const adj = new Map()
+  edges.forEach((e) => {
+    const { source, target } = e.data
+    if (!adj.has(source)) adj.set(source, [])
+    if (!adj.has(target)) adj.set(target, [])
+    adj.get(source).push(target)
+    adj.get(target).push(source)
+  })
+  return adj
+}
+
+// BFS ring distance from `centerId` over the (already server-bounded) node
+// set — layout only, not a second data-limiting pass.
+function _egoRings(nodes, edges, centerId) {
+  const ids = new Set(nodes.map(_nid))
+  const adj = _egoAdjacency(edges)
+  const ring = new Map([[centerId, 0]])
+  let frontier = [centerId]
+  let r = 0
+  while (frontier.length) {
+    r += 1
+    const next = []
+    frontier.forEach((id) => {
+      ;(adj.get(id) || []).forEach((to) => {
+        if (ids.has(to) && !ring.has(to)) {
+          ring.set(to, r)
+          next.push(to)
+        }
+      })
+    })
+    frontier = next
+  }
+  return ring
+}
+
+// ego graph (main "focus" view pane) — depth-zoomable radial layout.
+function EgoGraph({ bank, centerId, onGo }) {
+  const { FACT_COLORS, LINK_COLORS, LINK_LABEL } = window.MemV2
+  const [depth, setDepth] = useStateWorkspace(2)
+  const useBankSubgraph = window.__hal0UseBankSubgraph
+  const subQuery = useBankSubgraph
+    ? useBankSubgraph(bank, { mode: 'ego', node: centerId, depth, limit: 60, enabled: !!centerId })
+    : { data: null }
+  const nodes = subQuery.data?.nodes || []
+  const edges = subQuery.data?.edges || []
+
+  const depthSlider = (
+    <div className="mv-depthslider">
+      <span className="k">depth</span>
+      <input
+        type="range"
+        min="1"
+        max="10"
+        step="1"
+        data-testid="mv-ego-depth"
+        value={depth}
+        onChange={(e) => setDepth(+e.target.value)}
+      />
+      <b className="num">{depth}</b>
+    </div>
+  )
+
+  if (!centerId || nodes.length === 0) {
+    return (
+      <div className="mv-card mv-ego" data-testid="mv-ego">
+        <div className="hd">
+          <span className="mv-eyebrow">Neighbourhood</span>
+        </div>
+        <div style={{ position: 'relative' }}>
+          <div className="mv-empty" style={{ padding: 60 }}>
+            {centerId ? 'no facts match' : 'select a fact to see its neighbourhood'}
+          </div>
+          {centerId && depthSlider}
+        </div>
+      </div>
+    )
+  }
+
+  const ring = _egoRings(nodes, edges, centerId)
+  const R = (r) => 90 + (r - 1) * 70
+  const byRing = new Map()
+  nodes.forEach((n) => {
+    const r = ring.get(_nid(n)) ?? 0
+    if (!byRing.has(r)) byRing.set(r, [])
+    byRing.get(r).push(n)
+  })
+  const positions = new Map([[centerId, { x: 0, y: 0 }]])
+  ;[...byRing.entries()]
+    .filter(([r]) => r > 0)
+    .forEach(([r, group]) => {
+      group.forEach((n, i) => {
+        const a = (i / Math.max(1, group.length)) * 2 * Math.PI - Math.PI / 2
+        positions.set(_nid(n), { x: R(r) * Math.cos(a), y: R(r) * Math.sin(a) })
+      })
+    })
+  const xs = [...positions.values()].map((p) => p.x)
+  const ys = [...positions.values()].map((p) => p.y)
+  const minX = Math.min(...xs) - 90,
+    maxX = Math.max(...xs) + 90
+  const minY = Math.min(...ys) - 40,
+    maxY = Math.max(...ys) + 70
+  const VW = Math.max(400, maxX - minX),
+    VH = Math.max(300, maxY - minY)
+  const maxReach = Math.max(0, ...[...ring.values()])
+
+  return (
+    <div className="mv-card mv-ego" data-testid="mv-ego">
+      <div className="hd">
+        <span className="mv-eyebrow">Neighbourhood</span>
+        <span className="num" style={{ font: '400 10.5px var(--jbm)', color: 'var(--fg-4)' }}>
+          {nodes.length} facts · {edges.length} links
+          {maxReach < depth && <span> · exhausted at depth {maxReach}</span>}
+        </span>
+        <span className="sp" />
+        <span style={{ font: '400 10px var(--jbm)', color: 'var(--fg-5)' }}>click a node to re-centre</span>
+      </div>
+      <div style={{ position: 'relative' }}>
+        <svg viewBox={`${minX} ${minY} ${VW} ${VH}`} style={{ maxHeight: 640, margin: '0 auto', display: 'block', width: '100%' }}>
+          {Array.from({ length: Math.min(depth, maxReach) }, (_, i) => (
+            <circle key={i} cx={0} cy={0} r={R(i + 1)} fill="none" stroke="var(--line-soft,#1C1C1C)" strokeDasharray="2 5" />
+          ))}
+          {edges.map((e, i) => {
+            const a = positions.get(e.data.source)
+            const b = positions.get(e.data.target)
+            if (!a || !b) return null
+            const w = Number(e.data.weight) || 1
+            return (
+              <line
+                key={i}
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+                stroke={LINK_COLORS[e.data.linkType] || 'var(--fg-4)'}
+                strokeWidth={w >= 2 ? 1.5 : 1}
+                opacity={w >= 2 ? 0.65 : 0.35}
+              />
+            )
+          })}
+          {nodes.map((n) => {
+            const id = _nid(n)
+            const p = positions.get(id) || { x: 0, y: 0 }
+            const r0 = ring.get(id) ?? 0
+            const r = r0 === 0 ? 10 : r0 === 1 ? 6.5 : 5
+            const above = p.y < 0 || r0 === 0
+            return (
+              <g key={id} style={{ cursor: r0 === 0 ? 'default' : 'pointer' }} onClick={() => r0 !== 0 && onGo(id)}>
+                <circle cx={p.x} cy={p.y} r={r} fill={r0 === 0 ? FACT_COLORS[n.data.type] : 'var(--bg-2)'} stroke={FACT_COLORS[n.data.type]} strokeWidth="1.5" />
+                <text
+                  x={p.x}
+                  y={r0 === 0 ? p.y + 26 : above ? p.y - r - 8 : p.y + r + 14}
+                  textAnchor="middle"
+                  style={{ font: '500 10px var(--jbm)', fill: 'var(--fg-3)' }}
+                >
+                  {trunc(n.data.label || id, r0 >= 2 ? 18 : 24)}
+                </text>
+              </g>
+            )
+          })}
+        </svg>
+        {depthSlider}
+      </div>
+      <div className="mv-lg-legend" style={{ padding: '8px 14px 10px', borderTop: '1px solid var(--line-soft,#1C1C1C)' }}>
+        {Object.keys(LINK_COLORS).map((t) => (
+          <span key={t}>
+            <i style={{ background: LINK_COLORS[t] }} />
+            {LINK_LABEL[t]}
+          </span>
+        ))}
+        <span style={{ flex: 1 }} />
+        {Object.keys(FACT_COLORS).map((t) => (
+          <span key={t}>
+            <i style={{ background: FACT_COLORS[t], width: 7, height: 7, borderRadius: '50%' }} />
+            {t}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// inspector's compact depth-1 neighbourhood (no depth slider, no re-centre
+// zoom — a quick "what's directly connected" glance).
+function LocalGraph({ bank, centerId, onGo }) {
+  const { FACT_COLORS, LINK_COLORS } = window.MemV2
+  const useBankSubgraph = window.__hal0UseBankSubgraph
+  const subQuery = useBankSubgraph
+    ? useBankSubgraph(bank, { mode: 'ego', node: centerId, depth: 1, limit: 13, enabled: !!centerId })
+    : { data: null }
+  const nodes = subQuery.data?.nodes || []
+  const edges = subQuery.data?.edges || []
+  const center = nodes.find((n) => _nid(n) === centerId)
+  const nbrs = nodes.filter((n) => _nid(n) !== centerId)
+  const W = 372,
+    H = 236,
+    cx = W / 2,
+    cy = H / 2,
+    R = 78
+
+  if (!center) {
+    return (
+      <div className="mv-empty" style={{ padding: 18 }}>
+        {centerId ? 'loading neighbourhood…' : 'no fact selected'}
+      </div>
+    )
+  }
+
+  return (
+    <div className="mv-lg">
+      <svg viewBox={`0 0 ${W} ${H}`}>
+        <circle cx={cx} cy={cy} r={R} fill="none" stroke="var(--line-soft,#1C1C1C)" strokeDasharray="2 5" />
+        {nbrs.map((n, i) => {
+          const a = (i / Math.max(1, nbrs.length)) * 2 * Math.PI - Math.PI / 2
+          const x = cx + R * Math.cos(a),
+            y = cy + R * Math.sin(a)
+          const above = y < cy
+          const id = _nid(n)
+          const edge = edges.find(
+            (e) => (e.data.source === centerId && e.data.target === id) || (e.data.target === centerId && e.data.source === id),
+          )
+          return (
+            <g key={id} style={{ cursor: 'pointer' }} onClick={() => onGo(id)}>
+              <line x1={cx} y1={cy} x2={x} y2={y} stroke={edge ? LINK_COLORS[edge.data.linkType] || 'var(--fg-4)' : 'var(--fg-4)'} strokeWidth="1.5" opacity="0.75" />
+              <circle cx={x} cy={y} r="6" fill="var(--bg-2)" stroke={FACT_COLORS[n.data.type]} strokeWidth="1.5" />
+              <text x={x} y={above ? y - 12 : y + 19} textAnchor="middle" style={{ font: '500 10px var(--jbm)', fill: 'var(--fg-3)' }}>
+                {trunc(n.data.label || id)}
+              </text>
+            </g>
+          )
+        })}
+        <circle cx={cx} cy={cy} r="9" fill={FACT_COLORS[center.data.type]} stroke="var(--fg)" strokeWidth="1.25" />
+        <text x={cx} y={cy + 26} textAnchor="middle" style={{ font: '600 10.5px var(--jbm)', fill: 'var(--fg)' }}>
+          {trunc(center.data.label || centerId, 26)}
+        </text>
+      </svg>
+    </div>
+  )
+}
+
 // ── inspector ─────────────────────────────────────────────────────────────
 // `unitsPage` is the currently-displayed page of units (from BankWorkspace's
 // own useBankUnits fetch) — used to resolve the selected fact's data without
@@ -585,8 +834,14 @@ function Inspector({ bank, sel, setSel, unitsPage }) {
           Neighbourhood
           <span className="ct num"> · {Object.values(f.link_counts_by_type || {}).reduce((a, b) => a + b, 0)} links</span>
         </div>
-        <div className="mv-empty" style={{ padding: 24 }}>
-          renders in the ego focus view (final commit of this task)
+        <LocalGraph bank={bank} centerId={f.id} onGo={setSel} />
+        <div className="mv-lg-legend">
+          {Object.keys(window.MemV2.LINK_COLORS).map((t) => (
+            <span key={t}>
+              <i style={{ background: window.MemV2.LINK_COLORS[t] }} />
+              {window.MemV2.LINK_LABEL[t]}
+            </span>
+          ))}
         </div>
       </div>
       {isObservation && showHistory && (
@@ -758,6 +1013,12 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
     setPage(0)
   }, [bank, q, topic, src, brush, sort, JSON.stringify(types)])
 
+  // The ego/focus view needs a centre — default to the first matching fact
+  // when switching into it with nothing selected yet.
+  useEffectWorkspace(() => {
+    if (view === 'graph' && !sel && pageUnits.length) setSel(pageUnits[0].id)
+  }, [view, sel, pageUnits.length])
+
   const switchBank = (id) => {
     setBank(id)
     setSel(null)
@@ -877,13 +1138,7 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
               </div>
             </div>
           )}
-          {view === 'graph' && (
-            <div className="mv-card">
-              <div className="mv-empty" style={{ padding: 60 }}>
-                ego focus view — coming in the next commit of this task
-              </div>
-            </div>
-          )}
+          {view === 'graph' && <EgoGraph bank={bank} centerId={sel} onGo={setSel} />}
           {view === 'web' &&
             (typeof window.MemV2WebGraph === 'function' ? (
               <window.MemV2WebGraph bank={bank} sel={sel} setSel={setSel} />
@@ -947,4 +1202,6 @@ Object.assign(window, {
   MemV2FactList: FactList,
   MemV2DensityStrip: DensityStrip,
   MemV2Inspector: Inspector,
+  MemV2EgoGraph: EgoGraph,
+  MemV2LocalGraph: LocalGraph,
 })

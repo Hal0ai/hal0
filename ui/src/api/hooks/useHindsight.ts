@@ -313,7 +313,13 @@ export function useBankSubgraph(
     kind?: 'memories' | 'entities'
     mode?: 'ego' | 'top'
     node?: string
-    depth?: 1 | 2
+    // Widened from the original FU2 `1 | 2` cap for task C4's ego focus
+    // view, which needs the full 1–10 depth slider the Global Constraints
+    // require. The server already honours depth <= 10 (task A2, merged);
+    // the only existing caller (memory-graph.jsx's Direction-C ego slice)
+    // passes a hardcoded `depth: 1`, so this widening is backward
+    // compatible — nothing depended on the old 2-cap.
+    depth?: number
     top_k?: number
     by?: 'degree' | 'recency'
     limit?: number
