@@ -19,10 +19,11 @@ A Strix Halo machine gives hal0 three places to run a model:
 
 <CardGrid>
   <Card title="Radeon iGPU" icon="seti:default">
-    The integrated GPU runs LLM workloads through ROCm (`gpu-rocm`, which
-    requires `/dev/kfd`) and image/audio workloads through Vulkan
-    (`gpu-vulkan`). It's detected as an AMD `amdgpu` device; the marketing
-    name comes from the system at probe time.
+    The integrated GPU runs LLM and image workloads through either ROCm
+    (`gpu-rocm`, which requires `/dev/kfd`) or Vulkan (`gpu-vulkan`, which
+    requires a render node and a Vulkan-validated runner image). It's detected
+    as an AMD `amdgpu` device; the marketing name comes from the system at
+    probe time.
   </Card>
   <Card title="XDNA NPU" icon="seti:config">
     The AMD XDNA NPU is driven by FastFlowLM (FLM) on the `npu` device. hal0
@@ -42,29 +43,76 @@ NVIDIA silicon.) A slot's `device` field is what picks one of these — see
 [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) for why
 that ownership lives on the slot, not the profile, as of v1.0.
 
-## ROCm is the LLM lane on the iGPU
+## ROCm or Vulkan on the iGPU
 
-- **ROCm** (`gpu-rocm`) — AMD's compute stack, and the only supported backend
-  for llama.cpp (LLM) slots on AMD hardware. It needs the `/dev/kfd` compute
-  node to be visible to hal0 and to the slot containers.
-- **Vulkan** (`gpu-vulkan`) — retained for the non-llama.cpp runtimes that
-  genuinely ship Vulkan images (Kokoro TTS, whisper.cpp, ComfyUI). It is **not**
-  a supported LLM backend.
+The iGPU can run LLM slots through two backends. hal0 treats them as distinct
+devices, and a slot always names one explicitly — the runner is launched with
+an explicit device pin, never "whatever llama.cpp picks":
+
+- **ROCm** (`gpu-rocm`) — AMD's compute stack, and the lane hal0 seeds where
+  the box can run it. It needs the `/dev/kfd` compute node visible to hal0 and
+  to the slot containers; a `gpu-rocm` slot without it refuses to load.
+- **Vulkan** (`gpu-vulkan`) — the Mesa/RADV path. It needs only a DRM render
+  node (`/dev/dri/renderD*`), which makes it the lane for boxes where `/dev/kfd`
+  was never forwarded — an unprivileged LXC, for instance. It is also the lane
+  the non-llama.cpp Vulkan runtimes use (Kokoro TTS, whisper.cpp, ComfyUI).
+
+On the current validated runner, **Vulkan is the faster of the two on this
+hardware** — +13.96% prefill and +20.45% decode on a Strix Halo box, with much
+tighter variance ([full numbers](/docs/reference/hardware-matrix)). ROCm is
+seeded anyway, because it carries hal0's validation history and is the lane
+MTP/speculative decode is tuned against. That choice is revisited at GA; in the
+meantime switching is a supported, one-command operation — see below.
 
 <Aside type="caution">
-hal0's LLM slots all run the same unified ROCmFPX runner image, which is a
-single HIP + Vulkan build. llama.cpp picks ROCm when `/dev/kfd` is visible and
-silently falls back to that image's Vulkan backend when it is not — and that
-Vulkan backend emits invalid tokens for every model it serves, at full nominal
-speed, while HTTP 200, container health, `hal0 doctor` and the streaming `done`
-frame all read green.
+**The Vulkan LLM lane is gated on the runner image, by design.**
 
-So `/dev/kfd` is a hard requirement, not an optimisation. The installer refuses
-to complete a GPU install without it, and a GPU LLM slot refuses to load. In a
-Proxmox LXC, forward it with a `dev1: /dev/kfd` line in
-`/etc/pve/lxc/<CTID>.conf`, then `pct stop` / `pct start`. Without it, run
-CPU-only.
+hal0's LLM slots all run one runner image, a single HIP + Vulkan build. On the
+`ade07ba` lineage that image's Vulkan backend emitted invalid tokens for every
+model it served, at full nominal speed, while HTTP 200, container health,
+`hal0 doctor` and the streaming `done` frame all read green — hal0 shipped a
+release where an entire box served nonsense and every dial was in the green.
+
+The image was fixed, and the lane came back with two permanent guards:
+
+1. A `gpu-vulkan` LLM slot may only launch from a runner image whose Vulkan
+   backend has been validated. Anything else — including the old lineage — is
+   refused at slot load, by name, with the ticket number.
+2. Every LLM slot, on every lane, must pass an output-sanity probe before it
+   is marked ready. A backend that emits nonsense fails readiness in about a
+   second instead of serving it for hours.
+
+If you pin a slot to your own runner image, expect the Vulkan lane to refuse
+it until that image is added to the validated set. That refusal is the feature.
 </Aside>
+
+### Switching a slot to the Vulkan lane
+
+Both lanes are first-class, and moving between them is a normal operation —
+not a workaround:
+
+```sh
+hal0 slot edit agent --hardware vulkan     # gpu-rocm -> gpu-vulkan
+hal0 slot edit agent --hardware rocm       # and back
+```
+
+In the dashboard, open the slot's drawer and change **Device** in the same
+place. Either way the slot is re-rendered and restarted on the new lane.
+
+Two checks stand between the switch and serving traffic, and both are the
+point rather than an obstacle:
+
+1. **Preflight** — the target lane's devices must be present (`/dev/kfd` for
+   ROCm, a render node for Vulkan) and, for Vulkan, the slot's runner image
+   must be one whose Vulkan backend is validated. A refusal here names the
+   image and the reason.
+2. **Output sanity** — the slot answers a fixed prompt before it is marked
+   ready. A lane that emits nonsense fails in about a second instead of
+   serving it.
+
+Why you might switch: the measured prefill/decode advantage above. Why you
+might not: MTP / speculative-decode profiles are tuned on the ROCm lane, so a
+slot leaning on those may do better where it is.
 
 ## Unified memory is the tuning target
 

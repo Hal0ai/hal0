@@ -2981,6 +2981,38 @@ def converge_kfd_group(*, job_id: str | None = None) -> str:
     return status
 
 
+def _vulkan_lane_is_loadable(holder: dict) -> bool:
+    """Would ``load_sync`` accept this ``gpu-vulkan`` llama slot as configured?
+
+    #1948 re-enabled the Vulkan LLM lane behind an image gate, which turns
+    this migration's premise into a question rather than a constant. Under
+    #1923 every ``gpu-vulkan`` llama slot was unloadable by definition, so
+    relabeling all of them was strictly a rescue. Now a slot whose resolved
+    runner image is Vulkan-validated loads fine — relabeling THAT one would be
+    a reverse migration of a working configuration, and on a kfd-less box it
+    would push a functioning GPU slot onto the CPU.
+
+    Delegates to :func:`hal0.providers._gpu.vulkan_lane_serves`, the one
+    predicate the derivation ladders, the bench harness and the installer
+    preflight also use — so no two of them can reach different conclusions
+    about the same box.
+
+    Critically, that predicate looks through the retag (review B5). This pass
+    runs BEFORE :func:`retag_stale_slot_images`, so a slot carrying a stale
+    former-default pin is about to have that pin rewritten. Judging it on the
+    pin it has *right now* rewrote ``device`` to ``cpu`` first, and the retag —
+    which computes its replacement from the freshly-rewritten TOML — then read
+    ``device = "cpu"`` and installed the CPU toolbox image: the GPU stranded,
+    and a pin that looks like a deliberate CPU choice nobody made.
+
+    Fails CLOSED on any error: an unresolvable image is not an
+    established-safe one, and the relabel is the conservative outcome.
+    """
+    from hal0.providers._gpu import vulkan_lane_serves
+
+    return vulkan_lane_serves(holder)
+
+
 def relabel_stale_vulkan_slots(
     *,
     job_id: str | None = None,
@@ -3065,6 +3097,21 @@ def relabel_stale_vulkan_slots(
     whole parsed document via ``tomli_w`` — so any comments in a touched
     slot's TOML are dropped on that rewrite, exactly as they are for
     :func:`retag_stale_slot_images` and :func:`clear_stale_mtp_overrides`.
+    Image scope — #1948, and the reason this pass is no longer a blanket
+    rescue: the Vulkan LLM lane is supported again, on a runner image whose
+    Vulkan backend passed validation. Under #1923 every ``gpu-vulkan`` llama
+    slot was unloadable by definition, so relabeling all of them was strictly
+    a rescue. Now a slot whose resolved image serves the lane
+    (:func:`_vulkan_lane_is_loadable`) is SKIPPED — relabeling it would be a
+    reverse migration of a working configuration, and on a kfd-less box it
+    would push a functioning GPU slot onto the CPU. Slots on an unvalidated
+    image still refuse to load, so those are still rescued exactly as before.
+
+    Note what this does NOT do: it never relabels ``gpu-rocm`` BACK to
+    ``gpu-vulkan``. A box that already ran this migration keeps the device it
+    was given; the re-enabled lane is offered to new slots, not forced onto
+    old ones.
+
     Idempotent: once a slot's ``device`` reads ``"gpu-rocm"`` or ``"cpu"`` it
     no longer matches the ``"gpu-vulkan"`` guard, so a second run touches
     nothing and logs nothing
@@ -3136,6 +3183,19 @@ def relabel_stale_vulkan_slots(
             # these. Leave completely untouched (see docstring; #1941 tracks
             # the separate kfd-absent over-firing issue for this class).
             continue
+        if _vulkan_lane_is_loadable(holder):
+            # #1948: this slot's resolved runner image serves the Vulkan lane
+            # correctly, so it is NOT a stale label — it loads. Relabeling it
+            # would be a REVERSE migration of a deliberate, working choice,
+            # and on a kfd-less box it would drag the slot to CPU for no
+            # reason at all. Leave it exactly as the operator set it.
+            log.info(
+                "updater.vulkan_migration_slot_lane_supported",
+                job_id=job_id,
+                slot=slot_name,
+                note="gpu-vulkan slot runs a Vulkan-validated runner image — not migrated",
+            )
+            continue
         new_device = "gpu-rocm" if have_kfd else "cpu"
         holder["device"] = new_device
         try:
@@ -3152,8 +3212,9 @@ def relabel_stale_vulkan_slots(
                 old="gpu-vulkan",
                 new=new_device,
                 note=(
-                    "gpu-vulkan is retired for LLM slots (#1888/#1923); relabeled to "
-                    "gpu-rocm — /dev/kfd is present, slot keeps running on GPU"
+                    "this slot's runner image is not validated for the Vulkan lane "
+                    "(#1888); relabeled to gpu-rocm — /dev/kfd is present, slot keeps "
+                    "running on GPU"
                 ),
             )
         else:
@@ -3164,11 +3225,12 @@ def relabel_stale_vulkan_slots(
                 old="gpu-vulkan",
                 new=new_device,
                 note=(
-                    "BEHAVIOR CHANGE: gpu-vulkan is retired for LLM slots (#1888/#1923) "
-                    "and /dev/kfd (the ROCm compute node) is not present on this host — "
-                    "relabeled to cpu. This slot no longer runs on the GPU and will be "
-                    "significantly slower until /dev/kfd is forwarded and the slot is "
-                    "re-pointed at gpu-rocm."
+                    "BEHAVIOR CHANGE: this slot's runner image is not validated for the "
+                    "Vulkan lane (#1888) and /dev/kfd (the ROCm compute node) is not "
+                    "present on this host — relabeled to cpu. This slot no longer runs "
+                    "on the GPU and will be significantly slower until either /dev/kfd "
+                    "is forwarded and the slot is re-pointed at gpu-rocm, or the slot "
+                    "is repinned to a Vulkan-validated runner image."
                 ),
             )
     return relabeled

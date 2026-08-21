@@ -41,7 +41,7 @@ across 5 call sites, now unified). `DEFAULT_DEVICE = "gpu-rocm"`.
 | Device id | Label | Recommended | Default profile | Notes |
 |---|---|---|---|---|
 | `gpu-rocm` | GPU (ROCm) | ✅ | `chat` | Best throughput on Strix Halo — the recommended default. |
-| `gpu-vulkan` | GPU (Vulkan) | ❌ for LLM | `chat` | **Not a supported LLM backend** (#1888) — the unified ROCmFPX runner's Vulkan build emits invalid tokens. Retained for the non-llama.cpp Vulkan runtimes (Kokoro, whisper.cpp, ComfyUI) and for non-AMD GPUs. |
+| `gpu-vulkan` | GPU (Vulkan) | — | `chat` | Runs anywhere Mesa Vulkan does, and needs only a render node — so it is the lane for a box with no `/dev/kfd`. **Measures faster than ROCm on Strix Halo** (+13.96% prefill, +20.45% decode — see the lane comparison below); it is not the seeded default for maturity reasons, not speed ones. LLM slots on this device are gated on a Vulkan-validated runner image (#1888/#1948). Also the device the non-llama.cpp Vulkan runtimes use (Kokoro, whisper.cpp, ComfyUI). |
 | `gpu-cuda` | GPU (CUDA) | — | `chat` | NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. |
 | `cpu` | CPU | — | `cpu-chat` | Always available, slow but correct. |
 | `npu` | NPU (FLM) | — | `flm` | AMD XDNA NPU via FastFlowLM — chat/embed/ASR trio on one process. |
@@ -59,17 +59,49 @@ dashboard use to pick a device for a new slot, given a probed `HardwareInfo`:
 1. **AMD**, `compute_capable` (rocm-smi reachable) *or* `/dev/kfd` present →
    **ROCm**. The rationale string still names the "AMD UMA / Strix Halo class"
    when unified memory ≥ 32 GB and `vram_mb <= 4096` (a small dedicated VRAM
-   number is a UMA signal, not a real cap).
-2. **AMD**, no ROCm compute node → **CPU**. Not Vulkan: LLM slots run the
-   unified ROCmFPX runner image on every AMD GPU device, and that image's
-   Vulkan backend emits invalid tokens for every model (#1888), so CPU is the
-   only lane that produces valid output on such a box.
-3. **NVIDIA**, NVIDIA Container Toolkit present (`nvidia-ctk` on `PATH` or a CDI spec
+   number is a UMA signal, not a real cap). Note this is a *maturity*
+   preference, not a throughput one — see the lane comparison below.
+2. **AMD**, no ROCm compute node but a Vulkan-capable GPU → **Vulkan**. This
+   is the unprivileged-LXC shape: a working iGPU with no `/dev/kfd` forwarded.
+   The lane is real, but an LLM slot on it must resolve a Vulkan-validated
+   runner image or slot load refuses it by name (#1888/#1948) — the `ade07ba`
+   lineage's Vulkan backend emitted invalid tokens for every model.
+3. **AMD**, neither ROCm compute nor a usable Vulkan device → **CPU**.
+4. **NVIDIA**, NVIDIA Container Toolkit present (`nvidia-ctk` on `PATH` or a CDI spec
    under `/etc/cdi`/`/var/run/cdi`) → **CUDA**.
-4. **NVIDIA**, no CDI → **Vulkan** fallback.
-5. **Intel iGPU** / unknown-but-`vulkan_capable` → **Vulkan**.
-6. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
+5. **NVIDIA**, no CDI → **Vulkan** fallback.
+6. **Intel iGPU** / unknown-but-`vulkan_capable` → **Vulkan**.
+7. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
    correct").
+
+### ROCm vs Vulkan on AMD — what the numbers actually say
+
+Measured on the validated runner (`ghcr.io/hal0ai/hal0-combined:0822`) on a
+Strix Halo box, `-r 3`, otherwise idle:
+
+| Lane | pp512 (prefill, t/s) | tg128 (decode, t/s) |
+|---|---|---|
+| `ROCm0` | 8263.63 ± 775.88 | 192.19 ± 1.03 |
+| **`Vulkan0`** | **9417.36 ± 113.42** | **231.50 ± 0.23** |
+
+Vulkan is **+13.96% on prefill** and **+20.45% on decode**, and its run-to-run
+variance is far tighter. This inverts the pre-#1948 assumption, which was
+formed against a runner image whose Vulkan backend did not produce valid
+output at all — those numbers were never a fair comparison.
+
+hal0 still **seeds** `gpu-rocm` on a box that can run it. The reasons are
+maturity, not speed:
+
+- the ROCm lane carries hal0's whole validation history — every release
+  candidate has been exercised on it;
+- MTP / speculative-decode profiles are tuned against the ROCm lane, and those
+  gains are not represented in a plain pp512/tg128 comparison;
+- the Vulkan lane's clean record is one image on one hardware class.
+
+**The seeded default is an open question, revisited at GA against a broader
+matrix.** If your workload is plain prefill/decode on Strix Halo, switching is
+a defensible thing to do today — see
+[Switching a slot to the Vulkan lane](/docs/guides/manage-slots#switching-a-slot-to-the-vulkan-lane).
 
 VRAM budget (`_vram_budget_gb()`): AMD UMA → half of the unified pool; discrete GPU →
 `vram_mb`; CPU-only → half of `ram_available_mb`.

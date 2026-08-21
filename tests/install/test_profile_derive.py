@@ -40,19 +40,43 @@ def test_chat_on_rocm_box_picks_rocm():
     assert derive_profile("chat", "gpu-rocm") == "chat"
 
 
-def test_chat_on_amd_box_without_rocm_picks_cpu_not_vulkan(monkeypatch):
-    """#1888: an AMD GPU with no ROCm compute is NOT a Vulkan lane.
+def test_chat_on_amd_box_without_rocm_picks_the_vulkan_lane(monkeypatch):
+    """#1948: an AMD GPU with no ROCm compute IS a Vulkan lane again.
 
-    llama.cpp slots run the unified ROCmFPX runner image on every AMD GPU
-    device, and that image's Vulkan backend emits invalid tokens for every
-    model. Deriving ``gpu-vulkan`` here is what seeded a fresh unprivileged
-    install with three slots that served garbage while reading green — CPU is
-    the only honest fallback.
+    #1888 sent this box to CPU: llama.cpp slots ran one runner image on every
+    AMD GPU device and that image's Vulkan backend emitted invalid tokens, so
+    deriving ``gpu-vulkan`` seeded a fresh unprivileged install with slots
+    that served garbage while reading green. With a Vulkan-fixed image the
+    honest answer flips back — this is the ct151 shape, where Vulkan is the
+    only lane the box has. A box still carrying an unvalidated runner image
+    gets a named refusal at slot load, not silent garbage.
     """
     monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: True
+    )
     hw = _hw(compute=False, vulkan=True)
-    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
+    assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
     assert derive_profile("chat", "cpu") == "cpu-chat"
+
+
+def test_chat_on_amd_box_without_rocm_picks_cpu_when_the_image_cannot_serve_vulkan(
+    monkeypatch,
+):
+    """Review B2: deriving a lane the load-time gate then refuses is worse
+    than deriving CPU — it turns "slow but working" into "no loadable slot"."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: False
+    )
+    assert derive_device("chat", _hw(compute=False, vulkan=True), npu_opt_in=False) == "cpu"
+
+
+def test_chat_on_amd_box_with_neither_rocm_nor_vulkan_still_picks_cpu(monkeypatch):
+    """The CPU fallback survives — it just needs a real reason now."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    hw = _hw(compute=False, vulkan=False)
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
 
 
 def test_embed_on_rocm_box_uses_embed_profile():
@@ -157,14 +181,18 @@ def test_strix_platform_forces_rocm_when_the_compute_node_is_there(monkeypatch):
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
 
 
-def test_strix_platform_without_kfd_derives_cpu(monkeypatch):
-    """#1888: a Strix Halo box whose amdkfd node was never forwarded is the
-    exact fresh-LXC shape the blocker was found on. Deriving gpu-rocm there
-    would hand every seeded slot a load-time refusal immediately after a
-    deliberately CPU-only install."""
+def test_strix_platform_without_kfd_derives_vulkan_not_rocm(monkeypatch):
+    """A Strix Halo box whose amdkfd node was never forwarded is the exact
+    fresh-LXC shape #1888 was found on. Deriving ``gpu-rocm`` there would
+    still hand every seeded slot a load-time refusal — the ROCm gate is
+    untouched by #1948. What changed is the alternative: ``gpu-vulkan``
+    rather than ``cpu``, because the box does have a usable GPU."""
     monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: True
+    )
     hw = _hw(platform="strix-halo", compute=False, vulkan=True)
-    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
+    assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
 
 
 # ── CPU-only host fixes (#834) ─────────────────────────────────────────────────

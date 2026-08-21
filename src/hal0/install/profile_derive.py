@@ -14,7 +14,7 @@ The (device, profile) pairs this produces are backend-coherent per #807:
 from __future__ import annotations
 
 from hal0.config.schema import DEVICE_DEFAULT_PROFILES, HardwareInfo
-from hal0.providers._gpu import kfd_present
+from hal0.providers._gpu import default_image_serves_vulkan_lane, kfd_present
 
 #: NPU-trio capabilities (NPU chat agent + npu stt/embed passengers). Kept as a
 #: symbol because the trio code is left **dormant** (out of scope to remove,
@@ -110,16 +110,26 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
     rocm_ok = any(g.compute_capable for g in hw.gpus) or kfd_present()
     if rocm_ok and (hw.platform == "strix-halo" or any(g.compute_capable for g in hw.gpus)):
         return "gpu-rocm"
-    # Non-AMD vulkan-capable GPUs (Intel iGPU, NVIDIA without CDI) keep the
-    # Vulkan lane — the defect is characterised on the AMD/HIP build. Checked
-    # BEFORE the AMD→CPU fallback so a mixed host with a dead AMD adapter and
-    # a usable Intel one still gets its GPU.
-    if any(g.vulkan_capable and g.vendor != "amd" for g in hw.gpus):
+    # Vulkan-capable GPU, any vendor — AND a runner image that can serve the
+    # lane. #1923 restricted this to non-AMD because the pinned runner's Vulkan
+    # backend emitted invalid tokens on AMD, which sent a kfd-less AMD box to
+    # CPU with a working GPU in it. #1948 fixed the image, so the lane comes
+    # back — but only where it is real.
+    #
+    # The image half is not decoration (review B2). Deriving ``gpu-vulkan``
+    # without it on an install whose runner is still the ade07ba lineage would
+    # hand every seeded slot a device that the load-time gate then refuses by
+    # name: a regression from "slow but working on CPU" to "no loadable LLM
+    # slot at all". Asking the same question the gate asks means the derivation
+    # and the gate can never disagree, whatever the pin happens to be —
+    # :func:`~hal0.providers._gpu.default_image_serves_vulkan_lane` is the one
+    # predicate all three ladders and the installer preflight share.
+    #
+    # Note the ORDER: this is reached only when the ROCm branch above declined,
+    # so a box that can run ROCm still derives ROCm.
+    if any(g.vulkan_capable for g in hw.gpus) and default_image_serves_vulkan_lane():
         return "gpu-vulkan"
-    # AMD without a ROCm compute node is NOT a Vulkan lane: llama.cpp slots
-    # run the ROCmFPX runner image on both GPU devices, and that image's
-    # Vulkan backend emits invalid tokens for every model. CPU is the only
-    # honest answer.
+    # No GPU lane this host can validly use for inference.
     return "cpu"
 
 

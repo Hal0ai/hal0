@@ -27,7 +27,7 @@ from typing import Any
 
 from hal0.config.schema import HardwareInfo
 from hal0.model_meta import DEVICE_TO_DEFAULT_PROFILE, map_backend_to_device
-from hal0.providers._gpu import kfd_present
+from hal0.providers._gpu import default_image_serves_vulkan_lane, kfd_present
 from hal0.registry.curated import get_curated
 
 # Curated chat models suitable for the primary slot, ordered from
@@ -151,23 +151,38 @@ def _backend_for(hw: HardwareInfo) -> tuple[str, str]:
     gpus = hw.gpus
     primary = gpus[0] if gpus else None
 
-    # AMD — ROCm is the ONLY supported llama.cpp GPU lane (#1888). The
-    # release-pinned ROCmFPX runner is a single HIP+Vulkan build whose Vulkan
-    # backend emits invalid tokens for every model, so recommending Vulkan
-    # here (which this ladder used to do for the whole Strix Halo class) hands
-    # the operator a lane that reads green and serves garbage. ROCm needs the
-    # /dev/kfd compute node; without it there is no valid GPU lane on this
-    # image and CPU is the honest answer.
+    # AMD — ROCm first, Vulkan as the fallback lane, CPU only if neither.
+    #
+    # ROCm first is NOT a throughput claim. On the reference hardware the
+    # Vulkan lane measures faster on both metrics (#1948 §3-C, ct150 on the
+    # validated runner: +13.96% prefill, +20.45% decode). ROCm leads this
+    # ladder because it is the lane with the validation history and the one
+    # MTP/speculative decode is tuned on — and because changing what a fresh
+    # install recommends is an operator decision, revisited at GA against a
+    # broader matrix rather than flipped on one box's numbers.
+    #
+    # #1923 went further and made ROCm the ONLY lane, because the pinned
+    # runner's Vulkan backend emitted invalid tokens for every model (#1888) —
+    # which left a kfd-less AMD box recommending CPU with a working GPU in it.
+    # #1948 fixed the image (see ``VULKAN_FIXED_IMAGE``, validated on a
+    # kfd-ABSENT box), so Vulkan is a real recommendation again for exactly
+    # that population.
     if primary and primary.vendor == "amd":
         unified_gb = hw.unified_memory_mb / 1024
         if primary.compute_capable or kfd_present():
             if unified_gb >= _UMA_UNIFIED_GB_MIN and primary.vram_mb <= 4096:
                 return "rocm", f"AMD UMA (Strix Halo class — {unified_gb:.0f} GB unified)"
             return "rocm", "AMD GPU with ROCm compute reachable"
+        if primary.vulkan_capable and default_image_serves_vulkan_lane():
+            return "vulkan", (
+                "AMD GPU with no ROCm compute (/dev/kfd absent, rocm-smi unreachable) — "
+                "the Vulkan lane serves this box"
+            )
         return "cpu", (
-            "AMD GPU but no ROCm compute (/dev/kfd absent, rocm-smi unreachable) — "
-            "the runner image's Vulkan lane is unsupported (#1888); forward /dev/kfd "
-            "for GPU inference"
+            "AMD GPU but no usable GPU lane: no ROCm compute (/dev/kfd absent, "
+            "rocm-smi unreachable), and no Vulkan lane either (no Vulkan device, or "
+            "the pinned runner image is not validated for it — see #1888). Forward "
+            "/dev/kfd, or update to a runner whose Vulkan backend is validated"
         )
 
     # NVIDIA — the CUDA path (gpu-cuda device, upstream llama.cpp CUDA

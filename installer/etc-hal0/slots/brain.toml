@@ -59,10 +59,23 @@
 # deliberately want a bigger steward voice.
 name = "brain"
 type = "llm"
-# #1888: gpu-rocm, not gpu-vulkan. llama.cpp slots launch the unified
-# ROCmFPX runner on both GPU devices; that image's Vulkan backend emits
-# invalid tokens for every model, so gpu-vulkan named a lane no slot
-# could validly run. Requires /dev/kfd (preflight + load-time guard).
+# gpu-rocm, not gpu-vulkan — a preference now, not a prohibition.
+# #1888 made it a prohibition: llama.cpp slots launch one runner image on
+# both GPU devices, and that image's Vulkan backend emitted invalid tokens
+# for every model, so gpu-vulkan named a lane no slot could validly run.
+# #1948 fixed the image and Vulkan is a supported lane again.
+#
+# ROCm stays the SEEDED default, but not on speed: on the reference
+# hardware the Vulkan lane measures FASTER on both metrics (#1948 §3-C,
+# ct150: +13.96% prefill, +20.45% decode). It is seeded because it is the
+# lane with the validation history behind it and the one MTP/speculative
+# decode is tuned on. The seeded default is revisited at GA against a
+# broader matrix.
+#
+# Requires /dev/kfd (installer preflight + load-time guard). On a box
+# without it this slot derives gpu-vulkan instead. To switch deliberately:
+#   hal0 slot edit <slot> --hardware vulkan
+# or use the Device picker in the dashboard's slot drawer.
 device = "gpu-rocm"
 runtime = "container"
 profile = "brain"

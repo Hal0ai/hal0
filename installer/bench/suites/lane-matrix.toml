@@ -1,4 +1,4 @@
-# suites/lane-matrix.toml — feeds hal0-tune. The supported GPU lane across
+# suites/lane-matrix.toml — feeds hal0-tune. Both supported GPU lanes across
 # the full 2k/32k/128k depth axis, on a small set of profile-class representatives
 # — NOT the whole roster. This is a tuning signal, not a display board.
 # See the bench design handoff §4.
@@ -32,10 +32,10 @@ include = [
 ]
 
 [matrix]
-lanes    = ["rocm"]                    # explicit lane pin, unlike roster's "default".
-                                        # vulkan_radv is UNSUPPORTED (#1888): the ROCmFPX
-                                        # image's Vulkan backend emits invalid tokens, so
-                                        # its throughput numbers measure garbage.
+lanes    = ["rocm", "vulkan_radv"]     # both GPU lanes, unlike roster's "default".
+                                        # vulkan_radv was retired under #1888 and restored
+                                        # by #1948 on the Vulkan-fixed runner image — a
+                                        # lane comparison is the point of this suite.
 depths   = [2048, 32768, 131072]        # the full 2k/32k/128k ctx-fill axis
 samplers = ["greedy"]
 reps     = 3
