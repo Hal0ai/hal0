@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 from hal0.config.paths import model_store_root
+from hal0.install.perms import ensure_shared_dir
 
 __all__ = ["bundled_templates_dir", "seed_chat_templates"]
 
@@ -30,7 +31,14 @@ def seed_chat_templates() -> None:
     """
     try:
         dst = Path(model_store_root()) / "chat-templates"
-        dst.mkdir(parents=True, exist_ok=True)
+        # models/chat-templates/ is declared 2775; this is the ACTUAL first
+        # creator on a fresh box (create_app() calls seed_chat_templates() at
+        # startup, before any POST reaches create_chat_template), and a bare
+        # mkdir under the daemon's UMask=0022 births 2755 — which
+        # ensure_shared_dir in chat_templates.create_chat_template can no
+        # longer heal, since it only chmods components IT creates (#1958
+        # review). Same fix, same precedent: registry/pull.py persist_pull_job.
+        ensure_shared_dir(dst)
         for src in bundled_templates_dir().glob("*.jinja"):
             target = dst / src.name
             if not target.exists():

@@ -314,12 +314,27 @@ def test_stays_green_after_update_job_image_cache_and_chat_template_writes(
     each writer through :func:`hal0.install.perms.ensure_shared_dir` (the
     same fix ``registry/pull.py``'s ``persist_pull_job`` already uses) is
     what this test locks down.
+
+    The chat-template leg runs :func:`hal0.templates.seed_chat_templates`
+    BEFORE ``create_chat_template`` — production order, not test-of-convenience
+    order. ``create_app()`` calls ``seed_chat_templates`` at startup
+    (``api/__init__.py``), so it is the ACTUAL first creator of
+    ``models/chat-templates/`` on every real box; the daemon never reaches
+    ``create_chat_template`` against an absent dir. Exercising the writers in
+    the opposite order (as an earlier revision of this test did) let
+    ``create_chat_template``'s own ``ensure_shared_dir`` heal a dir it never
+    actually births in production, masking a real no-op: ``ensure_shared_dir``
+    only chmods components it creates (see
+    ``test_ensure_shared_dir_never_widens_an_existing_dir`` above), so once
+    the startup seed has birthed the dir ``2755`` a second, later
+    ``ensure_shared_dir(store)`` call changes nothing — #1958 delta review.
     """
     import asyncio
 
     from hal0.api import image_cache
     from hal0.api.routes import chat_templates
     from hal0.api.routes.updater import _persist_job
+    from hal0.templates import seed_chat_templates
 
     table = perms.ownership_table(service_user="hal0")
     _materialise_fresh_install(table)
@@ -334,7 +349,14 @@ def test_stays_green_after_update_job_image_cache_and_chat_template_writes(
         image_cache.write_png(b"\x89PNG\r\n\x1a\nfake-png-bytes")
         assert _mode_drift(table) == [], "drift after an image-cache write"
 
-        # 3. custom chat-template write -> models/chat-templates/<id>.jinja
+        # 3a. hal0-api startup -> seed_chat_templates() births
+        #     models/chat-templates/ FIRST, exactly like create_app() does on
+        #     every real boot, well before any POST /api/chat-templates.
+        seed_chat_templates()
+        assert _mode_drift(table) == [], "drift after the startup chat-template seed"
+
+        # 3b. custom chat-template write -> models/chat-templates/<id>.jinja,
+        #     into the dir the seed above already created.
         asyncio.run(
             chat_templates.create_chat_template(
                 chat_templates._TemplateBody(id="custom", content="{{ x }}")
