@@ -1010,7 +1010,7 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: (debug builds, A/B tests, etc.).  See #__hal0_image_control__ for the
 #: phasing: 0.9.5 wires slot.image + DEFAULT_ROCMFPX_IMAGE; 0.9.6 will
 #: drop ``image`` from SEED_PROFILES entirely.
-DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
+DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0822"
 
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
 #: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
@@ -1040,6 +1040,10 @@ DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
 #: control-token pieces are stripped before the parser sees them).
 STALE_ROCMFPX_IMAGE_REFS = frozenset(
     {
+        # Former default (rc.6). Its Vulkan backend emits invalid tokens for
+        # every model (#1888) — a slot still pinned here is debris from an
+        # older release, not an opt-out, and must be retagged.
+        "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba",
         "ghcr.io/hal0ai/hal0-rocmfpx:c077206",
         "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5",
         "localhost/hal0-rocmfpx:vulkan-minicpm5",
