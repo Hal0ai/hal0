@@ -142,6 +142,16 @@ export const MOCK_DATA = {
       bench_toks_per_sec: 52.8,
     },
     // C7 spec target: TTS container slot with the tts profile (device_class=cpu — fixed text).
+    //
+    // Also this fixture set's `image_status: 'unknown'` slot (#1939). The
+    // backend vocabulary is present | pulling | missing | unknown |
+    // not-configured; `unknown` means the container image store could not be
+    // ASKED (the rootful hal0-podman-ro seam returned rc 66, its sudoers grant
+    // is absent, or the probe timed out) — deliberately NOT the same claim as
+    // `missing`, which is podman having been asked and answered "no".
+    // (The DOM-level chip assertion runs against the forced-mock seed in
+    // src/dash/data.jsx, which is what the rendered pane actually reads; this
+    // one keeps the route-stubbed specs' vocabulary in step with it.)
     {
       name: 'tts', type: 'tts', device: 'cpu',
       device_class: 'cpu', backend: null,
@@ -150,7 +160,7 @@ export const MOCK_DATA = {
       runtime: 'container',
       profile: 'tts',
       image: 'ghcr.io/hal0ai/hal0-toolbox-kokoro:v1',
-      image_status: 'present',
+      image_status: 'unknown',
       container_status: 'running',
       container_health: true,
       mem_mb: 800,

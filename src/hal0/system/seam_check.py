@@ -96,7 +96,10 @@ SEAMS: tuple[SeamSpec, ...] = (
     # failed would keep the old one-verb wrapper, pass a `help` probe, and
     # report the seam healthy from `hal0 doctor` while image_status stayed
     # "missing" and actual_image stayed null — the exact undiagnosable-green
-    # failure #1465 exists to prevent. `check-slot-token` is release-specific
+    # failure #1465 exists to prevent. (Post-#1939 that stuck value reads
+    # "unknown" rather than "missing", which is honest but no less broken —
+    # this probe is still what tells an operator the wrapper is the old one.)
+    # `check-slot-token` is release-specific
     # (the old wrapper rejects it with rc 64) and side-effect-free: it
     # validates the token and prints the container name it WOULD build,
     # touching neither podman nor the filesystem.

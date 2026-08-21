@@ -237,6 +237,45 @@ function _formatAgo(deltaMs) {
 }
 
 /**
+ * Chip for an INDETERMINATE container-image read (#1939), or null.
+ *
+ * `image_status` is present | pulling | missing | unknown | not-configured.
+ * Four of those are claims the backend can stand behind; `unknown` is the
+ * backend saying it could not read the image store at all — the rootful
+ * hal0-podman-ro seam returned rc 66, the sudoers grant is absent, the
+ * wrapper and its Python mirror drifted, or the whole probe timed out.
+ *
+ * Only `unknown` gets a chip, and deliberately so:
+ *   • `present` / `not-configured` are the quiet, correct states;
+ *   • `pulling` already has the progress bar (SlotImagePullBar);
+ *   • `missing` stays backend-only, as it always has been — this change is
+ *     not the place to introduce a new red chip, and doing so would bury the
+ *     one state that actually needs an operator's eye;
+ *   • `unknown` is precisely a state an operator can ACT on (fix the grant,
+ *     fix podman) and that nothing else on the card hints at.
+ *
+ * The class is neutral on purpose. This card's colour rule is RED = error,
+ * AMBER = transitional, GREY = not loaded. "We could not read the store" is
+ * not an error in the slot and not a phase of it; painting it red or amber
+ * would re-tell the very lie the tri-state exists to stop.
+ *
+ * @param {object|null|undefined} slot
+ * @returns {{cls: string, label: string, tooltip: string}|null}
+ */
+export function imageStatusChip(slot) {
+  if (slot?.image_status !== "unknown") return null;
+  const img = slot?.image ? ` (${slot.image})` : "";
+  return {
+    cls: "chip image-unknown",
+    label: "image ?",
+    tooltip:
+      `hal0 could not read the container image store${img}, so it does not ` +
+      `know whether this image is on disk. This is NOT a report that the ` +
+      `image is absent. Check the read-only podman seam with \`hal0 doctor seams\`.`,
+  };
+}
+
+/**
  * Project slotPhase() → stateChipClass-compatible CSS class.
  * Used in slot-modals.jsx to color lifecycle state chips.
  */

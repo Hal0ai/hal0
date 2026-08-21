@@ -38,7 +38,7 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useMemoryMapModel } from './memory-map'
-import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
+import { slotIndicatorFromPhase, isSlotLive, imageStatusChip } from './slot-status.js'
 import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -221,6 +221,37 @@ function DevCell({ s, onProfile }) {
         {s.profile || 'default'}
         <Ic name="chev" size={10} />
       </button>
+    </span>
+  )
+}
+
+// Indeterminate container-image chip (#1939). Renders ONLY for
+// `image_status: "unknown"` — the backend saying it could not read the
+// container image store (rootful hal0-podman-ro seam rc 66, missing sudoers
+// grant, probe timeout), which is a different claim from "missing" (podman
+// was asked and said no).
+//
+// Neutral and dashed on purpose: this card's colour vocabulary is RED =
+// error, AMBER = transitional/degraded, GREY = not loaded. An unreadable
+// image store is none of those, and painting it as one would restate in CSS
+// exactly the confident-lie the tri-state was added to end. The classifier
+// itself lives in slot-status.js so this component and the (retired) grid
+// card cannot drift.
+export function SlotImageUnknownChip({ s }) {
+  const chip = imageStatusChip(s)
+  if (!chip) return null
+  return (
+    <span
+      className={chip.cls}
+      data-testid="slot-image-unknown"
+      title={chip.tooltip}
+      style={{
+        color: 'var(--fg-3)',
+        borderStyle: 'dashed',
+        borderColor: 'var(--fg-3)',
+      }}
+    >
+      {chip.label}
     </span>
   )
 }
@@ -485,6 +516,7 @@ export function SlotScard({
         <div className={'scard-foot' + (full ? '' : ' bare')}>
           <DevCell s={s} onProfile={onEdit} />
           <BackendMismatch s={s} onEdit={onEdit} />
+          <SlotImageUnknownChip s={s} />
           {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
           <span className="grow" />
           {controls}
