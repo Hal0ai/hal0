@@ -270,6 +270,99 @@ async def test_probe_fails_on_never_terminating_server(
     assert len(slot_server.seen) == 1
 
 
+async def test_a_second_opinion_that_never_arrives_does_not_compose_a_verdict(
+    slot_server: FakeSlotServer,
+) -> None:
+    """The MIXED case: raw answered badly, the chat fallback never answered.
+
+    The composition used to report the RAW verdict's status, so
+    ``empty_output`` + ``probe_timeout`` laundered into a plain
+    ``empty_output`` — terminal, unit stopped, durable mark — with the
+    timeout visible only in a prose ``detail``. That walks straight around
+    :data:`~hal0.slots.output_sanity.AMBIGUOUS_STATUSES`.
+
+    It is also the one thing this module says it must never do: "failing a
+    working slot on the strength of a single endpoint is the one mistake this
+    gate must not make." The fallback exists *because* one endpoint's bad
+    answer is not enough — so when the second opinion does not arrive, there
+    is no second verdict to condemn on.
+    """
+
+    def _respond(path: str, body: dict[str, Any]) -> tuple[int, Any] | None:
+        if path == "/completion":
+            return 200, {"content": "", "stop": True}
+        return None  # the chat fallback hangs
+
+    await slot_server.start(_respond)
+
+    verdict = await _probe(slot_server.port, timeout_s=0.4)
+
+    assert verdict.ok is False
+    assert output_sanity.is_ambiguous(verdict.status), (
+        f"a missing second opinion must stay ambiguous, got {verdict.status!r}"
+    )
+    # Both endpoints really were tried — this is the mixed case, not an early
+    # return.
+    assert [path for path, _ in slot_server.seen] == [
+        "/completion",
+        "/v1/chat/completions",
+    ]
+    # The raw endpoint's finding is still carried for the operator.
+    assert "empty_output" in verdict.detail
+
+
+async def test_a_mixed_verdict_parks_the_slot_warming_without_condemning_it(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    slot_server: FakeSlotServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mixed case, all the way through ``load``.
+
+    This is the CPU lane's shape by construction: the chat fallback asks 256
+    tokens, so a box slow enough to fail the raw probe is a box whose second
+    opinion times out. If that composes to a terminal verdict, the widened
+    raw budget rescues nothing — the slot the fallback exists to protect is
+    the slot it kills.
+    """
+
+    def _respond(path: str, body: dict[str, Any]) -> tuple[int, Any] | None:
+        if path == "/completion":
+            return 200, {"content": "", "stop": True}
+        return None
+
+    await slot_server.start(_respond)
+    (slot_root / "chat.toml").write_text(
+        "\n".join(
+            [
+                'name = "chat"',
+                f"port = {slot_server.port}",
+                'device = "cpu"',
+                'provider = "llama-server"',
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    async def _fast(port: int, **_kw: Any) -> output_sanity.SanityVerdict:
+        return await _probe(port, timeout_s=0.4)
+
+    monkeypatch.setattr("hal0.slots.output_sanity.probe", _fast)
+    sm = SlotManager()
+
+    slot = await sm.load("chat")
+
+    assert slot.state is SlotState.WARMING
+    record = sm._states[sm._key("chat")]
+    for key in output_sanity.SANITY_EXTRA_KEYS:
+        assert key not in record.extra
+    assert "chat" in container_stub.active
+    assert container_stub.unload_calls == []
+
+
 async def test_probe_fails_on_dead_port() -> None:
     """Nothing listening → a fail verdict, never an exception."""
     server = FakeSlotServer()
@@ -883,6 +976,12 @@ async def test_garbage_stays_terminal_even_though_a_timeout_does_not(
     timeouts removes false failures without weakening a single true positive.
     This pins the pair against one real server so the distinction cannot rot
     into "any probe failure is survivable".
+
+    It also pins the property that makes the ambiguity carve-outs SUFFICIENT
+    rather than merely safe: because garbage answers quickly, a garbage
+    backend corroborates on BOTH endpoints well inside the budget and still
+    composes to a terminal verdict. Only a genuinely slow box fails to answer
+    twice — and that is the box that must be retried, not condemned.
     """
     await slot_server.start(_completion(")))))))))))))"))
     (slot_root / "chat.toml").write_text(
@@ -911,6 +1010,61 @@ async def test_garbage_stays_terminal_even_though_a_timeout_does_not(
     assert sm._current_state("chat") is SlotState.ERROR
     record = sm._states[sm._key("chat")]
     assert record.extra.get(output_sanity.SANITY_FAILED_KEY) is True
+    # Both endpoints answered — the second opinion ARRIVED and agreed, which
+    # is what a fast-but-wrong backend always does and what the terminal
+    # composition requires.
+    assert [path for path, _ in slot_server.seen] == [
+        "/completion",
+        "/v1/chat/completions",
+    ]
+
+
+def test_the_chat_budget_is_not_shrunk_on_the_cpu_lane() -> None:
+    """Why the cpu lane widens the CLOCK but never narrows the TOKEN cap.
+
+    Shrinking ``SANITY_CHAT_MAX_TOKENS`` so the fallback fits the cpu budget
+    looks like the obvious complement to the wider wall clock — 256 tokens
+    inside 180s is a 1.42 tok/s floor, which the fleet's slowest measured box
+    (0.12 tok/s) cannot clear, so the fallback times out there by
+    construction.
+
+    It is a trap. A truncated generation is not reported as a truncation: a
+    thinking model that spends its whole cap inside ``<think>`` returns
+    ``content=""`` with a partial thought in ``reasoning_content``, and
+    ``_message_text`` judges the union — so a smaller cap turns a SAFE
+    outcome (``probe_timeout`` → ambiguous → WARMING) into ``incoherent_output``,
+    which is terminal: ERROR, unit stopped, durable un-adoptable mark. That is
+    a hard false-fail inflicted on precisely the population the fallback exists
+    to protect, in exchange for removing a deferral that costs nothing.
+
+    The timeout is the right lever, and it is already pulled: a fallback that
+    cannot finish now defers instead of convicting. Nothing is lost by letting
+    it time out, because the slot that times out is by definition the SLOW one
+    — a garbage backend streams at 60-120 tok/s and corroborates fast (pinned
+    by ``test_garbage_stays_terminal_even_though_a_timeout_does_not``).
+    """
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "reasoning_content": (
+                        "Okay, the user is asking about the capital of France. Let me recall"
+                    ),
+                },
+                "finish_reason": "length",
+            }
+        ]
+    }
+
+    verdict = output_sanity.classify(output_sanity._extract_text(body))
+
+    # THE trap, pinned: a cap-truncated think block is indistinguishable from
+    # garbage to the classifier, and garbage is terminal.
+    assert verdict.status == "incoherent_output"
+    assert not output_sanity.is_ambiguous(verdict.status)
+    # So the cap must stay big enough to contain a real reasoning preamble.
+    assert output_sanity.SANITY_CHAT_MAX_TOKENS >= 256
 
 
 def test_a_cpu_slot_gets_a_wider_probe_budget() -> None:

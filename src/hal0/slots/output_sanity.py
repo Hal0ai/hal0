@@ -193,7 +193,11 @@ _SECOND_OPINION_STATUSES: frozenset[str] = frozenset(
 #: The remaining ``probe_``-prefixed statuses (transport error, 5xx,
 #: unparseable body) stay terminal deliberately: each is an active, immediate
 #: misbehaviour by the runner rather than an expiring clock, and none of them
-#: is the shape a slow-but-correct box produces.
+#: is the shape a slow-but-correct box produces. That rests on ``/health`` 200
+#: strictly preceding ``/completion`` availability — structurally possible to
+#: violate (``wait_ready`` accepts a ``/v1/models`` 200 fallback) and not yet
+#: empirically settled against the pinned runner: tracked as #1969. If that
+#: window turns out to be real the fix is upstream of this set, not inside it.
 AMBIGUOUS_STATUSES: frozenset[str] = frozenset({"probe_timeout"})
 
 
@@ -272,7 +276,7 @@ def probe_budget_s(cfg: Mapping[str, Any] | None) -> float | None:
     request" knob this needs.
 
     Derived through ``_cfg_effective_backend`` rather than by reading
-    ``device`` directly so a legacy TOML carrying only ``backend`` resolves
+    ``device`` directly so an older TOML carrying only ``backend`` resolves
     the same way, and so the token can never diverge from what the load path
     itself derives.
 
@@ -503,9 +507,36 @@ async def probe(port: int, *, timeout_s: float | None = None) -> SanityVerdict:
         # Serves neither endpoint → not a completion server at all. Cannot
         # judge; see the docstring.
         return SanityVerdict(ok=True, status="probe_unsupported")
-    # Both endpoints answered badly. Report the RAW verdict — its sample is
-    # the diagnostic one (the operator needs to see the ")))") — annotated
-    # with what the chat endpoint said, so the retry is visible in the log.
+    if is_ambiguous(chat.status):
+        # The second opinion never ARRIVED, so there is no second opinion to
+        # convict on. Composing the raw status here would launder a timeout
+        # into a content verdict — ``empty_output`` + ``probe_timeout`` read
+        # out as a plain ``empty_output`` and went terminal, walking straight
+        # around AMBIGUOUS_STATUSES with the timeout demoted to prose in
+        # ``detail``.
+        #
+        # This is not a technicality, it is this function's premise: the
+        # fallback exists BECAUSE one endpoint's bad answer is not proof
+        # ("failing a working slot on the strength of a single endpoint is
+        # the one mistake this gate must not make" — see the docstring). No
+        # corroboration, no conviction.
+        #
+        # It costs #1888 nothing, for the same reason the raw-probe carve-out
+        # does: garbage is FAST. A backend that mis-computes streams its
+        # nonsense at 60-120 tok/s and answers the fallback well inside any
+        # budget, landing a real ``incoherent_output`` below. The only slot
+        # that reaches THIS line is one that was too slow to answer twice —
+        # which is the slot that must be retried, not condemned.
+        return SanityVerdict(
+            ok=False,
+            status=chat.status,
+            sample=verdict.sample,
+            detail=f"raw probe said {verdict.status}; the chat second opinion never arrived",
+        )
+    # Both endpoints answered, and both answered badly. Report the RAW verdict
+    # — its sample is the diagnostic one (the operator needs to see the ")))")
+    # — annotated with what the chat endpoint said, so the retry is visible in
+    # the log.
     return SanityVerdict(
         ok=False,
         status=verdict.status if verdict.status != "probe_absent" else chat.status,
