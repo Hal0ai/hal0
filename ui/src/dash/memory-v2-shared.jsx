@@ -235,6 +235,32 @@ const Icon = ({ name, size = 16, sw = 1.5 }) => (
   </svg>
 )
 
+// task C8: shared engine-outage error branch for the Bank workspace surfaces
+// (Overview's growth chart + bank rows, the workspace's units/sources lists,
+// the BankBar's reflect/rules tabs). Ported from memory.jsx's pre-v2
+// `MemError` component (#1539) so every v2 card gets the same "announce the
+// outage, don't render an empty-state" treatment instead of re-implementing
+// it per file. `query` is any TanStack Query result exposing `isError` /
+// `error` / (optionally) `refetch`.
+const MvError = ({ query, what, testid }) => {
+  if (!query?.isError) return null
+  return (
+    <div className="empty mono" data-testid={testid}>
+      <div>Memory engine unreachable — {query.error?.message || `could not load ${what}`}</div>
+      {query.refetch && (
+        <button
+          className="mv-btn"
+          style={{ marginTop: 8 }}
+          data-testid={`${testid}-retry`}
+          onClick={() => query.refetch()}
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  )
+}
+
 const MemV2 = {
   FACT_COLORS,
   FACT_DESC,
@@ -245,6 +271,7 @@ const MemV2 = {
   fmtN,
   dayKey,
   Icon,
+  MvError,
 }
 
 // Named exports alongside the window-globals publish, purely so the pure

@@ -52,9 +52,9 @@ function Spark({ series, w = 96, h = 26 }) {
 // `consolidation`-type operations (exact upstream task_type string, per the
 // Hindsight audit — NOT "consolidate") for `bank`, bucketed by day, so the
 // accent triangle marker lands on the same bar the operation happened on.
-function GrowthChart({ bank, banks, buckets, range, onRange, onBank, consolidationDays, wide }) {
-  const { FACT_COLORS, fmtN } = window.MemV2
-  const all = buckets || []
+function GrowthChart({ bank, banks, tsQuery, range, onRange, onBank, consolidationDays, wide }) {
+  const { FACT_COLORS, fmtN, MvError } = window.MemV2
+  const all = tsQuery?.data?.buckets || []
   const ts = range === '7d' ? all.slice(-7) : range === '1d' ? all.slice(-1) : all
   const W = wide ? 1240 : 640,
     H = wide ? 210 : 268,
@@ -101,7 +101,9 @@ function GrowthChart({ bank, banks, buckets, range, onRange, onBank, consolidati
         </div>
       </div>
       <div className="bd">
-        {ts.length === 0 ? (
+        {tsQuery?.isError ? (
+          <MvError query={tsQuery} what="retain activity" testid="mv-overview-error" />
+        ) : ts.length === 0 ? (
           <div className="empty mono" style={{ padding: '28px 0' }}>
             No retain activity in this window.
           </div>
@@ -245,9 +247,18 @@ function BankRow({ bank, onExplore, compact }) {
       </div>
       <div>
         <span className="mv-cell-k">facts · links</span>
-        <span className="mv-cell-v num">
-          {fmtN(facts)} <small>· {fmtN(links)}</small>
-        </span>
+        {statsQuery.isError ? (
+          // #1539-class fix, task C8: a failed stats query used to leave
+          // `stats` undefined and every count fell back to 0 — an
+          // unreachable engine read as an empty bank. Announce it instead.
+          <span className="mv-cell-v num" data-testid="mv-overview-error" style={{ color: 'var(--err)' }}>
+            stats unavailable
+          </span>
+        ) : (
+          <span className="mv-cell-v num">
+            {fmtN(facts)} <small>· {fmtN(links)}</small>
+          </span>
+        )}
       </div>
       {!compact && (
         <div>
@@ -256,12 +267,23 @@ function BankRow({ bank, onExplore, compact }) {
         </div>
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
-        {working > 0 && <span className="mv-chip on num">⟳ {working} working</span>}
-        {pending > 0 && <span className="mv-chip num">{pending} pending</span>}
-        {working === 0 && pending === 0 && (
-          <span className="mv-chip num" style={{ opacity: 0.6 }}>
-            idle
+        {opsQuery.isError ? (
+          // The old memory.jsx operations panel `return null`'d on an empty
+          // list, so a failed query made the whole card vanish (#1539). This
+          // chip is the per-row equivalent of that fix for the v2 table.
+          <span className="mv-chip num" data-testid="mv-overview-error" style={{ color: 'var(--err)' }}>
+            ops unavailable
           </span>
+        ) : (
+          <>
+            {working > 0 && <span className="mv-chip on num">⟳ {working} working</span>}
+            {pending > 0 && <span className="mv-chip num">{pending} pending</span>}
+            {working === 0 && pending === 0 && (
+              <span className="mv-chip num" style={{ opacity: 0.6 }}>
+                idle
+              </span>
+            )}
+          </>
         )}
       </div>
       <button
@@ -409,7 +431,7 @@ function MemV2Overview({ onExplore, growthBank, setGrowthBank }) {
       <GrowthChart
         bank={growthBank}
         banks={banks}
-        buckets={growthTsQuery.data?.buckets}
+        tsQuery={growthTsQuery}
         range={range}
         onRange={setRange}
         onBank={setGrowthBank}

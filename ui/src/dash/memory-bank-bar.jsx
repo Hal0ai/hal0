@@ -354,7 +354,7 @@ function AddModal({ bank, tab0 = 'fact', onClose }) {
 }
 
 function BankBar({ bank, setBank }) {
-  const { FACT_COLORS, fmtN, Icon } = window.MemV2
+  const { FACT_COLORS, fmtN, Icon, MvError } = window.MemV2
   const Spark = window.Spark
 
   const useMemoryBanks = window.__hal0UseMemoryBanks
@@ -546,6 +546,25 @@ function BankBar({ bank, setBank }) {
               recalling · reranking · composing…
             </div>
           )}
+          {/* task C8: reflect is a mutation, not a query, so it has no
+              `refetch` — the retry re-asks the same question via `ask()`
+              instead of MvError's default query.refetch() call. */}
+          {!reflect.isPending && reflect.isError && (
+            <div className="empty mono" data-testid="mv-reflect-error" style={{ padding: 18 }}>
+              <div>
+                Memory engine unreachable —{' '}
+                {reflect.error?.message || 'could not reflect over this bank'}
+              </div>
+              <button
+                className="mv-btn"
+                style={{ marginTop: 8 }}
+                data-testid="mv-reflect-error-retry"
+                onClick={() => ask(q)}
+              >
+                Retry
+              </button>
+            </div>
+          )}
           {ans && (
             <div
               className="pad"
@@ -580,7 +599,13 @@ function BankBar({ bank, setBank }) {
           )}
         </div>
       )}
-      {tab === 'rules' && (
+      {tab === 'rules' && (directivesQuery.isError || mentalModelsQuery.isError) ? (
+        <MvError
+          query={directivesQuery.isError ? directivesQuery : mentalModelsQuery}
+          what="directives and mental models"
+          testid="mv-rules-error"
+        />
+      ) : tab === 'rules' && (
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)' }}>
           <div className="pad" style={{ borderRight: '1px solid var(--line-soft,#1C1C1C)', padding: '12px 14px' }}>
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>

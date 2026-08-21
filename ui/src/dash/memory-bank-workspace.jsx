@@ -232,11 +232,19 @@ function TopicChips({ tags, topic, setTopic }) {
 }
 
 function SourcesPanel({ bank, src, setSrc, limit, setLimit, matchCount }) {
-  const { fmtN, Icon } = window.MemV2
+  const { fmtN, Icon, MvError } = window.MemV2
   const useBankDocuments = window.__hal0UseBankDocuments
   const useDocumentReprocess = window.__hal0UseDocumentReprocess
   const docsQuery = useBankDocuments ? useBankDocuments(bank, { limit: 50 }) : { data: null }
   const reprocess = useDocumentReprocess ? useDocumentReprocess() : { mutate: () => {}, isPending: false }
+
+  if (docsQuery.isError) {
+    return (
+      <div className="mv-card" data-testid="mv-sources">
+        <MvError query={docsQuery} what="sources" testid="mv-sources-error" />
+      </div>
+    )
+  }
   const docs = docsQuery.data?.items || []
   const focused = src && docs.find((d) => d.id === src)
 
@@ -323,8 +331,19 @@ function SourcesPanel({ bank, src, setSrc, limit, setLimit, matchCount }) {
 }
 
 // ── fact list ───────────────────────────────────────────────────────────
-function FactList({ units, sel, setSel, footer }) {
-  const { FACT_COLORS, LINK_COLORS, LINK_LABEL } = window.MemV2
+function FactList({ units, sel, setSel, footer, query, anyFilter }) {
+  const { FACT_COLORS, LINK_COLORS, LINK_LABEL, MvError } = window.MemV2
+  // #1539-class fix, task C8: a failed units query used to fall back to an
+  // empty array indistinguishable from "no facts match — clear a filter".
+  // Check it first so an engine outage is announced, not read as a healthy
+  // filtered-to-nothing bank.
+  if (query?.isError) {
+    return (
+      <div className="mv-card mv-list">
+        <MvError query={query} what="memory units" testid="mv-units-error" />
+      </div>
+    )
+  }
   return (
     <div className="mv-card mv-list">
       {units.map((f) => {
@@ -375,7 +394,18 @@ function FactList({ units, sel, setSel, footer }) {
           </div>
         )
       })}
-      {units.length === 0 && <div className="mv-empty">no facts match — clear a filter</div>}
+      {units.length === 0 &&
+        // task C8: a genuinely fresh bank (zero facts, no filters active) was
+        // showing the same "clear a filter" copy as a filtered-to-nothing
+        // search — telling the operator to clear a filter that doesn't
+        // exist. Distinguish the two.
+        (anyFilter ? (
+          <div className="mv-empty">no facts match — clear a filter</div>
+        ) : (
+          <div className="mv-empty" data-testid="mv-units-empty-bank">
+            No memories in this bank yet — use “+ Add” above to record the first fact.
+          </div>
+        ))}
       {units.length > 0 && footer && (
         <div className="mv-more num">slice end · refine with search, tags, or the time brush to go deeper</div>
       )}
@@ -1135,7 +1165,16 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
           {view === 'list' && (
             <SourcesPanel bank={bank} src={src} setSrc={setSrc} limit={srcLimit} setLimit={setSrcLimit} matchCount={totalMatched} />
           )}
-          {view === 'list' && <FactList units={pageUnits} sel={sel} setSel={setSel} footer={pageSafe === pages - 1} />}
+          {view === 'list' && (
+            <FactList
+              units={pageUnits}
+              sel={sel}
+              setSel={setSel}
+              footer={pageSafe === pages - 1}
+              query={unitsQuery}
+              anyFilter={anyFilter}
+            />
+          )}
           {view === 'list' && pages > 1 && (
             <div className="mv-card">
               <div className="fline" style={{ justifyContent: 'center', gap: 14 }}>
