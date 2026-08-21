@@ -616,6 +616,12 @@ function MiniCard({ s, ind, busy, handlers, grip, dragging, dropProps }) {
         <span className={'sdot ' + dot} title={ind.tooltip} />
         <span className="snm">{s.name}</span>
         <span className="sport">{s.port ? ':' + s.port : ''}</span>
+        {/* #1939 follow-up: the utility tier runs the same container images
+            as the headline tier, so it can hit the same unreadable image
+            store. Rendering the chip only on SlotScard made the seam failure
+            invisible for every embed / rerank / stt / tts slot — the tiers
+            differ in density, not in what they are allowed to hide. */}
+        <SlotImageUnknownChip s={s} />
       </div>
       <div className="mcard-b">
         <span className="smodel" title={s.model || ''}>
