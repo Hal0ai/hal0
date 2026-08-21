@@ -2657,6 +2657,12 @@ class ContainerProvider(Provider):
         try:
             runtime = _container_runtime()
         except RuntimeError:
+            log.warning(
+                "hal0.podman_ro.image_present_unanswered image=%s reason=podman-absent — "
+                "no container runtime on this box, so nothing can be asked about the image; "
+                "reporting image_status=unknown",
+                image,
+            )
             return None
         try:
             result = subprocess.run(
@@ -2664,7 +2670,13 @@ class ContainerProvider(Provider):
                 capture_output=True,
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning(
+                "hal0.podman_ro.image_present_unanswered image=%s reason=seam-error error=%s — "
+                "the local podman could not be run; reporting image_status=unknown",
+                image,
+                exc,
+            )
             return None
         if result.returncode == 0:
             return True

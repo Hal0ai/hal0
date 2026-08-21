@@ -134,7 +134,7 @@ def test_rootless_fallback_reports_missing_on_a_clean_negative(
 
 
 def test_rootless_fallback_reports_unknown_on_an_operational_failure(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The dev half of the same bug: a local podman that RAN and broke must
     not read as "the image is absent" either. `image inspect` could not tell
@@ -150,7 +150,11 @@ def test_rootless_fallback_reports_unknown_on_an_operational_failure(
 
     monkeypatch.setattr(container_mod.subprocess, "run", lambda *_a, **_k: _Proc())
 
-    assert ContainerProvider().image_present(IMAGE) is None
+    with caplog.at_level("WARNING"):
+        assert ContainerProvider().image_present(IMAGE) is None
+
+    assert "reason=podman-failed" in caplog.text
+    assert "rc=125" in caplog.text
 
 
 def test_a_ref_our_own_validator_rejected_never_falls_back(
@@ -169,12 +173,13 @@ def test_a_ref_our_own_validator_rejected_never_falls_back(
 
 
 def test_image_present_unknown_when_seam_silent_and_no_runtime(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#1939: no seam AND no podman binary means nothing on this box can be
     asked about the image. That is ``unknown``, not ``False`` — a box with no
     container runtime at all was previously reporting every slot image as
-    authoritatively absent."""
+    authoritatively absent. And it says so in the journal: an ``unknown`` with
+    no line behind it is undiagnosable, since the payload carries no reason."""
     monkeypatch.setattr(
         container_mod.podman_introspect, "image_presence", _probe("unknown", "not-service-user")
     )
@@ -185,11 +190,15 @@ def test_image_present_unknown_when_seam_silent_and_no_runtime(
 
     monkeypatch.setattr(container_mod, "_container_runtime", _no_runtime)
 
-    assert ContainerProvider().image_present(IMAGE) is None
+    with caplog.at_level("WARNING"):
+        assert ContainerProvider().image_present(IMAGE) is None
+
+    assert "image_present_unanswered" in caplog.text
+    assert "reason=podman-absent" in caplog.text
 
 
 def test_image_present_unknown_when_the_rootless_call_itself_raises(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A dev box whose podman binary blows up on exec has not answered either."""
     monkeypatch.setattr(
@@ -203,7 +212,11 @@ def test_image_present_unknown_when_the_rootless_call_itself_raises(
 
     monkeypatch.setattr(container_mod.subprocess, "run", _boom)
 
-    assert ContainerProvider().image_present(IMAGE) is None
+    with caplog.at_level("WARNING"):
+        assert ContainerProvider().image_present(IMAGE) is None
+
+    assert "reason=seam-error" in caplog.text
+    assert "exec format error" in caplog.text
 
 
 # ── running_image: the "actual_image is always null" bug ───────────────────

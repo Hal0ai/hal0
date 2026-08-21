@@ -161,6 +161,29 @@ def test_pull_status_route_reports_unknown_rather_than_missing(
     assert r.json()["state"] == "unknown"
 
 
+def test_pull_status_logs_before_degrading_to_unknown(
+    container_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising probe on this route must leave a journal trail too. The
+    payload carries no reason by design, so an ``unknown`` with nothing behind
+    it in the log is undiagnosable — the exact failure family #1939 is about,
+    and the release-validation kit's briefs promise the line exists."""
+    fake_catalog, _ = _fake_profile_catalog()
+    with (
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
+        patch(
+            "hal0.providers.container.ContainerProvider.image_present",
+            side_effect=RuntimeError("podman store is on fire"),
+        ),
+        caplog.at_level("WARNING"),
+    ):
+        r = container_client.get("/api/slots/gpu-chat/pull/status")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "unknown"
+    assert "image_probe_failed" in caplog.text
+    assert "podman store is on fire" in caplog.text
+
+
 def test_image_status_pulling_when_job_active(
     container_client: TestClient,
     container_app: FastAPI,

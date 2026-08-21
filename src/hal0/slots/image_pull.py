@@ -29,7 +29,10 @@ patches on ``ContainerProvider`` / ``load_profiles_config`` continue to bind.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 class ImagePullJob:
@@ -136,5 +139,16 @@ async def inspect_image_state(image: str | None) -> str:
             None, container_provider().image_present, image
         )
         return image_status_for(present)
-    except Exception:
+    except Exception as exc:
+        # Log before degrading. `unknown` carries no reason on the wire by
+        # design, so an unknown with nothing behind it in the journal is
+        # undiagnosable — the failure family #1939 is about. `image_present`
+        # logs its own seam reasons; this covers the unknowns that never got
+        # that far (provider construction, executor dispatch, a raising probe).
+        log.warning(
+            "slot_view.image_probe_failed image=%s reason=probe-error error=%s — "
+            "reporting pull state=unknown",
+            image,
+            exc,
+        )
         return "unknown"
