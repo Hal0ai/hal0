@@ -159,6 +159,12 @@ import './dash/memory-overview-v2.jsx'
 // window.TypeBar/window.Spark (memory-overview-v2.jsx, above) at render
 // time. Not routed yet (C6 wires #memory/bank).
 import './dash/memory-bank-bar.jsx'
+// Memory v2 Bank workspace (task C4) — list/filters/sources, inspector +
+// curation, ego focus view. Publishes window.MemV2Workspace; reads
+// window.MemV2, window.MemV2BankBar (above), and window.MemV2WebGraph
+// (C5, guarded — may not exist yet) at render time. Not routed yet
+// (task C6 wires #memory/bank).
+import './dash/memory-bank-workspace.jsx'
 import './dash/memory-graph-engine.jsx'
 import './dash/memory-graph-structured.jsx'
 import './dash/memory-graph-ego.jsx'
