@@ -84,7 +84,12 @@ def test_the_build_script_is_executable_and_valid_shell() -> None:
 
 def test_the_recipe_records_its_base_image() -> None:
     base = MANIFEST["base"]["image"]
-    assert base.startswith("ghcr.io/") or base.startswith("docker.io/"), base
+    # Exact host match, not a prefix check: startswith("ghcr.io/") admits
+    # "ghcr.io.evil.com/x"-shaped hosts and tripped CodeQL's
+    # incomplete-url-substring-sanitization (2x high) — and the digest test
+    # owns digest-shape now, so this assertion's only job is the registry
+    # host.
+    assert base.split("/")[0] in {"ghcr.io", "docker.io"}, base
     # The ROCm version is load-bearing: the runtime layer must match the
     # toolchain the binaries were linked against, or the runner resolves
     # libraries out of two different ROCm trees.
