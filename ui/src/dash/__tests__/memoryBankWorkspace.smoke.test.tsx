@@ -51,4 +51,25 @@ describe('MemV2Workspace (smoke)', () => {
     expect(html).toContain('mv-workspace')
     expect(html).toContain('mv-filter-card')
   })
+
+  it('renders the Inspector instead of the filter card when a fact is selected', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const MemV2Workspace = (globalThis as unknown as { MemV2Workspace: React.ComponentType<any> })
+      .MemV2Workspace
+
+    // fetch never settles, so `unitsPage` is empty — Inspector's own
+    // "fact not found" branch still exercises the mv-inspector render path
+    // without throwing (the not-found branch is a real, reachable UI state:
+    // a fact that left the current page).
+    const html = renderToStaticMarkup(
+      React.createElement(
+        QueryClientProvider,
+        { client: qc },
+        React.createElement(MemV2Workspace, { bank: 'primary', setBank: () => {}, sel: 'f1', setSel: () => {} }),
+      ),
+    )
+
+    expect(html).toContain('mv-inspector')
+    expect(html).not.toContain('mv-filter-card')
+  })
 })
