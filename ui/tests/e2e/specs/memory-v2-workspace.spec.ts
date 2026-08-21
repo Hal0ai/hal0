@@ -170,4 +170,19 @@ test.describe('memory-v2 Bank workspace', () => {
     await expect(page.locator('.mv-fact.on')).toHaveCount(1)
     await expect(page.getByTestId('mv-inspector')).toBeVisible()
   })
+
+  // task C8: a genuinely fresh/empty bank (MEM_BANKS' `empty` — fact_count:
+  // 0, no filters active) used to render the same "no facts match — clear a
+  // filter" copy as a filtered-to-nothing search, telling the operator to
+  // clear a filter that doesn't exist. Pins the dedicated empty-bank copy.
+  test('a genuinely empty bank shows an "add your first fact" empty-state, not "clear a filter"', async ({
+    page,
+  }) => {
+    await page.goto('/#memory/bank?bank=empty')
+    await expect(page.getByTestId('mv-workspace')).toBeVisible()
+    const empty = page.getByTestId('mv-units-empty-bank')
+    await expect(empty).toBeVisible()
+    await expect(empty).toContainText('No memories in this bank yet')
+    await expect(page.getByText('no facts match — clear a filter')).toHaveCount(0)
+  })
 })
