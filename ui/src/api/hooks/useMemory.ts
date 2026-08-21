@@ -7,10 +7,49 @@
 // Also exposes:
 //   useMemoryList      — GET /api/memory/list (paginated records)
 //   useAgentMemoryStats — GET /api/agents/{id}/memory/stats (per-agent counts)
+//   useMemoryAdd       — POST /api/memory/add (task C3 — Bank workspace Add-fact
+//                        modal; no pre-existing add-memory hook was found when
+//                        this was added, per the task brief's fallback)
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPost, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
+
+// ── Add a memory item ───────────────────────────────────────────────────────
+//
+// routes/memory.py's memory_add: body {text, dataset?, tags?, metadata?,
+// document_id?}. `dataset` is the bank to write into. `source` is NEVER
+// sent — the server rejects it outright (stamped server-side from the
+// X-hal0-Agent identity header so callers can't impersonate another agent).
+export interface MemoryAddBody {
+  text: string
+  dataset?: string
+  tags?: string[]
+  metadata?: Record<string, unknown>
+  document_id?: string
+}
+
+export interface MemoryAddResponse {
+  id: string
+  timestamp: string
+  operation_id?: string
+}
+
+export function useMemoryAdd() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: MemoryAddBody) =>
+      apiPost<MemoryAddResponse>(ENDPOINTS.memoryAdd, body as unknown as Record<string, unknown>),
+    onSuccess: (_d, vars) => {
+      // Refresh the written bank's unit/stats/tag caches (falls back to a
+      // broad memory invalidate if no dataset was given, matching the
+      // server's own dataset-resolution fallback).
+      void qc.invalidateQueries({
+        queryKey: vars.dataset ? ['memory', 'banks', vars.dataset] : ['memory'],
+      })
+    },
+  })
+}
 
 // ── Memory list ────────────────────────────────────────────────────────────
 

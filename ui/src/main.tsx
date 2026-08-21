@@ -153,6 +153,12 @@ import './dash/memory-v2-shared.jsx'
 // window.MemoryGraphPanel (dash/agents/memory-tab.jsx, already loaded by
 // this point) at render time. Not routed yet (C6 wires #memory).
 import './dash/memory-overview-v2.jsx'
+// Memory v2 BankBar + Add modal (task C3) — reflect, rules (directives +
+// mental models), add-fact/document/directive/model. Publishes
+// window.MemV2BankBar / window.MemV2AddModal; reads window.MemV2 and
+// window.TypeBar/window.Spark (memory-overview-v2.jsx, above) at render
+// time. Not routed yet (C6 wires #memory/bank).
+import './dash/memory-bank-bar.jsx'
 import './dash/memory-graph-engine.jsx'
 import './dash/memory-graph-structured.jsx'
 import './dash/memory-graph-ego.jsx'
