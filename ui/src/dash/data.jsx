@@ -236,6 +236,11 @@ const HAL0_DATA = {
       runtime: "container",
       profile: "tts",
       image: "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
+      // #1939 follow-up: the seed's UTILITY-tier seam-blind slot, alongside
+      // `legacy` in the headline tier. Utility slots render as MiniCard, a
+      // different component, and the indeterminate chip was missing there —
+      // so the γ-suite now exercises both card shapes.
+      image_status: "unknown",
       container_status: "running",
       container_health: true,
       model: "kokoro-v1",

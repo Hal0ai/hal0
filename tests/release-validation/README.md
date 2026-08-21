@@ -130,6 +130,13 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **7** (2026-08-21) — follow-up to 6, landed before its first run. `readonly/api.md` check 6
+  now names both `reason=` values on `slot_view.image_probe_failed` (`probe-error` when the
+  probe raised, `probe-timeout` when the slot probe blew its deadline first). v6 promised that
+  every `unknown` has a reason-bearing journal line behind it while the timeout path emitted
+  only the generic `container_probe_timeout`; the product side of that gap is fixed in the
+  same PR, so the promise now holds as written. No check added or removed.
+
 * **6** (2026-08-20) — `image_status` gains an `unknown` member (#1939), so the three briefs
   that adjudicate that field learn to tell its two failures apart. `missing` on a running slot
   is still regression `image-status-wrong-podman-store` — a confident wrong answer. `unknown`
@@ -142,9 +149,9 @@ known-issues, or regressions, and add a line to the changelog below. A report re
   three point at the `reason=` field on the `podman_ro.image_present_unanswered` journal line
   (`grant-denied` / `podman-failed` / `podman-absent` / `invalid-argument` / `seam-error`),
   which is where the wrapper's exit-code contract now surfaces, or at
-  `slot_view.image_probe_failed` for an unknown that never reached the seam. Every `unknown`
-  has one of those two lines behind it; one with neither is a finding. No lane, tier, or phase
-  change.
+  `slot_view.image_probe_failed` (`reason=probe-error` / `probe-timeout`) for an unknown that
+  never reached the seam. Every `unknown` has one of those two lines behind it; one with
+  neither is a finding. No lane, tier, or phase change.
 
 * **5** (2026-08-20) — pre-rc.7 brief hardening from the GA-plan handoff, applied before the
   kit's first v-4-era full run. Four new checks close verification gaps for fixes that would

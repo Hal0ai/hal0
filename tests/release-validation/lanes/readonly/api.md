@@ -48,8 +48,9 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
    finding**. Follow it up rather than passing it: grep the journal for
    `podman_ro.image_present_unanswered`, which carries a `reason=` naming which case fired
    (`grant-denied` / `podman-failed` / `podman-absent` / `invalid-argument` / `seam-error`),
-   or for `slot_view.image_probe_failed` (`reason=probe-error`, carrying the exception) when
-   the probe never reached the seam at all, and cross-check `hal0 doctor seams`. Every
+   or for `slot_view.image_probe_failed` (`reason=probe-error` when the probe raised before
+   reaching the seam, `reason=probe-timeout` when the whole slot probe blew its deadline
+   first), and cross-check `hal0 doctor seams`. Every
    `unknown` has exactly one of those two lines behind it; an `unknown` with neither is itself
    a finding. A whole fleet reading `unknown` is a broken install
    even though no field is lying. Conversely, `unknown` where the seam is demonstrably healthy

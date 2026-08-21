@@ -792,6 +792,22 @@ async def container_enrichment(
             except TimeoutError:
                 log.warning("slot_view.container_probe_timeout slot=%s", name)
                 profile_name = str(cfg.get("profile") or "")
+                if profile_name:
+                    # This is the third way to reach image_status="unknown",
+                    # and it needs the same reason-bearing line as the other
+                    # two: the release-validation kit tells operators that
+                    # every `unknown` has one behind it and that an `unknown`
+                    # with none is itself a finding. A timeout is a legitimate
+                    # unknown, so it must be diagnosable through the documented
+                    # route rather than only via the generic timeout line above.
+                    log.warning(
+                        "slot_view.image_probe_failed slot=%s profile=%s reason=probe-timeout — "
+                        "the slot probe exceeded %ss before the image store was read; "
+                        "reporting image_status=unknown",
+                        name,
+                        profile_name,
+                        _PROBE_TIMEOUT_S,
+                    )
                 return name, {
                     "container_status": "stopped",
                     "container_health": False,

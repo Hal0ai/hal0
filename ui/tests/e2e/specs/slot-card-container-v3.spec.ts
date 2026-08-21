@@ -342,6 +342,22 @@ test.describe('SlotCard container variant (#657)', () => {
     ).toHaveCount(0)
   })
 
+  test('the utility tier renders the chip too, not just the headline tier', async ({ page }) => {
+    // Utility slots (embed / rerank / stt / tts) render as MiniCard, a
+    // different component from SlotScard. They run the same container images
+    // and can hit the same unreadable store, so hiding the chip there made
+    // the seam failure invisible for a whole tier of slots. The seed gives
+    // `tts` image_status: 'unknown'.
+    const card = page.getByTestId('infer-slot-tts')
+    await expect(card).toBeVisible()
+    await expect(card).toHaveClass(/\bmcard\b/)
+    await expect(card.getByTestId('slot-image-unknown')).toBeVisible()
+    // A sibling mini card that is not seam-blind still carries none.
+    await expect(
+      page.getByTestId('infer-slot-embed').getByTestId('slot-image-unknown'),
+    ).toHaveCount(0)
+  })
+
   test('starting container card renders warming dot via slotIndicator', async ({ page }) => {
     // Verify warming dot for a starting container slot
     const ind = await page.evaluate((slot) => {
