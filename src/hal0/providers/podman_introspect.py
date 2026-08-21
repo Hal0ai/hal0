@@ -386,7 +386,12 @@ def image_user(
     """
     if not is_valid_image_ref(image):
         return None
-    return _seam_read("image-user", image, run=run, is_hal0_user=is_hal0_user, timeout=timeout)
+    read = _seam_read("image-user", image, run=run, is_hal0_user=is_hal0_user, timeout=timeout)
+    # ``stdout`` is set only on rc 0, where "" is a real answer; ``reason`` is
+    # set otherwise. Collapsing both to None would conflate "the image runs as
+    # root" with "the seam could not tell us", and the caller must not assume
+    # root on the latter.
+    return read.stdout
 
 
 def container_image(
