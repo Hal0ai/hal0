@@ -201,6 +201,64 @@ def test_units_sort_bogus_422():
         assert r.json()["error"]["code"] == "memory.invalid_query"
 
 
+# ── A3b: truthful multi-type filtering ──────────────────────────────────────
+#
+# Upstream /memories/list's `type` is single-value exact-equality (0.8.4);
+# `type=world,experience` silently returns an empty page, no 422.
+
+TYPE_ROWS = [
+    {"id": "t1", "fact_type": "world", "tags": [], "mentioned_at": "2026-01-01"},
+    {"id": "t2", "fact_type": "experience", "tags": [], "mentioned_at": "2026-01-02"},
+    {"id": "t3", "fact_type": "observation", "tags": [], "mentioned_at": "2026-01-03"},
+]
+
+TYPE_GRAPH = {
+    "nodes": [
+        {"data": {"id": "t1"}},
+        {"data": {"id": "t2"}},
+        {"data": {"id": "t3"}},
+    ],
+    "edges": [],
+}
+
+
+def test_units_single_type_still_forwarded_upstream():
+    _reset_cache()
+    app, rec = _app_with(rows=TYPE_ROWS, graph=TYPE_GRAPH)
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"type": "world"})
+        assert r.status_code == 200, r.text
+    fwd = next(req for req in rec.requests if req["path"].endswith("/memories/list"))
+    assert fwd["params"]["type"] == "world"
+
+
+def test_units_multi_type_filters_hal0_side_not_forwarded():
+    _reset_cache()
+    app, rec = _app_with(rows=TYPE_ROWS, graph=TYPE_GRAPH)
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"type": "world,experience"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = {u["id"] for u in body["items"]}
+        assert ids == {"t1", "t2"}  # observation excluded
+        assert body["total_matched"] == 2  # counts computed from the filtered set
+    fwd = next(req for req in rec.requests if req["path"].endswith("/memories/list"))
+    assert "type" not in fwd["params"]  # not forwarded — upstream can't OR it
+
+
+def test_units_invalid_type_422():
+    _reset_cache()
+    app, _rec = _app_with(rows=TYPE_ROWS, graph=TYPE_GRAPH)
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"type": "bogus"})
+        assert r.status_code == 422
+        assert r.json()["error"]["code"] == "memory.invalid_query"
+
+        r2 = c.get("/api/memory/banks/shared/units", params={"type": "world,bogus"})
+        assert r2.status_code == 422
+        assert r2.json()["error"]["code"] == "memory.invalid_query"
+
+
 def test_units_transport_failure_503():
     _reset_cache()
     rec = _Recorder()

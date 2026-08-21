@@ -346,6 +346,12 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
 #: these is present (first match wins).
 _UNIT_TS_KEYS = ("mentioned_at", "date")
 
+#: Upstream ``/memories/list``'s ``type`` param is single-value
+#: exact-equality (0.8.4) — ``type=world,experience`` silently returns an
+#: empty page, no 422. hal0 fails loudly on an unknown value instead, and
+#: does the OR itself hal0-side when more than one is selected.
+_VALID_FACT_TYPES = ("world", "experience", "observation")
+
 
 def _unit_ts(row: dict[str, Any]) -> str:
     for key in _UNIT_TS_KEYS:
@@ -391,15 +397,24 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
     limit = max(1, min(_int_param(qp, "limit", 20), 200))
     offset = max(_int_param(qp, "offset", 0), 0)
 
+    type_values = [t for t in (qp.get("type") or "").split(",") if t]
+    if any(t not in _VALID_FACT_TYPES for t in type_values):
+        raise UnprocessableEntity(f"invalid type: {qp.get('type')!r}", code="memory.invalid_query")
+    types = set(type_values)
+
     # NOTE: build upstream params explicitly, one at a time — the generic
     # forward's dict(request.query_params) collapses repeated params to the
     # last value. All params here are single-valued so that's moot today, but
     # if 0.8.5+ ever lands multi-value tag forwarding, that must use
     # request.query_params.multi_items() + an httpx list-of-tuples, not a
     # comma-join into a single string like the hal0-side `tags` filter below.
-    src_params: dict[str, str] = {
-        k: qp[k] for k in ("q", "type", "state", "document_id") if qp.get(k)
-    }
+    src_params: dict[str, str] = {k: qp[k] for k in ("q", "state", "document_id") if qp.get(k)}
+    if len(type_values) == 1:
+        # exactly one type: upstream's exact-equality `type` still applies.
+        src_params["type"] = type_values[0]
+    # 2+ types: do NOT forward `type` — upstream can't OR them (0.8.4 single-
+    # value exact match; a comma-joined value silently matches nothing). Pull
+    # the unfiltered slab instead and OR them hal0-side below.
     src_params["limit"] = "2000"
     listing = await _forward(
         client, "GET", f"/v1/default/banks/{bank_id}/memories/list", params=src_params
@@ -418,6 +433,7 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
         r
         for r in rows
         if isinstance(r, dict)
+        and (len(types) <= 1 or r.get("fact_type") in types)  # multi-type OR, hal0-side
         and (not tags or tags & set(r.get("tags") or ()))
         and (not (lo or hi) or _unit_ts(r) != "")  # window given: undated rows drop
         and (not lo or _unit_ts(r) >= lo)
