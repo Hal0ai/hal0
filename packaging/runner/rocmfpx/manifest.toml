@@ -1,0 +1,100 @@
+# Provenance for the ROCmFPX runner image (#1970).
+#
+# The pin in `hal0.config.schema.DEFAULT_ROCMFPX_IMAGE` is signed release
+# infrastructure, so its lineage has to be reconstructible from this repo
+# alone. `ade07ba` was not: it was a hand-build, and isolating #1888 meant
+# reconstructing its lineage from scratch. Pinning a second irreproducible
+# image would re-arm that trap for the next defect.
+#
+# Everything below is what `build.sh` consumes. Changing a ref here and
+# re-running that script is the whole reproduction procedure.
+
+[image]
+#: The tag this recipe produces. Keep in lockstep with DEFAULT_ROCMFPX_IMAGE.
+tag = "ghcr.io/hal0ai/hal0-combined:0822"
+
+[base]
+#: Runtime layer. A Kyuz0 amd-strix-halo-toolboxes derivative; the ROCm
+#: version here must match the toolchain the binaries are linked against, or
+#: the runner resolves libraries from two different ROCm trees.
+image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+rocm_version = "7.2.4"
+
+[source]
+#: charlie's tree, NOT ciru's. This is the load-bearing choice: #1888 was
+#: bisected to ciru-ai/ROCmFPX's port of ROCmFPX onto newer upstream, whose
+#: Vulkan backend emits invalid tokens for every model. charlie's Vulkan
+#: backend is demonstrably correct on gfx1151 (see #1948's matrix), which is
+#: why the two ports below exist rather than simply tracking ciru.
+repo = "https://github.com/charlie12345/ROCmFPX.git"
+ref = "0a59add89b8cba06fb6a0baf25a253a4e45faa78"
+ref_description = "Merge pull request #82 from charlie12345/fix/hip-drop-ffast-math"
+
+[build]
+#: gfx1151 (Strix Halo). Combined HIP+Vulkan in ONE image: hal0 resolves both
+#: the rocmfpx and vulkanfpx runners to this single tag.
+gpu_arch = "gfx1151"
+cmake_flags = [
+    "-DGGML_HIP=ON",
+    "-DGGML_HIP_ROCWMMA_FATTN=OFF",
+    "-DGGML_HIP_FORCE_MMQ=ON",
+    "-DGGML_VULKAN=ON",
+    "-DGGML_CUDA=OFF",
+    "-DCMAKE_HIP_ARCHITECTURES=gfx1151",
+    "-DGPU_TARGETS=gfx1151",
+    "-DLLAMA_BUILD_SERVER=ON",
+    "-DLLAMA_BUILD_WEBUI=OFF",
+    "-DLLAMA_USE_PREBUILT_WEBUI=OFF",
+]
+
+#: Applied in order to a pristine checkout of [source]. Verified to apply
+#: cleanly against that exact ref by tests/packaging/test_rocmfpx_recipe.py.
+[[patches]]
+file = "0001-vocab-minicpm5-pretokenizer-mapping.patch"
+why = """
+charlie's tree carries the LLAMA_VOCAB_PRE_TYPE_MINICPM5 enum and its
+tokenizer behaviour, but not the name->enum mapping, so every
+minicpm5-pretokenised GGUF — the whole shipped hal0-brain-sft family — failed
+to load with "unknown pre-tokenizer type: 'minicpm5'". Two lines.
+"""
+
+[[patches]]
+file = "0002-chat-minicpm5-tool-call-parser.patch"
+why = """
+The MiniCPM5 XML tool-call parser (<function name=..><param name=..>). Without
+it the model still emits the call but nothing structures it, so tool_calls is
+NONE and raw markup lands in content — an HTTP 200 with no format error, which
+means the runtime's learned-incompatible retry can never recover it.
+
+Written in charlie's own idiom rather than transplanted from ciru: that
+version depends on a continuation API (has_continuation/render_content), a
+message_delimiters field, and a p.ac() combinator that do not exist here, and
+none are needed for the tool-call contract. Modelled on the sibling
+deepseek_v3_2 parser, which uses the same <param name=> shape.
+
+Includes an explicit grammar_triggers entry: this tree's PEG API does not
+auto-derive triggers from trigger_rule, so a lazy grammar without one rejects
+every tools request with "no triggers set for lazy grammar!".
+"""
+
+[[patches]]
+file = "0003-vulkan-shaders-serialize-glslc.patch"
+why = """
+Caps concurrent glslc children in vulkan-shaders-gen to 1. Belt-and-braces,
+carried from kyuz0's rocmfpx-vulkan-shader-concurrency fix: the ROCmFPX shader
+matrix is materially larger than upstream llama.cpp's, and a build host that
+exhausts pipes or memory mid-generation is a documented failure class. NOT the
+cause of #1888 — that was ruled out by test — but cheap insurance on a build
+whose output is a signed pin.
+"""
+
+[verification]
+#: What this image was proven against before the pin moved. Full matrix and
+#: evidence: https://github.com/Hal0ai/hal0/issues/1948
+boxes = ["ct150 (kfd present)", "ct151 (kfd ABSENT — the #1888 repro shape)"]
+probes = [
+    "temp-0 'The capital of France is' -> 'Paris', both lanes, non-FPX and FPX models",
+    ">=256-token generation terminates with no )-repetition wedge",
+    "native MiniCPM5 tool_calls on the Vulkan lane of a kfd-less box",
+    "zero devices mapped -> readable diagnostic, exit 78, no SIGSEGV (#1936)",
+]
