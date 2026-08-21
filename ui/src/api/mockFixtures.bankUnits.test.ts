@@ -62,6 +62,20 @@ describe('buildBankUnits (mock fixture)', () => {
     expect(page.items.every((r) => r.fact_type === 'observation')).toBe(true)
   })
 
+  it('filters by a comma-joined multi-type OR (task A3b contract, fix round)', () => {
+    const page = unitsFor('primary', 'type=world,experience&limit=100')
+    expect(page.items.length).toBeGreaterThan(0)
+    expect(page.items.every((r) => r.fact_type === 'world' || r.fact_type === 'experience')).toBe(true)
+    // total_matched must be the TRUTHFUL count for the OR'd set, not the
+    // unfiltered total — this is exactly what fixes the "showing X-Y of N"
+    // / pagination mismatch the C4 review found when 2 of 3 type toggles
+    // are active.
+    const singleTypeTotals =
+      unitsFor('primary', 'type=world&limit=100').total_matched +
+      unitsFor('primary', 'type=experience&limit=100').total_matched
+    expect(page.total_matched).toBe(singleTypeTotals)
+  })
+
   it('filters by tags (topic)', () => {
     const page = unitsFor('primary', 'tags=performance')
     expect(page.items.length).toBeGreaterThan(0)

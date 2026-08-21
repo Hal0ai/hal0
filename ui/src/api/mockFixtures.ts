@@ -1169,7 +1169,23 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
   const tags = tagsParam
     ? tagsParam.split(',').map((t) => t.trim()).filter(Boolean)
     : []
-  const type = params.get('type') ?? ''
+  // Comma-joined multi-type OR (task A3b, fix round post C4-review):
+  // upstream Hindsight's own type field is single-value, but the hal0-side
+  // units route layers OR semantics on top so a caller can ask for
+  // `type=world,experience` and get a truthfully-filtered total_matched/
+  // next_offset back — this is what lets the Bank workspace's 3
+  // independent type toggle buttons drive the server directly instead of
+  // narrowing an already-paginated response client-side (which broke
+  // "showing X-Y of N" and pagination whenever exactly 2 of 3 were
+  // active). Real backend contract: any token outside
+  // {world, experience, observation} is a 422 memory.invalid_query; this
+  // mock doesn't reproduce that status (no status-signalling path from a
+  // builder function today) — an unknown token here just matches nothing,
+  // which is a safe (if less precise) mock-only fallback.
+  const typeParam = params.get('type') ?? ''
+  const types = typeParam
+    ? typeParam.split(',').map((t) => t.trim()).filter(Boolean)
+    : []
   const from = params.get('from')
   const to = params.get('to')
   const documentId = params.get('document_id') ?? ''
@@ -1193,8 +1209,8 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
   if (tags.length) {
     rows = rows.filter((r) => r.tags.some((t) => tags.includes(t)))
   }
-  if (type) {
-    rows = rows.filter((r) => r.fact_type === type)
+  if (types.length) {
+    rows = rows.filter((r) => types.includes(r.fact_type))
   }
   if (from) {
     const fromMs = new Date(from).getTime()

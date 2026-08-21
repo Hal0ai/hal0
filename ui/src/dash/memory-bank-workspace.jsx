@@ -959,6 +959,13 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
   const [src, setSrc] = useStateWorkspace(null)
   const [srcLimit, setSrcLimit] = useStateWorkspace(5)
   const [page, setPage] = useStateWorkspace(0)
+  // "Show invalidated" — the only way to browse/recover a fact once
+  // Inspector's local `override` state (set right after an invalidate
+  // mutation) is gone (navigated away, page reload, …). Flips the units
+  // query to `state=invalidated`; Inspector already renders the
+  // invalidated banner + Revert action for any fact with
+  // `state === 'invalidated'` regardless of how it got there.
+  const [showInvalidated, setShowInvalidated] = useStateWorkspace(false)
 
   const useBankStats = window.__hal0UseBankStats
   const useBankTags = window.__hal0UseBankTags
@@ -975,17 +982,23 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
   const tsQuery = useBankTimeseries ? useBankTimeseries(bank, '30d') : { data: null }
   const buckets = tsQuery.data?.buckets || []
 
-  // The real/mocked `type` filter is single-valued — it can't express "any
-  // 2 of 3" the prototype's independent per-type toggles allow. When
-  // exactly one type is active, that's sent straight to the server
-  // (the common case); for 0/2/3-active combinations (including the
-  // all-on default), no `type` param is sent and the already
-  // server-filtered page is narrowed client-side instead — `useBankUnits`
-  // still does the heavy lifting (q/tags/state/from/to/documentId/sort/
-  // paging), this is just the one filter dimension the API can't take a
-  // set for.
+  // Truthful server-side type filtering (fix round, post C4-review): the
+  // real/mocked `type` filter now accepts a comma-joined multi-value OR
+  // (hal0-side task A3b — upstream Hindsight itself is single-value-only,
+  // but the units route layers OR semantics on top: `type=world,experience`
+  // → truthful filtered total_matched/next_offset; the mock's
+  // `buildBankUnits` mirrors the same comma-list OR contract). ALL active
+  // types are sent — there is NO client-side narrowing of the returned
+  // page anymore, so `total_matched`/`pages`/"showing X–Y of N" always
+  // match exactly what's rendered, for every toggle combination (1, 2, or
+  // 3 of 3 active). All-3-active (the default) and 0-active both send no
+  // `type` param — the former because "every type" is equivalent to "no
+  // filter" on both mock and server; the latter is handled entirely
+  // client-side below (zero rows, no network round-trip needed) since
+  // "every type off" isn't a filter value any endpoint needs to express.
   const activeTypes = Object.keys(types).filter((t) => types[t])
-  const singleType = activeTypes.length === 1 ? activeTypes[0] : undefined
+  const zeroTypesActive = activeTypes.length === 0
+  const typeParam = !zeroTypesActive && activeTypes.length < 3 ? activeTypes.join(',') : undefined
 
   const from = brush && buckets[brush[0]] ? buckets[brush[0]].time : undefined
   const to = brush && buckets[brush[1]] ? buckets[brush[1]].time : undefined
@@ -993,7 +1006,8 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
   const unitsParams = {
     q: q || undefined,
     tags: topic ? [topic] : undefined,
-    type: singleType,
+    type: typeParam,
+    state: showInvalidated ? 'invalidated' : undefined,
     from,
     to,
     documentId: src || undefined,
@@ -1002,16 +1016,14 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
     offset: page * PAGE_SIZE,
   }
   const unitsQuery = useBankUnits ? useBankUnits(bank, unitsParams) : { data: null }
-  const allUnits = unitsQuery.data?.items || []
-  // Client-side narrowing only for the 0/2/3-active-types case (see above).
-  const pageUnits = singleType ? allUnits : allUnits.filter((u) => types[u.fact_type])
-  const totalMatched = unitsQuery.data?.total_matched ?? pageUnits.length
+  const pageUnits = zeroTypesActive ? [] : unitsQuery.data?.items || []
+  const totalMatched = zeroTypesActive ? 0 : unitsQuery.data?.total_matched ?? pageUnits.length
   const pages = Math.max(1, Math.ceil(totalMatched / PAGE_SIZE))
   const pageSafe = Math.min(page, pages - 1)
 
   useEffectWorkspace(() => {
     setPage(0)
-  }, [bank, q, topic, src, brush, sort, JSON.stringify(types)])
+  }, [bank, q, topic, src, brush, sort, showInvalidated, JSON.stringify(types)])
 
   // The ego/focus view needs a centre — default to the first matching fact
   // when switching into it with nothing selected yet.
@@ -1026,6 +1038,7 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
     setBrush(null)
     setQ('')
     setSrc(null)
+    setShowInvalidated(false)
   }
 
   // Keyboard (spec'd, not in the prototype): ↑/↓ moves list selection
@@ -1050,13 +1063,15 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [sel, view, pageUnits.map((u) => u.id).join(',')])
 
-  const anyFilter = q || topic || src || brush || !types.world || !types.experience || !types.observation
+  const anyFilter =
+    q || topic || src || brush || showInvalidated || !types.world || !types.experience || !types.observation
   const clearAll = () => {
     setQ('')
     setTypes({ world: true, experience: true, observation: true })
     setTopic(null)
     setSrc(null)
     setBrush(null)
+    setShowInvalidated(false)
   }
 
   return (
@@ -1182,6 +1197,21 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
                     {t} <span className="num" style={{ color: 'var(--fg-4)' }}>{typeCounts[t] ?? 0}</span>
                   </button>
                 ))}
+              </div>
+              <div className="fline sec-div">
+                {/* Only way to browse/recover an invalidated fact once
+                    Inspector's local `override` state is gone (nav away,
+                    reload). Flips the units query to state=invalidated;
+                    Inspector already renders the invalidated banner +
+                    Revert action for any fact in that state. */}
+                <button
+                  className={'mv-tf ' + (showInvalidated ? 'on' : 'off')}
+                  data-testid="mv-state-invalidated"
+                  onClick={() => setShowInvalidated((v) => !v)}
+                >
+                  <span className="dot" style={{ background: 'var(--warn)' }} />
+                  {showInvalidated ? 'showing invalidated' : 'show invalidated'}
+                </button>
               </div>
               <div className="fline sec-div" style={{ alignItems: 'flex-start' }}>
                 <DensityStrip ts={buckets} brush={brush} setBrush={setBrush} />
