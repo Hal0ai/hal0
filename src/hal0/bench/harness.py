@@ -143,11 +143,18 @@ class LaneSpec:
 #: Lanes that still resolve to a :class:`LaneSpec` (historical records name
 #: them) but are NOT supported and never enter :func:`default_lanes`.
 #:
-#: ``vulkan_radv`` pins ``-dev Vulkan0`` on the unified ROCmFPX runner image,
-#: whose Vulkan backend emits invalid tokens for every model it serves
-#: (#1888) — a throughput number from it measures how fast the box produces
-#: non-language. Retained rather than deleted so old records/suites parse.
-UNSUPPORTED_LANES: frozenset[str] = frozenset({"vulkan_radv"})
+#: EMPTY as of #1948. ``vulkan_radv`` was the sole entry: it pins ``-dev
+#: Vulkan0``, and on the ade07ba-lineage runner that backend emitted invalid
+#: tokens for every model (#1888), so a throughput number from it measured how
+#: fast the box produced non-language. ``VULKAN_FIXED_IMAGE`` restores a
+#: correct Vulkan backend, so the lane measures language again and is back in
+#: the GPU default sweep.
+#:
+#: The mechanism is kept (rather than deleted along with its last member)
+#: because it is the right shape for the next time a lane has to be retired
+#: without breaking historical records — and because ``lane_is_supported`` is
+#: called on the plan path, where an empty set is a cheap no-op.
+UNSUPPORTED_LANES: frozenset[str] = frozenset()
 
 
 def lane_is_supported(lane: str) -> bool:
@@ -178,12 +185,15 @@ def lane_specs() -> dict[str, LaneSpec]:
             env=("GGML_HIP_ENABLE_UNIFIED_MEMORY=1",),
             dev_args=(("-ngl", "99"), ("-dev", "ROCm0")),
         ),
-        # UNSUPPORTED (#1888) — kept only so historical records and an
-        # explicit `--backends vulkan_radv` still resolve to a spec. This
-        # lane pins ``-dev Vulkan0`` on the unified ROCmFPX image, whose
-        # Vulkan backend emits invalid tokens for every model: the numbers it
-        # produces are throughput measurements of garbage. Never in
-        # ``default_lanes``; callers must opt in and are warned.
+        # Supported again as of #1948. This lane pins ``-dev Vulkan0`` on the
+        # same runner image as ``rocm`` — which is why it was retired under
+        # #1923: on the ade07ba lineage that backend emits invalid tokens for
+        # every model (#1888) and its numbers were throughput measurements of
+        # garbage. Correctness of the lane is therefore a property of the
+        # PINNED IMAGE, not of the lane spec: point ``DEFAULT_ROCMFPX_IMAGE``
+        # at a runner whose Vulkan backend is not validated and this lane
+        # benchmarks nonsense again, silently, because llama-bench measures
+        # tokens/s without reading them.
         "vulkan_radv": LaneSpec(
             lane="vulkan_radv",
             image=DEFAULT_ROCMFPX_IMAGE,
@@ -209,13 +219,13 @@ def default_lanes(tier: str) -> list[str]:
     queues the unrunnable GPU lanes, and a GPU box never silently pays for a
     CPU lane's hours-long 27B/ctx65k cells by default.
 
-    ``vulkan_radv`` was dropped from the GPU default in the #1888 wave: the
-    ROCmFPX runner's Vulkan backend emits invalid tokens for every model, so
-    publishing throughput for that lane means publishing tok/s for output
-    that is not language. The lane spec is retained (see
-    :data:`UNSUPPORTED_LANES`) so historical records still resolve, but it is
-    opt-in only and stamped unsupported in the record."""
-    return ["cpu"] if tier == TIER_CPU else ["rocm"]
+    ``vulkan_radv`` was dropped from the GPU default in the #1888 wave (the
+    ROCmFPX runner's Vulkan backend emitted invalid tokens for every model, so
+    publishing throughput for it meant publishing tok/s for output that is not
+    language) and is RESTORED by #1948 on the fixed image. It sweeps after
+    ``rocm`` so the ROCm numbers — the recommended lane, and the trend line
+    with the longest history — land first if a sweep is interrupted."""
+    return ["cpu"] if tier == TIER_CPU else ["rocm", "vulkan_radv"]
 
 
 def dedupe_flags(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:

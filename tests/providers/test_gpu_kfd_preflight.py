@@ -153,11 +153,10 @@ class TestHostIsAmdGpu:
 
 
 class TestRequireKfdForGpuSlot:
-    @pytest.mark.parametrize("device", ["gpu-rocm", "gpu-vulkan"])
-    def test_amd_gpu_slot_without_kfd_is_refused(self, device, tmp_path) -> None:
+    def test_amd_gpu_slot_without_kfd_is_refused(self, tmp_path) -> None:
         with pytest.raises(GpuPreflightError) as exc:
             require_kfd_for_gpu_slot(
-                "agent", device=device, kfd_path=str(tmp_path / "kfd"), env={}, amd_host=True
+                "agent", device="gpu-rocm", kfd_path=str(tmp_path / "kfd"), env={}, amd_host=True
             )
         msg = str(exc.value)
         # The operator must be able to act on this without reading the source.
@@ -165,11 +164,33 @@ class TestRequireKfdForGpuSlot:
         assert "/kfd" in msg
         assert "1888" in msg
 
-    @pytest.mark.parametrize("device", ["gpu-rocm", "gpu-vulkan"])
-    def test_passes_when_kfd_is_present(self, device, tmp_path) -> None:
+    def test_an_amd_vulkan_llama_slot_is_refused_on_an_unvalidated_image(self, tmp_path) -> None:
+        """#1948 Phase D moved this device's gate, it did not remove it.
+
+        ``gpu-vulkan`` no longer needs ``/dev/kfd`` — Vulkan does not use the
+        compute node — but it now needs a runner image whose Vulkan backend
+        passed the §3-C matrix. The default ``image=None`` fails closed, so the
+        pre-#1948 call shape still refuses; only the reason changed from "no
+        compute node" to "unvalidated Vulkan image".
+
+        The positive direction and the render-node half live in
+        ``test_gpu_vulkan_lane_gate.py``.
+        """
+        with pytest.raises(GpuPreflightError) as exc:
+            require_kfd_for_gpu_slot(
+                "agent", device="gpu-vulkan", kfd_path=str(tmp_path / "kfd"), env={}, amd_host=True
+            )
+        msg = str(exc.value)
+        assert "agent" in msg
+        assert "1888" in msg
+        assert "not validated for the Vulkan lane" in msg
+
+    def test_passes_when_kfd_is_present(self, tmp_path) -> None:
         node = tmp_path / "kfd"
         node.write_text("")
-        require_kfd_for_gpu_slot("agent", device=device, kfd_path=str(node), env={}, amd_host=True)
+        require_kfd_for_gpu_slot(
+            "agent", device="gpu-rocm", kfd_path=str(node), env={}, amd_host=True
+        )
 
     def test_gpu_vulkan_on_a_non_amd_host_is_not_gated(self, tmp_path) -> None:
         """An Intel iGPU / NVIDIA-without-CDI box has no /dev/kfd by design and
@@ -438,8 +459,15 @@ class TestNonRocmRuntimesAreNotGated:
 
     def test_load_sync_still_refuses_the_llama_lane(self, monkeypatch) -> None:
         """The #1888 refusal must survive the scoping: a profile-less
-        ``gpu-vulkan`` slot resolves to the default llama-server provider and
-        still runs the poisoned ROCmFPX Vulkan lane."""
+        ``gpu-vulkan`` slot resolves to the default llama-server provider, and
+        on the default pin it still runs the poisoned ROCmFPX Vulkan lane.
+
+        Post-#1948 the refusal comes from the image gate rather than the kfd
+        one — the box in this fixture resolves the ade07ba-lineage default,
+        which is not a validated Vulkan image. Pinning the slot to
+        ``VULKAN_FIXED_IMAGE`` is what makes it load; see
+        ``test_gpu_vulkan_lane_gate.py``.
+        """
         from hal0.providers import container as container_mod
 
         self._amd_box_without_kfd(monkeypatch)

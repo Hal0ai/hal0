@@ -374,7 +374,7 @@ footer .mono{font-family:var(--jbm)}
 
   <h3>Inference backends</h3>
   <div class="grid c2">
-    <div class="card"><h4><span class="pill vulkan">/dev/kfd</span> required on AMD</h4><p class="k">LLM slots run the unified ROCmFPX runner, which serves <strong>ROCm</strong> when <code>/dev/kfd</code> is visible and silently falls back to a Vulkan backend that emits <strong>invalid tokens for every model</strong> when it is not. v1.0 therefore requires <code>/dev/kfd</code>: the installer refuses a GPU install without it and GPU slots refuse to load. On Proxmox LXC add <code>dev1: /dev/kfd</code>; otherwise install CPU-only.</p></div>
+    <div class="card"><h4><span class="pill rocm">ROCm</span> preferred, <span class="pill vulkan">Vulkan</span> supported</h4><p class="k">LLM slots name their device explicitly and the runner is pinned to it. <strong>ROCm</strong> is the recommended AMD lane (it leads on prefill) and needs <code>/dev/kfd</code> — on Proxmox LXC add <code>dev1: /dev/kfd</code>. <strong>Vulkan</strong> needs only a render node, so it serves boxes where <code>/dev/kfd</code> was never forwarded, and is gated on a Vulkan-validated runner image: the old <code>ade07ba</code> lineage emitted <strong>invalid tokens for every model</strong> on Vulkan and is refused by name. Every slot then has to clear an output-sanity probe before it is marked ready.</p></div>
     <div class="card"><h4><span class="pill rocm">ROCm</span> · <span class="pill npu">NPU</span> · <span class="pill cpu">CPU</span></h4><p class="k">ROCm/HIP for discrete AMD, AMDXDNA NPU via FastFlowLM (STT/embed/small LLMs), and a fully-supported CPU path (incl. Moonshine CPU STT). Devices are picked per-slot; you can pin any of them.</p></div>
   </div>
 

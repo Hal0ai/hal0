@@ -203,11 +203,16 @@ def test_amd_uma_recommends_rocm_not_vulkan() -> None:
     assert "vulkan" not in str(rec.get("backend", "")).lower()
 
 
-def test_amd_without_rocm_falls_back_to_cpu_not_vulkan(monkeypatch) -> None:
-    """No ROCm compute node → CPU, never the invalid Vulkan lane (#1888)."""
+def test_amd_without_rocm_falls_back_to_the_vulkan_lane(monkeypatch) -> None:
+    """No ROCm compute node → Vulkan, not CPU (#1948).
+
+    #1888 sent this box to CPU because the pinned runner's Vulkan backend
+    emitted invalid tokens; with a Vulkan-fixed image that answer strands a
+    working GPU. The load-time image gate is what keeps a stale-image box
+    honest, not a blanket recommendation of CPU."""
     monkeypatch.setattr("hal0.hardware.recommend.kfd_present", lambda *a, **k: False)
     rec = recommend_primary_slot(_amd_uma_host(96, compute_capable=False))
-    assert rec["device"] == "cpu"
+    assert rec["device"] == "gpu-vulkan"
 
 
 def test_amd_without_rocm_smi_but_with_kfd_is_rocm(monkeypatch) -> None:

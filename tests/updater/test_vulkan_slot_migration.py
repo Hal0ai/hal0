@@ -17,6 +17,13 @@ relabels them. This migration does that relabel automatically, AMD-only
 * AMD host, ``/dev/kfd`` absent → ``cpu``, logged loudly since it is a
   genuine operator-visible behavior change (the slot drops off the GPU).
 
+#1948 narrowed the premise: the Vulkan LLM lane is supported again on a
+Vulkan-validated runner image, so a ``gpu-vulkan`` slot resolving such an image
+LOADS and must not be relabeled — that would be a reverse migration of a
+working configuration, and on a kfd-less box it would push a functioning GPU
+slot onto the CPU. Slots on an unvalidated image still refuse to load and are
+still rescued exactly as before.
+
 Only the ``device`` key is ever touched (#1867 rails: narrow scope, log every
 mutation, idempotent).
 """
@@ -431,3 +438,72 @@ def test_default_probes_real_kfd_present(tmp_hal0_home: str, monkeypatch) -> Non
 
     assert relabel_stale_vulkan_slots() == 1
     assert _device_of("agent") == "gpu-rocm"
+
+
+# ── #1948: a slot on a Vulkan-validated image is NOT migrated ───────────── #
+
+
+def _vulkan_slot_on(image: str) -> str:
+    return f'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\nimage_pin = "{image}"\n'
+
+
+def test_slot_pinned_to_a_vulkan_validated_image_is_left_alone(tmp_hal0_home: str) -> None:
+    """The re-enabled lane must survive an update.
+
+    Without this, every ``hal0 update`` would silently undo a deliberate
+    ``gpu-vulkan`` choice — the migration would see the label, not the image.
+    """
+    from hal0.config.schema import VULKAN_FIXED_IMAGE
+
+    _write_slot("utility", _vulkan_slot_on(VULKAN_FIXED_IMAGE))
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert _device_of("utility") == "gpu-vulkan"
+
+
+def test_it_is_left_alone_on_a_kfd_less_box_too(tmp_hal0_home: str) -> None:
+    """The ct151 shape, and the case with the most to lose: Vulkan is the only
+    lane this box has, so relabeling to ``cpu`` would strand the GPU."""
+    from hal0.config.schema import VULKAN_FIXED_IMAGE
+
+    _write_slot("utility", _vulkan_slot_on(VULKAN_FIXED_IMAGE))
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert _device_of("utility") == "gpu-vulkan"
+
+
+def test_slot_pinned_to_an_unvalidated_image_is_still_rescued(tmp_hal0_home: str) -> None:
+    """The rescue this pass exists for is untouched: the ade07ba lineage's
+    Vulkan backend emits invalid tokens, the slot refuses to load, and the
+    migration moves it to a lane that works."""
+    from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+
+    _write_slot("utility", _vulkan_slot_on(DEFAULT_ROCMFPX_IMAGE))
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert _device_of("utility") == "gpu-rocm"
+
+
+def test_an_unresolvable_image_fails_closed_and_is_rescued(tmp_hal0_home: str, monkeypatch) -> None:
+    """Fail-closed: if the image cannot be resolved at all, the slot has not
+    been established safe, so the conservative relabel still happens."""
+    import hal0.updater.updater as updater_mod
+
+    def _boom(*_a: object, **_kw: object) -> str:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr("hal0.providers.container._resolve_image_ref", _boom)
+    _write_slot("utility", 'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\n')
+
+    assert updater_mod.relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert _device_of("utility") == "gpu-rocm"
+
+
+def test_it_never_relabels_gpu_rocm_back_to_vulkan(tmp_hal0_home: str) -> None:
+    """No reverse migration, ever. A box that already ran this pass keeps the
+    device it was given — the re-enabled lane is offered to new slots, not
+    forced onto existing ones."""
+    _write_slot("utility", 'name = "utility"\ndevice = "gpu-rocm"\nport = 8082\n')
+
+    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert _device_of("utility") == "gpu-rocm"

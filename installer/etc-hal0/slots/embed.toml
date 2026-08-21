@@ -12,10 +12,14 @@
 # `[model].default` is what activates the slot (#1369).
 name = "embed"
 type = "embedding"
-# #1888: gpu-rocm, not gpu-vulkan. llama.cpp slots launch the unified
-# ROCmFPX runner on both GPU devices; that image's Vulkan backend emits
-# invalid tokens for every model, so gpu-vulkan named a lane no slot
-# could validly run. Requires /dev/kfd (preflight + load-time guard).
+# gpu-rocm, not gpu-vulkan — a preference now, not a prohibition.
+# #1888 made it a prohibition: llama.cpp slots launch one runner image on
+# both GPU devices, and that image's Vulkan backend emitted invalid tokens
+# for every model, so gpu-vulkan named a lane no slot could validly run.
+# #1948 fixed the image and the Vulkan lane is offered again — but ROCm
+# stays the seeded default because it is the faster lane on the reference
+# hardware (notably prefill). Requires /dev/kfd (preflight + load-time
+# guard); on a box without it, switch this slot to gpu-vulkan.
 device = "gpu-rocm"
 runtime = "container"
 profile = "embedding"

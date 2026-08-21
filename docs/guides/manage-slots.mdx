@@ -67,15 +67,16 @@ hal0 slot create embed \
 
 3. **`--model` / `-m`** (required) — the initial model ref to assign.
 
-4. **`--hardware`** — the compute backend: `rocm`, `cpu`, or `vulkan`.
-   When omitted it reads the cached hardware probe: `rocm` on any AMD GPU
-   (and if no probe has run yet), `cpu` if the probe found no GPU. `vulkan`
-   is **not a supported LLM backend** — llama.cpp slots run the unified
-   ROCmFPX runner image, whose Vulkan build emits invalid tokens for every
-   model, so it is reserved for the non-llama.cpp Vulkan runtimes and for
-   non-AMD GPUs. `rocm` requires the `/dev/kfd` compute node; a slot
-   without it refuses to load rather than serving garbage. This sets the
-   slot's
+4. **`--hardware`** — the compute backend: `rocm`, `vulkan`, or `cpu`.
+   When omitted it reads the cached hardware probe: `rocm` on an AMD GPU with
+   ROCm compute reachable (and if no probe has run yet), `vulkan` on an AMD or
+   Intel GPU without it, `cpu` if the probe found no GPU. `rocm` is the
+   recommended AMD lane — it leads Vulkan on prefill — and requires the
+   `/dev/kfd` compute node. `vulkan` needs only a render node, which makes it
+   the lane for a box where `/dev/kfd` was never forwarded; an LLM slot on it
+   must also resolve a Vulkan-validated runner image, or slot load refuses it
+   by name. Either way the refusal is loud and immediate rather than a slot
+   that serves nonsense. This sets the slot's
    `device` field directly (`vulkan → gpu-vulkan`, `rocm → gpu-rocm`,
    `cpu → cpu`) — as of v1.0, **the slot owns its hardware grid**
    (`device`, `n_gpu_layers`, `threads`, `binary`, `image_pin`), not the

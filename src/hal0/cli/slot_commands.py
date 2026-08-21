@@ -144,12 +144,16 @@ def _detect_default_hardware() -> str:
         return "cpu"
     g = gpus[0] if isinstance(gpus[0], dict) else {}
     vendor = (g.get("vendor") or "").lower()
-    # AMD always defaults to ROCm (#1888): llama.cpp slots run the unified
-    # ROCmFPX runner image on every AMD GPU device, and that image's Vulkan
-    # backend emits invalid tokens for every model. A box without /dev/kfd
-    # gets a loud refusal at slot load rather than a silently-garbage lane.
+    # AMD prefers ROCm when the box can actually run it — it is the faster
+    # lane, notably on prefill. #1923 made AMD default to ROCm UNCONDITIONALLY
+    # because the pinned runner's Vulkan backend emitted invalid tokens for
+    # every model (#1888), so a kfd-less box got a loud refusal rather than a
+    # silently-garbage lane. #1948 fixed the image, so a compute-less AMD GPU
+    # falls back to Vulkan again instead of to a guaranteed refusal; if the
+    # slot's resolved runner image is not Vulkan-validated, slot load still
+    # says so by name.
     if vendor == "amd":
-        return "rocm"
+        return "rocm" if g.get("compute_capable") else "vulkan"
     if g.get("vulkan_capable") or vendor in ("nvidia", "intel"):
         return "vulkan"
     return "cpu"

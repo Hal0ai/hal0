@@ -217,20 +217,22 @@ def test_invalid_hardware_value_rejected_by_typer(
     assert "body" not in captured_post
 
 
-def test_bare_create_on_strix_halo_resolves_to_rocm(
+def test_bare_create_on_a_compute_less_strix_halo_resolves_to_vulkan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A bare ``slot create primary`` on a Strix Halo fixture auto-resolves
-    ``--hardware rocm`` — even when the probe did not flag compute_capable.
+    """A bare ``slot create primary`` on a Strix Halo fixture whose probe did
+    NOT flag ``compute_capable`` auto-resolves ``--hardware vulkan``.
 
-    Regression for #1888: this used to resolve ``vulkan`` on exactly this
-    fixture, which is how a fresh install was born with slots labelled
-    ``gpu-vulkan``. On a box with ``/dev/kfd`` those slots actually executed
-    on ROCm (the label lied); without it they executed on the runner image's
-    Vulkan backend and emitted invalid tokens for every model. ROCm is the
-    only backend an AMD llama.cpp slot can validly run, so it is what the
-    auto-detect must write.
+    This assertion has been both values. Originally ``vulkan``; #1888 forced
+    ``rocm`` for every AMD GPU because the runner image's Vulkan backend
+    emitted invalid tokens for every model, making a loud load-time refusal
+    strictly better than a silently-garbage lane. #1948 fixed the image, so a
+    box with no ROCm compute goes back to the lane it can actually run —
+    and if its runner image is not Vulkan-validated, slot load says so by
+    name rather than serving nonsense.
+
+    ``compute_capable: true`` still resolves ``rocm``; see the sibling test.
     """
     probe = tmp_path / "hardware.json"
     probe.write_text(
@@ -276,9 +278,45 @@ def test_bare_create_on_strix_halo_resolves_to_rocm(
     )
     assert result.exit_code == 0, result.output
     # Bare invocation → provider defaults to llama-server, hardware
-    # auto-resolves to rocm from the Strix Halo fixture.
+    # auto-resolves from the fixture: no ROCm compute → the Vulkan lane.
     assert captured["body"]["provider"] == "llama-server"
-    assert captured["body"]["device"] == "gpu-rocm"
+    assert captured["body"]["device"] == "gpu-vulkan"
+
+
+@pytest.mark.parametrize(
+    ("compute_capable", "expected"),
+    [(True, "rocm"), (False, "vulkan")],
+)
+def test_detect_default_hardware_prefers_rocm_when_compute_is_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    compute_capable: bool,
+    expected: str,
+) -> None:
+    """ROCm stays the PREFERRED AMD lane wherever the box can run it — #1948
+    restores Vulkan as a fallback, it does not demote ROCm."""
+    from hal0.cli.slot_commands import _detect_default_hardware
+    from hal0.config import paths as _paths
+
+    probe = tmp_path / "hardware.json"
+    probe.write_text(
+        json.dumps(
+            {
+                "gpus": [
+                    {
+                        "vendor": "amd",
+                        "name": "Strix Halo",
+                        "vram_mb": 512,
+                        "compute_capable": compute_capable,
+                        "vulkan_capable": True,
+                    }
+                ],
+                "unified_memory_mb": 102400,
+            }
+        )
+    )
+    monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
+    assert _detect_default_hardware() == expected
 
 
 # ── --profile (#1830) ────────────────────────────────────────────────────────

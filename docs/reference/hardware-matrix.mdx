@@ -41,7 +41,7 @@ across 5 call sites, now unified). `DEFAULT_DEVICE = "gpu-rocm"`.
 | Device id | Label | Recommended | Default profile | Notes |
 |---|---|---|---|---|
 | `gpu-rocm` | GPU (ROCm) | ✅ | `chat` | Best throughput on Strix Halo — the recommended default. |
-| `gpu-vulkan` | GPU (Vulkan) | ❌ for LLM | `chat` | **Not a supported LLM backend** (#1888) — the unified ROCmFPX runner's Vulkan build emits invalid tokens. Retained for the non-llama.cpp Vulkan runtimes (Kokoro, whisper.cpp, ComfyUI) and for non-AMD GPUs. |
+| `gpu-vulkan` | GPU (Vulkan) | — | `chat` | Runs anywhere Mesa Vulkan does, and needs only a render node — the lane for a box with no `/dev/kfd`. Slower than ROCm on Strix Halo (notably prefill), so it is the fallback rather than the default. LLM slots on this device are gated on a Vulkan-validated runner image (#1888/#1948). Also the device the non-llama.cpp Vulkan runtimes use (Kokoro, whisper.cpp, ComfyUI). |
 | `gpu-cuda` | GPU (CUDA) | — | `chat` | NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. |
 | `cpu` | CPU | — | `cpu-chat` | Always available, slow but correct. |
 | `npu` | NPU (FLM) | — | `flm` | AMD XDNA NPU via FastFlowLM — chat/embed/ASR trio on one process. |
@@ -60,15 +60,17 @@ dashboard use to pick a device for a new slot, given a probed `HardwareInfo`:
    **ROCm**. The rationale string still names the "AMD UMA / Strix Halo class"
    when unified memory ≥ 32 GB and `vram_mb <= 4096` (a small dedicated VRAM
    number is a UMA signal, not a real cap).
-2. **AMD**, no ROCm compute node → **CPU**. Not Vulkan: LLM slots run the
-   unified ROCmFPX runner image on every AMD GPU device, and that image's
-   Vulkan backend emits invalid tokens for every model (#1888), so CPU is the
-   only lane that produces valid output on such a box.
-3. **NVIDIA**, NVIDIA Container Toolkit present (`nvidia-ctk` on `PATH` or a CDI spec
+2. **AMD**, no ROCm compute node but a Vulkan-capable GPU → **Vulkan**. This
+   is the unprivileged-LXC shape: a working iGPU with no `/dev/kfd` forwarded.
+   The lane is real, but an LLM slot on it must resolve a Vulkan-validated
+   runner image or slot load refuses it by name (#1888/#1948) — the `ade07ba`
+   lineage's Vulkan backend emitted invalid tokens for every model.
+3. **AMD**, neither ROCm compute nor a usable Vulkan device → **CPU**.
+4. **NVIDIA**, NVIDIA Container Toolkit present (`nvidia-ctk` on `PATH` or a CDI spec
    under `/etc/cdi`/`/var/run/cdi`) → **CUDA**.
-4. **NVIDIA**, no CDI → **Vulkan** fallback.
-5. **Intel iGPU** / unknown-but-`vulkan_capable` → **Vulkan**.
-6. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
+5. **NVIDIA**, no CDI → **Vulkan** fallback.
+6. **Intel iGPU** / unknown-but-`vulkan_capable` → **Vulkan**.
+7. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
    correct").
 
 VRAM budget (`_vram_budget_gb()`): AMD UMA → half of the unified pool; discrete GPU →

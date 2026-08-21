@@ -110,16 +110,21 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
     rocm_ok = any(g.compute_capable for g in hw.gpus) or kfd_present()
     if rocm_ok and (hw.platform == "strix-halo" or any(g.compute_capable for g in hw.gpus)):
         return "gpu-rocm"
-    # Non-AMD vulkan-capable GPUs (Intel iGPU, NVIDIA without CDI) keep the
-    # Vulkan lane — the defect is characterised on the AMD/HIP build. Checked
-    # BEFORE the AMD→CPU fallback so a mixed host with a dead AMD adapter and
-    # a usable Intel one still gets its GPU.
-    if any(g.vulkan_capable and g.vendor != "amd" for g in hw.gpus):
+    # Vulkan-capable GPU, any vendor. #1923 restricted this to non-AMD because
+    # the pinned runner's Vulkan backend emitted invalid tokens on AMD, which
+    # sent a kfd-less AMD box to CPU — a real GPU sitting idle. #1948 fixed the
+    # image (``VULKAN_FIXED_IMAGE``, validated on a kfd-ABSENT box where Vulkan
+    # is the only lane there is), so AMD gets its Vulkan lane back here.
+    #
+    # Note the ORDER: this is reached only when the ROCm branch above declined,
+    # so a box that can run ROCm still derives ROCm. This changes the derived
+    # device for exactly one hardware class — AMD GPU, no ROCm compute node —
+    # and changes it from ``cpu`` to ``gpu-vulkan``. If the box's resolved
+    # runner image is not Vulkan-validated, the slot's load-time preflight says
+    # so by name rather than serving garbage.
+    if any(g.vulkan_capable for g in hw.gpus):
         return "gpu-vulkan"
-    # AMD without a ROCm compute node is NOT a Vulkan lane: llama.cpp slots
-    # run the ROCmFPX runner image on both GPU devices, and that image's
-    # Vulkan backend emits invalid tokens for every model. CPU is the only
-    # honest answer.
+    # No GPU this host can use for inference at all.
     return "cpu"
 
 

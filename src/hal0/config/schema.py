@@ -1054,6 +1054,45 @@ STALE_ROCMFPX_IMAGE_REFS = frozenset(
     }
 )
 
+#: The runner image whose Vulkan backend was proven CORRECT (#1948 §3-C).
+#:
+#: ``:0822`` is built from ``charlie12345/ROCmFPX`` main — the only ROCmFPX
+#: tree with a demonstrated-correct Vulkan backend — with the MiniCPM5 XML
+#: tool-call parser restored, so it is a superset of the ade07ba lineage:
+#: correct Vulkan output AND native brain tool calls. Validated on ct150
+#: (kfd present) and on ct151 (kfd ABSENT — the box #1888 was reproduced on,
+#: where Vulkan is the ONLY lane): temp-0 Paris probe on both lanes, FPX and
+#: plain non-FPX ggufs, a ≥256-token generation with a clean tail, native
+#: ``tool_calls`` on the shipped brain, and a readable diagnostic instead of
+#: a SIGSEGV with zero devices mapped (#1936).
+VULKAN_FIXED_IMAGE = "ghcr.io/hal0ai/hal0-combined:0822"
+
+#: Runner images allowed to serve the ``gpu-vulkan`` llama.cpp lane on an AMD
+#: host. Consulted by :func:`hal0.providers._gpu.image_serves_vulkan_lane`,
+#: which the slot-load preflight uses to refuse the lane on any other image.
+#:
+#: WHY AN EXPLICIT SET AND NOT "the pin or later".
+#: An ordering comparison over these refs cannot be written honestly. The tags
+#: are not versions: ``ade07ba`` and ``c077206`` are git shortrefs, ``0822`` is
+#: a date stamp, ``server`` and ``vulkan-minicpm5`` are names — there is no
+#: total order to compare against, and inventing one (lexical, date-shaped,
+#: "newer digest") would silently admit the next tag that happens to sort
+#: high. Worse, Vulkan correctness here is not monotonic in build recency: the
+#: #1948 bisect found the OLDER charlie tree correct and the NEWER ciru tree
+#: broken, so "later than the fixed pin" is not even a proxy for "fixed".
+#:
+#: So membership is earned by evidence, one ref at a time: an image joins this
+#: set only after it passes the §3-C matrix on a kfd-present AND a kfd-absent
+#: box. The cost is that a new runner pin must ALSO be added here or the Vulkan
+#: lane refuses it — that failure is loud, static, and correct-by-default,
+#: which is exactly the trade #1888 argues for.
+#:
+#: Deliberately disjoint from :data:`STALE_ROCMFPX_IMAGE_REFS`, and note that
+#: :data:`DEFAULT_ROCMFPX_IMAGE` is NOT a member while the default pin is still
+#: the ade07ba lineage — which is the whole reason the gate cannot key off the
+#: default.
+VULKAN_CAPABLE_IMAGE_REFS = frozenset({VULKAN_FIXED_IMAGE})
+
 #: Lean fallback toolbox images for the two non-rocmfpx lanes. The rocmfpx
 #: runner is Vulkan-portable — its Mesa/RADV Vulkan backend runs on any AMD GPU
 #: (the gfx1151 HIP kernels are a bonus on Strix Halo, not a requirement) — so

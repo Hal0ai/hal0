@@ -159,12 +159,17 @@ def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list
 # model's runner backend as "vulkan"/"rocm"; benchlab's lanes are "vulkan_radv"/
 # "rocm" (the lane names harness.lane_specs() defines).
 #
-# #1888: the registry's "vulkan" hint now resolves to the **rocm** lane. Both
-# GPU lanes share the unified ROCmFPX runner image, and llama.cpp runs ROCm on
-# it whenever /dev/kfd is visible — so a "vulkan"-labelled model was already
-# executing on ROCm in every serving path, and benching it on `-dev Vulkan0`
-# measured a backend that emits invalid tokens. An explicit "vulkan_radv"
-# still resolves to itself so a deliberate opt-in comparison remains possible.
+# #1888 redirected the registry's bare "vulkan" hint to the **rocm** lane, and
+# #1948 LEAVES IT THERE deliberately, for a reason that outlived the defect:
+# the hint is a MODEL label ("this GGUF runs on llama.cpp"), not a statement
+# about which device a slot was created on. Every AMD GPU lane shares one
+# runner image, so that label is satisfied by either lane — and the rocm lane
+# is both the faster one and the one with the long trend history, so it is the
+# right thing to bench when nothing more specific was asked for.
+#
+# An explicit "vulkan_radv" resolves to itself and is now a fully supported
+# lane (it is back in ``harness.default_lanes`` for GPU tiers), so a suite that
+# wants the Vulkan numbers simply names it.
 _BACKEND_TO_LANE = {"vulkan": "rocm", "vulkan_radv": "vulkan_radv", "rocm": "rocm"}
 
 
@@ -504,16 +509,18 @@ def plan(
         tokenizer = _resolve_tokenizer(model) or ""
         for lane_token in suite.matrix.lanes:
             lane = _resolve_lane(model, lane_token)
-            # #1888: an UNSUPPORTED lane is opt-in only and must never be
-            # planned silently — a vulkan_radv record is a throughput
-            # measurement of invalid output, and would otherwise be stored and
-            # published indistinguishably from a supported one.
+            # An UNSUPPORTED lane is opt-in only and must never be planned
+            # silently: its records would otherwise be stored and published
+            # indistinguishably from supported ones. ``UNSUPPORTED_LANES`` is
+            # empty as of #1948 (vulkan_radv was its only member and is
+            # supported again on the fixed image), so this is dormant — kept
+            # armed because the next retirement should not have to re-derive
+            # that a retired lane still has to warn rather than vanish.
             if not harness.lane_is_supported(lane) and lane not in warned_unsupported:
                 warned_unsupported.add(lane)
                 print(
                     f"WARNING: suite {suite.id!r} plans the UNSUPPORTED lane {lane!r} — "
-                    "the ROCmFPX runner's Vulkan backend emits invalid tokens for every "
-                    "model (#1888), so any throughput it reports measures garbage. "
+                    "hal0 does not stand behind throughput numbers from it. "
                     "Records from this lane must not be published.",
                     file=sys.stderr,
                 )

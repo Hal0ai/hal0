@@ -78,10 +78,17 @@ _GPU_GROUP_FALLBACK_GIDS: dict[str, int] = {"render": 993, "video": 44}
 #: fails and llama.cpp SILENTLY falls back to that image's Vulkan backend.
 KFD_DEVICE_PATH = "/dev/kfd"
 
+#: The DRM device directory. The ``renderD*`` node under it is what the Vulkan
+#: lane actually runs on — Vulkan needs no ``/dev/kfd`` at all, which is why a
+#: kfd-less box can serve the Vulkan lane and nothing else (#1948).
+DRI_DEVICE_DIR = "/dev/dri"
+
 #: Escape hatch for the ROCm requirement below (#1888). Set to ``1`` only when
-#: you knowingly want the runner's Vulkan lane despite it emitting invalid
-#: tokens for every model — there is no supported configuration where this is
-#: the right answer; it exists so a box can be inspected, not run.
+#: you knowingly want a lane whose output may be invalid — there is no
+#: supported configuration where this is the right answer; it exists so a box
+#: can be inspected, not run. It cannot conjure a missing device node, so it
+#: applies to the correctness gates (missing ``/dev/kfd``, a runner image whose
+#: Vulkan backend is not validated) and never to a missing render node.
 ENV_ALLOW_VULKAN_FALLBACK = "HAL0_ALLOW_VULKAN_FALLBACK"
 
 
@@ -346,6 +353,57 @@ def converge_kfd_device_group(
     return "changed", f"{kfd_path}: gid {st.st_gid} -> {target}, mode 0660"
 
 
+def render_node_present(dri_dir: str = DRI_DEVICE_DIR) -> bool:
+    """Is a DRM render node visible AND usable by this process?
+
+    The Vulkan analogue of :func:`kfd_present`, and gated the same way for the
+    same reason: a ``renderD*`` node that exists but cannot be opened by the
+    runner identity (the mis-mapped-gid LXC passthrough shape) is not a device
+    the slot can use, and treating existence as sufficient reproduces exactly
+    the false pass that made #1888 expensive.
+
+    Only ``renderD*`` counts. ``card*`` is the KMS/master node — a display
+    device, not a compute one; a container that gets only ``card0`` has no
+    Vulkan device.
+
+    Cheap and total: no ioctl, no driver probe, never raises. Whether the
+    backend then produces valid tokens is the output-sanity readiness gate's
+    question (#1922), not this one's.
+    """
+    try:
+        entries = sorted(os.listdir(dri_dir))
+    except OSError:
+        return False
+    for name in entries:
+        if not name.startswith("renderD"):
+            continue
+        node = os.path.join(dri_dir, name)
+        if os.access(node, os.R_OK | os.W_OK):
+            return True
+    return False
+
+
+def image_serves_vulkan_lane(image: str | None) -> bool:
+    """May this runner image serve the ``gpu-vulkan`` llama.cpp lane?
+
+    Membership in :data:`~hal0.config.schema.VULKAN_CAPABLE_IMAGE_REFS` — an
+    allowlist earned per-image by the #1948 §3-C validation matrix, NOT an
+    ordering comparison over tags. That constant's docstring carries the full
+    argument for why an order cannot be written honestly here; the short form
+    is that the tags are shortrefs and date stamps rather than versions, and
+    that Vulkan correctness was empirically NOT monotonic in build recency (the
+    bisect found the older tree correct and the newer one broken).
+
+    Fails closed on ``None``/blank: a caller that cannot say which image a slot
+    launches has not established that the lane is safe, and the #1888 failure
+    mode is silent garbage at full speed — the expensive direction to guess
+    wrong in.
+    """
+    from hal0.config.schema import VULKAN_CAPABLE_IMAGE_REFS
+
+    return (image or "").strip() in VULKAN_CAPABLE_IMAGE_REFS
+
+
 def host_is_amd_gpu(module_dir: str = _AMDGPU_MODULE_DIR) -> bool:
     """Is the amdgpu kernel driver bound on this host?
 
@@ -357,17 +415,87 @@ def host_is_amd_gpu(module_dir: str = _AMDGPU_MODULE_DIR) -> bool:
     return os.path.isdir(module_dir)
 
 
+def _require_vulkan_lane_prerequisites(
+    slot_name: str,
+    *,
+    dri_dir: str,
+    image: str | None,
+    env: dict[str, str] | None,
+) -> None:
+    """Admission check for a ``gpu-vulkan`` llama.cpp slot on an AMD host.
+
+    Two gates, checked in that order because the first is the one #1888 is
+    about and the second is an ordinary passthrough problem:
+
+    1. **Image.** The resolved runner image must be one whose Vulkan backend
+       has passed the #1948 §3-C matrix. The ade07ba lineage — still the
+       default pin — emits invalid tokens on Vulkan for every model at full
+       nominal speed while every health surface reads green, so serving this
+       lane from it is the exact regression #1923 retired the lane to prevent.
+       Refusing here means a stale-image box gets a one-line explanation
+       instead of two hours of garbage.
+    2. **Render node.** Vulkan runs on ``/dev/dri/renderD*``. Without one the
+       container has no device at all — a forwarding problem, described as
+       such, with no mention of #1888.
+
+    Split out of :func:`require_kfd_for_gpu_slot` rather than inlined so the
+    ROCm path's control flow stays readable, and so the Vulkan lane's
+    prerequisites can be read (and tested) as one unit.
+    """
+    environ = os.environ if env is None else env
+    opted_in = str(environ.get(ENV_ALLOW_VULKAN_FALLBACK, "")).strip() in ("1", "true", "yes")
+
+    if not image_serves_vulkan_lane(image):
+        from hal0.config.schema import VULKAN_FIXED_IMAGE
+
+        resolved = (image or "").strip() or "<unresolved>"
+        why = (
+            f"Runner image {resolved} is not validated for the Vulkan lane: the "
+            "pinned ROCmFPX lineage's Vulkan backend emits invalid tokens for "
+            "every model it serves, at full nominal speed, while HTTP 200, "
+            "container health and hal0 doctor all read green (#1888)."
+        )
+        if opted_in:
+            log.warning(
+                "gpu_slot_vulkan_lane_unvalidated_image_allowed",
+                slot=slot_name,
+                device="gpu-vulkan",
+                image=resolved,
+                runtime_lane="llama",
+                detail=why,
+            )
+        else:
+            raise GpuPreflightError(
+                f"slot {slot_name!r} (device=gpu-vulkan) cannot run on this runner "
+                f"image. {why} Repin this slot to {VULKAN_FIXED_IMAGE} (or a later "
+                "image validated for the Vulkan lane), or move the slot to "
+                "device='gpu-rocm' on a host with /dev/kfd."
+            )
+
+    if not render_node_present(dri_dir):
+        raise GpuPreflightError(
+            f"slot {slot_name!r} (device=gpu-vulkan) needs a DRM render node "
+            f"({dri_dir}/renderD*) that the hal0 runner identity can open, and "
+            "none is available here. Forward the render node from the host "
+            "(Proxmox LXC: add 'dev0: /dev/dri/renderD128' to "
+            "/etc/pve/lxc/<CTID>.conf with a gid the runner is a member of, then "
+            "pct stop/start), or move this slot to device='cpu'."
+        )
+
+
 def require_kfd_for_gpu_slot(
     slot_name: str,
     *,
     device: str,
     runtime_lane: RuntimeLane = "llama",
     kfd_path: str = KFD_DEVICE_PATH,
+    dri_dir: str = DRI_DEVICE_DIR,
+    image: str | None = None,
     env: dict[str, str] | None = None,
     amd_host: bool | None = None,
     runner_uid: int | Callable[[], int] = SLOT_RUNNER_UID,
 ) -> None:
-    """Loud-fail a GPU slot whose runtime needs ROCm but has no compute node.
+    """Loud-fail a GPU slot that cannot validly run on this host as configured.
 
     The release-pinned ROCmFPX runner (``DEFAULT_ROCMFPX_IMAGE``) is a single
     HIP+Vulkan build. llama.cpp picks ROCm when ``/dev/kfd`` is visible and
@@ -404,26 +532,46 @@ def require_kfd_for_gpu_slot(
 
     Scope by device, given that lane:
 
-    * ``gpu-rocm`` — always gated, in every lane. The device name IS the ROCm
-      claim, whatever the runtime does with it.
-    * ``gpu-vulkan`` — gated only on an **AMD** host (``amdgpu`` bound) and
-      only when the lane needs ROCm. An Intel iGPU or an NVIDIA card without
-      CDI has no ``/dev/kfd`` by design and keeps working.
-    * ``cpu`` / ``npu`` / ``gpu-cuda`` — never gated: none of them can reach
-      the ROCmFPX image's Vulkan fallback.
+    * ``gpu-rocm`` — always gated on ``/dev/kfd``, in every lane. The device
+      name IS the ROCm claim, whatever the runtime does with it. Unaffected by
+      the image gate below: a ROCm slot on a Vulkan-fixed image is still a
+      ROCm slot.
+    * ``gpu-vulkan`` + the **llama** lane on an **AMD** host — the lane #1923
+      retired and #1948 Phase D restores. NOT gated on ``/dev/kfd`` any more:
+      Vulkan does not use the compute node, and the kfd-less box is precisely
+      where Vulkan is the only lane there is. Gated instead on the two things
+      that actually decide whether it produces language:
+      :func:`image_serves_vulkan_lane` (the resolved runner image must be one
+      whose Vulkan backend passed the #1948 §3-C matrix — the ade07ba lineage
+      never can) and :func:`render_node_present` (a ``renderD*`` node the
+      runner identity can open).
+    * ``gpu-vulkan`` + the **rocm** lane — unchanged (#1952). ComfyUI and
+      Qwen3-TTS run HIP images behind the picker's GPU row; the llama.cpp
+      image allowlist says nothing about them, so they keep the kfd gate.
+    * ``gpu-vulkan`` + the **no-rocm** lane — unchanged (#1941): never gated.
+    * ``gpu-vulkan`` on a **non-AMD** host — unchanged: ungated. #1925 — the
+      Intel/NVIDIA Vulkan lane was never characterised and runs a different
+      image entirely, so applying an AMD-derived allowlist there would strand
+      hardware the defect was never about.
+    * ``cpu`` / ``npu`` / ``gpu-cuda`` — never gated.
 
-    ``runtime_lane`` defaults to ``"llama"`` on purpose: a caller that forgets
-    gets the fail-closed pre-#1941 behaviour, never a silent pass into the
-    poisoned lane.
+    ``runtime_lane`` defaults to ``"llama"`` and ``image`` defaults to ``None``
+    on purpose, and both fail CLOSED: a caller that forgets the lane gets the
+    pre-#1941 behaviour, and a caller that cannot say which image the slot
+    launches gets the Vulkan refusal rather than a silent pass into the lane
+    #1888 poisoned.
 
     ``runner_uid`` is the identity the slot container runs as — root for
     hal0's rootful ``hal0-slot@`` units. It is NOT the uid of whoever calls
     this function: ``hal0-api`` runs as ``hal0`` and would otherwise refuse
     every GPU slot on a box whose ``/dev/kfd`` is ``root:root`` but whose
-    containers use it perfectly well (#1953).
+    containers use it perfectly well (#1953). The same identity governs the
+    render-node check on the Vulkan side (#1981).
 
-    An explicit :data:`ENV_ALLOW_VULKAN_FALLBACK` opt-in downgrades the
-    refusal to a warning — a warn, never a silent pass.
+    An explicit :data:`ENV_ALLOW_VULKAN_FALLBACK` opt-in downgrades a
+    CORRECTNESS refusal (missing ``/dev/kfd``, unvalidated Vulkan image) to a
+    warning — a warn, never a silent pass. It does not apply to a missing
+    render node, which is a passthrough fact no env var can change.
     """
     if device == "gpu-vulkan":
         if runtime_lane == "no-rocm":
@@ -432,6 +580,11 @@ def require_kfd_for_gpu_slot(
             # /dev/kfd is irrelevant to it (#1941).
             return
         if not (host_is_amd_gpu() if amd_host is None else amd_host):
+            return
+        if runtime_lane == "llama":
+            # The re-enabled lane (#1948 Phase D). It has its own two gates and
+            # deliberately does NOT fall through to the kfd requirement below.
+            _require_vulkan_lane_prerequisites(slot_name, dri_dir=dri_dir, image=image, env=env)
             return
     elif device != "gpu-rocm":
         return
@@ -731,8 +884,10 @@ def gpu_visibility_env(device: str | None, gpu_index: int | None) -> dict[str, s
 
 __all__ = [
     "gpu_visibility_env",
+    "image_serves_vulkan_lane",
     "is_nvidia_gpu_device",
     "nvidia_cdi_devices",
+    "render_node_present",
     "resolve_gpu_device_paths",
     "resolve_gpu_group_ids",
 ]

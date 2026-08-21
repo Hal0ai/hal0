@@ -2383,20 +2383,34 @@ class ContainerProvider(Provider):
         # ``gpu_runtime_needs_rocm``; ``runtime_lane_for_provider`` turns that
         # into the lane.
         #
-        # runner_uid is the ORTHOGONAL question (#1953): given the lane needs
-        # the node, WHICH identity opens it. Derived from the image rather
-        # than assumed root — rootful podman still honours a USER-declaring
-        # image, and assuming root there would fail OPEN into the poisoned
-        # lane the guard exists to block.
+        # The guard needs TWO further facts about this launch, and they are
+        # different questions about the same image.
+        #
+        # WHICH IMAGE (#1948 Phase D): the Vulkan LLM lane is supported again,
+        # but only on a runner whose Vulkan backend passed the §3-C validation
+        # matrix — the ade07ba lineage never can. So the guard needs the ref
+        # this slot will ACTUALLY launch, ``image_pin`` included.
+        #
+        # WHICH IDENTITY (#1953): given the lane needs the compute node, which
+        # uid opens it. Derived from the image rather than assumed root —
+        # rootful podman still honours a USER-declaring image, and assuming
+        # root there would fail OPEN into the poisoned lane the guard blocks.
+        #
+        # Resolved ONCE into a local. ``_resolve_image_ref`` is cheap (a dict
+        # read plus a registry lookup, no subprocess), so hoisting it costs
+        # nothing and removes the chance of the two arguments describing
+        # different images. What is expensive is ``resolve_image_runtime_uid``
+        # — a sudo round-trip plus two podman calls — so THAT stays behind the
+        # lambda: the guard returns early for cpu/npu/gpu-cuda and for
+        # non-ROCm lanes, and charging every slot on the box for a probe only
+        # the gated ones need is what the laziness exists to avoid.
+        resolved_image = _resolve_image_ref(slot_cfg, None)
         require_kfd_for_gpu_slot(
             str(slot_cfg.get("name", "") or token),
             device=str(slot_cfg.get("device", "") or ""),
             runtime_lane=runtime_lane_for_provider(spec_provider),
-            # Lazy: the guard returns early for cpu/npu/gpu-cuda and for
-            # non-ROCm lanes, and this is a sudo round-trip plus two podman
-            # calls. Passing it eagerly charged every slot on the box for a
-            # probe only the gated ones need.
-            runner_uid=lambda: resolve_image_runtime_uid(_resolve_image_ref(slot_cfg, model_info)),
+            image=resolved_image,
+            runner_uid=lambda: resolve_image_runtime_uid(resolved_image),
         )
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
