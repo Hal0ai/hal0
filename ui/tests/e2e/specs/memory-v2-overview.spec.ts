@@ -50,4 +50,47 @@ test.describe('memory-v2 Overview', () => {
     await page.getByTestId('mv-bank-explore-primary').click()
     await expect(page).toHaveURL(/#memory\/bank\?bank=primary/)
   })
+
+  // ── ADR-0023 graph-extraction panel (ported from the deleted
+  // memory-graph-v3.spec.ts, task C7) — MemoryGraphPanel itself is
+  // untouched and reused verbatim; its canonical home now is here, embedded
+  // in MemV2Overview's EnginePanel, rather than the old #agent → Memory tab
+  // path (which still works independently via memory-tab.jsx's pointer
+  // card, unaffected by this migration). All 3 assertions here were
+  // `test.skip`-ed in the deleted spec; they run for real here.
+  test('ADR-0023 panel: default OFF state shows the enable affordance', async ({ page }) => {
+    // buildMemoryGraphStatus() mock already defaults to enabled: false —
+    // no page.route override needed.
+    await page.goto('/#memory')
+    const panel = page.getByTestId('mv-engine-panel')
+    await expect(panel).toContainText('Graph extraction')
+    await expect(panel).toContainText('OFF')
+    await expect(panel.getByRole('button', { name: 'Enable graph extraction' })).toBeVisible()
+  })
+
+  test('ADR-0023 panel: enable with a chosen extraction_slot sends the correct PUT payload', async ({
+    page,
+  }) => {
+    let putBody: unknown = null
+    await page.route('**/api/memory/graph', async (route) => {
+      putBody = route.request().postDataJSON()
+      await route.fulfill({ json: { ...(putBody as object), status: { enabled: true } } })
+    })
+    await page.goto('/#memory')
+    const panel = page.getByTestId('mv-engine-panel')
+    await panel.getByRole('button', { name: 'Enable graph extraction' }).click()
+    await page.locator('[data-testid=graph-slot-select]').selectOption('agent')
+    await page.getByRole('button', { name: /Enable graph extraction|Save/i }).click()
+    await expect.poll(() => putBody).toMatchObject({ enabled: true, extraction_slot: 'agent' })
+  })
+
+  test('ADR-0023 panel: disclosure + caveat copy match ADR §3 + §4 verbatim', async ({ page }) => {
+    await page.goto('/#memory')
+    const panel = page.getByTestId('mv-engine-panel')
+    await panel.getByRole('button', { name: 'Enable graph extraction' }).click()
+    await expect(panel).toContainText(/Graph extraction sends ingested memory text/)
+    await expect(panel).toContainText(
+      /Graph quality varies by model\. We don't currently measure it for you/,
+    )
+  })
 })

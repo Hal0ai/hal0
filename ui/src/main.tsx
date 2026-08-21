@@ -171,11 +171,12 @@ import './dash/memory-bank-workspace.jsx'
 // `typeof === 'function'` for its 'web' view tab. Uses window.__hal0D3Force
 // only — never imports d3 itself.
 import './dash/memory-web-graph.jsx'
-import './dash/memory-graph-engine.jsx'
-import './dash/memory-graph-structured.jsx'
-import './dash/memory-graph-ego.jsx'
-import './dash/memory-graph.jsx'
-import './dash/memory-tools.jsx'
+// Task C7: memory-graph-engine.jsx, memory-graph-structured.jsx,
+// memory-graph-ego.jsx, memory-graph.jsx, memory-tools.jsx — the pre-v2
+// graph explorer + tools panel — are deleted. Nothing outside those five
+// files consumed memory-graph-engine.jsx's globals (normalizeGraph,
+// useSize, usePanZoom, GraphDefs, MG_PALETTE, …), so it was killed
+// alongside the four files it only ever served.
 import './dash/memory.jsx'
 
 // Operator Board (#board) — a hal0-skinned kanban wired to the Hermes kanban
