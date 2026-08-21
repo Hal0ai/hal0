@@ -772,6 +772,16 @@ a { color: inherit; text-decoration: none; }
 .foot-health .pip.warm { background: var(--warn); border-color: transparent; box-shadow: 0 0 6px var(--warn); animation: pulse 1.5s var(--ease) infinite; }
 .foot-health .pip.err { background: var(--err); border-color: transparent; box-shadow: 0 0 6px var(--err); }
 .foot-health .pip.off { background: var(--bg-4); border-color: var(--line-strong); }
+/* Slot pips mirror the slot-card indicator dot vocabulary
+   (slotIndicatorFromPhase): serving green pulse · stale/ready yellow ·
+   warming amber pulse · error red. Stopped slots render no pip at all. */
+.foot-health .pip.serving { background: var(--ok); border-color: transparent; box-shadow: 0 0 6px var(--ok); animation: pulse 1.2s ease-in-out infinite; }
+.foot-health .pip.stale { background: var(--warn); border-color: transparent; box-shadow: 0 0 6px rgba(232, 185, 78, 0.45); }
+.foot-health .pip.warming { background: var(--warn); border-color: transparent; box-shadow: 0 0 6px var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+.foot-health .pip.error { background: var(--err); border-color: transparent; box-shadow: 0 0 6px var(--err); }
+@media (prefers-reduced-motion: reduce) {
+  .foot-health .pip.serving, .foot-health .pip.warming { animation: none; }
+}
 .foot-health .lbl { display: inline-flex; flex-direction: column; gap: 1px; line-height: 1.15; }
 .foot-health .lbl .k { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-5); }
 .foot-health .lbl .v { font-size: 11.5px; color: var(--fg-2); }

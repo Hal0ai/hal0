@@ -23,11 +23,12 @@ test.describe('Footer runtime chip reflects container readiness (#221)', () => {
 
     const runtimes = footer.locator('[data-testid="foot-health-runtimes"]')
     await expect(runtimes).toBeVisible()
-    // HAL0_DATA seeds 8 model-bound slots (legacy has no model, #1369); all ready
-    // → "8 / 8 ready", all LED pips lit green.
+    // HAL0_DATA seeds 8 model-bound slots (legacy has no model, #1369); all
+    // active → "8 / 8 ready" with one pip per ACTIVE slot, coloured by the
+    // slot-card indicator vocabulary (serving/stale) — never the old ok/off.
     await expect(runtimes.locator('.lbl .v')).toContainText('8 / 8 ready')
-    await expect(runtimes.locator('.pip.ok')).toHaveCount(8)
-    await expect(runtimes.locator('.pip.off')).toHaveCount(0)
+    await expect(runtimes.locator('.pip')).toHaveCount(8)
+    await expect(runtimes.locator('.pip.serving, .pip.stale')).toHaveCount(8)
   })
 
   test('runtime chip counts drop when containers stop', async ({ page }) => {
@@ -54,7 +55,8 @@ test.describe('Footer runtime chip reflects container readiness (#221)', () => {
 
     const runtimes = footer.locator('[data-testid="foot-health-runtimes"]')
     await expect(runtimes).toBeVisible()
+    // Stopped slots render NO pip — the count line alone carries the total.
     await expect(runtimes.locator('.lbl .v')).toContainText('0 / 8 ready')
-    await expect(runtimes.locator('.pip.off')).toHaveCount(8)
+    await expect(runtimes.locator('.pip')).toHaveCount(0)
   })
 })
