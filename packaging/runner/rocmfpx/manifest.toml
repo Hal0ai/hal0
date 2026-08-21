@@ -17,8 +17,58 @@ tag = "ghcr.io/hal0ai/hal0-combined:0822"
 #: Runtime layer. A Kyuz0 amd-strix-halo-toolboxes derivative; the ROCm
 #: version here must match the toolchain the binaries are linked against, or
 #: the runner resolves libraries from two different ROCm trees.
+#:
+#: The TAG is here for humans; the DIGEST is what build.sh actually consumes
+#: (`FROM ${BASE}@${DIGEST}` in both stages). A tag is mutable — re-push it and
+#: every future run of this recipe yields a different image from byte-identical
+#: tracked inputs, silently, with the same --check output. That is the exact
+#: trap #1970 exists to disarm, so pinning the interesting 5% (the patches) and
+#: floating the other 95% (the base) would not have closed it.
 image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+#: Resolved 2026-08-21 08:46 UTC against ghcr.io's Registry v2 API — a
+#: `GET /v2/hal0ai/amd-strix-halo-toolboxes/manifests/rocm-7.2.4-rocmfp4-server`
+#: with an anonymous pull token, reading `Docker-Content-Digest` (skopeo was not
+#: available on the resolving host; the value was cross-checked by sha256-ing
+#: the returned manifest bytes, which reproduces it exactly). Single-arch
+#: schema2 manifest, not a multi-arch index.
+#:
+#: This is NOT a fresh guess at "whatever the tag points to today": it is the
+#: digest the SHIPPED :0822 was actually built from. Verified by comparing layer
+#: lists — the base's 9 layer digests are an exact ordered prefix of :0822's 13
+#: (the 4 extra layers are this recipe's dnf/COPY/chmod steps). So the tag has
+#: not been re-pushed since :0822 was built, and this pin records real lineage
+#: rather than freezing a drifted tag after the fact.
+digest = "sha256:4f5418c1b1e39e5ad9bbadfd2e8381c6b8a70e9b03f667179a7233c6f681462a"
 rocm_version = "7.2.4"
+#: Upstream lineage, stated as far as it is actually known rather than implied.
+#: The base is a hal0-namespace REPUBLICATION of the Kyuz0 toolbox family
+#: (https://github.com/kyuz0/amd-strix-halo-toolboxes), whose `rocm-*-rocmfp4-*`
+#: images build on fedora-minimal:43 — the published :0822 config still carries
+#: that project's inherited `org.opencontainers.image.vendor=Fedora Project` /
+#: `version=43` labels, which is corroboration, not proof.
+#:
+#: What is genuinely NOT known and should not be guessed at: which upstream
+#: Kyuz0 commit produced this particular image, and whether hal0's copy was a
+#: straight `podman pull`/`push` or carries local modifications. No recipe for
+#: that derivation exists in this repo. Tracking it is the real fix and belongs
+#: upstream of here; the digest above is what makes the gap SURVIVABLE in the
+#: meantime — a future bisect can always retrieve this exact byte-identical
+#: layer set even if the tag moves or the upstream history is rewritten.
+upstream_family = "https://github.com/kyuz0/amd-strix-halo-toolboxes"
+upstream_ref = "unknown — see the note above; deliberately not guessed"
+
+#: DEFERRED, consciously (#1970 scope): the `dnf install` lines in both stages
+#: of build.sh carry no version constraints, so whatever dnf resolves on build
+#: day is compiled into the artefact. Pinning every package (a dnf versionlock
+#: or a snapshotted repo) is real work with its own drift surface and is out of
+#: scope for the rc.7 cut. The position taken here is deliberate rather than
+#: accidental: the digest pin above freezes the layer that matters — the entire
+#: ROCm toolchain, the Fedora base, and every library the binaries link against
+#: all live INSIDE the pinned base, not in these dnf lines. What the dnf lines
+#: add on top is the build toolchain (builder stage, which does not ship) and
+#: three Vulkan runtime packages (runtime stage). That residue is the accepted
+#: risk; revisit it if a defect is ever bisected into it.
+dnf_packages_pinned = false
 
 [source]
 #: charlie's tree, NOT ciru's. This is the load-bearing choice: #1888 was
@@ -29,6 +79,12 @@ rocm_version = "7.2.4"
 repo = "https://github.com/charlie12345/ROCmFPX.git"
 ref = "0a59add89b8cba06fb6a0baf25a253a4e45faa78"
 ref_description = "Merge pull request #82 from charlie12345/fix/hip-drop-ffast-math"
+#: NO SUBMODULES — recorded because the silence above otherwise reads as an
+#: omission. At this ref `.gitmodules` is empty and `git submodule status
+#: --recursive` returns nothing; `ggml` is vendored in-tree. So `ref` alone
+#: really does pin the whole source side, with no second unpinned input hiding
+#: behind a submodule pointer.
+submodules = false
 
 [build]
 #: gfx1151 (Strix Halo). Combined HIP+Vulkan in ONE image: hal0 resolves both

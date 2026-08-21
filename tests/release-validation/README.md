@@ -21,6 +21,7 @@ mechanical enough, into `pytest`/`release-test.sh` so they stop needing an agent
 | `lanes/readonly/*.md` | Read-only surface briefs (safe to run in parallel, no mutations) |
 | `lanes/stateful/*.md` | Stateful briefs (serialised on one box, mutations expected) |
 | `lanes/update/*.md` | In-place upgrade briefs (run on the update box, parallel to the fresh box) |
+| `provenance/*.md` | Where a pinned artefact came from — the tree, refs and digests behind an image a release cites (#1970) |
 | `templates/report.md` | Report skeleton the synthesis phase fills in |
 | `reports/*.md` | One committed report per validated release |
 
