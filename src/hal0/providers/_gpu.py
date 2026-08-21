@@ -119,31 +119,31 @@ def resolve_image_runtime_uid(image_ref: str | None) -> int:
     exactly that pattern (``packaging/toolbox/cpu.Dockerfile`` ends ``USER
     hal0``). Equating "rootful podman" with uid 0 would let :func:`kfd_status`
     pass a ``0660 root:root`` node that the real process cannot open — waving
-    through the invalid Vulkan fallback the guard exists to stop (#1953 review).
+    through the invalid Vulkan fallback the guard exists to stop (#1953).
 
-    Best-effort by design: an unreadable image falls back to
-    :data:`SLOT_RUNNER_UID`, which is the correct answer for every GPU runner
-    hal0 currently ships (none declare ``USER``). A DECLARED non-root user is
+    Routed through the ``hal0-podman-ro`` root-store seam, NOT a bare ``podman
+    image inspect`` (#1953 R2). hal0-api runs as the unprivileged ``hal0`` user
+    with no subuid ranges, so a bare call reads hal0's own ROOTLESS store —
+    a different store, which never contains a slot image. That would make this
+    check a silent no-op in production, which is #1889 with extra steps.
+
+    Best-effort by design: an unanswerable seam falls back to
+    :data:`SLOT_RUNNER_UID`, the correct answer for every GPU runner hal0
+    currently ships (none declare ``USER``). A DECLARED non-root user is
     honoured, which is the conservative direction — it can only make the guard
     refuse more, never less.
     """
     if not image_ref:
         return SLOT_RUNNER_UID
-    try:
-        import subprocess
+    from hal0.providers import podman_introspect
 
-        out = subprocess.run(
-            ["podman", "image", "inspect", "--format", "{{.Config.User}}", image_ref],
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-    except Exception:  # pragma: no cover - podman absent / hung
+    user = podman_introspect.image_user(image_ref)
+    if user is None:
+        # Seam did not answer (not the service user, no grant, podman absent).
+        # Deliberately no rootless fallback — see the docstring.
         return SLOT_RUNNER_UID
-    if out.returncode != 0:
-        return SLOT_RUNNER_UID
-    user = (out.stdout or b"").decode(errors="replace").strip().split(":")[0]
-    if not user or user == "root" or user == "0":
+    user = user.strip().split(":")[0]
+    if not user or user in ("root", "0"):
         return SLOT_RUNNER_UID
     if user.isdigit():
         return int(user)
@@ -152,9 +152,9 @@ def resolve_image_runtime_uid(image_ref: str | None) -> int:
 
         return pwd.getpwnam(user).pw_uid
     except Exception:
-        # A name we cannot resolve on the HOST may still resolve inside the
-        # image. Assume non-root and let the mode check decide, rather than
-        # silently falling back to the permissive root answer.
+        # A name the HOST cannot resolve may still resolve inside the image.
+        # Assume non-root and let the mode check decide rather than falling
+        # back to the permissive root answer.
         return -1
 
 

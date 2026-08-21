@@ -361,6 +361,30 @@ def image_presence(
     return ImageProbe("unknown", "seam-error")
 
 
+def image_user(
+    image: str,
+    *,
+    run: _RunFn = subprocess.run,
+    is_hal0_user: Callable[[], bool] = is_hal0_service_user,
+    timeout: float = 10.0,
+) -> str | None:
+    """The image's configured ``USER`` from ROOT's store; ``None`` if unanswerable.
+
+    ``""`` is a real answer meaning "no USER declared", i.e. the container
+    process runs as root. ``None`` means the seam did not answer at all.
+
+    Same #1889 reasoning as :func:`image_exists`, and the reason
+    :func:`hal0.providers._gpu.resolve_image_runtime_uid` must not shell a bare
+    ``podman image inspect``: hal0-api runs as the unprivileged ``hal0`` user
+    with no subuid ranges, so a bare call reads hal0's OWN ROOTLESS store,
+    which never contains a slot image. The answer from that store is not a
+    stale answer — it is an answer about a different object.
+    """
+    if not is_valid_image_ref(image):
+        return None
+    return _seam_read("image-user", image, run=run, is_hal0_user=is_hal0_user, timeout=timeout)
+
+
 def container_image(
     token: str,
     *,

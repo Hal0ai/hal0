@@ -207,6 +207,28 @@ case "$cmd" in
     esac
     ;;
 
+  image-user)              # arg: image ref -> prints the image's configured USER ("" if root)
+    [[ $# -eq 1 ]] || die "image-user takes exactly one argument"
+    validate_image_ref "$1"
+    require_podman
+    # #1953: the guard needs the identity the CONTAINER PROCESS will run as,
+    # which is the image's configured USER — not an assumption that rootful
+    # podman implies uid 0. Read-only, one literal --format field, same shape
+    # as container-image below. `image exists` first so a genuinely absent
+    # image is a real negative (empty output, rc 0) rather than being reported
+    # as an operational failure, matching image-exists' contract.
+    run_podman image exists -- "$1"
+    case "$PODMAN_RC" in
+      0) ;;
+      1) exit 0 ;;   # no such image in root's store — a real negative answer
+      *) podman_failed "podman image exists failed" "$PODMAN_RC" ;;
+    esac
+    ref="$1"
+    run_podman image inspect --format '{{.Config.User}}' -- "$ref"
+    (( PODMAN_RC == 0 )) || podman_failed "podman image inspect failed" "$PODMAN_RC"
+    printf '%s\n' "$PODMAN_OUT"
+    ;;
+
   container-image)         # arg: slot token -> prints the running image ref
     [[ $# -eq 1 ]] || die "container-image takes exactly one argument"
     validate_slot_token "$1"
@@ -248,6 +270,7 @@ case "$cmd" in
 usage: hal0-podman-ro <command> [arg]
   images                     podman images --format {{.Repository}}   (root's image store)
   image-exists <ref>         "present" | "missing" for a validated image ref
+  image-user <ref>           the image's configured USER ("" when it runs as root)
   container-image <token>    running image of hal0-slot-<token>, or nothing
   container-argv <token>     live command argv of hal0-slot-<token>, or nothing
   check-image-ref <ref>      validate an image ref only (no podman call)

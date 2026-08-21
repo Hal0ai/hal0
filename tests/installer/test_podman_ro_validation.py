@@ -174,6 +174,7 @@ def test_help_lists_every_verb() -> None:
     for verb in (
         "images",
         "image-exists",
+        "image-user",
         "container-image",
         "container-argv",
         "check-image-ref",
@@ -188,7 +189,9 @@ def test_unknown_verb_is_rejected() -> None:
     assert "bad cmd" in proc.stderr
 
 
-@pytest.mark.parametrize("verb", ["image-exists", "container-image", "container-argv"])
+@pytest.mark.parametrize(
+    "verb", ["image-exists", "image-user", "container-image", "container-argv"]
+)
 def test_write_verbs_are_not_reachable(verb: str) -> None:
     """The seam stays READ-ONLY: no verb spells a mutation, and the three
     argument-taking verbs refuse a second argv word outright (so a validated
@@ -198,7 +201,9 @@ def test_write_verbs_are_not_reachable(verb: str) -> None:
     assert "exactly one argument" in proc.stderr
 
 
-@pytest.mark.parametrize("verb", ["image-exists", "container-image", "container-argv"])
+@pytest.mark.parametrize(
+    "verb", ["image-exists", "image-user", "container-image", "container-argv"]
+)
 def test_argument_verbs_require_an_argument(verb: str) -> None:
     proc = _run(verb)
     assert proc.returncode == 64
@@ -298,7 +303,23 @@ def test_presence_probes_use_exists_not_inspect() -> None:
     assert "run_podman image exists --" in src
     assert "run_podman container exists --" in src
     code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
-    assert not [ln for ln in code if "image inspect" in ln]
+
+    # The PRESENCE probe itself must never be an inspect.
+    exists_arm = src.split("image-exists)", 1)[1].split(";;", 1)[0]
+    exists_code = "\n".join(ln for ln in exists_arm.splitlines() if not ln.lstrip().startswith("#"))
+    assert "image exists" in exists_code
+    assert "image inspect" not in exists_code
+
+    # Reading a FIELD needs inspect — there is no other podman verb for it —
+    # but only after presence has already been established, so "missing" and
+    # "broken store" stay distinguishable. Exactly the shape container_read
+    # uses (container exists -> container inspect), which this file has always
+    # permitted. Every such line must sit in an arm that guards with `exists`.
+    for idx, line in enumerate(code):
+        if "image inspect" not in line:
+            continue
+        preceding = "\n".join(code[max(0, idx - 12) : idx])
+        assert "image exists" in preceding, f"unguarded image inspect: {line}"
 
 
 def test_inspect_calls_are_type_qualified() -> None:

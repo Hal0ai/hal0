@@ -72,9 +72,19 @@ class TestKfdPresent:
         """
         node = tmp_path / "kfd"
         node.write_text("")
-        node.chmod(0o660)  # group-only rw, group is the test user's — not hal0's
-        assert kfd_present(str(node)) is True  # default: SLOT_RUNNER_UID (root)
-        assert kfd_status(str(node), for_uid=0) == KFD_OK
+        # 0o000, not 0o660: the node must be unopenable to the CURRENT process,
+        # or this passes on main too and proves nothing (review nit). The dual
+        # assert is the actual contract — same node, opposite verdicts,
+        # decided solely by which identity is asked about.
+        node.chmod(0o000)
+        try:
+            if os.access(str(node), os.R_OK):
+                pytest.skip("this process bypasses file permissions")
+            assert kfd_status(str(node), for_uid=None) == KFD_NOT_OPENABLE
+            assert kfd_present(str(node)) is True  # default: SLOT_RUNNER_UID
+            assert kfd_status(str(node), for_uid=0) == KFD_OK
+        finally:
+            node.chmod(0o600)
 
     def test_status_distinguishes_missing_from_unopenable(self, tmp_path) -> None:
         """The two shapes need OPPOSITE remedies, so they must not be one bool."""
@@ -323,11 +333,27 @@ class TestNonRocmRuntimesAreNotGated:
     @staticmethod
     def _amd_box_without_kfd(monkeypatch) -> None:
         """An AMD host (amdgpu bound) that has no usable /dev/kfd — the exact
-        shape of the box #1941 was reported from."""
+        shape of the box #1941 was reported from.
+
+        Patches ``kfd_status``, NOT ``kfd_present``: the guard calls the former
+        (#1952 + #1953 composed). Patching ``kfd_present`` was a dead stub —
+        these tests then passed only because the CI runner happens to lack
+        /dev/kfd, and went RED on any box that has one (CT105, ct151, dev
+        workstations), taking the #1888/#1941 regression cover with them.
+        """
         from hal0.providers import _gpu as gpu_mod
 
         monkeypatch.setattr(gpu_mod, "host_is_amd_gpu", lambda *_a, **_k: True)
-        monkeypatch.setattr(gpu_mod, "kfd_present", lambda *_a, **_k: False)
+        monkeypatch.setattr(gpu_mod, "kfd_status", lambda *_a, **_k: gpu_mod.KFD_MISSING)
+
+    @staticmethod
+    def _amd_box_with_unopenable_kfd(monkeypatch) -> None:
+        """The node IS forwarded but the runner identity cannot open it — the
+        third status, which nothing exercised through ``load_sync`` before."""
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr(gpu_mod, "host_is_amd_gpu", lambda *_a, **_k: True)
+        monkeypatch.setattr(gpu_mod, "kfd_status", lambda *_a, **_k: gpu_mod.KFD_NOT_OPENABLE)
 
     @staticmethod
     def _stub_unit_write(monkeypatch) -> list[str]:
@@ -346,6 +372,41 @@ class TestNonRocmRuntimesAreNotGated:
             lambda self, token, unit_text: written.append(token),
         )
         return written
+
+    def test_load_sync_refuses_the_llama_lane_on_an_unopenable_node(self, monkeypatch) -> None:
+        """KFD_NOT_OPENABLE through load_sync — the third status, previously
+        unexercised on this path.
+
+        A forwarded-but-unopenable node is just as poisoned as a missing one:
+        HIP still fails to initialise and llama.cpp still lands on the invalid
+        Vulkan lane. The refusal must fire, and its remedy must be the group
+        fix rather than a re-forward (#1953).
+        """
+        from hal0.providers import container as container_mod
+
+        self._amd_box_with_unopenable_kfd(monkeypatch)
+        self._stub_unit_write(monkeypatch)
+
+        with pytest.raises(GpuPreflightError) as err:
+            container_mod.ContainerProvider().load_sync(
+                {"name": "utility", "device": "gpu-vulkan", "port": 8082}, {}
+            )
+        msg = str(err.value)
+        assert "IS forwarded" in msg
+        assert "dev1:" not in msg  # never send them to re-forward a present node
+
+    def test_a_non_rocm_runtime_is_unaffected_by_an_unopenable_node(self, monkeypatch) -> None:
+        """The lane scoping (#1941) still wins over the status: Kokoro forwards
+        no compute node at all, so its openability is irrelevant."""
+        from hal0.providers import container as container_mod
+
+        self._amd_box_with_unopenable_kfd(monkeypatch)
+        written = self._stub_unit_write(monkeypatch)
+
+        container_mod.ContainerProvider().load_sync(
+            {"name": "voice", "type": "tts", "device": "gpu-vulkan", "port": 8090}, {}
+        )
+        assert written == ["voice"]
 
     @pytest.mark.parametrize(
         "slot_cfg",
@@ -699,3 +760,64 @@ class TestConvergeAgainstRealPermissionDenial:
         after = os.stat(kfd)
         assert after.st_gid == before.st_gid
         assert after.st_mode == before.st_mode
+
+
+class TestResolveImageRuntimeUidUsesTheRootStore:
+    """#1953 R2 — the uid must come from ROOT's image store, never hal0's own.
+
+    hal0-api runs as the unprivileged ``hal0`` user with no subuid ranges, so a
+    bare ``podman image inspect`` reads hal0's ROOTLESS store — a different
+    store, which never contains a slot image. Reading it would make this check
+    a silent no-op in production, which is #1889 with extra steps.
+    """
+
+    def test_it_routes_through_the_seam(self, monkeypatch) -> None:
+        from hal0.providers import _gpu as gpu_mod
+
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "hal0.providers.podman_introspect.image_user",
+            lambda ref, **k: seen.append(ref) or "hal0",
+        )
+        import pwd
+
+        monkeypatch.setattr(pwd, "getpwnam", lambda n: type("P", (), {"pw_uid": 1234})())
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == 1234
+        assert seen == ["ghcr.io/x/y:1"]
+
+    def test_it_never_shells_bare_podman(self, monkeypatch) -> None:
+        """The regression guard: a bare subprocess call is the #1889 trap."""
+        import subprocess
+
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr("hal0.providers.podman_introspect.image_user", lambda *a, **k: "")
+
+        def _boom(*a, **k):  # pragma: no cover - only runs if the bug returns
+            raise AssertionError(f"bare podman call: {a!r}")
+
+        monkeypatch.setattr(subprocess, "run", _boom)
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == gpu_mod.SLOT_RUNNER_UID
+
+    def test_an_unanswerable_seam_falls_back_to_root_not_rootless(self, monkeypatch) -> None:
+        """``None`` means the seam did not answer. Deliberately NO rootless
+        fallback: that store's answer is about a different object."""
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr("hal0.providers.podman_introspect.image_user", lambda *a, **k: None)
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == gpu_mod.SLOT_RUNNER_UID
+
+    @pytest.mark.parametrize("declared", ["", "root", "0"])
+    def test_root_equivalents_resolve_to_the_slot_runner_uid(self, monkeypatch, declared) -> None:
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr("hal0.providers.podman_introspect.image_user", lambda *a, **k: declared)
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == gpu_mod.SLOT_RUNNER_UID
+
+    def test_a_numeric_user_is_honoured(self, monkeypatch) -> None:
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr(
+            "hal0.providers.podman_introspect.image_user", lambda *a, **k: "1000:1000"
+        )
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == 1000
