@@ -41,6 +41,18 @@ def test_degree_by_node_isolated_node_absent():
     assert out == {}  # adjacency only carries nodes with edges
 
 
+def test_degree_by_node_caused_by_weighs_same_as_causal():
+    # wire-format alias (0.8.4 emits `caused_by`, not `causal`) must flow
+    # through the same weighted-salience math, not floor to semantic's 1.0.
+    graph = {
+        "nodes": [{"data": {"id": "a"}}, {"data": {"id": "b"}}],
+        "edges": [{"data": {"source": "a", "target": "b", "type": "caused_by"}}],
+    }
+    out = sg.degree_by_node(graph)
+    assert out["a"] == (1, 4.0)
+    assert out["b"] == (1, 4.0)
+
+
 # ── Step 2: composed route ───────────────────────────────────────────────────
 
 ROWS = [
