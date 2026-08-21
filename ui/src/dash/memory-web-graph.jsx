@@ -34,7 +34,8 @@ function _nidWeb(n) {
 export function computeSalience(nodes, edges, linkWeight) {
   const salience = new Map(nodes.map((n) => [_nidWeb(n), 0]))
   edges.forEach((e) => {
-    const w = linkWeight[e.data.linkType] ?? 1
+    // Real payloads emit `type`; the mock (and v1's normalizer) said `linkType`.
+    const w = linkWeight[e.data.linkType ?? e.data.type] ?? 1
     const { source, target } = e.data
     if (salience.has(source)) salience.set(source, salience.get(source) + w)
     if (salience.has(target)) salience.set(target, salience.get(target) + w)
@@ -88,7 +89,8 @@ function WebGraph({ bank, sel, setSel, filters }) {
   const links = []
   const seen = new Set()
   allEdges.forEach((e) => {
-    const { source, target, linkType } = e.data
+    const { source, target } = e.data
+    const linkType = e.data.linkType ?? e.data.type
     if (!ids.has(source) || !ids.has(target)) return
     const key = [source, target].sort().join('|') + '|' + linkType
     if (seen.has(key)) return
