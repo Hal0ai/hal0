@@ -37,7 +37,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > brain steward model, and starts the API. When it finishes, open the
 > dashboard and assign models to slots.
 
-> **Status: release candidate — `v1.0.0-rc.6`.** v1.0.0 stable is the target
+> **Status: release candidate — `v1.0.0-rc.7`.** v1.0.0 stable is the target
 > of the current cut. Every release candidate is validated on a real-hardware
 > fleet before the next cut; see [`CHANGELOG.md`](./CHANGELOG.md) for what
 > each candidate closed.
