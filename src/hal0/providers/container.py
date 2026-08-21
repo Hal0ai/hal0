@@ -2497,6 +2497,18 @@ class ContainerProvider(Provider):
         if unit_path.exists():
             _SYSTEMCTL_SEAM.remove_quadlet(unit_path)
             self._run("systemctl", "daemon-reload", timeout=_UNIT_STOP_TIMEOUT_S)
+        # A DELIBERATE stop must not leave the unit parked in `failed`.
+        # The bounded stop above escalates to SIGKILL (exit 137) — and a
+        # container that traps SIGTERM exits 143 — so systemd records
+        # Result=exit-code and keeps the failed unit resident in memory
+        # even after the Quadlet source is gone (daemon-reload does NOT
+        # clear failed runtime state, contrary to what this teardown used
+        # to assume). The slot-view status probe reads that as "crashed"
+        # and the dashboard painted every cleanly-stopped slot red.
+        # reset-failed marks the stop as intentional; a unit that failed
+        # on its own (crash, OOM) never passes through this teardown and
+        # stays `failed` → red.
+        self._run("systemctl", "reset-failed", unit, check=False, timeout=_UNIT_STOP_TIMEOUT_S)
 
     def is_active(self, slot: Mapping[str, Any] | str) -> bool:
         """Return True if the slot's systemd unit is in an active state.

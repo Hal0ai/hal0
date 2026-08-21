@@ -722,8 +722,9 @@ const _shortTs = (ts) => {
 
 // Slot pips reuse slotIndicatorFromPhase (slot-status.js) so the footer
 // matches the slot-card indicator dots exactly — no parallel vocabulary.
-// A service indicator's tone (up/warn/err) → LED tone (ok/warm/err).
-const _svcPip = (tone) => (tone === 'up' ? 'ok' : tone === 'warn' ? 'warm' : 'err');
+// A service indicator's tone (up/warn/off/err) → LED tone (ok/warm/off/err).
+const _svcPip = (tone) =>
+  tone === 'up' ? 'ok' : tone === 'warn' ? 'warm' : tone === 'off' ? 'off' : 'err';
 
 // ─── Footer ───
 // Phase 3 of #322: the journal pane reads `useLogsStream` against
@@ -846,7 +847,10 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
       : (serviceHealth.services || []).map((s) => ({
           id: s.id,
           label: s.name || s.id,
-          tone: s.up ? 'up' : 'err',
+          // 'stopped' is deliberate (grey pip, out of the ready count);
+          // only a failed/unknown service reads red. Older backends omit
+          // `state` — fall back to the boolean.
+          tone: s.state === 'stopped' ? 'off' : (s.state ? (s.state === 'up' ? 'up' : 'err') : (s.up ? 'up' : 'err')),
           title: s.detail || `${s.name || s.id} down`,
         }))),
   ];
@@ -859,7 +863,10 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
   const slotPips = configuredSlots
     .map((s) => ({ slot: s, ind: slotIndicatorFromPhase(s) }))
     .filter(({ ind }) => ind.cls !== 'offline');
-  const servicesReady = footerIndicators.filter((s) => s.tone === 'up').length;
+  // Deliberately-stopped services keep a grey pip but leave the ready
+  // fraction — "2 / 2 ready" with a grey comfyui pip, not "2 / 3".
+  const servicesActive = footerIndicators.filter((s) => s.tone !== 'off');
+  const servicesReady = servicesActive.filter((s) => s.tone === 'up').length;
 
   return (
     <div className={"footer" + (expanded ? " expanded" : "")}>
@@ -1025,8 +1032,8 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
           </span>
           <span className="lbl">
             <span className="k">services</span>
-            <span className={"v" + (servicesReady < footerIndicators.length ? " warn" : "")}>
-              <b>{servicesReady} / {footerIndicators.length}</b> ready
+            <span className={"v" + (servicesReady < servicesActive.length ? " warn" : "")}>
+              <b>{servicesReady} / {servicesActive.length}</b> ready
             </span>
           </span>
         </div>
