@@ -1553,7 +1553,7 @@ regressions:
     repro: |
       # Force (or simulate, if the box cannot hold two runner images at once — record which)
       # a gpu-vulkan slot's resolved image onto a ref NOT in VULKAN_CAPABLE_IMAGE_REFS:
-      hal0 slot edit <throwaway> --device gpu-vulkan --model <small chat model>
+      hal0 slot edit <throwaway> --hardware vulkan --model <small chat model>
       # ... with the slot's image_pin forced to a known-stale ref (e.g. ade07ba) ...
       hal0 slot load <throwaway>
       # Expect a preflight refusal (GpuPreflightError) naming #1888 and VULKAN_FIXED_IMAGE,

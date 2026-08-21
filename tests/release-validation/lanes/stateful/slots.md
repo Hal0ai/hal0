@@ -111,7 +111,10 @@ at the ends.
      the env override. This is the check that proves the permanent net actually holds even when
      every earlier refusal in the chain has been deliberately defeated — if this one fails,
      nothing else in this lane matters. Record the exact env/command combination used so it is
-     reproducible blind.
+     reproducible blind. Same honest-failure rule as 8b: if you cannot construct the fixture on
+     this box (no stale image in the store to force, or the override is refused for another
+     reason), say so explicitly and record it as a coverage gap rather than a pass — do not
+     invent a verdict for a check you could not run.
 9. **Reject a bad model file.** Feed `hal0 model add` a file with a `.gguf` name and no GGUF
    magic (`head -c 2000000 /dev/urandom`). The registration-with-warning outcome is now
    by-design (`known-issues: model-add-detection-surfacing`) — what you assert is the warning
