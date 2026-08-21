@@ -51,9 +51,39 @@ OUTPUT_SANITY_TIMEOUT_S = 20.0
 #: answer instead of on the clock.
 OUTPUT_SANITY_CHAT_TIMEOUT_S = 45.0
 
+#: Both gate budgets on a ``device="cpu"`` slot, which is a different machine
+#: from the accelerated lane the two constants above are sized for.
+#:
+#: The 20s/45s pair assumes a GPU that decodes a dozen greedy tokens in about
+#: a second. The fleet's own numbers say the CPU lane is two orders of
+#: magnitude away from that: the ``v1.0.0-rc.5`` validation measured ct151
+#: (8 cores, 16 GB, no GPU passthrough) at 0.12 tok/s for a 0.8B model under
+#: exactly the contention a load happens in, and one brain reply took 3m42s.
+#: A no-GPU box is not an exotic case either — ``install.profile_derive.
+#: derive_device`` resolves EVERY seeded slot to ``cpu`` there, and the brain
+#: slot then binds the unquantized F16 variant precisely because the box is
+#: slow.
+#:
+#: Set to :data:`HEALTH_TIMEOUT_S` rather than to a fresh literal: it is the
+#: wall clock the same box already gets to answer ``/health`` after spawning,
+#: so the gate asks for no more patience than the phase before it. That is
+#: 0.067 tok/s for the raw probe's dozen tokens — under the slowest thing the
+#: fleet has measured — and it also covers the chat fallback, whose 256-token
+#: ask is where a reasoning model on a CPU box would otherwise be judged on
+#: an answer it had no room to write.
+#:
+#: Consumed via ``hal0.slots.output_sanity.probe_budget_s``, which returns it
+#: for a cpu-backed slot and ``None`` (module defaults) for everything else.
+OUTPUT_SANITY_CPU_TIMEOUT_S = HEALTH_TIMEOUT_S
+
 #: What the gate can cost ONE load, worst case: the raw probe, then the chat
 #: fallback. A load that passes on the raw probe pays only the first.
-OUTPUT_SANITY_LOAD_ALLOWANCE_S = OUTPUT_SANITY_TIMEOUT_S + OUTPUT_SANITY_CHAT_TIMEOUT_S
+#:
+#: Charged at the CPU lane's budget because a client timeout must cover the
+#: slowest slot the server might be converging, and the client is handed a
+#: slot name — not its device — by every lifecycle verb. An accelerated slot
+#: spends 65s of this and returns early.
+OUTPUT_SANITY_LOAD_ALLOWANCE_S = 2 * OUTPUT_SANITY_CPU_TIMEOUT_S
 
 #: Sequential unloads a single ``load`` may perform before it spawns
 #: anything: ``preload_evict.admit`` awaits ``host.unload(candidate)`` once per
@@ -90,11 +120,14 @@ EVICTION_UNLOAD_ALLOWANCE = 3
 #:     90   3 x 30, ``preload_evict.admit`` unloading eviction candidates in
 #:          series (EVICTION_UNLOAD_ALLOWANCE)
 #:    180   the post-spawn ``/health`` poll (HEALTH_TIMEOUT_S)
-#:     65   the output-sanity gate (#1922): 20 raw probe + 45 chat fallback
+#:    360   the output-sanity gate (#1922), at its CPU-lane budget: 180 raw
+#:          probe + 180 chat fallback (OUTPUT_SANITY_LOAD_ALLOWANCE_S = 2 x
+#:          OUTPUT_SANITY_CPU_TIMEOUT_S). An accelerated slot spends 20 + 45
+#:          instead, but the client cannot know which it is asking about
 #:     30   the failed gate's teardown, which runs before the ERROR stamp and
 #:          therefore still inside the lock
 #:    ---
-#:    395
+#:    690
 LOAD_LOCK_HOLD_S = (
     TERMINATE_TIMEOUT_S
     + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S

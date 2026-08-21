@@ -103,12 +103,23 @@ and is not yet dispatchable. A wrong answer on the raw `/completion` endpoint bu
 retry through `/v1/chat/completions` (with room for a reasoning model's `<think>` block)
 before the load is refused.
 
-Failure is terminal for that load: the slot lands in `ERROR` with a message naming the
-probe, the expected token and what the model actually said, its unit is stopped, and it
-will **not** be re-adopted as `READY` by a later `/api/slots` poll or by the boot-time
-reconcile — a passing gate on a subsequent load is what clears the verdict. A probe
-timeout counts as a failure; "inconclusive, so let it through" is the silent degrade this
-gate exists to remove.
+A **wrong answer** is terminal for that load: the slot lands in `ERROR` with a message
+naming the probe, the expected token and what the model actually said, its unit is stopped
+(best-effort — a stop that does not return is reported in the same message), and it will
+**not** be re-adopted as `READY` by a later `/api/slots` poll or by the boot-time
+reconcile. A passing gate on a subsequent load is what clears the verdict.
+
+A **probe that never answers** is treated differently. A timeout says the answer did not
+arrive inside a wall clock, not that the answer was wrong, so the slot resolves to
+`WARMING` — the same policy the health wait already applies to its own ambiguous outcome.
+Nothing is published as `READY`, nothing is stamped, the unit is left alone, and the next
+load re-runs the gate. Slow hardware is judged on its answer; the budget widens to match on
+a `device = "cpu"` slot, which decodes far slower than the accelerated lane.
+
+<Aside type="note">
+"Inconclusive, so let it through" remains the one thing the gate never does: an
+unanswered probe can only produce `WARMING`, never `READY`.
+</Aside>
 
 Embedding, reranking, TTS, STT and image slots are never gated (they cannot serve a chat
 completion), and the FLM/NPU lane keeps its own `verify_inference` sentinel.

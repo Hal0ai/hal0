@@ -197,10 +197,7 @@ def _server_load_lock_hold_s() -> float:
     added to ``load`` without a matching budget edit fails here.
     """
     from hal0.providers.container import _HEALTH_TIMEOUT_S
-    from hal0.slot_lifecycle_budget import (
-        OUTPUT_SANITY_CHAT_TIMEOUT_S,
-        OUTPUT_SANITY_TIMEOUT_S,
-    )
+    from hal0.slot_lifecycle_budget import OUTPUT_SANITY_CPU_TIMEOUT_S
     from hal0.slots.manager import SlotManager
 
     terminate = float(SlotManager._terminate_timeout_s)
@@ -212,9 +209,12 @@ def _server_load_lock_hold_s() -> float:
         + _MIN_EVICTION_UNLOADS * terminate
         # The post-spawn /health poll.
         + float(_HEALTH_TIMEOUT_S)
-        # The output-sanity gate (#1922): raw probe, then the chat fallback.
-        + float(OUTPUT_SANITY_TIMEOUT_S)
-        + float(OUTPUT_SANITY_CHAT_TIMEOUT_S)
+        # The output-sanity gate (#1922): raw probe, then the chat fallback —
+        # at the CPU lane's budget, which is what both requests get on a
+        # device="cpu" slot (output_sanity.probe_budget_s). The client is
+        # handed a slot NAME by every lifecycle verb and cannot know which
+        # lane it is waiting on, so the floor has to charge the slower one.
+        + 2 * float(OUTPUT_SANITY_CPU_TIMEOUT_S)
         # A failed gate stops the unit before the ERROR stamp, still in-lock.
         + terminate
     )

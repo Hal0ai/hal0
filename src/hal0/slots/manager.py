@@ -3695,19 +3695,21 @@ class SlotManager:
 
         Returns:
             SlotState.READY when the container is serving. On a health-wait
-            timeout, resolves to SlotState.WARMING (non-dispatchable) rather
-            than a lying READY: WARMING keeps the slot retryable so the fail
-            watcher / next-request reload governs recovery, instead of live
-            traffic being forwarded to a wedged server on a false READY.
+            timeout — or an output-sanity probe that never came back
+            (``output_sanity.AMBIGUOUS_STATUSES``) — resolves to
+            SlotState.WARMING (non-dispatchable) rather than a lying READY:
+            WARMING keeps the slot retryable so the fail watcher /
+            next-request reload governs recovery, instead of live traffic
+            being forwarded to a wedged server on a false READY. One policy,
+            applied to every ambiguous outcome this method can reach.
 
         Raises:
-            SlotOutputSanityFailed: the server is healthy but its output is
-                not language (garbage/empty/off-topic, or no completion inside
-                the probe budget). Unlike the health-wait timeout this is NOT
-                ambiguous — retrying cannot fix a backend that mis-computes —
-                so it raises into ``load``'s ERROR branch (red dot, actionable
-                message, crash-loop bookkeeping) instead of parking the slot
-                in a retryable WARMING.
+            SlotOutputSanityFailed: the server is healthy, ANSWERED, and what
+                it said is not language (garbage / empty / off-topic). Unlike
+                a timeout this is not ambiguous — retrying cannot fix a
+                backend that mis-computes — so it raises into ``load``'s ERROR
+                branch (red dot, actionable message, crash-loop bookkeeping)
+                instead of parking the slot in a retryable WARMING.
         """
         cfg = await self._maybe_load_config(slot_name)
         if not cfg:
@@ -3814,10 +3816,17 @@ class SlotManager:
         #
         # Scoped by ``skip_reason``: llm slots only (an embed/rerank/TTS/STT/
         # image slot cannot serve a chat completion), and escapable per box or
-        # per slot. A failure RAISES rather than returning WARMING: a wedged
-        # loader may converge on a retry, a backend that computes wrong answers
-        # never will, so this is a red dot with an actionable message — not a
-        # slot that quietly re-loads at request cadence and burns the GPU.
+        # per slot.
+        #
+        # A failure that JUDGED THE MODEL raises rather than returning WARMING:
+        # a wedged loader may converge on a retry, a backend that computes
+        # wrong answers never will, so this is a red dot with an actionable
+        # message — not a slot that quietly re-loads at request cadence and
+        # burns the GPU. A failure that judged only the CLOCK
+        # (``output_sanity.AMBIGUOUS_STATUSES``) returns WARMING instead, the
+        # same answer this method already gives an ambiguous health wait: see
+        # that constant for why a timeout is not the #1888 signature and must
+        # not be re-classified as one.
         if provider is None:
             from hal0.slots import output_sanity
 
@@ -3831,7 +3840,12 @@ class SlotManager:
                     extra={"slot": slot_name, "reason": skip},
                 )
             else:
-                sanity = await output_sanity.probe(slot_port)
+                # A cpu-device slot decodes far slower than the accelerated
+                # lane the default budget is sized for, so it is judged on its
+                # answer instead of on the clock.
+                sanity = await output_sanity.probe(
+                    slot_port, timeout_s=output_sanity.probe_budget_s(cfg)
+                )
                 log.info(
                     "slot.output_sanity",
                     extra={
@@ -3842,6 +3856,25 @@ class SlotManager:
                         "sample": sanity.sample,
                     },
                 )
+                if not sanity.ok and output_sanity.is_ambiguous(sanity.status):
+                    # Not a verdict: the answer did not arrive, which is not
+                    # the same as the answer being wrong. WARMING is not
+                    # dispatchable, so nothing is published as READY on this
+                    # path — but nothing is condemned either. The next load
+                    # re-runs the gate (``load``'s stale-in-flight branch
+                    # tears the unit down and re-enters from OFFLINE), and a
+                    # unit systemd has given up on is still converted to ERROR
+                    # by ``load``'s ``unit_failure_reason`` check.
+                    log.warning(
+                        "slot.output_sanity_inconclusive",
+                        extra={
+                            "slot": slot_name,
+                            "port": slot_port,
+                            "status": sanity.status,
+                            "detail": sanity.detail,
+                        },
+                    )
+                    return SlotState.WARMING
                 if not sanity.ok:
                     message = output_sanity.failure_message(sanity)
                     log.error(

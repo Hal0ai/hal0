@@ -28,9 +28,11 @@ DESIGN RULES (learned from the FLM gate and from #1888)
 * **One shot, off the hot path.**  Runs exactly once per load, inside
   ``_await_ready`` where the slot holds its lock and is not yet dispatchable.
   It must never join the 2s fail-watch or the per-request readiness gate.
-* **A timeout is a FAIL.**  A runner that cannot emit 12 greedy tokens inside
-  :data:`OUTPUT_SANITY_TIMEOUT_S` is not ready, and "inconclusive → pass" is
-  exactly the lie this gate exists to stop.
+* **A timeout is not a PASS — and not a CONDEMNATION either.**  "Inconclusive
+  → ready" is exactly the lie this gate exists to stop, so a timed-out probe
+  never yields READY.  But it does not yield ERROR either: see
+  :data:`AMBIGUOUS_STATUSES`.  Only a completed round-trip whose *answer* fell
+  short is a verdict against the model.
 * **Never false-fail a working model.**  The gate stops a unit, so a wrong
   FAIL is worse than the bug it guards.  Concretely, that means judging the
   whole of what the model emitted (a reasoning model answers in
@@ -54,7 +56,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from hal0.slot_lifecycle_budget import OUTPUT_SANITY_CHAT_TIMEOUT_S, OUTPUT_SANITY_TIMEOUT_S
+from hal0.slot_lifecycle_budget import (
+    OUTPUT_SANITY_CHAT_TIMEOUT_S,
+    OUTPUT_SANITY_CPU_TIMEOUT_S,
+    OUTPUT_SANITY_TIMEOUT_S,
+)
 
 log = logging.getLogger(__name__)
 
@@ -160,6 +166,44 @@ _SECOND_OPINION_STATUSES: frozenset[str] = frozenset(
     {"empty_output", "incoherent_output", "no_content", "probe_absent"}
 )
 
+#: Failure statuses that are AMBIGUOUS rather than damning — the load path
+#: parks the slot in the retryable ``WARMING`` and stamps nothing.
+#:
+#: DO NOT "fix" ``probe_timeout`` back into a terminal failure. The reflex is
+#: to read a timeout as "the backend is wedged", but #1888 — the defect this
+#: whole module exists for — was never shaped like one: rc.6's garbage box
+#: streamed at 60-120 tok/s and closed with a ``done`` frame. Garbage was
+#: FAST. A timeout is the opposite signature, and on the CPU lane it is the
+#: signature of a box that is merely SLOW: ``/health`` proves nothing about
+#: decode rate (``providers.container`` runs no inference sentinel by design),
+#: so this probe is the first inference that box has ever done, and the fleet
+#: measured 0.12 tok/s there under load-time contention. Condemning that is a
+#: false FAIL — and this module's first rule is that a wrong FAIL is worse
+#: than the bug it guards.
+#:
+#: The line is: a COMPLETED round-trip whose answer fell short (``no_content``
+#: / ``empty_output`` / ``incoherent_output``) is a verdict about the model
+#: and stays terminal, un-adoptable, unit stopped. A round-trip that did not
+#: finish is a fact about the clock. This mirrors ``_await_ready``'s own
+#: health-wait policy ("an ambiguous outcome is treated as still loading, not
+#: failed") and :meth:`hal0.providers.flm.FLMProvider.verify_inference`, which
+#: has asked 1 token in 30s and returned retryable WARMING on failure since
+#: long before this gate existed.
+#:
+#: The remaining ``probe_``-prefixed statuses (transport error, 5xx,
+#: unparseable body) stay terminal deliberately: each is an active, immediate
+#: misbehaviour by the runner rather than an expiring clock, and none of them
+#: is the shape a slow-but-correct box produces.
+AMBIGUOUS_STATUSES: frozenset[str] = frozenset({"probe_timeout"})
+
+
+def is_ambiguous(status: str) -> bool:
+    """True when a failed verdict must NOT be treated as a verdict.
+
+    See :data:`AMBIGUOUS_STATUSES` for why the set is exactly what it is.
+    """
+    return status in AMBIGUOUS_STATUSES
+
 
 @dataclass(frozen=True, slots=True)
 class SanityVerdict:
@@ -215,6 +259,36 @@ def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
         # cannot claim it is chat-capable.
         return f"slot_type_{slot_type or 'unset'}"
     return None
+
+
+def probe_budget_s(cfg: Mapping[str, Any] | None) -> float | None:
+    """Per-request probe budget for this slot — ``None`` means module defaults.
+
+    The 20s raw / 45s chat pair is sized for a GPU. A ``device="cpu"`` slot
+    decodes one to two orders of magnitude slower (see
+    :data:`~hal0.slot_lifecycle_budget.OUTPUT_SANITY_CPU_TIMEOUT_S`), so it
+    gets the wider budget for BOTH requests — :func:`probe`'s ``timeout_s``
+    overrides the pair, which is exactly the "spend no more than this per
+    request" knob this needs.
+
+    Derived through ``_cfg_effective_backend`` rather than by reading
+    ``device`` directly so a legacy TOML carrying only ``backend`` resolves
+    the same way, and so the token can never diverge from what the load path
+    itself derives.
+
+    A wider budget only ever turns a false FAIL into a PASS or a WARMING; it
+    cannot let garbage through, because garbage answers fast and is judged on
+    its content.
+    """
+    if not isinstance(cfg, Mapping):
+        return None
+    from hal0.slots.config_write import _cfg_effective_backend
+
+    try:
+        backend = _cfg_effective_backend(cfg)
+    except Exception:  # pragma: no cover - a malformed cfg is the health path's problem
+        return None
+    return OUTPUT_SANITY_CPU_TIMEOUT_S if backend == "cpu" else None
 
 
 #: Fields of an OpenAI-shaped ``message`` that carry model output.  Judged
@@ -504,8 +578,10 @@ def teardown_failure_note(slot_name: str, error: str) -> str:
 
 
 __all__ = [
+    "AMBIGUOUS_STATUSES",
     "EXPECTED_TOKENS",
     "OUTPUT_SANITY_CHAT_TIMEOUT_S",
+    "OUTPUT_SANITY_CPU_TIMEOUT_S",
     "OUTPUT_SANITY_TIMEOUT_S",
     "SANITY_CFG_KEY",
     "SANITY_CHAT_MAX_TOKENS",
@@ -522,7 +598,9 @@ __all__ = [
     "failure_message",
     "gate_disabled_globally",
     "gate_failed",
+    "is_ambiguous",
     "probe",
+    "probe_budget_s",
     "skip_reason",
     "teardown_failure_note",
 ]

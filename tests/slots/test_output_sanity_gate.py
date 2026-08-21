@@ -251,11 +251,13 @@ async def test_probe_accepts_a_model_that_only_answers_through_its_template(
 async def test_probe_fails_on_never_terminating_server(
     slot_server: FakeSlotServer,
 ) -> None:
-    """A timeout is a FAIL, not a pass.
+    """A timeout is not a pass.
 
     "The probe was inconclusive so let the slot through" is precisely the
-    silent degrade this gate exists to remove — a runner that cannot emit a
-    dozen greedy tokens is not ready by any definition.
+    silent degrade this gate exists to remove. The verdict layer therefore
+    reports ``ok=False``; what the *load path* does with an ambiguous failure
+    is a separate decision, pinned by
+    ``test_a_slow_server_parks_the_slot_warming_instead_of_condemning_it``.
     """
     await slot_server.start(lambda path, body: None)
 
@@ -726,12 +728,73 @@ async def test_load_reaches_ready_when_the_slot_answers(
     assert container_stub.sanity_probes == [8081], "the gate runs exactly once per load"
 
 
-async def test_load_errors_when_the_probe_times_out(
+async def test_a_slow_server_parks_the_slot_warming_instead_of_condemning_it(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    slot_server: FakeSlotServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CPU-lane shape: a real server that is merely SLOW must stay retryable.
+
+    A probe timeout is ambiguous — it says the answer did not arrive inside a
+    wall clock, not that the answer was wrong. Treating it as terminal turned
+    the gate into a false-fail machine on exactly the box the release gets
+    validated on: ct151 measured 0.12 tok/s under load-time contention, the
+    container health probe runs no inference sentinel (so the gate is that
+    box's first-ever inference), and a no-GPU box binds the unquantized F16
+    brain variant. An ERROR there is not recoverable by retrying; it also
+    stamps the durable un-adoptable mark.
+
+    Real never-answering socket, real httpx round-trip, real timeout — only
+    the wall clock is shrunk, so this is the production path.
+    """
+    await slot_server.start(lambda path, body: None)
+    (slot_root / "chat.toml").write_text(
+        "\n".join(
+            [
+                'name = "chat"',
+                f"port = {slot_server.port}",
+                'device = "cpu"',
+                'provider = "llama-server"',
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    async def _slow(port: int, **_kw: Any) -> output_sanity.SanityVerdict:
+        return await _probe(port, timeout_s=0.3)
+
+    monkeypatch.setattr("hal0.slots.output_sanity.probe", _slow)
+    sm = SlotManager()
+
+    slot = await sm.load("chat")
+
+    # Retryable, non-dispatchable, and NOT a lying READY.
+    assert slot.state is SlotState.WARMING
+    record = sm._states[sm._key("chat")]
+    # No durable verdict: nothing here is proven bad, so nothing may be made
+    # un-adoptable.
+    for key in output_sanity.SANITY_EXTRA_KEYS:
+        assert key not in record.extra
+    # And the unit is left alone — the teardown belongs to a condemned slot.
+    assert "chat" in container_stub.active
+    assert container_stub.unload_calls == []
+
+
+async def test_a_probe_timeout_leaves_the_slot_adoptable(
     slot_root: Path,
     container_stub: FakeContainerProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A probe timeout must fail the load, not fall through to READY."""
+    """WARMING must not poison the adoption path the way a real verdict does.
+
+    The durable mark is what makes a FAILED gate survive a restart. An
+    ambiguous outcome earns none of that: the next load re-runs the gate and
+    the slot converges on evidence, not on a stamp nothing cleared.
+    """
 
     async def _timeout(port: int, **_kw: Any) -> output_sanity.SanityVerdict:
         return output_sanity.SanityVerdict(ok=False, status="probe_timeout")
@@ -739,10 +802,173 @@ async def test_load_errors_when_the_probe_times_out(
     monkeypatch.setattr("hal0.slots.output_sanity.probe", _timeout)
     sm = SlotManager()
 
+    await sm.load("chat")
+
+    assert sm._current_state("chat") is SlotState.WARMING
+    cfg = await sm._maybe_load_config("chat")
+    assert cfg is not None
+    assert await sm._maybe_adopt_running_slot("chat", cfg) is not None
+
+
+async def test_a_slot_parked_warming_re_runs_the_gate_on_the_next_load(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Convergence: WARMING is a retry, not a resting place.
+
+    ``load``'s stale-in-flight branch (PULLING/STARTING/WARMING) tears the
+    unit down and re-enters the lifecycle from OFFLINE, so the gate runs
+    again on every retry. Without that the slot would sit un-judged forever
+    behind an ambiguous verdict.
+    """
+    timeouts = True
+
+    async def _probe_then_recover(port: int, **_kw: Any) -> output_sanity.SanityVerdict:
+        if timeouts:
+            return output_sanity.SanityVerdict(ok=False, status="probe_timeout")
+        return output_sanity.classify(" Paris.")
+
+    monkeypatch.setattr("hal0.slots.output_sanity.probe", _probe_then_recover)
+    sm = SlotManager()
+    await sm.load("chat")
+    assert sm._current_state("chat") is SlotState.WARMING
+
+    timeouts = False
+    slot = await sm.load("chat")
+
+    assert slot.state is SlotState.READY
+
+
+async def test_a_dead_backend_still_converges_to_error_in_the_same_load(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WARMING must not become a hiding place for a genuinely dead slot.
+
+    The ambiguity carve-out only says "the probe cannot tell". Something else
+    still can: ``load`` asks systemd directly whenever the readiness resolve
+    comes back WARMING (#1791), and a unit parked in ``failed`` / gone is
+    proof no retry will help. That converts the ambiguous outcome into ERROR
+    inside the same load, with the crash-loop bookkeeping the breaker needs —
+    so a dead backend never rides a timeout into an unbounded retry loop.
+    """
+
+    async def _timeout(port: int, **_kw: Any) -> output_sanity.SanityVerdict:
+        return output_sanity.SanityVerdict(ok=False, status="probe_timeout")
+
+    monkeypatch.setattr("hal0.slots.output_sanity.probe", _timeout)
+    container_stub.unit_failure_by_slot["chat"] = "start-limit-hit"
+    sm = SlotManager()
+
+    with pytest.raises(Exception) as excinfo:
+        await sm.load("chat")
+
+    assert "start-limit-hit" in str(excinfo.value)
+    assert sm._current_state("chat") is SlotState.ERROR
+    assert sm._load_failures[sm._key("chat")][0] == 1
+
+
+async def test_garbage_stays_terminal_even_though_a_timeout_does_not(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    slot_server: FakeSlotServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #1888 signature is untouched by the timeout carve-out.
+
+    rc.6's garbage box streamed at 60-120 tok/s and closed with a ``done``
+    frame: garbage was FAST. A timeout was never its signature, so exempting
+    timeouts removes false failures without weakening a single true positive.
+    This pins the pair against one real server so the distinction cannot rot
+    into "any probe failure is survivable".
+    """
+    await slot_server.start(_completion(")))))))))))))"))
+    (slot_root / "chat.toml").write_text(
+        "\n".join(
+            [
+                'name = "chat"',
+                f"port = {slot_server.port}",
+                'provider = "llama-server"',
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    async def _real(port: int, **_kw: Any) -> output_sanity.SanityVerdict:
+        return await _probe(port, timeout_s=5.0)
+
+    monkeypatch.setattr("hal0.slots.output_sanity.probe", _real)
+    sm = SlotManager()
+
     with pytest.raises(SlotOutputSanityFailed):
         await sm.load("chat")
 
     assert sm._current_state("chat") is SlotState.ERROR
+    record = sm._states[sm._key("chat")]
+    assert record.extra.get(output_sanity.SANITY_FAILED_KEY) is True
+
+
+def test_a_cpu_slot_gets_a_wider_probe_budget() -> None:
+    """A slow-but-correct box must be judged on its answer, not on the clock.
+
+    The accelerated lane's 20s is a fine bound for a GPU that decodes a dozen
+    tokens instantly. A ``device="cpu"`` slot is the lane the fleet's own
+    measurements say cannot clear it — and on a no-GPU box every seeded slot
+    is derived to ``cpu`` (``install.profile_derive.derive_device``), so this
+    is the default shape there, not an exotic one.
+    """
+    from hal0.slot_lifecycle_budget import OUTPUT_SANITY_CPU_TIMEOUT_S, OUTPUT_SANITY_TIMEOUT_S
+
+    assert output_sanity.probe_budget_s({"device": "cpu"}) == OUTPUT_SANITY_CPU_TIMEOUT_S
+    assert OUTPUT_SANITY_CPU_TIMEOUT_S > OUTPUT_SANITY_TIMEOUT_S
+    # An accelerated slot keeps the module defaults (both of them — the raw
+    # probe's and the chat fallback's), which ``None`` is the signal for.
+    assert output_sanity.probe_budget_s({"device": "gpu-rocm"}) is None
+    assert output_sanity.probe_budget_s({"device": "npu"}) is None
+    assert output_sanity.probe_budget_s(None) is None
+    # Legacy TOMLs carry only ``backend``; the cpu lane must be recognised
+    # there too or the widening misses every un-migrated box.
+    assert output_sanity.probe_budget_s({"backend": "cpu"}) == OUTPUT_SANITY_CPU_TIMEOUT_S
+
+
+async def test_the_load_path_hands_the_probe_the_slot_s_budget(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The derived budget is worthless if the gate does not pass it through."""
+    from hal0.slot_lifecycle_budget import OUTPUT_SANITY_CPU_TIMEOUT_S
+
+    (slot_root / "chat.toml").write_text(
+        "\n".join(
+            [
+                'name = "chat"',
+                "port = 8081",
+                'device = "cpu"',
+                'provider = "llama-server"',
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    seen: list[float | None] = []
+
+    async def _record(port: int, *, timeout_s: float | None = None) -> output_sanity.SanityVerdict:
+        seen.append(timeout_s)
+        return output_sanity.classify(" Paris.")
+
+    monkeypatch.setattr("hal0.slots.output_sanity.probe", _record)
+
+    await SlotManager().load("chat")
+
+    assert seen == [OUTPUT_SANITY_CPU_TIMEOUT_S]
 
 
 async def test_load_skips_the_gate_for_non_llm_slots(
