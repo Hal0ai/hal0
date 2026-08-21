@@ -294,7 +294,7 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
         node = qp.get("node")
         if not node:
             raise UnprocessableEntity("ego mode requires ?node=", code="memory.invalid_query")
-        depth = min(int(qp.get("depth", 1)), 2)
+        depth = min(int(qp.get("depth", 1)), 10)
         keep = _sg.ego_bfs(graph, node, depth=depth, limit=limit)
         if not keep:
             raise NotFound(f"node {node!r} not in bank graph", code="memory.node_not_found")

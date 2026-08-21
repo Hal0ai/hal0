@@ -222,6 +222,27 @@ def test_subgraph_entities_kind_hits_entities_graph():
         assert any(req["path"].endswith("/entities/graph") for req in rec.requests)
 
 
+def test_subgraph_ego_depth_honoured_to_ten():
+    _reset_cache()
+    chain = {
+        "nodes": [{"data": {"id": f"n{i}"}} for i in range(11)],
+        "edges": [
+            {"data": {"source": f"n{i}", "target": f"n{i + 1}", "type": "semantic"}}
+            for i in range(10)
+        ],
+    }
+    rec = _Recorder()
+    rec.respond("GET", "/v1/default/banks/shared/graph", 200, chain)
+    app = _build_app(_HindsightStubProvider(_client_for(rec)))
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/memory/banks/shared/graph/subgraph",
+            params={"mode": "ego", "node": "n0", "depth": 10},
+        )
+        assert r.status_code == 200, r.text
+        assert len(r.json()["nodes"]) == 11  # depth clamp allows the full chain
+
+
 def test_subgraph_caches_upstream_fetch():
     _reset_cache()
     rec = _Recorder()
