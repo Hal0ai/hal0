@@ -230,6 +230,25 @@ def test_reflect_post_forwards(client: TestClient, recorder: _Recorder) -> None:
     assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/reflect"
 
 
+def test_memory_curate_patch_forwards(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond(
+        "PATCH",
+        "/v1/default/banks/shared/memories/fact-1",
+        200,
+        {"id": "fact-1", "text": "edited", "state": "invalidated"},
+    )
+    r = client.patch(
+        "/api/memory/banks/shared/memories/fact-1",
+        json={"text": "edited", "state": "invalidated", "reason": "stale"},
+    )
+    assert r.status_code == 200
+    assert r.json()["state"] == "invalidated"
+    fwd = recorder.requests[-1]
+    assert fwd["method"] == "PATCH"
+    assert fwd["path"] == "/v1/default/banks/shared/memories/fact-1"
+    assert '"reason": "stale"' in fwd["body"] or '"reason":"stale"' in fwd["body"]
+
+
 # ── #1026: response-shape guards on the cognition consoles ──────────────────────
 
 

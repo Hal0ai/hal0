@@ -586,6 +586,14 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/memories/{memory_id}/history",
         "/v1/default/banks/{bank_id}/memories/{memory_id}/history",
     ),
+    # memory_curate (MCP parity): edit text/context/fact_type/entities or
+    # invalidate a unit (state="invalidated", reason). Reversible → no
+    # _DELETE_ACTIONS entry, no approval gate.
+    (
+        "PATCH",
+        "/banks/{bank_id}/memories/{memory_id}",
+        "/v1/default/banks/{bank_id}/memories/{memory_id}",
+    ),
     # documents + chunks + tags
     ("GET", "/banks/{bank_id}/documents", "/v1/default/banks/{bank_id}/documents"),
     (
