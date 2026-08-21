@@ -556,7 +556,7 @@ function EgoGraph({ bank, centerId, onGo }) {
                 y1={a.y}
                 x2={b.x}
                 y2={b.y}
-                stroke={LINK_COLORS[e.data.linkType] || 'var(--fg-4)'}
+                stroke={LINK_COLORS[e.data.linkType ?? e.data.type] || 'var(--fg-4)'}
                 strokeWidth={w >= 2 ? 1.5 : 1}
                 opacity={w >= 2 ? 0.65 : 0.35}
               />
@@ -645,7 +645,7 @@ function LocalGraph({ bank, centerId, onGo }) {
           )
           return (
             <g key={id} style={{ cursor: 'pointer' }} onClick={() => onGo(id)}>
-              <line x1={cx} y1={cy} x2={x} y2={y} stroke={edge ? LINK_COLORS[edge.data.linkType] || 'var(--fg-4)' : 'var(--fg-4)'} strokeWidth="1.5" opacity="0.75" />
+              <line x1={cx} y1={cy} x2={x} y2={y} stroke={edge ? LINK_COLORS[edge.data.linkType ?? edge.data.type] || 'var(--fg-4)' : 'var(--fg-4)'} strokeWidth="1.5" opacity="0.75" />
               <circle cx={x} cy={y} r="6" fill="var(--bg-2)" stroke={FACT_COLORS[n.data.type]} strokeWidth="1.5" />
               <text x={x} y={above ? y - 12 : y + 19} textAnchor="middle" style={{ font: '500 10px var(--jbm)', fill: 'var(--fg-3)' }}>
                 {trunc(n.data.label || id)}
