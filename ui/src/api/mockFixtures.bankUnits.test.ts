@@ -162,6 +162,22 @@ describe('buildBankUnits (mock fixture)', () => {
     expect(page.next_offset).toBeNull()
   })
 
+  it('final-review M3: the empty-bank early return still carries truncated: false', () => {
+    // The empty-bank branch used to omit `truncated` entirely, diverging
+    // from the main return's shape — a caller couldn't rely on the field
+    // existing regardless of which path answered.
+    const page = unitsFor('empty')
+    expect(page.truncated).toBe(false)
+  })
+
+  it('final-review M5: clamps limit at 200 to match the real endpoint (memory_admin.py bank_units)', () => {
+    // The mock used to clamp at 100; the server clamps at 200
+    // (`max(1, min(limit, 200))`). Moot while PAGE_SIZE is 10, but a latent
+    // drift the mock should not carry.
+    const page = unitsFor('primary', 'limit=500')
+    expect(page.items.length).toBeLessThanOrEqual(200)
+  })
+
   it('excludes invalidated units by default (upstream archive behaviour)', () => {
     const page = unitsFor('primary', 'limit=100')
     expect(page.items.every((r) => r.state === 'valid')).toBe(true)
