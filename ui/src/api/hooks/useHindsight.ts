@@ -380,12 +380,23 @@ export function useRecall() {
   })
 }
 
+// Post-smoke fix (curl-verified against the live install, 2026-08-21):
+// upstream Hindsight 0.8.4's reflect route requires `query` in the request
+// body — `text` (the field this hook sent before this fix, on the mistaken
+// assumption it matched the passthrough's other verbatim fields) 422s with
+// `{"loc":["body","query"],"msg":"Field required"}`. The RESPONSE shape is
+// unaffected — it still carries `text` (the answer) + `based_on`, typed
+// below exactly as before; only the request field name changes.
+export interface ReflectBody {
+  query: string
+}
+
 export function useReflect() {
   return useMutation({
-    mutationFn: ({ bank, body }: { bank: string; body: Record<string, unknown> }) =>
+    mutationFn: ({ bank, body }: { bank: string; body: ReflectBody }) =>
       apiPost<{ text: string; based_on?: Record<string, number> }>(
         ENDPOINTS.memoryBankReflect(bank),
-        body,
+        body as unknown as Record<string, unknown>,
       ),
   })
 }

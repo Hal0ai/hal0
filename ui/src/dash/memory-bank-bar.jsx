@@ -396,10 +396,12 @@ function BankBar({ bank, setBank }) {
     const question = (text ?? q).trim()
     if (!question) return
     setQ(question)
-    // Verbatim Hindsight passthrough — the body field is `text`, not
-    // `query` (memory_admin.py's passthrough allowlist requires `text`
-    // for this route).
-    reflect.mutate({ bank, body: { text: question } })
+    // Post-smoke fix: upstream Hindsight 0.8.4's reflect route requires
+    // `query`, not `text` — curl-verified against the live install
+    // (2026-08-21), which 422s on `text` with "Field required: body.query".
+    // The response itself still carries `text` (the answer), read below via
+    // `reflect.data`/`ans` — only the request field name was wrong.
+    reflect.mutate({ bank, body: { query: question } })
   }
   const ans = reflect.data
 
