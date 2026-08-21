@@ -16,20 +16,29 @@ test.describe('memory-v2 BankBar + Add modal', () => {
     // GET-only (confirmed in the C3 report), so this always falls through
     // to the real network, which the apiMock fixture's blanket `/api/`
     // catch-all answers with `{}` unless overridden here.
-    await page.route('**/api/memory/banks/primary/reflect', (route) =>
-      route.fulfill({
+    let postBody: unknown = null
+    await page.route('**/api/memory/banks/primary/reflect', (route) => {
+      postBody = route.request().postDataJSON()
+      return route.fulfill({
         json: {
           text: 'Over the last six weeks the strix-halo-01 operator hardened a fresh hal0 install into a resilient daily driver.',
           based_on: { facts: 22, documents: 6, mental_models: 3 },
         },
-      }),
-    )
+      })
+    })
     await page.goto('/#memory/bank?bank=primary')
     await page.getByTestId('mv-reflect-tab').click()
     await page.getByTestId('mv-reflect-q').fill('why is extraction lagging?')
     await page.getByTestId('mv-reflect-run').click()
     await expect(page.getByTestId('mv-reflect-out')).toBeVisible()
     await expect(page.getByTestId('mv-reflect-out')).toContainText('strix-halo-01')
+    // Post-smoke fix: upstream Hindsight 0.8.4 requires `query`, not `text`,
+    // in the request body (curl-verified live, 2026-08-21 — `text` 422s).
+    // The response the mock above returns still carries `text` (the
+    // answer), asserted above via mv-reflect-out — only the request field
+    // changed.
+    expect(postBody).toMatchObject({ query: 'why is extraction lagging?' })
+    expect(postBody).not.toHaveProperty('text')
   })
 
   test('rules tab lists directives and mental models from the mock', async ({ page }) => {
