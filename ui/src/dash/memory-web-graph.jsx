@@ -65,13 +65,21 @@ function WebGraph({ bank, sel, setSel, filters }) {
   const W = 860,
     H = 620
 
-  // Server-side params the real /graph endpoint actually supports; the
-  // rest of `filters` (tags/from/to/documentId) has no server-side
-  // equivalent on this route, so it's applied as a client-side dim below —
-  // documented, not silently dropped.
-  const graphQuery = useBankGraph
-    ? useBankGraph(bank, { type: filters?.type, q: filters?.q, limit: 500 })
-    : { data: null }
+  // `type` is deliberately NEVER forwarded to /graph (final-review I1):
+  // `/graph` is a verbatim Hindsight passthrough — upstream `type` is
+  // single-value exact-equality, so a comma-joined multi-type value (1 or 2
+  // of the 3 toggles active) matches nothing and silently returns an empty
+  // graph. Worse, even a *single* valid type filtered server-side drops any
+  // edge whose other endpoint falls outside that type — the same
+  // cross-type-edge understatement A3b fixed for `bank_units` — which would
+  // also skew this view's salience cap. Filtering client-side via
+  // `matchesFilters` below (dimming, not removing, so the true edge set and
+  // salience ranking stay intact) avoids both problems in one fix rather
+  // than conditionally forwarding only single values. The rest of `filters`
+  // (tags/from/to/documentId) has no server-side equivalent on this route
+  // either, so it was already applied the same way — this just adds `type`
+  // to that existing client-side dim instead of a third, redundant path.
+  const graphQuery = useBankGraph ? useBankGraph(bank, { q: filters?.q, limit: 500 }) : { data: null }
   const allNodes = graphQuery.data?.nodes || []
   const allEdges = graphQuery.data?.edges || []
 
@@ -113,13 +121,21 @@ function WebGraph({ bank, sel, setSel, filters }) {
     })
   }, [presentTypes.join(',')])
 
-  // Client-side dim for the filter dimensions the /graph endpoint can't
-  // take: tags (node.data.topic), from/to (node.data.date). documentId has
-  // no equivalent field on a graph node at all — a fact's source document
-  // isn't part of this payload, so that one filter dimension simply isn't
-  // enforceable here (documented, not silently ignored).
+  // filters.type is unitsParams' comma-joined type string (undefined when
+  // all 3 fact-type toggles are active, i.e. "no filter") — split once per
+  // render rather than per node.
+  const typeSet = filters?.type ? new Set(filters.type.split(',')) : null
+
+  // Client-side dim for every filter dimension the /graph endpoint either
+  // can't take (tags — node.data.topic; from/to — node.data.date) or that
+  // we deliberately stopped forwarding (type — see the graphQuery comment
+  // above). documentId has no equivalent field on a graph node at all — a
+  // fact's source document isn't part of this payload, so that one filter
+  // dimension simply isn't enforceable here (documented, not silently
+  // ignored).
   const matchesFilters = (n) => {
     const d = n.data
+    if (typeSet && !typeSet.has(d.type)) return false
     if (filters?.tags && filters.tags.length && !filters.tags.includes(d.topic)) return false
     if (filters?.from && d.date && new Date(d.date).getTime() < new Date(filters.from).getTime()) return false
     if (filters?.to && d.date && new Date(d.date).getTime() > new Date(filters.to).getTime()) return false

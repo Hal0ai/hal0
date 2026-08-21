@@ -55,3 +55,51 @@ describe('MemV2WebGraph (smoke)', () => {
     expect(html).toContain('mv-web-zoom')
   })
 })
+
+describe('MemV2WebGraph — final-review I1 (stop forwarding type to /graph)', () => {
+  it('never passes a type param to useBankGraph, even when filters.type is set', () => {
+    // /graph is a verbatim Hindsight passthrough with single-value
+    // exact-equality `type` semantics; a comma-joined multi-type value
+    // matches nothing, and even a single value drops cross-type edges
+    // server-side (the same understatement A3b fixed for bank_units). The
+    // fix stops forwarding `type` to this route entirely and dims
+    // client-side instead — this pins the "entirely" half by spying on
+    // exactly what reaches useBankGraph.
+    const calls: Array<Record<string, unknown>> = []
+    const real = (globalThis as unknown as { __hal0UseBankGraph: unknown }).__hal0UseBankGraph
+    ;(globalThis as unknown as { __hal0UseBankGraph: unknown }).__hal0UseBankGraph = (
+      _bank: string,
+      params: Record<string, unknown>,
+    ) => {
+      calls.push(params)
+      return { data: { nodes: [], edges: [] } }
+    }
+
+    try {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const MemV2WebGraph = (globalThis as unknown as { MemV2WebGraph: React.ComponentType<any> })
+        .MemV2WebGraph
+      renderToStaticMarkup(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(MemV2WebGraph, {
+            bank: 'primary',
+            sel: null,
+            setSel: () => {},
+            filters: { type: 'world,experience', q: 'x' },
+          }),
+        ),
+      )
+
+      expect(calls.length).toBeGreaterThan(0)
+      for (const params of calls) {
+        expect(Object.prototype.hasOwnProperty.call(params, 'type')).toBe(false)
+      }
+      // q still forwards — only type stopped.
+      expect(calls[0].q).toBe('x')
+    } finally {
+      ;(globalThis as unknown as { __hal0UseBankGraph: unknown }).__hal0UseBankGraph = real
+    }
+  })
+})
