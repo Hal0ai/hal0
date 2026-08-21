@@ -46,6 +46,20 @@ def adjacency(graph: dict[str, Any]) -> dict[Any, list[tuple[Any, str, float]]]:
     return adj
 
 
+def degree_by_node(graph: dict[str, Any]) -> dict[Any, tuple[int, float]]:
+    """Node id -> (degree, weighted salience) over the undirected adjacency.
+
+    Weighted salience sums ``type_weight(link_type) * weight`` per incident
+    edge — same salience math as :func:`rank_by_degree`'s secondary sort key,
+    exposed standalone so callers (e.g. the ranked units endpoint) can attach
+    it to individual rows without re-deriving a rank order.
+    """
+    adj = adjacency(graph)
+    return {
+        nid: (len(nbrs), sum(type_weight(lt) * w for _, lt, w in nbrs)) for nid, nbrs in adj.items()
+    }
+
+
 def rank_by_degree(graph: dict[str, Any]) -> list[Any]:
     adj = adjacency(graph)
     ids = [_nid(n) for n in graph.get("nodes", [])]

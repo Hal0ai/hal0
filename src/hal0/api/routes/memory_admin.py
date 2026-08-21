@@ -316,6 +316,111 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
     return out
 
 
+# ── composed ranked units endpoint (NOT a passthrough) ─────────────────────────
+#
+# Upstream /memories/list only understands q/type/state/document_id/limit/offset
+# (0.8.4); tag, time-window filtering and salience ranking are computed here
+# over a cached slab — same tradeoff, and the same per-bank graph cache, as
+# bank_subgraph. Registered explicitly BEFORE the _FORWARDS loop.
+
+#: 0.8.4 list rows carry no ``created_at`` — timestamps come from whichever of
+#: these is present (first match wins).
+_UNIT_TS_KEYS = ("mentioned_at", "date")
+
+
+def _unit_ts(row: dict[str, Any]) -> str:
+    for key in _UNIT_TS_KEYS:
+        value = row.get(key)
+        if value:
+            return str(value)
+    return ""  # missing sorts last
+
+
+@router.get("/banks/{bank_id}/units")
+async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
+    """Ranked, filterable fact slice for the Bank workspace (memory_v2 ask #2).
+
+    Each returned unit is the upstream ``/memories/list`` row verbatim plus
+    computed ``salience`` (graph-degree weighted, see ``_sg.degree_by_node``)
+    and ``link_counts_by_type`` (whatever link types the bank graph emits —
+    ``temporal``/``semantic``/``entity`` today; never hardcoded). ``tags``,
+    ``from``/``to`` and ``sort=salience`` are hal0-side; ``q``/``type``/
+    ``state``/``document_id`` forward upstream verbatim (``state`` matters:
+    invalidated facts live in a separate archive excluded from the default
+    listing, so the inspector's revert flow needs ``state=invalidated`` to
+    have anything to list).
+    """
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    qp = request.query_params
+    sort = qp.get("sort", "recency")
+    if sort not in ("recency", "salience"):
+        raise UnprocessableEntity(f"invalid sort: {sort!r}", code="memory.invalid_query")
+    limit = min(int(qp.get("limit", 20)), 200)
+    offset = max(int(qp.get("offset", 0)), 0)
+
+    # NOTE: build upstream params explicitly, one at a time — the generic
+    # forward's dict(request.query_params) collapses repeated params to the
+    # last value. All params here are single-valued so that's moot today, but
+    # if 0.8.5+ ever lands multi-value tag forwarding, that must use
+    # request.query_params.multi_items() + an httpx list-of-tuples, not a
+    # comma-join into a single string like the hal0-side `tags` filter below.
+    src_params: dict[str, str] = {
+        k: qp[k] for k in ("q", "type", "state", "document_id") if qp.get(k)
+    }
+    src_params["limit"] = "2000"
+    listing = await _forward(
+        client, "GET", f"/v1/default/banks/{bank_id}/memories/list", params=src_params
+    )
+    rows = listing.get("items") if isinstance(listing, dict) else listing
+    if not isinstance(rows, list):
+        raise MemoryEngineShape("memories/list returned no item list")
+
+    tags = {t for t in (qp.get("tags") or "").split(",") if t}
+    lo, hi = qp.get("from"), qp.get("to")
+    kept = [
+        r
+        for r in rows
+        if isinstance(r, dict)
+        and (not tags or tags & set(r.get("tags") or ()))
+        and (not (lo or hi) or _unit_ts(r) != "")  # window given: undated rows drop
+        and (not lo or _unit_ts(r) >= lo)
+        and (not hi or _unit_ts(r)[: len(hi)] <= hi)
+    ]
+
+    # salience + per-type link counts from the cached bank graph (45s TTL).
+    # Cache key mirrors bank_subgraph's (bank, kind, type, q) so a graph
+    # explorer view and this list share the same cached slab.
+    cache_key = f"{bank_id}:memories:{qp.get('type', '')}:{qp.get('q', '')}"
+    graph = _GRAPH_CACHE.peek(cache_key)
+    if graph is None:
+        graph_params: dict[str, str] = {k: qp[k] for k in ("type", "q") if qp.get(k)}
+        graph_params.setdefault("limit", "2000")
+        graph = await _forward(
+            client, "GET", f"/v1/default/banks/{bank_id}/graph", params=graph_params
+        )
+        _GRAPH_CACHE.put(cache_key, graph)
+    adj = _sg.adjacency(graph)
+    salience_by_node = _sg.degree_by_node(graph)
+    for r in kept:
+        nbrs = adj.get(r.get("id"), [])
+        counts: dict[str, int] = {}
+        for _t, link_type, _w in nbrs:
+            counts[link_type] = counts.get(link_type, 0) + 1
+        r["link_counts_by_type"] = counts
+        r["salience"] = salience_by_node.get(r.get("id"), (0, 0.0))[1]
+
+    kept.sort(
+        key=(lambda r: (-r["salience"], _unit_ts(r)))
+        if sort == "salience"
+        else (lambda r: _unit_ts(r)),
+        reverse=(sort == "recency"),
+    )
+    page = kept[offset : offset + limit]
+    nxt = offset + limit if offset + limit < len(kept) else None
+    return {"items": page, "total_matched": len(kept), "next_offset": nxt}
+
+
 # ── DELETE /banks/{bank_id} — guarded (NOT a passthrough) ──────────────────────
 #
 # Bank deletion is irreversible upstream (drops every memory/document/entity in
