@@ -16,6 +16,20 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  // This config intentionally skips `@vitejs/plugin-react` (see the header
+  // comment — no DOM/React-rendering test needs it yet), but esbuild's own
+  // default JSX transform is the *classic* runtime (`React.createElement`,
+  // expecting a global `React`), while the app's real vite.config.ts (via
+  // the react plugin) uses the automatic runtime. Without this, importing
+  // any dash/*.jsx module that defines top-level JSX (e.g.
+  // memory-v2-shared.jsx's icon glyph map) throws `ReferenceError: React is
+  // not defined` at import time — even when the only thing under test is a
+  // plain pure helper function that has nothing to do with JSX. Matching
+  // esbuild's `jsx` mode to the app's runtime fixes that without pulling in
+  // the full plugin.
+  esbuild: {
+    jsx: 'automatic',
+  },
   test: {
     environment: 'node',
     // tests/e2e/port.test.ts covers the Playwright port derivation (#1399) —

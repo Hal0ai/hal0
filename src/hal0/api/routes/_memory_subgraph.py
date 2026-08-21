@@ -46,6 +46,20 @@ def adjacency(graph: dict[str, Any]) -> dict[Any, list[tuple[Any, str, float]]]:
     return adj
 
 
+def degree_by_node(graph: dict[str, Any]) -> dict[Any, tuple[int, float]]:
+    """Node id -> (degree, weighted salience) over the undirected adjacency.
+
+    Weighted salience sums ``type_weight(link_type) * weight`` per incident
+    edge — same salience math as :func:`rank_by_degree`'s secondary sort key,
+    exposed standalone so callers (e.g. the ranked units endpoint) can attach
+    it to individual rows without re-deriving a rank order.
+    """
+    adj = adjacency(graph)
+    return {
+        nid: (len(nbrs), sum(type_weight(lt) * w for _, lt, w in nbrs)) for nid, nbrs in adj.items()
+    }
+
+
 def rank_by_degree(graph: dict[str, Any]) -> list[Any]:
     adj = adjacency(graph)
     ids = [_nid(n) for n in graph.get("nodes", [])]
@@ -154,3 +168,14 @@ class GraphCache:
     def put(self, key: str, value: Any) -> None:
         self._evict_if_full(key)
         self._store[key] = (self._clock(), value)
+
+    def clear_bank(self, bank_id: str) -> None:
+        """Drop every cached slab for ``bank_id`` (cache keys are ``f"{bank_id}:..."``).
+
+        Called after a mutation that changes what the next ``peek`` should
+        return (e.g. a curate PATCH) — otherwise a caller within the TTL
+        window keeps seeing the pre-mutation slab. See PR #1987 review M5.
+        """
+        prefix = f"{bank_id}:"
+        for key in [k for k in self._store if k.startswith(prefix)]:
+            self._store.pop(key, None)

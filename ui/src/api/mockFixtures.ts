@@ -592,7 +592,7 @@ const MEM_ENTITIES: { id: string; label: string; kind: string }[] = [
   { id: 'igpu', label: 'Radeon 8060S', kind: 'device' },
 ]
 
-const MEM_FACTS: MemFact[] = [
+export const MEM_FACTS: MemFact[] = [
   // setup
   { id: 'f1', date: '2026-04-28T10:12', topic: 'setup', type: 'experience', label: 'Installed hal0 on Debian 13', text: 'Installed hal0 on Debian 13 via the one-line installer; lemond came up first try.', ents: ['box', 'lemond'] },
   { id: 'f2', date: '2026-04-28T11:40', topic: 'setup', type: 'world', label: 'Proxmox iGPU passthrough', text: 'Configured Proxmox LXC privileged passthrough for the Radeon 8060S iGPU and XDNA NPU.', ents: ['proxmox', 'igpu', 'npu', 'box'] },
@@ -621,6 +621,14 @@ const MEM_FACTS: MemFact[] = [
   { id: 'f20', date: '2026-05-17T20:15', topic: 'models', type: 'experience', label: 'Swapped NPU chat model', text: 'Swapped NPU chat gemma3:1b → llama-3.2-3b-npu; voice + embed paused ~14s on FLM restart.', ents: ['gemma', 'npu'] },
   { id: 'f21', date: '2026-05-18T20:40', topic: 'models', type: 'observation', label: 'llama-3.2 better at tools', text: 'llama-3.2-3b follows tool-call schemas more reliably than gemma3:1b on the NPU.', ents: ['gemma', 'npu'] },
   { id: 'f22', date: '2026-06-05T11:20', topic: 'models', type: 'world', label: 'Pinned Qwen quant', text: 'Pinned the Q4_K_M Qwen quant after testing Q5 — Q5 spilled into shared RAM.', ents: ['qwen', 'disk'] },
+  // Memory v2 (Bank workspace UI, #B1) — 4 more facts landing INSIDE the
+  // 21-day window `buildBankTimeseries` renders (ending 2026-06-12), so a
+  // when-brush time-window filter over `buildBankUnits` has a non-trivial
+  // intersection with the timeseries chart instead of only ever hitting f22.
+  { id: 'f23', date: '2026-05-25T09:00', topic: 'operator', type: 'observation', label: 'Approves risky ops via dashboard', text: 'Operator now approves destructive memory ops (bank delete, directive delete) via the dashboard confirm dialog instead of raw API calls.', ents: ['halo'] },
+  { id: 'f24', date: '2026-05-30T14:00', topic: 'storage', type: 'experience', label: 'Set weekly quant prune cron', text: 'Added a weekly cron to auto-prune GGUF quants untouched for 30 days, keeping /var below 80%.', ents: ['disk', 'hf'] },
+  { id: 'f25', date: '2026-06-08T10:00', topic: 'setup', type: 'world', label: 'hal0 upgraded to v0.8', text: 'Upgraded hal0 to v0.8 on strix-halo-01; new memory v2 dashboard replaces the old graph tab.', ents: ['box', 'lemond'] },
+  { id: 'f26', date: '2026-06-10T20:00', topic: 'reliability', type: 'experience', label: 'UPS self-test passed', text: 'Monthly UPS self-test completed clean; runtime holding at ~20 min under full load.', ents: ['ups'] },
 ]
 
 // explicit "led to" chains (directed)
@@ -1065,6 +1073,188 @@ function buildBankDocuments() {
   return { items, total: items.length }
 }
 
+// topic -> the doc it lives in, above (keeps unit.document_id resolvable
+// against buildBankDocuments' ids so the Overview's "jump to source
+// document" affordance always resolves for the primary bank).
+const MEM_TOPIC_DOCUMENT: Record<string, string> = {
+  setup: 'doc-install-log',
+  reliability: 'doc-outage-postmortem',
+  performance: 'doc-thermal-notes',
+  storage: 'doc-storage-prune',
+  models: 'doc-npu-eval',
+  operator: 'doc-operator-profile',
+}
+
+function entityLabelsFor(ents: string[]): string[] {
+  return ents.map((id) => MEM_ENTITIES.find((e) => e.id === id)?.label ?? id)
+}
+
+// Upstream (hindsight-api 0.8.4) archives invalidated facts out of the
+// default /units listing; the curation inspector's revert flow lists them
+// back in via `state=invalidated`. 2 of the 26 seed facts are marked
+// invalidated here (state below) so `buildBankUnits`'s default-exclude AND
+// `state=invalidated` paths are both exercised by the mock. f9/f20 are
+// picked because they fall outside the topics/dates the other unit tests
+// filter on (performance/operator/thermal/the timeseries window), so
+// marking them invalidated doesn't starve an unrelated test.
+const MEM_INVALIDATED_FACT_IDS = new Set(['f9', 'f20'])
+
+// Curatable unit rows (Memory v2 Bank workspace) — one per MEM_FACTS entry,
+// enriched with the fields the units endpoint actually returns:
+// salience (derived from total link degree, so it's stable and non-uniform)
+// and link_counts_by_type (a real tally off `buildMemFactGraph`'s edges, so
+// the Overview's "top salient" and the fact inspector's "N links" agree).
+function buildUnitRows(facts: MemFact[] = MEM_FACTS) {
+  const graph = buildMemFactGraph(facts)
+  const linkCounts: Record<string, Record<string, number>> = {}
+  const bump = (id: string, linkType: string) => {
+    const forId = (linkCounts[id] = linkCounts[id] || {})
+    forId[linkType] = (forId[linkType] || 0) + 1
+  }
+  graph.edges.forEach((e) => {
+    const { source, target, linkType } = e.data as { source: string; target: string; linkType: string }
+    bump(source, linkType)
+    bump(target, linkType)
+  })
+  const totalLinksFor = (id: string) => Object.values(linkCounts[id] ?? {}).reduce((a, b) => a + b, 0)
+  const maxLinks = Math.max(1, ...facts.map((f) => totalLinksFor(f.id)))
+  return facts.map((f) => {
+    const counts = linkCounts[f.id] ?? {}
+    return {
+      id: f.id,
+      text: f.text,
+      context: f.label,
+      occurred_start: ISO(f.date),
+      occurred_end: null as string | null,
+      fact_type: f.type,
+      entities: entityLabelsFor(f.ents),
+      tags: [f.topic],
+      document_id: MEM_TOPIC_DOCUMENT[f.topic] ?? null,
+      state: MEM_INVALIDATED_FACT_IDS.has(f.id) ? ('invalidated' as const) : ('valid' as const),
+      salience: Math.round((totalLinksFor(f.id) / maxLinks) * 100) / 100,
+      link_counts_by_type: counts,
+    }
+  })
+}
+
+type UnitRow = ReturnType<typeof buildUnitRows>[number]
+
+function parseUnitsQuery(url: string): URLSearchParams {
+  try {
+    // Same dummy-origin base as the other inline `new URL(url, 'http://x')`
+    // parses in this file (buildBankSubgraphRoute et al.) — url here is
+    // always a path-relative string, the base only exists to satisfy the
+    // WHATWG URL constructor.
+    return new URL(url, 'http://x').searchParams
+  } catch {
+    return new URLSearchParams()
+  }
+}
+
+// GET /api/memory/banks/:bank/units — q/tags/type/from/to/documentId filter,
+// sort (default: recency desc; 'salience' — the only other value the server
+// accepts, memory_admin.bank_units 422s on anything else), limit/offset
+// paging. `truncated` is always false here: the mock dataset never reaches
+// the server's 2000-row slab cap (see PR #1987 review B2/M10).
+function buildBankUnits(url: string, match: RegExpMatchArray) {
+  const bank = bankFrom(match)
+  if (bank === 'empty') return { items: [], total_matched: 0, next_offset: null, truncated: false }
+
+  const params = parseUnitsQuery(url)
+  const q = (params.get('q') ?? '').trim().toLowerCase()
+  const tagsParam = params.get('tags')
+  const tags = tagsParam
+    ? tagsParam.split(',').map((t) => t.trim()).filter(Boolean)
+    : []
+  const type = params.get('type') ?? ''
+  const from = params.get('from')
+  const to = params.get('to')
+  const documentId = params.get('document_id') ?? ''
+  // Forwarded verbatim: no `state` param -> upstream's default archive
+  // behaviour (exclude invalidated facts); an explicit `state` (e.g.
+  // `invalidated`, from the curation inspector's revert flow) filters to
+  // an exact match instead, so `state=valid` and `state=invalidated` both
+  // work as an explicit override.
+  const state = params.get('state')
+  const sort = params.get('sort') ?? 'recency'
+  const limit = Math.min(Math.max(Number(params.get('limit') ?? 20) || 20, 1), 100)
+  const offset = Math.max(Number(params.get('offset') ?? 0) || 0, 0)
+
+  let rows: UnitRow[] = buildUnitRows(MEM_FACTS)
+  rows = state ? rows.filter((r) => r.state === state) : rows.filter((r) => r.state === 'valid')
+  if (q) {
+    rows = rows.filter(
+      (r) => r.text.toLowerCase().includes(q) || r.context.toLowerCase().includes(q),
+    )
+  }
+  if (tags.length) {
+    rows = rows.filter((r) => r.tags.some((t) => tags.includes(t)))
+  }
+  if (type) {
+    rows = rows.filter((r) => r.fact_type === type)
+  }
+  if (from) {
+    const fromMs = new Date(from).getTime()
+    rows = rows.filter((r) => new Date(r.occurred_start).getTime() >= fromMs)
+  }
+  if (to) {
+    const toMs = new Date(to).getTime()
+    rows = rows.filter((r) => new Date(r.occurred_start).getTime() <= toMs)
+  }
+  if (documentId) {
+    rows = rows.filter((r) => r.document_id === documentId)
+  }
+
+  const sorted = [...rows].sort((a, b) => {
+    if (sort === 'salience') return b.salience - a.salience
+    // 'recency' (default, and the fallback for any other value): newest first
+    return new Date(b.occurred_start).getTime() - new Date(a.occurred_start).getTime()
+  })
+
+  const totalMatched = sorted.length
+  const items = sorted.slice(offset, offset + limit)
+  const nextOffset = offset + limit < totalMatched ? offset + limit : null
+  return { items, total_matched: totalMatched, next_offset: nextOffset, truncated: false }
+}
+
+// GET /api/memory/banks/:bank/tags — usage counts over the same unit set
+// `buildBankUnits` filters, so tag chips and the units filter bar never
+// disagree on what's in-bank.
+function buildBankTags(_url: string, match: RegExpMatchArray) {
+  const bank = bankFrom(match)
+  if (bank === 'empty') return { items: [] }
+  const counts: Record<string, number> = {}
+  // Only count valid (non-archived) units by default, matching
+  // `buildBankUnits`'s default exclude-invalidated behaviour, so the tag
+  // sidebar and the units filter bar never disagree on what's in-bank.
+  buildUnitRows(MEM_FACTS)
+    .filter((r) => r.state === 'valid')
+    .forEach((r) => {
+      r.tags.forEach((t) => {
+        counts[t] = (counts[t] ?? 0) + 1
+      })
+    })
+  const items = Object.entries(counts)
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
+  return { items }
+}
+
+// GET /api/memory/banks/:bank/memories/:id/history — upstream (hindsight-api
+// 0.8.4) only tracks history for observation-type facts and returns a bare
+// JSON ARRAY of events (not a `{events:[...]}` dict); everything else 404s.
+// `jsonResponse` (./mock.ts) turns a `null` builder return into a 404, so
+// returning `null` here for a non-observation/unknown unit mirrors that
+// real 404 behaviour instead of faking a 200 with an empty array.
+// `useUnitHistory`'s normalizer tolerates both the array shape here and a
+// dict, in case a future backend revision wraps it.
+function buildUnitHistory(_url: string, match: RegExpMatchArray) {
+  const id = decodeURIComponent(match[2] ?? '')
+  const unit = buildUnitRows(MEM_FACTS).find((r) => r.id === id)
+  if (!unit || unit.fact_type !== 'observation') return null
+  return [{ state: unit.state, at: unit.occurred_start, reason: null }]
+}
+
 function buildMentalModels() {
   const items = [
     { id: 'mm-power-resilience', name: 'Power resilience posture', source_query: 'how does the box handle power loss?', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.', tags: ['reliability'], is_stale: false, last_refreshed_at: '2026-06-10T08:00:00.000Z' },
@@ -1277,4 +1467,7 @@ export const MOCK_BUILDERS: Record<string, Builder> = {
   bankOperations: buildBankOperations,
   bankRecall: buildBankRecall,
   bankReflect: buildBankReflect,
+  bankTags: buildBankTags,
+  bankUnits: buildBankUnits,
+  unitHistory: buildUnitHistory,
 }

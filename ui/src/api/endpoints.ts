@@ -218,6 +218,18 @@ export const ENDPOINTS = {
     `/api/memory/banks/${encodeURIComponent(bank)}/operations/${encodeURIComponent(id)}/retry`,
   memoryBankConsolidate: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/consolidate`,
+  // Memory v2 (Bank workspace UI) — tags in use + the curatable unit list,
+  // plus the single-unit resource (curate PATCH / delete) and its audit
+  // trail. Units live at .../memories/:id (NOT .../units/:id) — /units is
+  // the list-only collection endpoint.
+  memoryBankTags: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/tags`,
+  memoryBankUnits: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/units`,
+  memoryUnit: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/memories/${encodeURIComponent(id)}`,
+  memoryUnitHistory: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/memories/${encodeURIComponent(id)}/history`,
   // Per-agent memory stats — parameterised by agent id. Previously a
   // hardcoded "/api/agents/hermes/memory/stats" placeholder; now generic.
   agentMemoryStats: (id: string) =>

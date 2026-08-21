@@ -12,7 +12,7 @@
  * The mock fetch harness (src/api/mock.ts) short-circuits the allowlisted
  * /api/memory/banks/* endpoints BEFORE the network layer, so per-spec page.route
  * stubs for those paths are bypassed — the explorer is driven by the baked
- * forced-mock dataset (22 facts across 4 banks: primary/hermes/scratch/ingest;
+ * forced-mock dataset (MEM_FACTS.length facts across 4 banks: primary/hermes/scratch/ingest;
  * a rich entity co-occurrence graph). These tests therefore assert against that
  * baked dataset and against DOM behaviour, not against captured requests.
  *
@@ -26,6 +26,13 @@
  */
 
 import { test, expect } from '../fixtures/apiMock'
+import { MEM_FACTS } from '../../../src/api/mockFixtures'
+
+// The baked forced-mock dataset drives these specs (see NOTE above); the
+// expected fact-node count is derived from that fixture rather than
+// hardcoded, so adding fixtures elsewhere in mockFixtures.ts can't silently
+// desync this spec (see PR #1987 review).
+const FACT_COUNT = MEM_FACTS.length
 
 async function gotoGraph(page: any) {
   await page.goto('/#memory/graph')
@@ -44,9 +51,9 @@ test.describe('Memory graph explorer', () => {
     const svg = page.locator('[data-testid="mem-graph-svg"]')
     await expect(svg).toBeVisible()
 
-    // baked fact graph = 22 facts → 22 node groups, each with a circle.
+    // baked fact graph = MEM_FACTS.length facts → that many node groups, each with a circle.
     const nodes = svg.locator('g[data-node]')
-    await expect(nodes).toHaveCount(22)
+    await expect(nodes).toHaveCount(FACT_COUNT)
     // edges render as <path> (direct children of the zoom <g>); some present.
     await expect.poll(async () => await svg.locator('g[data-node] circle').count()).toBeGreaterThan(0)
     const edgeCount = await svg.locator('g > path').count()
@@ -55,7 +62,7 @@ test.describe('Memory graph explorer', () => {
     // self-loops are dropped by normalizeGraph (source !== target). The baked
     // graph carries none, so no edge connects a node to itself — the meta line
     // reports the resulting node/edge totals.
-    await expect(page.locator('[data-testid="mem-graph-meta"]')).toContainText('22 nodes')
+    await expect(page.locator('[data-testid="mem-graph-meta"]')).toContainText(`${FACT_COUNT} nodes`)
   })
 
   test('source toggle redraws as the entity co-occurrence graph', async ({ page }) => {
@@ -63,13 +70,13 @@ test.describe('Memory graph explorer', () => {
 
     const svg = page.locator('[data-testid="mem-graph-svg"]')
     const factCount = await svg.locator('g[data-node]').count()
-    expect(factCount).toBe(22)
+    expect(factCount).toBe(FACT_COUNT)
 
     await page.click('[data-testid="mem-graph-source-entities"]')
-    // entity graph has a different (smaller) node set than the 22-fact graph.
+    // entity graph has a different (smaller) node set than the fact graph.
     await expect
       .poll(async () => await svg.locator('g[data-node]').count())
-      .not.toBe(22)
+      .not.toBe(FACT_COUNT)
     await expect.poll(async () => await svg.locator('g[data-node]').count()).toBeGreaterThan(0)
   })
 
