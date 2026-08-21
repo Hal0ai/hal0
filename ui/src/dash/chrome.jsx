@@ -14,6 +14,7 @@ import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState, useSlotDrift, useRestartDriftedSlots } from '@/api/hooks/useUpdates'
 import { useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
+import { slotIndicatorFromPhase } from './slot-status.js'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 
@@ -719,14 +720,8 @@ const _shortTs = (ts) => {
   return m ? (m[2] ? `${m[1]}.${m[2]}` : m[1]) : String(ts ?? '');
 };
 
-// A slot's LED tone for the `runtimes` group: green ready · amber warming ·
-// grey offline. Mirrors useRuntimeRollup's readiness rule.
-const _slotPip = (s) => {
-  const st = String(s?.state ?? '').toLowerCase();
-  if (s?.container_status === 'running' || ['ready', 'serving', 'idle'].includes(st)) return 'ok';
-  if (['warming', 'starting', 'loading', 'connecting'].includes(st)) return 'warm';
-  return 'off';
-};
+// Slot pips reuse slotIndicatorFromPhase (slot-status.js) so the footer
+// matches the slot-card indicator dots exactly — no parallel vocabulary.
 // A service indicator's tone (up/warn/err) → LED tone (ok/warm/err).
 const _svcPip = (tone) => (tone === 'up' ? 'ok' : tone === 'warn' ? 'warm' : 'err');
 
@@ -855,9 +850,15 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
           title: s.detail || `${s.name || s.id} down`,
         }))),
   ];
-  // runtimes group — one LED pip per CONFIGURED slot (a model bound is what
-  // makes a slot real, #1369), plus the ready count.
+  // slots group — one LED pip per ACTIVE configured slot (a model bound is
+  // what makes a slot real, #1369). Stopped slots render no pip — the ready
+  // count already says how many of the total are up. Pip colours mirror the
+  // slot-card indicator dot exactly (slotIndicatorFromPhase: serving green
+  // pulse · ready yellow · warming amber pulse · error red).
   const configuredSlots = (useSlots().data || []).filter((s) => !!(s.model || s.model_default));
+  const slotPips = configuredSlots
+    .map((s) => ({ slot: s, ind: slotIndicatorFromPhase(s) }))
+    .filter(({ ind }) => ind.cls !== 'offline');
   const servicesReady = footerIndicators.filter((s) => s.tone === 'up').length;
 
   return (
@@ -989,15 +990,20 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
         </>
       )}
       <div className="foot-chips">
-        {/* runtimes — one LED pip per enabled slot + ready count */}
+        {/* slots — one LED pip per ACTIVE slot (stopped slots hidden) + ready
+            count; pip colours mirror the slot-card indicator dots */}
         <div className="foot-health" data-testid="foot-health-runtimes" title={runtimeTitle}>
           <span className="pips" aria-hidden="true">
-            {configuredSlots.map((s, i) => (
-              <span key={s.name ?? i} className={"pip " + _slotPip(s)} />
+            {slotPips.map(({ slot: s, ind }, i) => (
+              <span
+                key={s.name ?? i}
+                className={"pip " + ind.cls}
+                title={`${s.name ?? "slot"} — ${ind.label}`}
+              />
             ))}
           </span>
           <span className="lbl">
-            <span className="k">runtimes</span>
+            <span className="k">slots</span>
             <span className={"v" + (L.ready < L.total ? " warn" : "")}>
               <b>{L.ready} / {L.total}</b> ready
             </span>
