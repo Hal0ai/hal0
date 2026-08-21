@@ -1,0 +1,162 @@
+diff --git a/common/chat.cpp b/common/chat.cpp
+index 58a193f..83cc09a 100644
+--- a/common/chat.cpp
++++ b/common/chat.cpp
+@@ -1709,6 +1709,142 @@ static common_chat_params common_chat_params_init_gigachat_v3(
+     return data;
+ }
+ 
++// MiniCPM5 format (hal0 port, #1948):
++//   Reasoning: <think>{reasoning}</think> (optional)
++//   Tool calls: <function name="foo"><param name="bar">value</param></function>
++//
++// Written in THIS tree's idiom rather than transplanted from the ciru fork:
++// that version depends on a continuation API (has_continuation/render_content),
++// a message_delimiters field, and a p.ac() combinator none of which exist here.
++// None are needed for the tool-call contract, so this is modelled on the
++// sibling deepseek_v3_2 parser above, which uses the same <param name=...> shape.
++// Dropped deliberately: the CDATA escape branch (an edge case for values
++// containing a literal </param>) — the plain until(PARAM_END) form is what every
++// other XML tool parser in this file uses.
++static common_chat_params common_chat_params_init_minicpm5(const common_chat_template &          tmpl,
++                                                           const autoparser::generation_params & inputs) {
++    common_chat_params data;
++
++    data.prompt             = common_chat_template_direct_apply_impl(tmpl, inputs);
++    data.format             = COMMON_CHAT_FORMAT_PEG_NATIVE;
++    data.supports_thinking  = true;
++    data.thinking_start_tag = "<think>";
++    data.thinking_end_tag   = "</think>";
++    data.preserved_tokens   = {
++        "<function",
++        "<param",
++        "</function>",
++        "</param>",
++        "<think>",
++        "</think>",
++    };
++
++    auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
++    auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
++    auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
++    auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
++
++    const std::string THINK_START = "<think>";
++    const std::string THINK_END   = "</think>";
++    const std::string PARAM_END   = "</param>";
++
++    auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
++        auto generation_prompt = p.prefix(inputs.generation_prompt, THINK_START);
++        auto end = p.end();
++
++        auto reasoning = p.eps();
++        if (extract_reasoning && inputs.enable_thinking) {
++            reasoning = p.optional(THINK_START + p.reasoning(p.until(THINK_END)) + THINK_END);
++        } else if (extract_reasoning) {
++            reasoning = p.optional(p.literal(THINK_START) + p.until(THINK_END) + p.literal(THINK_END));
++        }
++
++        if (has_response_format) {
++            return generation_prompt + reasoning +
++                   p.content(p.schema(p.json(), "response-format", inputs.json_schema)) + end;
++        }
++
++        if (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
++            auto tool_choice = p.choice();
++            foreach_function(inputs.tools, [&](const json & tool) {
++                const auto &      function = tool.at("function");
++                const std::string name     = function.at("name");
++                auto              params   = function.contains("parameters") ? function.at("parameters") : json::object();
++
++                auto args = p.eps();
++                if (params.contains("properties") && params.at("properties").is_object() &&
++                    !params.at("properties").empty()) {
++                    auto schema_info = common_schema_info();
++                    schema_info.resolve_refs(params);
++
++                    auto arg_choice = p.choice();
++                    for (const auto & [prop_name, prop_schema] : params.at("properties").items()) {
++                        auto value_parser =
++                            schema_info.resolves_to_string(prop_schema)
++                                ? p.tool_arg_string_value(p.until(PARAM_END)) + p.tool_arg_close(p.literal(PARAM_END))
++                                : p.tool_arg_json_value(p.schema(p.json(),
++                                                                 "tool-" + name + "-arg-" + prop_name + "-schema",
++                                                                 prop_schema, false)) +
++                                      p.tool_arg_close(p.literal(PARAM_END));
++
++                        arg_choice |= p.tool_arg(
++                            p.tool_arg_open(p.literal("<param name=\"") + p.tool_arg_name(p.literal(prop_name)) +
++                                            p.literal("\">")) +
++                            value_parser);
++                    }
++                    args = p.zero_or_more(arg_choice + p.space());
++                }
++
++                auto tool_parser = p.tool(
++                    p.tool_open(p.literal("<function name=\"") + p.tool_name(p.literal(name)) + p.literal("\">"))
++                    << p.tool_args(args)
++                    << p.tool_close(p.literal("</function>")));
++
++                tool_choice |= p.rule("tool-" + name, tool_parser);
++            });
++
++            auto max_calls  = inputs.parallel_tool_calls ? -1 : 1;
++            auto tool_calls = p.trigger_rule("tool-call", p.repeat(tool_choice + p.space(), 1, max_calls));
++            auto content    = p.content(p.until("<function"));
++
++            return generation_prompt + reasoning + content + tool_calls + end;
++        }
++
++        return generation_prompt + reasoning + p.content(p.rest()) + end;
++    });
++
++    data.parser = parser.save();
++
++    if (include_grammar) {
++        data.grammar_lazy = !(has_response_format ||
++                              (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED));
++        data.grammar      = build_grammar([&](const common_grammar_builder & builder) {
++            foreach_function(inputs.tools, [&](const json & tool) {
++                const auto & function = tool.at("function");
++                auto         schema   = function.contains("parameters") ? function.at("parameters") : json::object();
++                builder.resolve_refs(schema);
++            });
++            if (has_response_format) {
++                auto schema = inputs.json_schema;
++                builder.resolve_refs(schema);
++            }
++            parser.build_grammar(builder, data.grammar_lazy);
++        });
++        // This tree's PEG API does not auto-derive triggers from trigger_rule
++        // the way the newer fork's does - a lazy grammar with no registered
++        // trigger fails the request with "no triggers set for lazy grammar!".
++        // A MiniCPM5 tool call always opens with the literal <function name="
++        if (data.grammar_lazy) {
++            data.grammar_triggers = {
++                { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<function name=\"" }
++            };
++        }
++    }
++
++    return data;
++}
++
++
+ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_chat_template &    tmpl,
+                                                                  const autoparser::generation_params & inputs) {
+     common_chat_params data;
+@@ -2144,6 +2280,14 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
+         return common_chat_params_init_gigachat_v3(tmpl, params);
+     }
+ 
++    // MiniCPM5 - XML tool calls: <function name=..><param name=..></param></function>
++    if (src.find("Tool usage guidelines:") != std::string::npos &&
++        src.find("<function name=\"") != std::string::npos &&
++        src.find("<param name=\"") != std::string::npos) {
++        LOG_DBG("Using specialized template: MiniCPM5\n");
++        return common_chat_params_init_minicpm5(tmpl, params);
++    }
++
+     // DeepSeek V3.2 format detection: template defines dsml_token and uses it for tool calls.
+     // The template source contains the token as a variable assignment, not as a literal in markup.
+     if (src.find("dsml_token") != std::string::npos &&
