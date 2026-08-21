@@ -165,6 +165,12 @@ import './dash/memory-bank-bar.jsx'
 // (C5, guarded — may not exist yet) at render time. Not routed yet
 // (task C6 wires #memory/bank).
 import './dash/memory-bank-workspace.jsx'
+// Memory v2 web graph (task C5) — d3-force full-graph view with link-type
+// lenses and a 120-node salience cap. Publishes window.MemV2WebGraph,
+// which memory-bank-workspace.jsx (above) already render-guards behind
+// `typeof === 'function'` for its 'web' view tab. Uses window.__hal0D3Force
+// only — never imports d3 itself.
+import './dash/memory-web-graph.jsx'
 import './dash/memory-graph-engine.jsx'
 import './dash/memory-graph-structured.jsx'
 import './dash/memory-graph-ego.jsx'

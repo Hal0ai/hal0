@@ -1141,7 +1141,7 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
           {view === 'graph' && <EgoGraph bank={bank} centerId={sel} onGo={setSel} />}
           {view === 'web' &&
             (typeof window.MemV2WebGraph === 'function' ? (
-              <window.MemV2WebGraph bank={bank} sel={sel} setSel={setSel} />
+              <window.MemV2WebGraph bank={bank} sel={sel} setSel={setSel} filters={unitsParams} />
             ) : (
               <div className="mv-card">
                 <div className="mv-empty" style={{ padding: 60 }}>
