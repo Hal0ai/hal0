@@ -926,6 +926,16 @@ HAL0_GPU_RC_NO_DEVICE=4
 #                                    green (#1888). Caller allows an explicit
 #                                    CPU-only opt-in, same as NO_DEVICE.
 HAL0_GPU_RC_NO_KFD=5
+#       HAL0_GPU_RC_KFD_GID(6)    → /dev/kfd IS forwarded, but its owning gid
+#                                    differs from the render node's, so the
+#                                    hal0 user cannot open it even though the
+#                                    rootful slot containers can (#1953). A
+#                                    plain LXC dev passthrough produces exactly
+#                                    this: renderD128 lands root:render while
+#                                    the compute node lands root:root. Fixable
+#                                    IN PLACE — never tell the operator to
+#                                    re-forward a device that is already there.
+HAL0_GPU_RC_KFD_GID=6
 preflight_gpu() {
     local gate="${HAL0_GPU_GATE:-0}"
 
@@ -1062,6 +1072,57 @@ preflight_gpu() {
             warn "  Load the amdkfd driver (it ships with amdgpu; check 'dmesg | grep -i kfd')."
         fi
         [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_KFD}"
+    fi
+
+    # ── ROCm compute-node group wiring (#1953) ───────────────────────────
+    # The node above exists — but a plain LXC `dev` passthrough hands it over
+    # as root:root 0660 while /dev/dri/renderD128 lands root:render 0660. The
+    # rootful slot containers open it regardless, so ROCm genuinely WORKS; the
+    # hal0 service user does not, so every hal0-user GPU probe reports the box
+    # unusable and #1923's guard then refuses every AMD GPU slot.
+    #
+    # The target gid comes from the RENDER NODE, never from `getent group
+    # render`: the kernel gates on the integer and the name for that integer is
+    # not portable (a halo143-class box has renderD128 owned by a gid whose
+    # /etc/group name is 'clock', while 'render' resolves to a different,
+    # useless gid). Same authority resolve_gpu_group_ids() already follows for
+    # --group-add, so the two devices cannot disagree.
+    if [[ -n "${have_kfd}" && -n "${node}" ]]; then
+        local kfd_path kfd_gid render_gid
+        kfd_path="${HAL0_GPU_KFD_PATH:-/dev/kfd}"
+        # Both gids come from the real nodes. Deliberately NOT
+        # HAL0_GPU_RENDER_GID_OVERRIDE: that override fakes the group-NAME
+        # mapping check above, and reusing it here would compare a claimed gid
+        # against a real one. HAL0_GPU_KFD_GID_OVERRIDE is this check's own
+        # seam, so divergence can be forced without needing two real groups.
+        kfd_gid="${HAL0_GPU_KFD_GID_OVERRIDE:-$(stat -c '%g' "${kfd_path}" 2>/dev/null || true)}"
+        render_gid="$(stat -c '%g' "${node}" 2>/dev/null || true)"
+        # Gate on the INACCESSIBLE shape, not on gid inequality. A differing gid
+        # is not itself a fault: a valid box can put /dev/kfd on `video` and the
+        # render nodes on `render`, and install.sh adds hal0 to BOTH; world bits
+        # or an ACL can grant access independently too. Rewriting those to the
+        # render group would remove access from video-only users and, on an
+        # unprivileged LXC, abort a fresh install over a working config.
+        #
+        # The shape that actually breaks is the plain-passthrough default:
+        # root-owned with no group the service user can ever be in (gid 0) and
+        # no world access. Only that is repaired.
+        local kfd_mode kfd_world_rw=0
+        kfd_mode="$(stat -c '%a' "${kfd_path}" 2>/dev/null || echo 000)"
+        case "${kfd_mode}" in *[67]) kfd_world_rw=1 ;; esac
+        if [[ -n "${kfd_gid}" && -n "${render_gid}" \
+            && "${kfd_gid}" != "${render_gid}" \
+            && "${kfd_gid}" == "0" \
+            && "${kfd_world_rw}" == "0" ]]; then
+            warn "gpu: ${kfd_path} is root-owned (gid ${kfd_gid}, mode ${kfd_mode}) while ${node} uses gid ${render_gid}"
+            warn "  The compute node is forwarded and the rootful slot containers can use it,"
+            warn "  but the hal0 service user cannot — so GPU slots get refused on a working box (#1953)."
+            warn "  Fix IN PLACE (no re-forward, no reboot):"
+            warn "    chgrp ${render_gid} ${kfd_path} && chmod 0660 ${kfd_path}"
+            warn "  Unprivileged LXC (chgrp returns EPERM): set it on the Proxmox host instead:"
+            warn "    dev1: ${kfd_path},gid=${render_gid}   (the gid INSIDE the container)"
+            [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_KFD_GID}"
+        fi
     fi
     return 0
 }

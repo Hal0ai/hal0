@@ -20,10 +20,16 @@ import pytest
 
 from hal0.providers._gpu import (
     ENV_ALLOW_VULKAN_FALLBACK,
+    KFD_MISSING,
+    KFD_NOT_OPENABLE,
+    KFD_OK,
     GpuPreflightError,
+    converge_kfd_device_group,
     host_is_amd_gpu,
     kfd_present,
+    kfd_status,
     require_kfd_for_gpu_slot,
+    resolve_kfd_target_gid,
     runtime_lane_for_provider,
 )
 
@@ -37,19 +43,105 @@ class TestKfdPresent:
     def test_false_when_it_does_not(self, tmp_path) -> None:
         assert kfd_present(str(tmp_path / "kfd")) is False
 
-    def test_false_when_it_exists_but_is_not_accessible(self, tmp_path) -> None:
+    def test_false_when_it_exists_but_this_process_cannot_open_it(self, tmp_path) -> None:
         """An LXC passthrough with a mis-mapped gid leaves the node visible but
         unopenable — HIP still fails and llama.cpp still lands on the invalid
-        Vulkan lane, so existence alone must not count as a pass."""
+        Vulkan lane, so existence alone must not count as a pass.
+
+        ``for_uid=None`` asks about THIS process, which is the only identity a
+        DAC probe can honestly answer for.
+        """
         node = tmp_path / "kfd"
         node.write_text("")
         node.chmod(0o000)
         try:
             if os.access(str(node), os.R_OK):  # running as root — chmod is advisory
                 pytest.skip("root bypasses file permissions")
-            assert kfd_present(str(node)) is False
+            assert kfd_present(str(node), for_uid=None) is False
         finally:
             node.chmod(0o600)
+
+    def test_unopenable_node_still_passes_for_the_root_slot_runner(self, tmp_path) -> None:
+        """#1953: the identity that matters is the one that OPENS the device.
+
+        hal0-api runs as ``hal0``; the slot containers run rootful as root. A
+        plain LXC passthrough routinely leaves ``/dev/kfd`` ``root:root 0660``
+        while the render node lands ``root:render 0660`` — ROCm works fine in
+        the container, but a probe run as ``hal0`` used to report False and
+        #1923's guard then refused every AMD GPU slot on a healthy box.
+        """
+        node = tmp_path / "kfd"
+        node.write_text("")
+        # 0o000, not 0o660: the node must be unopenable to the CURRENT process,
+        # or this passes on main too and proves nothing (review nit). The dual
+        # assert is the actual contract — same node, opposite verdicts,
+        # decided solely by which identity is asked about.
+        node.chmod(0o000)
+        try:
+            if os.access(str(node), os.R_OK):
+                pytest.skip("this process bypasses file permissions")
+            assert kfd_status(str(node), for_uid=None) == KFD_NOT_OPENABLE
+            assert kfd_present(str(node)) is True  # default: SLOT_RUNNER_UID
+            assert kfd_status(str(node), for_uid=0) == KFD_OK
+        finally:
+            node.chmod(0o600)
+
+    def test_status_distinguishes_missing_from_unopenable(self, tmp_path) -> None:
+        """The two shapes need OPPOSITE remedies, so they must not be one bool."""
+        assert kfd_status(str(tmp_path / "nope"), for_uid=0) == KFD_MISSING
+        node = tmp_path / "kfd"
+        node.write_text("")
+        node.chmod(0o000)
+        try:
+            if os.access(str(node), os.R_OK):
+                pytest.skip("root bypasses file permissions")
+            assert kfd_status(str(node), for_uid=None) == KFD_NOT_OPENABLE
+        finally:
+            node.chmod(0o600)
+
+
+class TestKfdStatusIdentityRules:
+    """#1953 — which identity the probe answers for, pinned explicitly.
+
+    The first cut short-circuited ``uid == 0 -> KFD_OK`` on the theory that
+    root always bypasses DAC. It does not: root bypasses only with
+    CAP_DAC_OVERRIDE, and a hardened container drops it. CI runs in exactly
+    such a container, so an unopenable node was reported usable — failing
+    OPEN, into the poisoned Vulkan lane this guard exists to block.
+    """
+
+    def test_asking_about_this_process_consults_the_os_even_when_root(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """No uid-0 short-circuit for the CURRENT process: ask os.access.
+
+        Simulated rather than requiring a root test runner: pretend to be uid
+        0 while os.access reports the denial a capability-dropped container
+        would produce.
+        """
+        node = tmp_path / "kfd"
+        node.write_text("")
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.setattr(os, "access", lambda *a, **k: False)
+        assert kfd_status(str(node), for_uid=None) == KFD_NOT_OPENABLE
+        # for_uid=0 is NOT the same question, even from a root caller: it names
+        # the rootful slot container, whose CAP_DAC_OVERRIDE this process's
+        # denial says nothing about. Asserting NOT_OPENABLE here contradicted
+        # test_asking_about_a_different_root_identity_still_assumes_override
+        # for identical input, and collapsed the parameter for root callers.
+        assert kfd_status(str(node), for_uid=0) == KFD_OK
+
+    def test_asking_about_a_different_root_identity_still_assumes_override(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The slot container's root is not this process — we cannot probe it,
+        so the usual DAC override is assumed. That is the whole point of the
+        runner-identity parameter."""
+        node = tmp_path / "kfd"
+        node.write_text("")
+        monkeypatch.setattr(os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(os, "access", lambda *a, **k: False)
+        assert kfd_status(str(node), for_uid=0) == KFD_OK
 
 
 class TestHostIsAmdGpu:
@@ -246,11 +338,27 @@ class TestNonRocmRuntimesAreNotGated:
     @staticmethod
     def _amd_box_without_kfd(monkeypatch) -> None:
         """An AMD host (amdgpu bound) that has no usable /dev/kfd — the exact
-        shape of the box #1941 was reported from."""
+        shape of the box #1941 was reported from.
+
+        Patches ``kfd_status``, NOT ``kfd_present``: the guard calls the former
+        (#1952 + #1953 composed). Patching ``kfd_present`` was a dead stub —
+        these tests then passed only because the CI runner happens to lack
+        /dev/kfd, and went RED on any box that has one (CT105, ct151, dev
+        workstations), taking the #1888/#1941 regression cover with them.
+        """
         from hal0.providers import _gpu as gpu_mod
 
         monkeypatch.setattr(gpu_mod, "host_is_amd_gpu", lambda *_a, **_k: True)
-        monkeypatch.setattr(gpu_mod, "kfd_present", lambda *_a, **_k: False)
+        monkeypatch.setattr(gpu_mod, "kfd_status", lambda *_a, **_k: gpu_mod.KFD_MISSING)
+
+    @staticmethod
+    def _amd_box_with_unopenable_kfd(monkeypatch) -> None:
+        """The node IS forwarded but the runner identity cannot open it — the
+        third status, which nothing exercised through ``load_sync`` before."""
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr(gpu_mod, "host_is_amd_gpu", lambda *_a, **_k: True)
+        monkeypatch.setattr(gpu_mod, "kfd_status", lambda *_a, **_k: gpu_mod.KFD_NOT_OPENABLE)
 
     @staticmethod
     def _stub_unit_write(monkeypatch) -> list[str]:
@@ -269,6 +377,41 @@ class TestNonRocmRuntimesAreNotGated:
             lambda self, token, unit_text: written.append(token),
         )
         return written
+
+    def test_load_sync_refuses_the_llama_lane_on_an_unopenable_node(self, monkeypatch) -> None:
+        """KFD_NOT_OPENABLE through load_sync — the third status, previously
+        unexercised on this path.
+
+        A forwarded-but-unopenable node is just as poisoned as a missing one:
+        HIP still fails to initialise and llama.cpp still lands on the invalid
+        Vulkan lane. The refusal must fire, and its remedy must be the group
+        fix rather than a re-forward (#1953).
+        """
+        from hal0.providers import container as container_mod
+
+        self._amd_box_with_unopenable_kfd(monkeypatch)
+        self._stub_unit_write(monkeypatch)
+
+        with pytest.raises(GpuPreflightError) as err:
+            container_mod.ContainerProvider().load_sync(
+                {"name": "utility", "device": "gpu-vulkan", "port": 8082}, {}
+            )
+        msg = str(err.value)
+        assert "IS forwarded" in msg
+        assert "dev1:" not in msg  # never send them to re-forward a present node
+
+    def test_a_non_rocm_runtime_is_unaffected_by_an_unopenable_node(self, monkeypatch) -> None:
+        """The lane scoping (#1941) still wins over the status: Kokoro forwards
+        no compute node at all, so its openability is irrelevant."""
+        from hal0.providers import container as container_mod
+
+        self._amd_box_with_unopenable_kfd(monkeypatch)
+        written = self._stub_unit_write(monkeypatch)
+
+        container_mod.ContainerProvider().load_sync(
+            {"name": "voice", "type": "tts", "device": "gpu-vulkan", "port": 8090}, {}
+        )
+        assert written == ["voice"]
 
     @pytest.mark.parametrize(
         "slot_cfg",
@@ -467,3 +610,282 @@ class TestFallbackWarningIsLaneScoped:
 
 def _raiser(*_a: object, **_kw: object) -> None:
     raise GpuPreflightError("no /dev/kfd")
+
+
+class TestResolveKfdTargetGid:
+    """#1953: the target gid must come from the DEVICE NODE, never a group name.
+
+    The kernel gates on the integer. On a halo143-class box ``renderD128`` is
+    owned by gid 993 whose ``/etc/group`` name is ``clock``, while ``render``
+    resolves to a different, useless gid — so ``grp.getgrnam("render")``
+    produces a number that grants nothing. Baking in 993 (or any constant) is
+    the same bug wearing a different hat.
+    """
+
+    def test_follows_the_render_node_gid(self, tmp_path, monkeypatch) -> None:
+        node = tmp_path / "renderD128"
+        node.write_text("")
+        os.chown(node, -1, os.getgid())
+        monkeypatch.setattr(
+            "hal0.providers._gpu.resolve_gpu_device_paths", lambda *a, **k: [str(node)]
+        )
+        monkeypatch.setattr(
+            "hal0.providers._gpu._device_node_for_group",
+            lambda name, paths: str(node) if name == "render" else None,
+        )
+        assert resolve_kfd_target_gid() == os.stat(node).st_gid
+
+    def test_returns_none_rather_than_guessing_a_constant(self, monkeypatch) -> None:
+        """No render node → no opinion. Guessing 993 is how a wrong gid gets baked in."""
+        monkeypatch.setattr("hal0.providers._gpu.resolve_gpu_device_paths", lambda *a, **k: [])
+        monkeypatch.setattr("hal0.providers._gpu._device_node_for_group", lambda name, paths: None)
+        assert resolve_kfd_target_gid() is None
+
+
+class TestConvergeKfdDeviceGroup:
+    def test_noop_when_already_aligned(self, tmp_path, monkeypatch) -> None:
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        kfd.chmod(0o660)
+        monkeypatch.setattr(
+            "hal0.providers._gpu.resolve_kfd_target_gid",
+            lambda *a, **k: os.stat(kfd).st_gid,
+        )
+        status, _ = converge_kfd_device_group(str(kfd))
+        assert status == "noop"
+
+    def test_skips_when_no_render_node_to_learn_from(self, tmp_path, monkeypatch) -> None:
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        monkeypatch.setattr("hal0.providers._gpu.resolve_kfd_target_gid", lambda *a, **k: None)
+        status, detail = converge_kfd_device_group(str(kfd))
+        assert status == "skipped"
+        assert "render node" in detail
+
+    def test_skips_when_the_node_is_absent(self, tmp_path) -> None:
+        status, _ = converge_kfd_device_group(str(tmp_path / "nope"))
+        assert status == "skipped"
+
+    def test_dry_run_reports_without_writing(self, tmp_path, monkeypatch) -> None:
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        kfd.chmod(0o600)
+        before = os.stat(kfd).st_mode
+        monkeypatch.setattr("hal0.providers._gpu.resolve_kfd_target_gid", lambda *a, **k: 4242)
+        status, _ = converge_kfd_device_group(str(kfd), dry_run=True)
+        assert status == "changed"
+        assert os.stat(kfd).st_mode == before
+
+    def test_failure_is_reported_not_raised(self, tmp_path, monkeypatch) -> None:
+        """Unprivileged LXC: chgrp is EPERM. Surface the host remedy, never abort."""
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        monkeypatch.setattr("hal0.providers._gpu.resolve_kfd_target_gid", lambda *a, **k: 4242)
+
+        def _boom(*a, **k):
+            raise PermissionError("Operation not permitted")
+
+        monkeypatch.setattr(os, "chown", _boom)
+        status, detail = converge_kfd_device_group(str(kfd))
+        assert status == "failed"
+        assert "gid=4242" in detail
+
+
+class TestGuardRemedyText:
+    def test_unopenable_does_not_tell_you_to_re_forward_the_device(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """#1953's headline harm: the old text sent operators to reboot production
+        for a device that was already forwarded."""
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        monkeypatch.setattr("hal0.providers._gpu.kfd_status", lambda *a, **k: KFD_NOT_OPENABLE)
+        monkeypatch.setattr("hal0.providers._gpu.resolve_kfd_target_gid", lambda *a, **k: 993)
+        with pytest.raises(GpuPreflightError) as err:
+            require_kfd_for_gpu_slot("brain", device="gpu-rocm", kfd_path=str(kfd))
+        msg = str(err.value)
+        assert "IS forwarded" in msg
+        assert "chgrp 993" in msg
+        assert "pct stop/start" in msg  # only as the unprivileged-LXC sub-case
+        assert "dev1:" not in msg  # the WRONG remedy must not appear
+
+    def test_missing_still_tells_you_to_forward_it(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("hal0.providers._gpu.kfd_status", lambda *a, **k: KFD_MISSING)
+        with pytest.raises(GpuPreflightError) as err:
+            require_kfd_for_gpu_slot("brain", device="gpu-rocm", kfd_path=str(tmp_path / "nope"))
+        assert "dev1:" in str(err.value)
+
+
+class TestConvergeAgainstRealPermissionDenial:
+    """#1953 gap 2 — exercise a GENUINE chgrp refusal, not a monkeypatched one.
+
+    The unprivileged-LXC path (where ``/dev/kfd``'s ownership is host-mapped and
+    ``chown`` returns EPERM) has NOT been validated on a real unprivileged
+    container — see the regression register entry
+    ``kfd-gid-unprivileged-lxc-unverified``. This gets as close as a unit test
+    honestly can: a real chown against a gid the running user is not a member
+    of, which the kernel refuses for the same reason.
+
+    It proves the failure is reported rather than raised, and that the message
+    carries an actionable gid. It does NOT prove the idmap semantics of a real
+    unprivileged LXC, and must not be read as if it did.
+    """
+
+    def test_a_real_eperm_is_reported_with_an_actionable_remedy(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        if os.geteuid() == 0:
+            pytest.skip("root can chown to any gid — no denial to observe")
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        # A gid this user is certainly not a member of.
+        foreign_gid = 61997
+        assert foreign_gid not in os.getgroups()
+        monkeypatch.setattr(
+            "hal0.providers._gpu.resolve_kfd_target_gid", lambda *a, **k: foreign_gid
+        )
+        status, detail = converge_kfd_device_group(str(kfd))
+        assert status == "failed"
+        # The operator must be able to act on this without reading the source.
+        assert f"gid={foreign_gid}" in detail
+        assert "unprivileged" in detail.lower() or "host" in detail.lower()
+
+    def test_the_node_is_left_untouched_when_the_chgrp_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A refused converge must not half-apply (e.g. chmod without chgrp)."""
+        if os.geteuid() == 0:
+            pytest.skip("root can chown to any gid — no denial to observe")
+        kfd = tmp_path / "kfd"
+        kfd.write_text("")
+        kfd.chmod(0o600)
+        before = os.stat(kfd)
+        monkeypatch.setattr("hal0.providers._gpu.resolve_kfd_target_gid", lambda *a, **k: 61997)
+        converge_kfd_device_group(str(kfd))
+        after = os.stat(kfd)
+        assert after.st_gid == before.st_gid
+        assert after.st_mode == before.st_mode
+
+
+class TestResolveImageRuntimeUidUsesTheRootStore:
+    """#1953 R2 — the uid must come from ROOT's image store, never hal0's own.
+
+    hal0-api runs as the unprivileged ``hal0`` user with no subuid ranges, so a
+    bare ``podman image inspect`` reads hal0's ROOTLESS store — a different
+    store, which never contains a slot image. Reading it would make this check
+    a silent no-op in production, which is #1889 with extra steps.
+    """
+
+    def test_it_routes_through_the_seam(self, monkeypatch) -> None:
+        from hal0.providers import _gpu as gpu_mod
+
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "hal0.providers.podman_introspect.image_user",
+            lambda ref, **k: seen.append(ref) or "hal0",
+        )
+        import pwd
+
+        monkeypatch.setattr(pwd, "getpwnam", lambda n: type("P", (), {"pw_uid": 1234})())
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == 1234
+        assert seen == ["ghcr.io/x/y:1"]
+
+    def test_it_never_shells_bare_podman(self, monkeypatch) -> None:
+        """The regression guard: a bare subprocess call is the #1889 trap."""
+        import subprocess
+
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr("hal0.providers.podman_introspect.image_user", lambda *a, **k: "")
+
+        def _boom(*a, **k):  # pragma: no cover - only runs if the bug returns
+            raise AssertionError(f"bare podman call: {a!r}")
+
+        monkeypatch.setattr(subprocess, "run", _boom)
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == gpu_mod.SLOT_RUNNER_UID
+
+    def test_an_unanswerable_seam_falls_back_to_root_not_rootless(self, monkeypatch) -> None:
+        """``None`` means the seam did not answer. Deliberately NO rootless
+        fallback: that store's answer is about a different object."""
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr("hal0.providers.podman_introspect.image_user", lambda *a, **k: None)
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == gpu_mod.SLOT_RUNNER_UID
+
+    @pytest.mark.parametrize("declared", ["", "root", "0"])
+    def test_root_equivalents_resolve_to_the_slot_runner_uid(self, monkeypatch, declared) -> None:
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr("hal0.providers.podman_introspect.image_user", lambda *a, **k: declared)
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == gpu_mod.SLOT_RUNNER_UID
+
+    def test_a_numeric_user_is_honoured(self, monkeypatch) -> None:
+        from hal0.providers import _gpu as gpu_mod
+
+        monkeypatch.setattr(
+            "hal0.providers.podman_introspect.image_user", lambda *a, **k: "1000:1000"
+        )
+        assert gpu_mod.resolve_image_runtime_uid("ghcr.io/x/y:1") == 1000
+
+
+class TestTheUidProbeIsLazy:
+    """#1953 N2 — resolving the runner uid is a sudo round-trip plus two podman
+    calls. An eager argument expression charged EVERY slot for a probe only the
+    gated ones need."""
+
+    def _never(self):
+        def _boom() -> int:  # pragma: no cover - only runs if laziness breaks
+            raise AssertionError("uid probe ran for an ungated slot")
+
+        return _boom
+
+    @pytest.mark.parametrize("device", ["cpu", "npu", "gpu-cuda", ""])
+    def test_ungated_devices_never_resolve_the_uid(self, device, tmp_path) -> None:
+        require_kfd_for_gpu_slot(
+            "x",
+            device=device,
+            kfd_path=str(tmp_path / "kfd"),
+            env={},
+            amd_host=True,
+            runner_uid=self._never(),
+        )
+
+    def test_a_non_rocm_lane_never_resolves_the_uid(self, tmp_path) -> None:
+        """Kokoro/Moonshine forward no compute node, so the identity that would
+        open it is irrelevant (#1941 scoping runs before the probe)."""
+        require_kfd_for_gpu_slot(
+            "voice",
+            device="gpu-vulkan",
+            runtime_lane="no-rocm",
+            kfd_path=str(tmp_path / "kfd"),
+            env={},
+            amd_host=True,
+            runner_uid=self._never(),
+        )
+
+    def test_a_gated_lane_does_resolve_the_uid(self, tmp_path) -> None:
+        """...and the lazy form must still actually be consulted when it counts."""
+        node = tmp_path / "kfd"
+        node.write_text("")
+        calls: list[int] = []
+
+        def _probe() -> int:
+            calls.append(1)
+            return 0
+
+        require_kfd_for_gpu_slot(
+            "brain",
+            device="gpu-rocm",
+            kfd_path=str(node),
+            env={},
+            amd_host=True,
+            runner_uid=_probe,
+        )
+        assert calls == [1]
+
+    def test_a_plain_int_still_works(self, tmp_path) -> None:
+        node = tmp_path / "kfd"
+        node.write_text("")
+        require_kfd_for_gpu_slot(
+            "brain", device="gpu-rocm", kfd_path=str(node), env={}, amd_host=True, runner_uid=0
+        )

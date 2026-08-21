@@ -1,0 +1,29 @@
+[Unit]
+Description=hal0 GPU device permissions (align /dev/kfd with the render node)
+Documentation=https://github.com/Hal0ai/hal0/issues/1953
+# /dev/kfd is recreated every boot — by udev on bare metal, by container start
+# from the host's `dev` entry on an LXC — so the install/update-time converge is
+# undone unless the host entry itself carries gid=. Re-apply it once per boot.
+#
+# After systemd-tmpfiles-setup-dev: /dev must be populated before there is a
+# node to chgrp. Before hal0.target: slots and the API must observe the
+# converged state, never race it.
+After=systemd-tmpfiles-setup-dev.service local-fs.target
+Before=hal0.target
+ConditionPathExists=/dev/kfd
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Root: chgrp on a device node needs it, and this is exactly the privileged
+# tidy-up the unprivileged API must never perform itself.
+ExecStart=/usr/lib/hal0/venv/bin/python -m hal0.install.gpu_perms
+# A GPU-permissions tidy-up must never be able to wedge the boot. The module
+# already returns 0 for every outcome including "refused by an unprivileged
+# LXC"; this is the belt to that braces.
+SuccessExitStatus=0 1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=hal0.target

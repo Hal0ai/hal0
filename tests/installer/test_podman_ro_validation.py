@@ -23,6 +23,7 @@ re-creates #1889 for the refs it wrongly rejects.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -174,6 +175,7 @@ def test_help_lists_every_verb() -> None:
     for verb in (
         "images",
         "image-exists",
+        "image-user",
         "container-image",
         "container-argv",
         "check-image-ref",
@@ -188,7 +190,9 @@ def test_unknown_verb_is_rejected() -> None:
     assert "bad cmd" in proc.stderr
 
 
-@pytest.mark.parametrize("verb", ["image-exists", "container-image", "container-argv"])
+@pytest.mark.parametrize(
+    "verb", ["image-exists", "image-user", "container-image", "container-argv"]
+)
 def test_write_verbs_are_not_reachable(verb: str) -> None:
     """The seam stays READ-ONLY: no verb spells a mutation, and the three
     argument-taking verbs refuse a second argv word outright (so a validated
@@ -198,7 +202,9 @@ def test_write_verbs_are_not_reachable(verb: str) -> None:
     assert "exactly one argument" in proc.stderr
 
 
-@pytest.mark.parametrize("verb", ["image-exists", "container-image", "container-argv"])
+@pytest.mark.parametrize(
+    "verb", ["image-exists", "image-user", "container-image", "container-argv"]
+)
 def test_argument_verbs_require_an_argument(verb: str) -> None:
     proc = _run(verb)
     assert proc.returncode == 64
@@ -297,8 +303,61 @@ def test_presence_probes_use_exists_not_inspect() -> None:
     src = WRAPPER.read_text()
     assert "run_podman image exists --" in src
     assert "run_podman container exists --" in src
-    code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
-    assert not [ln for ln in code if "image inspect" in ln]
+
+    # Reading a FIELD needs inspect — there is no other podman verb for it —
+    # but only after presence has already been established, so "missing" and
+    # "broken store" stay distinguishable. Exactly the shape container_read
+    # uses (container exists -> container inspect), which this file has always
+    # permitted.
+    #
+    # ARM-SCOPED BY THE NEXT CASE LABEL, not by `;;`. Two prior shapes of this
+    # check were falsified by execution: a fixed-line positional lookback read
+    # across a `;;` into the neighbouring arm, and a `.split(";;", 1)` slice
+    # terminated at the NESTED `;;` of an arm's own rc dispatch — three lines
+    # above the inspect it existed to police — so deleting only the exists
+    # guard left the suite green both times. Top-level arms are exactly
+    # two-space indented (nested dispatches are deeper), which is what bounds
+    # the slice here.
+    labels = [
+        (m.start(), m.group(1))
+        for m in re.finditer(r"^\s{2}([a-z][a-z-]*\)|\*\))", src, re.MULTILINE)
+    ]
+    label_names = [name for _, name in labels]
+    assert "image-user)" in label_names, "arm discovery broke; the scan below is vacuous"
+    assert "image-exists)" in label_names, "arm discovery broke; the scan below is vacuous"
+    arms: dict[str, str] = {}
+    for i, (pos, name) in enumerate(labels):
+        end = labels[i + 1][0] if i + 1 < len(labels) else len(src)
+        arms[name] = src[pos:end]
+
+    def _code(arm: str) -> str:
+        return "\n".join(ln for ln in arm.splitlines() if not ln.lstrip().startswith("#"))
+
+    # The PRESENCE probe itself must never be an inspect.
+    exists_code = _code(arms["image-exists)"])
+    assert "image exists" in exists_code
+    assert "image inspect" not in exists_code
+
+    # Vacuity guard, one level down from label discovery: image-user READS a
+    # field, so its slice MUST contain the inspect. If it does not, the
+    # slicing regressed again and the loop below would silently skip the one
+    # arm it exists to police — "no match" must never read as "clean".
+    assert "image inspect" in _code(arms["image-user)"]), (
+        "image-user's arm slice lost its inspect — the arm scan is vacuous"
+    )
+    # Match the INVOCATION (`run_podman image exists`), not the bare phrase —
+    # the rc-dispatch's own failure message contains "image exists" as prose,
+    # which satisfied a substring check even with the guard deleted (found by
+    # re-running the surgical falsification against the first version of this
+    # rewrite).
+    for name, arm in arms.items():
+        arm_code = _code(arm)
+        if "image inspect" not in arm_code:
+            continue
+        assert "run_podman image exists" in arm_code, f"unguarded image inspect in {name}"
+        assert arm_code.index("run_podman image exists") < arm_code.index("image inspect"), (
+            f"{name} inspects before establishing presence"
+        )
 
 
 def test_inspect_calls_are_type_qualified() -> None:

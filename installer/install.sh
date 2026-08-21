@@ -454,6 +454,34 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
             err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
             exit 1
         fi
+    elif (( gpu_rc == HAL0_GPU_RC_KFD_GID )); then
+        # #1953: /dev/kfd IS forwarded, its group is just wrong. We are root
+        # here, so repair it in place rather than making the operator do it —
+        # and rather than the old behaviour of sending them to re-forward a
+        # device that is already present. The gid comes from the render node
+        # (never from `getent group render`; see preflight_gpu for why).
+        _kfd_path="${HAL0_GPU_KFD_PATH:-/dev/kfd}"
+        _render_node="$(compgen -G '/dev/dri/renderD*' 2>/dev/null | head -1)"
+        _render_gid="$(stat -c '%g' "${_render_node}" 2>/dev/null || true)"
+        if [[ -n "${_render_gid}" ]] \
+            && chgrp "${_render_gid}" "${_kfd_path}" 2>/dev/null \
+            && chmod 0660 "${_kfd_path}" 2>/dev/null; then
+            info "gpu: aligned ${_kfd_path} to gid ${_render_gid} (matches ${_render_node})"
+        else
+            # Unprivileged LXC: the node's ownership is host-mapped, so chgrp
+            # is EPERM and the only real fix is on the host's dev entry.
+            #
+            # WARN, never block. Since the slot containers run rootful, they
+            # open a root:root compute node perfectly well — a mismatched gid
+            # costs hal0-user probes and diagnostics their GPU visibility, not
+            # inference. Hard-stopping here would newly refuse installation on
+            # every unprivileged LXC for a condition that no longer breaks
+            # serving (the identity fix in #1953 is what changed this).
+            warn "gpu: ${_kfd_path} has a different group (${_render_gid:-?} expected) and could not be changed from inside this container."
+            warn "  GPU slots still work — they run rootful — but hal0-user probes and diagnostics cannot read the compute node."
+            warn "  To fix, set it on the Proxmox host: dev1: ${_kfd_path},gid=${_render_gid:-<render gid inside the container>}"
+            warn "  (the gid INSIDE the container), then: pct stop <CTID> && pct start <CTID>. See hal0 issue #1953."
+        fi
     elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."
@@ -1384,6 +1412,45 @@ if [[ -f "${TARGET_UNIT_SRC}" ]]; then
     info "wrote ${TARGET_UNIT_DST}"
 else
     warn "${TARGET_UNIT_SRC} not found — hal0.target not installed; slots will not autostart after reboot"
+fi
+
+# GPU device permissions (#1953). /dev/kfd is recreated every boot, so the
+# install/update-time converge is undone by the next reboot unless the host's
+# LXC `dev` entry carries gid=. This oneshot re-derives the target gid FROM THE
+# RENDER NODE and re-applies it before hal0.target — deliberately a service
+# rather than a tmpfiles.d/udev rule, both of which would have to name a gid,
+# and a baked gid is not portable across hosts (see preflight_gpu).
+GPU_PERMS_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-gpu-perms.service"
+GPU_PERMS_UNIT_DST="${UNIT_DIR}/hal0-gpu-perms.service"
+if [[ -f "${GPU_PERMS_UNIT_SRC}" ]]; then
+    install -m 0644 "${GPU_PERMS_UNIT_SRC}" "${GPU_PERMS_UNIT_DST}"
+    # A non-default HAL0_PREFIX moves the venv, and the shipped unit hardcodes
+    # the FHS path — without this rewrite ExecStart points at a nonexistent
+    # interpreter and the unit dies 203/EXEC, so the compute node is never
+    # converged after a reboot. Same treatment the bench units get; done in
+    # Python, not sed, so a prefix containing sed metacharacters is safe.
+    if [[ "${VENV_DIR}" != "/usr/lib/hal0/venv" ]]; then
+        "${PY}" - "${GPU_PERMS_UNIT_DST}" "${VENV_DIR}" <<'PYEOF'
+import sys
+from pathlib import Path
+
+dst, venv = Path(sys.argv[1]), sys.argv[2]
+dst.write_text(
+    dst.read_text(encoding="utf-8").replace("/usr/lib/hal0/venv", venv),
+    encoding="utf-8",
+)
+PYEOF
+    fi
+    info "wrote ${GPU_PERMS_UNIT_DST}"
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        # WantedBy=hal0.target. Enabling is safe on a non-AMD box: the unit
+        # carries ConditionPathExists=/dev/kfd and the module no-ops without
+        # amdgpu bound.
+        systemctl enable hal0-gpu-perms.service >/dev/null 2>&1 \
+            || warn "could not enable hal0-gpu-perms.service"
+    fi
+else
+    warn "${GPU_PERMS_UNIT_SRC} not found — /dev/kfd group will not be re-applied after a reboot"
 fi
 
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"

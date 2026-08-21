@@ -30,6 +30,7 @@ RC_OK = 0
 RC_BROKEN_GID = 3
 RC_NO_DEVICE = 4
 RC_NO_KFD = 5
+RC_KFD_GID = 6
 
 # A gid with no matching group on any sane host — forces "maps to NO group".
 UNMAPPED_GID = "61999"
@@ -316,3 +317,112 @@ def test_doctor_mode_missing_kfd_is_soft(render_glob: str, tmp_path: Path) -> No
         }
     )
     assert rc == RC_OK
+
+
+class TestKfdGroupGate:
+    """#1953 — /dev/kfd forwarded but group-misaligned with the render node.
+
+    A plain LXC ``dev`` passthrough lands renderD128 as root:render and the
+    compute node as root:root. The rootful slot containers open both fine, so
+    ROCm genuinely works — but the hal0 service user cannot open the compute
+    node, so #1923's guard refuses every AMD GPU slot on a healthy box. The
+    gate has to catch that shape, and must NOT tell the operator to re-forward
+    a device that is already present.
+    """
+
+    def test_mismatched_kfd_gid_is_caught(self, tmp_path: Path) -> None:
+        render = tmp_path / "renderD128"
+        render.touch()
+        kfd = tmp_path / "kfd"
+        kfd.touch()
+        rc = _run_gpu_gate(
+            {
+                "HAL0_GPU_GATE": "1",
+                "HAL0_GPU_AMD_OVERRIDE": "1",
+                "HAL0_GPU_DRI_GLOB": str(tmp_path / "renderD*"),
+                # Satisfy the group-NAME check above so we reach the gid
+                # check under test; it reads the real nodes regardless.
+                "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+                "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+                "HAL0_GPU_KFD_PATH": str(kfd),
+                "HAL0_GPU_KFD_GID_OVERRIDE": "0",
+                "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            }
+        )
+        # The compute node is ROOT-owned while the render node is not — the
+        # exact inaccessible shape a plain LXC dev passthrough produces.
+        assert rc == RC_KFD_GID
+
+    def test_aligned_gids_pass(self, tmp_path: Path) -> None:
+        render = tmp_path / "renderD128"
+        render.touch()
+        kfd = tmp_path / "kfd"
+        kfd.touch()
+        rc = _run_gpu_gate(
+            {
+                "HAL0_GPU_GATE": "1",
+                "HAL0_GPU_AMD_OVERRIDE": "1",
+                "HAL0_GPU_DRI_GLOB": str(tmp_path / "renderD*"),
+                # Satisfy the group-NAME check above so we reach the gid
+                # check under test; it reads the real nodes regardless.
+                "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+                "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+                "HAL0_GPU_KFD_PATH": str(kfd),
+                "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            }
+        )
+        # Both nodes are real files with the same owning gid — nothing to fix.
+        assert rc == RC_OK
+
+    def test_remedy_never_says_re_forward_the_device(self, tmp_path: Path) -> None:
+        """The headline harm of #1953: the old advice cost a production reboot."""
+        (tmp_path / "renderD128").touch()
+        kfd = tmp_path / "kfd"
+        kfd.touch()
+        script = f"set -uo pipefail\nsource {PREFLIGHT!s}\npreflight_gpu 2>&1 || true\n"
+        env = {
+            **os.environ,
+            "HAL0_GPU_GATE": "1",
+            "HAL0_GPU_AMD_OVERRIDE": "1",
+            "HAL0_GPU_DRI_GLOB": str(tmp_path / "renderD*"),
+            "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+            "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+            "HAL0_GPU_KFD_PATH": str(kfd),
+            "HAL0_GPU_KFD_GID_OVERRIDE": "0",
+            "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+        }
+        out = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True).stdout
+        render_gid = os.stat(tmp_path / "renderD128").st_gid
+        assert f"chgrp {render_gid}" in out
+        # The host-side remedy must carry a REAL gid, never a placeholder.
+        assert f"gid={render_gid}" in out
+        # And it must never send the operator to re-forward a present device.
+        assert "dev1: /dev/kfd\n" not in out
+
+    def test_a_non_root_gid_divergence_is_left_alone(self, tmp_path: Path) -> None:
+        """#1953 review: a differing gid is NOT itself a fault.
+
+        A valid box can put /dev/kfd on `video` and the render nodes on
+        `render` — install.sh adds hal0 to BOTH. Rewriting that to the render
+        group would strip access from video-only users, and on an unprivileged
+        LXC the failed chgrp would abort a fresh install over a working config.
+        Only the root-owned, no-world-access shape is repaired.
+        """
+        (tmp_path / "renderD128").touch()
+        kfd = tmp_path / "kfd"
+        kfd.touch()
+        rc = _run_gpu_gate(
+            {
+                "HAL0_GPU_GATE": "1",
+                "HAL0_GPU_AMD_OVERRIDE": "1",
+                "HAL0_GPU_DRI_GLOB": str(tmp_path / "renderD*"),
+                "HAL0_GPU_RENDER_GID_OVERRIDE": "0",
+                "HAL0_GPU_RENDER_GROUP_OVERRIDE": "root",
+                "HAL0_GPU_KFD_PATH": str(kfd),
+                # Differs from the render node, but is a REAL group the service
+                # user can be added to — not the root-owned passthrough shape.
+                "HAL0_GPU_KFD_GID_OVERRIDE": "61996",
+                "HAL0_GPU_CONTAINER_OVERRIDE": "lxc",
+            }
+        )
+        assert rc == RC_OK

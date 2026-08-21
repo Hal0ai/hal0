@@ -82,6 +82,7 @@ from hal0.providers._gpu import (
     require_kfd_for_gpu_slot,
     resolve_gpu_device_paths,
     resolve_gpu_group_ids,
+    resolve_image_runtime_uid,
     runtime_lane_for_provider,
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
@@ -2381,10 +2382,21 @@ class ContainerProvider(Provider):
         # Qwen3-TTS are ROCm builds that do. Each provider declares
         # ``gpu_runtime_needs_rocm``; ``runtime_lane_for_provider`` turns that
         # into the lane.
+        #
+        # runner_uid is the ORTHOGONAL question (#1953): given the lane needs
+        # the node, WHICH identity opens it. Derived from the image rather
+        # than assumed root — rootful podman still honours a USER-declaring
+        # image, and assuming root there would fail OPEN into the poisoned
+        # lane the guard exists to block.
         require_kfd_for_gpu_slot(
             str(slot_cfg.get("name", "") or token),
             device=str(slot_cfg.get("device", "") or ""),
             runtime_lane=runtime_lane_for_provider(spec_provider),
+            # Lazy: the guard returns early for cpu/npu/gpu-cuda and for
+            # non-ROCm lanes, and this is a sudo round-trip plus two podman
+            # calls. Passing it eagerly charged every slot on the box for a
+            # probe only the gated ones need.
+            runner_uid=lambda: resolve_image_runtime_uid(_resolve_image_ref(slot_cfg, model_info)),
         )
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently

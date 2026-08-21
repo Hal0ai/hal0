@@ -2934,6 +2934,53 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
     return retagged
 
 
+def converge_kfd_group(*, job_id: str | None = None) -> str:
+    """Align ``/dev/kfd``'s group with the render node's. PRIVILEGED CALLERS ONLY.
+
+    NOT part of :func:`run_post_activation_migrations`, deliberately. That chain
+    runs in an ``asyncio.to_thread`` inside ``hal0-api`` — ``User=hal0`` — and
+    BEFORE ``seam.activate()``. Calling it from there was wrong twice over: the
+    ``chown`` hit EPERM as an unprivileged user and reported ``failed`` for
+    exactly the boxes it was meant to converge, and on the FIRST update
+    delivering this code the running daemon is still executing the previous
+    release, where this function does not exist at all.
+
+    Convergence now happens root-side in :func:`refresh_gpu_perms_unit`, which
+    runs during ``activate`` (euid 0) and starts the freshly-installed unit once
+    so a box converges without waiting for a reboot. ``install.sh`` covers the
+    fresh-install path, also as root.
+
+    Kept as a callable seam for those privileged entry points and for tests.
+
+    #1953. A plain LXC passthrough leaves the compute node ``root:root 0660``
+    while ``/dev/dri/renderD128`` lands ``root:render 0660``. Slot containers
+    run rootful so ROCm works fine, but every hal0-user probe reports the GPU
+    unusable — and the operator is told to re-forward a device that is already
+    forwarded. Converging the two nodes makes both identities agree.
+
+    Runs BEFORE :func:`relabel_stale_vulkan_slots` deliberately: that pass
+    branches on the compute node's state to decide ``gpu-rocm`` vs ``cpu``, so
+    it must see the converged answer rather than race the repair.
+
+    Best-effort by construction. On an unprivileged LXC the node's ownership is
+    host-mapped and ``chown`` raises ``EPERM``; the remedy there is a ``gid=``
+    on the host's ``dev`` entry, which the guard's own error text now spells
+    out. Never raises, never blocks an update.
+    """
+    from hal0.providers._gpu import converge_kfd_device_group, host_is_amd_gpu
+
+    if not host_is_amd_gpu():
+        return "skipped"
+    status, detail = converge_kfd_device_group()
+    if status == "changed":
+        log.warning("updater.kfd_group_converged", job_id=job_id, detail=detail)
+    elif status == "failed":
+        log.warning("updater.kfd_group_converge_refused", job_id=job_id, detail=detail)
+    else:
+        log.info("updater.kfd_group_noop", job_id=job_id, status=status, detail=detail)
+    return status
+
+
 def relabel_stale_vulkan_slots(
     *,
     job_id: str | None = None,
@@ -3369,6 +3416,81 @@ def _restore_service_ownership(root: Path, *, job_id: str | None = None) -> None
         log.warning("updater.cache_chown_failed", job_id=job_id, path=str(root), error=str(exc))
 
 
+def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
+    """Install/refresh ``hal0-gpu-perms.service`` from the activated release (#1953).
+
+    Same #1689 shape as :func:`refresh_privileged_wrappers`: ``install.sh`` was
+    about to become the only installer of this unit, so a box that only ever
+    runs ``hal0 update`` would never receive it and its ``/dev/kfd`` group would
+    silently revert on the next reboot with nothing to re-apply it.
+
+    Privileged-side ONLY — a no-op unless ``os.geteuid() == 0``, matching
+    :func:`refresh_privileged_wrappers`. The unprivileged daemon must never
+    write ``/etc/systemd/system``.
+
+    Best-effort: a release tree without the unit source is skipped, and a
+    failed ``systemctl enable`` is logged rather than raised. A missing
+    permissions tidy-up must never fail an otherwise-successful activate.
+
+    Returns one of ``"installed"``, ``"unchanged"``, ``"skipped"``, ``"failed"``.
+    """
+    if os.geteuid() != 0:
+        return "skipped"
+    src = target / "installer" / "systemd" / "hal0-gpu-perms.service"
+    if not src.is_file():
+        log.info("updater.gpu_perms_unit_absent", job_id=job_id, src=str(src))
+        return "skipped"
+    dst = Path("/etc/systemd/system/hal0-gpu-perms.service")
+    try:
+        desired = src.read_text(encoding="utf-8")
+        # NOT an early return on identical content: enable/start still re-run
+        # below so a previously-failed enable self-heals on the next activate.
+        up_to_date = dst.is_file() and dst.read_text(encoding="utf-8") == desired
+        if not up_to_date:
+            dst.write_text(desired, encoding="utf-8")
+            os.chmod(dst, 0o644)
+        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True)
+        # Enable is CHECKED. Treating the file write alone as success let a
+        # transient systemd failure latch permanently: the next update saw
+        # matching content, returned "unchanged" early, and never retried the
+        # enable — so the box silently lost the boot-time convergence this
+        # delivery path exists to provide.
+        enabled = subprocess.run(
+            ["systemctl", "enable", "hal0-gpu-perms.service"],
+            check=False,
+            capture_output=True,
+        )
+        if enabled.returncode != 0:
+            log.warning(
+                "updater.gpu_perms_unit_enable_failed",
+                job_id=job_id,
+                returncode=enabled.returncode,
+                stderr=(enabled.stderr or b"").decode(errors="replace").strip()[:400],
+            )
+            return "failed"
+        # Converge NOW, not just at next boot. This call site runs at euid 0
+        # during activate — unlike the migration chain, which runs as `hal0`
+        # and before activation — so an updated box does not have to reboot
+        # before its compute node becomes usable by the service user.
+        started = subprocess.run(
+            ["systemctl", "start", "hal0-gpu-perms.service"],
+            check=False,
+            capture_output=True,
+        )
+        if started.returncode != 0:
+            log.warning(
+                "updater.gpu_perms_unit_start_failed",
+                job_id=job_id,
+                returncode=started.returncode,
+                detail="unit installed and enabled; convergence deferred to next boot",
+            )
+    except OSError as exc:
+        log.warning("updater.gpu_perms_unit_failed", job_id=job_id, error=str(exc))
+        return "failed"
+    log.info("updater.gpu_perms_unit_installed", job_id=job_id, path=str(dst))
+    return "unchanged" if up_to_date else "installed"
+
+
 def refresh_privileged_wrappers(target: Path, *, job_id: str | None = None) -> dict[str, Any]:
     """Re-install the privileged sudo wrappers from the just-activated release (#1689).
 
@@ -3570,6 +3692,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     # activate (a wrapper that fails to refresh keeps the OLD one in place,
     # same class of degradation as before this fix, not a new failure mode).
     wrappers = refresh_privileged_wrappers(target, job_id=job_id)
+    gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
 
     log.info(
         "updater.activate_ok",
@@ -3581,6 +3704,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
         "previous": str(prior) if prior else None,
         "target": str(target),
         "wrappers_refreshed": wrappers["refreshed"],
+        "gpu_perms_unit": gpu_perms_unit,
     }
 
 
@@ -4389,6 +4513,7 @@ __all__ = [
     "ensure_seed_profiles",
     "fetch_release_manifest",
     "profile_reset_status",
+    "refresh_gpu_perms_unit",
     "refresh_privileged_wrappers",
     "release_dir_name",
     "releases_url",

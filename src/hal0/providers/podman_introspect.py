@@ -361,6 +361,39 @@ def image_presence(
     return ImageProbe("unknown", "seam-error")
 
 
+def image_user(
+    image: str,
+    *,
+    run: _RunFn = subprocess.run,
+    is_hal0_user: Callable[[], bool] = is_hal0_service_user,
+    timeout: float = 10.0,
+) -> str | None:
+    """The image's configured ``USER`` from ROOT's store; ``None`` if unanswerable.
+
+    ``""`` is a real answer, but it covers TWO facts: "no USER declared" (the
+    container process runs as root) and "the image is not in root's store yet".
+    Both map to root caller-side, so behaviour is correct — but note the
+    consequence: on a slot's FIRST load the image is often not yet pulled into
+    root's store, so a non-root-``USER`` image is assumed root exactly once.
+    ``None`` means the seam did not answer at all.
+
+    Same #1889 reasoning as :func:`image_exists`, and the reason
+    :func:`hal0.providers._gpu.resolve_image_runtime_uid` must not shell a bare
+    ``podman image inspect``: hal0-api runs as the unprivileged ``hal0`` user
+    with no subuid ranges, so a bare call reads hal0's OWN ROOTLESS store,
+    which never contains a slot image. The answer from that store is not a
+    stale answer — it is an answer about a different object.
+    """
+    if not is_valid_image_ref(image):
+        return None
+    read = _seam_read("image-user", image, run=run, is_hal0_user=is_hal0_user, timeout=timeout)
+    # ``stdout`` is set only on rc 0, where "" is a real answer; ``reason`` is
+    # set otherwise. Collapsing both to None would conflate "the image runs as
+    # root" with "the seam could not tell us", and the caller must not assume
+    # root on the latter.
+    return read.stdout
+
+
 def container_image(
     token: str,
     *,

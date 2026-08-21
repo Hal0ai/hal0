@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+from collections.abc import Callable
 from typing import Any, Literal
 
 import structlog
@@ -99,8 +100,153 @@ class GpuPreflightError(RuntimeError):
 _AMDGPU_MODULE_DIR = "/sys/module/amdgpu"
 
 
-def kfd_present(kfd_path: str = KFD_DEVICE_PATH) -> bool:
-    """Is the ROCm compute node visible AND usable by this process?
+#: uid the slot containers are launched as. hal0's ``hal0-slot@.service`` units
+#: carry no ``User=``, so podman runs rootful and the container process opens
+#: ``/dev/kfd`` as root — regardless of which user ``hal0-api`` itself runs as.
+#: See :func:`kfd_present` for why that distinction is load-bearing.
+SLOT_RUNNER_UID = 0
+
+#: :func:`kfd_status` verdicts.
+KFD_OK = "ok"
+KFD_MISSING = "missing"
+KFD_NOT_OPENABLE = "not-openable"
+
+
+def resolve_image_runtime_uid(image_ref: str | None) -> int:
+    """UID the container process will actually run as, best-effort.
+
+    Rootful podman does NOT imply the process is root: an image declaring
+    ``USER`` runs as that user unless the unit overrides it, and this repo ships
+    exactly that pattern (``packaging/toolbox/cpu.Dockerfile`` ends ``USER
+    hal0``). Equating "rootful podman" with uid 0 would let :func:`kfd_status`
+    pass a ``0660 root:root`` node that the real process cannot open — waving
+    through the invalid Vulkan fallback the guard exists to stop (#1953).
+
+    Routed through the ``hal0-podman-ro`` root-store seam, NOT a bare ``podman
+    image inspect`` (#1953 R2). hal0-api runs as the unprivileged ``hal0`` user
+    with no subuid ranges, so a bare call reads hal0's own ROOTLESS store —
+    a different store, which never contains a slot image. That would make this
+    check a silent no-op in production, which is #1889 with extra steps.
+
+    Best-effort by design: an unanswerable seam falls back to
+    :data:`SLOT_RUNNER_UID`, the correct answer for every GPU runner hal0
+    currently ships (none declare ``USER``). A DECLARED non-root user is
+    honoured, which is the conservative direction — it can only make the guard
+    refuse more, never less.
+    """
+    if not image_ref:
+        return SLOT_RUNNER_UID
+    from hal0.providers import podman_introspect
+
+    user = podman_introspect.image_user(image_ref)
+    if user is None:
+        # Seam did not answer (not the service user, no grant, podman absent).
+        # Deliberately no rootless fallback — see the docstring.
+        return SLOT_RUNNER_UID
+    user = user.strip().split(":")[0]
+    if not user or user in ("root", "0"):
+        return SLOT_RUNNER_UID
+    if user.isdigit():
+        return int(user)
+    try:
+        import pwd
+
+        return pwd.getpwnam(user).pw_uid
+    except Exception:
+        # A name the HOST cannot resolve may still resolve inside the image.
+        # Assume non-root and let the mode check decide rather than falling
+        # back to the permissive root answer.
+        return -1
+
+
+def kfd_status(
+    kfd_path: str = KFD_DEVICE_PATH,
+    *,
+    for_uid: int | None = None,
+) -> str:
+    """Classify the ROCm compute node: absent, present-but-unopenable, or fine.
+
+    Split out from :func:`kfd_present` because the two failure modes need
+    OPPOSITE remedies and conflating them sends operators to reboot a box
+    whose device is already forwarded (#1953):
+
+    * :data:`KFD_MISSING` — not forwarded. Remedy is an LXC ``dev`` entry
+      plus ``pct stop/start``.
+    * :data:`KFD_NOT_OPENABLE` — forwarded, but its owning gid grants nothing
+      to ``for_uid``. Remedy is a group fix on the node; no reboot involved.
+
+    ``for_uid`` names the identity that will actually open the device:
+
+    * ``None`` — THIS process. The only form that can be probed directly, so
+      the only one that consults ``os.access``. No uid-0 short-circuit: root
+      bypasses DAC only with ``CAP_DAC_OVERRIDE``, which a hardened container
+      drops.
+    * ``0`` — the rootful slot container, always a DIFFERENT process. Podman
+      grants it ``CAP_DAC_OVERRIDE`` by default and its capability set is not
+      the caller's, so this answers :data:`KFD_OK` on existence regardless of
+      who is asking. Branching on whether the CALLER happens to be root would
+      make the parameter collapse for root callers (``install.sh``,
+      ``install.profile_derive``) — the same harm this parameter exists to fix.
+    * any other uid — evaluated against that uid's group set via the mode bits,
+      because ``os.access`` can only answer about the current process.
+    """
+    if not os.path.exists(kfd_path):
+        return KFD_MISSING
+    # Branch on the QUESTION, not on who is asking. ``for_uid=None`` is the
+    # only form that names THIS process, and therefore the only one that can
+    # be probed directly. Branching on ``uid == os.geteuid()`` instead made the
+    # identity parameter silently collapse whenever the caller happened to
+    # share the uid it was asking about — so a root caller (install.sh,
+    # install/profile_derive.py) on a box whose root lacks CAP_DAC_OVERRIDE
+    # got "unopenable" for a node the rootful slot container opens perfectly
+    # well. That is #1953's original harm wearing a different hat.
+    if for_uid is None:
+        # Root gets NO short-circuit here: it bypasses DAC only with
+        # CAP_DAC_OVERRIDE, and a hardened container (CI runs in one) drops
+        # it, so a blanket "root is fine" reports a genuinely unopenable node
+        # as usable — failing OPEN, into the poisoned lane.
+        return KFD_OK if os.access(kfd_path, os.R_OK | os.W_OK) else KFD_NOT_OPENABLE
+    if for_uid == 0:
+        # Always ANOTHER process: the rootful slot container, which podman
+        # grants CAP_DAC_OVERRIDE by default. Its capability set is not the
+        # caller's and cannot be probed from here, so the assumed-override
+        # answer is right regardless of who is asking.
+        return KFD_OK
+    # Some other uid — evaluate the mode bits against its group set rather
+    # than silently answering for the wrong identity.
+    return KFD_OK if _mode_grants_rw(kfd_path, for_uid) else KFD_NOT_OPENABLE
+
+
+def _mode_grants_rw(path: str, uid: int) -> bool:
+    """Would ``uid`` get read+write on ``path`` under plain DAC rules?"""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if st.st_uid == uid:
+        return st.st_mode & stat.S_IRUSR and st.st_mode & stat.S_IWUSR
+    if st.st_mode & stat.S_IROTH and st.st_mode & stat.S_IWOTH:
+        return True
+    if not (st.st_mode & stat.S_IRGRP and st.st_mode & stat.S_IWGRP):
+        return False
+    try:
+        import grp
+        import pwd
+
+        name = pwd.getpwuid(uid).pw_name
+        member_gids = {g.gr_gid for g in grp.getgrall() if name in g.gr_mem}
+        member_gids.add(pwd.getpwuid(uid).pw_gid)
+    except Exception:  # pragma: no cover - no pwd/grp (non-Linux, minimal img)
+        return False
+    return st.st_gid in member_gids
+
+
+def kfd_present(
+    kfd_path: str = KFD_DEVICE_PATH,
+    *,
+    for_uid: int | None = SLOT_RUNNER_UID,
+) -> bool:
+    """Is the ROCm compute node visible AND usable by the identity that runs it?
 
     Existence alone is not enough: an LXC passthrough with a mis-mapped gid
     leaves ``/dev/kfd`` visible but unopenable, HIP still fails to initialise,
@@ -108,11 +254,96 @@ def kfd_present(kfd_path: str = KFD_DEVICE_PATH) -> bool:
     false-pass shape ``preflight_gpu``'s gid check exists to catch on the
     render node. So this also requires read+write access.
 
+    **Whose access, though.** This used to test the CALLING process, which is
+    wrong for the question every caller is actually asking: "will the slot
+    container be able to use the GPU?" ``hal0-api`` runs as user ``hal0``,
+    the slot containers run rootful as root, and a plain LXC passthrough
+    routinely leaves ``/dev/kfd`` as ``root:root 0660`` while
+    ``/dev/dri/renderD128`` lands ``root:render 0660``. On such a box ROCm
+    worked perfectly while this function reported False from the API process,
+    and #1923's guard refused every AMD GPU slot (#1953). So the identity is
+    now explicit and defaults to :data:`SLOT_RUNNER_UID`.
+
+    Pass ``for_uid=None`` to ask about the current process instead.
+
     Still cheap — no ioctl, no driver probe, never raises. A genuinely
     functional ROCm probe belongs in the output-sanity readiness gate
     (#1922), not on the slot-load hot path.
     """
-    return os.path.exists(kfd_path) and os.access(kfd_path, os.R_OK | os.W_OK)
+    return kfd_status(kfd_path, for_uid=for_uid) == KFD_OK
+
+
+def resolve_kfd_target_gid(
+    node_paths: list[str] | None = None,
+) -> int | None:
+    """Which gid SHOULD own ``/dev/kfd`` on this box? ``None`` when unknowable.
+
+    Deliberately derived from the render node rather than from
+    ``grp.getgrnam("render")``: the kernel gates on the integer, and the group
+    NAME for that integer is not portable across hosts. On a halo143-class box
+    ``renderD128`` is owned by gid 993 whose ``/etc/group`` name is ``clock``,
+    while ``render`` resolves to a different, useless gid — so a name lookup
+    produces a number that grants nothing. The render node is already the
+    authority :func:`resolve_gpu_group_ids` follows for ``--group-add``; the
+    compute node must agree with it or the two devices grant different access.
+
+    Never returns the ``_GPU_GROUP_FALLBACK_GIDS`` constants: guessing 993 on a
+    box we could not read is exactly how a wrong gid gets baked in. No render
+    node → no opinion.
+    """
+    if node_paths is None:
+        node_paths = resolve_gpu_device_paths()
+    node = _device_node_for_group("render", node_paths)
+    if node is None:
+        return None
+    try:
+        return os.stat(node).st_gid
+    except OSError:
+        return None
+
+
+def converge_kfd_device_group(
+    kfd_path: str = KFD_DEVICE_PATH,
+    *,
+    node_paths: list[str] | None = None,
+    dry_run: bool = False,
+) -> tuple[str, str]:
+    """Align ``/dev/kfd``'s group with the render node's. Returns (status, detail).
+
+    Idempotent and safe to run on every install/update: a box that is already
+    consistent is a no-op, and a box with no render node or no compute node is
+    left alone rather than guessed at.
+
+    Statuses: ``"noop"``, ``"changed"``, ``"skipped"``, ``"failed"``.
+
+    ``failed`` is not fatal by design — on an UNPRIVILEGED LXC the node's
+    ownership is host-mapped and ``chgrp`` returns EPERM, where the real remedy
+    is a ``gid=`` on the host's ``dev`` entry. Callers surface that remedy
+    instead of aborting.
+    """
+    if not os.path.exists(kfd_path):
+        return "skipped", f"{kfd_path} is not present"
+    target = resolve_kfd_target_gid(node_paths)
+    if target is None:
+        return "skipped", "no render node to take the gid from"
+    try:
+        st = os.stat(kfd_path)
+    except OSError as exc:
+        return "failed", f"cannot stat {kfd_path}: {exc}"
+    if st.st_gid == target and st.st_mode & stat.S_IRGRP and st.st_mode & stat.S_IWGRP:
+        return "noop", f"{kfd_path} already group {target} with group rw"
+    if dry_run:
+        return "changed", f"would set {kfd_path} to gid {target}, mode 0660"
+    try:
+        os.chown(kfd_path, -1, target)
+        os.chmod(kfd_path, 0o660)
+    except OSError as exc:
+        return "failed", (
+            f"cannot set {kfd_path} to gid {target} ({exc}). On an unprivileged "
+            f"LXC set it on the host instead: dev entry '{kfd_path},gid={target}' "
+            "(the gid INSIDE the container), then pct stop/start."
+        )
+    return "changed", f"{kfd_path}: gid {st.st_gid} -> {target}, mode 0660"
 
 
 def host_is_amd_gpu(module_dir: str = _AMDGPU_MODULE_DIR) -> bool:
@@ -134,6 +365,7 @@ def require_kfd_for_gpu_slot(
     kfd_path: str = KFD_DEVICE_PATH,
     env: dict[str, str] | None = None,
     amd_host: bool | None = None,
+    runner_uid: int | Callable[[], int] = SLOT_RUNNER_UID,
 ) -> None:
     """Loud-fail a GPU slot whose runtime needs ROCm but has no compute node.
 
@@ -184,6 +416,12 @@ def require_kfd_for_gpu_slot(
     gets the fail-closed pre-#1941 behaviour, never a silent pass into the
     poisoned lane.
 
+    ``runner_uid`` is the identity the slot container runs as — root for
+    hal0's rootful ``hal0-slot@`` units. It is NOT the uid of whoever calls
+    this function: ``hal0-api`` runs as ``hal0`` and would otherwise refuse
+    every GPU slot on a box whose ``/dev/kfd`` is ``root:root`` but whose
+    containers use it perfectly well (#1953).
+
     An explicit :data:`ENV_ALLOW_VULKAN_FALLBACK` opt-in downgrades the
     refusal to a warning — a warn, never a silent pass.
     """
@@ -197,7 +435,13 @@ def require_kfd_for_gpu_slot(
             return
     elif device != "gpu-rocm":
         return
-    if kfd_present(kfd_path):
+    # Resolved HERE, not at the call site: every early return above has already
+    # happened, so a cpu/npu/gpu-cuda slot never pays for it. It is a `sudo -n`
+    # round-trip plus two podman calls now, so an eager argument expression put
+    # that on the load path of every slot on the box (#1953 N2).
+    uid = runner_uid() if callable(runner_uid) else runner_uid
+    status = kfd_status(kfd_path, for_uid=uid)
+    if status == KFD_OK:
         return
     # Computed once and reused on both the warn and raise paths below, so
     # neither can drift from the lane it is actually describing (#1952
@@ -234,13 +478,39 @@ def require_kfd_for_gpu_slot(
             detail=why,
         )
         return
-    raise GpuPreflightError(
-        f"slot {slot_name!r} (device={device}) needs the ROCm compute node "
-        f"{kfd_path}, which is not visible here. {why} "
-        "Forward the device from the host (Proxmox LXC: add "
-        f"'dev1: {kfd_path}' to /etc/pve/lxc/<CTID>.conf, then pct stop/start), "
-        "or move this slot to device='cpu'."
+    preamble = (
+        f"slot {slot_name!r} (device={device}) needs the ROCm compute node {kfd_path}. {why} "
     )
+    if status == KFD_NOT_OPENABLE:
+        target = resolve_kfd_target_gid()
+        owner = ""
+        try:
+            st = os.stat(kfd_path)
+            owner = f" It is currently gid {st.st_gid}, mode {st.st_mode & 0o777:04o}."
+        except OSError:  # pragma: no cover - raced away between calls
+            pass
+        if target is not None:
+            fix = (
+                f"'chgrp {target} {kfd_path} && chmod 0660 {kfd_path}' "
+                f"(gid {target} is the one the render node uses on this box)"
+            )
+            host_fix = f"'{kfd_path},gid={target}'"
+        else:
+            fix = f"give it the same gid as /dev/dri/renderD*, then chmod 0660 {kfd_path}"
+            host_fix = f"'{kfd_path},gid=<the render node's gid in this container>'"
+        remedy = (
+            f"It IS forwarded, but uid {uid} cannot open it.{owner} Do NOT "
+            f"re-forward the device — fix its group instead: {fix}. On an "
+            f"unprivileged LXC apply it to the host's dev entry ({host_fix}) and "
+            "pct stop/start. See #1953."
+        )
+    else:
+        remedy = (
+            "It is not visible here. Forward the device from the host (Proxmox "
+            f"LXC: add 'dev1: {kfd_path}' to /etc/pve/lxc/<CTID>.conf, then pct "
+            "stop/start), or move this slot to device='cpu'."
+        )
+    raise GpuPreflightError(preamble + remedy)
 
 
 def resolve_gpu_device_paths(
