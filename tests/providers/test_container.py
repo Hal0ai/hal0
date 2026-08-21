@@ -964,6 +964,11 @@ class TestLoadSync:
 
         cmds = [" ".join(c) for c in calls_made]
         assert any("stop" in c for c in cmds), f"stop not in {cmds}"
+        # A deliberate stop must clear failed runtime state: the bounded stop
+        # escalates to SIGKILL (exit 137) and daemon-reload does NOT drop a
+        # failed unit from memory, so without reset-failed every cleanly
+        # stopped slot rendered "crashed"/red on the dashboard.
+        assert any("reset-failed" in c for c in cmds), f"reset-failed not in {cmds}"
         # Unit file must be deleted
         assert not unit_file.exists()
         # #1224: every teardown verb is bounded — an unbounded `systemctl stop`
