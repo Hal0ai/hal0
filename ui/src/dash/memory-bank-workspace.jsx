@@ -1108,6 +1108,7 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
               <span className="mini">sort</span>
               <select
                 className="mono"
+                data-testid="mv-sort"
                 style={{ font: '500 11px var(--jbm)', background: 'transparent', color: 'var(--fg-2)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 4px' }}
                 value={sort}
                 onChange={(e) => setSort(e.target.value)}

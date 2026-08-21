@@ -2,24 +2,14 @@
  * memory-v2-overview — Playwright coverage for the Memory v2 Bank workspace
  * Overview (`window.MemV2Overview`, task C2).
  *
- * NOT ROUTED YET: `#memory` still renders the pre-v2 `MemoryView`
- * (dash/memory.jsx) — wiring the new Overview into that route is task C6's
- * job, not C2's, and the brief explicitly forbids touching memory.jsx /
- * agent-view.jsx here to force a route just for this spec. Per the brief's
- * fallback, this whole spec is `.skip`-ed until C6 lands the route; the
- * component itself is smoke-tested in the meantime by
- * `ui/src/dash/__tests__/memoryOverviewV2.smoke.test.tsx` (mounts
- * `window.MemV2Overview` under a real QueryClientProvider with the real
- * hook globals installed, via `react-dom/server`'s `renderToStaticMarkup`).
- *
- * C6 unskips: once `#memory` (or a `#memory/overview` sub-route) renders
- * `window.MemV2Overview`, remove the `.skip` and this comment block's first
- * paragraph. The assertions below describe the intended contract per the
- * task C2 brief.
+ * Unskipped by task C6: `#memory` now renders `MemoryView`'s Overview
+ * sub-tab, which mounts `window.MemV2Overview` directly (memory.jsx). Runs
+ * against the default forced-mock dataset — no page.route overrides
+ * needed.
  */
 import { test, expect } from '../fixtures/apiMock'
 
-test.describe.skip('memory-v2 Overview (C6 unskips — not routed yet)', () => {
+test.describe('memory-v2 Overview', () => {
   test('engine panel renders stats from the mock engine card', async ({ page }) => {
     await page.goto('/#memory')
     const panel = page.getByTestId('mv-engine-panel')
@@ -41,7 +31,11 @@ test.describe.skip('memory-v2 Overview (C6 unskips — not routed yet)', () => {
     await page.goto('/#memory')
     const growth = page.getByTestId('mv-growth')
     await expect(growth).toBeVisible()
-    await expect(growth.locator('svg rect').first()).toBeVisible()
+    // The chart stacks 3 rects (world/experience/observation) per bucket —
+    // any individual segment can legitimately be a real, correctly-drawn
+    // height="0" rect on a day with zero facts of that type, so assert on
+    // the total rect count rather than the first element's visibility.
+    await expect(growth.locator('svg rect')).not.toHaveCount(0)
 
     await page.getByTestId('mv-growth-range-7d').click()
     await expect(page.getByTestId('mv-growth-range-7d')).toHaveClass(/on/)
