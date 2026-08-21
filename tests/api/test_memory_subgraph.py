@@ -45,6 +45,15 @@ def test_type_weight_orders_causal_above_semantic():
         > sg.type_weight("cooccurrence")
         > sg.type_weight("semantic")
     )
+
+
+def test_type_weight_caused_by_aliases_causal():
+    # hindsight-api 0.8.4 emits `caused_by` on the wire (verified live against
+    # prod 2026-08-21: {temporal: 8458, semantic: 3715, entity: 4514,
+    # caused_by: 43}) — without this alias it silently floors to the semantic
+    # weight (1.0), understating causal salience everywhere degree_by_node's
+    # weighted salience feeds into (units endpoint, subgraph top-degree rank).
+    assert sg.type_weight("caused_by") == sg.type_weight("causal") == 4.0
     assert sg.type_weight("mystery") == sg.type_weight("semantic")  # default floor
 
 

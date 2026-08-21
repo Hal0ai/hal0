@@ -13,7 +13,19 @@ from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
 
-_TYPE_WEIGHT = {"causal": 4.0, "temporal": 3.0, "cooccurrence": 2.0, "semantic": 1.0}
+#: `causal` is kept for compat; hindsight-api 0.8.4 actually emits
+#: `caused_by` on the wire (verified live against prod 2026-08-21: memory
+#: graph link-type counts {temporal: 8458, semantic: 3715, entity: 4514,
+#: caused_by: 43}) — without this alias real causal edges silently floor to
+#: the semantic weight below, understating causal salience everywhere this
+#: feeds into (degree_by_node, rank_by_degree, ego_bfs, the units endpoint).
+_TYPE_WEIGHT = {
+    "causal": 4.0,
+    "caused_by": 4.0,
+    "temporal": 3.0,
+    "cooccurrence": 2.0,
+    "semantic": 1.0,
+}
 _TS_KEYS = ("t", "created_at", "timestamp", "updated_at")
 
 
