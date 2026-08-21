@@ -794,6 +794,15 @@ function MemoryView({ param } = {}) {
   const [growthBank, setGrowthBank] = useStateMem(bankId);
   const [creating, setCreating] = useStateMem(false);
 
+  // Overview's growth chart needs a bank to fetch a timeseries for. On a
+  // completely fresh session (no deep-link `?bank=`, nothing in
+  // localStorage yet) `bankId`/`growthBank` both start null — default to
+  // the first bank once the bank list loads, same as the Bank tab's own
+  // `effectiveBank` fallback below.
+  useEffectMem(() => {
+    if (!growthBank && banks.length > 0) setGrowthBank(banks[0].bank_id);
+  }, [growthBank, banks.length]);
+
   // Re-sync from the hash on navigation (back/forward, external hash edits,
   // or a deep link arriving after first mount).
   useEffectMem(() => {
