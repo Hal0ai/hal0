@@ -59,20 +59,59 @@ at the ends.
    ~180 s is by-design (`known-issues.yaml: crash-loop-warming-180s-window`) — the finding is a
    state that never converges, an empty message on `error`, or a death nothing surfaces in
    `hal0 status` / `hal0 doctor`. Then swap it to a good model and clean it up.
-   * **8b. Output-sanity gate fires (#1922).** The gate that answers rc.6's #1888 class
-     (garbage output behind green health). First confirm it exists and is wired into the ready
-     path: grep the installed tree for the readiness probe call site (slots/manager.py or
-     wherever it landed) and confirm it runs before a slot is marked `ready`, with the
-     temp-0 "The capital of France is" → "Paris" shape. Then, if a synthetic bad case can be
+   * **8b. Output-sanity gate fires (#1922) — now a shipped product gate, not a to-do.** #1922
+     merged as PR #1962 (main `b78b3ffc`) and is the permanent net under the rc.7 Vulkan
+     restoration (#1948): confirm it exists and is wired into the ready path — grep the
+     installed tree for the readiness probe call site (`slots/manager.py` or wherever it
+     landed) and confirm it runs before a slot is marked `ready`, with the temp-0 "The capital
+     of France is" -> "Paris" shape, on BOTH endpoints (timeouts land in a retryable `warming`
+     with a device-derived budget, not a silent pass). Then, if a synthetic bad case can be
      constructed on this box (a degenerate/non-instruct model file, or any still-existing
      explicit override onto a broken backend), load it and confirm the slot lands in `error`
      with a message naming the probe and the expected token — never `ready`, never a silent
      degrade, never an infinite retry. If no bad case can be forced on this box, say so
      explicitly and record it as a coverage gap rather than a pass — a healthy slot's canary
-     passing does NOT verify the gate. If the grep finds NO gate in the installed tree,
-     first check whether #1922 shipped in the release under test: if it did not, record
-     against the open #1922 rather than filing a duplicate; if it did, the missing call site
-     is its own finding.
+     passing does NOT verify the gate.
+
+   * **8c. gpu-vulkan LLM lane, restored — the positive case.** On this box (render node, no
+     /dev/kfd), assign a small chat model to a throwaway slot with `device=gpu-vulkan` and load
+     it. Preflight must PASS: `require_kfd_for_gpu_slot`'s `gpu-vulkan` branch
+     (`providers/_gpu.py`) delegates the `llama` runtime lane on an AMD host to
+     `_require_vulkan_lane_prerequisites`, which does NOT consult `/dev/kfd` at all — it checks
+     (1) `image_serves_vulkan_lane()`, membership of the slot's resolved image in the
+     `VULKAN_CAPABLE_IMAGE_REFS` allowlist (`config/schema.py`, currently just
+     `VULKAN_FIXED_IMAGE = ghcr.io/hal0ai/hal0-combined:0822`), and (2) `render_node_present()`
+     for the runner identity (uid 0, the rootful `hal0-slot@` container). Record the resolved
+     image ref (`systemctl cat hal0-slot@<slot> | grep '^Image='`) alongside the pass. The #1922
+     sanity gate (check 8b) must run and pass before `ready`. Confirm output is coherent past the
+     canary: a second, different prompt through the same slot's own port, not just the gate's
+     internal probe. Clean the slot up when done.
+
+   * **8d. gpu-vulkan LLM lane, negative case — a stale/broken image must be REFUSED at
+     preflight.** Force (or simulate, if the box cannot hold two runner images at once — say so
+     either way) a `gpu-vulkan` slot's resolved image onto a ref NOT in `VULKAN_CAPABLE_IMAGE_REFS`
+     (the outgoing `ghcr.io/hal0ai/hal0-rocmfpx:ade07ba` pin — a member of
+     `STALE_ROCMFPX_IMAGE_REFS` — is the concrete example, #1888's defect). Loading it must raise
+     `GpuPreflightError` from `_require_vulkan_lane_prerequisites`'s image gate (`providers/
+     _gpu.py`), citing #1888 by number and naming `VULKAN_FIXED_IMAGE` as the repin target —
+     confirm both appear in the CLI/API error text, not just the journal. This gate fires BEFORE
+     the render-node check, so a box with no render node at all still gets the image-specific
+     message when the image is also bad. Grep to confirm the call site:
+     `grep -n '_require_vulkan_lane_prerequisites\|image_serves_vulkan_lane' providers/_gpu.py`.
+
+   * **8e. The deliberately-garbage lane — THE single most important check of this release.**
+     `ENV_ALLOW_VULKAN_FALLBACK` (`HAL0_ALLOW_VULKAN_FALLBACK` in the environment) downgrades
+     BOTH correctness refusals in `require_kfd_for_gpu_slot` to a warning — missing `/dev/kfd` on
+     the ROCm path, and the 8d image-allowlist refusal on the restored Vulkan path — never the
+     render-node check, which is a passthrough fact no env var changes. Set it, force a
+     `gpu-vulkan` slot onto a stale/broken image (as in 8d) with a valid render node, and load.
+     Preflight now WARNS (`gpu_slot_vulkan_lane_unvalidated_image_allowed` in the journal) and
+     admits the load instead of refusing. The #1922 output-sanity gate (8b) MUST then convict it:
+     the slot lands in a terminal `error` naming the failed probe, NEVER `ready`, regardless of
+     the env override. This is the check that proves the permanent net actually holds even when
+     every earlier refusal in the chain has been deliberately defeated — if this one fails,
+     nothing else in this lane matters. Record the exact env/command combination used so it is
+     reproducible blind.
 9. **Reject a bad model file.** Feed `hal0 model add` a file with a `.gguf` name and no GGUF
    magic (`head -c 2000000 /dev/urandom`). The registration-with-warning outcome is now
    by-design (`known-issues: model-add-detection-surfacing`) — what you assert is the warning
