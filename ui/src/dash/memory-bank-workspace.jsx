@@ -204,13 +204,24 @@ function AtlasPanel({ tags, totalFacts, onTag, embed }) {
   )
 }
 
+// Post-smoke fix: this chip row and AtlasPanel's bubble visualization below
+// it both rendered the SAME full tag list (a real production bank had ~90
+// distinct tags) — unbounded, so the quick-filter row was as long a wall of
+// chips as the "map" visualization it duplicates. Cap the row at the top
+// TAGS_VISIBLE by count (the list already arrives count-sorted) with a
+// "+N more" expander; leave AtlasPanel untouched as the one full view.
+const TAGS_VISIBLE = 24
+
 function TopicChips({ tags, topic, setTopic }) {
   const { TOPIC_COLORS, fmtN } = window.MemV2
+  const [expanded, setExpanded] = useStateWorkspace(false)
+  const hiddenCount = Math.max(0, tags.length - TAGS_VISIBLE)
+  const shown = expanded || hiddenCount === 0 ? tags : tags.slice(0, TAGS_VISIBLE)
   return (
     <div className="fline sec-div">
       <span className="rowlbl">tags</span>
       <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center' }}>
-        {tags.map((t, i) => {
+        {shown.map((t, i) => {
           const c = TOPIC_COLORS[i % TOPIC_COLORS.length]
           const on = topic === t.tag
           return (
@@ -226,6 +237,15 @@ function TopicChips({ tags, topic, setTopic }) {
             </button>
           )
         })}
+        {hiddenCount > 0 && (
+          <button
+            className="mv-tf"
+            data-testid="mv-tags-more"
+            onClick={() => setExpanded((e) => !e)}
+          >
+            {expanded ? 'show fewer' : `+${hiddenCount} more`}
+          </button>
+        )}
       </div>
     </div>
   )
@@ -1123,25 +1143,34 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
           <div className="mv-card">
             <div className="fline">
-              <span className="mini num">
-                showing{' '}
-                <b style={{ color: 'var(--fg-2)' }}>
-                  {totalMatched ? pageSafe * PAGE_SIZE + 1 : 0}–{Math.min(totalMatched, (pageSafe + 1) * PAGE_SIZE)}
-                </b>{' '}
-                of {totalMatched} matched
-                {/* final-review I2: the server's 2000-row upstream slab can
-                    clip the match set — total_matched/paging (and, under
-                    sort=salience, the ranking) are only accurate within that
-                    slab. Say so, mirroring the web view's own "top 120 by
-                    salience" cap notice, instead of stating a number the
-                    server itself flagged as a floor, not a total. */}
-                {unitsQuery.data?.truncated && (
-                  <span data-testid="mv-units-truncated" style={{ color: 'var(--warn)' }}>
-                    {' '}
-                    (first 2000 matched — refine filters)
-                  </span>
-                )}
-              </span>
+              {/* Post-smoke fix: this count only ever reflects the List
+                  view's units query — it kept showing "0–0 of 0 matched"
+                  while sitting on the Web tab, which has its own real count
+                  ("120 facts · N links") right in its own header. Confusing
+                  side-by-side with a tab that's actually populated, so scope
+                  it to the view it actually describes. */}
+              {view === 'list' && (
+                <span className="mini num">
+                  showing{' '}
+                  <b style={{ color: 'var(--fg-2)' }}>
+                    {totalMatched ? pageSafe * PAGE_SIZE + 1 : 0}–
+                    {Math.min(totalMatched, (pageSafe + 1) * PAGE_SIZE)}
+                  </b>{' '}
+                  of {totalMatched} matched
+                  {/* final-review I2: the server's 2000-row upstream slab can
+                      clip the match set — total_matched/paging (and, under
+                      sort=salience, the ranking) are only accurate within that
+                      slab. Say so, mirroring the web view's own "top 120 by
+                      salience" cap notice, instead of stating a number the
+                      server itself flagged as a floor, not a total. */}
+                  {unitsQuery.data?.truncated && (
+                    <span data-testid="mv-units-truncated" style={{ color: 'var(--warn)' }}>
+                      {' '}
+                      (first 2000 matched — refine filters)
+                    </span>
+                  )}
+                </span>
+              )}
               {topic && (
                 <span className="mv-tf amb" onClick={() => setTopic(null)}>
                   tag: {topic} <window.MemV2.Icon name="close" size={10} />
