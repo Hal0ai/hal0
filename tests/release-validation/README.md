@@ -141,7 +141,10 @@ known-issues, or regressions, and add a line to the changelog below. A report re
   check 1, and the `image-status-wrong-podman-store` expect clause all now say so, and all
   three point at the `reason=` field on the `podman_ro.image_present_unanswered` journal line
   (`grant-denied` / `podman-failed` / `podman-absent` / `invalid-argument` / `seam-error`),
-  which is where the wrapper's exit-code contract now surfaces. No lane, tier, or phase change.
+  which is where the wrapper's exit-code contract now surfaces, or at
+  `slot_view.image_probe_failed` for an unknown that never reached the seam. Every `unknown`
+  has one of those two lines behind it; one with neither is a finding. No lane, tier, or phase
+  change.
 
 * **5** (2026-08-20) — pre-rc.7 brief hardening from the GA-plan handoff, applied before the
   kit's first v-4-era full run. Four new checks close verification gaps for fixes that would

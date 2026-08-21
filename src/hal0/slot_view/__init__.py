@@ -755,11 +755,24 @@ async def container_enrichment(
                 cp = _resolve_container_provider(provider)
                 present = await loop.run_in_executor(None, _image_present_cached, cp, image)
                 entry["image_status"] = image_status_for(present)
-            except Exception:
+            except Exception as exc:
                 # #1939: this branch used to answer "missing". Whatever went
                 # wrong here — resolving the provider, the executor, the probe
                 # itself — the one thing we did NOT learn is whether the image
                 # is on disk, so that is what we say.
+                #
+                # And we say WHY in the journal. The payload deliberately
+                # carries no reason field, so an `unknown` with no log line
+                # behind it would be undiagnosable — the failure family this
+                # whole issue is about. `image_present` logs its own seam
+                # reasons; this covers every unknown that never reached it.
+                log.warning(
+                    "slot_view.image_probe_failed slot=%s image=%s reason=probe-error "
+                    "error=%s — reporting image_status=unknown",
+                    name,
+                    image,
+                    exc,
+                )
                 entry["image_status"] = "unknown"
         else:
             # No profile/image declared — the slot runs on the default toolbox.
@@ -778,18 +791,22 @@ async def container_enrichment(
                 return await asyncio.wait_for(_one(name, cfg), timeout=_PROBE_TIMEOUT_S)
             except TimeoutError:
                 log.warning("slot_view.container_probe_timeout slot=%s", name)
+                profile_name = str(cfg.get("profile") or "")
                 return name, {
                     "container_status": "stopped",
                     "container_health": False,
                     "runtime": "container",
-                    "profile": str(cfg.get("profile") or ""),
+                    "profile": profile_name,
                     "image": None,
                     "resolved_command": None,
-                    # #1939: a probe that timed out never got as far as
-                    # resolving the profile, so it cannot know whether an image
-                    # is even declared — "not-configured" was a claim ABOUT
-                    # CONFIG made by a probe that read none.
-                    "image_status": "unknown",
+                    # #1939. A PROFILELESS slot declares no image at all
+                    # (#1226) — that is knowable from ``cfg`` alone, needs no
+                    # probe, and the timeout does not make it any less true, so
+                    # it stays "not-configured". A slot WITH a profile does
+                    # have a declared image and we simply never got far enough
+                    # to look at the store: reporting that as "not-configured"
+                    # was a claim about config from a probe that read none.
+                    "image_status": "unknown" if profile_name else "not-configured",
                 }
 
     out: dict[str, dict[str, Any]] = {}

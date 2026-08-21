@@ -121,11 +121,33 @@ async def test_one_wedged_slot_cannot_hold_the_list(
     assert out["s3"]["container_status"] == "stopped"
     assert out["s3"]["container_health"] is False
     assert out["s2"]["container_status"] == "running"
-    # #1939: a probe that timed out never resolved the slot's profile, so it
-    # cannot know whether an image is declared, let alone whether it is on
-    # disk. The old fallback asserted "not-configured" — a claim about config
-    # made by a probe that read no config. "unknown" is the only honest answer.
-    assert out["s3"]["image_status"] == "unknown"
+    # #1939: these configs are PROFILELESS, and "no profile → no declared
+    # image" is knowable from the config alone — the timeout does not make it
+    # any less true. So this case stays "not-configured" (#1226); see the
+    # profiled case below for the one the timeout really cannot answer.
+    assert out["s3"]["image_status"] == "not-configured"
+
+
+async def test_a_wedged_profiled_slot_reports_unknown_not_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1939: a slot that DOES declare an image, whose probe timed out.
+
+    The old fallback answered "not-configured" here — a statement about this
+    slot's configuration, made by a probe that never read its configuration,
+    about a slot that is in fact configured. The honest answer is that we did
+    not get to look.
+    """
+    monkeypatch.setattr(sv_mod, "_PROBE_TIMEOUT_S", 0.4)
+    provider = SlowProvider(delay=0.01, wedged={"s1"})
+    configs = _configs(3)
+    for cfg in configs:
+        cfg["profile"] = "rocm-mtp"
+
+    out = await container_enrichment(configs, provider=provider)
+
+    assert out["s1"]["image_status"] == "unknown"
+    assert out["s1"]["profile"] == "rocm-mtp", "the fallback still reports the declared profile"
 
 
 # ── the whole GET /api/slots path ────────────────────────────────────────────

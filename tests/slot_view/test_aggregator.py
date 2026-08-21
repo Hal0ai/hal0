@@ -748,22 +748,33 @@ class TestContainerEnrichment:
         assert missing["gpu-chat"]["image_status"] == "missing"
 
     async def test_probe_exception_reports_unknown_not_missing(
-        self, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+        self, tmp_hal0_home: str, caplog: pytest.LogCaptureFixture
     ) -> None:
         """The except-branch around the image probe defaulted to ``missing``,
-        so a provider that blew up looked exactly like an absent image."""
+        so a provider that blew up looked exactly like an absent image.
+
+        It also has to LOG. The payload carries no reason field by design, so
+        an ``unknown`` with nothing behind it in the journal would be
+        undiagnosable — which is the failure family this issue is about. The
+        seam's own unknowns are logged by ``image_present``; this branch
+        covers every unknown that never reached it.
+        """
         ProfileCatalog().create("imgprof", ProfileConfig(flags=""))
 
         class _Exploding(FakeContainerProvider):
             def image_present(self, image: str) -> bool:
                 raise RuntimeError("podman store is on fire")
 
-        out = await container_enrichment(
-            [_container_cfg(profile="imgprof", image_pin=_PINNED_IMAGE)],
-            pull_jobs={},
-            provider=_Exploding(active=False),
-        )
+        with caplog.at_level("WARNING"):
+            out = await container_enrichment(
+                [_container_cfg(profile="imgprof", image_pin=_PINNED_IMAGE)],
+                pull_jobs={},
+                provider=_Exploding(active=False),
+            )
         assert out["gpu-chat"]["image_status"] == "unknown"
+        assert "slot_view.image_probe_failed" in caplog.text
+        assert "gpu-chat" in caplog.text
+        assert "podman store is on fire" in caplog.text
 
     async def test_npu_table_surfaced(self) -> None:
         out = await container_enrichment(

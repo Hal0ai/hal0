@@ -1002,8 +1002,9 @@ regressions:
       "unknown" is the API declining to answer because the rootful hal0-podman-ro seam was
       unusable; it does not re-open this entry, but it is not a pass either — file it as a seam
       finding and read the reason= field on the podman_ro.image_present_unanswered journal line
-      (grant-denied / podman-failed / podman-absent / invalid-argument / seam-error). A fleet
-      reading "unknown" everywhere means the sudoers grant did not install.
+      (grant-denied / podman-failed / podman-absent / invalid-argument / seam-error), or on
+      slot_view.image_probe_failed when the probe never reached the seam. A fleet reading
+      "unknown" everywhere means the sudoers grant did not install.
 
   - id: fpx-quant-guard-dead-null-quant
     issue: 1890   # filed by rc.6 fix wave — root cause behind cpu-install-fpx-brain-default's rc.6 partial

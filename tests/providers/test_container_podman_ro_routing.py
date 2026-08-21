@@ -110,7 +110,62 @@ def test_image_present_falls_back_to_rootless_when_seam_silent(
     monkeypatch.setattr(container_mod.subprocess, "run", _run)
 
     assert ContainerProvider().image_present(IMAGE) is True
-    assert calls == [["/usr/bin/podman", "image", "inspect", IMAGE]]
+    # `image exists`, NOT `image inspect` (#1939): only `exists` has the rc
+    # 0/1/other contract that keeps "podman is broken" from reading as "the
+    # image is absent" — the same reason the wrapper uses it root-side.
+    assert calls == [["/usr/bin/podman", "image", "exists", IMAGE]]
+
+
+def test_rootless_fallback_reports_missing_on_a_clean_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        container_mod.podman_introspect, "image_presence", _probe("unknown", "not-service-user")
+    )
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
+    monkeypatch.setattr(container_mod, "_container_runtime", lambda: "/usr/bin/podman")
+
+    class _Proc:
+        returncode = 1  # `podman image exists`: a real "no"
+
+    monkeypatch.setattr(container_mod.subprocess, "run", lambda *_a, **_k: _Proc())
+
+    assert ContainerProvider().image_present(IMAGE) is False
+
+
+def test_rootless_fallback_reports_unknown_on_an_operational_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dev half of the same bug: a local podman that RAN and broke must
+    not read as "the image is absent" either. `image inspect` could not tell
+    the two apart at all, which is why this path uses `image exists`."""
+    monkeypatch.setattr(
+        container_mod.podman_introspect, "image_presence", _probe("unknown", "not-service-user")
+    )
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
+    monkeypatch.setattr(container_mod, "_container_runtime", lambda: "/usr/bin/podman")
+
+    class _Proc:
+        returncode = 125  # store corruption, lock contention, ...
+
+    monkeypatch.setattr(container_mod.subprocess, "run", lambda *_a, **_k: _Proc())
+
+    assert ContainerProvider().image_present(IMAGE) is None
+
+
+def test_a_ref_our_own_validator_rejected_never_falls_back(
+    monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]]
+) -> None:
+    """Even off the service account. A ref this side rejects is one podman
+    would reject too, so the rootless store has nothing to add — and asking it
+    anyway would turn a validation failure back into an authoritative
+    "missing", on exactly the boxes the seam does not protect."""
+    monkeypatch.setattr(
+        container_mod.podman_introspect, "image_presence", _probe("unknown", "invalid-argument")
+    )
+    monkeypatch.setattr(container_mod, "is_hal0_service_user", lambda: False)
+
+    assert ContainerProvider().image_present(IMAGE) is None
 
 
 def test_image_present_unknown_when_seam_silent_and_no_runtime(

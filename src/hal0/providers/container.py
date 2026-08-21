@@ -2626,8 +2626,18 @@ class ContainerProvider(Provider):
 
         In a dev checkout, where hal0-api runs as the operator, the rootless
         store IS the store slots use, so the fallback is correct there — but
-        even there, a box with no container runtime at all, or one whose
-        podman will not exec, has not answered the question either.
+        only for the one reason that actually means "we never asked because
+        this is not a provisioned box" (``not-service-user``). Any other
+        reason means the seam was tried, or that our own mirror of the
+        wrapper's validator rejected the ref — and a ref this side rejects is
+        one podman would reject too, so the rootless store has nothing to add.
+
+        The fallback probe is ``podman image exists``, NOT ``image inspect``,
+        for exactly the reason the wrapper header gives: ``exists`` has the
+        contract rc 0 = yes / rc 1 = no / anything else = operational failure,
+        while ``inspect`` collapses "not found" and "podman is broken" into a
+        single non-zero rc. Using ``inspect`` here would reintroduce the same
+        conflation on dev boxes that the seam removed on deployed ones.
 
         Runs synchronously — callers must dispatch to a thread executor when
         called from an async context.
@@ -2635,7 +2645,7 @@ class ContainerProvider(Provider):
         probe = podman_introspect.image_presence(image)
         if probe.presence != "unknown":
             return probe.presence == "present"
-        if is_hal0_service_user():
+        if probe.reason != "not-service-user":
             log.warning(
                 "hal0.podman_ro.image_present_unanswered image=%s reason=%s — the rootful "
                 "seam did not answer; reporting image_status=unknown rather than consulting "
@@ -2650,13 +2660,23 @@ class ContainerProvider(Provider):
             return None
         try:
             result = subprocess.run(
-                [runtime, "image", "inspect", image],
+                [runtime, "image", "exists", image],
                 capture_output=True,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
             return None
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        log.warning(
+            "hal0.podman_ro.image_present_unanswered image=%s reason=podman-failed rc=%s — "
+            "the local podman ran but failed operationally; reporting image_status=unknown",
+            image,
+            result.returncode,
+        )
+        return None
 
     def running_image(self, slot: Mapping[str, Any] | str) -> str | None:
         """Return the image ref of the running container for a slot (#663).
