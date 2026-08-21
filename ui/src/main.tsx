@@ -148,6 +148,11 @@ import './dash/memory-hook-bridge'
 // bridge above. Must load before any Phase C view module that reads
 // window.MemV2.
 import './dash/memory-v2-shared.jsx'
+// Memory v2 Overview (task C2) — engine panel, growth chart, bank table.
+// Publishes window.MemV2Overview; reads window.MemV2 (above) and
+// window.MemoryGraphPanel (dash/agents/memory-tab.jsx, already loaded by
+// this point) at render time. Not routed yet (C6 wires #memory).
+import './dash/memory-overview-v2.jsx'
 import './dash/memory-graph-engine.jsx'
 import './dash/memory-graph-structured.jsx'
 import './dash/memory-graph-ego.jsx'
