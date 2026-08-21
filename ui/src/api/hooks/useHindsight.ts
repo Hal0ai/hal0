@@ -646,14 +646,25 @@ export interface BankUnitsPage {
   truncated: boolean
 }
 
-export function useBankUnits(bank: string | null, params: BankUnitsParams = {}) {
+// final-review M6: `options.enabled` lets a caller skip the network
+// round-trip (e.g. the Bank workspace's "0 of 3 type toggles active" state,
+// which always discards the result client-side) without making the hook
+// call itself conditional — React's rules of hooks require every render to
+// call the same hooks in the same order, so the `enabled` query option (not
+// an `if` around the call) is the correct lever. Defaults to `true` so
+// every pre-existing caller is unaffected.
+export function useBankUnits(
+  bank: string | null,
+  params: BankUnitsParams = {},
+  options?: { enabled?: boolean },
+) {
   return useQuery<BankUnitsPage>({
     queryKey: ['memory', 'banks', bank, 'units', params],
     queryFn: () =>
       apiGet<BankUnitsPage>(
         `${ENDPOINTS.memoryBankUnits(bank as string)}${serializeBankUnitsParams(params)}`,
       ),
-    enabled: !!bank,
+    enabled: !!bank && (options?.enabled ?? true),
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   })

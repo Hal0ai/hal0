@@ -78,6 +78,88 @@ describe('MemV2Workspace (smoke)', () => {
   })
 })
 
+describe('MemV2Workspace — final-review I2 (truncated slab notice)', () => {
+  it('renders mv-units-truncated when the units query reports truncated: true', () => {
+    // Direct unit test of the label logic (per the fix-wave brief): the
+    // mock builder never produces `truncated: true` (its dataset is far
+    // under the real 2000-row slab, by design — see
+    // mockFixtures.bankUnits.test.ts), so this overrides the
+    // window.__hal0UseBankUnits global directly — the same lever the real
+    // hook bridge uses — to a stub returning a fixed, already-resolved
+    // result, rather than routing a real fetch through react-query's async
+    // resolution just to reach a render-time branch.
+    const realUseBankUnits = (globalThis as unknown as { __hal0UseBankUnits: unknown })
+      .__hal0UseBankUnits
+    ;(globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits = () => ({
+      data: {
+        items: [
+          {
+            id: 'f1',
+            text: 't',
+            context: 't',
+            occurred_start: '2026-01-01',
+            fact_type: 'world',
+            tags: [],
+            salience: 1,
+            link_counts_by_type: {},
+            state: 'valid',
+          },
+        ],
+        total_matched: 2000,
+        next_offset: null,
+        truncated: true,
+      },
+      isError: false,
+      isLoading: false,
+    })
+
+    try {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const MemV2Workspace = (globalThis as unknown as { MemV2Workspace: React.ComponentType<any> })
+        .MemV2Workspace
+      const html = renderToStaticMarkup(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(MemV2Workspace, { bank: 'primary', setBank: () => {}, sel: null, setSel: () => {} }),
+        ),
+      )
+
+      expect(html).toContain('mv-units-truncated')
+      expect(html).toContain('first 2000 matched')
+    } finally {
+      ;(globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits = realUseBankUnits
+    }
+  })
+
+  it('does not render mv-units-truncated when truncated is false', () => {
+    const realUseBankUnits = (globalThis as unknown as { __hal0UseBankUnits: unknown })
+      .__hal0UseBankUnits
+    ;(globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits = () => ({
+      data: { items: [], total_matched: 0, next_offset: null, truncated: false },
+      isError: false,
+      isLoading: false,
+    })
+
+    try {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const MemV2Workspace = (globalThis as unknown as { MemV2Workspace: React.ComponentType<any> })
+        .MemV2Workspace
+      const html = renderToStaticMarkup(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(MemV2Workspace, { bank: 'primary', setBank: () => {}, sel: null, setSel: () => {} }),
+        ),
+      )
+
+      expect(html).not.toContain('mv-units-truncated')
+    } finally {
+      ;(globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits = realUseBankUnits
+    }
+  })
+})
+
 describe('MemV2EgoGraph (smoke)', () => {
   it('mounts under QueryClientProvider with the real hook globals without throwing', () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })

@@ -856,8 +856,12 @@ function Inspector({ bank, sel, setSel, unitsPage }) {
           <span className="k">salience</span>
           <span className="v">
             {/* task C7 (backend A3b): null for a unit outside the
-                salience-scored slab — render "—", not "null". */}
-            {f.salience == null ? '—' : f.salience}{' '}
+                salience-scored slab — render "—", not "null". final-review
+                M1: the real server value is an unbounded full-precision
+                float (sum of type_weight*weight over incident edges, e.g.
+                7.399999999999999) — the mock rounds to 2dp, which is why no
+                test caught the raw render. .toFixed(2), null-safe. */}
+            {f.salience == null ? '—' : f.salience.toFixed(2)}{' '}
             <span style={{ color: 'var(--fg-4)' }}>{f.salience == null ? 'unknown' : 'weighted degree'}</span>
           </span>
         </div>
@@ -1048,7 +1052,12 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
     limit: PAGE_SIZE,
     offset: page * PAGE_SIZE,
   }
-  const unitsQuery = useBankUnits ? useBankUnits(bank, unitsParams) : { data: null }
+  // final-review M6: the hook must still be called unconditionally (React
+  // hooks rule — it's a real hook call either way, `enabled` just tells
+  // react-query to skip the network round-trip), but with 0 type toggles
+  // active the result is always discarded by the `zeroTypesActive ? [] : …`
+  // branches below — so there's no reason to fire it.
+  const unitsQuery = useBankUnits ? useBankUnits(bank, unitsParams, { enabled: !zeroTypesActive }) : { data: null }
   const pageUnits = zeroTypesActive ? [] : unitsQuery.data?.items || []
   const totalMatched = zeroTypesActive ? 0 : unitsQuery.data?.total_matched ?? pageUnits.length
   const pages = Math.max(1, Math.ceil(totalMatched / PAGE_SIZE))
@@ -1120,6 +1129,18 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
                   {totalMatched ? pageSafe * PAGE_SIZE + 1 : 0}–{Math.min(totalMatched, (pageSafe + 1) * PAGE_SIZE)}
                 </b>{' '}
                 of {totalMatched} matched
+                {/* final-review I2: the server's 2000-row upstream slab can
+                    clip the match set — total_matched/paging (and, under
+                    sort=salience, the ranking) are only accurate within that
+                    slab. Say so, mirroring the web view's own "top 120 by
+                    salience" cap notice, instead of stating a number the
+                    server itself flagged as a floor, not a total. */}
+                {unitsQuery.data?.truncated && (
+                  <span data-testid="mv-units-truncated" style={{ color: 'var(--warn)' }}>
+                    {' '}
+                    (first 2000 matched — refine filters)
+                  </span>
+                )}
               </span>
               {topic && (
                 <span className="mv-tf amb" onClick={() => setTopic(null)}>
