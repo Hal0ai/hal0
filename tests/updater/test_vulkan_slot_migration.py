@@ -35,7 +35,6 @@ import tomllib
 from hal0.config.paths import slots_config_dir
 from hal0.updater.updater import relabel_stale_vulkan_slots
 
-
 #: The runner image whose Vulkan backend carries #1888. Named LITERALLY, never
 #: as ``DEFAULT_ROCMFPX_IMAGE``: the default pin is a moving target, and once
 #: it moves to a Vulkan-validated image every fixture below that relies on
@@ -56,7 +55,16 @@ def _write_slot(name: str, body: str) -> None:
     the #1948 "validated image is not migrated" cases opt out.
     """
     if 'device = "gpu-vulkan"' in body and "image_pin" not in body:
-        body = body.rstrip("\n") + f'\nimage_pin = "{STALE_LLAMA_IMAGE}"\n'
+        # Inserted immediately after the ``device`` line so it lands in the
+        # SAME table — top-level for the flat shape, inside ``[slot]`` for the
+        # nested one. Appending at the end would drop it into whatever table
+        # happens to come last (``[model]``), where nothing reads it.
+        lines = body.split("\n")
+        for i, line in enumerate(lines):
+            if line.strip() == 'device = "gpu-vulkan"':
+                lines.insert(i + 1, f'image_pin = "{STALE_LLAMA_IMAGE}"')
+                break
+        body = "\n".join(lines)
     d = slots_config_dir()
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{name}.toml").write_text(body, encoding="utf-8")
