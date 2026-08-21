@@ -61,6 +61,12 @@ code paths (`agents/hermes_provision.py`) default to `http://hal0.local:8080`. I
 rely on the default rather than setting it explicitly, verify which code path applies.
 </Aside>
 
+## Slots
+
+| Variable | Default | Controls |
+|---|---|---|
+| `HAL0_SLOT_OUTPUT_SANITY` | unset (gate ON) | `0`/`false`/`no`/`off` disables the [output-sanity gate](/docs/reference/slot-lifecycle/#output-sanity-gate) box-wide, so a `type = "llm"` slot reaches `READY` on the health probe alone. Per-slot equivalent: `output_sanity = false` in the slot TOML. |
+
 ## Hermes agent
 
 | Variable | Default | Controls |

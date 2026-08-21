@@ -105,6 +105,7 @@ from hal0.slots.state import (
     SlotConfigError,
     SlotCrashLooping,
     SlotNotFound,
+    SlotOutputSanityFailed,
     SlotPinned,
     SlotSpawnFailed,
     SlotState,
@@ -1260,6 +1261,15 @@ class SlotManager:
             self._load_failures.pop(key, None)
             carried_extra.pop("parked", None)
             carried_extra.pop("load_failures", None)
+            # …and the output-sanity verdict (#1922). Reaching READY/IDLE means
+            # a load ran the gate and the model answered (or the operator
+            # switched the gate off for this slot) — the one piece of evidence
+            # that retires a FAIL. Adoption can never clear it by accident: a
+            # slot carrying the mark is refused before it gets this far.
+            from hal0.slots.output_sanity import SANITY_EXTRA_KEYS
+
+            for sanity_key in SANITY_EXTRA_KEYS:
+                carried_extra.pop(sanity_key, None)
         effective_model_id = (
             model_id if model_id is not None else (prior.model_id if prior else None)
         )
@@ -1757,6 +1767,60 @@ class SlotManager:
                             },
                         )
             except Exception as exc:
+                error_message = str(exc)
+                gate_extra: dict[str, Any] = {}
+                if isinstance(exc, SlotOutputSanityFailed):
+                    # The gate failed on a unit that is ACTIVE and healthy — it
+                    # just talks nonsense. Stamping ERROR is not enough on its
+                    # own: the inverse-drift branch in ``status()`` (and the
+                    # boot-time upstream reconcile) adopt any ERROR/OFFLINE slot
+                    # whose unit is active straight back to READY, so the very
+                    # next /api/slots poll would undo the gate and re-publish
+                    # the garbage slot as dispatchable.
+                    #
+                    # Two independent remedies, because they fail differently:
+                    #
+                    #  1. Stop the unit — right on its own merits (a slot that
+                    #     cannot produce language should not hold VRAM), and it
+                    #     removes the "active" half adoption keys on. But
+                    #     ``terminate`` is best-effort by construction: it
+                    #     raises SlotTerminateTimeout when ``systemctl stop``
+                    #     does not return (#1224), which is exactly what a
+                    #     wedged container does. Suppressed, that silently
+                    #     handed the slot back to the adopter.
+                    #  2. Stamp the verdict on the state record. THIS is what
+                    #     the gate's durability rests on: adoption refuses a
+                    #     slot carrying it (see ``_maybe_adopt_running_slot``)
+                    #     whether or not the unit is still up, and the record is
+                    #     on disk, so an api restart cannot forget it either.
+                    #
+                    # A later load that PASSES the gate clears the mark
+                    # (``_transition``), so recovery needs no manual step and is
+                    # never silent.
+                    from hal0.slots import output_sanity
+
+                    unit_stopped = True
+                    try:
+                        await self.terminate(slot_name)
+                    except Exception as stop_exc:
+                        unit_stopped = False
+                        log.error(
+                            "slot.output_sanity_teardown_failed",
+                            extra={"slot": slot_name, "error": str(stop_exc)},
+                        )
+                        # terminate() only deregisters the upstream when the
+                        # stop returned; do it here so nothing can route to a
+                        # slot we have just judged unfit to answer.
+                        with contextlib.suppress(Exception):
+                            self._deregister_container_upstream(slot_name)
+                        error_message += output_sanity.teardown_failure_note(
+                            slot_name, str(stop_exc)
+                        )
+                    details = getattr(exc, "details", None) or {}
+                    gate_extra = output_sanity.failure_extra(
+                        str(details.get("probe_status") or ""),
+                        unit_stopped=unit_stopped,
+                    )
                 # Crash-loop bookkeeping: consecutive failures drive the
                 # backoff/park gate above. ``parked`` rides ``extra`` (not a
                 # new enum value — wire/state-machine compatible) so the UI
@@ -1764,7 +1828,7 @@ class SlotManager:
                 key = self._key(slot_name)
                 failures = self._load_failures.get(key, (0, 0.0))[0] + 1
                 self._load_failures[key] = (failures, time.monotonic())
-                err_extra: dict[str, Any] = {"load_failures": failures}
+                err_extra: dict[str, Any] = {"load_failures": failures, **gate_extra}
                 if failures >= _CRASH_LOOP_PARK_AFTER:
                     err_extra["parked"] = True
                 # TIER1: never swallow — record ERROR with details, re-raise.
@@ -1773,7 +1837,7 @@ class SlotManager:
                     SlotState.ERROR,
                     model_id=resolved_model,
                     port=_cfg_port(cfg),
-                    message=str(exc),
+                    message=error_message,
                     extra=err_extra,
                     force=True,
                 )
@@ -3625,14 +3689,27 @@ class SlotManager:
     async def _await_ready(self, slot_name: str, port: int) -> SlotState:
         """Resolve the slot's final readiness state after spawning.
 
-        Polls GET /health on the slot's container port until 200.
+        Polls GET /health on the slot's container port until 200, then — for a
+        chat-capable (``type=llm``) slot — proves the server can actually
+        produce language before it is published as READY (#1922).
 
         Returns:
             SlotState.READY when the container is serving. On a health-wait
-            timeout, resolves to SlotState.WARMING (non-dispatchable) rather
-            than a lying READY: WARMING keeps the slot retryable so the fail
-            watcher / next-request reload governs recovery, instead of live
-            traffic being forwarded to a wedged server on a false READY.
+            timeout — or an output-sanity probe that never came back
+            (``output_sanity.AMBIGUOUS_STATUSES``) — resolves to
+            SlotState.WARMING (non-dispatchable) rather than a lying READY:
+            WARMING keeps the slot retryable so the fail watcher /
+            next-request reload governs recovery, instead of live traffic
+            being forwarded to a wedged server on a false READY. One policy,
+            applied to every ambiguous outcome this method can reach.
+
+        Raises:
+            SlotOutputSanityFailed: the server is healthy, ANSWERED, and what
+                it said is not language (garbage / empty / off-topic). Unlike
+                a timeout this is not ambiguous — retrying cannot fix a
+                backend that mis-computes — so it raises into ``load``'s ERROR
+                branch (red dot, actionable message, crash-loop bookkeeping)
+                instead of parking the slot in a retryable WARMING.
         """
         cfg = await self._maybe_load_config(slot_name)
         if not cfg:
@@ -3722,6 +3799,103 @@ class SlotManager:
                     },
                 )
                 return SlotState.WARMING
+            return SlotState.READY
+
+        # ── output-sanity gate (#1922) ───────────────────────────────────────
+        #
+        # The container/llama-server lane's readiness proof stopped at /health
+        # 200 — a TRANSPORT proof. A GPU backend that loads weights and then
+        # mis-computes answers /health, streams at 60-120 tok/s and closes with
+        # a `done` frame while emitting runs of `)` or nothing at all (#1888,
+        # ct151/rc.6: two hours of garbage behind five green surfaces). The FLM
+        # lane already had a one-shot inference gate here; this is the same
+        # promise for every other llm slot — one greedy completion whose answer
+        # is known, run exactly once, where the FLM gate runs and for the same
+        # reasons (slot lock held, not yet dispatchable, warming fail-watcher
+        # skips /health, so there is no contention and no repetition).
+        #
+        # Scoped by ``skip_reason``: llm slots only (an embed/rerank/TTS/STT/
+        # image slot cannot serve a chat completion), and escapable per box or
+        # per slot.
+        #
+        # A failure that JUDGED THE MODEL raises rather than returning WARMING:
+        # a wedged loader may converge on a retry, a backend that computes
+        # wrong answers never will, so this is a red dot with an actionable
+        # message — not a slot that quietly re-loads at request cadence and
+        # burns the GPU. A failure that judged only the CLOCK
+        # (``output_sanity.AMBIGUOUS_STATUSES``) returns WARMING instead, the
+        # same answer this method already gives an ambiguous health wait: see
+        # that constant for why a timeout is not the #1888 signature and must
+        # not be re-classified as one.
+        if provider is None:
+            from hal0.slots import output_sanity
+
+            # A portless slot cannot be probed at all — that is a config
+            # fault for the health path to report, not something to
+            # mis-attribute to the model's output.
+            skip = output_sanity.skip_reason(cfg) if slot_port > 0 else "no_port"
+            if skip is not None:
+                log.debug(
+                    "slot.output_sanity_skipped",
+                    extra={"slot": slot_name, "reason": skip},
+                )
+            else:
+                # A cpu-device slot decodes far slower than the accelerated
+                # lane the default budget is sized for, so it is judged on its
+                # answer instead of on the clock.
+                sanity = await output_sanity.probe(
+                    slot_port, timeout_s=output_sanity.probe_budget_s(cfg)
+                )
+                log.info(
+                    "slot.output_sanity",
+                    extra={
+                        "slot": slot_name,
+                        "port": slot_port,
+                        "ok": sanity.ok,
+                        "status": sanity.status,
+                        "sample": sanity.sample,
+                    },
+                )
+                if not sanity.ok and output_sanity.is_ambiguous(sanity.status):
+                    # Not a verdict: the answer did not arrive, which is not
+                    # the same as the answer being wrong. WARMING is not
+                    # dispatchable, so nothing is published as READY on this
+                    # path — but nothing is condemned either. The next load
+                    # re-runs the gate (``load``'s stale-in-flight branch
+                    # tears the unit down and re-enters from OFFLINE), and a
+                    # unit systemd has given up on is still converted to ERROR
+                    # by ``load``'s ``unit_failure_reason`` check.
+                    log.warning(
+                        "slot.output_sanity_inconclusive",
+                        extra={
+                            "slot": slot_name,
+                            "port": slot_port,
+                            "status": sanity.status,
+                            "detail": sanity.detail,
+                        },
+                    )
+                    return SlotState.WARMING
+                if not sanity.ok:
+                    message = output_sanity.failure_message(sanity)
+                    log.error(
+                        "slot.output_sanity_failed",
+                        extra={
+                            "slot": slot_name,
+                            "port": slot_port,
+                            "status": sanity.status,
+                            "sample": sanity.sample,
+                            "detail": sanity.detail,
+                        },
+                    )
+                    raise SlotOutputSanityFailed(
+                        message,
+                        details={
+                            "slot": slot_name,
+                            "port": slot_port,
+                            "probe_status": sanity.status,
+                            "sample": sanity.sample,
+                        },
+                    )
         return SlotState.READY
 
     # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────
@@ -3732,6 +3906,13 @@ class SlotManager:
         Checks systemctl is-active (via _is_active). Returns the
         post-adoption Slot snapshot, or ``None`` when the slot is not
         running — caller falls back to the on-disk record.
+
+        Refuses outright for a slot whose record carries a failed
+        output-sanity verdict (#1922): "the unit is active" is the ONLY thing
+        adoption ever proves, and a slot that failed the gate is active by
+        definition — healthy unit, healthy ``/health``, garbage output. Without
+        this the gate lasted exactly one ``/api/slots`` poll whenever stopping
+        the unit did not work.
         """
         port = _cfg_port(cfg)
         model_id = _model_default(cfg) or None
@@ -3741,6 +3922,26 @@ class SlotManager:
 
         active = await self._is_active(slot_name)
         if not active:
+            return None
+
+        # #1922: an active unit that failed the output-sanity gate is not a
+        # slot to recover, it is the slot the gate refused. Read through to
+        # disk — after an api restart nothing is in ``_states`` yet, and that
+        # restart is the exact moment the boot-time reconcile tries to adopt
+        # every active unit it finds.
+        from hal0.slots.output_sanity import SANITY_STATUS_KEY, gate_failed
+
+        prior = self._states.get(self._key(slot_name)) or read_state(
+            self._state_file_for(slot_name)
+        )
+        if prior is not None and gate_failed(prior.extra):
+            log.warning(
+                "slot.adopt_refused_output_sanity",
+                extra={
+                    "slot": slot_name,
+                    "probe_status": prior.extra.get(SANITY_STATUS_KEY),
+                },
+            )
             return None
 
         # #790: an active unit is not necessarily ready. A still-loading or

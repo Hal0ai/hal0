@@ -34,6 +34,57 @@ HEALTH_TIMEOUT_S = 180.0
 #: ``hal0.slots.manager.SlotManager._terminate_timeout_s``.
 TERMINATE_TIMEOUT_S = 30.0
 
+#: Wall-clock bound on the RAW ``/completion`` output-sanity probe — the one a
+#: ``type=llm`` load runs after ``/health`` converges (#1922 — the gate that
+#: turns "the port answers" into "the model produces language"). Consumed by
+#: ``hal0.slots.output_sanity.probe``; deliberately small, because it asks for
+#: a dozen greedy tokens from an already-warm server, so anything near this
+#: bound is itself the failure the gate reports.
+OUTPUT_SANITY_TIMEOUT_S = 20.0
+
+#: Wall-clock bound on the CHAT fallback, which only runs when the raw probe's
+#: answer was wrong. Wider on purpose: that request asks for
+#: ``output_sanity.SANITY_CHAT_MAX_TOKENS`` (256) rather than a dozen, because
+#: a reasoning model spends its first tokens inside ``<think>`` and a tight cap
+#: fails working slots. 256 tokens inside 45s is ~6 tok/s — under the slowest
+#: warm lane we ship (CPU), so a slow-but-correct model is judged on its
+#: answer instead of on the clock.
+OUTPUT_SANITY_CHAT_TIMEOUT_S = 45.0
+
+#: Both gate budgets on a ``device="cpu"`` slot, which is a different machine
+#: from the accelerated lane the two constants above are sized for.
+#:
+#: The 20s/45s pair assumes a GPU that decodes a dozen greedy tokens in about
+#: a second. The fleet's own numbers say the CPU lane is two orders of
+#: magnitude away from that: the ``v1.0.0-rc.5`` validation measured ct151
+#: (8 cores, 16 GB, no GPU passthrough) at 0.12 tok/s for a 0.8B model under
+#: exactly the contention a load happens in, and one brain reply took 3m42s.
+#: A no-GPU box is not an exotic case either — ``install.profile_derive.
+#: derive_device`` resolves EVERY seeded slot to ``cpu`` there, and the brain
+#: slot then binds the unquantized F16 variant precisely because the box is
+#: slow.
+#:
+#: Set to :data:`HEALTH_TIMEOUT_S` rather than to a fresh literal: it is the
+#: wall clock the same box already gets to answer ``/health`` after spawning,
+#: so the gate asks for no more patience than the phase before it. That is
+#: 0.067 tok/s for the raw probe's dozen tokens — under the slowest thing the
+#: fleet has measured — and it also covers the chat fallback, whose 256-token
+#: ask is where a reasoning model on a CPU box would otherwise be judged on
+#: an answer it had no room to write.
+#:
+#: Consumed via ``hal0.slots.output_sanity.probe_budget_s``, which returns it
+#: for a cpu-backed slot and ``None`` (module defaults) for everything else.
+OUTPUT_SANITY_CPU_TIMEOUT_S = HEALTH_TIMEOUT_S
+
+#: What the gate can cost ONE load, worst case: the raw probe, then the chat
+#: fallback. A load that passes on the raw probe pays only the first.
+#:
+#: Charged at the CPU lane's budget because a client timeout must cover the
+#: slowest slot the server might be converging, and the client is handed a
+#: slot name — not its device — by every lifecycle verb. An accelerated slot
+#: spends 65s of this and returns early.
+OUTPUT_SANITY_LOAD_ALLOWANCE_S = 2 * OUTPUT_SANITY_CPU_TIMEOUT_S
+
 #: Sequential unloads a single ``load`` may perform before it spawns
 #: anything: ``preload_evict.admit`` awaits ``host.unload(candidate)`` once per
 #: evicted candidate, in series, inside the load path. The true count is
@@ -56,12 +107,40 @@ TERMINATE_TIMEOUT_S = 30.0
 #: estimate; bounding it server-side is the real fix (#1869).
 EVICTION_UNLOAD_ALLOWANCE = 3
 
+#: Worst wall-clock a single ``SlotManager.load`` can hold the slot lock —
+#: every phase it runs between acquiring and releasing, summed. Keep this
+#: derivation exhaustive: it is the number BOTH the per-load charge and the
+#: lock-wait allowance below are built from, so a phase added to ``load``
+#: without a line here silently re-creates #1832 (client reports a timeout on
+#: an op the server is still converging).
+#:
+#:     30   pre-spawn terminate — the drifted re-converge (#1224), the ERROR
+#:          retry and the stale in-flight branches each stop the unit in place
+#:          before re-spawning
+#:     90   3 x 30, ``preload_evict.admit`` unloading eviction candidates in
+#:          series (EVICTION_UNLOAD_ALLOWANCE)
+#:    180   the post-spawn ``/health`` poll (HEALTH_TIMEOUT_S)
+#:    360   the output-sanity gate (#1922), at its CPU-lane budget: 180 raw
+#:          probe + 180 chat fallback (OUTPUT_SANITY_LOAD_ALLOWANCE_S = 2 x
+#:          OUTPUT_SANITY_CPU_TIMEOUT_S). An accelerated slot spends 20 + 45
+#:          instead, but the client cannot know which it is asking about
+#:     30   the failed gate's teardown, which runs before the ERROR stamp and
+#:          therefore still inside the lock
+#:    ---
+#:    690
+LOAD_LOCK_HOLD_S = (
+    TERMINATE_TIMEOUT_S
+    + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S
+    + HEALTH_TIMEOUT_S
+    + OUTPUT_SANITY_LOAD_ALLOWANCE_S
+    + TERMINATE_TIMEOUT_S
+)
+
 #: Every lifecycle verb takes the per-slot lock (``SlotManager._lock``), so a
 #: request can sit queued behind whatever is already converging that slot
 #: before doing any of its own work. Charged once per request, at the cost of
-#: the worst thing that can hold the lock — a full load, evictions included,
-#: not just its health poll.
-LOCK_WAIT_ALLOWANCE_S = HEALTH_TIMEOUT_S + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S
+#: the worst thing that can hold the lock — a full load, start to finish.
+LOCK_WAIT_ALLOWANCE_S = LOAD_LOCK_HOLD_S
 
 #: Slots one ``POST /api/stacks/{slug}/apply`` may converge in a single request.
 #: ``StackApplyEngine.converge`` walks the stack's entries sequentially
@@ -94,13 +173,13 @@ def slot_lifecycle_timeout_s(*, loads: int = 1, unloads: int = 1, slots: int = 1
     (``/api/updates/restart-slots`` loops ``sm.restart`` over every drifted
     slot). Clamped to at least 1.
 
-    A load charges the health poll plus :data:`EVICTION_UNLOAD_ALLOWANCE`
-    terminates for the evictions ``preload_evict.admit`` may run before the
-    spawn; an unload charges one terminate; the whole request additionally
-    charges one :data:`LOCK_WAIT_ALLOWANCE_S` for queueing behind an in-flight
-    op on the same slot.
+    A load charges :data:`LOAD_LOCK_HOLD_S` — every phase it runs while
+    holding the lock, itemised at that constant; an unload charges one
+    terminate; the whole request additionally charges one
+    :data:`LOCK_WAIT_ALLOWANCE_S` per lock-acquiring phase, for queueing behind
+    an in-flight op on the same slot.
     """
-    per_slot = loads * (HEALTH_TIMEOUT_S + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S)
+    per_slot = loads * LOAD_LOCK_HOLD_S
     per_slot += unloads * TERMINATE_TIMEOUT_S
     # The lock allowance is charged per lock-acquiring phase, per slot. A
     # compound verb does NOT hold one lock: ``SlotManager.restart`` releases

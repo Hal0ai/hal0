@@ -245,6 +245,10 @@ Boot start is separate and explicit (`autoload`); a retired `lru` key is still a
 but ignored, with a one-time deprecation warning. See
 [Slot lifecycle → Activation](/docs/reference/slot-lifecycle/#activation).
 
+`output_sanity` (bool, default `true`) is accepted here too, though it is not a typed
+field: `false` exempts this one slot from the
+[output-sanity gate](/docs/reference/slot-lifecycle/#output-sanity-gate).
+
 <Aside type="note">
 A legacy `backend` key on a slot is silently promoted to `device` and dropped on load
 — it is never a schema field itself. On the v1.0 branch (Stream C,
