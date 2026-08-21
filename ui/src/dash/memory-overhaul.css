@@ -313,6 +313,25 @@
 .mem-failed-h { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-4); margin-bottom: 2px; }
 .mem-failed-row { font-size: 11px; color: var(--err); }
 
+/* Compact bank-card activity — a single spinner + in-flight count beside the
+   bank name (the full breakdown lives in the tooltip and in the
+   graph-extraction card's active-tasks list). */
+.mem-act-inline { flex-wrap: nowrap; gap: 6px; }
+.mem-act-inline .mem-spin { width: 10px; height: 10px; }
+.mem-act-inline-n { font-size: 10.5px; color: var(--accent); }
+
+/* Graph-extraction card — per-bank active tasks (below the stat grid). */
+.graph-tasks { display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--line); border-radius: var(--rad); padding: 10px 12px; margin-bottom: 12px; }
+.graph-tasks-h { font-size: 10px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.08em; }
+.graph-task-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.graph-task-bank { font-size: 12px; font-weight: 500; color: var(--fg); flex-shrink: 0; }
+.graph-task-detail { flex: 1; min-width: 0; font-size: 11px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-task-counts { display: inline-flex; gap: 8px; font-size: 10.5px; flex-shrink: 0; }
+.graph-task-proc { color: var(--accent); }
+.graph-task-pend { color: var(--warn); }
+.graph-tasks-quiet { font-size: 11px; color: var(--fg-5); }
+.graph-tasks:has(.graph-task-row) .graph-tasks-quiet { display: none; }
+
 /* Spinner — self-contained (no cross-file keyframe dependency). */
 .mem-spin { width: 11px; height: 11px; border: 1.5px solid var(--line-strong); border-top-color: var(--accent); border-radius: 50%; animation: mem-spin 0.7s linear infinite; flex-shrink: 0; }
 @keyframes mem-spin { to { transform: rotate(360deg); } }
