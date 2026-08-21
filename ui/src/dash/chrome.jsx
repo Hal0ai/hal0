@@ -71,6 +71,12 @@ const GLYPHS = {
   minus: <path d="M3 8h10"/>,
   fit: <path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2"/>,
   overview: <g><rect x="2" y="2.5" width="12" height="4" rx="1"/><rect x="2" y="9" width="5.5" height="4.5" rx="1"/><rect x="8.5" y="9" width="5.5" height="4.5" rx="1"/></g>,
+  // task C7: graph/focus/layers were the pre-v2 graph explorer's
+  // (memory-graph.jsx, memory-graph-engine.jsx) direction-switcher icons —
+  // both files are deleted, so these three are orphaned (no consumer left
+  // in the tree). Left in place — harmless, and window.MemV2.Icon
+  // (memory-v2-shared.jsx) already carries its own independent copies of
+  // the same glyph names for the new Bank workspace.
   graph: <g><circle cx="4" cy="11" r="1.7"/><circle cx="11.5" cy="4" r="1.7"/><circle cx="12" cy="12" r="1.7"/><path d="M5.4 9.9l4.8-4.2M5.7 11.3l4.6 0.6"/></g>,
   tools: <g><path d="M9.5 2.5a3 3 0 0 0 3.9 3.9l-2 2L6 13.8a1.6 1.6 0 0 1-2.3-2.3l5.4-5.4z"/></g>,
   clock: <g><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></g>,

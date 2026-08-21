@@ -614,14 +614,6 @@ function MemBankDetail({ bank, period, setPeriod, onClose, onDeleted }) {
       <div className="mem-detail-activity">
         <MemBankActivity bank={bank.bank_id} />
       </div>
-      {/* Full tools surface (recall · reflect · documents · models ·
-          directives) for this bank, embedded so it lives in the primary
-          bank display instead of a separate sub-tab. */}
-      <div className="sec">
-        <h2>Tools</h2>
-        <div className="rule" />
-      </div>
-      {typeof MemToolsPanel === 'function' ? <MemToolsPanel bank={bank.bank_id} embedded /> : null}
       {/* .sec is a flex title-row — keep only the heading in it; content
           (ops list, danger controls) must be siblings or they shrink-wrap. */}
       <div className="sec">
