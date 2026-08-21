@@ -259,6 +259,75 @@ def test_units_invalid_type_422():
         assert r2.json()["error"]["code"] == "memory.invalid_query"
 
 
+# ── A3b fix round: unfiltered salience slab + truthful out-of-slab scoring ──
+#
+# The salience graph fetch must be unfiltered regardless of the listing's
+# `type`/`q` — both because upstream's `type` param has the same
+# single-value-exact-equality footgun as /memories/list, AND because a
+# type-filtered graph query drops cross-type edges (upstream only returns an
+# edge when both endpoints survive the filter), understating degree even for
+# a single valid type.
+
+CROSS_TYPE_GRAPH = {
+    "nodes": TYPE_GRAPH["nodes"],
+    "edges": [{"data": {"source": "t1", "target": "t2", "type": "semantic"}}],
+}
+
+
+def test_units_salience_graph_fetch_is_never_type_or_q_filtered():
+    _reset_cache()
+    app, rec = _app_with(rows=TYPE_ROWS, graph=CROSS_TYPE_GRAPH)
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/memory/banks/shared/units",
+            params={"type": "world,experience", "q": "whatever"},
+        )
+        assert r.status_code == 200, r.text
+    graph_fwd = next(req for req in rec.requests if req["path"].endswith("/graph"))
+    assert "type" not in graph_fwd["params"]
+    assert "q" not in graph_fwd["params"]
+
+
+def test_units_salience_sees_cross_type_edges_despite_type_filter():
+    _reset_cache()
+    # t1 is `world`, t2 is `experience` — a type=world,experience listing
+    # filter must not blind the t1<->t2 edge's contribution to salience.
+    app, _rec = _app_with(rows=TYPE_ROWS, graph=CROSS_TYPE_GRAPH)
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"type": "world,experience"})
+        assert r.status_code == 200, r.text
+        by_id = {u["id"]: u for u in r.json()["items"]}
+        assert by_id["t1"]["salience"] == 1.0  # semantic floor weight
+        assert by_id["t2"]["salience"] == 1.0
+        assert by_id["t1"]["link_counts_by_type"] == {"semantic": 1}
+
+
+def test_units_out_of_slab_rows_get_null_salience_and_sort_after_scored():
+    _reset_cache()
+    rows = [
+        *TYPE_ROWS,
+        {"id": "t4", "fact_type": "world", "tags": [], "mentioned_at": "2026-01-05"},
+        {"id": "t5", "fact_type": "world", "tags": [], "mentioned_at": "2026-01-06"},
+    ]
+    # t4/t5 are NOT in the graph's node list — genuinely unknown connectivity,
+    # not zero (the slab is a capped recent-units window, not the whole bank).
+    app, _rec = _app_with(rows=rows, graph=CROSS_TYPE_GRAPH)
+    with TestClient(app) as c:
+        r = c.get("/api/memory/banks/shared/units", params={"sort": "salience"})
+        assert r.status_code == 200, r.text
+        items = r.json()["items"]
+    by_id = {u["id"]: u for u in items}
+    assert by_id["t4"]["salience"] is None
+    assert by_id["t4"]["link_counts_by_type"] == {}
+    assert by_id["t5"]["salience"] is None
+
+    ordered_ids = [u["id"] for u in items]
+    scored_positions = [ordered_ids.index(x) for x in ("t1", "t2", "t3")]
+    unscored_positions = [ordered_ids.index(x) for x in ("t4", "t5")]
+    assert max(scored_positions) < min(unscored_positions)  # nulls sort after scored
+    assert ordered_ids.index("t5") < ordered_ids.index("t4")  # newer-first among nulls
+
+
 def test_units_transport_failure_503():
     _reset_cache()
     rec = _Recorder()

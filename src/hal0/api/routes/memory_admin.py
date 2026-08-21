@@ -376,14 +376,15 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
     have anything to list).
 
     Both the unit listing and the salience graph are pulled as a single
-    ``limit=2000``-row slab (see ``src_params``/``graph_params`` below); a
-    bank with more than 2000 matching units or more than 2000 graph nodes is
-    silently clipped at that slab boundary. The response's ``truncated`` flag
-    covers the unit-listing slab (``total_matched``/paging are only accurate
-    within it); when it is set, ``salience``/``link_counts_by_type`` under
-    ``sort=salience`` are also ranked against a partial graph — units outside
-    the 2000-node graph slab read back as ``salience: 0.0`` even though they
-    may legitimately rank higher. See PR #1987 review B2.
+    ``limit=2000``-row slab (see ``src_params`` below, and the unfiltered
+    bank-graph fetch further down); a bank with more than 2000 matching units
+    or more than 2000 graph nodes is silently clipped at that slab boundary.
+    The response's ``truncated`` flag covers the unit-listing slab
+    (``total_matched``/paging are only accurate within it). A unit outside
+    the 2000-node graph slab has genuinely unknown connectivity — it reads
+    back as ``salience: null`` and ``link_counts_by_type: {}`` rather than a
+    false ``0.0``, and sorts after every scored row under ``sort=salience``.
+    See PR #1987 review B2.
     """
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
@@ -440,34 +441,63 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
         and (not hi or _unit_ts(r)[: len(hi)] <= hi)
     ]
 
-    # salience + per-type link counts from the cached bank graph (45s TTL).
-    # Cache key mirrors bank_subgraph's (bank, kind, type, q) so a graph
-    # explorer view and this list share the same cached slab.
-    cache_key = f"{bank_id}:memories:{qp.get('type', '')}:{qp.get('q', '')}"
+    # Salience + per-type link counts from the cached bank graph (45s TTL).
+    #
+    # Deliberately UNFILTERED — no `type`/`q` forwarded to `/graph`, always,
+    # regardless of this request's listing filters. Two independent reasons,
+    # both footguns, so do not "fix" this by threading qp['type']/qp['q']
+    # through again:
+    #   1. Same upstream single-value exact-equality trap as `/memories/list`
+    #      — a comma-joined `type` would silently fetch an empty graph.
+    #   2. Even a single valid `type` would be wrong here: upstream's edge
+    #      query only returns an edge when BOTH endpoints are in the filtered
+    #      node set, so cross-type edges (e.g. an `experience` fact linked to
+    #      a `world` fact) vanish and every node's degree is understated.
+    # Cache key is therefore constant per bank (no type/q component) so this
+    # slab is shared across every /units call and with bank_subgraph's
+    # unfiltered fetches.
+    #
+    # Also note: upstream caps this endpoint at ~10k edges (max_edges) and
+    # silently truncates dense banks past that — no behavior change here,
+    # just a known ceiling on the salience/link-count accuracy for very
+    # large/dense banks.
+    cache_key = f"{bank_id}:memories::"
     graph = _GRAPH_CACHE.peek(cache_key)
     if graph is None:
-        graph_params: dict[str, str] = {k: qp[k] for k in ("type", "q") if qp.get(k)}
-        graph_params.setdefault("limit", "2000")
         graph = await _forward(
-            client, "GET", f"/v1/default/banks/{bank_id}/graph", params=graph_params
+            client, "GET", f"/v1/default/banks/{bank_id}/graph", params={"limit": "2000"}
         )
         _GRAPH_CACHE.put(cache_key, graph)
     adj = _sg.adjacency(graph)
     salience_by_node = _sg.degree_by_node(graph)
+    # The slab is capped at the 2000 most-recent units — a row outside it has
+    # genuinely unknown connectivity, not zero. Score it null (never a false
+    # 0) and mark it out-of-slab in link_counts_by_type too.
+    graph_node_ids = {(n.get("data") or n).get("id") for n in graph.get("nodes", [])}
     for r in kept:
-        nbrs = adj.get(r.get("id"), [])
+        rid = r.get("id")
+        if rid not in graph_node_ids:
+            r["link_counts_by_type"] = {}
+            r["salience"] = None
+            continue
+        nbrs = adj.get(rid, [])
         counts: dict[str, int] = {}
         for _t, link_type, _w in nbrs:
             counts[link_type] = counts.get(link_type, 0) + 1
         r["link_counts_by_type"] = counts
-        r["salience"] = salience_by_node.get(r.get("id"), (0, 0.0))[1]
+        r["salience"] = salience_by_node.get(rid, (0, 0.0))[1]
 
-    kept.sort(
-        key=(lambda r: (-r["salience"], _unit_ts(r)))
-        if sort == "salience"
-        else (lambda r: _unit_ts(r)),
-        reverse=(sort == "recency"),
-    )
+    if sort == "salience":
+        # Scored rows first (highest salience first, ties by recency);
+        # unscored (out-of-slab, salience is None) rows after, stable by
+        # recency among themselves rather than an arbitrary/false ranking.
+        scored = [r for r in kept if r["salience"] is not None]
+        unscored = [r for r in kept if r["salience"] is None]
+        scored.sort(key=lambda r: (-r["salience"], _unit_ts(r)))
+        unscored.sort(key=lambda r: _unit_ts(r), reverse=True)
+        kept = scored + unscored
+    else:
+        kept.sort(key=lambda r: _unit_ts(r), reverse=True)
     page = kept[offset : offset + limit]
     nxt = offset + limit if offset + limit < len(kept) else None
     return {
