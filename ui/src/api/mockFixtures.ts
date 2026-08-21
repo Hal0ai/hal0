@@ -1089,6 +1089,16 @@ function entityLabelsFor(ents: string[]): string[] {
   return ents.map((id) => MEM_ENTITIES.find((e) => e.id === id)?.label ?? id)
 }
 
+// Upstream (hindsight-api 0.8.4) archives invalidated facts out of the
+// default /units listing; the curation inspector's revert flow lists them
+// back in via `state=invalidated`. 2 of the 26 seed facts are marked
+// invalidated here (state below) so `buildBankUnits`'s default-exclude AND
+// `state=invalidated` paths are both exercised by the mock. f9/f20 are
+// picked because they fall outside the topics/dates the other unit tests
+// filter on (performance/operator/thermal/the timeseries window), so
+// marking them invalidated doesn't starve an unrelated test.
+const MEM_INVALIDATED_FACT_IDS = new Set(['f9', 'f20'])
+
 // Curatable unit rows (Memory v2 Bank workspace) — one per MEM_FACTS entry,
 // enriched with the fields the units endpoint actually returns:
 // salience (derived from total link degree, so it's stable and non-uniform)
@@ -1120,7 +1130,7 @@ function buildUnitRows(facts: MemFact[] = MEM_FACTS) {
       entities: entityLabelsFor(f.ents),
       tags: [f.topic],
       document_id: MEM_TOPIC_DOCUMENT[f.topic] ?? null,
-      state: 'valid' as const,
+      state: MEM_INVALIDATED_FACT_IDS.has(f.id) ? ('invalidated' as const) : ('valid' as const),
       salience: Math.round((totalLinksFor(f.id) / maxLinks) * 100) / 100,
       link_counts_by_type: counts,
     }
@@ -1131,7 +1141,11 @@ type UnitRow = ReturnType<typeof buildUnitRows>[number]
 
 function parseUnitsQuery(url: string): URLSearchParams {
   try {
-    return new URL(url, 'http://mock.local').searchParams
+    // Same dummy-origin base as the other inline `new URL(url, 'http://x')`
+    // parses in this file (buildBankSubgraphRoute et al.) — url here is
+    // always a path-relative string, the base only exists to satisfy the
+    // WHATWG URL constructor.
+    return new URL(url, 'http://x').searchParams
   } catch {
     return new URLSearchParams()
   }
@@ -1153,11 +1167,18 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
   const from = params.get('from')
   const to = params.get('to')
   const documentId = params.get('document_id') ?? ''
+  // Forwarded verbatim: no `state` param -> upstream's default archive
+  // behaviour (exclude invalidated facts); an explicit `state` (e.g.
+  // `invalidated`, from the curation inspector's revert flow) filters to
+  // an exact match instead, so `state=valid` and `state=invalidated` both
+  // work as an explicit override.
+  const state = params.get('state')
   const sort = params.get('sort') ?? 'recency'
   const limit = Math.min(Math.max(Number(params.get('limit') ?? 20) || 20, 1), 100)
   const offset = Math.max(Number(params.get('offset') ?? 0) || 0, 0)
 
   let rows: UnitRow[] = buildUnitRows(MEM_FACTS)
+  rows = state ? rows.filter((r) => r.state === state) : rows.filter((r) => r.state === 'valid')
   if (q) {
     rows = rows.filter(
       (r) => r.text.toLowerCase().includes(q) || r.context.toLowerCase().includes(q),
@@ -1203,29 +1224,35 @@ function buildBankTags(_url: string, match: RegExpMatchArray) {
   const bank = bankFrom(match)
   if (bank === 'empty') return { items: [] }
   const counts: Record<string, number> = {}
-  buildUnitRows(MEM_FACTS).forEach((r) => {
-    r.tags.forEach((t) => {
-      counts[t] = (counts[t] ?? 0) + 1
+  // Only count valid (non-archived) units by default, matching
+  // `buildBankUnits`'s default exclude-invalidated behaviour, so the tag
+  // sidebar and the units filter bar never disagree on what's in-bank.
+  buildUnitRows(MEM_FACTS)
+    .filter((r) => r.state === 'valid')
+    .forEach((r) => {
+      r.tags.forEach((t) => {
+        counts[t] = (counts[t] ?? 0) + 1
+      })
     })
-  })
   const items = Object.entries(counts)
     .map(([tag, count]) => ({ tag, count }))
     .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
   return { items }
 }
 
-// GET /api/memory/banks/:bank/memories/:id/history — passthrough dict; the
-// mock only needs to be internally consistent (curate is reversible, so a
-// unit's one "creation" event is enough to exercise the history drawer).
+// GET /api/memory/banks/:bank/memories/:id/history — upstream (hindsight-api
+// 0.8.4) only tracks history for observation-type facts and returns a bare
+// JSON ARRAY of events (not a `{events:[...]}` dict); everything else 404s.
+// `jsonResponse` (./mock.ts) turns a `null` builder return into a 404, so
+// returning `null` here for a non-observation/unknown unit mirrors that
+// real 404 behaviour instead of faking a 200 with an empty array.
+// `useUnitHistory`'s normalizer tolerates both the array shape here and a
+// dict, in case a future backend revision wraps it.
 function buildUnitHistory(_url: string, match: RegExpMatchArray) {
-  const bank = decodeURIComponent(match[1] ?? 'primary')
   const id = decodeURIComponent(match[2] ?? '')
   const unit = buildUnitRows(MEM_FACTS).find((r) => r.id === id)
-  return {
-    unit_id: id,
-    bank_id: bank,
-    events: [{ state: 'valid', at: unit?.occurred_start ?? null, reason: null }],
-  }
+  if (!unit || unit.fact_type !== 'observation') return null
+  return [{ state: unit.state, at: unit.occurred_start, reason: null }]
 }
 
 function buildMentalModels() {

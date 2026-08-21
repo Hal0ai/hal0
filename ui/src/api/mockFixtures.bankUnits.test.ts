@@ -108,6 +108,24 @@ describe('buildBankUnits (mock fixture)', () => {
     expect(page.total_matched).toBe(0)
     expect(page.next_offset).toBeNull()
   })
+
+  it('excludes invalidated units by default (upstream archive behaviour)', () => {
+    const page = unitsFor('primary', 'limit=100')
+    expect(page.items.every((r) => r.state === 'valid')).toBe(true)
+    expect(page.items.some((r) => r.id === 'f9' || r.id === 'f20')).toBe(false)
+  })
+
+  it('state=invalidated lists exactly the archived units', () => {
+    const page = unitsFor('primary', 'state=invalidated&limit=100')
+    expect(page.items.length).toBe(2)
+    expect(page.items.every((r) => r.state === 'invalidated')).toBe(true)
+    expect(page.items.map((r) => r.id).sort()).toEqual(['f20', 'f9'])
+  })
+
+  it('state=valid is an explicit no-op equivalent to the default', () => {
+    const page = unitsFor('primary', 'state=valid&limit=100')
+    expect(page.items.every((r) => r.state === 'valid')).toBe(true)
+  })
 })
 
 describe('buildBankTags (mock fixture)', () => {
@@ -124,11 +142,25 @@ describe('buildBankTags (mock fixture)', () => {
 })
 
 describe('buildUnitHistory (mock fixture)', () => {
-  it('returns a passthrough history dict for a known unit id', () => {
-    const path = '/api/memory/banks/primary/memories/f1/history'
+  function historyFor(id: string) {
+    const path = `/api/memory/banks/primary/memories/${id}/history`
     const match = path.match(HISTORY_RE) as RegExpMatchArray
-    const history = MOCK_BUILDERS.unitHistory(path, match) as Record<string, unknown>
-    expect(history.unit_id).toBe('f1')
-    expect(Array.isArray(history.events)).toBe(true)
+    return MOCK_BUILDERS.unitHistory(path, match)
+  }
+
+  it('returns a bare JSON array of events for an observation fact (matches upstream 0.8.4)', () => {
+    // f6 — 'Prefers terse technical answers' — is fact_type: observation.
+    const history = historyFor('f6')
+    expect(Array.isArray(history)).toBe(true)
+    expect((history as unknown[]).length).toBeGreaterThan(0)
+  })
+
+  it('returns null (mock.ts turns this into a 404) for a non-observation fact', () => {
+    // f1 — 'Installed hal0 on Debian 13' — is fact_type: experience.
+    expect(historyFor('f1')).toBeNull()
+  })
+
+  it('returns null (404) for an unknown unit id', () => {
+    expect(historyFor('does-not-exist')).toBeNull()
   })
 })

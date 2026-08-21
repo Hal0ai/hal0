@@ -16,13 +16,14 @@ describe('serializeBankUnitsParams', () => {
     expect(serializeBankUnitsParams({ q: '', tags: [], limit: undefined })).toBe('')
   })
 
-  it('serializes q, type, from, to, documentId, sort', () => {
+  it('serializes q, type, from, to, documentId, state, sort', () => {
     const qs = serializeBankUnitsParams({
       q: 'undervolt',
       type: 'observation',
       from: '2026-05-01T00:00:00.000Z',
       to: '2026-06-01T00:00:00.000Z',
       documentId: 'doc-thermal-notes',
+      state: 'invalidated',
       sort: 'salience',
     })
     const params = new URLSearchParams(qs.replace(/^\?/, ''))
@@ -32,7 +33,13 @@ describe('serializeBankUnitsParams', () => {
     expect(params.get('to')).toBe('2026-06-01T00:00:00.000Z')
     // camelCase hook param -> snake_case query param, matching the backend.
     expect(params.get('document_id')).toBe('doc-thermal-notes')
+    // `state` is forwarded verbatim, no key or value transform.
+    expect(params.get('state')).toBe('invalidated')
     expect(params.get('sort')).toBe('salience')
+  })
+
+  it('omits state when not given', () => {
+    expect(serializeBankUnitsParams({ q: 'x' }).includes('state')).toBe(false)
   })
 
   it('joins tags with commas', () => {

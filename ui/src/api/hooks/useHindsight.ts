@@ -12,7 +12,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query'
-import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../client'
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // ── types (mirror Hindsight 0.7.x response shapes we consume) ───────────────
@@ -577,6 +577,11 @@ export interface BankUnitsParams {
   from?: string
   to?: string
   documentId?: string
+  // Forwarded verbatim (no transform) — upstream (hindsight-api 0.8.4)
+  // archives invalidated facts out of the default /units listing; the
+  // curation inspector's revert flow passes `state=invalidated` to list
+  // them back in.
+  state?: string
   sort?: string
   limit?: number
   offset?: number
@@ -596,6 +601,7 @@ export function serializeBankUnitsParams(params: BankUnitsParams = {}): string {
   if (params.from) sp.set('from', params.from)
   if (params.to) sp.set('to', params.to)
   if (params.documentId) sp.set('document_id', params.documentId)
+  if (params.state) sp.set('state', params.state)
   if (params.sort) sp.set('sort', params.sort)
   if (params.limit !== undefined) sp.set('limit', String(params.limit))
   if (params.offset !== undefined) sp.set('offset', String(params.offset))
@@ -661,16 +667,57 @@ export function useUnitCurate(bank: string) {
   })
 }
 
+export interface UnitHistoryEvent {
+  state?: string
+  at?: string | null
+  reason?: string | null
+  [key: string]: unknown
+}
+
+export interface UnitHistory {
+  events: UnitHistoryEvent[]
+}
+
+// Upstream (hindsight-api 0.8.4) returns a bare JSON ARRAY of history
+// events for /memories/:id/history, not a `{events:[...]}` dict — normalize
+// both shapes (plus null/undefined/anything-else) to `{events: [...]}` so
+// callers never have to branch on the wire shape. Exported so it's
+// unit-testable without mounting the hook.
+export function normalizeUnitHistory(raw: unknown): UnitHistory {
+  if (Array.isArray(raw)) return { events: raw as UnitHistoryEvent[] }
+  if (raw && typeof raw === 'object') {
+    const events = (raw as { events?: unknown }).events
+    return { events: Array.isArray(events) ? (events as UnitHistoryEvent[]) : [] }
+  }
+  return { events: [] }
+}
+
+// Upstream 404s /memories/:id/history for non-observation facts (it only
+// tracks history for observation-type facts) — that is "no history yet",
+// not a fetch failure, so the drawer shouldn't render an error state for
+// it. Any other error rethrows so react-query's isError path still fires.
+// Exported so the 404-tolerance is unit-testable without mounting the hook.
+export function unitHistoryOrEmptyOn404(err: unknown): UnitHistory {
+  if (err instanceof Hal0Error && err.status === 404) return { events: [] }
+  throw err
+}
+
 export function useUnitHistory(
   bank: string | null,
   id: string | null,
   opts: { enabled?: boolean } = {},
 ) {
   const enabled = (opts.enabled ?? true) && !!bank && !!id
-  return useQuery<Record<string, unknown>>({
+  return useQuery<UnitHistory>({
     queryKey: ['memory', 'banks', bank, 'unit', id, 'history'],
-    queryFn: () =>
-      apiGet<Record<string, unknown>>(ENDPOINTS.memoryUnitHistory(bank as string, id as string)),
+    queryFn: async () => {
+      try {
+        const raw = await apiGet<unknown>(ENDPOINTS.memoryUnitHistory(bank as string, id as string))
+        return normalizeUnitHistory(raw)
+      } catch (err) {
+        return unitHistoryOrEmptyOn404(err)
+      }
+    },
     enabled,
     staleTime: 30_000,
   })
