@@ -475,7 +475,16 @@ class TestNonRocmRuntimesAreNotGated:
 
         with pytest.raises(GpuPreflightError):
             container_mod.ContainerProvider().load_sync(
-                {"name": "utility", "device": "gpu-vulkan", "port": 8082}, {}
+                {
+                    "name": "utility",
+                    "device": "gpu-vulkan",
+                    "port": 8082,
+                    # Pinned LITERALLY rather than left to the default pin: the
+                    # default is a moving target and this assertion is about
+                    # #1888's carrier specifically.
+                    "image_pin": "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba",
+                },
+                {},
             )
 
     @pytest.mark.parametrize(

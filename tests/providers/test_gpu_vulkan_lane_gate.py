@@ -26,7 +26,6 @@ import os
 import pytest
 
 from hal0.config.schema import (
-    DEFAULT_ROCMFPX_IMAGE,
     STALE_ROCMFPX_IMAGE_REFS,
     VULKAN_CAPABLE_IMAGE_REFS,
     VULKAN_FIXED_IMAGE,
@@ -38,6 +37,17 @@ from hal0.providers._gpu import (
     render_node_present,
     require_kfd_for_gpu_slot,
 )
+
+#: The image whose Vulkan backend carries #1888 — the stand-in for "a runner
+#: this lane must refuse", used everywhere below.
+#:
+#: A LITERAL, deliberately, and NOT ``DEFAULT_ROCMFPX_IMAGE``. The default pin
+#: is a moving target: it is this ref on main today and becomes
+#: ``VULKAN_FIXED_IMAGE`` the moment the repin lands, at which point every
+#: "stale image is refused" assertion written against the default would invert
+#: and start asserting that the fixed image is refused. The defect belongs to
+#: THIS ref, so this ref is what the tests name.
+ADE07BA_REF = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
 
 
 def _render_node(tmp_path):
@@ -57,10 +67,24 @@ class TestVulkanCapableImageSet:
         assert image_serves_vulkan_lane(VULKAN_FIXED_IMAGE) is True
 
     def test_the_ade07ba_lineage_pin_is_not_capable(self) -> None:
-        """#1888's carrier. It is the CURRENT default on main, which is exactly
-        why the gate cannot be a "default or later" comparison."""
-        assert DEFAULT_ROCMFPX_IMAGE not in VULKAN_CAPABLE_IMAGE_REFS
-        assert image_serves_vulkan_lane(DEFAULT_ROCMFPX_IMAGE) is False
+        """#1888's carrier, named literally.
+
+        This ref must never become capable, whatever the default pin is doing
+        — which is the whole reason the gate is an allowlist of validated refs
+        rather than a comparison against ``DEFAULT_ROCMFPX_IMAGE``.
+        """
+        assert ADE07BA_REF not in VULKAN_CAPABLE_IMAGE_REFS
+        assert image_serves_vulkan_lane(ADE07BA_REF) is False
+
+    def test_the_gate_does_not_key_off_the_moving_default_pin(self) -> None:
+        """Whatever ``DEFAULT_ROCMFPX_IMAGE`` happens to be, capability is
+        decided by membership and nothing else — so a pin bump can neither
+        silently grant the lane nor silently revoke it."""
+        from hal0.config import schema
+
+        for ref in (ADE07BA_REF, VULKAN_FIXED_IMAGE, "ghcr.io/hal0ai/whatever:next"):
+            assert image_serves_vulkan_lane(ref) is (ref in VULKAN_CAPABLE_IMAGE_REFS)
+        assert schema.DEFAULT_ROCMFPX_IMAGE  # the constant exists; it is just not consulted
 
     @pytest.mark.parametrize("ref", sorted(STALE_ROCMFPX_IMAGE_REFS))
     def test_no_retired_runner_ref_can_serve_the_lane(self, ref: str) -> None:
@@ -118,14 +142,14 @@ class TestVulkanLaneGuard:
                 runtime_lane="llama",
                 kfd_path=str(tmp_path / "kfd"),
                 dri_dir=_render_node(tmp_path),
-                image=DEFAULT_ROCMFPX_IMAGE,
+                image=ADE07BA_REF,
                 env={},
                 amd_host=True,
             )
         msg = str(exc.value)
         assert "utility" in msg
         assert "1888" in msg  # name the defect this refusal exists to prevent
-        assert DEFAULT_ROCMFPX_IMAGE in msg  # name the image actually resolved
+        assert ADE07BA_REF in msg  # name the image actually resolved
         assert VULKAN_FIXED_IMAGE in msg  # name the way out
 
     def test_an_unresolvable_image_is_refused(self, tmp_path) -> None:
@@ -191,7 +215,7 @@ class TestVulkanLaneGuard:
                 runtime_lane="llama",
                 kfd_path=str(tmp_path / "kfd"),
                 dri_dir=_render_node(tmp_path),
-                image=DEFAULT_ROCMFPX_IMAGE,
+                image=ADE07BA_REF,
                 env={ENV_ALLOW_VULKAN_FALLBACK: "1"},
                 amd_host=True,
             )
@@ -222,7 +246,7 @@ class TestVulkanLaneGuard:
             runtime_lane="llama",
             kfd_path=str(tmp_path / "kfd"),
             dri_dir=str(tmp_path / "no-dri"),
-            image=DEFAULT_ROCMFPX_IMAGE,
+            image=ADE07BA_REF,
             env={},
             amd_host=False,
         )
@@ -255,12 +279,12 @@ class TestUnchangedNeighbours:
             device="gpu-rocm",
             runtime_lane="llama",
             kfd_path=str(node),
-            image=DEFAULT_ROCMFPX_IMAGE,
+            image=ADE07BA_REF,
             env={},
             amd_host=True,
         )
 
-    @pytest.mark.parametrize("image", [None, DEFAULT_ROCMFPX_IMAGE, VULKAN_FIXED_IMAGE])
+    @pytest.mark.parametrize("image", [None, ADE07BA_REF, VULKAN_FIXED_IMAGE])
     def test_a_no_rocm_runtime_on_gpu_vulkan_is_never_image_gated(self, tmp_path, image) -> None:
         """Kokoro / Moonshine (#1941). Their ``gpu-vulkan`` label is the
         picker's GPU row, not a claim about a llama.cpp backend — the image
@@ -276,7 +300,7 @@ class TestUnchangedNeighbours:
             amd_host=True,
         )
 
-    @pytest.mark.parametrize("image", [None, DEFAULT_ROCMFPX_IMAGE, VULKAN_FIXED_IMAGE])
+    @pytest.mark.parametrize("image", [None, ADE07BA_REF, VULKAN_FIXED_IMAGE])
     def test_a_rocm_runtime_on_gpu_vulkan_still_needs_kfd(self, tmp_path, image) -> None:
         """ComfyUI / Qwen3-TTS (#1952). Their images resolve HIP, so they keep
         the kfd requirement and must NOT be diverted into the Vulkan gate — an
@@ -304,7 +328,7 @@ class TestUnchangedNeighbours:
             device=device,
             kfd_path=str(tmp_path / "kfd"),
             dri_dir=str(tmp_path / "no-dri"),
-            image=DEFAULT_ROCMFPX_IMAGE,
+            image=ADE07BA_REF,
             env={},
             amd_host=True,
         )
@@ -352,7 +376,7 @@ class TestLoadSyncThreadsTheResolvedImage:
                     "name": "utility",
                     "device": "gpu-vulkan",
                     "port": 8082,
-                    "image_pin": DEFAULT_ROCMFPX_IMAGE,
+                    "image_pin": ADE07BA_REF,
                 },
                 {},
             )

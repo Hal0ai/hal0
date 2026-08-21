@@ -36,7 +36,27 @@ from hal0.config.paths import slots_config_dir
 from hal0.updater.updater import relabel_stale_vulkan_slots
 
 
+#: The runner image whose Vulkan backend carries #1888. Named LITERALLY, never
+#: as ``DEFAULT_ROCMFPX_IMAGE``: the default pin is a moving target, and once
+#: it moves to a Vulkan-validated image every fixture below that relies on
+#: "the default is broken" would silently invert and stop exercising the
+#: rescue path at all.
+STALE_LLAMA_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
+
+
 def _write_slot(name: str, body: str) -> None:
+    """Write a slot TOML into the fixture's slots dir.
+
+    Every ``gpu-vulkan`` fixture that does not pin an image of its own gets
+    :data:`STALE_LLAMA_IMAGE` injected. That is what this migration's whole
+    population looks like — slots materialised on a release whose runner
+    image could not serve the Vulkan lane — and pinning it explicitly keeps
+    each fixture's meaning fixed regardless of what the default pin becomes.
+    A fixture that DOES pin an image is left exactly as written, which is how
+    the #1948 "validated image is not migrated" cases opt out.
+    """
+    if 'device = "gpu-vulkan"' in body and "image_pin" not in body:
+        body = body.rstrip("\n") + f'\nimage_pin = "{STALE_LLAMA_IMAGE}"\n'
     d = slots_config_dir()
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{name}.toml").write_text(body, encoding="utf-8")
@@ -476,9 +496,7 @@ def test_slot_pinned_to_an_unvalidated_image_is_still_rescued(tmp_hal0_home: str
     """The rescue this pass exists for is untouched: the ade07ba lineage's
     Vulkan backend emits invalid tokens, the slot refuses to load, and the
     migration moves it to a lane that works."""
-    from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
-
-    _write_slot("utility", _vulkan_slot_on(DEFAULT_ROCMFPX_IMAGE))
+    _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
 
     assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
     assert _device_of("utility") == "gpu-rocm"
