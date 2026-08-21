@@ -825,7 +825,10 @@ function Inspector({ bank, sel, setSel, unitsPage }) {
           <span className="v">{(f.entities || []).length ? f.entities.join(' · ') : '—'}</span>
           <span className="k">salience</span>
           <span className="v">
-            {f.salience} <span style={{ color: 'var(--fg-4)' }}>weighted degree</span>
+            {/* task C7 (backend A3b): null for a unit outside the
+                salience-scored slab — render "—", not "null". */}
+            {f.salience == null ? '—' : f.salience}{' '}
+            <span style={{ color: 'var(--fg-4)' }}>{f.salience == null ? 'unknown' : 'weighted degree'}</span>
           </span>
         </div>
       </div>

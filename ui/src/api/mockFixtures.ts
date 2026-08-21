@@ -592,7 +592,7 @@ const MEM_ENTITIES: { id: string; label: string; kind: string }[] = [
   { id: 'igpu', label: 'Radeon 8060S', kind: 'device' },
 ]
 
-export const MEM_FACTS: MemFact[] = [
+const MEM_FACTS: MemFact[] = [
   // setup
   { id: 'f1', date: '2026-04-28T10:12', topic: 'setup', type: 'experience', label: 'Installed hal0 on Debian 13', text: 'Installed hal0 on Debian 13 via the one-line installer; lemond came up first try.', ents: ['box', 'lemond'] },
   { id: 'f2', date: '2026-04-28T11:40', topic: 'setup', type: 'world', label: 'Proxmox iGPU passthrough', text: 'Configured Proxmox LXC privileged passthrough for the Radeon 8060S iGPU and XDNA NPU.', ents: ['proxmox', 'igpu', 'npu', 'box'] },
@@ -1102,6 +1102,14 @@ function entityLabelsFor(ents: string[]): string[] {
 // marking them invalidated doesn't starve an unrelated test.
 const MEM_INVALIDATED_FACT_IDS = new Set(['f9', 'f20'])
 
+// task C7 (controller-sanctioned extra, backend A3b fix): the real units
+// endpoint may return `salience: null` + empty `link_counts_by_type` for a
+// fact that exists in the bank but fell outside the salience-scored slab
+// (e.g. a large bank's graph is capped, and some units simply never got
+// scored). f2/f3 simulate that here — chosen because nothing else in the
+// existing unit/workspace test suite filters or asserts on them.
+const MEM_NULL_SALIENCE_FACT_IDS = new Set(['f2', 'f3'])
+
 // Curatable unit rows (Memory v2 Bank workspace) — one per MEM_FACTS entry,
 // enriched with the fields the units endpoint actually returns:
 // salience (derived from total link degree, so it's stable and non-uniform)
@@ -1122,7 +1130,8 @@ function buildUnitRows(facts: MemFact[] = MEM_FACTS) {
   const totalLinksFor = (id: string) => Object.values(linkCounts[id] ?? {}).reduce((a, b) => a + b, 0)
   const maxLinks = Math.max(1, ...facts.map((f) => totalLinksFor(f.id)))
   return facts.map((f) => {
-    const counts = linkCounts[f.id] ?? {}
+    const outOfSlab = MEM_NULL_SALIENCE_FACT_IDS.has(f.id)
+    const counts = outOfSlab ? {} : linkCounts[f.id] ?? {}
     return {
       id: f.id,
       text: f.text,
@@ -1134,7 +1143,7 @@ function buildUnitRows(facts: MemFact[] = MEM_FACTS) {
       tags: [f.topic],
       document_id: MEM_TOPIC_DOCUMENT[f.topic] ?? null,
       state: MEM_INVALIDATED_FACT_IDS.has(f.id) ? ('invalidated' as const) : ('valid' as const),
-      salience: Math.round((totalLinksFor(f.id) / maxLinks) * 100) / 100,
+      salience: outOfSlab ? null : Math.round((totalLinksFor(f.id) / maxLinks) * 100) / 100,
       link_counts_by_type: counts,
     }
   })
@@ -1155,13 +1164,10 @@ function parseUnitsQuery(url: string): URLSearchParams {
 }
 
 // GET /api/memory/banks/:bank/units — q/tags/type/from/to/documentId filter,
-// sort (default: recency desc; 'salience' — the only other value the server
-// accepts, memory_admin.bank_units 422s on anything else), limit/offset
-// paging. `truncated` is always false here: the mock dataset never reaches
-// the server's 2000-row slab cap (see PR #1987 review B2/M10).
+// sort (default: recency desc; 'salience' or 'oldest'), limit/offset paging.
 function buildBankUnits(url: string, match: RegExpMatchArray) {
   const bank = bankFrom(match)
-  if (bank === 'empty') return { items: [], total_matched: 0, next_offset: null, truncated: false }
+  if (bank === 'empty') return { items: [], total_matched: 0, next_offset: null }
 
   const params = parseUnitsQuery(url)
   const q = (params.get('q') ?? '').trim().toLowerCase()
@@ -1225,15 +1231,26 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
   }
 
   const sorted = [...rows].sort((a, b) => {
-    if (sort === 'salience') return b.salience - a.salience
-    // 'recency' (default, and the fallback for any other value): newest first
+    if (sort === 'salience') {
+      // Out-of-slab units (salience: null) sort after every scored unit,
+      // regardless of direction — nulls have no ranking to offer, they
+      // just fall to the tail.
+      if (a.salience == null && b.salience == null) return 0
+      if (a.salience == null) return 1
+      if (b.salience == null) return -1
+      return b.salience - a.salience
+    }
+    if (sort === 'oldest') {
+      return new Date(a.occurred_start).getTime() - new Date(b.occurred_start).getTime()
+    }
+    // 'recency' (default): newest first
     return new Date(b.occurred_start).getTime() - new Date(a.occurred_start).getTime()
   })
 
   const totalMatched = sorted.length
   const items = sorted.slice(offset, offset + limit)
   const nextOffset = offset + limit < totalMatched ? offset + limit : null
-  return { items, total_matched: totalMatched, next_offset: nextOffset, truncated: false }
+  return { items, total_matched: totalMatched, next_offset: nextOffset }
 }
 
 // GET /api/memory/banks/:bank/tags — usage counts over the same unit set
