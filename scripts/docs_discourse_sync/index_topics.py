@@ -15,9 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .discovery import EXTERNAL_ID_PREFIX, SECTION_TITLES, SECTIONS, Doc
-
-INDEX_EXTERNAL_ID_PREFIX = f"{EXTERNAL_ID_PREFIX}-index"
+from .discovery import SECTION_TITLES, SECTIONS, Doc, make_external_id
 
 
 @dataclass(slots=True)
@@ -63,7 +61,7 @@ def build_index_topics(docs: list[Doc], url_map: dict[str, str]) -> list[IndexTo
 
         topics.append(
             IndexTopic(
-                external_id=f"{INDEX_EXTERNAL_ID_PREFIX}/{section}",
+                external_id=make_external_id("index", section),
                 title=f"hal0 docs: {SECTION_TITLES[section]}",
                 body_md="\n".join(lines).strip("\n") + "\n",
             )

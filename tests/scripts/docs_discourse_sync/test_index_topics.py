@@ -17,7 +17,8 @@ def _doc(section: str, subsection: str | None, slug: str, title: str, order: flo
         slug=slug,
         title=title,
         short_title=title,
-        external_id=f"hal0-docs/{key}",
+        external_id="--".join(["hal0-docs", *key.split("/")]),
+        rel_key=key,
         body_md="",
         sidebar_order=order,
         applies_to_version=None,
@@ -36,11 +37,12 @@ def test_one_index_topic_per_section_present_in_docs() -> None:
     }
     topics = build_index_topics(docs, url_map)
     assert {t.external_id for t in topics} == {
-        "hal0-docs-index/getting-started",
-        "hal0-docs-index/concepts",
+        "hal0-docs--index--getting-started",
+        "hal0-docs--index--concepts",
     }
+    assert all("/" not in t.external_id for t in topics)
     # A section with no docs (guides/operate/reference here) gets no topic.
-    assert "hal0-docs-index/guides" not in {t.external_id for t in topics}
+    assert "hal0-docs--index--guides" not in {t.external_id for t in topics}
 
 
 def test_bullets_in_sidebar_order() -> None:

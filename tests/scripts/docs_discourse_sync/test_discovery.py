@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -21,27 +22,48 @@ def test_external_id_and_site_path_for_leaf_doc(tmp_path: Path) -> None:
     docs = discovery.discover_docs(tmp_path)
     assert len(docs) == 1
     doc = docs[0]
-    assert doc.external_id == "hal0-docs/getting-started/install"
+    # '--'-joined, not '/'-joined: Discourse's Topic model validates
+    # external_id with `format: { with: /\A[\w-]+\z/ }` (app/models/topic.rb)
+    # and REJECTS a literal '/' at creation time (422) — not just a
+    # lookup-routing mismatch.
+    assert doc.external_id == "hal0-docs--getting-started--install"
+    assert "/" not in doc.external_id
     assert doc.site_path == "/docs/getting-started/install/"
     assert doc.section == "getting-started"
     assert doc.subsection is None
     assert doc.rel_key == "getting-started/install"
+    assert doc.source_dir_key == "getting-started"
 
 
 def test_index_doc_drops_slug_segment(tmp_path: Path) -> None:
     _write(tmp_path / "getting-started" / "index.mdx", "hal0 documentation", 0)
     doc = discovery.discover_docs(tmp_path)[0]
-    assert doc.external_id == "hal0-docs/getting-started"
+    assert doc.external_id == "hal0-docs--getting-started"
     assert doc.site_path == "/docs/getting-started/"
+    assert doc.rel_key == "getting-started"
+    assert doc.source_dir_key == "getting-started"
+
+
+def test_index_and_sibling_leaf_share_the_same_source_dir_key(tmp_path: Path) -> None:
+    """docs/getting-started/index.mdx and docs/getting-started/install.mdx
+    are sibling files on disk — a relative link written in either one must
+    resolve the same way. source_dir_key existing at all (rather than
+    deriving a doc's link-resolution directory from its rel_key, which
+    drops "index" and would need re-stripping) is what keeps that true."""
+    _write(tmp_path / "getting-started" / "index.mdx", "hal0 documentation", 0)
+    _write(tmp_path / "getting-started" / "install.mdx", "Install hal0", 10)
+    docs = {d.slug: d for d in discovery.discover_docs(tmp_path)}
+    assert docs[""].source_dir_key == docs["install"].source_dir_key == "getting-started"
 
 
 def test_nested_api_subsection(tmp_path: Path) -> None:
     _write(tmp_path / "reference" / "api" / "rest-api.mdx", "REST API index", 100)
     doc = discovery.discover_docs(tmp_path)[0]
-    assert doc.external_id == "hal0-docs/reference/api/rest-api"
+    assert doc.external_id == "hal0-docs--reference--api--rest-api"
     assert doc.site_path == "/docs/reference/api/rest-api/"
     assert doc.section == "reference"
     assert doc.subsection == "api"
+    assert doc.source_dir_key == "reference/api"
 
 
 def test_short_title_falls_back_to_title(tmp_path: Path) -> None:
@@ -76,7 +98,7 @@ def test_sections_outside_the_published_set_are_ignored(tmp_path: Path) -> None:
         "---\ntitle: Internal\n---\nBody\n", encoding="utf-8"
     )
     docs = discovery.discover_docs(tmp_path)
-    assert [d.external_id for d in docs] == ["hal0-docs/getting-started/install"]
+    assert [d.external_id for d in docs] == ["hal0-docs--getting-started--install"]
 
 
 def test_duplicate_external_id_raises(tmp_path: Path) -> None:
@@ -113,3 +135,42 @@ def test_sort_order_by_sidebar_order_then_title(tmp_path: Path) -> None:
     _write(tmp_path / "guides" / "a.mdx", "Alpha", 10)
     docs = sorted(discovery.discover_docs(tmp_path), key=lambda d: (d.sidebar_order, d.title))
     assert [d.title for d in docs] == ["Alpha", "Bravo"]
+
+
+# ── make_external_id: Discourse's own validation rule ────────────────────
+# app/models/topic.rb: `validates :external_id, format: { with: /\A[\w-]+\z/ },
+# length: { maximum: EXTERNAL_ID_MAX_LENGTH }` where EXTERNAL_ID_MAX_LENGTH = 50.
+
+
+def test_make_external_id_never_contains_a_slash() -> None:
+    external_id = discovery.make_external_id("reference", "api", "rest-api")
+    assert external_id == "hal0-docs--reference--api--rest-api"
+    assert "/" not in external_id
+
+
+def test_make_external_id_matches_discourse_format_rule() -> None:
+    external_id = discovery.make_external_id("guides", "connect-external-providers")
+    assert re.fullmatch(r"[\w-]+", external_id)
+
+
+def test_make_external_id_truncates_with_hash_past_the_length_cap() -> None:
+    long_id = discovery.make_external_id("section", "a" * 80)
+    assert len(long_id) <= 50
+    assert re.fullmatch(r"[\w-]+", long_id)
+    # Two different over-long inputs must not collapse to the same id.
+    other_id = discovery.make_external_id("section", "b" * 80)
+    assert long_id != other_id
+
+
+def test_every_real_doc_external_id_is_discourse_valid() -> None:
+    """The regression this whole scheme exists for: run it over the real
+    docs/ corpus and confirm every generated id satisfies Discourse's
+    actual validation rule, not just the handful of synthetic cases above."""
+    docs_dir = Path(__file__).resolve().parents[3] / "docs"
+    if not docs_dir.is_dir():
+        pytest.skip("docs/ not present (unexpected checkout layout)")
+    docs = discovery.discover_docs(docs_dir)
+    assert len(docs) >= 40
+    for doc in docs:
+        assert re.fullmatch(r"[\w-]+", doc.external_id), doc.external_id
+        assert len(doc.external_id) <= 50, doc.external_id
