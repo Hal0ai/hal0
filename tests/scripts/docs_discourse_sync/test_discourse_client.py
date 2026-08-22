@@ -122,6 +122,7 @@ def test_create_topic_posts_expected_payload() -> None:
         "raw": "body md",
         "category": 7,
         "external_id": "hal0-docs--getting-started--install",
+        "skip_validations": True,
     }
     assert topic == Topic(
         topic_id=34,
@@ -157,7 +158,12 @@ def test_update_topic_puts_expected_payload() -> None:
     assert captured["path"] == "/posts/999.json"
     assert captured["body"]["post"]["raw"] == "new body"
     assert captured["body"]["title"] == "Install hal0"
-    assert captured["body"]["category"] == 7
+    # category_id belongs nested under "post" (verified against
+    # PostsController#update, which reads params[:post][:category_id]) —
+    # a top-level "category" (create's field name) is silently ignored here.
+    assert "category" not in captured["body"]
+    assert captured["body"]["post"]["category_id"] == 7
+    assert captured["body"]["post"]["skip_validations"] is True
 
 
 def test_update_topic_dry_run_makes_no_request() -> None:

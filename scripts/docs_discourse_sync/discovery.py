@@ -42,6 +42,25 @@ SECTION_TITLES: dict[str, str] = {
 _EXTERNAL_ID_SEP = "--"
 _EXTERNAL_ID_MAX_LENGTH = 50
 
+# Discourse's out-of-box SiteSetting default for min_topic_title_length.
+# discourse_client.create_topic sends skip_validations=true, which — verified
+# against PostsController#create_params — bypasses this on creation. It does
+# NOT reliably bypass it on a later update: Topic's title validator re-runs
+# whenever category_id changes (not just when the title itself does), and
+# PostsController#update never wires a client skip_validations through to
+# PostRevisor. A category-drift correction (sync.py) on a short-titled doc
+# would still 422 on that specific update without this floor. 14 of the 44
+# current docs — "Slots", "Agents", "Memory", "Stacks", "Services", ... —
+# are under it, so this isn't a hypothetical edge case.
+_DISCOURSE_MIN_TITLE_LENGTH = 15
+_TITLE_PAD_SUFFIX = " (hal0 docs)"
+
+
+def _discourse_safe_title(title: str) -> str:
+    if len(title) >= _DISCOURSE_MIN_TITLE_LENGTH:
+        return title
+    return f"{title}{_TITLE_PAD_SUFFIX}"
+
 
 class DiscoveryError(ValueError):
     """Something under docs/<section> isn't a syncable doc."""
@@ -129,7 +148,11 @@ def _load_doc(docs_dir: Path, path: Path) -> Doc:
         section=section,
         subsection=subsection,
         slug=slug,
-        title=frontmatter.title,
+        # Padded for Discourse's title-length floor if needed (see
+        # _discourse_safe_title above) — short_title, used for index-topic
+        # bullet display rather than sent as a Discourse topic title
+        # itself, deliberately stays the clean, unpadded value.
+        title=_discourse_safe_title(frontmatter.title),
         short_title=short_title,
         external_id=external_id,
         rel_key=rel_key,

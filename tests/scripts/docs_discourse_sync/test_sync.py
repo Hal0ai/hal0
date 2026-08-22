@@ -101,7 +101,10 @@ class FakeForum:
                 if topic["post_id"] == post_id:
                     topic["raw"] = payload["post"]["raw"]
                     topic["title"] = payload["title"]
-                    topic["category_id"] = payload["category"]
+                    # category_id is nested under "post" on the real
+                    # PostsController#update — a top-level "category" (the
+                    # create-only field name) is silently ignored there.
+                    topic["category_id"] = payload["post"]["category_id"]
                     return httpx.Response(200, json={})
             return httpx.Response(404, json={"error_type": "not_found"})
 
