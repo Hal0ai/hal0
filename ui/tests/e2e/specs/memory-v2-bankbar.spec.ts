@@ -70,6 +70,22 @@ test.describe('memory-v2 BankBar + Add modal', () => {
     await expect(page.locator('[data-testid^="mv-rule-row-"]').first()).toBeVisible()
   })
 
+  // Live screenshot feedback (2026-08-22): the "…" button next to + Add had
+  // no onClick at all — did nothing when clicked, despite its
+  // "consolidate · export · wipe" title. Wired to the one real, safe,
+  // already-hooked action (consolidate-now); this pins it actually fires.
+  test('the "more" button next to + Add now triggers consolidate-now', async ({ page }) => {
+    let posted = false
+    await page.route('**/api/memory/banks/primary/consolidate', (route) => {
+      posted = true
+      return route.fulfill({ json: { queued: true } })
+    })
+    await page.goto('/#memory/bank?bank=primary')
+    await page.getByTestId('mv-consolidate-now').click()
+    await expect.poll(() => posted).toBe(true)
+    await expect(page.getByText('Consolidation queued')).toBeVisible()
+  })
+
   test('add-fact posts to /api/memory/add and toasts on success', async ({ page }) => {
     // Mutation — the GET-only forced-mock never substitutes this route.
     await page.route('**/api/memory/add', (route) =>

@@ -132,6 +132,15 @@
 
 /* inspector */
 .mv-insp{position:sticky;top:0;display:flex;flex-direction:column;max-height:calc(100vh - 210px);overflow:auto}
+/* .mvi-banner had NO rule at all (flagged, never fixed, in the final
+   whole-branch review) — its JSX already assumes a flex row (a `flex:1`
+   spacer span sits between the label and the Revert button), so with no
+   CSS at all it rendered as an unstyled block: no padding, no background,
+   the spacer collapsing to nothing, and the tags row right below crowding
+   up against it. Live screenshot feedback (2026-08-22) confirmed the
+   cramped result. Styled as a proper warn banner, same color-mix(--warn)
+   convention as .mv-chip.warn above. */
+.mvi-banner{display:flex;align-items:center;gap:8px;padding:10px 14px;background:color-mix(in srgb,var(--warn) 10%,transparent);border-bottom:1px solid color-mix(in srgb,var(--warn) 25%,transparent);color:var(--warn);font:500 11.5px var(--jbm)}
 .mvi-sec{display:block;padding:12px 14px;border-bottom:1px solid var(--line-soft,#1C1C1C)}
 .mvi-sec:last-child{border-bottom:0}
 .mvi-top{display:flex;align-items:center;gap:6px;margin-bottom:10px}
@@ -224,8 +233,13 @@
 .mv-toolsgrid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(320px,1fr);gap:14px;align-items:start}
 @media (max-width:1100px){.mv-toolsgrid{grid-template-columns:minmax(0,1fr)}}
 .mv-bankbar .row{display:flex;align-items:center;gap:20px;padding:12px 14px;flex-wrap:wrap}
-.mv-bankbar .pick{font:600 13px var(--jbm);background:var(--bg-2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 10px;cursor:pointer;flex:none}
-.mv-bankbar .pick:hover{border-color:var(--line-strong,#3A3A3A)}
+/* .pick: the bank-picker <select> look. Was scoped to `.mv-bankbar .pick`
+   only; broadened to a plain top-level rule (2026-08-22) so the Overview's
+   own bank-selector card (memory-overview-v2.jsx) can reuse the identical
+   style instead of a bespoke one — same class, same look, wherever a bank
+   picker <select> appears. */
+.pick{font:600 13px var(--jbm);background:var(--bg-2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 10px;cursor:pointer;flex:none}
+.pick:hover{border-color:var(--line-strong,#3A3A3A)}
 .mv-bankbar .pers{font:400 11.5px var(--geist,sans-serif);color:var(--fg-4);flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4}
 .mv-bankbar .dist{width:210px;flex:none}
 .mv-bankbar .cell{flex:none;min-width:0}

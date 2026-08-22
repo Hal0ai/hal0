@@ -144,6 +144,20 @@ function DensityStrip({ ts, brush, setBrush }) {
 }
 
 // ── atlas: tag bubbles, fed by useBankTags (not a static TOPICS mock) ──────
+// Live screenshot feedback (2026-08-22): long/namespaced tags
+// ("migrated:private__hermes", "session:019f8563-e830-…") overflowed their
+// bubble in the Tag map, running text into neighbours. Strip a leading
+// "namespace:" prefix to surface the human-meaningful part as a short 1-2
+// word descriptor (the full tag is still in the bubble's <title> hover and
+// still what's actually sent as the filter value on click — this only
+// shortens the on-canvas label), then hard-truncate anything still long as
+// a safety net.
+function shortTagLabel(tag) {
+  const stripped = String(tag).replace(/^[a-z0-9_]+:/i, '')
+  const base = stripped || String(tag)
+  return base.length > 16 ? base.slice(0, 15) + '…' : base
+}
+
 function AtlasPanel({ tags, totalFacts, onTag, embed }) {
   const { fmtN } = window.MemV2
   const W = 372,
@@ -192,7 +206,7 @@ function AtlasPanel({ tags, totalFacts, onTag, embed }) {
             {labelled && (
               <>
                 <text x={t.x} y={t.y - 2} textAnchor="middle" style={{ font: `600 ${t.r > 40 ? 11.5 : 10}px var(--jbm)`, fill: 'var(--fg-1, var(--fg))' }}>
-                  {t.tag}
+                  {shortTagLabel(t.tag)}
                 </text>
                 <text x={t.x} y={t.y + 12} textAnchor="middle" className="num" style={{ font: '400 9.5px var(--jbm)', fill: 'var(--fg-3)' }}>
                   {fmtN(t.count)}
@@ -368,7 +382,7 @@ function SourcesPanel({ bank, src, setSrc, limit, setLimit, matchCount }) {
 
 // ── fact list ───────────────────────────────────────────────────────────
 function FactList({ units, sel, setSel, footer, query, anyFilter }) {
-  const { FACT_COLORS, LINK_COLORS, LINK_LABEL, MvError } = window.MemV2
+  const { FACT_COLORS, LINK_COLORS, LINK_LABEL, MvError, isUuidLike } = window.MemV2
   // #1539-class fix, task C8: a failed units query used to fall back to an
   // empty array indistinguishable from "no facts match — clear a filter".
   // Check it first so an engine outage is announced, not read as a healthy
@@ -384,7 +398,10 @@ function FactList({ units, sel, setSel, footer, query, anyFilter }) {
     <div className="mv-card mv-list">
       {units.map((f) => {
         const counts = f.link_counts_by_type || {}
-        const tag = (f.tags || [])[0]
+        // Live screenshot feedback (2026-08-22): picking the raw first tag
+        // could surface a bare session/document-id UUID as the row's tag
+        // badge. Skip UUID-shaped tags in favour of the first real one.
+        const tag = (f.tags || []).find((t) => !isUuidLike(t))
         return (
           <div
             key={f.id}
@@ -707,7 +724,7 @@ function LocalGraph({ bank, centerId, onGo }) {
 // is also how a just-invalidated fact (which vanishes from the default
 // valid-only listing) stays viewable/revertable without a fallback fetch.
 function Inspector({ bank, sel, setSel, unitsPage }) {
-  const { FACT_COLORS, Icon } = window.MemV2
+  const { FACT_COLORS, Icon, isUuidLike } = window.MemV2
   const useUnitCurate = window.__hal0UseUnitCurate
   const useUnitHistory = window.__hal0UseUnitHistory
   const useMemoryDelete = window.__hal0UseMemoryDelete
@@ -830,7 +847,13 @@ function Inspector({ bank, sel, setSel, unitsPage }) {
           >
             ● {f.fact_type}
           </span>
-          {(f.tags || []).map((t) => (
+          {/* Live screenshot feedback (2026-08-22): a real fact's tags
+              include auto-generated session/document-id UUIDs alongside
+              real human tags — shown raw here (e.g.
+              "20b27576-9276-4964-90da-ec21dbb084d4"), a useless label. Same
+              filter as the workspace's TopicChips/AtlasPanel (task
+              post-smoke), applied here too — this spot was missed then. */}
+          {(f.tags || []).filter((t) => !isUuidLike(t)).map((t) => (
             <span key={t} className="mv-tag" style={{ color: 'var(--fg-3)', border: '1px solid var(--line)' }}>
               {t}
             </span>
