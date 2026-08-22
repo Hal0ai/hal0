@@ -146,9 +146,21 @@ class DiscourseClient:
         without ever calling a mutating endpoint. Returns ``None`` on 404
         (no topic with this external_id yet), which is the expected,
         common case on a doc's first sync — not an error.
+
+        This endpoint never returns the topic JSON directly: Discourse's
+        ``TopicsController#show_by_external_id`` always
+        ``redirect_to_correct_topic``s — a 301 to the canonical
+        ``/t/<slug>/<id>.json``, found on the live pilot's second sync
+        (mocks never modeled it, since every mock returned 200 straight
+        away). The redirect target carries ``include_raw`` forward
+        (Discourse allow-lists it through the redirect), so following it
+        loses nothing — ``follow_redirects`` is scoped to just this GET,
+        not enabled client-wide, since a redirected POST/PUT changing
+        method or replaying a body is a very different, riskier thing to
+        do silently.
         """
         path = f"/t/external_id/{external_id}.json"
-        response = self._request("GET", path, params={"include_raw": "true"})
+        response = self._request("GET", path, params={"include_raw": "true"}, follow_redirects=True)
         if response.status_code == 404:
             return None
         if response.status_code != 200:

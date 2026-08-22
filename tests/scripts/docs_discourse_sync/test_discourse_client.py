@@ -32,20 +32,35 @@ def _client(handler, **kwargs) -> DiscourseClient:
     )
 
 
+def _resolve_topic_json() -> dict:
+    return {
+        "id": 55,
+        "slug": "install-hal0",
+        "title": "Install hal0",
+        "category_id": 7,
+        "post_stream": {"posts": [{"id": 999, "raw": "content here"}]},
+    }
+
+
 def test_resolve_topic_found() -> None:
+    """Discourse's real /t/external_id/{id}.json NEVER returns the topic
+    JSON directly — TopicsController#show_by_external_id always
+    redirect_to_correct_topic (301 to the canonical /t/<slug>/<id>.json,
+    verified against the controller source). Every mock here follows
+    that same two-hop shape so the test suite doesn't diverge from the
+    live pilot's actual behavior the way it did before this was found."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/t/external_id/hal0-docs--getting-started--install.json"
-        assert request.url.params["include_raw"] == "true"
-        return httpx.Response(
-            200,
-            json={
-                "id": 55,
-                "slug": "install-hal0",
-                "title": "Install hal0",
-                "category_id": 7,
-                "post_stream": {"posts": [{"id": 999, "raw": "content here"}]},
-            },
-        )
+        if request.url.path == "/t/external_id/hal0-docs--getting-started--install.json":
+            assert request.url.params["include_raw"] == "true"
+            return httpx.Response(
+                301,
+                headers={"Location": "/t/install-hal0/55.json?include_raw=true"},
+            )
+        if request.url.path == "/t/install-hal0/55.json":
+            assert request.url.params["include_raw"] == "true"
+            return httpx.Response(200, json=_resolve_topic_json())
+        raise AssertionError(f"unexpected request: {request.url.path}")
 
     with _client(handler) as client:
         topic = client.resolve_topic("hal0-docs--getting-started--install")
@@ -59,6 +74,21 @@ def test_resolve_topic_found() -> None:
         category_id=7,
     )
     assert topic.url("https://forum.hal0.dev") == "https://forum.hal0.dev/t/install-hal0/55"
+
+
+def test_create_topic_does_not_follow_a_redirect() -> None:
+    """Redirect-following is scoped to resolve_topic's GET, not enabled
+    client-wide — a redirected mutating call changing method or
+    replaying a body is a very different, riskier thing to do silently.
+    A 301 from a mutating call should surface as an error, not get
+    silently followed and treated as success."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(301, headers={"Location": "/posts/999.json"})
+
+    with _client(handler) as client, pytest.raises(DiscourseAPIError) as exc_info:
+        client.create_topic(external_id="hal0-docs--x", title="X", raw="raw", category_id=7)
+    assert exc_info.value.status_code == 301
 
 
 def test_resolve_topic_lookup_path_has_exactly_one_id_segment() -> None:
