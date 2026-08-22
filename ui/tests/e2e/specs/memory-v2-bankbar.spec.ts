@@ -41,6 +41,27 @@ test.describe('memory-v2 BankBar + Add modal', () => {
     expect(postBody).not.toHaveProperty('text')
   })
 
+  test('the bank-select dropdown actually switches banks (regression, live-reproduced 2026-08-22)', async ({
+    page,
+  }) => {
+    // Live bug: picking a different bank from the dropdown briefly fetched
+    // the new bank's data (network requests fired) then immediately
+    // snapped the hash and the dropdown's value back to the old bank —
+    // stuck. Root cause: BankWorkspace's `switchBank` called `setSel(null)`
+    // right after `setBank(id)`; memory.jsx's `setSel` closes over its own
+    // (stale, not-yet-updated-this-render) `bankId` when it rewrites the
+    // hash, clobbering the bank `setBank` had just written. Pins both the
+    // URL and the select element's own value actually landing on the new
+    // bank, not just a transient fetch.
+    await page.goto('/#memory/bank?bank=primary')
+    await expect(page.getByTestId('mv-bank-select')).toHaveValue('primary')
+
+    await page.getByTestId('mv-bank-select').selectOption('scratch')
+
+    await expect(page).toHaveURL(/#memory\/bank\?bank=scratch/)
+    await expect(page.getByTestId('mv-bank-select')).toHaveValue('scratch')
+  })
+
   test('rules tab lists directives and mental models from the mock', async ({ page }) => {
     await page.goto('/#memory/bank?bank=primary')
     await page.getByTestId('mv-rules-tab').click()

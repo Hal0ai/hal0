@@ -1134,9 +1134,24 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
     if (view === 'graph' && !sel && pageUnits.length) setSel(pageUnits[0].id)
   }, [view, sel, pageUnits.length])
 
+  // Live bug (2026-08-22): the bank-select dropdown was stuck — picking a
+  // different bank flashed a fetch for it (network requests fired for the
+  // new bank's stats/units/etc) then immediately snapped the hash and
+  // dropdown back to the old bank. Root cause: `setSel(null)` right below
+  // used to run after `setBank(id)`. memory.jsx's outer `setSel` closes
+  // over its own `bankId` state to preserve it while just clearing the fact
+  // selection (`writeMemHash('bank', bankId, factId)`) — correct for
+  // "clear the selected fact, keep the current bank" callers. But within
+  // this SAME synchronous handler, `setBank(id)` only *schedules* the
+  // bankId state update for next render; the `bankId` `setSel` closes over
+  // is still the OLD value in this render. So `setSel(null)` immediately
+  // overwrote the hash `setBank` had just written, reverting it to the old
+  // bank — a stale-closure double-write race, not a state-management
+  // choice. `setBank(id)` (memory.jsx) already clears `sel` itself
+  // (`setSelState(null)`) as part of switching banks, so calling `setSel`
+  // here was always redundant on top of being the actual bug.
   const switchBank = (id) => {
     setBank(id)
-    setSel(null)
     setTopic(null)
     setBrush(null)
     setQ('')
