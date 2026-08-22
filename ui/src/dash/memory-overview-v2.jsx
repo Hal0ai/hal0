@@ -360,15 +360,46 @@ function EnginePanel({ banks, growthBank }) {
           <b className="num">{fmtN(aggregate.totalFacts || 0)}</b>
           <span className="s">all banks</span>
         </div>
+        {/* Post-smoke-review regression fix (2026-08-21): "graph built /
+            errors / live" is genuinely duplicative of MemoryGraphPanel's own
+            grid ONLY while extraction is enabled — MemoryGraphPanel
+            (memory-tab.jsx, reused verbatim) renders its Built/Errors/Live
+            numbers exclusively in its `enabled` branch; when extraction is
+            OFF it shows explanatory copy + an "Enable" button instead, with
+            no numbers at all. Removing these cells unconditionally (the
+            prior version of this fix) meant an operator with extraction
+            OFF lost visibility into accumulated build/error/in-flight
+            history entirely — real information loss, not dedup. Render
+            them here ONLY in exactly the state MemoryGraphPanel hides its
+            own copy (`!g?.enabled`), so there's no duplication when ON and
+            no blindness when OFF. */}
+        {!g?.enabled && (
+          <>
+            <div>
+              <span className="k">graph built</span>
+              <b className="num">{fmtN(g?.builds_ok ?? 0)}</b>
+              <span className="s">lifetime</span>
+            </div>
+            <div>
+              <span className="k">errors</span>
+              <b className="num" style={{ color: g?.errors ? 'var(--err)' : undefined }}>
+                {g?.errors ?? 0}
+              </b>
+              <span className="s">{g?.errors ? 'see logs' : '—'}</span>
+            </div>
+            <div>
+              <span className="k">live</span>
+              <b className="num" style={{ color: 'var(--accent)' }}>
+                {fmtN(g?.in_flight ?? 0)}
+              </b>
+              <span className="s">pending</span>
+            </div>
+          </>
+        )}
       </div>
-      {/* Live-observed redundancy (2026-08-21): this grid used to repeat
-          "graph built / errors / live" as 3 more cells here, then the
-          embedded ADR-0023 panel below rendered the exact same three
-          numbers again in its own grid a few pixels down — duplicate
-          content, not duplicate meaning, just extra vertical space for
-          nothing new. Dropped the 3 duplicate cells; MemoryGraphPanel
-          (reused verbatim, not modified — ADR-0023 constraint) is the one
-          place those numbers live now. */}
+      {/* ADR-0023 — reused verbatim, not reimplemented (enable/disable,
+          slot picker, its own built/errors/live grid when enabled +
+          active-tasks list). */}
       {window.MemoryGraphPanel && <window.MemoryGraphPanel />}
     </div>
   )

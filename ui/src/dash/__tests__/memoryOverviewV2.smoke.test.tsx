@@ -65,3 +65,66 @@ describe('MemV2Overview (smoke)', () => {
     expect(html).toContain('mv-page')
   })
 })
+
+// Post-smoke-review regression fix: EnginePanel's "graph built / errors /
+// live" cells must render when — and only when — extraction is OFF, since
+// that's exactly the state MemoryGraphPanel (stubbed above) hides its own
+// copy of the same three numbers. Overrides window.__hal0UseMemoryGraphStatus
+// directly (same lever the real hook bridge uses) with fixed, already-
+// resolved data — no need to wait on the never-settling fetch stub above.
+describe('MemV2Overview — EnginePanel graph-stat cells vs extraction toggle', () => {
+  it('renders graph built/errors/live when extraction is OFF (nonzero counters)', () => {
+    const real = (globalThis as unknown as { __hal0UseMemoryGraphStatus: unknown })
+      .__hal0UseMemoryGraphStatus
+    ;(globalThis as unknown as { __hal0UseMemoryGraphStatus: unknown }).__hal0UseMemoryGraphStatus = () => ({
+      data: { enabled: false, builds_ok: 1301, errors: 383, in_flight: 1 },
+    })
+
+    try {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const MemV2Overview = (globalThis as unknown as { MemV2Overview: React.ComponentType<any> })
+        .MemV2Overview
+      const html = renderToStaticMarkup(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(MemV2Overview, { onExplore: () => {}, growthBank: 'primary', setGrowthBank: () => {} }),
+        ),
+      )
+
+      expect(html).toContain('graph built')
+      expect(html).toContain('1,301')
+      expect(html).toContain('errors')
+      expect(html).toContain('383')
+      expect(html).toContain('pending')
+    } finally {
+      ;(globalThis as unknown as { __hal0UseMemoryGraphStatus: unknown }).__hal0UseMemoryGraphStatus = real
+    }
+  })
+
+  it('does not duplicate graph built/errors/live when extraction is ON', () => {
+    const real = (globalThis as unknown as { __hal0UseMemoryGraphStatus: unknown })
+      .__hal0UseMemoryGraphStatus
+    ;(globalThis as unknown as { __hal0UseMemoryGraphStatus: unknown }).__hal0UseMemoryGraphStatus = () => ({
+      data: { enabled: true, builds_ok: 1301, errors: 383, in_flight: 1 },
+    })
+
+    try {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const MemV2Overview = (globalThis as unknown as { MemV2Overview: React.ComponentType<any> })
+        .MemV2Overview
+      const html = renderToStaticMarkup(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(MemV2Overview, { onExplore: () => {}, growthBank: 'primary', setGrowthBank: () => {} }),
+        ),
+      )
+
+      expect(html).not.toContain('graph built')
+      expect(html).not.toContain('lifetime')
+    } finally {
+      ;(globalThis as unknown as { __hal0UseMemoryGraphStatus: unknown }).__hal0UseMemoryGraphStatus = real
+    }
+  })
+})
