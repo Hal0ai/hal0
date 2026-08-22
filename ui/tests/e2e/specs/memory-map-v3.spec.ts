@@ -142,4 +142,26 @@ test.describe('Unified memory hero (dashboard)', () => {
     await expect(cell.locator('.rd-health-v')).toContainText('39.1')
     await expect(cell.locator('.rd-health-v')).toContainText('/128 GB')
   })
+
+  // Live screenshot feedback (2026-08-22): the operator spotted the
+  // Slots-page header's own "CPU · Memory" gauge cell (telemetry-
+  // header.jsx's ThCellCpuMem, a DIFFERENT file than #1978 touched)
+  // still reading the raw ram_total_mb (~94 GB) right next to ThRuler's
+  // memory-map band on the SAME page correctly showing the ~128 GB pool
+  // total — the exact class of divergence #1978 fixed for the dashboard's
+  // three other "memory" figures, just missed here.
+  test('Slots-page "CPU · Memory" gauge also reads the shared pool total, not raw ram_total_mb', async ({
+    page,
+  }) => {
+    await mockStatsHardware(page, { configured: false, detected: false })
+    await page.goto('/#slots')
+    const hero = page.getByTestId('telemetry-header')
+    const cell = hero.locator('.th-cell', { hasText: 'CPU · Memory' })
+    await expect(cell).toBeVisible()
+    // Same 40000 MB used / unified_memory_mb 131072 probe mock as the
+    // health-strip test above — same pool, same expected reading.
+    await expect(cell).toContainText('39.1')
+    await expect(cell).toContainText('/ 128 GB')
+    await expect(cell).not.toContainText('/ 94 GB')
+  })
 })

@@ -234,9 +234,22 @@ function ThCellCpuMem() {
   const stats = useStatsHardware()
   const power = useStatsPower()
   const s = stats.data
+  // #1978 unified the dashboard's "unified memory" figures against the
+  // shared memory-map pool total (useMemoryMapModel) so the Slots-page map,
+  // the dashboard hero card, and the dashboard health strip could no
+  // longer diverge — but this cell lives in telemetry-header.jsx (a
+  // different file than that fix touched) and was missed: it still sized
+  // itself off ram_total_mb, showing the host's raw ~96 GB RAM total right
+  // next to ThRuler's memory-map band on this SAME page showing the
+  // GTT-aware ~116 GB pool total for what reads as "the same number".
+  // Same fix, same fallback order: prefer the live pool total on a
+  // GPU/unified box, fall back to RAM total everywhere else (non-UMA boxes,
+  // and test mocks with no memory-map model wired up).
+  const mm = useMemoryMapModel()
+  const poolTotalGb = mm.pool.kind === 'unified' ? mm.pool.totalGb || 0 : 0
 
   const usedGb = s?.ram_used_mb != null ? s.ram_used_mb / 1024 : null
-  const totalGb = s?.ram_total_mb != null ? s.ram_total_mb / 1024 : hw.data?.ram?.total || null
+  const totalGb = poolTotalGb || (s?.ram_total_mb != null ? s.ram_total_mb / 1024 : hw.data?.ram?.total || null)
   const ramPct = usedGb != null && totalGb ? (usedGb / totalGb) * 100 : null
   const cpuUtil = typeof s?.cpu_util === 'number' ? s.cpu_util : null
   const cpuTemp = power.data?.cpu_temp_c ?? null
