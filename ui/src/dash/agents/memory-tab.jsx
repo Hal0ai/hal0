@@ -44,9 +44,9 @@ function MemoryTab({ subsection } = {}) { // eslint-disable-line no-unused-vars
             <button
               className="btn ghost sm"
               data-testid="memory-open-graph"
-              onClick={() => { window.location.hash = "#memory/graph"; }}
+              onClick={() => { window.location.hash = "#memory/bank"; }}
             >
-              Open graph
+              Open bank
             </button>
           </div>
         </div>

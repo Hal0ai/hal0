@@ -102,6 +102,10 @@
   --rad-lg: 10px;
   --rad-xl: 14px;
   --rad-pill: 999px;
+  /* task C7: migrated from memory-overhaul.css (which is being trimmed
+     toward eventual removal) — the only two of its six :root tokens that
+     weren't already defined here. */
+  --rad-xs: 3px;
 
   /* Operator Board — motion + surface tokens (ported from the kanban
      prototype board.css; added here so the board, scoped under .board, can
@@ -113,6 +117,8 @@
   --dur-slow:      .22s;
   --shadow-drawer: -24px 0 80px -20px rgba(0, 0, 0, 0.7);
   --shadow-toast:  0 12px 36px -12px rgba(0, 0, 0, 0.6);
+  /* task C7: migrated from memory-overhaul.css. */
+  --shadow-menu:   0 8px 24px rgba(0, 0, 0, 0.45);
 
   /* Layout */
   --topbar-h:    52px;

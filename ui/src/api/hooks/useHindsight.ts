@@ -313,7 +313,13 @@ export function useBankSubgraph(
     kind?: 'memories' | 'entities'
     mode?: 'ego' | 'top'
     node?: string
-    depth?: 1 | 2
+    // Widened from the original FU2 `1 | 2` cap for task C4's ego focus
+    // view, which needs the full 1–10 depth slider the Global Constraints
+    // require. The server already honours depth <= 10 (task A2, merged);
+    // the only existing caller (memory-graph.jsx's Direction-C ego slice)
+    // passes a hardcoded `depth: 1`, so this widening is backward
+    // compatible — nothing depended on the old 2-cap.
+    depth?: number
     top_k?: number
     by?: 'degree' | 'recency'
     limit?: number
@@ -374,12 +380,23 @@ export function useRecall() {
   })
 }
 
+// Post-smoke fix (curl-verified against the live install, 2026-08-21):
+// upstream Hindsight 0.8.4's reflect route requires `query` in the request
+// body — `text` (the field this hook sent before this fix, on the mistaken
+// assumption it matched the passthrough's other verbatim fields) 422s with
+// `{"loc":["body","query"],"msg":"Field required"}`. The RESPONSE shape is
+// unaffected — it still carries `text` (the answer) + `based_on`, typed
+// below exactly as before; only the request field name changes.
+export interface ReflectBody {
+  query: string
+}
+
 export function useReflect() {
   return useMutation({
-    mutationFn: ({ bank, body }: { bank: string; body: Record<string, unknown> }) =>
+    mutationFn: ({ bank, body }: { bank: string; body: ReflectBody }) =>
       apiPost<{ text: string; based_on?: Record<string, number> }>(
         ENDPOINTS.memoryBankReflect(bank),
-        body,
+        body as unknown as Record<string, unknown>,
       ),
   })
 }
@@ -622,7 +639,10 @@ export interface BankUnitRow {
   tags?: string[]
   document_id?: string | null
   state: 'valid' | 'invalidated' | string
-  salience: number
+  // task C7 (backend A3b): null for a unit that fell outside the
+  // salience-scored slab (e.g. a large bank's capped graph) — no ranking
+  // to offer, not a zero score.
+  salience: number | null
   link_counts_by_type: Record<string, number>
 }
 
@@ -637,14 +657,25 @@ export interface BankUnitsPage {
   truncated: boolean
 }
 
-export function useBankUnits(bank: string | null, params: BankUnitsParams = {}) {
+// final-review M6: `options.enabled` lets a caller skip the network
+// round-trip (e.g. the Bank workspace's "0 of 3 type toggles active" state,
+// which always discards the result client-side) without making the hook
+// call itself conditional — React's rules of hooks require every render to
+// call the same hooks in the same order, so the `enabled` query option (not
+// an `if` around the call) is the correct lever. Defaults to `true` so
+// every pre-existing caller is unaffected.
+export function useBankUnits(
+  bank: string | null,
+  params: BankUnitsParams = {},
+  options?: { enabled?: boolean },
+) {
   return useQuery<BankUnitsPage>({
     queryKey: ['memory', 'banks', bank, 'units', params],
     queryFn: () =>
       apiGet<BankUnitsPage>(
         `${ENDPOINTS.memoryBankUnits(bank as string)}${serializeBankUnitsParams(params)}`,
       ),
-    enabled: !!bank,
+    enabled: !!bank && (options?.enabled ?? true),
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   })

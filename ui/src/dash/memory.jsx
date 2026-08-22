@@ -614,14 +614,6 @@ function MemBankDetail({ bank, period, setPeriod, onClose, onDeleted }) {
       <div className="mem-detail-activity">
         <MemBankActivity bank={bank.bank_id} />
       </div>
-      {/* Full tools surface (recall · reflect · documents · models ·
-          directives) for this bank, embedded so it lives in the primary
-          bank display instead of a separate sub-tab. */}
-      <div className="sec">
-        <h2>Tools</h2>
-        <div className="rule" />
-      </div>
-      {typeof MemToolsPanel === 'function' ? <MemToolsPanel bank={bank.bank_id} embedded /> : null}
       {/* .sec is a flex title-row — keep only the heading in it; content
           (ops list, danger controls) must be siblings or they shrink-wrap. */}
       <div className="sec">
@@ -723,86 +715,135 @@ function MemNewBankForm({ onClose }) {
   );
 }
 
+// ── Root routing helpers (task C6) ──────────────────────────────────────────
+//
+// MemoryView keeps its own #memory/<section> sub-nav; main.jsx/agent-view.jsx
+// resolve BOTH `#memory/<section>` and `#agent/memory/<section>` back to this
+// component with `param` = the section (agent-view.jsx:39-52) — there is no
+// rewrite anywhere, so navigation issued FROM HERE must preserve whichever
+// prefix is currently active or a user sitting on `#agent/memory/bank` would
+// get silently bounced to the bare `#memory/...` shape on their next click.
+function memHashPrefix() {
+  const hash = (typeof window !== 'undefined' && window.location.hash) || '';
+  return hash.startsWith('#agent/memory') ? '#agent/memory' : '#memory';
+}
+
+// Deep-link query parsing: `?bank=<id>&fact=<id>` on the memory hash. Read
+// directly off `window.location.hash` (NOT the `param` prop) — agent-view.jsx
+// strips the query string before computing `param`/`section`, and the brief
+// requires zero changes there, so this file owns its own query parsing.
+function parseMemHashQuery() {
+  const hash = (typeof window !== 'undefined' && window.location.hash) || '';
+  const qIdx = hash.indexOf('?');
+  if (qIdx === -1) return { bank: null, fact: null };
+  const params = new URLSearchParams(hash.slice(qIdx + 1));
+  return { bank: params.get('bank') || null, fact: params.get('fact') || null };
+}
+
+function writeMemHash(section, bank, fact) {
+  const prefix = memHashPrefix();
+  const path = section === 'bank' ? prefix + '/bank' : prefix;
+  const params = new URLSearchParams();
+  if (bank) params.set('bank', bank);
+  if (fact) params.set('fact', fact);
+  const qs = params.toString();
+  window.location.hash = path + (qs ? '?' + qs : '');
+}
+
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 function MemoryView({ param } = {}) {
-  // Tools moved into the primary bank display, so #memory/tools falls back to
-  // Overview; only Overview + Graph remain as sub-sections.
-  const section = param === 'graph' ? 'graph' : 'overview';
+  // param contract: null → overview; 'bank' → the Bank workspace. Legacy
+  // `#memory/graph` and `#memory/tools` (both folded into the new Bank
+  // workspace's list/inspector/ego/web views) redirect to `#memory/bank`.
+  const isLegacySection = param === 'graph' || param === 'tools';
+  const section = param === 'bank' || isLegacySection ? 'bank' : 'overview';
+
+  useEffectMem(() => {
+    if (!isLegacySection) return;
+    const hash = window.location.hash || '';
+    const qIdx = hash.indexOf('?');
+    const qs = qIdx >= 0 ? hash.slice(qIdx) : '';
+    window.location.hash = memHashPrefix() + '/bank' + qs;
+  }, [param])
+
   const useMemoryEngine = window.__hal0UseMemoryEngine;
   const useMemoryBanks = window.__hal0UseMemoryBanks;
-  const useMemoryGraphStatus = window.__hal0UseMemoryGraphStatus;
-  const engineQuery = useMemoryEngine ? useMemoryEngine() : { data: null, isLoading: false };
+  const engineQuery = useMemoryEngine ? useMemoryEngine() : { data: null, isLoading: false, isError: false };
   const banksQuery = useMemoryBanks ? useMemoryBanks() : { data: null, isLoading: false };
-  const graphQuery = useMemoryGraphStatus ? useMemoryGraphStatus() : { data: null };
-  const graphEnabled = !!graphQuery.data?.enabled;
-  const graphInFlight = graphQuery.data?.in_flight || 0;
-  const useConsolidate = window.__hal0UseConsolidate;
-  const consolidate = useConsolidate ? useConsolidate() : null;
-  const useRetryFailedExtractions = window.__hal0UseRetryFailedExtractions;
-  const retryFailed = useRetryFailedExtractions ? useRetryFailedExtractions() : null;
-
   const banks = banksQuery.data?.banks || [];
-  const [selectedId, setSelectedId] = useStateMem(() => {
+
+  // Bank + fact selection: seeded from the deep-link query string first,
+  // falling back to the persisted last-viewed bank (kept for the Graph/Tools
+  // era's localStorage contract — still honoured for anyone landing on
+  // `#memory/bank` with no `?bank=` of their own).
+  const [bankId, setBankIdState] = useStateMem(() => {
+    const fromHash = parseMemHashQuery().bank;
+    if (fromHash) return fromHash;
     try { return localStorage.getItem(MEM_BANK_LS_KEY) || null; } catch { return null; }
   });
+  const [sel, setSelState] = useStateMem(() => parseMemHashQuery().fact);
+  const [growthBank, setGrowthBank] = useStateMem(bankId);
   const [creating, setCreating] = useStateMem(false);
-  const [period, setPeriod] = useStateMem('7d');
 
-  // Persist selection to the shared key the Graph/Tools tabs read.
+  // Overview's growth chart needs a bank to fetch a timeseries for. On a
+  // completely fresh session (no deep-link `?bank=`, nothing in
+  // localStorage yet) `bankId`/`growthBank` both start null — default to
+  // the first bank once the bank list loads, same as the Bank tab's own
+  // `effectiveBank` fallback below.
   useEffectMem(() => {
-    if (!selectedId) return;
-    try { localStorage.setItem(MEM_BANK_LS_KEY, selectedId); } catch { /* ignore */ }
-  }, [selectedId]);
+    if (!growthBank && banks.length > 0) setGrowthBank(banks[0].bank_id);
+  }, [growthBank, banks.length]);
 
-  const selected = banks.find(b => b.bank_id === selectedId) || null;
+  // Re-sync from the hash on navigation (back/forward, external hash edits,
+  // or a deep link arriving after first mount).
+  useEffectMem(() => {
+    function onHashChange() {
+      const q = parseMemHashQuery();
+      if (q.bank) setBankIdState(q.bank);
+      setSelState(q.fact);
+    }
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
-  function selectBank(bankId) {
-    const next = bankId === selectedId ? null : bankId;
-    setSelectedId(next);
-    if (next) { try { localStorage.setItem(MEM_BANK_LS_KEY, next); } catch { /* ignore */ } }
+  // Persist bank selection — the shared key the old Graph/Tools tabs read.
+  useEffectMem(() => {
+    if (!bankId) return;
+    try { localStorage.setItem(MEM_BANK_LS_KEY, bankId); } catch { /* ignore */ }
+  }, [bankId]);
+
+  function setBank(id) {
+    setBankIdState(id);
+    setSelState(null);
+    if (section === 'bank') writeMemHash('bank', id, null);
   }
+  function setSel(factId) {
+    setSelState(factId);
+    if (section === 'bank') writeMemHash('bank', bankId, factId);
+  }
+  // MemV2Overview's bank-table rows call this to jump into the workspace
+  // pre-focused on that bank (its own "explore"/row-click affordance).
+  function openBank(id) {
+    setBankIdState(id);
+    setSelState(null);
+    writeMemHash('bank', id, null);
+  }
+  function goOverview() { writeMemHash('overview', null, null); }
+  function goBank() { writeMemHash('bank', bankId, sel); }
 
-  const doConsolidate = async () => {
-    if (!selected) return;
-    // The consolidate hook is republished on `window` by memory-hook-bridge;
-    // if the bridge hasn't loaded, fail loudly instead of silently swallowing
-    // the click (the old `return` made the button look like it did nothing).
-    if (!consolidate) {
-      memToast('Consolidate unavailable — reload the page', 'err');
-      return;
-    }
-    if (consolidate.isPending) return; // guard double-fire
-    try {
-      const res = await consolidate.mutateAsync(selected.bank_id);
-      const opId = res?.operation_id ?? res?.id ?? res?.operation;
-      memToast(`Consolidation queued (${opId || 'ok'})`, 'ok');
-    } catch (err) {
-      const msg = err?.message || '';
-      if (err?.status === 409 || /in progress|nothing to consolidate/i.test(msg)) {
-        memToast(msg || 'Consolidation already in progress', 'info');
-      } else {
-        memToast(msg || 'Consolidate failed', 'err');
-      }
-    }
-  };
-
-  const doRetryFailed = async () => {
-    if (!retryFailed) return;
-    try {
-      const res = await retryFailed.mutateAsync();
-      const q = res?.queued ?? 0;
-      const s = res?.skipped ?? 0;
-      memToast(
-        q === 0 && s === 0
-          ? 'No failed extractions to retry'
-          : `Requeued ${q} failed extraction${q === 1 ? '' : 's'}${s ? ` · ${s} skipped` : ''}`,
-        'ok',
-      );
-    } catch (err) {
-      memToast(err?.message || 'Retry failed — see logs', 'err');
-    }
-  };
+  const engine = engineQuery.data;
+  const engineLoading = engineQuery.isLoading;
+  const engineDown = engineQuery.isError || engine?.reachable === false;
+  // Fail-soft non-Hindsight fallback (routes/memory_admin.py's 501
+  // memory.engine_unsupported path — e.g. a pgvector-only provider with no
+  // Hindsight client): the engine answers, but graph/reflect/directives
+  // aren't available and data isn't following the Hindsight persistence
+  // path. Mocks always report `engine: 'hindsight'`, so this branch is
+  // real-backend-only in practice.
+  const engineVolatile = !engineDown && !!engine?.enabled && !!engine?.engine && engine.engine !== 'hindsight';
+  const banksEmpty = !banksQuery.isLoading && banks.length === 0;
+  const effectiveBank = bankId || banks[0]?.bank_id || null;
 
   return (
     <div className="view">
@@ -811,100 +852,74 @@ function MemoryView({ param } = {}) {
       <div className="mem-tabs">
         <button
           className={'btn ghost xs' + (section === 'overview' ? ' active' : '')}
-          onClick={() => { window.location.hash = '#memory'; }}
+          onClick={goOverview}
           data-testid="mem-tab-overview"
         >
           Overview
         </button>
         <button
-          className={'btn ghost xs' + (section === 'graph' ? ' active' : '')}
-          onClick={() => { window.location.hash = '#memory/graph'; }}
-          data-testid="mem-tab-graph"
+          className={'btn ghost xs' + (section === 'bank' ? ' active' : '')}
+          onClick={goBank}
+          data-testid="mem-tab-bank"
         >
-          Graph
+          Bank
         </button>
       </div>
 
-      {section === 'graph' ? (
-        <MemGraphExplorer />
+      {engineLoading ? (
+        <div className="card mo-engine mo-provider" data-testid="mem-provider-card-hindsight">
+          <div className="mo-engine-head">
+            <span className="mono mo-engine-name"><Icon name="brain" size={15} /> Hindsight</span>
+          </div>
+          <div className="empty mono">Probing engine…</div>
+        </div>
+      ) : engineDown ? (
+        <MemError query={engineQuery} what="the memory engine" testid="mem-engine-error" />
       ) : (
-      <div className="mo">
-      {/* Provider identity: the Hindsight engine card owns its own
-          reachability/stats/actions. Full-width so the 3-up stat grid has
-          room to breathe. */}
-      <div className="mo-providers-row">
-        <MemHindsightCard
-          engine={engineQuery.data}
-          isLoading={engineQuery.isLoading}
-          banks={banks}
-          graphEnabled={graphEnabled}
-          graphErrors={graphQuery.data?.errors ?? 0}
-          onOpenGraph={() => { window.location.hash = '#memory/graph'; }}
-          selectedBank={selected}
-          onConsolidate={doConsolidate}
-          consolidating={!!consolidate?.isPending}
-          onRetryFailed={doRetryFailed}
-          retryingFailed={!!retryFailed?.isPending}
-        />
-      </div>
-      {/* Aggregated graph-extraction stats + bank timeseries, beside the
-          bank list. */}
-      <div className="mo-top2">
-        <div style={{display: "flex", flexDirection: "column", gap: 14}}>
-          <MemoryGraphPanel />
-          {selected && (
-            <MemTimeseries bank={selected.bank_id} period={period} setPeriod={setPeriod} />
-          )}
-        </div>
-        <div className="mo-banks-col">
-          {/* .sec is a flex title-row (h2 + flex:1 rule); content must be a
-              SIBLING, not a child, or it shrink-wraps into the heading row. */}
-          <div className="sec">
-            <h2>Banks {banks.length > 0 && <span className="ct">{banks.length}</span>}</h2>
-            <div className="rule" />
-            <button className="btn sm" onClick={() => setCreating(true)} data-testid="mem-btn-new-bank">
-              + New bank
-            </button>
-          </div>
-          {banksQuery.isLoading ? (
-            <div className="empty mono">Loading banks…</div>
-          ) : banks.length === 0 ? (
-            <div className="empty mono">No memory banks yet.</div>
-          ) : (
-            <div className="mo-grid">
-              {banks.map(b => (
-                <MemBankCard
-                  key={b.bank_id}
-                  bank={b}
-                  selected={b.bank_id === selectedId}
-                  onSelect={(bank) => selectBank(bank.bank_id)}
-                />
-              ))}
+        <>
+          {engineVolatile && (
+            // task C8: the pgvector-only fallback (memory_admin.py's 501
+            // memory.engine_unsupported path has no Hindsight client to talk
+            // to) keeps facts in an in-process/ephemeral store, not
+            // Hindsight's durable persistence — a restart of the fallback
+            // provider loses them. Say so plainly rather than just "data is
+            // stored".
+            <div className="empty mono" data-testid="mem-engine-volatile" style={{ marginBottom: 14 }}>
+              Memory is running on a non-Hindsight fallback engine ({engine.engine}) — volatile,
+              writes don't survive restart. Graph extraction, reflect, and directives aren't
+              available either.
             </div>
           )}
-
-          {creating && <MemNewBankForm onClose={() => setCreating(false)} />}
-
-          <div className="sec" style={{marginTop: 22}}>
-            <h2>{selected ? selected.bank_id : 'Detail'}</h2>
-            <div className="rule" />
-          </div>
-          {selected ? (
-            <MemBankDetail
-              bank={selected}
-              period={period}
-              setPeriod={setPeriod}
-              onClose={() => setSelectedId(null)}
-              onDeleted={() => setSelectedId(null)}
-            />
-          ) : (
+          {section === 'overview' ? (
+            <>
+              {typeof window.MemV2Overview === 'function' ? (
+                <window.MemV2Overview onExplore={openBank} growthBank={growthBank} setGrowthBank={setGrowthBank} />
+              ) : null}
+              <div style={{ marginTop: 14 }}>
+                {creating ? (
+                  <MemNewBankForm onClose={() => setCreating(false)} />
+                ) : (
+                  <button className="btn ghost sm" onClick={() => setCreating(true)} data-testid="mem-btn-new-bank">
+                    + New bank
+                  </button>
+                )}
+              </div>
+            </>
+          ) : banksEmpty ? (
             <div className="card mo-main mo-main-empty" data-testid="mem-main-empty">
-              <div className="empty mono">Select a bank above to see its memories, graph extraction, and operations.</div>
+              <div className="empty mono">No memory banks yet. Create one to start recording.</div>
+              {creating ? (
+                <MemNewBankForm onClose={() => setCreating(false)} />
+              ) : (
+                <button className="btn sm" style={{ marginTop: 10 }} onClick={() => setCreating(true)} data-testid="mem-btn-new-bank">
+                  + New bank
+                </button>
+              )}
             </div>
-          )}
-        </div>
-      </div>
-      </div>
+          ) : effectiveBank && typeof window.MemV2Workspace === 'function' ? (
+            <window.MemV2Workspace bank={effectiveBank} setBank={setBank} sel={sel} setSel={setSel} />
+          ) : null}
+        </>
       )}
     </div>
   );

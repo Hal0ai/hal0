@@ -148,11 +148,35 @@ import './dash/memory-hook-bridge'
 // bridge above. Must load before any Phase C view module that reads
 // window.MemV2.
 import './dash/memory-v2-shared.jsx'
-import './dash/memory-graph-engine.jsx'
-import './dash/memory-graph-structured.jsx'
-import './dash/memory-graph-ego.jsx'
-import './dash/memory-graph.jsx'
-import './dash/memory-tools.jsx'
+// Memory v2 Overview (task C2) — engine panel, growth chart, bank table.
+// Publishes window.MemV2Overview; reads window.MemV2 (above) and
+// window.MemoryGraphPanel (dash/agents/memory-tab.jsx, already loaded by
+// this point) at render time. Not routed yet (C6 wires #memory).
+import './dash/memory-overview-v2.jsx'
+// Memory v2 BankBar + Add modal (task C3) — reflect, rules (directives +
+// mental models), add-fact/document/directive/model. Publishes
+// window.MemV2BankBar / window.MemV2AddModal; reads window.MemV2 and
+// window.TypeBar/window.Spark (memory-overview-v2.jsx, above) at render
+// time. Not routed yet (C6 wires #memory/bank).
+import './dash/memory-bank-bar.jsx'
+// Memory v2 Bank workspace (task C4) — list/filters/sources, inspector +
+// curation, ego focus view. Publishes window.MemV2Workspace; reads
+// window.MemV2, window.MemV2BankBar (above), and window.MemV2WebGraph
+// (C5, guarded — may not exist yet) at render time. Not routed yet
+// (task C6 wires #memory/bank).
+import './dash/memory-bank-workspace.jsx'
+// Memory v2 web graph (task C5) — d3-force full-graph view with link-type
+// lenses and a 120-node salience cap. Publishes window.MemV2WebGraph,
+// which memory-bank-workspace.jsx (above) already render-guards behind
+// `typeof === 'function'` for its 'web' view tab. Uses window.__hal0D3Force
+// only — never imports d3 itself.
+import './dash/memory-web-graph.jsx'
+// Task C7: memory-graph-engine.jsx, memory-graph-structured.jsx,
+// memory-graph-ego.jsx, memory-graph.jsx, memory-tools.jsx — the pre-v2
+// graph explorer + tools panel — are deleted. Nothing outside those five
+// files consumed memory-graph-engine.jsx's globals (normalizeGraph,
+// useSize, usePanZoom, GraphDefs, MG_PALETTE, …), so it was killed
+// alongside the four files it only ever served.
 import './dash/memory.jsx'
 
 // Operator Board (#board) — a hal0-skinned kanban wired to the Hermes kanban

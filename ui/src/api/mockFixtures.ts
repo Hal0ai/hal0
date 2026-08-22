@@ -592,7 +592,7 @@ const MEM_ENTITIES: { id: string; label: string; kind: string }[] = [
   { id: 'igpu', label: 'Radeon 8060S', kind: 'device' },
 ]
 
-export const MEM_FACTS: MemFact[] = [
+const MEM_FACTS: MemFact[] = [
   // setup
   { id: 'f1', date: '2026-04-28T10:12', topic: 'setup', type: 'experience', label: 'Installed hal0 on Debian 13', text: 'Installed hal0 on Debian 13 via the one-line installer; lemond came up first try.', ents: ['box', 'lemond'] },
   { id: 'f2', date: '2026-04-28T11:40', topic: 'setup', type: 'world', label: 'Proxmox iGPU passthrough', text: 'Configured Proxmox LXC privileged passthrough for the Radeon 8060S iGPU and XDNA NPU.', ents: ['proxmox', 'igpu', 'npu', 'box'] },
@@ -918,7 +918,10 @@ function buildBankSubgraphRoute(url: string, match: RegExpMatchArray) {
   let keep: Set<string>
   if (mode === 'ego') {
     const node = params.get('node') ?? ''
-    const depth = Math.min(Number(params.get('depth') ?? 1) || 1, 2)
+    // Widened from the original FU2 cap of 2 for task C4's ego focus view
+    // (Global Constraints: depth slider 1–10; the server already honours
+    // depth <= 10, task A2).
+    const depth = Math.min(Number(params.get('depth') ?? 1) || 1, 10)
     keep = _subEgoBfs(graph, node, depth, limit)
   } else {
     const by = params.get('by') || (kind === 'entities' ? 'degree' : 'recency')
@@ -1099,6 +1102,14 @@ function entityLabelsFor(ents: string[]): string[] {
 // marking them invalidated doesn't starve an unrelated test.
 const MEM_INVALIDATED_FACT_IDS = new Set(['f9', 'f20'])
 
+// task C7 (controller-sanctioned extra, backend A3b fix): the real units
+// endpoint may return `salience: null` + empty `link_counts_by_type` for a
+// fact that exists in the bank but fell outside the salience-scored slab
+// (e.g. a large bank's graph is capped, and some units simply never got
+// scored). f2/f3 simulate that here — chosen because nothing else in the
+// existing unit/workspace test suite filters or asserts on them.
+const MEM_NULL_SALIENCE_FACT_IDS = new Set(['f2', 'f3'])
+
 // Curatable unit rows (Memory v2 Bank workspace) — one per MEM_FACTS entry,
 // enriched with the fields the units endpoint actually returns:
 // salience (derived from total link degree, so it's stable and non-uniform)
@@ -1119,7 +1130,8 @@ function buildUnitRows(facts: MemFact[] = MEM_FACTS) {
   const totalLinksFor = (id: string) => Object.values(linkCounts[id] ?? {}).reduce((a, b) => a + b, 0)
   const maxLinks = Math.max(1, ...facts.map((f) => totalLinksFor(f.id)))
   return facts.map((f) => {
-    const counts = linkCounts[f.id] ?? {}
+    const outOfSlab = MEM_NULL_SALIENCE_FACT_IDS.has(f.id)
+    const counts = outOfSlab ? {} : linkCounts[f.id] ?? {}
     return {
       id: f.id,
       text: f.text,
@@ -1131,7 +1143,7 @@ function buildUnitRows(facts: MemFact[] = MEM_FACTS) {
       tags: [f.topic],
       document_id: MEM_TOPIC_DOCUMENT[f.topic] ?? null,
       state: MEM_INVALIDATED_FACT_IDS.has(f.id) ? ('invalidated' as const) : ('valid' as const),
-      salience: Math.round((totalLinksFor(f.id) / maxLinks) * 100) / 100,
+      salience: outOfSlab ? null : Math.round((totalLinksFor(f.id) / maxLinks) * 100) / 100,
       link_counts_by_type: counts,
     }
   })
@@ -1152,12 +1164,15 @@ function parseUnitsQuery(url: string): URLSearchParams {
 }
 
 // GET /api/memory/banks/:bank/units — q/tags/type/from/to/documentId filter,
-// sort (default: recency desc; 'salience' — the only other value the server
-// accepts, memory_admin.bank_units 422s on anything else), limit/offset
-// paging. `truncated` is always false here: the mock dataset never reaches
-// the server's 2000-row slab cap (see PR #1987 review B2/M10).
+// sort (default: recency desc; 'salience' — the mock only ever supports
+// those two, per the fallback comment at the sort call site below), limit/
+// offset paging.
 function buildBankUnits(url: string, match: RegExpMatchArray) {
   const bank = bankFrom(match)
+  // final-review M3: match the main return's shape exactly (including
+  // `truncated`) rather than a hand-trimmed subset — a genuinely empty bank
+  // is never truncated, but the field still needs to exist so callers don't
+  // have to special-case "empty bank" vs. "no truncation".
   if (bank === 'empty') return { items: [], total_matched: 0, next_offset: null, truncated: false }
 
   const params = parseUnitsQuery(url)
@@ -1166,7 +1181,23 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
   const tags = tagsParam
     ? tagsParam.split(',').map((t) => t.trim()).filter(Boolean)
     : []
-  const type = params.get('type') ?? ''
+  // Comma-joined multi-type OR (task A3b, fix round post C4-review):
+  // upstream Hindsight's own type field is single-value, but the hal0-side
+  // units route layers OR semantics on top so a caller can ask for
+  // `type=world,experience` and get a truthfully-filtered total_matched/
+  // next_offset back — this is what lets the Bank workspace's 3
+  // independent type toggle buttons drive the server directly instead of
+  // narrowing an already-paginated response client-side (which broke
+  // "showing X-Y of N" and pagination whenever exactly 2 of 3 were
+  // active). Real backend contract: any token outside
+  // {world, experience, observation} is a 422 memory.invalid_query; this
+  // mock doesn't reproduce that status (no status-signalling path from a
+  // builder function today) — an unknown token here just matches nothing,
+  // which is a safe (if less precise) mock-only fallback.
+  const typeParam = params.get('type') ?? ''
+  const types = typeParam
+    ? typeParam.split(',').map((t) => t.trim()).filter(Boolean)
+    : []
   const from = params.get('from')
   const to = params.get('to')
   const documentId = params.get('document_id') ?? ''
@@ -1177,7 +1208,10 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
   // work as an explicit override.
   const state = params.get('state')
   const sort = params.get('sort') ?? 'recency'
-  const limit = Math.min(Math.max(Number(params.get('limit') ?? 20) || 20, 1), 100)
+  // final-review M5: match the server's clamp exactly (memory_admin.py's
+  // bank_units route: `max(1, min(limit, 200))`) — moot today since
+  // PAGE_SIZE is 10, but a latent drift otherwise.
+  const limit = Math.min(Math.max(Number(params.get('limit') ?? 20) || 20, 1), 200)
   const offset = Math.max(Number(params.get('offset') ?? 0) || 0, 0)
 
   let rows: UnitRow[] = buildUnitRows(MEM_FACTS)
@@ -1190,8 +1224,8 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
   if (tags.length) {
     rows = rows.filter((r) => r.tags.some((t) => tags.includes(t)))
   }
-  if (type) {
-    rows = rows.filter((r) => r.fact_type === type)
+  if (types.length) {
+    rows = rows.filter((r) => types.includes(r.fact_type))
   }
   if (from) {
     const fromMs = new Date(from).getTime()
@@ -1206,14 +1240,26 @@ function buildBankUnits(url: string, match: RegExpMatchArray) {
   }
 
   const sorted = [...rows].sort((a, b) => {
-    if (sort === 'salience') return b.salience - a.salience
-    // 'recency' (default, and the fallback for any other value): newest first
+    if (sort === 'salience') {
+      // Out-of-slab units (salience: null) sort after every scored unit,
+      // regardless of direction — nulls have no ranking to offer, they
+      // just fall to the tail.
+      if (a.salience == null && b.salience == null) return 0
+      if (a.salience == null) return 1
+      if (b.salience == null) return -1
+      return b.salience - a.salience
+    }
+    // 'recency' (default, and the fallback for any sort value the server
+    // would 422 on — the mock never pretends to support a third mode):
+    // newest first
     return new Date(b.occurred_start).getTime() - new Date(a.occurred_start).getTime()
   })
 
   const totalMatched = sorted.length
   const items = sorted.slice(offset, offset + limit)
   const nextOffset = offset + limit < totalMatched ? offset + limit : null
+  // `truncated` mirrors the real endpoint's slab flag; the mock dataset is
+  // far below the 2000-row slab cap, so it is always false here.
   return { items, total_matched: totalMatched, next_offset: nextOffset, truncated: false }
 }
 

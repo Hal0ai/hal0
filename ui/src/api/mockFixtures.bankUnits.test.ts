@@ -62,6 +62,20 @@ describe('buildBankUnits (mock fixture)', () => {
     expect(page.items.every((r) => r.fact_type === 'observation')).toBe(true)
   })
 
+  it('filters by a comma-joined multi-type OR (task A3b contract, fix round)', () => {
+    const page = unitsFor('primary', 'type=world,experience&limit=100')
+    expect(page.items.length).toBeGreaterThan(0)
+    expect(page.items.every((r) => r.fact_type === 'world' || r.fact_type === 'experience')).toBe(true)
+    // total_matched must be the TRUTHFUL count for the OR'd set, not the
+    // unfiltered total — this is exactly what fixes the "showing X-Y of N"
+    // / pagination mismatch the C4 review found when 2 of 3 type toggles
+    // are active.
+    const singleTypeTotals =
+      unitsFor('primary', 'type=world&limit=100').total_matched +
+      unitsFor('primary', 'type=experience&limit=100').total_matched
+    expect(page.total_matched).toBe(singleTypeTotals)
+  })
+
   it('filters by tags (topic)', () => {
     const page = unitsFor('primary', 'tags=performance')
     expect(page.items.length).toBeGreaterThan(0)
@@ -101,8 +115,29 @@ describe('buildBankUnits (mock fixture)', () => {
 
   it('sorts by salience descending when requested', () => {
     const page = unitsFor('primary', 'sort=salience&limit=100')
-    const saliences = page.items.map((r) => r.salience as number)
+    // Scored units only — out-of-slab (salience: null) units are covered by
+    // their own dedicated test below (they sort after every scored unit,
+    // not by a numeric comparison).
+    const saliences = page.items.map((r) => r.salience).filter((s): s is number => s != null)
     for (let i = 1; i < saliences.length; i++) expect(saliences[i]).toBeLessThanOrEqual(saliences[i - 1])
+  })
+
+  it('out-of-slab units (salience: null) render null, not a score, and sort after every scored unit (task C7, backend A3b)', () => {
+    const page = unitsFor('primary', 'limit=100')
+    const f2 = page.items.find((r) => r.id === 'f2')
+    const f3 = page.items.find((r) => r.id === 'f3')
+    expect(f2?.salience).toBeNull()
+    expect(f3?.salience).toBeNull()
+    // empty link_counts_by_type too — no scored edges for an out-of-slab unit.
+    expect(f2?.link_counts_by_type).toEqual({})
+    expect(f3?.link_counts_by_type).toEqual({})
+
+    const sorted = unitsFor('primary', 'sort=salience&limit=100')
+    const saliences = sorted.items.map((r) => r.salience)
+    const firstNullIdx = saliences.findIndex((s) => s == null)
+    expect(firstNullIdx).toBeGreaterThan(-1)
+    // every null comes after every non-null — no scored unit trails a null.
+    expect(saliences.slice(firstNullIdx).every((s) => s == null)).toBe(true)
   })
 
   it('paginates with limit/offset and a correct next_offset', () => {
@@ -125,6 +160,22 @@ describe('buildBankUnits (mock fixture)', () => {
     expect(page.items).toHaveLength(0)
     expect(page.total_matched).toBe(0)
     expect(page.next_offset).toBeNull()
+  })
+
+  it('final-review M3: the empty-bank early return still carries truncated: false', () => {
+    // The empty-bank branch used to omit `truncated` entirely, diverging
+    // from the main return's shape — a caller couldn't rely on the field
+    // existing regardless of which path answered.
+    const page = unitsFor('empty')
+    expect(page.truncated).toBe(false)
+  })
+
+  it('final-review M5: clamps limit at 200 to match the real endpoint (memory_admin.py bank_units)', () => {
+    // The mock used to clamp at 100; the server clamps at 200
+    // (`max(1, min(limit, 200))`). Moot while PAGE_SIZE is 10, but a latent
+    // drift the mock should not carry.
+    const page = unitsFor('primary', 'limit=500')
+    expect(page.items.length).toBeLessThanOrEqual(200)
   })
 
   it('excludes invalidated units by default (upstream archive behaviour)', () => {
