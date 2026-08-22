@@ -3,7 +3,7 @@
    tokens (--bg-*, --fg-*, --line*, --accent, --ok/--warn/--err/--info,
    --jbm/--geist) -- every one of those is already defined in dashboard.css,
    and the prototype file defines no :root block of its own, so nothing
-   needed remapping there. It is NOT fully mv-*/mvi-* namespaced, though:
+   needed remapping there. It is NOT fully mv-* / mvi-* namespaced, though:
    this file is imported unconditionally (main.tsx, after dashboard.css), so
    any bare-element or un-prefixed-class rule here wins app-wide, not just
    on the memory-v2 page. Every such rule below is scoped under .mv-page,
