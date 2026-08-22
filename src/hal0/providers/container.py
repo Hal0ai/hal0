@@ -732,16 +732,30 @@ def _render_quadlet_from_plan(
         # slot's restart rate-limiting (install-validation m2, halo150,
         # 2026-07-19). Restart=/RestartSec= stay in [Service] below — those
         # ARE Service-section keys.
-        "StartLimitIntervalSec=300",
-        "StartLimitBurst=5",
+        #
+        # Window/burst are sized for the RestartSteps= ramp below: ~10
+        # attempts spread over ~20 minutes (5s → 300s geometric), so a
+        # transient cause — a neighbour hogging the GPU, a cold mount, a
+        # slow image pull — gets real time to clear before systemd gives
+        # up. The old 300s/5 pairing burned all 5 attempts in ~16s and
+        # LATCHED the unit in ``failed`` (#1424): slot 15 stayed down for
+        # hours after the actual contention had passed.
+        "StartLimitIntervalSec=1800",
+        "StartLimitBurst=10",
         "",
         "[Container]",
         f"Image={plan.image}",
         f"ContainerName={container_name}",
-        # ``LogDriver=none`` keeps conmon→journal the single sink so
-        # ``journalctl -u`` isn't double-fed (podman's own journald driver
-        # would tag a second copy — the old B3 note).
-        "LogDriver=none",
+        # ``LogDriver=passthrough`` hands the container's stdout/stderr to
+        # the unit itself, which systemd journals exactly once. The old
+        # ``LogDriver=none`` assumed conmon→journal held the streams, but
+        # the Quadlet service runs podman detached: the client exits after
+        # echoing the container id, conmon holds the real streams, and with
+        # podman's own sink disabled there was NO sink at all — every slot
+        # produced zero container output and a crashing model's actual
+        # error was invisible. (#721/B3 was a real double-logging bug; the
+        # wrong copy was removed.)
+        "LogDriver=passthrough",
     ]
     # ── ONE quadlet render for every substrate (halo150/143 O8+O11) ──────
     # DELIBERATE: no native AutoRemove=/GroupAdd=/SecurityOpt= keys and no
@@ -839,7 +853,13 @@ def _render_quadlet_from_plan(
             "",
             "[Service]",
             "Restart=always",
-            "RestartSec=3",
+            # Geometric restart ramp (systemd ≥ 254; the lxc105 reference
+            # substrate runs 255): 5s → 10 → 20 → 39 → 77 → 152 → 300,
+            # capped at RestartMaxDelaySec. Sized together with the
+            # StartLimit window in [Unit] above.
+            "RestartSec=5",
+            "RestartSteps=6",
+            "RestartMaxDelaySec=300",
             f"SyslogIdentifier={container_name}",
             "StandardOutput=journal",
             "StandardError=journal",

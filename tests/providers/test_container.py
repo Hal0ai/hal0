@@ -572,8 +572,8 @@ class TestRenderUnit:
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         unit_section, _, remainder = unit.partition("[Container]")
         service_section = remainder.partition("[Service]")[2].partition("[Install]")[0]
-        assert "StartLimitIntervalSec=300" in unit_section
-        assert "StartLimitBurst=5" in unit_section
+        assert "StartLimitIntervalSec=1800" in unit_section
+        assert "StartLimitBurst=10" in unit_section
         assert "StartLimitIntervalSec" not in service_section
         assert "StartLimitBurst" not in service_section
 

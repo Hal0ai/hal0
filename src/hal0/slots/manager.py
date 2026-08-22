@@ -169,11 +169,37 @@ class RegistryUnavailableError(Hal0Error):
 
 # Crash-loop breaker (issue i4): a load() from ERROR is throttled with
 # exponential backoff — min(base * 2**(failures-1), max) — and after
-# _CRASH_LOOP_PARK_AFTER consecutive failures the slot is parked (refuses
-# lazy-load until an operator action resets the breaker).
+# _CRASH_LOOP_PARK_AFTER consecutive failures the slot is parked. A parked
+# breaker HALF-OPENS once its cool-down elapses: one trial load rides the
+# normal path (which clears systemd's start-limit latch before the start),
+# success closes the breaker, failure re-parks it with a doubled cool-down
+# up to _CRASH_LOOP_PARK_MAX_S. Operator actions (reset_load_failures)
+# still short-circuit all of it.
 _CRASH_LOOP_BASE_S = 5.0
 _CRASH_LOOP_MAX_S = 300.0
 _CRASH_LOOP_PARK_AFTER = 5
+_CRASH_LOOP_PARK_MAX_S = 3600.0
+
+
+def _crash_loop_remaining_s(failures: int, last_failure: float) -> float:
+    """Seconds until the breaker permits the next spawn attempt (0 = now).
+
+    Below the park threshold: the i4 backoff curve. At or past it: the
+    half-open cool-down, doubling per failed trial and capped at
+    ``_CRASH_LOOP_PARK_MAX_S``.
+    """
+    if failures <= 0:
+        return 0.0
+    interval: float
+    if failures >= _CRASH_LOOP_PARK_AFTER:
+        interval = min(
+            _CRASH_LOOP_MAX_S * (2 ** (failures - _CRASH_LOOP_PARK_AFTER)),
+            _CRASH_LOOP_PARK_MAX_S,
+        )
+    else:
+        interval = min(_CRASH_LOOP_BASE_S * (2 ** (failures - 1)), _CRASH_LOOP_MAX_S)
+    return max(0.0, last_failure + interval - time.monotonic())
+
 
 # slot.state event coalescing window: identical ERROR-edged transition
 # pairs (error→starting / starting→error) within this window fold into
@@ -1496,29 +1522,38 @@ class SlotManager:
         failures, last_failure = self._load_failures.get(self._key(slot_name), (0, 0.0))
         if failures <= 0:
             return
+        remaining = _crash_loop_remaining_s(failures, last_failure)
+        if remaining <= 0:
+            # Half-open: the cool-down has elapsed, so this ONE attempt is
+            # permitted through the normal path (which clears systemd's
+            # start-limit latch before starting the unit). The slot lock
+            # serialises it; a concurrent caller lands after either the
+            # healthy convergence (breaker cleared) or the failure stamp
+            # (fresh timestamp → gate refuses again). Without this, a
+            # parked slot stayed down until a human noticed: the breaker
+            # returned 503s forever while systemd held the unit ``failed``.
+            return
         if failures >= _CRASH_LOOP_PARK_AFTER:
             raise SlotCrashLooping(
                 f"slot {slot_name!r} is parked after {failures} consecutive load "
-                "failures — fix the cause, then load/restart it manually",
+                f"failures — next automatic trial in {remaining:.0f}s "
+                "(or fix the cause and load/restart it manually)",
                 details={
                     "slot": slot_name,
                     "failures": failures,
                     "parked": True,
-                    "retry_after_s": int(_CRASH_LOOP_MAX_S),
-                },
-            )
-        backoff_s = min(_CRASH_LOOP_BASE_S * (2 ** (failures - 1)), _CRASH_LOOP_MAX_S)
-        remaining = last_failure + backoff_s - time.monotonic()
-        if remaining > 0:
-            raise SlotCrashLooping(
-                f"slot {slot_name!r} failed {failures} consecutive load(s) — "
-                f"backing off {remaining:.0f}s before the next spawn attempt",
-                details={
-                    "slot": slot_name,
-                    "failures": failures,
                     "retry_after_s": max(1, int(remaining) + 1),
                 },
             )
+        raise SlotCrashLooping(
+            f"slot {slot_name!r} failed {failures} consecutive load(s) — "
+            f"backing off {remaining:.0f}s before the next spawn attempt",
+            details={
+                "slot": slot_name,
+                "failures": failures,
+                "retry_after_s": max(1, int(remaining) + 1),
+            },
+        )
 
     def reset_load_failures(self, slot_name: str) -> None:
         """Clear the crash-loop breaker for *slot_name* (operator intent).
@@ -1531,6 +1566,31 @@ class SlotManager:
         key = self._peek_key(self._resolve_alias(slot_name))
         if key is not None:
             self._load_failures.pop(key, None)
+
+    def _breaker_snapshot(self, slot_name: str) -> dict[str, Any] | None:
+        """Live breaker view for status surfaces, or ``None`` when closed.
+
+        The breaker used to be invisible: it refused dispatch with 503s
+        while the slot card showed a bare ERROR/OFFLINE, and nothing short
+        of ``systemctl`` told the operator why — which is how a parked slot
+        survived four hours unnoticed. ``status()`` stamps this into slot
+        metadata so the inventory carries the state and the wait.
+        """
+        failures, last_failure = self._load_failures.get(self._key(slot_name), (0, 0.0))
+        if failures <= 0:
+            return None
+        remaining = _crash_loop_remaining_s(failures, last_failure)
+        if remaining <= 0:
+            state = "half-open"
+        elif failures >= _CRASH_LOOP_PARK_AFTER:
+            state = "parked"
+        else:
+            state = "backoff"
+        return {
+            "state": state,
+            "failures": failures,
+            "retry_after_s": 0 if remaining <= 0 else max(1, int(remaining) + 1),
+        }
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -2164,6 +2224,9 @@ class SlotManager:
         }
         if backend:
             meta["backend"] = backend
+        breaker = self._breaker_snapshot(slot_name)
+        if breaker:
+            meta["breaker"] = breaker
         if include_config_drift:
             config_drift = await self.compute_config_drift(slot_name, cfg=cfg, active=active)
             if config_drift is not None:
