@@ -368,6 +368,7 @@ function BankBar({ bank, setBank }) {
   const useDirectiveDelete = window.__hal0UseDirectiveDelete
   const useMentalModels = window.__hal0UseMentalModels
   const useMentalModelRefresh = window.__hal0UseMentalModelRefresh
+  const useConsolidate = window.__hal0UseConsolidate
 
   const banksQuery = useMemoryBanks ? useMemoryBanks() : { data: null }
   const banks = banksQuery.data?.banks || []
@@ -404,6 +405,21 @@ function BankBar({ bank, setBank }) {
     reflect.mutate({ bank, body: { query: question } })
   }
   const ans = reflect.data
+
+  // Live screenshot feedback (2026-08-22): this button's title promised
+  // "consolidate · export · wipe" but had no onClick at all — did nothing.
+  // Export has no backend endpoint (checked: no matching route anywhere),
+  // and wipe (whole-bank delete) is a destructive action that deserves its
+  // own confirmation flow, not a quick add-on here — so wire up the one
+  // action that's real, safe, and already has a working hook:
+  // consolidate-now. Title updated to match what it actually does.
+  const consolidate = useConsolidate ? useConsolidate() : { mutate: () => {}, isPending: false }
+  const runConsolidate = () => {
+    consolidate.mutate(bank, {
+      onSuccess: () => memToast('Consolidation queued', 'ok'),
+      onError: (err) => memToast(`Consolidate failed: ${err.message}`, 'err'),
+    })
+  }
 
   const directivesQuery = useDirectives ? useDirectives(bank) : { data: null }
   const directives = directivesQuery.data?.items || []
@@ -479,8 +495,14 @@ function BankBar({ bank, setBank }) {
           <button className="mv-btn primary" data-testid="mv-add-open" onClick={() => setModal('fact')}>
             + Add
           </button>
-          <button className="mv-btn" title="consolidate · export · wipe">
-            <Icon name="more" size={13} />
+          <button
+            className="mv-btn"
+            title="Consolidate now"
+            data-testid="mv-consolidate-now"
+            onClick={runConsolidate}
+            disabled={consolidate.isPending}
+          >
+            <Icon name="refresh" size={13} />
           </button>
         </div>
       </div>
@@ -609,7 +631,11 @@ function BankBar({ bank, setBank }) {
         />
       ) : tab === 'rules' && (
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)' }}>
-          <div className="pad" style={{ borderRight: '1px solid var(--line-soft,#1C1C1C)', padding: '12px 14px' }}>
+          {/* Live screenshot feedback (2026-08-22): the rules-tab content
+              read as cramped against the card's bottom edge, right above
+              the workspace toolbar below it — best-effort read of the
+              annotation; a bit more bottom breathing room here. */}
+          <div className="pad" style={{ borderRight: '1px solid var(--line-soft,#1C1C1C)', padding: '12px 14px 16px' }}>
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
               <span className="mv-cell-k" style={{ margin: 0 }}>
                 directives · {onCount} on
@@ -642,7 +668,7 @@ function BankBar({ bank, setBank }) {
               </div>
             ))}
           </div>
-          <div className="pad" style={{ padding: '12px 14px' }}>
+          <div className="pad" style={{ padding: '12px 14px 16px' }}>
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
               <span className="mv-cell-k" style={{ margin: 0 }}>
                 mental models · {staleCount} stale

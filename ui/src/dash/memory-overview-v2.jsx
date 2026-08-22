@@ -52,7 +52,7 @@ function Spark({ series, w = 96, h = 26 }) {
 // `consolidation`-type operations (exact upstream task_type string, per the
 // Hindsight audit — NOT "consolidate") for `bank`, bucketed by day, so the
 // accent triangle marker lands on the same bar the operation happened on.
-function GrowthChart({ bank, banks, tsQuery, range, onRange, onBank, consolidationDays, wide }) {
+function GrowthChart({ tsQuery, range, onRange, consolidationDays, wide }) {
   const { FACT_COLORS, fmtN, MvError } = window.MemV2
   const all = tsQuery?.data?.buckets || []
   const ts = range === '7d' ? all.slice(-7) : range === '1d' ? all.slice(-1) : all
@@ -70,18 +70,6 @@ function GrowthChart({ bank, banks, tsQuery, range, onRange, onBank, consolidati
     <div className="mv-card mv-growth" data-testid="mv-growth">
       <div className="hd" style={{ flexWrap: 'wrap' }}>
         <span className="mv-eyebrow">Retained</span>
-        <span style={{ display: 'flex', gap: 4 }}>
-          {(banks || []).map((b) => (
-            <button
-              key={b.bank_id}
-              className={'mv-tf' + (bank === b.bank_id ? ' on' : '')}
-              style={{ padding: '2px 9px', fontSize: 10.5 }}
-              onClick={() => onBank(b.bank_id)}
-            >
-              {b.name || b.bank_id}
-            </button>
-          ))}
-        </span>
         <span className="mono num" style={{ font: '600 12px var(--jbm)', color: 'var(--fg-2)' }}>
           +{fmtN(total)}{' '}
           <span style={{ color: 'var(--fg-4)', fontWeight: 400 }}>facts in {range}</span>
@@ -453,13 +441,36 @@ function MemV2Overview({ onExplore, growthBank, setGrowthBank }) {
 
   return (
     <div className="mv-page">
+      {/* Post-screenshot-review fix (2026-08-22, operator's own red-text
+          annotation): the growth chart used to carry an inline row of bank
+          pill-buttons in its own header for picking which bank's retained-
+          growth data to show — pulled out into its own card, above the
+          metrics, using the same `<select>` treatment as the Bank tab's own
+          bank picker (`.mv-bankbar .pick`, memory-bank-bar.jsx) rather than
+          a bespoke pill row. */}
+      <div className="mv-card">
+        <div className="hd">
+          <span className="mv-eyebrow">Bank</span>
+        </div>
+        <div style={{ padding: '0 14px 12px' }}>
+          <select
+            className="pick mono"
+            data-testid="mv-growth-bank-select"
+            value={growthBank || ''}
+            onChange={(e) => setGrowthBank(e.target.value)}
+          >
+            {(banks || []).map((b) => (
+              <option key={b.bank_id} value={b.bank_id}>
+                {b.name || b.bank_id}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
       <GrowthChart
-        bank={growthBank}
-        banks={banks}
         tsQuery={growthTsQuery}
         range={range}
         onRange={setRange}
-        onBank={setGrowthBank}
         consolidationDays={consolidationDays}
         wide
       />

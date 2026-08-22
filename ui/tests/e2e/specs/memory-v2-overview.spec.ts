@@ -51,6 +51,37 @@ test.describe('memory-v2 Overview', () => {
     await expect(page).toHaveURL(/#memory\/bank\?bank=primary/)
   })
 
+  // Live screenshot feedback (2026-08-22, operator's own red-text
+  // annotation): the growth chart's inline bank pill-buttons were replaced
+  // with a separate bank-selector card above it, matching the Bank tab's
+  // own <select> picker style.
+  test('a separate bank-selector card (not inline pills) switches the growth chart bank', async ({
+    page,
+  }) => {
+    // Note: the mock's buildBankTimeseries() is bank-agnostic by design
+    // (derived from the shared MEM_FACTS set regardless of which bank was
+    // requested — a pre-existing mock limitation, not something this fix
+    // introduced or can exercise), so the rendered total can't be asserted
+    // to differ between banks here. This pins what's actually verifiable:
+    // the picker is a real <select> in its own card (not the old inline
+    // pill row), it lists every bank, and picking one holds without
+    // crashing or reverting (the same class of bug fixed in the Bank tab's
+    // own selector, task fix 5908bb11).
+    await page.goto('/#memory')
+    const select = page.getByTestId('mv-growth-bank-select')
+    await expect(select).toBeVisible()
+    await expect(select).toHaveValue(/.+/)
+    const optionValues = await select.locator('option').allTextContents()
+    expect(optionValues.length).toBeGreaterThan(1)
+
+    await select.selectOption('big')
+    await expect(select).toHaveValue('big')
+    await expect(page.getByTestId('mv-growth')).toBeVisible()
+    // Holds — not a transient state that reverts on the next render.
+    await page.waitForTimeout(300)
+    await expect(select).toHaveValue('big')
+  })
+
   // ── ADR-0023 graph-extraction panel (ported from the deleted
   // memory-graph-v3.spec.ts, task C7) — MemoryGraphPanel itself is
   // untouched and reused verbatim; its canonical home now is here, embedded
