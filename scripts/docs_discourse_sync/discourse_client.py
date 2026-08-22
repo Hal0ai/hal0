@@ -51,6 +51,7 @@ class Topic:
     slug: str
     title: str
     raw: str
+    category_id: int
 
     def url(self, base_url: str) -> str:
         return f"{base_url.rstrip('/')}/t/{self.slug}/{self.topic_id}"
@@ -155,6 +156,7 @@ class DiscourseClient:
             slug=data.get("slug", "-"),
             title=data.get("title", ""),
             raw=raw,
+            category_id=data.get("category_id", -1),
         )
 
     def create_topic(self, *, external_id: str, title: str, raw: str, category_id: int) -> Topic:
@@ -163,7 +165,14 @@ class DiscourseClient:
         placeholder so pass-2 planning still has a URL shape to reason
         about."""
         if self.dry_run:
-            return Topic(topic_id=-1, first_post_id=-1, slug="dry-run", title=title, raw=raw)
+            return Topic(
+                topic_id=-1,
+                first_post_id=-1,
+                slug="dry-run",
+                title=title,
+                raw=raw,
+                category_id=category_id,
+            )
         response = self._request(
             "POST",
             "/posts.json",
@@ -178,6 +187,9 @@ class DiscourseClient:
             slug=data.get("topic_slug", "-"),
             title=title,
             raw=raw,
+            # Not parsed from the response: we already know it, we just
+            # created the topic with it.
+            category_id=category_id,
         )
 
     def update_topic(self, *, post_id: int, title: str, raw: str, category_id: int) -> None:

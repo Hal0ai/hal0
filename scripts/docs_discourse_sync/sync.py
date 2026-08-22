@@ -20,6 +20,7 @@ doc that links to another doc.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +29,11 @@ from .discourse_client import DiscourseClient, Topic
 from .discovery import Doc
 
 _DRY_RUN_PENDING_MARKER = "<pending>"
+# upload:// URLs only ever appear as a markdown link/image destination
+# (`![alt](upload://...)`), so stop at the closing ')' as well as
+# whitespace — a bare \S+ would swallow it too, corrupting everything
+# after the URL in the normalized comparison string.
+_UPLOAD_URL_RE = re.compile(r"upload://[^\s)]+")
 
 
 @dataclass(slots=True)
@@ -53,8 +59,33 @@ class SyncReport:
         return sum(1 for a in self.actions if a.kind == kind)
 
 
-def _content_changed(existing: Topic, *, title: str, raw: str) -> bool:
-    return existing.title != title or existing.raw.strip() != raw.strip()
+def _content_changed(
+    existing: Topic, *, title: str, raw: str, category_id: int, dry_run: bool = False
+) -> bool:
+    """Whether *existing* needs updating to match *title*/*raw*/*category_id*.
+
+    A topic that's drifted into (or was synced into) the wrong category
+    needs correcting too — not just title/body — so category_id is part
+    of the comparison, not just logged separately.
+
+    Under ``dry_run``, image references in *raw* carry a synthetic
+    ``upload://dry-run-<name>`` placeholder (no real upload happened),
+    while *existing.raw* — fetched from a real prior sync — carries the
+    real ``upload://<token>`` Discourse assigned. Diffed literally, every
+    image-bearing doc would report as a perpetual "would update" in every
+    `--dry-run`, forever, even with zero real changes. Both sides are
+    normalized to a common placeholder before comparing, but only in
+    dry-run planning — a real run always diffs the literal strings, since
+    there the comparison is exact and an actual content-level image swap
+    should be caught.
+    """
+    if existing.category_id != category_id or existing.title != title:
+        return True
+    existing_raw, new_raw = existing.raw.strip(), raw.strip()
+    if dry_run:
+        existing_raw = _UPLOAD_URL_RE.sub("upload://<planned>", existing_raw)
+        new_raw = _UPLOAD_URL_RE.sub("upload://<planned>", new_raw)
+    return existing_raw != new_raw
 
 
 def _topic_url(topic: Topic, external_id: str, *, base_url: str) -> str:
@@ -83,7 +114,9 @@ def _sync_one(
         )
         report.log(create_kind, external_id, title)
         return topic
-    if _content_changed(existing, title=title, raw=raw):
+    if _content_changed(
+        existing, title=title, raw=raw, category_id=category_id, dry_run=client.dry_run
+    ):
         client.update_topic(
             post_id=existing.first_post_id, title=title, raw=raw, category_id=category_id
         )
@@ -145,7 +178,7 @@ def sync_docs(
     # then settle each doc's *final* content against the server.
     for doc in docs:
         rewrite = links.rewrite_internal_links(
-            prepared[doc.external_id], current_key=doc.rel_key, url_map=url_map
+            prepared[doc.external_id], current_dir=doc.source_dir_key, url_map=url_map
         )
         report.warnings.extend(
             f"{doc.external_id}: unresolved link {u}" for u in rewrite.unresolved
@@ -167,7 +200,13 @@ def sync_docs(
                 report.log("link-rewrite", doc.external_id, f"{rewrite.changed} link(s) rewritten")
             continue
 
-        if _content_changed(existing, title=doc.title, raw=final_raw):
+        if _content_changed(
+            existing,
+            title=doc.title,
+            raw=final_raw,
+            category_id=category_id,
+            dry_run=client.dry_run,
+        ):
             client.update_topic(
                 post_id=existing.first_post_id,
                 title=doc.title,

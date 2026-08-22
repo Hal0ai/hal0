@@ -103,8 +103,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  warning: {warning}")
 
     if args.check:
+        # Relative to --docs-dir, not the repo root: --docs-dir can point
+        # anywhere (a different checkout, a tmp fixture dir for manual
+        # testing) and source_path is always guaranteed to be under it by
+        # construction, unlike an assumed relationship to _REPO_ROOT.
         for doc in sorted(docs, key=lambda d: d.external_id):
-            print(f"  {doc.external_id}  <-  {doc.source_path.relative_to(_REPO_ROOT)}")
+            print(f"  {doc.external_id}  <-  {doc.source_path.relative_to(args.docs_dir)}")
         return 0
 
     missing = [

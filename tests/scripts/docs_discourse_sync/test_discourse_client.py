@@ -34,7 +34,7 @@ def _client(handler, **kwargs) -> DiscourseClient:
 
 def test_resolve_topic_found() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/t/external_id/hal0-docs/getting-started/install.json"
+        assert request.url.path == "/t/external_id/hal0-docs--getting-started--install.json"
         assert request.url.params["include_raw"] == "true"
         return httpx.Response(
             200,
@@ -42,12 +42,13 @@ def test_resolve_topic_found() -> None:
                 "id": 55,
                 "slug": "install-hal0",
                 "title": "Install hal0",
+                "category_id": 7,
                 "post_stream": {"posts": [{"id": 999, "raw": "content here"}]},
             },
         )
 
     with _client(handler) as client:
-        topic = client.resolve_topic("hal0-docs/getting-started/install")
+        topic = client.resolve_topic("hal0-docs--getting-started--install")
 
     assert topic == Topic(
         topic_id=55,
@@ -55,8 +56,31 @@ def test_resolve_topic_found() -> None:
         slug="install-hal0",
         title="Install hal0",
         raw="content here",
+        category_id=7,
     )
     assert topic.url("https://forum.hal0.dev") == "https://forum.hal0.dev/t/install-hal0/55"
+
+
+def test_resolve_topic_lookup_path_has_exactly_one_id_segment() -> None:
+    """Regression: external_id values used to be '/'-joined
+    (e.g. "hal0-docs/reference/api/rest-api"), which turned
+    /t/external_id/{id}.json into multiple path segments — Discourse's
+    own route constraint (`external_id: /[\\w-]+/` in config/routes.rb)
+    only matches one. external_id is slash-free now (see discovery.py's
+    make_external_id), so the lookup path must resolve to exactly one
+    segment after "external_id/"."""
+    seen_path = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_path["path"] = request.url.path
+        return httpx.Response(404, json={"error_type": "not_found"})
+
+    with _client(handler) as client:
+        client.resolve_topic("hal0-docs--reference--api--rest-api")
+
+    id_segment = seen_path["path"].removeprefix("/t/external_id/").removesuffix(".json")
+    assert "/" not in id_segment
+    assert id_segment == "hal0-docs--reference--api--rest-api"
 
 
 def test_resolve_topic_not_found_returns_none() -> None:
@@ -86,7 +110,7 @@ def test_create_topic_posts_expected_payload() -> None:
 
     with _client(handler) as client:
         topic = client.create_topic(
-            external_id="hal0-docs/getting-started/install",
+            external_id="hal0-docs--getting-started--install",
             title="Install hal0",
             raw="body md",
             category_id=7,
@@ -97,10 +121,15 @@ def test_create_topic_posts_expected_payload() -> None:
         "title": "Install hal0",
         "raw": "body md",
         "category": 7,
-        "external_id": "hal0-docs/getting-started/install",
+        "external_id": "hal0-docs--getting-started--install",
     }
     assert topic == Topic(
-        topic_id=34, first_post_id=12, slug="install-hal0", title="Install hal0", raw="body md"
+        topic_id=34,
+        first_post_id=12,
+        slug="install-hal0",
+        title="Install hal0",
+        raw="body md",
+        category_id=7,
     )
 
 
@@ -109,8 +138,9 @@ def test_create_topic_dry_run_makes_no_request() -> None:
         raise AssertionError("dry-run must not call the network for a mutating request")
 
     with _client(handler, dry_run=True) as client:
-        topic = client.create_topic(external_id="hal0-docs/x", title="X", raw="raw", category_id=7)
+        topic = client.create_topic(external_id="hal0-docs--x", title="X", raw="raw", category_id=7)
     assert topic.topic_id == -1
+    assert topic.category_id == 7
 
 
 def test_update_topic_puts_expected_payload() -> None:
