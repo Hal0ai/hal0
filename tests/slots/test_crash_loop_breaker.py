@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hal0.slots.manager import _CRASH_LOOP_PARK_AFTER, SlotManager
+from hal0.slots.manager import _CRASH_LOOP_MAX_S, _CRASH_LOOP_PARK_AFTER, SlotManager
 from hal0.slots.state import SlotCrashLooping, SlotState
 from tests.slots.conftest import FakeContainerProvider
 
@@ -86,11 +86,14 @@ async def test_parks_after_max_consecutive_failures(
     container_stub: FakeContainerProvider,
 ) -> None:
     """After N consecutive failures the slot parks: load() short-circuits
-    with SlotCrashLooping regardless of elapsed time."""
+    with SlotCrashLooping for the whole half-open cool-down."""
     sm = SlotManager()
-    for _ in range(_CRASH_LOOP_PARK_AFTER):
+    for i in range(_CRASH_LOOP_PARK_AFTER):
         await _fail_load_once(sm, container_stub)
-        _rewind_backoff(sm)
+        if i < _CRASH_LOOP_PARK_AFTER - 1:
+            # Keep the LAST failure's timestamp fresh — the parked refusal
+            # holds only inside the cool-down (half-open opens after it).
+            _rewind_backoff(sm)
 
     key = sm._key("chat")
     rec = sm._states[key]
@@ -101,9 +104,82 @@ async def test_parks_after_max_consecutive_failures(
     with pytest.raises(SlotCrashLooping) as exc_info:
         await sm.load("chat")
     assert exc_info.value.details["parked"] is True
+    # The refusal carries the real wait, not a permanent verdict.
+    assert 1 <= exc_info.value.details["retry_after_s"] <= int(_CRASH_LOOP_MAX_S) + 1
     # Parked refusal is free — no terminate, no spawn.
     assert len(container_stub.unload_calls) == unloads_before
     assert container_stub.load_calls == []
+
+
+async def test_parked_breaker_half_opens_and_recovers(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """Once the cool-down elapses, ONE trial load rides the normal path —
+    a parked slot self-heals instead of waiting for an operator."""
+    sm = SlotManager()
+    for _ in range(_CRASH_LOOP_PARK_AFTER):
+        await _fail_load_once(sm, container_stub)
+        _rewind_backoff(sm)
+
+    container_stub.fail_load = None
+    await sm.load("chat")
+
+    key = sm._key("chat")
+    assert sm._current_state("chat") == SlotState.READY
+    assert key not in sm._load_failures
+    assert "parked" not in sm._states[key].extra
+
+
+async def test_failed_half_open_trial_reparks_with_longer_cooldown(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A failed trial re-opens the breaker with a doubled cool-down, so a
+    genuinely broken model converges to rare, cheap probes — not a hot loop."""
+    sm = SlotManager()
+    for _ in range(_CRASH_LOOP_PARK_AFTER):
+        await _fail_load_once(sm, container_stub)
+        _rewind_backoff(sm)
+
+    # The permitted trial fails too (the model really is broken).
+    await _fail_load_once(sm, container_stub)
+
+    with pytest.raises(SlotCrashLooping) as exc_info:
+        await sm.load("chat")
+    assert exc_info.value.details["parked"] is True
+    assert exc_info.value.details["failures"] == _CRASH_LOOP_PARK_AFTER + 1
+    assert exc_info.value.details["retry_after_s"] > int(_CRASH_LOOP_MAX_S)
+
+
+async def test_status_surfaces_breaker_state(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """The inventory carries the breaker: state, failure count, and the wait —
+    the failure mode used to be invisible outside systemctl."""
+    sm = SlotManager()
+    assert "breaker" not in (await sm.status("chat")).metadata
+
+    await _fail_load_once(sm, container_stub)
+    breaker = (await sm.status("chat")).metadata["breaker"]
+    assert breaker == {"state": "backoff", "failures": 1, "retry_after_s": breaker["retry_after_s"]}
+    assert breaker["retry_after_s"] >= 1
+
+    for _ in range(_CRASH_LOOP_PARK_AFTER - 1):
+        _rewind_backoff(sm)
+        await _fail_load_once(sm, container_stub)
+    breaker = (await sm.status("chat")).metadata["breaker"]
+    assert breaker["state"] == "parked"
+    assert breaker["failures"] == _CRASH_LOOP_PARK_AFTER
+
+    _rewind_backoff(sm)
+    breaker = (await sm.status("chat")).metadata["breaker"]
+    assert breaker == {
+        "state": "half-open",
+        "failures": _CRASH_LOOP_PARK_AFTER,
+        "retry_after_s": 0,
+    }
 
 
 async def test_manual_reset_unparks_and_load_recovers(
