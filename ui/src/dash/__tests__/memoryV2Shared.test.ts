@@ -6,7 +6,7 @@
 // this vitest coverage.
 import { describe, expect, it } from 'vitest'
 
-import { dayKey, fmtN, mvErrorHeadline } from '../memory-v2-shared.jsx'
+import { dayKey, fmtN, isUuidLike, mvErrorHeadline } from '../memory-v2-shared.jsx'
 
 describe('fmtN', () => {
   it('formats with en-US thousands separators', () => {
@@ -57,5 +57,22 @@ describe('mvErrorHeadline', () => {
     expect(mvErrorHeadline({ status: 501, message: 'engine unsupported' }, 'units')).toBe(
       'Memory engine unreachable — engine unsupported',
     )
+  })
+})
+
+// Live-observed (2026-08-21): a real production bank's tag set was heavily
+// populated with auto-generated session/document-id UUIDs alongside real
+// human tags — a bare UUID as a chip/bubble label carries zero information.
+describe('isUuidLike', () => {
+  it('matches a bare UUIDv4-shaped string, case-insensitively', () => {
+    expect(isUuidLike('0c386b1b-1fe1-4bc8-9a24-7853eeaf0819')).toBe(true)
+    expect(isUuidLike('0C386B1B-1FE1-4BC8-9A24-7853EEAF0819')).toBe(true)
+  })
+
+  it('does not match real human tags, including ones that merely contain a dash', () => {
+    expect(isUuidLike('agent:claude')).toBe(false)
+    expect(isUuidLike('project:hal0-web')).toBe(false)
+    expect(isUuidLike('session:019f8563-e830-75d8-b77c-453428ff38e2')).toBe(false)
+    expect(isUuidLike('gotcha')).toBe(false)
   })
 })
