@@ -1,0 +1,22 @@
+---
+title: Quick start — WSL2 (experimental)
+description: Running hal0 under WSL2 on Windows — what works, what doesn't, enabling systemd, and the accelerator limits (no ROCm, no NPU) you should expect.
+sidebar:
+  order: 14
+---
+
+import { Steps, Aside, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="Experimental and unsupported">
+Windows is **out of scope for hal0 v1**. hal0 can *detect* that it is
+running under WSL2, but nothing in the installer, pre-flight, or doctor
+accommodates or works around WSL's limitations. Expect **CPU-only**
+inference and a fair amount of manual setup. Use this path for
+experimentation only — for real hardware acceleration run hal0 on
+[bare metal](/docs/getting-started/bare-metal/) or in a
+[Proxmox](/docs/getting-started/proxmox/).
+</Aside>
+
+## What to expect
+
+WSL2 runs a real Linux kernel — this line just anchors a heading after the aside.

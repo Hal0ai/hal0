@@ -1,0 +1,38 @@
+---
+title: Architecture
+description: How hal0 fits together — the FastAPI control plane, podman-backed inference slots, the dispatcher that routes each request, and the dashboard front end.
+sidebar:
+  order: 10
+---
+
+import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+
+hal0 is a single self-hosted service that turns one machine into an
+OpenAI-compatible inference platform.
+
+## The pieces
+
+<CardGrid>
+  <Card title="hal0-api" icon="rocket">
+    A FastAPI application that binds `0.0.0.0:8080`. It serves the REST control
+    plane under `/api/*`, the OpenAI-compatible inference surface under
+    `/v1/*`, the MCP servers under `/mcp/*`, and the built dashboard at `/`.
+  </Card>
+  <Card title="Slots" icon="puzzle">
+    Each slot is one model served by one podman container, managed through a
+    `hal0-slot@<name>.service` systemd unit. `SlotManager` owns their
+    lifecycle and state; it never imports the dispatcher.
+  </Card>
+  <Card title="Stacks" icon="seti:db">
+    A named, portable bundle of slot assignments plus the profiles and model
+    metadata they reference — apply one to load, swap, and unload a whole
+    slot lineup as a unit. See [Stacks](/docs/concepts/stacks).
+  </Card>
+</CardGrid>
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle, single-flight dispatch, and the write-boundary partition." />
+  <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="How capabilities, profiles, and devices shape a slot." />
+</CardGrid>

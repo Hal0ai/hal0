@@ -145,3 +145,8 @@ docs/.dev/
 
 # Serena MCP project config (per-developer, local only)
 /.serena/
+
+# docs->Discourse sync output artifact (generated per run; CI uploads it
+# as a workflow artifact instead of committing it — see
+# scripts/docs_discourse_sync/README.md)
+/scripts/docs_discourse_sync/redirect-map.json
