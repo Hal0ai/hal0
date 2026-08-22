@@ -71,6 +71,14 @@ jobs:
       - name: Checkout hal0
         if: steps.gate.outputs.skip != 'true'
         uses: actions/checkout@v6
+        with:
+          # workflow_dispatch has no branch input, so a manual run is
+          # pinned to main here rather than defaulting to whatever ref it
+          # was invoked from (same rule as mirror-docs.yml) — a manual
+          # dry-run off a feature branch must never publish that branch's
+          # unmerged docs to the live forum, even in dry-run mode where
+          # nothing writes but the *plan* would still be based on it.
+          ref: main
 
       # Public repo, read-only — no token needed. Screenshots the docs
       # reference (/screenshots/*.png) live here, not in hal0/docs/.
