@@ -11,6 +11,7 @@ second blind run.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -65,6 +66,18 @@ class FakeForum:
         if request.method == "GET" and request.url.path.startswith("/t/external_id/"):
             external_id = request.url.path.removeprefix("/t/external_id/").removesuffix(".json")
             topic = self.topics.get(external_id)
+            if topic is None:
+                return httpx.Response(404, json={"error_type": "not_found"})
+            # Real Discourse never answers this lookup directly — it 301s
+            # to the canonical /t/<slug>/<id>.json (found on the live
+            # pilot's second sync; TopicsController#show_by_external_id
+            # always redirect_to_correct_topic, verified against source).
+            location = f"/t/{topic['slug']}/{topic['topic_id']}.json?include_raw=true"
+            return httpx.Response(301, headers={"Location": location})
+
+        if request.method == "GET" and re.match(r"^/t/[^/]+/\d+\.json$", request.url.path):
+            topic_id = int(request.url.path.rsplit("/", 1)[-1].removesuffix(".json"))
+            topic = next((t for t in self.topics.values() if t["topic_id"] == topic_id), None)
             if topic is None:
                 return httpx.Response(404, json={"error_type": "not_found"})
             return httpx.Response(
