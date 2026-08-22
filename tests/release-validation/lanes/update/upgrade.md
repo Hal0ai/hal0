@@ -92,12 +92,31 @@ the fact otherwise:
      this box) — this REPLACES the old ade07ba-era expectation ("Vulkan ~-10% decode vs ROCm")
      carried by earlier kit versions. A >20% variance from the new envelope, in either
      direction, needs explanation; do not flag "Vulkan is faster than ROCm" as a regression.
-6. **Rollback.** `hal0 update --rollback`. Does it return the box to the previous version with
-   its state intact? Then roll forward again. If rollback is not exercised here it is not
-   exercised anywhere. (`updater.*` journal lines from the ROLLBACK path legitimately carry
-   `job_id=None` — the rollback route constructs its Updater without a job — so do not
+6. **Rollback.** Before touching it, snapshot `/var/lib/hal0/hal0.previous`'s content — an
+   earlier idempotent same-version re-apply anywhere in this lane's run silently overwrites it,
+   which turns the rollback test into an unintended same-version no-op without any error. Then
+   `hal0 update --rollback`. Does it return the box to the previous version with its state
+   intact? Immediately after, curl `/api/health` and compare its reported version against the
+   CLI's own `--version` output BEFORE assuming the rollback took effect — rollback deliberately
+   does NOT restart hal0-api (`known-issues: update-rollback-defers-hal0-api-restart`), so a
+   version mismatch here is expected, not a failure; restart hal0-api and re-check to confirm
+   convergence. Separately, check whether the CLI's OWN output named this requirement at all —
+   `hal0 update --rollback`'s banner staying silent about the pending restart is a real gap
+   against closed #1541 (regression `update-rollback-cli-silent-on-restart-need`), distinct from
+   the by-design non-restart itself. Then roll forward again. If rollback is not exercised here
+   it is not exercised anywhere. (`updater.*` journal lines from the ROLLBACK path legitimately
+   carry `job_id=None` — the rollback route constructs its Updater without a job — so do not
    re-open `update-audit-trail-gaps` from rollback-window lines; check 4's job_id assertion
    applies to the upgrade itself.)
+7. **Live image vs resolved image, post-upgrade** — regression
+   `slot-drift-ignores-image-and-device`. For every already-running slot, diff
+   `podman inspect <container> --format '{{.Config.Image}}'` against
+   `hal0 slot show <n> --json | jq .status.image` (or `/api/slots/<n>` `actual_image` vs the
+   unit's resolved `Image=`). The drift/restart-slots mechanism does NOT catch an image-only
+   drift on its own (`GET /api/updates/slot-drift` compares only `--ctx-size`/`--model`/
+   `--alias`/`--port`/`-b`/`-ub` in argv, never the image or AddDevice lines) — this lane must
+   check it independently rather than trusting a `count: 0` drift response as "nothing to
+   restart".
 
 ## Leave behind
 

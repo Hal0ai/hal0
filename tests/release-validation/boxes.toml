@@ -18,20 +18,27 @@ privileged = false
 gpu = true          # dev0 /dev/dri/renderD128 (Strix Halo iGPU) + dev3 /dev/accel/accel0 (XDNA NPU), both gid=991
 cores = 8
 ram_gb = 16
-snapshot = "rc6-installed"
+snapshot = "pristine"    # the "rc6-installed" convenience snapshot NO LONGER EXISTS (stale fact
+                         # found by rc.7 preflight, corrected 2026-08-22): `pct listsnapshot 151`
+                         # shows only `pristine` (2026-08-08, pre-install) and `current`. Whoever
+                         # provisioned the rc.7 run rolled back to `pristine` and ran a real
+                         # installer, which is the better fresh-install test anyway — just do not
+                         # attempt `pct rollback 151 rc6-installed`, it will fail.
 api = "http://10.0.1.151:8080"
 auth_required = false
-status = "PREFERRED fresh box as of 2026-08-15 — two snapshots, verified rc.6 install"
+status = "PREFERRED fresh box as of 2026-08-22 — rc.7 verified via a genuine fresh install from pristine"
 notes = """
-Fresh-install lane. Reset: `pct rollback 151 pristine|rc6-installed` on the hypervisor.
-
-This is the BEST fresh box in the fleet — the only one with snapshots. Two reset points:
-  * `pristine`       — pre-install Ubuntu 26.04, for exercising the installer itself
-  * `rc6-installed`  — hal0 1.0.0-rc.6 immediately post-install (2026-08-15): api + hermes
-                       active, installer-seeded brain model present and serving. Do NOT assert
-                       "no models on a fresh install" — the installer pulls the brain model.
-(`rc5-installed` no longer exists.) The only fresh box in the fleet — ct152-cpu-fresh was
-destroyed 2026-08-21 and there is no other CPU-only fresh box to fall back to.
+Fresh-install lane. Reset: `pct rollback 151 pristine` on the hypervisor, THEN run the installer
+fresh — this is now the ONLY reset point (corrected 2026-08-22: the `rc6-installed` /
+`rc5-installed` convenience post-install snapshots this file used to document are GONE;
+`pct listsnapshot 151` shows only `pristine` (2026-08-08) and `current`). Do not attempt
+`pct rollback 151 rc6-installed` or any named post-install snapshot — it will fail. Every prior
+"two reset points" convenience this file described no longer applies; budget the full installer
+run (~30 min) into any reset of this box. Do NOT assert "no models on a fresh install" — the
+installer pulls the brain model, so a post-install fresh box always has exactly one model
+present and serving/erroring depending on hardware (see the seeded-anchor-slot finding below).
+The only fresh box in the fleet — ct152-cpu-fresh was destroyed 2026-08-21 and there is no other
+CPU-only fresh box to fall back to.
 
 GPU PASSTHROUGH since the rc.5 era, NO /dev/kfd (render node only: dev0 /dev/dri/renderD128
 + dev3 /dev/accel/accel0). As of the rc.7 Vulkan-restoration fold (#1948, landed as #1954 +
@@ -70,9 +77,11 @@ GOTCHAS, in order:
      model roots, so a staged gguf is invisible until `hal0 model add`.
   4. (stale, retired) "/dev/dri absent in sysfs" predates the dev0/dev3 passthrough. After any
      `pct rollback 151`, confirm dev0/dev3 keep gid=991 or the installer's GPU preflight aborts.
-  5. After a rollback to the `rc6-installed` snapshot, services do not come back on their own —
-     `systemctl start hal0.target` (the hermes unit is `hermes-gateway.service`). Preflight
-     reads "API unreachable" when this was skipped; this is the fix to name in the blocker.
+  5. (stale, retired 2026-08-22 — no post-install convenience snapshot exists any more, so this
+     no longer applies) After a rollback to a named post-install snapshot, services would not
+     come back on their own — `systemctl start hal0.target` (hermes unit
+     `hermes-gateway.service`). A genuinely fresh installer run (the only reset path now)
+     starts both units itself; no manual start has been needed on the last two runs.
 """
 
 # ct152-cpu-fresh (the CPU-only fresh box, no GPU passthrough) was DESTROYED 2026-08-21. There
@@ -143,11 +152,25 @@ ip = "10.0.1.163"
 os = "ubuntu 24.04"
 privileged = true
 gpu = false
+cores = 8            # added 2026-08-22 (was missing, unlike ct151/ct150) — nproc
+ram_gb = 16           # added 2026-08-22 — free -h total
 snapshot = "pristine"
+api = "http://10.0.1.163:8080"    # added 2026-08-22, for consistency with ct151/ct150
+auth_required = false             # added 2026-08-22 — open, unauthenticated /api/models = 200
 notes = """
 Second fresh-install box: privileged, older Ubuntu. Not in the default matrix — enable it when
-a finding smells privilege- or distro-specific. AppArmor blocks podman until remediated
-(#1563 ordering bug; workaround: containers.conf.d apparmor_profile="unconfined").
+a finding smells privilege- or distro-specific. This is currently the ONLY box in the fleet with
+ZERO GPU device passthrough at all (no /dev/dri, no /dev/kfd, no /dev/accel) — the only place to
+get genuine CPU-only fresh-install coverage since ct152-cpu-fresh was destroyed 2026-08-21. The
+installer still seeds the primary `brain` anchor slot at `device=gpu-rocm` here despite there
+being no GPU at all, so it crash-loops from t=0 with no CPU fallback offered — see regression
+`seeded-anchor-slots-rocm-on-kfd-less-box`. AppArmor blocks podman until remediated
+(#1563 ordering bug; workaround: containers.conf.d apparmor_profile="unconfined") — status is
+AMBIGUOUS, not clearly stale or clearly true: `apparmor.service` shows failed but podman is
+demonstrably functional for at least the openwebui image without the documented workaround
+applied; the one image that failed to pull (hal0-combined:0822) failed for an unrelated
+pre-container-launch guard reason, so this box has not yet exercised the actual "podman launches
+a hal0 slot container under AppArmor" path the gotcha warns about.
 """
 
 [boxes.ct105-prod]

@@ -18,11 +18,30 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
    the shipped slot TOML is by-design (`known-issues.yaml:
    capabilities-seed-devices-from-slot-tomls`); a default selection naming a backend the host
    never advertises, or one no catalog row can match, is a hard fail — that is where the seed
-   costs the user something.
+   costs the user something. Registration path matters here: a LOCALLY-added model
+   (`hal0 model add`) can advertise a backend a curated/catalog row for the same capability
+   correctly omits — regression
+   `capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models`. Register a
+   throwaway small gguf (`hal0 model add <path> --id zzprobe`) and compare its `backends` list
+   against a curated row's for the same capability type; remove it when done. Do not conflate
+   this with `catalogs.voice.tts`'s `qwen3-tts` row always listing `gpu-rocm` — that is a
+   deliberate two-engine switch (`known-issues: tts-catalog-lists-qwen3-on-gpu-rocm-regardless-
+   of-host`), not a bug.
 2. **Enable a capability against the real hardware.** Bind the embedding model to the embed
    capability on the backend this box actually has, and enable it. Does the flip from the seeded
    default work cleanly? Does enabling load or require the slot? Verify through both
    `capabilities list` and the API.
+2b. **Pull-before-load, for a not-yet-downloaded catalog row** — regression
+    `capability-apply-skips-model-pull`. Find a catalog row with `downloaded:false,
+    pullable:true` for any capability child, apply it, and check `GET /api/models/pulls`
+    IMMEDIATELY (not after settling) for a corresponding pull job. rc.7 found NO pull job is
+    ever created — the apply blocks for the full crash-loop dwell (~3 min) then returns 200
+    `{"status":"warming"}` while the container dies on a bare model id with no path. Also check
+    whether the capabilities dashboard picker marks the row as undownloaded (⬇ or equivalent) —
+    the shipped panels currently offer every row unmarked. If the box's rerank slot TOML default
+    (`bge-reranker-v2-m3-q4_k_m`) is itself undownloaded at lane entry, that IS this defect's
+    first-click blast radius on a fresh install — record it as such rather than only as a
+    manufactured probe.
 3. **Same for the rerank child**, then verify the path that consumes it: the memory reranker
    config (`[memory.embedding] rerank_model`, `rerank_gateway_url`). Issue a rerank through the
    gateway with a query and three documents. In rc.4 this whole path was dead because profile

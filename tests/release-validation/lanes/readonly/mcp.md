@@ -56,6 +56,16 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 9. `serverInfo` reports the hal0 version, not the FastMCP library version (rc.4 reported
    FastMCP 1.28.1).
 10. Latency: note anything that takes more than a couple of seconds for a list call.
+11. **isError vs REST parity, specifically on a resource in a NON-healthy lifecycle state** —
+    regression `mcp-status-tools-iserror-on-error-state-resource`. Find (or induce) a slot in
+    `state: error`, then call `slot_status`/`slot_by_name`/`slot_by_id` (or the equivalent
+    status/show tool for any resource) against it and compare `isError` to the matching REST
+    route's HTTP status for the SAME resource (`GET /api/slots/<n>` etc). `isError: true` for a
+    resource read that the REST surface answers 200 for is a lying tool result, even though the
+    JSON body inside is correct — it hides real data behind a false failure flag. This is a
+    standing check now, not a one-off: the collision is keyed to a literal top-level `status`
+    field name colliding with the wrapper's own error sentinel, so re-run it on whichever
+    status/show tools exist each release, not just the ones this run happened to catch.
 
 ## Carry-forward
 

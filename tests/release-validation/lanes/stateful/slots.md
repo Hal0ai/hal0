@@ -11,13 +11,23 @@ another agent is mutating the box: if slots appear that you did not create, stop
 capacity, port and failed-unit assertions are worthless on a contended box. Re-diff against the
 entry snapshot **before every capacity, port, or failed-unit assertion**, not only at exit —
 in rc.6 foreign `zz*` slots appeared mid-lane and invalidated three checks that had only diffed
-at the ends.
+at the ends. When staging a model for a check this lane has none pre-staged for, grep
+`ps aux` / `hal0 model list` / `hal0 slot list` for unexpected `zz*`-prefixed resources BEFORE
+creating your own, not just at the entry-snapshot diff — rc.7's contention with a concurrent
+lane first appeared 30+ minutes into the run, well after the initial baseline diff, so re-check
+immediately before you name a new throwaway resource, not only at lane start.
 
 ## Checks
 
 1. **Post-install baseline.** Record every slot, its assigned model, its state, and the unit
    status, before touching anything. On a fresh install this is a finding-rich moment: which
-   slots ship seeded, which ship model-less, and does anything already look wrong? Include an
+   slots ship seeded, which ship model-less, and does anything already look wrong? Specifically
+   on a box with no `/dev/kfd`: every seeded LLM lifecycle slot should derive
+   `device = "gpu-vulkan"` (render node present) or `"cpu"` (no render node) — a seeded slot
+   reading `device = "gpu-rocm"` and `state: "error"` (especially the autoload:true `brain`
+   anchor) is regression `seeded-anchor-slots-rocm-on-kfd-less-box`, not expected pre-lane-1
+   state; do not silently fix it by reloading onto a different device before recording the
+   as-shipped state first. Include an
    ownership sweep of the state the daemon writes: for each dir under /var/lib/hal0 that
    hal0-api must write (model-pull-jobs especially), `sudo -u hal0 test -w`, and grep the boot
    journal for `pull_job_persist_failed` after the installer's own pull — regression
@@ -124,17 +134,29 @@ at the ends.
    (`slot.spawn_failed`/`slot.crash_looping`), never a generic `system.internal` 500 with an
    empty message — the empty-message shape is regression
    `container-health-readerror-unhandled`, intermittent, so record which envelope you got.
-10. **Backend selection is real, not a label.** Diff `systemctl cat hal0-slot@<slot>` between the
-    same slot pinned to `cpu` and to the box's GPU backend. What must change is the runner
-    **image** and the `AddDevice=` lines; a residual `-ngl -1` on a CPU-pinned slot is inert and
-    adjudicated (`known-issues.yaml: cpu-pinned-slot-keeps-ngl-flag`). Restore the original
-    device when done.
+10. **Backend selection is real, not a label — INCLUDING the already-ready edit+load path.** Diff
+    `systemctl cat hal0-slot@<slot>` between the same slot pinned to `cpu` and to the box's GPU
+    backend via a FRESH `slot create`+`load`. What must change is the runner **image** and the
+    `AddDevice=` lines; a residual `-ngl -1` on a CPU-pinned slot is inert and adjudicated
+    (`known-issues.yaml: cpu-pinned-slot-keeps-ngl-flag`). Then repeat WITHOUT an intervening
+    `unload`: on a slot already `ready`, `hal0 slot edit <s> --hardware <other>` followed by
+    `hal0 slot load <s>` — regression `slot-drift-ignores-image-and-device`. Record
+    `podman ps --format '{{.Names}} {{.CreatedAt}}'` for the slot BEFORE and AFTER this second
+    edit+load: if `CreatedAt` is unchanged, the container was never recreated, and the image/
+    AddDevice lines from the OLD device will still be live even though `declared_backend` now
+    reports the new one — cross-check `curl $API/api/slots/<s> | jq '{declared_backend,
+    actual_image, image_mismatch}'` for the same contradiction. `hal0 slot restart <s>`
+    converges fully (workaround, not a fix) — use it to restore state when done, and restore the
+    original device.
 11. **Memory accounting** — regression `slot-capacity-vram-attribution` (#1839).
     `hal0 slot capacity` must not book VRAM on a box where `/api/hardware` reports no GPU that
     is either `vulkan_capable` or `compute_capable` — a vulkan-only box booking resident memory
     to VRAM is the FIX, not the bug (`known-issues: slot-capacity-vram-on-vulkan-is-declared`).
     Total MB must match `/api/slots/metrics` mem_rss_mb for the same RESIDENT slot in the same
-    second. State which figure is real RSS and which is an estimate.
+    second, UNLESS Total equals that slot's file-size+KV estimate (a deliberate floor for
+    GTT-resident weights the cgroup under-charges — see the known-issue's `still_report_if` for
+    the exact formula before flagging a divergence). State which figure is real RSS and which is
+    an estimate.
 
 ## Leave behind
 

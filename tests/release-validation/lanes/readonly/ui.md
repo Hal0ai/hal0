@@ -50,7 +50,12 @@ Load the Playwright MCP tools via ToolSearch: `browser_navigate`, `browser_snaps
    agent card health badge vs BOTH `/api/agents` `unit_active` and the footer service chips.
    For the footer: diff the service-chip ID SET against `/api/services/health` keys, not just
    each chip's colour — a service omitted from the group can never move the count, so an outage
-   reads "3 / 3 ready" (regression `ui-footer-services-omits-comfyui`). An amber "READY" dot on
+   reads "3 / 3 ready" (regression `ui-footer-services-omits-comfyui`). Before diffing the
+   footer chips, curl `/api/services` vs `/api/services/health` directly (this is now check 13
+   in `lanes/readonly/api.md` — cross-reference it rather than re-deriving) — if a service id is
+   missing from `/api/services/health` itself, the gap is the API's, not the footer's, and a
+   UI-only fix would not close it (regression `services-health-omits-hindsight`: hindsight is
+   never in the health payload under any configuration). An amber "READY" dot on
    the Hermes card is by design (`known-issues.yaml: ui-agents-card-amber-ready-dot`).
    And where one screen shows the same quantity twice (the Slots page memory ruler vs the
    Inference Engine card footer's "N GB free"), assert they reconcile — rc.6's footer read the

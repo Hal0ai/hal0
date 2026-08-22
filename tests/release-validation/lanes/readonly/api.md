@@ -87,6 +87,22 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
     claims. On an auth-enabled box, confirm anonymous requests are actually rejected.
 11. **Headers.** Record the response headers verbatim (CORS, security headers, server banner) so
     a silent change in exposure posture shows up in next release's diff.
+12. **Capabilities backend fan-out, local vs catalog** — regression
+    `capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models`. On a box whose
+    `/api/hardware` shows every GPU `compute_capable: false`, compare the per-model `backends`
+    list in `GET /api/capabilities` between a CATALOG/curated row and a LOCALLY-added model of
+    the same capability type (`hal0 model add <path> --id zzprobe` against any small gguf, then
+    `hal0 model rm zzprobe -f` when done). A locally-added model advertising `gpu-rocm` while the
+    top-level `.backends` array and every curated row correctly omit it is the finding — do not
+    conflate it with the `catalogs.voice.tts` `qwen3-tts` row's unconditional `gpu-rocm`, which
+    is a deliberate two-engine switch (`known-issues: tts-catalog-lists-qwen3-on-gpu-rocm-
+    regardless-of-host`), not a bug.
+13. **Services health vs service registry** — regression `services-health-omits-hindsight`.
+    `diff <(curl -s $API/api/services | jq -r '.[].id' | sort) <(curl -s $API/api/services/health
+    | jq -r '.services[].id' | sort)`. Any id present in `/api/services` but absent from
+    `/api/services/health` means the dashboard footer can never reflect that service's outage —
+    check this directly here rather than only inferring it from the UI lane's footer diff, so an
+    API-side omission is never misdiagnosed as "frontend still hardcoded".
 
 ## Carry-forward
 

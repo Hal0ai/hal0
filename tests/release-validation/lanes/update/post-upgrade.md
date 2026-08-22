@@ -42,7 +42,15 @@ did not ask for?**
      relabel will NOT fire unless #1960's fix landed in the release under test. If TOMLs are
      unchanged and no relabel breadcrumbs exist, first check whether #1960 is fixed in this
      release: if not, record the result against #1960 (do not file a duplicate); if it is,
-     the unfired migration is a fresh regression of its own.
+     the unfired migration is a fresh regression of its own. Cross-check the updater's relabel
+     DECISION against the ACTUALLY-RUNNING container image, not just the resolved/config image —
+     regression `slot-drift-ignores-image-and-device` found this exact seam blind:
+     `podman inspect <slot ctr> --format '{{.Config.Image}}'` vs the unit's resolved `Image=` vs
+     `GET /api/slots/<n>` `actual_image`/`image_mismatch`. A slot whose on-disk unit was
+     correctly re-pinned to the new image while the LIVE container keeps running the old one
+     (no bounce on a plain update is by-design — `updater.py`'s own comment: a bounce could kill
+     a mid-inference request) must still be flagged by `GET /api/updates/slot-drift`; a
+     `count: 0` response for such a slot is the defect, not a pass.
 3. **Functional smoke on the upgraded box.** A short version of the fresh-box lanes: chat
    completion, embeddings, a memory retain and recall, a brain steward question, the dashboard
    loading with real data. Anything broken here that works on the freshly installed box is an
@@ -64,6 +72,13 @@ did not ask for?**
    slots were (not) bounced as documented.
 6. **Second update check.** `hal0 update --check` on the upgraded box must now report up to
    date, against the same manifest.
+7. **Memory extraction ctx-preflight, fail-fast and no dangling op.** POST a retain against a
+   known-undersized extraction anchor (an upgraded box's historical pin is the likely
+   candidate — see check 3's grounding probe) and confirm a rejection creates ZERO operations,
+   not merely that the request 400s. This verifies the fail-fast CONTRACT — a rejected request
+   that still leaves a dangling `processing`/`failed` op behind is the shape of regression
+   `memory-extraction-ctx-preflight-missing`, and a bare 400 with no op created can look like a
+   pass if you only check the HTTP status.
 
 ## Leave behind
 

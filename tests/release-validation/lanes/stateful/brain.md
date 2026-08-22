@@ -75,6 +75,21 @@ Ask two or three questions whose true answers you already know from the box, phr
 non-tool answer would be plausible. Any answer that is fluent and wrong, with no tool call behind
 it, is a `major` finding on its own — regardless of whether the tools plumbing "works".
 
+For EVERY live-state question in this test, ask it TWICE, as a matched pair, not once:
+  (a) plain factual phrasing, no explicit verb ("what port is X on", "how many Y do I have")
+  (b) the same question with an explicit "check/look up" verb ("check what port X is on")
+Regression `brain-steward-fabricates-live-platform-state` found this is phrasing-sensitive on
+the shipped small brain-sft model: explicit-check phrasing reliably triggers a tool call,
+plain phrasing reliably fabricates — a single-phrasing probe will silently pass a real defect.
+Record both results, not just one.
+
+A tool call succeeding STRUCTURALLY (200, well-formed `tool_call`/`tool_result` frames) is not
+enough — diff the tool RESULT against the question actually asked. The steward can call a real,
+correctly-schema'd tool and still answer wrong because it picked the WRONG tool for the
+question (e.g. `model_catalogue`, the pullable-HuggingFace list, answering "how many models are
+registered" instead of the local `list_models`). A frame-type check alone will not catch this;
+read the tool_result payload and confirm it actually answers what was asked.
+
 ## Leave behind
 
 Brain healthy. Note any slot you loaded for the tool-model test, and restore `brain_chat` config
