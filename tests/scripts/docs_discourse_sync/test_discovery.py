@@ -164,6 +164,25 @@ def test_short_title_padding_does_not_affect_short_title_field(tmp_path: Path) -
     assert doc.short_title == "Slots"
 
 
+@pytest.mark.parametrize("title", ["X", "Hi", "CLI", "1234", "A" * 14])
+def test_discourse_safe_title_always_clears_the_floor(title: str) -> None:
+    """codex round 3 on PR #2004: a single suffix append is tuned for the
+    corpus's shortest real title ("CLI", 3 chars — lands exactly on 15)
+    but undershoots for a 1-2 char title ("X" + the 12-char suffix = 13).
+    Every length up to (and including) one short of the floor must clear
+    it, not just the ones that happen to occur in docs/ today."""
+    padded = discovery._discourse_safe_title(title)
+    assert len(padded) >= discovery._DISCOURSE_MIN_TITLE_LENGTH
+    assert padded.startswith(title)
+
+
+def test_discourse_safe_title_one_char_title_is_padded_enough(tmp_path: Path) -> None:
+    _write(tmp_path / "concepts" / "x.mdx", "X", 10)
+    doc = discovery.discover_docs(tmp_path)[0]
+    assert len(doc.title) >= 15
+    assert doc.title.startswith("X")
+
+
 # ── make_external_id: Discourse's own validation rule ────────────────────
 # app/models/topic.rb: `validates :external_id, format: { with: /\A[\w-]+\z/ },
 # length: { maximum: EXTERNAL_ID_MAX_LENGTH }` where EXTERNAL_ID_MAX_LENGTH = 50.

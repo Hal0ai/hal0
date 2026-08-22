@@ -57,9 +57,21 @@ _TITLE_PAD_SUFFIX = " (hal0 docs)"
 
 
 def _discourse_safe_title(title: str) -> str:
-    if len(title) >= _DISCOURSE_MIN_TITLE_LENGTH:
-        return title
-    return f"{title}{_TITLE_PAD_SUFFIX}"
+    """Pad *title* to the Discourse title-length floor, unconditionally.
+
+    A single ``_TITLE_PAD_SUFFIX`` appended once isn't a guarantee — it's
+    tuned for the current corpus's shortest title ("CLI", 3 chars +
+    12-char suffix = 15, exactly at the floor) but a 1-2 char title would
+    still undershoot it (codex round 3 on PR #2004: "X" + suffix = 13).
+    Reappending the same suffix until the floor is cleared is guaranteed
+    regardless of how short the original title is, at the cost of visible
+    repetition for a title that short — an acceptable tradeoff for a case
+    that doesn't exist in the docs/ corpus today (nothing under 3 chars).
+    """
+    padded = title
+    while len(padded) < _DISCOURSE_MIN_TITLE_LENGTH:
+        padded = f"{padded}{_TITLE_PAD_SUFFIX}"
+    return padded
 
 
 class DiscoveryError(ValueError):
