@@ -64,6 +64,16 @@ const TOPIC_COLORS = [
 
 const fmtN = (n) => n.toLocaleString('en-US')
 
+// Live-observed issue (2026-08-21, operator's direct exploration of the
+// deployed UI): a real production bank's tag set is heavily populated with
+// auto-generated session/document ids (bare UUIDv4 strings) mixed in with
+// real human tags — as a visual chip/bubble label a raw UUID carries zero
+// information, and on a bank with dozens of them it drowns out the tags
+// someone can actually read. Both the tags quick-filter row and the Atlas
+// bubble map filter these out via this helper before rendering.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const isUuidLike = (s) => UUID_RE.test(String(s))
+
 // t is a local-ISO-ish timestamp string ("YYYY-MM-DDTHH:MM…") — slices out
 // "MM-DD" and reformats as "MM/DD" for compact axis/day-bucket labels.
 const dayKey = (t) => t.slice(5, 10).replace('-', '/')
@@ -298,6 +308,7 @@ const MemV2 = {
   dayKey,
   Icon,
   MvError,
+  isUuidLike,
 }
 
 // Named exports alongside the window-globals publish, purely so the pure
@@ -306,7 +317,7 @@ const MemV2 = {
 // contract, not a module import, is how Phase C views are meant to consume
 // MemV2). Guard the window write so importing this module under vitest's
 // node test environment (no `window` global) doesn't throw.
-export { fmtN, dayKey, mvErrorHeadline }
+export { fmtN, dayKey, mvErrorHeadline, isUuidLike }
 
 if (typeof window !== 'undefined') {
   Object.assign(window, { MemV2 })

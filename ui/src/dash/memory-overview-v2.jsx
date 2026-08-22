@@ -229,7 +229,14 @@ function BankRow({ bank, onExplore, compact }) {
         </div>
       </div>
       <div>
-        <div className="mv-legend num">
+        {/* Live-observed spacing issue (2026-08-21): the compact bank
+            table's middle column is too narrow to fit "world N ·
+            experience N · observation N" on one line at 5-6-digit counts,
+            so the shared .mv-legend flex-wrap produced a lopsided 2-then-1
+            wrap. Force a clean vertical stack here instead of widening the
+            shared class (which other, wider .mv-legend usages rely on for
+            a single-row layout). */}
+        <div className="mv-legend num" style={{ flexDirection: 'column', gap: 2, flexWrap: 'nowrap' }}>
           <span>
             <span className="sw" style={{ background: FACT_COLORS.world }} />
             <b>{fmtN(world)}</b>
@@ -353,28 +360,15 @@ function EnginePanel({ banks, growthBank }) {
           <b className="num">{fmtN(aggregate.totalFacts || 0)}</b>
           <span className="s">all banks</span>
         </div>
-        <div>
-          <span className="k">graph built</span>
-          <b className="num">{fmtN(g?.builds_ok ?? 0)}</b>
-          <span className="s">lifetime</span>
-        </div>
-        <div>
-          <span className="k">errors</span>
-          <b className="num" style={{ color: g?.errors ? 'var(--err)' : undefined }}>
-            {g?.errors ?? 0}
-          </b>
-          <span className="s">{g?.errors ? 'see logs' : '—'}</span>
-        </div>
-        <div>
-          <span className="k">live</span>
-          <b className="num" style={{ color: 'var(--accent)' }}>
-            {fmtN(g?.in_flight ?? 0)}
-          </b>
-          <span className="s">pending</span>
-        </div>
       </div>
-      {/* ADR-0023 — reused verbatim, not reimplemented (enable/disable,
-          slot picker, its own built/errors/live grid + active-tasks list). */}
+      {/* Live-observed redundancy (2026-08-21): this grid used to repeat
+          "graph built / errors / live" as 3 more cells here, then the
+          embedded ADR-0023 panel below rendered the exact same three
+          numbers again in its own grid a few pixels down — duplicate
+          content, not duplicate meaning, just extra vertical space for
+          nothing new. Dropped the 3 duplicate cells; MemoryGraphPanel
+          (reused verbatim, not modified — ADR-0023 constraint) is the one
+          place those numbers live now. */}
       {window.MemoryGraphPanel && <window.MemoryGraphPanel />}
     </div>
   )

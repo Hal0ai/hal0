@@ -170,19 +170,35 @@ function AtlasPanel({ tags, totalFacts, onTag, embed }) {
       placed.push({ ...t, x, y })
     })
   const { TOPIC_COLORS } = window.MemV2
+  // Live-observed (2026-08-21): every bubble always showed its full tag name
+  // + count regardless of size — on a bank with dozens of tags, most bubbles
+  // are near the minimum radius, and labeling all of them at once produces
+  // an unreadable wall of overlapping/crowded text. Only label bubbles big
+  // enough to legibly hold text; smaller ones stay as plain colored dots
+  // (still clickable, still filter by that tag) with a native <title> hover
+  // tooltip so the tag name/count is still one hover away, not gone.
+  const LABEL_MIN_R = 18
   const svg = tags.length > 0 && (
     <svg viewBox={`0 0 ${W} ${H}`}>
       {placed.map((t, i) => {
         const c = TOPIC_COLORS[i % TOPIC_COLORS.length]
+        const labelled = t.r >= LABEL_MIN_R
         return (
           <g key={t.tag} className="bubble" onClick={() => onTag(t.tag)}>
+            <title>
+              {t.tag} · {fmtN(t.count)}
+            </title>
             <circle cx={t.x} cy={t.y} r={t.r} fill={`color-mix(in srgb, ${c} 14%, transparent)`} stroke={c} strokeWidth="1.25" />
-            <text x={t.x} y={t.y - 2} textAnchor="middle" style={{ font: `600 ${t.r > 40 ? 11.5 : 10}px var(--jbm)`, fill: 'var(--fg-1, var(--fg))' }}>
-              {t.tag}
-            </text>
-            <text x={t.x} y={t.y + 12} textAnchor="middle" className="num" style={{ font: '400 9.5px var(--jbm)', fill: 'var(--fg-3)' }}>
-              {fmtN(t.count)}
-            </text>
+            {labelled && (
+              <>
+                <text x={t.x} y={t.y - 2} textAnchor="middle" style={{ font: `600 ${t.r > 40 ? 11.5 : 10}px var(--jbm)`, fill: 'var(--fg-1, var(--fg))' }}>
+                  {t.tag}
+                </text>
+                <text x={t.x} y={t.y + 12} textAnchor="middle" className="num" style={{ font: '400 9.5px var(--jbm)', fill: 'var(--fg-3)' }}>
+                  {fmtN(t.count)}
+                </text>
+              </>
+            )}
           </g>
         )
       })}
@@ -1034,7 +1050,12 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
   const typeCounts = stats?.nodes_by_fact_type || {}
 
   const tagsQuery = useBankTags ? useBankTags(bank) : { data: null }
-  const tags = tagsQuery.data?.items || []
+  // Live-observed (2026-08-21): a real bank's tag set is heavily populated
+  // with auto-generated session/document-id UUIDs mixed into real human
+  // tags — as a chip/bubble label a bare UUID carries zero information and
+  // drowns out the readable ones. Filtered once here so both TopicChips and
+  // AtlasPanel below stay in sync automatically.
+  const tags = (tagsQuery.data?.items || []).filter((t) => !window.MemV2.isUuidLike(t.tag))
 
   const tsQuery = useBankTimeseries ? useBankTimeseries(bank, '30d') : { data: null }
   const buckets = tsQuery.data?.buckets || []
