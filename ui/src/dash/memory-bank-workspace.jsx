@@ -888,7 +888,27 @@ function Inspector({ bank, sel, setSel, unitsPage }) {
             {f.id}
           </span>
           <span className="k">entities</span>
-          <span className="v">{(f.entities || []).length ? f.entities.join(' · ') : '—'}</span>
+          {/* Live crash fix (2026-08-22): `f` here is always the units-LIST
+              row (Inspector reuses it verbatim from `unitsPage`, never a
+              separate single-record fetch) — and per the documented
+              backend contract, the list endpoint's `entities` field is a
+              COMMA-JOINED STRING, not an array (only `GET .../memories/:id`
+              returns a real array). `(f.entities || []).length` is truthy
+              for a non-empty string too, so the old code reached
+              `f.entities.join(...)` and threw "entities.join is not a
+              function" for any fact with entities set. Normalize to an
+              array regardless of which shape arrived. */}
+          <span className="v">
+            {(() => {
+              const raw = f.entities
+              const list = Array.isArray(raw)
+                ? raw
+                : typeof raw === 'string' && raw
+                  ? raw.split(',').map((s) => s.trim()).filter(Boolean)
+                  : []
+              return list.length ? list.join(' · ') : '—'
+            })()}
+          </span>
           <span className="k">salience</span>
           <span className="v">
             {/* task C7 (backend A3b): null for a unit outside the

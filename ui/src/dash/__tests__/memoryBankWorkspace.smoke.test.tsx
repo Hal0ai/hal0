@@ -160,6 +160,118 @@ describe('MemV2Workspace — final-review I2 (truncated slab notice)', () => {
   })
 })
 
+describe('Inspector — live crash fix (entities as a comma-joined string)', () => {
+  it('renders entities without throwing when the units-list row carries entities as a string, not an array', () => {
+    // Live crash (2026-08-22): `f.entities.join is not a function`. The
+    // Inspector reuses the units-LIST row verbatim (no separate
+    // single-record fetch) — and per the documented backend contract, the
+    // list endpoint's `entities` field is a comma-joined STRING, only
+    // `GET .../memories/:id` returns a real array. `(f.entities ||
+    // []).length` was truthy for a non-empty string too, so the old code
+    // reached `.join` on a string and threw for any fact with entities set.
+    const real = (globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits
+    ;(globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits = () => ({
+      data: {
+        items: [
+          {
+            id: 'f-entities-string',
+            text: 'fact with string-shaped entities',
+            context: 'ctx',
+            occurred_start: '2026-08-22T00:00:00Z',
+            fact_type: 'world',
+            tags: [],
+            salience: 1,
+            link_counts_by_type: {},
+            state: 'valid',
+            entities: 'hal0, memory-v2, CT105',
+          },
+        ],
+        total_matched: 1,
+        next_offset: null,
+        truncated: false,
+      },
+      isError: false,
+      isLoading: false,
+    })
+
+    try {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const MemV2Workspace = (globalThis as unknown as { MemV2Workspace: React.ComponentType<any> })
+        .MemV2Workspace
+
+      let html = ''
+      expect(() => {
+        html = renderToStaticMarkup(
+          React.createElement(
+            QueryClientProvider,
+            { client: qc },
+            React.createElement(MemV2Workspace, {
+              bank: 'primary',
+              setBank: () => {},
+              sel: 'f-entities-string',
+              setSel: () => {},
+            }),
+          ),
+        )
+      }).not.toThrow()
+
+      expect(html).toContain('mv-inspector')
+      expect(html).toContain('hal0 · memory-v2 · CT105')
+    } finally {
+      ;(globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits = real
+    }
+  })
+
+  it('still renders a real array of entities correctly (single-record fetch shape, unaffected)', () => {
+    const real = (globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits
+    ;(globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits = () => ({
+      data: {
+        items: [
+          {
+            id: 'f-entities-array',
+            text: 'fact with array-shaped entities',
+            context: 'ctx',
+            occurred_start: '2026-08-22T00:00:00Z',
+            fact_type: 'world',
+            tags: [],
+            salience: 1,
+            link_counts_by_type: {},
+            state: 'valid',
+            entities: ['hal0', 'memory-v2'],
+          },
+        ],
+        total_matched: 1,
+        next_offset: null,
+        truncated: false,
+      },
+      isError: false,
+      isLoading: false,
+    })
+
+    try {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const MemV2Workspace = (globalThis as unknown as { MemV2Workspace: React.ComponentType<any> })
+        .MemV2Workspace
+      const html = renderToStaticMarkup(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(MemV2Workspace, {
+            bank: 'primary',
+            setBank: () => {},
+            sel: 'f-entities-array',
+            setSel: () => {},
+          }),
+        ),
+      )
+
+      expect(html).toContain('hal0 · memory-v2')
+    } finally {
+      ;(globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits = real
+    }
+  })
+})
+
 describe('MemV2EgoGraph (smoke)', () => {
   it('mounts under QueryClientProvider with the real hook globals without throwing', () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
