@@ -221,10 +221,18 @@ function BankRow({ bank, onExplore, compact }) {
             table's middle column is too narrow to fit "world N ·
             experience N · observation N" on one line at 5-6-digit counts,
             so the shared .mv-legend flex-wrap produced a lopsided 2-then-1
-            wrap. Force a clean vertical stack here instead of widening the
-            shared class (which other, wider .mv-legend usages rely on for
-            a single-row layout). */}
-        <div className="mv-legend num" style={{ flexDirection: 'column', gap: 2, flexWrap: 'nowrap' }}>
+            wrap — fixed at the time by forcing a vertical stack, which
+            traded the wrap bug for 3 extra lines of card height.
+            Un-stacked (2026-08-22): keep it on one row and let
+            `justify-content: space-between` (not the shared class's
+            gap-based flow) spread the three counts across the full row
+            width, with `flexWrap: 'nowrap'` so it can never fall back to
+            wrapping — the counts just sit closer together on the
+            narrowest panel instead of breaking to a new line. */}
+        <div
+          className="mv-legend num"
+          style={{ justifyContent: 'space-between', flexWrap: 'nowrap', marginBottom: 4 }}
+        >
           <span>
             <span className="sw" style={{ background: FACT_COLORS.world }} />
             <b>{fmtN(world)}</b>
