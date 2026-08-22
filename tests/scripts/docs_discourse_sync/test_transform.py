@@ -135,6 +135,38 @@ def test_fenced_code_block_passes_through_untouched() -> None:
     assert "```python\nimport os\nvalue = {1, 2, 3}\n```" in result.body_md
 
 
+def test_double_backtick_span_wrapping_a_literal_backtick_is_protected() -> None:
+    """CommonMark: a code span's delimiter is a run of N backticks, closed
+    by the *next run of exactly N backticks* — not just "the next
+    backtick". A naive single-backtick scan mis-reads the outer ``` `` ```
+    delimiters here as their own (bogus) single-backtick spans instead of
+    one double-backtick span wrapping a literal backtick, which then
+    desyncs pairing for every code span after it in the file — the same
+    corruption class an unrecognised fence caused before it was protected
+    too. Also checks the very next, ordinary single-backtick span still
+    pairs correctly afterwards (proof pairing didn't desync)."""
+    body = "Use `` `not-a-tag` `` literally, then `a normal span` right after.\n"
+    result = transform.transform_body(body, source="x.mdx")
+    assert result.body_md.strip() == body.strip()  # entirely code/prose, nothing to rewrite
+    assert "`` `not-a-tag` ``" in result.body_md
+    assert "`a normal span`" in result.body_md
+
+
+def test_brace_after_a_double_backtick_span_is_still_validated() -> None:
+    """A stray {expr} placed *after* a `` double-backtick `` span must
+    still be caught — proof the double-backtick span's protected range
+    ends where it should, not somewhere pairing-corrupted."""
+    body = "Use `` `not-a-tag` `` here, then a real stray {brace} outside any backticks.\n"
+    with pytest.raises(transform.TransformError, match="JSX expression"):
+        transform.transform_body(body, source="x.mdx")
+
+
+def test_double_backtick_span_without_a_closer_is_literal_text() -> None:
+    body = "This has a stray `` double backtick run with no closer.\n"
+    result = transform.transform_body(body, source="x.mdx")
+    assert result.body_md.strip() == body.strip()
+
+
 def test_indented_fence_under_ordered_list_is_protected() -> None:
     """Regression: an unrecognised indented fence's backticks used to
     mis-pair with the *next* inline code span in the document, corrupting

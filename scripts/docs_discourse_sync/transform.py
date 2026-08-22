@@ -53,12 +53,8 @@ _ASIDE_LABELS = {"note": "Note", "tip": "Tip", "caution": "Caution", "danger": "
 # its backticks then mis-pair with the *next* unrelated inline code span
 # in the document and corrupt everything after it.
 _CODE_FENCE_RE = re.compile(r"^([ \t]*)([`~]{3,})[^\n]*\n.*?^\1\2[ \t]*$", re.DOTALL | re.MULTILINE)
-# A single soft-wrapped newline inside a code span is valid CommonMark (it
-# renders as a space) and shows up throughout these hand-wrapped docs, e.g.
-# `` `GET\n  /api/slots/{name}/logs` `` — so newlines are allowed *within* a
-# span, just not a blank line, which would mean the backtick never closed
-# and this "span" is actually two separate stray backticks in prose.
-_INLINE_CODE_RE = re.compile(r"`(?:[^`\n]|\n(?!\n))+`")
+_BACKTICK_RUN_RE = re.compile(r"`+")
+_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
 _JSX_COMMENT_RE = re.compile(r"\{\s*/\*.*?\*/\s*\}", re.DOTALL)
 _TAG_RE = re.compile(r"<(/?)([A-Za-z][\w.]*)\b")
 _ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
@@ -133,13 +129,44 @@ def _mask_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
     return "".join(out)
 
 
+def _find_inline_code_spans(text: str) -> list[tuple[int, int]]:
+    """CommonMark code-span pairing: an opening backtick run's closer is
+    the *next run of the same length* — not just the next backtick — so
+    `` `like this` `` (single backticks) is distinct from
+    ``` ``code with a ` backtick`` ``` (double backticks, wrapping a
+    literal single backtick). A naive "next backtick closes it" scan
+    mis-pairs the outer double-backtick delimiters with the inner literal
+    one, then corrupts pairing for every code span after it in the file —
+    the exact same failure class fence-indentation caused before it was
+    protected too (see the git history of _CODE_FENCE_RE above). A run
+    with no same-length closer before a blank line is literal text, not a
+    delimiter, matching CommonMark's own rule.
+    """
+    runs = [m.span() for m in _BACKTICK_RUN_RE.finditer(text)]
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(runs):
+        open_start, open_end = runs[i]
+        length = open_end - open_start
+        for j in range(i + 1, len(runs)):
+            close_start, close_end = runs[j]
+            if _BLANK_LINE_RE.search(text, open_end, close_start):
+                break  # no valid closer before a blank line — this run is literal
+            if close_end - close_start == length:
+                spans.append((open_start, close_end))
+                i = j
+                break
+        i += 1
+    return spans
+
+
 def _protected_ranges(text: str) -> list[tuple[int, int]]:
     """Byte ranges of *text* that must never be substituted into: fenced
     code blocks and inline code spans."""
     fence_ranges = [m.span() for m in _CODE_FENCE_RE.finditer(text)]
     masked = _mask_ranges(text, fence_ranges)
     ranges = list(fence_ranges)
-    ranges.extend(m.span() for m in _INLINE_CODE_RE.finditer(masked))
+    ranges.extend(_find_inline_code_spans(masked))
     ranges.sort()
     return ranges
 
@@ -381,11 +408,17 @@ def transform_body(body: str, *, source: str, line_offset: int = 1) -> Transform
 
     working = _CODE_FENCE_RE.sub(_stash_fence, working)
 
-    def _stash_code(m: re.Match[str]) -> str:
-        codespans.append(m.group(0))
-        return _INLINE_PLACEHOLDER.format(len(codespans) - 1)
-
-    working = _INLINE_CODE_RE.sub(_stash_code, working)
+    spans = _find_inline_code_spans(working)
+    if spans:
+        pieces: list[str] = []
+        last = 0
+        for start, end in spans:
+            pieces.append(working[last:start])
+            codespans.append(working[start:end])
+            pieces.append(_INLINE_PLACEHOLDER.format(len(codespans) - 1))
+            last = end
+        pieces.append(working[last:])
+        working = "".join(pieces)
 
     working = _JSX_COMMENT_RE.sub("", working)
     working = _drop_silent_components(working, warnings, source=source)
