@@ -495,6 +495,18 @@ export function SlotScard({
         ) : (
           modelNode
         )}
+        {/* Device + profile pill gets its OWN row, directly under the model
+            control, instead of sharing the bottom action bar. It's a long,
+            variable-length control (custom profile names can run well past
+            "vulkan"/"rocm") and packing it into .scard-foot alongside the
+            image/mem chips and the lifecycle buttons was squeezing the
+            buttons onto a cramped wrapped line on any card with a longer
+            profile name or an image-unknown chip present. Giving it a row of
+            its own means .scard-foot only ever holds short, fixed-width
+            chips + controls, so the controls stop competing for space. */}
+        <div className="scard-profile-row">
+          <DevCell s={s} onProfile={onEdit} />
+        </div>
         {full && (
           <div className="scard-meta">
             <div className="m">
@@ -514,7 +526,6 @@ export function SlotScard({
           </div>
         )}
         <div className={'scard-foot' + (full ? '' : ' bare')}>
-          <DevCell s={s} onProfile={onEdit} />
           <BackendMismatch s={s} onEdit={onEdit} />
           <SlotImageUnknownChip s={s} />
           {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
