@@ -187,16 +187,50 @@ test.describe('Slot edit controls (/slots)', () => {
     expect(puts[0]).toHaveProperty('n_gpu_layers', -1)
   })
 
-  test('HW grid — the typed fields + Runner Image render; Device does not (§2)', async ({ page }) => {
+  test('HW grid — the typed fields + Runner Image + Device render (§2)', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/primary')
-    // Device is create-time only now: it rides the model and is fixed for the
-    // slot's lifetime, so the drawer displays it but offers no control.
-    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
+    // Device is editable post-create for GPU slots (fix-gpu-slot-switch):
+    // it is the UI's only rocm↔vulkan switch — BINARY never flips the
+    // backend (metadata, not a selector) and seed profiles declare none.
+    await expect(page.getByTestId('slot-hw-device')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-device')).toHaveValue('gpu-rocm')
     await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
     await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
     await expect(page.getByTestId('slot-hw-binary')).toBeVisible()
     await expect(page.getByTestId('slot-hw-image-pin')).toBeVisible()
+  })
+
+  test('HW grid — switching Device rocm→vulkan Save PUTs /config { device } and restarts', async ({ page }) => {
+    const puts: any[] = []
+    const restarts: string[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    await page.route('**/api/slots/primary/restart', async (route) => {
+      restarts.push(route.request().method())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await seedSlots(page, [PRIMARY, EMBED])
+    await page.goto('/#slots/primary')
+    await page.getByTestId('slot-hw-device').selectOption('gpu-vulkan')
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0]).toMatchObject({ device: 'gpu-vulkan' })
+    // A device flip is a hardware change — the cold restart fires in the
+    // background after the config write lands.
+    await expect.poll(() => restarts.length).toBeGreaterThan(0)
+  })
+
+  test('HW grid — Device select is absent on a non-GPU slot', async ({ page }) => {
+    await seedSlots(page, [{ ...PRIMARY, name: 'cpuish', device: 'cpu' }, EMBED])
+    await page.goto('/#slots/cpuish')
+    await expect(page.locator('.drawer')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
   })
 
   test('HW grid — all editable fields persist their wire keys', async ({ page }) => {
