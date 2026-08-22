@@ -63,6 +63,32 @@ const pane = (page: Page) => page.locator('.infer-pane:not(.infer-hero-top)').fi
 const card = (page: Page, name: string) => pane(page).getByTestId(`infer-slot-${name}`)
 const grip = (page: Page, name: string) => page.getByTestId(`infer-grip-${name}`)
 
+// Native HTML5 drag-and-drop requires the browser to see the pointer cross a
+// drag THRESHOLD shortly after mousedown to actually start a drag session.
+// `locator.dragTo()` moves from source to target in one hop, which is fine
+// over a short distance but can silently fail to trigger dragstart at all
+// over a longer one (no drag session ever begins — dragenter/drop never
+// fire, and the reorder is a no-op). The full-card grid rows aren't a fixed
+// height (P2 card content varies — e.g. the profile pill's row), so the
+// vertical distance between a grip and another row's card isn't constant.
+// Stepping the mouse move — the standard Playwright workaround for native
+// DnD — keeps the drag reliable regardless of row height.
+async function dragGripTo(page: Page, source: ReturnType<typeof grip>, target: ReturnType<typeof card>) {
+  const src = (await source.boundingBox())!
+  const dst = (await target.boundingBox())!
+  const sx = src.x + src.width / 2
+  const sy = src.y + src.height / 2
+  const tx = dst.x + dst.width / 2
+  const ty = dst.y + dst.height / 2
+  await page.mouse.move(sx, sy)
+  await page.mouse.down()
+  const steps = 10
+  for (let i = 1; i <= steps; i++) {
+    await page.mouse.move(sx + (tx - sx) * (i / steps), sy + (ty - sy) * (i / steps))
+  }
+  await page.mouse.up()
+}
+
 const namesOf = (sel: string) => async (page: Page) => {
   const ids = await pane(page)
     .locator(sel)
@@ -103,11 +129,17 @@ test.describe('Slot card — drag to reorder', () => {
     expect(await chatOrder(page)).toEqual(['alpha', 'bravo', 'charlie'])
 
     // The cards sit below the telemetry header; a native drag needs both ends
-    // of the gesture inside the viewport, so bring the row up first.
-    await card(page, 'charlie').scrollIntoViewIfNeeded()
+    // of the gesture inside the viewport, so bring the row up first. Scroll
+    // to the DRAG SOURCE (alpha), not the target — "nearest" scrolling to
+    // charlie alone can leave alpha's row flush against the fixed topbar,
+    // with the grip's hit-test point actually landing on the topbar instead
+    // of the grip itself (the row content is variable-height — e.g. the
+    // profile-pill row — so how much scroll "nearest" applies isn't fixed).
+    await grip(page, 'alpha').scrollIntoViewIfNeeded()
+    await expect(card(page, 'charlie')).toBeInViewport()
 
     // Drag alpha rightwards onto charlie — it lands past charlie.
-    await grip(page, 'alpha').dragTo(card(page, 'charlie'))
+    await dragGripTo(page, grip(page, 'alpha'), card(page, 'charlie'))
     await expect.poll(() => chatOrder(page)).toEqual(['bravo', 'charlie', 'alpha'])
 
     // No Save step: the arrangement is already persisted, client-side only.
