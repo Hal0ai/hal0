@@ -10,7 +10,7 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded PR runs (the ~8 min γ-suite is the priciest PR check);
+# Cancel superseded PR runs (the 8-12 min γ-suite is the priciest PR check);
 # never cancel a push to main — it's a required check + nightly gate input.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
