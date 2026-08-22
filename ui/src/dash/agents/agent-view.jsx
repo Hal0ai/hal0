@@ -77,7 +77,6 @@ function AgentView() {
         <span className="vh-eye mono">Tools</span>
         <h1>Agents</h1>
         <span className="vh-spacer" />
-        <span className="hint mono">Chat in terminal: <code>hermes chat</code></span>
       </div>
 
       <div
