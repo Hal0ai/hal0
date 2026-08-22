@@ -1358,12 +1358,17 @@ cat > "${API_UNIT}" <<EOF
 [Unit]
 Description=hal0 API daemon
 Documentation=https://github.com/hal0ai/hal0
-# hindsight-api ordering (#1613): a cold engine start outlasts hal0-api's
-# boot probe, degrading memory to the pgvector fallback. After= narrows the
-# boot-time window (the runtime self-heal re-probe covers the rest); both
-# directives are no-ops on a box without the engine unit.
-After=network-online.target hindsight-api.service
-Wants=network-online.target hindsight-api.service
+# hindsight-api ordering: deliberately NO After=/Wants= on hindsight-api.
+# The engine unit already carries a soft After=hal0-api.service (its
+# extraction LLM fronts through hal0-api), so pointing back at it from here
+# — as #1613 once did — created a bidirectional ordering cycle that systemd
+# resolved by dropping a unit from the cold-boot transaction, failing the
+# boot outright (observed on CT105, 2026-08-21). The #1613 concern (cold
+# engine start outlasting the boot probe) is covered by the runtime
+# self-heal re-probe alone; memory degrades to pgvector briefly instead of
+# the box failing to boot.
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
