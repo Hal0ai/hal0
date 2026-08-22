@@ -266,9 +266,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// in npu-pane.jsx, so react-query serves it from cache here.
 	const slotsQuery = useSlots();
 	// HW grid (spec-hw-slot-ownership §2): BINARY options + fit-check metadata
-	// from system-info (RUNNER_IMAGES). The device ENUM is no longer read here —
-	// device rides the model at creation and is not editable post-create, so the
-	// drawer only ever *displays* the slot's persisted device.
+	// from system-info (RUNNER_IMAGES). Device is seeded from the model at
+	// creation and editable here post-create (the HW grid's Device select) —
+	// it is the UI's only rocm↔vulkan switch, since BINARY is metadata-gated
+	// to the same image and profiles carry backend only as an inert fit hint.
 	const systemInfoQuery = useSystemInfo();
 
 	// Seed from the PERSISTED context window (slot.ctx_max, from
@@ -627,8 +628,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// would strand the currently-bound model — block Save until the
 		// operator swaps to a compatible model or reverts the profile pick.
 		if (strandsBoundModel) {
-			errs.profile =
-				"This profile switches the slot to a device that can't run the bound model — swap to a compatible model first, or pick a same-backend profile.";
+			const msg =
+				"This switches the slot to a device that can't run the bound model — swap to a compatible model first, or keep the current backend.";
+			if (changes.device) errs.device = msg;
+			else errs.profile = msg;
+		}
+		// Device and profile edited to CONFLICTING backends in one Save — the
+		// server hard-rejects that pair (_reconcile_device_profile's operator
+		// error). Surface it inline instead of as a failed submit.
+		if (changes.device && changes.profile && profileSel) {
+			const selProf = (
+				Array.isArray(profilesQuery.data) ? profilesQuery.data : []
+			).find((p) => p.name === profileSel);
+			if (selProf?.backend && selProf.backend !== deviceBackend(device)) {
+				errs.profile = `Profile "${profileSel}" declares backend "${selProf.backend}" but Device is set to "${device}" — pick a matching pair.`;
+			}
 		}
 		if (Object.keys(errs).length > 0) {
 			setFieldErrs(errs);
@@ -767,21 +781,36 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// "is this actually pending" from an equality check on every read.
 	const pendingCrossDevice =
 		pendingDevice !== device ? pendingDevice : null;
-	// Codex P1: a Save that switches the slot to `pendingCrossDevice` also
-	// re-derives its device server-side (_reconcile_device_profile) — but the
-	// currently BOUND model rides along untouched. If that model doesn't fit
-	// the new backend (e.g. a rocmfp4 model on a ROCm→Vulkan switch), Save
-	// would strand it: a live container restarts onto a runner that can't
-	// load its own bound model. Block Save in that case (see onSaveClick)
-	// rather than let the restart fail after the fact.
-	const boundModelId = slot.model_id || slot.model || "";
+	// A live edit of the HW grid's Device select itself (the direct
+	// rocm↔vulkan switch): `device` state has already moved, so
+	// `pendingDevice` equals it — compare against the PERSISTED device to
+	// know a switch is pending. Same Save-time consequences as a
+	// cross-backend profile pick, different control.
+	// Compared against the FROZEN baseline (#1398), not the live-polled slot
+	// prop, so background drift can never read as an operator edit.
+	const deviceIsLiveEdit = baseline ? device !== baseline.device : false;
+	// The device this slot will actually launch on after Save, when that
+	// differs from the persisted one — from either switching control.
+	const pendingTargetDevice =
+		pendingCrossDevice || (deviceIsLiveEdit ? device : null);
+	// Codex P1: a Save that switches the slot's device — via a cross-backend
+	// profile (server-side _reconcile_device_profile) or the Device select
+	// directly — leaves the currently BOUND model riding along untouched. If
+	// that model doesn't fit the new backend (e.g. a rocmfp4 model on a
+	// ROCm→Vulkan switch), Save would strand it: a live container restarts
+	// onto a runner that can't load its own bound model. Block Save in that
+	// case (see onSaveClick) rather than let the restart fail after the fact.
+	// Judge the RESOLVED bound-model row (curModelRow), not the bare bound id:
+	// an id that doesn't resolve against /api/models (catalog still loading,
+	// legacy alias, HAL0_DATA seed) gives no honest compatibility answer, and
+	// blocking on "not found" would veto every switch in that window.
 	const strandsBoundModel =
-		!!pendingCrossDevice &&
-		!!boundModelId &&
+		!!pendingTargetDevice &&
+		!!curModelRow &&
 		!compatibleModels(modelsQuery.data, {
 			type: slot.type,
-			backend: deviceBackend(pendingCrossDevice),
-		}).some((m) => m.id === boundModelId);
+			backend: deviceBackend(pendingTargetDevice),
+		}).some((m) => m.id === curModelRow.id);
 
 	// Instant-apply pin/unpin for the drawer header toggle (§21.10, #1367).
 	// Fires the PUT, toasts the result, and lets the slots poll re-render from
@@ -1467,13 +1496,70 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							!supported.includes(devBackend)
 								? `Device backend "${devBackend}" is not in ${binary}'s supported backends (${supported.join(", ")}). The slot may fall back or fail at spawn.`
 								: null;
+						// GPU device options: the rocm↔vulkan pair every GPU box can
+						// host (one Vulkan-portable image serves both), plus the
+						// slot's persisted value when it sits outside that pair
+						// (gpu-cuda, hand-edited TOML) so opening the drawer never
+						// silently rewrites it. Non-GPU devices (npu/cpu/img) route
+						// to different runtime families — switching those is a
+						// re-create, not an edit, so they keep no control.
+						const gpuDeviceOptions = ["gpu-rocm", "gpu-vulkan"];
+						const persistedDevice = slot.device || "gpu-rocm";
+						if (
+							deviceClassOf(persistedDevice) === "gpu" &&
+							!gpuDeviceOptions.includes(persistedDevice)
+						)
+							gpuDeviceOptions.unshift(persistedDevice);
 						return (
 							<>
-								{/* Device has no control here on purpose: it rides the model
-								    at creation (see the create modal's device-redirect note);
-								    the per-slot Profile select above picks this slot's
-								    runtime (runner family + image), not its flag tune. The
-								    drawer still READS slot.device for the fit filters below. */}
+								{/* Device — the slot's typed backend fact (gpu-rocm /
+								    gpu-vulkan). Seeded from the model at creation, editable
+								    here post-create: this select is the ONLY UI path that
+								    switches a slot between the ROCm and Vulkan backends
+								    (the Runner Binary below is metadata-gated to the SAME
+								    image and never flips the backend; profiles carry
+								    backend only as an inert fit hint). Save persists it
+								    via PUT /config { device } and cold-restarts. */}
+								{deviceClassOf(persistedDevice) === "gpu" && (
+									<div className="form-row">
+										<div className="form-lbl">
+											<span>Device</span>
+											<FieldInfoIcon description="⟳ GPU backend this slot launches on. Switching
+												rocm↔vulkan restarts the slot onto the other
+												llama-server backend (same runner image). The bound
+												model must be runnable on the target backend —
+												Save blocks otherwise." />
+										</div>
+										<div className="form-ctl">
+											<select
+												className={
+													"input mono" + (fieldErrs.device ? " input-err" : "")
+												}
+												data-testid="slot-hw-device"
+												value={device}
+												onChange={(e) => {
+													setDevice(e.target.value);
+													setFieldErrs((p) => ({ ...p, device: undefined }));
+												}}
+											>
+												{gpuDeviceOptions.map((d) => (
+													<option key={d} value={d}>
+														{d} · {deviceBackend(d)}
+													</option>
+												))}
+											</select>
+											{fieldErrs.device && (
+												<div
+													className="hint"
+													data-testid="slot-hw-device-err"
+													style={{ color: "var(--err)" }}
+												>
+													{fieldErrs.device}
+												</div>
+											)}
+										</div>
+									</div>
+								)}
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Runner Image</span>
