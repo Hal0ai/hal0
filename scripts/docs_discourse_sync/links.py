@@ -14,10 +14,21 @@ so it has no forum topic to point at. Left as a root-relative path it
 would resolve against forum.hal0.dev and 404; these are rewritten to a
 GitHub blob URL at the source instead.
 
+A fourth: a root-relative link that's missing its ``/docs`` prefix
+(``docs/reference/env-vars.mdx`` has exactly one — a real typo,
+``/guides/run-agents/...`` instead of ``/docs/guides/run-agents/...``).
+Starlight's own dev server would have 404'd on this too, so it's
+recognised and resolved the same as the correct form rather than shipped
+as a second, forum-side 404.
+
 This runs strictly after :mod:`transform` on already-transformed
 Discourse markdown, once pass 1 has produced a full external_id -> topic
 URL map — a link to a doc that doesn't exist yet at transform time (the
-whole reason this is a *second* pass) resolves fine here.
+whole reason this is a *second* pass) resolves fine here. Fenced code
+blocks and inline code spans are masked out before rewriting for the same
+reason :mod:`transform` protects them: a documentation example that
+*shows* markdown link syntax (``[Install](/docs/getting-started/install)``
+as literal text, not a real link) must not get rewritten.
 """
 
 from __future__ import annotations
@@ -26,13 +37,17 @@ import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from .discovery import source_key_for_site_path
+from . import transform
+from .discovery import SECTIONS, source_key_for_site_path
 
 # [text](url "optional title") — the standard inline markdown link form,
 # which is the only one the transform ever emits.
 _LINK_RE = re.compile(r"(?P<full>!?\[(?P<text>[^\]]*)\]\((?P<url>[^()\s]+)(?:\s+\"[^\"]*\")?\))")
 
 _DEFAULT_GITHUB_BLOB_BASE = "https://github.com/Hal0ai/hal0/blob/main"
+_ROOT_RELATIVE_SECTION_RE = re.compile(
+    "^/(?:" + "|".join(re.escape(s) for s in SECTIONS) + r")(?:/|$)"
+)
 
 
 @dataclass(slots=True)
@@ -58,6 +73,13 @@ def _resolve(url: str, *, current_dir: str) -> tuple[str, str, str] | None:
         return None
 
     path, _, anchor = url.partition("#")
+
+    # A root-relative link that's missing its /docs prefix (a source-doc
+    # typo, but a real one — see docs/reference/env-vars.mdx) — treat it
+    # the same as if it had been written correctly, rather than leaving a
+    # link that was already broken on hal0.dev broken on the forum too.
+    if _ROOT_RELATIVE_SECTION_RE.match(path):
+        path = f"/docs{path}"
 
     if path.startswith("/docs/"):
         key = source_key_for_site_path(path)
@@ -92,9 +114,12 @@ def _resolve(url: str, *, current_dir: str) -> tuple[str, str, str] | None:
 def find_internal_link_keys(body_md: str, *, current_dir: str) -> set[str]:
     """The set of synced doc rel_keys *body_md* links to internally
     (excludes ``"blob"``-kind links, which don't participate in the
-    sync's URL map)."""
+    sync's URL map, and any link inside a fenced/inline code span)."""
+    protected = transform.protected_ranges(body_md)
     keys: set[str] = set()
     for m in _LINK_RE.finditer(body_md):
+        if transform.is_protected(m.start(), protected):
+            continue
         resolved = _resolve(m.group("url"), current_dir=current_dir)
         if resolved and resolved[0] == "topic":
             keys.add(resolved[1])
@@ -115,13 +140,19 @@ def rewrite_internal_links(
     A ``"topic"`` link whose target isn't in *url_map* (a doc that
     doesn't exist, or was skipped) is left as-is and reported in
     ``unresolved`` — pass 2 logs these rather than failing the whole sync
-    over one stale link.
+    over one stale link. A link inside a fenced code block or inline code
+    span is left untouched entirely, matching :mod:`transform`'s own
+    "code is opaque" rule — a doc example that *shows* markdown link
+    syntax as literal text isn't a real cross-link.
     """
     changed = 0
     unresolved: list[str] = []
+    protected = transform.protected_ranges(body_md)
 
     def _sub(m: re.Match[str]) -> str:
         nonlocal changed
+        if transform.is_protected(m.start(), protected):
+            return m.group("full")
         resolved = _resolve(m.group("url"), current_dir=current_dir)
         if not resolved:
             return m.group("full")
