@@ -135,6 +135,36 @@ def test_fenced_code_block_passes_through_untouched() -> None:
     assert "```python\nimport os\nvalue = {1, 2, 3}\n```" in result.body_md
 
 
+def test_fenced_code_blank_lines_are_not_collapsed() -> None:
+    """Regression: blank-line tidying used to run *after* fence
+    restoration, so a fenced example with two consecutive blank lines
+    (three-plus newlines) got globally collapsed right along with
+    surrounding prose — violating the module's own "fences are never
+    touched" invariant."""
+    body = "Text.\n\n```python\ndef a():\n    pass\n\n\ndef b():\n    pass\n```\n\nMore.\n"
+    result = transform.transform_body(body, source="x.mdx")
+    assert "def a():\n    pass\n\n\ndef b():\n    pass" in result.body_md
+
+
+def test_single_quoted_jsx_attributes_parsed_like_double_quoted() -> None:
+    body = "<LinkCard title='Slots' href='/docs/concepts/slots' description='The lifecycle.' />\n"
+    result = transform.transform_body(body, source="x.mdx")
+    assert result.body_md.strip() == "- [Slots](/docs/concepts/slots): The lifecycle."
+
+
+def test_single_quoted_aside_attributes_parsed_like_double_quoted() -> None:
+    body = "<Aside type='danger' title='Stop'>\nRead this first.\n</Aside>\n"
+    result = transform.transform_body(body, source="x.mdx")
+    assert '[details="Danger: Stop"]' in result.body_md
+    assert "Read this first." in result.body_md
+
+
+def test_mixed_quote_styles_on_the_same_tag_both_parse() -> None:
+    body = "<LinkCard title='Slots' href=\"/docs/concepts/slots\" />\n"
+    result = transform.transform_body(body, source="x.mdx")
+    assert result.body_md.strip() == "- [Slots](/docs/concepts/slots)"
+
+
 def test_double_backtick_span_wrapping_a_literal_backtick_is_protected() -> None:
     """CommonMark: a code span's delimiter is a run of N backticks, closed
     by the *next run of exactly N backticks* — not just "the next

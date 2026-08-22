@@ -57,7 +57,14 @@ _BACKTICK_RUN_RE = re.compile(r"`+")
 _BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
 _JSX_COMMENT_RE = re.compile(r"\{\s*/\*.*?\*/\s*\}", re.DOTALL)
 _TAG_RE = re.compile(r"<(/?)([A-Za-z][\w.]*)\b")
-_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
+# Both quote styles are valid JSX attribute syntax (`title="x"` and
+# `title='x'`) — matching only double quotes let a single-quoted attribute
+# silently vanish instead of being read: <LinkCard title='Slots' href='...' />
+# became "- []()" (empty title/href, no error), and <Aside type='danger'
+# title='Stop'> rendered as an untitled Note — exactly the silent-corruption
+# class this whole transform exists to avoid for genuinely *unknown*
+# components; a quote-style gap on a *known* one shouldn't get a pass either.
+_ATTR_RE = re.compile(r"""([\w-]+)=(?:"([^"]*)"|'([^']*)')""")
 
 _IMPORT_LINE_RE = re.compile(r"^import\s+.+?\s+from\s+['\"][^'\"]+['\"];?\s*$")
 _EXPORT_LINE_RE = re.compile(r"^export\s+.+?;?\s*$")
@@ -160,9 +167,12 @@ def _find_inline_code_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _protected_ranges(text: str) -> list[tuple[int, int]]:
+def protected_ranges(text: str) -> list[tuple[int, int]]:
     """Byte ranges of *text* that must never be substituted into: fenced
-    code blocks and inline code spans."""
+    code blocks and inline code spans. Public — :mod:`links` reuses this
+    to keep its own link-rewrite pass from touching a documentation
+    example that *shows* markdown link syntax as literal code, the same
+    "code is opaque" rule this module enforces on itself."""
     fence_ranges = [m.span() for m in _CODE_FENCE_RE.finditer(text)]
     masked = _mask_ranges(text, fence_ranges)
     ranges = list(fence_ranges)
@@ -171,7 +181,7 @@ def _protected_ranges(text: str) -> list[tuple[int, int]]:
     return ranges
 
 
-def _is_protected(pos: int, ranges: list[tuple[int, int]]) -> bool:
+def is_protected(pos: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start <= pos < end for start, end in ranges)
 
 
@@ -207,7 +217,7 @@ def _validate(body: str, *, source: str, line_offset: int) -> None:
     """Raise :class:`TransformError` on anything the transform can't render,
     computing line numbers against the untouched original body."""
     header_lines, header_end = _leading_header_span(body)
-    protected = _protected_ranges(body)
+    protected = protected_ranges(body)
     protected.append((0, header_end))
     protected.sort()
     comment_ranges = [m.span() for m in _JSX_COMMENT_RE.finditer(body)]
@@ -222,7 +232,7 @@ def _validate(body: str, *, source: str, line_offset: int) -> None:
     # is not MDX/JS and must pass through untouched.
     pos = header_end
     for lineno, text in enumerate(body.split("\n")[header_lines:], start=header_lines):
-        if _LEADING_IMPORT_OR_EXPORT_RE.match(text) and not _is_protected(pos, protected):
+        if _LEADING_IMPORT_OR_EXPORT_RE.match(text) and not is_protected(pos, protected):
             raise TransformError(
                 source,
                 lineno + line_offset,
@@ -238,7 +248,7 @@ def _validate(body: str, *, source: str, line_offset: int) -> None:
     depth: dict[str, int] = {}
     for m in _TAG_RE.finditer(body):
         pos = m.start()
-        if _is_protected(pos, protected):
+        if is_protected(pos, protected):
             continue
         closing, name = m.group(1), m.group(2)
         if name not in _KNOWN_COMPONENTS:
@@ -280,7 +290,7 @@ def _validate(body: str, *, source: str, line_offset: int) -> None:
         if pos == -1:
             break
         i = pos + 1
-        if _is_protected(pos, protected) or _in_comment(pos):
+        if is_protected(pos, protected) or _in_comment(pos):
             continue
         raise TransformError(
             source,
@@ -297,7 +307,9 @@ def _strip_leading_esm_header(body: str) -> str:
 
 
 def _parse_attrs(raw: str) -> dict[str, str]:
-    return dict(_ATTR_RE.findall(raw))
+    # findall returns (name, double_quoted, single_quoted) per match, with
+    # whichever quote style *wasn't* used left as "" — pick the one that was.
+    return {name: dq or sq for name, dq, sq in _ATTR_RE.findall(raw)}
 
 
 def _render_aside(atype: str, title: str | None, body: str) -> str:
@@ -431,6 +443,13 @@ def transform_body(body: str, *, source: str, line_offset: int = 1) -> Transform
         kind, idx = m.group(1), int(m.group(2))
         return (fences if kind == "FENCE" else codespans)[idx]
 
-    working = _PLACEHOLDER_RE.sub(_restore, working)
+    # Tidy blank-line runs *before* restoring fences/code spans, not
+    # after: a placeholder token is a single opaque line with no embedded
+    # newline, so collapsing "\n{3,}" here can never reach inside a fence
+    # — restoring first would let a real fenced example's own internal
+    # blank lines (module docstring's stated invariant: fences are never
+    # touched) get globally collapsed right along with the surrounding
+    # prose's.
     working = _tidy_blank_lines(working)
+    working = _PLACEHOLDER_RE.sub(_restore, working)
     return TransformResult(body_md=working, warnings=warnings)

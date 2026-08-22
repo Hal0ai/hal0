@@ -139,3 +139,59 @@ def test_out_of_scope_docs_path_with_anchor_preserved() -> None:
     assert result.body_md == (
         "[ADR](https://github.com/Hal0ai/hal0/blob/main/docs/adr/0001-foo.md#some-heading)"
     )
+
+
+# ── Root-relative link missing its /docs prefix (a real source-doc typo) ──
+
+
+def test_root_relative_link_missing_docs_prefix_resolves() -> None:
+    """Regression: docs/reference/env-vars.mdx links to
+    /guides/run-agents/... (missing /docs) — a real typo that would have
+    404'd on hal0.dev's own dev server too. Recognised and resolved the
+    same as the correctly-prefixed form rather than left root-relative
+    (which would 404 against forum.hal0.dev instead)."""
+    body = "See [Run agents](/guides/run-agents/#hermes-terminal-tool-off-by-default)."
+    url_map = {"guides/run-agents": "https://forum.hal0.dev/t/run-agents/9"}
+    result = links.rewrite_internal_links(body, current_dir="x", url_map=url_map)
+    assert result.body_md == (
+        "See [Run agents](https://forum.hal0.dev/t/run-agents/9#hermes-terminal-tool-off-by-default)."
+    )
+    assert result.unresolved == []
+
+
+def test_root_relative_link_to_non_section_path_is_untouched() -> None:
+    """A root-relative path whose first segment isn't a published section
+    name isn't a "missing /docs prefix" typo — leave it alone rather than
+    guessing."""
+    body = "[Blog](/blog/some-post)"
+    result = links.rewrite_internal_links(body, current_dir="x", url_map=URL_MAP)
+    assert result.body_md == body
+    assert result.changed == 0
+
+
+# ── Code examples are never touched by link rewriting ─────────────────────
+
+
+def test_link_syntax_inside_fenced_code_block_is_untouched() -> None:
+    body = (
+        "Example:\n\n```md\n[Install](/docs/getting-started/install)\n```\n\n"
+        "Real link: [Install](/docs/getting-started/install)."
+    )
+    result = links.rewrite_internal_links(body, current_dir="x", url_map=URL_MAP)
+    # The fenced example keeps its literal, unrewritten markdown...
+    assert "```md\n[Install](/docs/getting-started/install)\n```" in result.body_md
+    # ...while the real link right after it still gets rewritten.
+    assert "Real link: [Install](https://forum.hal0.dev/t/install/2)." in result.body_md
+    assert result.changed == 1
+
+
+def test_link_syntax_inside_inline_code_span_is_untouched() -> None:
+    body = "Links look like `[text](/docs/getting-started/install)` in markdown."
+    result = links.rewrite_internal_links(body, current_dir="x", url_map=URL_MAP)
+    assert result.body_md == body
+    assert result.changed == 0
+
+
+def test_find_internal_link_keys_excludes_code_examples() -> None:
+    body = "```md\n[Install](/docs/getting-started/install)\n```"
+    assert links.find_internal_link_keys(body, current_dir="x") == set()

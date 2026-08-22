@@ -2,13 +2,20 @@
 
 Endpoints mirror discourse/discourse-developer-docs' own ``sync_docs``
 script (``lib/api.rb``): ``POST /posts.json`` to create a topic with an
-``external_id``, ``PUT /posts/{id}.json`` to edit its first post
-(title/category ride along as top-level params, same as upstream), and
-``POST /uploads.json`` (multipart) for image uploads. Where this diverges
-from upstream is topic lookup: upstream resolves every doc's topic in one
-batch via a Data Explorer query (``fetch_current_state``); this project's
-own task spec calls for the plain, documented per-doc endpoint instead —
-``GET /t/external_id/{id}.json`` — which needs no Data Explorer plugin
+``external_id``, ``PUT /posts/{id}.json`` to edit its first post, and
+``POST /uploads.json`` (multipart) for image uploads. This project's
+own param shapes were verified against Discourse's actual
+``PostsController`` source rather than assumed from upstream by
+analogy — ``create``'s ``category`` is a top-level param,
+``update``'s category change has to be ``post.category_id`` (a
+different field, nested), and ``skip_validations`` only bypasses topic
+validations (title length among them) on create, not on this update
+endpoint — see :meth:`DiscourseClient.update_topic`'s docstring. Where
+this diverges from upstream more deliberately is topic lookup: upstream
+resolves every doc's topic in one batch via a Data Explorer query
+(``fetch_current_state``); this project's own task spec calls for the
+plain, documented per-doc endpoint instead — ``GET
+/t/external_id/{id}.json`` — which needs no Data Explorer plugin
 installed and is simpler to reason about at hal0's ~50-doc scale.
 
 Every mutating call is skipped under ``dry_run`` and returns a synthesized
@@ -176,7 +183,22 @@ class DiscourseClient:
         response = self._request(
             "POST",
             "/posts.json",
-            json={"title": title, "raw": raw, "category": category_id, "external_id": external_id},
+            json={
+                "title": title,
+                "raw": raw,
+                "category": category_id,
+                "external_id": external_id,
+                # Verified against Discourse's PostsController#create_params:
+                # `is_api?` (true for an Api-Key/Api-Username request, which is
+                # all this client ever makes) permits `skip_validations`, and
+                # PostCreator skips TopicCreator's validate_child entirely when
+                # it's set — including topic_title_length. Without it, any doc
+                # whose title is under the site's min_topic_title_length
+                # (Discourse's own out-of-box default is 15; hal0's docs/
+                # corpus has 14 titles under that, e.g. "Slots", "Memory")
+                # 422s on its very first sync.
+                "skip_validations": True,
+            },
         )
         if response.status_code not in (200, 201):
             raise DiscourseAPIError("POST", "/posts.json", response)
@@ -193,7 +215,29 @@ class DiscourseClient:
         )
 
     def update_topic(self, *, post_id: int, title: str, raw: str, category_id: int) -> None:
-        """``PUT /posts/{id}.json``. Skipped under dry_run."""
+        """``PUT /posts/{id}.json``. Skipped under dry_run.
+
+        ``title`` is a top-level param (``PostsController#update`` reads
+        ``params[:title]`` directly) but the category change has to be
+        ``post.category_id``, not a top-level ``category`` — that field
+        doesn't exist on this endpoint at all and was silently ignored
+        (verified against ``PostsController#update``, which reads
+        ``params[:post][:category_id]``). A category-drift correction
+        used to report success while leaving the topic in its old
+        category, so the next sync would detect "changed" and try again,
+        forever.
+
+        ``skip_validations`` is included for parity with create, but
+        verified NOT to reliably bypass Discourse's title-length check
+        here the way it does on create: ``PostsController#update`` never
+        wires a client-supplied ``skip_validations`` through to
+        ``PostRevisor`` (only auto-sets it for staff-edited small_action
+        posts), and ``Topic``'s title validator re-runs whenever
+        ``category_id_changed?`` — not just when the title itself
+        changes — so a short-titled doc *would* still 422 on exactly the
+        category-correction update this method exists to make. See
+        ``discovery.py``'s title padding for the actual fix to that gap.
+        """
         if self.dry_run:
             return
         path = f"/posts/{post_id}.json"
@@ -201,9 +245,13 @@ class DiscourseClient:
             "PUT",
             path,
             json={
-                "post": {"raw": raw, "edit_reason": "Synced from Hal0ai/hal0 docs/"},
+                "post": {
+                    "raw": raw,
+                    "edit_reason": "Synced from Hal0ai/hal0 docs/",
+                    "category_id": category_id,
+                    "skip_validations": True,
+                },
                 "title": title,
-                "category": category_id,
             },
         )
         if response.status_code != 200:

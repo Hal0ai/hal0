@@ -131,10 +131,37 @@ def test_source_key_for_site_path_round_trips() -> None:
 
 
 def test_sort_order_by_sidebar_order_then_title(tmp_path: Path) -> None:
-    _write(tmp_path / "guides" / "b.mdx", "Bravo", 20)
-    _write(tmp_path / "guides" / "a.mdx", "Alpha", 10)
+    # Titles long enough to not trigger the min-title-length padding below
+    # — keeps this test about sort order alone.
+    _write(tmp_path / "guides" / "b.mdx", "Bravo Guide Doc", 20)
+    _write(tmp_path / "guides" / "a.mdx", "Alpha Guide Doc", 10)
     docs = sorted(discovery.discover_docs(tmp_path), key=lambda d: (d.sidebar_order, d.title))
-    assert [d.title for d in docs] == ["Alpha", "Bravo"]
+    assert [d.title for d in docs] == ["Alpha Guide Doc", "Bravo Guide Doc"]
+
+
+# ── Discourse minimum title length ────────────────────────────────────────
+
+
+def test_short_title_is_padded_for_discourse(tmp_path: Path) -> None:
+    _write(tmp_path / "concepts" / "slots.mdx", "Slots", 10)
+    doc = discovery.discover_docs(tmp_path)[0]
+    assert doc.title == "Slots (hal0 docs)"
+    assert len(doc.title) >= 15
+
+
+def test_title_at_or_over_min_length_is_untouched(tmp_path: Path) -> None:
+    title = "Architecture Overview"  # 22 chars, over the 15-char floor
+    _write(tmp_path / "concepts" / "architecture.mdx", title, 10)
+    doc = discovery.discover_docs(tmp_path)[0]
+    assert doc.title == title
+
+
+def test_short_title_padding_does_not_affect_short_title_field(tmp_path: Path) -> None:
+    """short_title (index-topic bullet display) stays the clean, unpadded
+    value — only the Discourse-bound title gets the length floor."""
+    _write(tmp_path / "concepts" / "slots.mdx", "Slots", 10)
+    doc = discovery.discover_docs(tmp_path)[0]
+    assert doc.short_title == "Slots"
 
 
 # ── make_external_id: Discourse's own validation rule ────────────────────
