@@ -501,12 +501,12 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
         # that newest-first order among any rows tied on salience.
         scored = [r for r in kept if r["salience"] is not None]
         unscored = [r for r in kept if r["salience"] is None]
-        scored.sort(key=lambda r: _unit_ts(r), reverse=True)
+        scored.sort(key=_unit_ts, reverse=True)
         scored.sort(key=lambda r: -r["salience"])
-        unscored.sort(key=lambda r: _unit_ts(r), reverse=True)
+        unscored.sort(key=_unit_ts, reverse=True)
         kept = scored + unscored
     else:
-        kept.sort(key=lambda r: _unit_ts(r), reverse=True)
+        kept.sort(key=_unit_ts, reverse=True)
     page = kept[offset : offset + limit]
     nxt = offset + limit if offset + limit < len(kept) else None
     return {

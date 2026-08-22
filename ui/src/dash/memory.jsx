@@ -765,7 +765,7 @@ function MemoryView({ param } = {}) {
     const qIdx = hash.indexOf('?');
     const qs = qIdx >= 0 ? hash.slice(qIdx) : '';
     window.location.hash = memHashPrefix() + '/bank' + qs;
-  }, [param])
+  }, [param]);
 
   const useMemoryEngine = window.__hal0UseMemoryEngine;
   const useMemoryBanks = window.__hal0UseMemoryBanks;
