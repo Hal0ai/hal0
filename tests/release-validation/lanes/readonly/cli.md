@@ -52,7 +52,15 @@ command group is unfamiliar, run `--help` first and only run the verbs that clea
    own `--fix` backstop by **ctime** (chmod bumps ctime, not mtime) so install-time drift is
    distinguishable from lane damage. Never assert a drift row COUNT — it grows with every slot
    load and model pull. The secrets-dir mode is declared 0700 (#1896; was 0755, now fixed —
-   `known-issues: doctor-perms-secrets-dir-0700-is-declared`).
+   `known-issues: doctor-perms-secrets-dir-0700-is-declared`). A `split-brain /root/.hermes` row
+   is NOT automatically a regression against #843 — before filing, date `/root/.hermes`'s birth
+   timestamp against the installer log's last mtime: a birth timestamp AFTER install-completion
+   means an agent or operator ran the raw hermes venv binary as root during this run, which is
+   the already-adjudicated by-design detector working correctly
+   (`known-issues: doctor-perms-split-brain-root-hermes-is-correct-detection`), not installer
+   drift. Cross-check the run every release against `doctor-perms-never-converges` (#1896)
+   specifically — it is cheap, directly falsifiable, and belongs in the regression register as a
+   standing line item rather than a fresh guess each time.
 8. **Service-user writability of state the daemon writes.** For each dir/db under
    /var/lib/hal0 that hal0-api writes (model-pull-jobs, activity.db, hal0.db, slots/, ...):
    `sudo -u hal0 test -w <path>` plus one journal grep for `persist_failed|init_failed`. A
@@ -64,7 +72,13 @@ command group is unfamiliar, run `--help` first and only run the verbs that clea
 
 Record which other lanes are mutating the box in your window. On a shared box, a slot loaded or
 a slot created by another agent mid-lane reads exactly like CLI/systemd drift. Say what was
-running; an unattributed drift claim is a suspicion, not a finding.
+running; an unattributed drift claim is a suspicion, not a finding. Before treating ANY CLI/API
+state drift as a finding, diff the current model count / slot state against CONTEXT.md's
+documented run-start baseline, and check mtimes on staged model paths — if a model or slot
+appeared after the preflight snapshot and it isn't yours, it is very likely a concurrently-
+running stateful lane, not a defect. Attribution can take longer than the drift itself is
+subtle: this run's contention first showed up 30+ minutes into a lane, well after the initial
+baseline diff, so don't stop checking after the first comparison.
 
 ## Carry-forward
 

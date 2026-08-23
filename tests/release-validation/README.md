@@ -131,6 +131,84 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **9** (2026-08-22) — Curation from the v1.0.0-rc.7 skeptic/verify pass (10 candidate findings
+  adversarially re-checked, 10 ended up split between real-new-defect and adjudicated-by-design).
+  `regressions.yaml`: 10 new entries filed as `issue: null` (mode=report, nothing filed to
+  GitHub yet) — `slot-drift-ignores-image-and-device` (major: slot edit+load on an already-ready
+  slot never re-renders the container's image/device), `seeded-anchor-slots-rocm-on-kfd-less-box`
+  (major: fresh-install LLM slot seeds hardcode `gpu-rocm` on ANY host, refusing loudly on every
+  kfd-less box including the fleet's only zero-GPU box), `brain-steward-fabricates-live-platform-
+  state` (ga-blocker: a brevity instruction alone flips the steward from tool-grounded to
+  confidently-wrong on the shipped small brain-sft model; a second wrong-tool-selection mode
+  reproduces without any brevity hint), `hermes-venv-missing-mcp-extra` (ga-blocker: the hermes
+  venv ships with NO `mcp` package at all — `hermes-agent[web]` needs `[web,mcp]` — so both
+  bundled MCP servers are silently dead behind every green self-check surface, reproduced on
+  every fresh AND upgraded box), `capability-apply-skips-model-pull` (major: applying an
+  undownloaded catalog row never creates a pull job and returns 200 after a ~3min crash-loop
+  block), `update-rollback-cli-silent-on-restart-need` (minor: a real regression against closed
+  #1541 — the CLI's own rollback banner never names the pending hal0-api restart, though the
+  dashboard already does), `hindsight-response-format-400-via-thinking-policy` (ga-blocker: the
+  single highest-value find this round — hal0-api's `/v1` unconditionally injects
+  `chat_template_kwargs.enable_thinking=false`, which fatally collides with `response_format:
+  json_object` on any Qwen3-templated model, taking down every hindsight fact-extraction call
+  AND any client's structured-output request; this REFUTES two separate candidate findings that
+  blamed hindsight and hermes respectively for what turned out to be one proxy-layer defect),
+  `mcp-status-tools-iserror-on-error-state-resource` (major: the MCP admin wrapper's error
+  sentinel collides with the slot object's own `status` field, so reading an error-state slot
+  through MCP reports `isError: true` for a fully successful call), `services-health-omits-
+  hindsight` (minor: `/api/services/health` hardcodes three ids and can never include hindsight,
+  so the dashboard footer can never reflect a hindsight outage), and
+  `capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models` (minor: a locally
+  `hal0 model add`-registered GGUF advertises `gpu-rocm` unconditionally, unlike curated rows,
+  which correctly gate on host capability). Also updated three existing regression entries with
+  `rc7_note`s: `crash-loop-lifecycle` (#1791, REFUTED as a regression — #2012's self-heal policy
+  intentionally extended the crash-loop-to-`failed` window from ~21s to ~20min, `stopped` during
+  that ramp is now correct, `expect` rewritten), `slot-capacity-vram-attribution` (#1839, the old
+  ">5% divergence" reading self-triggered on a documented max(cgroup,estimate) floor for
+  GTT-resident weights, `expect` rewritten around the floor).
+  `known-issues.yaml`: 5 new by-design entries (`hermes-renders-upstream-400-as-context-
+  exceeded`, `update-rollback-defers-hal0-api-restart`, `unversioned-openai-compat-paths-405-
+  are-generic-not-rerank-specific`, `doctor-perms-split-brain-root-hermes-is-correct-detection`,
+  `tts-catalog-lists-qwen3-on-gpu-rocm-regardless-of-host`) capture five candidate findings the
+  verify pass refuted or adjudicated by-design, each with a `still_report_if` so the same
+  ground isn't relitigated blind next release. Updated `still_report_if` on three existing
+  entries where the old clause was proven over-broad or stale: `crash-loop-warming-180s-window`
+  (the "container_status never reaches crashed while failed" clause self-triggered on #2012's
+  new ~20min ramp), `slot-capacity-vram-on-vulkan-is-declared` (the ">5%" clause replaced with
+  the max(cgroup,estimate)-floor-aware version), `memory-extraction-quality-is-anchor-dependent`
+  (extended to cover the zero-yield case as the same axis as fabrication, with a discrimination
+  procedure so "0 facts extracted" is not filed as a broken retain path without first ruling out
+  duplicate-content dedup and anchor yield variance) and `load-restart-error-surfacing` (#1424,
+  confirmed it covers the Vulkan-preflight-refusal bare-500 shape too, provided
+  metadata.message is populated).
+  `lanes/**.md`: folded in every check the run's agents invented that survived review — api.md
+  gained the capabilities local-vs-catalog backend diff and a direct `/api/services` vs
+  `/api/services/health` cross-check; cli.md strengthened its concurrent-lane attribution
+  guidance and added a doctor-perms-vs-#1896 standing cross-check; mcp.md gained the isError/REST
+  parity check as a standing (not one-off) item; hermes.md gained an explicit `hermes mcp test`
+  connectivity check (batched with the smoke_tests live-state check) and named the exact
+  hindsight-operations-list baseline endpoint; ui.md cross-references the new api.md services
+  check so a backend omission is never misdiagnosed as a frontend defect; slots.md gained the
+  podman-CreatedAt drift-detection recipe for the already-ready edit+load path, a zz*-prefixed
+  contention pre-scan, and a seeded-anchor-device check in the baseline step; routing.md gained
+  the response_format/json_object probe, a dispatch.decision cross-check standing instruction,
+  and clarified the /rerank 405 as generic-not-rerank-specific; brain.md's fabrication test now
+  requires a matched brevity/plain phrasing pair per question plus a tool-RESULT-semantics check,
+  not just tool-frame presence; memory.md gained a hindsight-port-vs-hal0-wrapper cross-check, a
+  same-marker retry through the newly-routed target, and a plain-chat-vs-extraction-slot A/B;
+  capabilities.md gained the pull-before-load check and the local-vs-catalog backend check;
+  upgrade.md gained the `.hal0.previous` snapshot-before-testing warning, the post-rollback
+  `/api/health`-vs-CLI-version check, and a running-image-vs-resolved-image diff; post-upgrade.md
+  gained the same running-image cross-check plus a memory ctx-preflight fail-fast-with-no-
+  dangling-op probe.
+  `boxes.toml`: `[boxes.ct151-cpu-fresh]` — the documented `rc6-installed` convenience
+  post-install snapshot NO LONGER EXISTS (`pct listsnapshot 151` shows only `pristine` and
+  `current`); `snapshot` and every reset instruction corrected to the single remaining path
+  (`pct rollback 151 pristine`, then run the installer fresh). `[boxes.ct163-cpu-fresh]` gained
+  its previously-missing `cores`/`ram_gb`/`api`/`auth_required` keys for consistency with the
+  other three box entries, and its notes now state plainly that it is the fleet's only
+  zero-GPU-passthrough box and reproduces `seeded-anchor-slots-rocm-on-kfd-less-box`.
+
 * **8** (2026-08-21) — Vulkan-restoration coverage for the rc.7 fold (#1948), FINALIZED against
   the landed fold chain: #1954 (kfd identity by runner uid + device gid, `e5e5925a`), #1973 (the
   `gpu-vulkan` lane re-enable behind an explicit image allowlist, `3474ec03`), #1959 (repin to

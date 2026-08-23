@@ -27,9 +27,12 @@ SSE and tok/s over pure garbage; the canary is the 2-second guard against that.
 4. **Rerank.** `POST` the rerank route with a query and three documents: scores returned and
    ordered sensibly (use the seeded `bge-reranker-v2-m3-q4_k_m`; the curated base row is
    unloadable — regression `curated-reranker-base-row-unloadable`). Same 501 failure mode in
-   rc.4. Probe the **unversioned** `/rerank` as well as `/v1/rerank` — Cohere- and
-   Jina-compatible clients default to the unversioned path and hal0 answers it with 405. Record
-   it as pass or warn deliberately rather than discovering it ad hoc. Also time the COLD path:
+   rc.4. Probe `/v1/rerank` and `/v1/rerankings` (both 200) — the **unversioned** `/rerank` 405
+   is by-design and generic to EVERY unrouted top-level path, not rerank-specific
+   (`known-issues: unversioned-openai-compat-paths-405-are-generic-not-rerank-specific`); confirm
+   with one control probe of a nonexistent path (`POST /totally-bogus-path`) returning the
+   identical `system.http_405` body before recording anything here as a finding. Also time the
+   COLD path:
    a rerank issued while the slot is offline/autoloading must produce first response bytes
    inside the documented load window, and a crash-looping slot must end in a structured 503 +
    Retry-After, never a connection with no bytes past 240 s (see the rc6_note on
@@ -63,6 +66,29 @@ SSE and tok/s over pure garbage; the canary is the 2-second guard against that.
     non-streaming request cut off at `[dispatcher] direct_read_timeout_s` (300 s default) is
     by-design (`known-issues.yaml: dispatcher-300s-read-timeout`); measure the elapsed time
     before filing, and note that streaming is exempt.
+11. **`response_format: json_object` through `/v1`, on the chat-profile slot** — regression
+    `hindsight-response-format-400-via-thinking-policy`, GA-blocker. `POST
+    /v1/chat/completions` with `{"response_format":{"type":"json_object"}}` against a chat-
+    profile slot serving a Qwen3-family-templated model (the installer-seeded `hal0-brain-sft-*`
+    is the only such model on a fresh box): must be 200, matching the identical body sent direct
+    to the slot's own port. A 400 "Failed to initialize samplers: std::exception" through `:8080`
+    that a direct-to-port request does not reproduce means hal0-api's `chat_template_kwargs`
+    injection (`normalize/thinking.py`) is fatally colliding with the grammar — this silently
+    takes down EVERY hindsight `retain_extract_facts` call too (`HINDSIGHT_API_LLM_BASE_URL`
+    points at `:8080/v1`), so a green result here is worth checking before the memory lane
+    spends its budget chasing a downstream symptom.
+
+## Standing instructions
+
+Cross-check `journalctl -u hal0-api | grep dispatch.decision` (`resolution_path`, `upstream`)
+against the ACTUALLY-LOADED slot state for every wire-format probe in this lane, not just the
+anchor-substitution case (check 6) — it is cheap, and in rc.7 it caught the item-7 registry
+error-message defect on three separate model refs from one grep. When re-probing a capability-
+mismatch or dispatcher known-issue that is adjudicated by-design against a SPECIFIC HTTP
+status/body shape, re-verify that shape fresh every release even though it is marked
+by-design — rc.7 found `chat-to-embed-slot-500-passthrough`'s offline half had silently improved
+from an untyped 500 to a typed 404 since the entry was last checked; the entry's own
+`still_report_if` was written to catch exactly that but nothing had re-tested it since rc.6.
 
 ## Leave behind
 

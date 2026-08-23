@@ -16,8 +16,8 @@
 # Do not treat a review-due entry as automatically still valid.
 
 schema: 1
-updated: 2026-08-15
-updated_for: v1.0.0-rc.6
+updated: 2026-08-22
+updated_for: v1.0.0-rc.7
 
 known_issues:
   # ── Open defects, already tracked ───────────────────────────────────────────
@@ -42,6 +42,18 @@ known_issues:
       also prints `ReadTimeout` and exits 1, because `api_post` caps the client read at 10 s
       against a 180 s server budget (#1832). Do not assume a ReadTimeout means the operation
       failed; always verify the server-side outcome before reporting either issue.
+    rc7_note: >-
+      Confirmed this covers the GPU preflight refusal shape specifically: `GpuPreflightError`
+      (`providers/_gpu.py`) is a plain `RuntimeError`, not a `Hal0Error` subclass, so it never
+      reaches the typed-envelope path and `POST /api/slots/<n>/load` returns the generic
+      `{"error":{"code":"system.internal","message":"internal server error"}}` for EVERY GPU
+      preflight refusal (Vulkan stale-image gate, render-node gate, /dev/kfd gate alike) —
+      verified on ct151 with a forced stale-image Vulkan slot load. This is #1424, not a new
+      finding, PROVIDED the full actionable message is present one GET away on the slot record
+      (`GET /api/slots/<n>` -> `metadata.message`) and rendered by `hal0 slot show`/`slot list`
+      — verified true in the same probe. Do not re-file "bare 500 on slot load failure" without
+      also checking metadata.message; if that is ALSO empty, it is regression
+      `container-health-readerror-unhandled`'s territory, not this entry's.
     review_at: v1.0.0
     review_due: true
 
@@ -163,8 +175,26 @@ known_issues:
       systemd verdict and the `journalctl` command. Measured on rc.5: error at +183 s, stable.
     still_report_if: >-
       The slot is still `warming` more than ~240 s after the load call; OR `metadata.message` is
-      empty once `state` is `error`; OR `container_status` never reaches `crashed` while the
-      unit is `failed`; OR a GPU box shows a materially longer dwell.
+      empty once `state` is `error`; OR `container_status` is not `crashed` at a sample where
+      `systemctl is-active <slot unit>` prints exactly `failed` (NOT merely where
+      `systemctl show -p Result` reads `exit-code` — since #2012 (rc.7,
+      commit cee9d812) the quadlet ships StartLimitIntervalSec=1800 / StartLimitBurst=10 /
+      RestartSec=5 / RestartSteps=6 / RestartMaxDelaySec=300, so a crash-looping unit reads
+      ActiveState=activating, SubState=auto-restart, Result=exit-code for up to ~20 minutes
+      before it latches `failed`, and `container_status: stopped` during that ramp is
+      correct-by-policy, not a defect); OR the unit fails to reach ActiveState=failed within
+      ~25 minutes of the load; OR the restart ladder's per-attempt gap does not grow
+      (a flat RestartSec means the ramp itself was dropped); OR a GPU box shows a materially
+      longer dwell than the ~20 min figure above.
+    rc7_note: >-
+      #2012 (PR #2012, commit cee9d812, "self-heal crash-looped slots") intentionally replaced
+      the old StartLimitBurst=5/fixed-RestartSec pairing (which burned all 5 attempts in ~16s
+      and latched a unit `failed` for hours after the actual contention passed, #1424) with the
+      ramp above. The ~180s `_HEALTH_TIMEOUT_S` `warming` dwell this entry originally described
+      is now nested INSIDE a much longer natural-failure window; `container_status: stopped`
+      (not `crashed`) is correct throughout most of it. `still_report_if` rewritten accordingly
+      — see regression `crash-loop-lifecycle` (#1791) for the rc.7 re-probe that hit this
+      exactly and was refuted as a regression.
     rc6_note: >-
       Two rc.6 additions. (a) Scope extension — the REQUEST surface: a /v1/rerank (or any
       capability wake) arriving during a crash-looping autoload waits the full ~180 s in
@@ -1021,6 +1051,29 @@ known_issues:
       (no "Context size has been exceeded" in the hindsight journal); OR a retain the engine
       drops with retain_extract_facts HTTP 500 still returns 200 + a document id with no failed
       op surfaced; OR hal0 gains the extraction ctx preflight and it fails to fire.
+    rc7_note: >-
+      A retain that yields ZERO facts is the same axis as one that yields fabricated facts, not
+      a different defect — do not file "memory retain never lands" against this box shape
+      without discriminating extraction YIELD from a broken pipeline first. rc.7 (ct151) found a
+      0-fact retain against the shipped 1.1 GB SFT anchor completing (`status=completed,
+      retry_count=0, error_message=None`) with the raw document stored but unsearchable — 2 of 3
+      such ops were genuine 0-yield (a natural memory-worthy sentence extracted 0 facts), the
+      other 3 were duplicate-content retains correctly deduping to "0 facts" (matching
+      content_hash of an already-extracted document). SAME box, SAME run, the SAME extraction
+      slot correctly extracted facts from three separate hermes-generated documents seconds
+      apart — so this is anchor YIELD variance, not a broken retain path; a genuinely broken
+      retain path on rc.7 instead surfaces as a LOUD terminal `failed` op with a real error
+      (see regression `hindsight-response-format-400-via-thinking-policy`, a fully separate
+      proxy-layer defect discovered while investigating this). Discriminate before filing: (a)
+      retain a natural, memory-worthy sentence of comparable length to real agent content and
+      confirm it ALSO yields 0 facts, not just a synthetic marker string; (b) check the
+      document's content_hash is not a duplicate of one already extracted (duplicate retains
+      correctly log "0 facts" — not a defect). still_report_if extended: also report if a retain
+      yields 0 facts on a box whose resolved extraction slot IS serving an operator-assigned
+      model, for content a comparable model extracts facts from; OR the 0-yield persists after
+      hal0 gains an "extracted 0 facts" op/status indicator and it fails to fire; OR the retain
+      op reports `completed` while the raw document is ALSO absent (that is data loss, not
+      yield, and is not covered by this entry).
     review_at: v1.1.0
 
   - id: slots-gpu-telemetry-on-vulkan-box-is-correct
@@ -1063,6 +1116,190 @@ known_issues:
     still_report_if: >-
       Non-zero VRAM MB on a box where EVERY gpu entry is compute_capable:false AND
       vulkan_capable:false (or gpus: []); OR a cpu-device slot reports non-zero VRAM; OR
-      capacity Total MB disagrees with /api/slots/metrics mem_rss_mb by >5% for the same
-      RESIDENT slot sampled in the same second.
+      `hal0 slot capacity` Total MB is LOWER than /api/slots/metrics mem_rss_mb for the same
+      resident slot sampled in the same second (capacity takes max(cgroup, file-size+KV
+      estimate) and must never under-report); OR Total MB exceeds mem_rss_mb while ALSO
+      differing by more than 0.2 MB from that slot's own file-size+KV estimate
+      (size_bytes/1MiB + 0.5 MiB per 1000 ctx tokens, ctx = defaults.context_size else
+      metadata.context_length else the launcher dense cap) — i.e. the figure is neither of the
+      two legitimate inputs.
+    rc7_note: >-
+      Replaced the old ">5% at same second" clause — it self-triggered on the documented
+      max(cgroup, estimate) floor for GTT-resident weights (capacity.py, #672, predates this
+      entry) whenever a resident slot's cgroup sits below its model's file-size+KV estimate,
+      which rc.7 (ct151) confirmed on 2 of 3 same-second-sampled resident slots (88-108%
+      divergence, both matching the estimate to 0.1 MB, while the third slot — cgroup above its
+      estimate — agreed with mem_rss_mb to 0.02%, proving the probe itself is live). Total MB
+      exceeding mem_rss_mb while equalling the estimate is the floor working as intended,
+      regardless of slot state, and is NOT a finding. `No slot capacity data.` while slots are
+      pulling/starting is likewise by-design — `per_slot` only lists warming/ready/serving/idle
+      slots with a bound model.
+    review_at: v1.1.0
+
+  # ── Adjudicated by-design: v1.0.0-rc.7 curation ─────────────────────────────
+
+  - id: hermes-renders-upstream-400-as-context-exceeded
+    status: by-design      # upstream hermes-agent behaviour, not a hal0 defect
+    adjudicated: v1.0.0-rc.7
+    summary: >-
+      An upstream HTTP 400 that hermes cannot parse is reported to the user as "Context length
+      exceeded (N tokens). Cannot compress further.", where N is a tiny number that has nothing
+      to do with any context window.
+    why: >-
+      `agent/conversation_loop.py`'s failover classifier deliberately buckets a generic 400 into
+      `FailoverReason.context_overflow` ("generic 400 + large session heuristic (#1630)"). Hermes
+      then runs its compression ladder, cannot shrink an already-tiny turn, and emits the line
+      at the compression-exhausted return path. The message is a fixed string on that path; it
+      is not evidence that hermes measured a context window, and it is not evidence the anchor
+      advertises a small ctx. This is pinned upstream hermes-agent code under hal0's
+      VETTED_HERMES_REFS compatibility freeze; hal0 does not own the string. Verified on ct151:
+      `GET /v1/models/hal0/agent` advertised context_length/max_context_window 65536 (>=
+      MINIMUM_CONTEXT_LENGTH 64000) at the exact moment a hermes turn emitted this message, and
+      the hal0-api journal showed ~10 consecutive genuine upstream 400s
+      ("Failed to initialize samplers: std::exception", a grammar/response_format defect — see
+      regression `hindsight-response-format-400-via-thinking-policy`) in the same window.
+    still_report_if: >-
+      The message appears while hal0's own /v1 surface is returning 200 for the same request
+      shape (then the defect is in hermes' request construction, not the upstream); OR
+      `GET /v1/models/hal0/agent` advertises context_length below MINIMUM_CONTEXT_LENGTH
+      (64000) at the moment of the failure (that is the real #1827 regression and belongs
+      there); OR hermes emits it with zero upstream non-2xx in the hal0-api journal for the same
+      window. ALWAYS attach the hal0-api journal grep for "400 Bad Request" plus the serving
+      slot's own `podman logs` for the window BEFORE filing anything under this symptom — the
+      user-visible string names the wrong subsystem by construction.
+    review_at: v1.1.0
+
+  - id: update-rollback-defers-hal0-api-restart
+    status: by-design
+    adjudicated: v1.0.0-rc.7
+    summary: >-
+      `hal0 update --rollback` swaps the install tree, re-pips the venv, re-renders slot units,
+      and exits 0 WITHOUT restarting hal0-api — the running process keeps serving the pre-
+      rollback code until the operator restarts it.
+    why: >-
+      Explicitly documented (`docs/guides/update-and-rollback.mdx`: "Unlike an apply, a rollback
+      does not try-restart hal0-api for you") and deliberately deferred in the #1549 commit
+      (7c9ed3d2): "Not done here: restarting hal0-api automatically on rollback. That wants the
+      background-job machinery commit already has ... rather than race it." Rollback is the only
+      mutating updater operation that is not a background job, and auto-restarting it would race
+      the restart ordering fixed in #1540. The dashboard rollback confirm dialog and the success
+      toast BOTH state the requirement in the running-service copy
+      ("...keeps serving until you restart hal0-api (Settings -> Advanced)"). One `systemctl
+      restart hal0-api` self-heals cleanly (`/api/health` version agrees afterward). The CLI's
+      OWN silence about this (it discards `rolled_back_to`/`schema_warning` and never compares
+      against `/api/health`) is NOT covered by this adjudication — see regression
+      `update-rollback-cli-silent-on-restart-need`, which is a real gap against closed #1541.
+    still_report_if: >-
+      `hal0 update --rollback` prints anything about a restart being required and it still does
+      not happen; OR the dashboard rollback confirm dialog / success toast stops naming
+      `systemctl restart hal0-api` (Settings -> Advanced); OR the docs guide's "does not
+      try-restart hal0-api for you" paragraph is removed while the behaviour stays; OR rollback
+      grows the background-job machinery (a job id, a state=applied record) and STILL skips the
+      restart, since the #1549 deferral rationale ("wants the background-job machinery commit
+      already has") is then spent; OR a rollback leaves the box in a state a manual `systemctl
+      restart hal0-api` does NOT fix.
+    review_at: v1.1.0
+
+  - id: unversioned-openai-compat-paths-405-are-generic-not-rerank-specific
+    status: by-design
+    adjudicated: v1.0.0-rc.7
+    related_issue: null
+    summary: >-
+      `POST /rerank` (unversioned) returns HTTP 405 `system.http_405` — the SAME generic 405
+      returned for POST to ANY unrouted top-level path (`/chat/completions`, `/embeddings`,
+      `/completions`, `/models`, `/totally-bogus-path`). Not a rerank-specific gap; there is no
+      client-compatibility defect here.
+    why: >-
+      hal0's OpenAI-compatible surface is mounted exclusively under `/v1`
+      (`app.include_router(v1.router, prefix="/v1")`), mirroring OpenAI's own convention and
+      matching Cohere's and Jina's actual rerank paths, which are themselves versioned
+      (`/v1/rerank`, `/v2/rerank`). `POST /v1/rerank` and `POST /v1/rerankings` both serve 200
+      with correct relevance scores — verified end to end with a real reranker model on ct151.
+      The unversioned `/rerank` 405 is a side effect of the SPA fallback route
+      (`@app.get("/{full_path:path}")`), which deliberately matches every non-`/api/`, non-`/v1/`
+      path for GET so the dashboard router works on deep links — POST to that same path is a
+      plain Starlette 405, identical for every unrouted top-level path tested. No doc, UI
+      string, or OpenAPI entry promises an unversioned `/rerank`; the OpenAPI document lists only
+      `/v1/rerank` and `/v1/rerankings`.
+    still_report_if: >-
+      POST /v1/rerank or POST /v1/rerankings returns anything other than 200 for a well-formed
+      body with the rerank slot loadable; OR the OpenAPI document, docs site, dashboard, or a CLI
+      help/error string tells a user to POST an UNVERSIONED /rerank (or any other unversioned
+      OpenAI-compat path); OR POST /rerank starts returning something OTHER than the generic
+      system.http_405 every other unrouted path returns (i.e. it becomes genuinely
+      rerank-specific); OR a mainstream rerank SDK is shown, with its emitted request line
+      captured, to default to an unversioned /rerank against a custom base_url; OR hal0 begins
+      serving some unversioned OpenAI-compat paths but not /rerank (inconsistent surface).
+    review_at: v1.1.0
+
+  - id: doctor-perms-split-brain-root-hermes-is-correct-detection
+    status: by-design
+    adjudicated: v1.0.0-rc.7
+    related_issue: 843
+    summary: >-
+      `hal0 doctor perms` exits 1 on a box where /root/.hermes exists, reporting
+      "split-brain /root/.hermes | DRIFT | root ran Hermes; remove after reconciling". This is
+      the #843 root-clobber DETECTOR working correctly, not drift inflicted by a hal0-shipped
+      path.
+    why: >-
+      The canonical entry point `/usr/local/bin/hermes` carries a run-as-hal0 guard, verified
+      firing on ct151 (root + custom HOME -> directory left EMPTY, rc=0, no tree created). The
+      installer and both systemd units (hal0-agent@hermes.service, hermes-gateway.service) pin
+      HOME/HERMES_HOME off `/var/lib/hal0`, never `/root`. The detector's purpose is to go loud
+      red the moment root DOES run Hermes (e.g. by reaching around the wrapper to the raw venv
+      binary `/var/lib/hal0/venvs/hermes/bin/hermes`, or with `HAL0_ALLOW_ROOT=1`) because a
+      root-owned ~/.hermes is a state tree the User=hal0 unit can never read — Hermes then
+      silently falls back to the default provider, which is worse (silent wrongness) than a red
+      doctor line. Reaching around the wrapper is the same unsupported-invocation class already
+      adjudicated by-design under `hermes-cwd-eacces-crash`. The row is sticky by design: hal0
+      deliberately will not `rm -rf` an operator-created path under /root on its own — the
+      detail column says "remove after reconciling", not "auto-repaired". One genuine cosmetic
+      gap: the red footer's remediation pointer, `sudo hal0 agent bootstrap hermes --repair`,
+      reconciles ownership of the MANAGED tree but no shipped code path removes the STRAY tree,
+      so a user following the footer literally sees no change — worth a one-line footer/detail
+      tweak (append "then: sudo rm -rf /root/.hermes"), not a fix-wave issue.
+    still_report_if: >-
+      A hal0-SHIPPED path creates /root/.hermes on a fresh install — i.e. the split-brain row is
+      DRIFT immediately after the installer finishes, with /root/.hermes's birth timestamp
+      inside the installer's own run window and before any manual hermes invocation; OR the
+      run-as-hal0 guard fails to fire (a root invocation of the canonical wrapper creates a
+      stray tree, the guard script is missing, or none of runuser/setpriv/sudo are present so
+      the wrapper proceeds as root instead of refusing); OR hal0-agent@<id>.service or
+      hermes-gateway.service is observed with User=root or without HERMES_HOME/HOME pinned off
+      /root; OR the audit reports the stray tree as ok/absent while /root/.hermes exists
+      (detector false negative); OR the managed side drifts (HERMES_HOME tree, config.yaml,
+      runtime.json, or the hermes venv owned by anything other than hal0); OR
+      `sudo hal0 agent bootstrap hermes --repair` is made to claim it removed the stray tree and
+      doctor perms still shows the row. Do NOT re-report: doctor perms exiting 1 solely because a
+      validation agent, an operator, or HAL0_ALLOW_ROOT=1 ran the raw venv binary as root during
+      the run — establish provenance by birth timestamp against the installer log's last mtime
+      before filing.
+    review_at: v1.1.0
+
+  - id: tts-catalog-lists-qwen3-on-gpu-rocm-regardless-of-host
+    status: by-design
+    adjudicated: v1.0.0-rc.7
+    summary: >-
+      `catalogs.voice.tts` always lists `qwen3-tts` with `backends: [gpu-rocm]`, fit_status
+      allowed, even on a box with no /dev/kfd where the top-level `.backends` array correctly
+      omits gpu-rocm.
+    why: >-
+      `voice.tts` is a two-ENGINE switch, not a host-fit model list. `catalog.py`'s
+      `_TTS_ENGINES` hardcodes `kokoro-v1 -> cpu` and `qwen3-tts -> gpu-rocm` because each engine
+      has exactly one legal device; `_tts_rows_for_capability` injects both rows directly,
+      bypassing the llamacpp host fan-out on purpose. Locked by
+      `tests/capabilities/test_tts_capability_switch.py`, which does not mock hardware. The row
+      stays honest about being unusable on a kfd-less box: `downloaded:false, pullable:false,
+      size_gb:0.0`. An apply on such a box refuses loudly at the lifecycle stage
+      (503 capability.apply_failed naming /dev/kfd) rather than serving silence. Do NOT confuse
+      this with the SEPARATE, real defect where a locally-added chat/embed/rerank GGUF
+      advertises `gpu-rocm` unconditionally regardless of host — see regression
+      `capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models`, which is a
+      different code path (`_backend_variants`'s rocm branch missing a host-backends
+      intersection) with no deliberate-engine-switch justification.
+    still_report_if: >-
+      The qwen3-tts row reports `downloaded: true` on a box with no staged Qwen3-TTS weights; OR
+      selecting qwen3-tts on a kfd-less box produces a tts slot that reports ready/serves silence
+      instead of refusing; OR the kokoro-v1 CPU row disappears or stops being the only cpu-device
+      tts option, leaving a kfd-less box with no usable TTS engine in the picker.
     review_at: v1.1.0

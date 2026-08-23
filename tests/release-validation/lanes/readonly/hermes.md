@@ -18,6 +18,23 @@ chat messages — that is the `hermes-e2e` stateful lane.
    `hermes-smoke-ok-over-failures`. When a probe records a SKIP, cross-check its stated reason
    before believing it: rc.5's reason string ("'hal0/agent' not loaded on the gateway") was
    false, and `GET /v1/models/hal0/agent` returned 200 at the same moment.
+   Batch this with a live `GET /v1/models/hal0/agent` + `GET /api/slots` check in the SAME
+   lane pass -- that lets you tell "brain-slot-caused honest failure" (a smoke_tests
+   chat_completions/memory_roundtrip failure that matches a genuinely errored/offline slot at
+   that moment) apart from a real preflight-gate regression, without waiting on the slots lane,
+   and it re-validates `hermes-smoke-ok-over-failures` and `smoke-preflight-skips-chat-probes`
+   every release for free.
+2b. **MCP client actually works, not just "provisioned".** `provision.json`'s `mcp_wire` phase
+   reporting `status: ok` is NOT sufficient evidence the hermes MCP client can talk to hal0 --
+   verify directly: `sudo -u hal0 hermes mcp test hal0-admin` and `hermes mcp test hal0-memory`
+   must both connect (not "requires HTTP transport but mcp.client.streamable_http is not
+   available", not a ~40s timeout). If either fails, check
+   `/var/lib/hal0/venvs/hermes/bin/python -c "import mcp"` -- `ModuleNotFoundError` means the
+   venv was built without the `mcp` extra (`installer/agents/hermes/requirements.txt` installing
+   `hermes-agent[web]` instead of `hermes-agent[web,mcp]`) and EVERY hal0-admin/hal0-memory tool
+   is silently dead behind a green `hermes tools list`/`hermes mcp list`. This is a standing
+   check now -- regression `hermes-venv-missing-mcp-extra` found it reproduces on fresh AND
+   upgraded boxes alike, so run it everywhere, not just on fresh installs.
 3. **Bundled skills actually landed.** Every directory listed in `skills.external_dirs` in
    `/var/lib/hal0/.hermes/config.yaml` must be non-empty, every skill shipped under
    `/usr/share/hal0/skills` must be reachable from one of them, and
@@ -47,7 +64,10 @@ chat messages — that is the `hermes-e2e` stateful lane.
 7. **Dependencies.** The hindsight API on loopback: health endpoint, and the bank list if
    discoverable. A fresh box should not have failed memory operations sitting in a bank. Read
    the provisioning smoke-marker retain's op status/retry_count now and record it as a baseline
-   — the memory lane's drain test wants the install-time datapoint, and only this lane sees it
+   — capture the full `shared` bank operations list too
+   (`GET http://127.0.0.1:9177/v1/default/banks/shared/operations`), not just the one
+   smoke-marker op — the memory lane's drain test wants the install-time datapoint, and only
+   this lane sees it
    before the box is churned.
 8. **Defaults posture.** No external integration (slack/discord/telegram/etc.) should be
    configured or enabled on a fresh install. Anything enabled by default is a finding.

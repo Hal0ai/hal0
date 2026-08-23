@@ -34,7 +34,22 @@ declare `utility` off-limits — say in your report which of the two you got.
    `boot_degraded|degraded_write|provider_healed` to attribute it.
 3. **Fix the routing.** Assign a chat model to the utility slot and load it. Confirm the
    hindsight target ref now routes (`POST /v1/chat/completions` with that exact ref). If it
-   still does not resolve, find what ref *does* and report the mapping gap precisely.
+   still does not resolve, find what ref *does* and report the mapping gap precisely. Then
+   RETRY THE SAME check-1 marker through the newly-bound target — do not treat check 1's
+   pre-routing-fix failure and this post-fix attempt as redundant. The two paths can fail in
+   genuinely different ways (a silent dead-letter before routing existed vs a loud 400 after
+   routing exists — see regression `hindsight-response-format-400-via-thinking-policy`) and
+   testing only one misses half the picture.
+   Before assuming a post-fix failure is memory-specific, diff a PLAIN chat call against the
+   exact slot/ref hindsight extraction is bound to, in the SAME time window as a failing retain:
+   `POST /v1/chat/completions` with a trivial prompt (no `response_format`) against that ref.
+   If plain chat works but the retain still 400s, the defect is in the STRUCTURED-OUTPUT request
+   hindsight (or hal0-api's rewrite of it) sends, not in the model or slot — this single A/B is
+   what distinguished "model/slot broken" from "the extraction request itself is broken" in
+   rc.7. Also cross-check hindsight's OWN port directly:
+   `POST http://127.0.0.1:9177/v1/default/banks/<bank>/memories/recall` against the hal0-wrapped
+   `/api/memory/search|list|recall` for the same query — a mismatch tells you immediately whether
+   a query-surfacing defect lives in hal0's REST layer or in the underlying hindsight engine.
 4. **Retain, then prove it LANDED — and prove what landed is GROUNDED.** Store a memory
    containing a literal marker, e.g. *"the <BOX> validation marker is MARKER-7734"*. Do not stop
    at the HTTP 200 and the operation id — that is what made rc.5's headline defect invisible to

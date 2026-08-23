@@ -216,13 +216,23 @@ regressions:
     severity: major
     tier: judgment
     lane: slots
-    last_result: { release: v1.0.0-rc.6, result: partial }
-    rc6_note: >-
-      Same partial as rc.5: error-state convergence, container_status=crashed, and swap-writes-
-      new-model all held; `hal0 status` surfaces the failed unit. Still missing, both tracked as
-      #1840 items 5 and 6: delete leaves `hal0-slot@<n>.service not-found failed` in
-      `systemctl --failed` (adjudicated as an open known-issue, `slot-delete-leaves-failed-unit`
-      — do not re-file), and `hal0 doctor` never mentions a failed slot unit.
+    last_result: { release: v1.0.0-rc.7, result: partial }
+    rc7_note: >-
+      REFUTED as a regression, expect clause corrected. PR #2012 (commit cee9d812, "self-heal
+      crash-looped slots") deliberately replaced the old StartLimitBurst=5/fixed-RestartSec
+      quadlet policy with StartLimitIntervalSec=1800 / StartLimitBurst=10 / RestartSec=5 /
+      RestartSteps=6 / RestartMaxDelaySec=300, so a crash-looping unit now sits in
+      ActiveState=activating / SubState=auto-restart for ~20 minutes before it latches `failed`
+      — the old ~21s-to-crashed reading this entry's `expect` used to require is GONE BY DESIGN.
+      `container_status` correctly reads `stopped` (not `crashed`) during that ramp, because
+      `crashed` is only set when `systemctl is-active` prints exactly `failed`; forcing the unit
+      to actually latch failed (6x manual `systemctl restart` to burn the burst) immediately
+      produced `container_status: crashed`, proving the mapping itself is intact. The
+      metadata.message string also regressed to the generic watchdog "container unit died while
+      warming" instead of rc.6's systemd-result-naming string during the ~20 min ramp — see
+      known-issues `crash-loop-warming-180s-window`'s updated still_report_if for the corrected
+      window. Error-convergence, swap-writes-new-model, and `hal0 status` surfacing all still
+      hold once the unit actually reaches `failed`.
     summary: >-
       A crash-looping slot reported `warming` indefinitely, died silently at the systemd start
       limit, and `hal0 slot swap` on it rewrote the quadlet with the OLD model.
@@ -234,16 +244,23 @@ regressions:
       never mentions a slot unit sitting in systemd `failed` (rollup #1840).
     repro: |
       Induce a crash loop on a throwaway slot (bind it to a non-model file such as
-      /var/lib/hal0/models/zzbroken/zzbroken.gguf), then poll every 10 s for FOUR MINUTES:
+      /var/lib/hal0/models/zzbroken/zzbroken.gguf), then EITHER poll every 30 s for up to
+      ~25 MINUTES (the natural ramp, post-#2012):
         curl -s $API/api/slots/<n> | jq '{state, container_status, msg: .metadata.message}'
-        systemctl show hal0-slot@<n> -p ActiveState -p Result -p NRestarts
+        systemctl is-active hal0-slot@<n>   # activating (auto-restart) -> failed
+      OR force the unit to latch `failed` immediately by burning the restart burst manually
+      (6x `systemctl restart hal0-slot@<n>`), then re-read the API 5 s later.
       Then: hal0 status; hal0 doctor; hal0 slot swap <n> --model <a good model>; wait 60 s;
       systemctl cat hal0-slot@<n> | grep -o -- '--model [^ ]*'.
       Delete the throwaway slot and confirm `systemctl --failed` gained no new entry.
     expect: >-
-      State reaches `error` within ~240 s with a non-empty `metadata.message` naming the systemd
-      result; `container_status` reads `crashed` from the moment the unit fails; swap writes the
-      NEW model; doctor or status surfaces the failed unit; delete leaves no failed unit behind.
+      `container_status` reads `crashed` the moment `systemctl is-active hal0-slot@<n>` prints
+      exactly `failed` — NOT within a fixed ~240 s window (StartLimitIntervalSec=1800 /
+      StartLimitBurst=10 / RestartSteps=6 means natural failure can take ~20 min; `stopped`
+      during that `activating (auto-restart)` ramp is correct-by-policy, see known-issues
+      `crash-loop-warming-180s-window`). Once `error`, `metadata.message` is non-empty; swap
+      writes the NEW model; doctor or status surfaces the failed unit; delete leaves no failed
+      unit behind.
 
   - id: memory-retain-dead-letter
     issue: 1792
@@ -861,9 +878,23 @@ regressions:
       memory to VRAM — that is the fix, not the bug: `compute_capable` only means rocm-smi
       answered, and a vulkan runner genuinely serves on the iGPU. `hal0 slot capacity` Total MB
       must agree with `/api/slots/metrics` mem_rss_mb for the same RESIDENT slot in the same
-      second (a warming slot showing the file-size+KV fallback while metrics reads 0.0 is
-      documented, not a finding).
-    last_result: { release: v1.0.0-rc.6, result: fixed }
+      second, UNLESS Total MB equals that slot's file-size+KV estimate (size_bytes/1MiB + 0.5 MiB
+      per 1000 ctx tokens) — `resident_mb = max(cgroup_mb, estimate_mb)` (capacity.py, #672, long
+      predating this entry) is a deliberate floor for UMA/GTT-resident weights the container
+      cgroup under-charges, and Total exceeding mem_rss_mb while EQUALLING the estimate is that
+      floor working, not a probe failure (a warming slot showing the file-size+KV fallback while
+      metrics reads 0.0 is likewise documented, not a finding). Total being LOWER than
+      mem_rss_mb, or differing from BOTH mem_rss_mb and the file-size+KV estimate, is the actual
+      regression.
+    last_result: { release: v1.0.0-rc.7, result: partial }
+    rc7_note: >-
+      The old ">5% divergence = finding" reading was too strict and self-triggers on the
+      documented path-2 floor above — rewritten into `expect`. Same-second sample on ct151: two
+      of three resident slots showed Total exceeding mem_rss_mb by 88-108%, and in BOTH cases
+      Total matched that slot's file-size+KV estimate to 0.1 MB while the THIRD slot (cgroup
+      already above its estimate) agreed with mem_rss_mb to 0.02% — proving the probe is live,
+      not failing. Direction is always capacity >= metrics (never under-reports). Corresponding
+      known-issues `slot-capacity-vram-on-vulkan-is-declared` still_report_if updated to match.
     rc6_note: >-
       Both halves resolved: cgroup probe routes around the rootful-store denial via
       `systemctl show ... MemoryCurrent` (Total 2183.3 == mem_rss_mb 2183.3, above the model
@@ -1570,3 +1601,471 @@ regressions:
       (`HAL0_ALLOW_VULKAN_FALLBACK`) is explicitly set (in which case the #1922 output-sanity
       gate, not this preflight check, is what must convict the resulting garbage — see
       `brain-vulkan-backend-garbage-output` and `lanes/stateful/slots.md` 8e).
+
+  # ── Filed from v1.0.0-rc.7 curation (mode=report — issue numbers pending) ───
+
+  - id: slot-drift-ignores-image-and-device
+    issue: 2024
+    from: v1.0.0-rc.7
+    severity: major
+    tier: judgment
+    lane: slots
+    summary: >-
+      `src/hal0/slots/drift.py::_CONFIG_DRIFT_KEYS` compares only
+      ('--ctx-size','--model','--alias','--port','-b','-ub') between the running container's argv
+      and the resolved plan. Neither the runner IMAGE nor DEVICE passthrough (AddDevice=/dev/dri,
+      AddDevice=/dev/kfd, --group-add render/video) is compared. Two consumers go blind on
+      exactly those two dimensions: (1) `hal0 slot edit <s> --hardware cpu|vulkan|rocm` followed
+      by `hal0 slot load <s>` on an already-ready slot short-circuits via `_should_converge`
+      (manager.py) without re-rendering the quadlet or recreating the container — the old image
+      and old AddDevice/group-add survive while `declared_backend` reports the NEW device; (2)
+      the updater's `GET /api/updates/slot-drift` (same comparator, api/routes/updater.py) drives
+      the post-update banner and `POST /api/updates/restart-slots` — an image-only drift (running
+      container on a retired image, on-disk unit correctly re-pinned) reports count:0, so the
+      banner never appears and `--restart-slots` is a guaranteed no-op. `/api/slots/<n>` DOES
+      report the truth (`actual_image`, `image_mismatch: true`) and the dashboard drawer's
+      device-change path correctly fires a background restart — this is a CLI/API-lifecycle-path
+      and updater-comparator defect, not a UI defect.
+    repro: |
+      # Half 1 — slot edit/load short-circuit:
+      hal0 slot create zztest --type embedding --hardware gpu-vulkan --model <small model>
+      hal0 slot load zztest   # note podman ps CreatedAt for hal0-slot-zztest
+      hal0 slot edit zztest --hardware cpu
+      hal0 slot load zztest   # -> "Loaded zztest -> state=ready"
+      podman ps --format '{{.Names}} {{.Image}} {{.CreatedAt}}' | grep zztest   # CreatedAt unchanged
+      systemctl cat hal0-slot@zztest | grep -E 'Image=|AddDevice='             # still GPU image/devices
+      curl -s $API/api/slots/zztest | jq '{declared_backend, actual_image, image_mismatch}'
+      hal0 slot restart zztest   # workaround: converges fully
+      hal0 slot delete zztest
+
+      # Half 2 — updater comparator, on an upgraded box with a stale-running/re-pinned-on-disk slot:
+      podman ps --format '{{.Names}} {{.Image}}'
+      grep '^Image=' /etc/containers/systemd/hal0-slot@<n>.container
+      curl -s $API/api/updates/slot-drift
+      curl -s $API/api/slots | jq '.[] | {name, actual_image, image_mismatch}'
+    expect: >-
+      `hal0 slot edit <s> --hardware X` followed by `hal0 slot load <s>` on a ready/serving/idle
+      slot converges the container's image and AddDevice/group-add set to match the new device —
+      NOT merely updating `declared_backend` while the old container keeps running. Separately,
+      `GET /api/updates/slot-drift` must include any slot whose `actual_image` differs from its
+      unit's resolved `Image=` — a count:0 response while `/api/slots` reports `image_mismatch:
+      true` for a running slot is the regression. `rerender_slot_units` intentionally not
+      bouncing running slots on a plain update is by-design (updater.py) and must not be "fixed"
+      — the defect is that the resulting opt-in banner/`--restart-slots` never fires because the
+      comparator cannot see the image.
+
+  - id: seeded-anchor-slots-rocm-on-kfd-less-box
+    issue: 2023
+    from: v1.0.0-rc.7
+    severity: major
+    tier: judgment
+    lane: gpu
+    summary: >-
+      On a FRESH install, `install.sh`'s slot-seed loop copies `installer/etc-hal0/slots/*.toml`
+      VERBATIM into /etc/hal0/slots/ before `hal0 setup --auto` runs (which deliberately skips
+      slots that already have a config). All eight LLM lifecycle slot seeds (agent, brain, coder,
+      embed, img, qwen3tts, rerank, utility) ship `device = "gpu-rocm"` regardless of hardware —
+      the hardware-aware derivation ladder (`hal0.install.profile_derive.derive_device`) never
+      runs on them. On a box with no /dev/kfd, `_gpu.require_kfd_for_gpu_slot` refuses every one
+      of them at load time (loud, actionable `state=error`, not silent garbage), and because the
+      installer's own brain-model step binds a model to `brain` with autoload:true, the primary
+      chat anchor is dead from t=0. This contradicts the preflight's own printed line ("LLM
+      slots will use the Vulkan lane") and the seed file's own comment ("On a box without
+      [/dev/kfd] this slot derives gpu-vulkan instead"). Reproduces identically on privileged
+      (ct163, zero GPU) and unprivileged (ct151, render node) fresh installs; does NOT reproduce
+      on an upgraded box (rc.6 boxes carry gpu-vulkan seeds that survive the upgrade — the
+      updater never relabels gpu-rocm back to gpu-vulkan, but it also never relabels a working
+      seed away from it). Workaround: `hal0 slot edit <slot> --hardware vulkan` (or `cpu` on a
+      box with no render node) per slot.
+    repro: |
+      # On a FRESH rc.7 install, before touching any slot:
+      grep -H '^device' /etc/hal0/slots/*.toml
+      curl -s $API/api/slots/brain | jq '{state, declared_backend, autoload, metadata}'
+      ls /dev/kfd 2>&1   # confirm absent
+      journalctl -u hal0-api --since <install start> | grep -E 'backend_aware_load_failed|GpuPreflightError'
+      sed -n '/gpu:/p' /root/*install*.log   # the "LLM slots will use the Vulkan lane" preflight line
+    expect: >-
+      On a fresh install with no /dev/kfd, every seeded LLM lifecycle slot (especially `brain`,
+      autoload:true) derives `device = "gpu-vulkan"` (render node present) or `device = "cpu"`
+      (no render node), matching the preflight's own printed claim and the seed file's own
+      comment. A seeded gpu-rocm slot refusing loudly with an actionable remedy is the CURRENT
+      (defective) behavior, not the expectation — `state: "error"` with a kfd-refusal message on
+      an autoload:true anchor slot, present immediately after a fresh install with no manual
+      intervention, is the regression. Untested but source-implied: any non-AMD, kfd-less host
+      (NVIDIA/Intel/CPU-VM) gets the same AMD/ROCm-specific refusal message on a device it could
+      never have — worth a look if such a box joins the fleet.
+
+  - id: brain-steward-fabricates-live-platform-state
+    issue: 2022
+    from: v1.0.0-rc.7
+    severity: ga-blocker
+    tier: judgment
+    lane: brain
+    summary: >-
+      With the shipped installer-seeded brain model (`hal0-brain-sft-q8-rocmfpx`, ~1.1B) serving
+      on a passing coherence canary, `POST /api/brain/chat` answers a live-state question with a
+      confidently INVENTED value and ZERO tool frames whenever the user prompt adds a brevity
+      instruction ("Answer in one short sentence."). Dropping only that clause flips the SAME
+      question to a correct, tool-grounded answer (2/2 both directions). A second, brevity-
+      independent failure mode: ordinary plain-phrased live-state questions ("How many models are
+      registered?", "Which port is the brain slot bound to?") call the WRONG tool
+      (`model_catalogue` — the pullable HuggingFace catalog — or `get_board` — the task board —
+      instead of the correct local `list_models`/`list_slots`) and answer confidently from the
+      wrong tool's result. Not a tool-surfacing defect: a LOCAL `list_models` tool IS available
+      and correctly described; the steward chooses the wrong tool. On production (ct105, the
+      larger `lfm2-5-2-6b-q8-0` brain model), the identical brevity-suffixed probe correctly calls
+      a tool and answers right — this tracks the small installer-seeded brain-sft model class,
+      which is the default first-run experience on every fresh/modest-hardware install.
+    repro: |
+      # Against the SHIPPED brain model explicitly (works even if `brain` slot is bound to
+      # something else — chat.py resolves payload["model"] first):
+      curl -s -X POST $API/api/brain/chat -d '{"model":"hal0-brain-sft-q8-rocmfpx",
+        "messages":[{"role":"user","content":"What port is the brain slot running on? Answer in one short sentence."}]}'
+      # Expect a fabricated port number with NO tool_call frame. Ground truth:
+      curl -s $API/api/slots/brain | jq .port
+      # Control — same question, no brevity clause:
+      curl -s -X POST $API/api/brain/chat -d '{"model":"hal0-brain-sft-q8-rocmfpx",
+        "messages":[{"role":"user","content":"What port is the brain slot running on?"}]}'
+      # Expect a tool_call: list_slots frame and the CORRECT port.
+      # Wrong-tool probe:
+      curl -s -X POST $API/api/brain/chat -d '{"model":"hal0-brain-sft-q8-rocmfpx",
+        "messages":[{"role":"user","content":"How many models are registered on this hal0 install right now?"}]}'
+      hal0 model list   # compare against the tool-cited count
+    expect: >-
+      A live-state question the steward answers MUST either call a grounded tool matching the
+      question's subject and report its result, or honestly decline. A confident, specific,
+      wrong answer (a fabricated port/count) with zero tool frames — triggered specifically by a
+      brevity instruction on an otherwise-correct question — is the regression this entry exists
+      to catch. Calling a real but WRONG tool (catalog for a registry question, board for a slot
+      question) and reporting its result as if it answered the question is also the regression.
+      Re-probe against BOTH the shipped small brain-sft model and, if available, a larger bound
+      brain model — the larger model on production did not reproduce it, so this is model-class
+      dependent and re-scoring must record which model was probed.
+
+  - id: hermes-venv-missing-mcp-extra
+    issue: 2021
+    from: v1.0.0-rc.7
+    severity: ga-blocker
+    tier: mechanical
+    lane: hermes
+    promote_ready: true
+    summary: >-
+      `installer/agents/hermes/requirements.txt` installs `hermes-agent[web]`, but upstream gates
+      the MCP client behind a separate `[mcp]` extra (`Requires-Dist: mcp==1.26.0; extra == "mcp"`)
+      that hal0 never requests. The hermes venv therefore has NO `mcp` package at all. Both MCP
+      servers hal0 itself provisions into hermes' config.yaml (hal0-admin, hal0-memory) are dead:
+      `hermes mcp test hal0-admin` fails immediately ("requires HTTP transport but
+      mcp.client.streamable_http is not available"), `hermes mcp test hal0-memory` times out at
+      40s. `hermes tools list` / `hermes mcp list` both claim "all tools enabled" / "✓ enabled",
+      and the installer's own `mcp_wire` provisioning phase reports `status: ok,
+      mcp_server_count: 2` — every self-check surface is green over a wholly dead client. Net
+      effect: hermes' system prelude tells the model it has hal0-admin/hal0-memory MCP tools, the
+      model receives a tools array with ZERO hal0-admin tools, and every live-state question is
+      answered from static prelude/STATE.md text with a confident fabrication (wording varies —
+      "no slots loaded", or hitting the tool-iteration ceiling — the invariant is "wrong,
+      tool-free answer", not a specific string). Reproduces on every rc.7 box checked: two fresh
+      installs (ct151, ct163) AND the upgrade box (ct150) — an agent-upgrade rebuild loses MCP
+      too. Production (ct105) still has `mcp` importable only because of a pre-rc.7 venv left
+      over from before this requirements.txt regressed; that is stale residue masking the defect
+      on the one box people actually chat through, not evidence it's fixed there.
+    repro: |
+      /var/lib/hal0/venvs/hermes/bin/python -c "import mcp"   # expect ModuleNotFoundError
+      sudo -u hal0 /usr/local/bin/hermes mcp test hal0-admin   # expect a transport-unavailable failure
+      sudo -u hal0 /usr/local/bin/hermes mcp test hal0-memory  # expect a ~40s timeout
+      grep -n 'Requires-Dist: mcp' /var/lib/hal0/venvs/hermes/lib/python3*/site-packages/hermes_agent-*.dist-info/METADATA
+      grep -n 'hermes-agent' installer/agents/hermes/requirements.txt   # confirm no [mcp] extra
+      sudo -u hal0 HOME=/var/lib/hal0 /usr/local/bin/hermes -z \
+        "How many hal0 slots are currently loaded and ready right now? Use a tool to check live state, do not guess." --cli
+      # compare against: curl -s $API/api/slots | jq '[.[] | select(.state=="ready")] | length'
+      journalctl -u hal0-api --since <turn start> | grep -c 'client_id=hermes'   # expect 0
+    expect: >-
+      `hermes mcp test hal0-admin` and `hermes mcp test hal0-memory` both connect and pass. The
+      model actually receives hal0-admin tool schemas in its `tools` array (verify with a request
+      logging proxy or by observing `client_id=hermes` invocations in the hal0-api journal during
+      a hermes turn that should call a tool). A live-state question answered via a real tool call
+      is correct; the fabricated-answer symptom disappears once the venv has `mcp` importable.
+      Fix site: installer/agents/hermes/requirements.txt — `hermes-agent[web]` needs the `mcp`
+      extra too; the provisioning `mcp_wire` phase and `smoke_tests.admin_tools_list` should also
+      be made to probe THROUGH the hermes client, not just against the server, so this class of
+      defect cannot pass silently green again.
+
+  - id: capability-apply-skips-model-pull
+    issue: 2026
+    from: v1.0.0-rc.7
+    severity: major
+    tier: judgment
+    lane: capabilities
+    summary: >-
+      `CapabilityOrchestrator.apply` (src/hal0/capabilities/orchestrator.py) goes straight to
+      `SlotManager.load` for a selected catalog row with no pull step. If the row's weights are
+      not on disk (`downloaded:false, pullable:true`), no pull job is ever created
+      (`GET /api/models/pulls` unchanged), no preflight rejects the selection, and the runner is
+      launched with the bare model id as `--model`, so llama-server dies immediately
+      (`gguf_init_from_file: failed to open GGUF file '<id>'`). The apply call blocks for the
+      full ~180s crash-loop dwell then returns HTTP 200 `{"status":"warming"}` — NOT the typed
+      500 known-issue `capability-apply-persists-intent-on-lifecycle-failure` documents, because
+      the generated quadlet's StartLimitIntervalSec=1800/StartLimitBurst=10 means the unit is
+      still `activating (auto-restart)`, not `failed`, at the 180s mark the apply route checks.
+      The shipped capabilities dashboard panels have zero references to `downloaded`/`pull` and
+      offer every catalog row unmarked, contradicting the API's own documented intent
+      (catalog.py:546) to render a ⬇ chip on pullable-but-absent rows. On a FRESH install this is
+      not a theoretical row — `/etc/hal0/slots/rerank.toml`'s own default model
+      (`bge-reranker-v2-m3-q4_k_m`) is not staged by the installer, so the rerank capability
+      picker's first-click default is an undownloaded row.
+    repro: |
+      curl -s $API/api/models | jq '.[] | select(.downloaded==false and .pullable==true) | .id'
+      # pick one, e.g. bge-base-en-v1.5-q4_k_m for the embed capability:
+      time curl -s -w '\nHTTP=%{http_code}\n' -X POST $API/api/capabilities/embed/embed \
+        -H 'content-type: application/json' \
+        -d '{"model":"<undownloaded-model-id>","backend":"gpu-vulkan","enabled":true}'
+      curl -s $API/api/models/pulls   # expect unchanged, no new job
+      curl -s $API/api/slots/embed | jq .resolved_command   # expect bare model id, no path
+      journalctl -u hal0-slot@embed --since -2min | grep 'failed to open GGUF file'
+    expect: >-
+      A capability apply naming a model with `downloaded:false` returns a typed 4xx/5xx BEFORE
+      any container is spawned, naming the missing weights and the `POST /api/models/{id}/pull`
+      remediation — not a 2xx after a ~3min block. The dashboard capability pickers mark
+      undownloaded rows (⬇ or equivalent) and do not toast success for an apply whose slot never
+      reaches ready. Any shipped capability slot's TOML default (rerank.toml, embed.toml, ...)
+      names a model the installer actually places on disk. Separately (may be filed/fixed
+      independently): a fast-failing crash-looping capability slot's apply should return the
+      documented typed 500 `slot.spawn_failed`, not a bare 200 — the honesty contract in
+      `capability-apply-persists-intent-on-lifecycle-failure` is currently unmet whenever the
+      unit's StartLimitBurst outlives the apply route's health check window.
+
+  - id: update-rollback-cli-silent-on-restart-need
+    issue: 2027
+    from: v1.0.0-rc.7
+    severity: minor
+    tier: mechanical
+    lane: upgrade
+    summary: >-
+      `hal0 update --rollback` prints only `rolled back (<channel>)` and exits 0, discarding the
+      three fields the route was specifically changed to return for the CLI's benefit
+      (`rolled_back_to`, `previous_now`, `schema_warning`) — `src/hal0/cli/update_commands.py`'s
+      `if rollback:` branch never reads `body` beyond `channel`. This is a regression against
+      CLOSED issue #1541, whose stated minimum acceptance criterion was "the rollback banner
+      states plainly that the running service is unchanged until `systemctl restart hal0-api`,
+      and ideally prints the command." The fix commit for #1541 (7c9ed3d2) touched only
+      `api/routes/updater.py` + CHANGELOG.md — zero CLI changes — yet the shipped rc.1 CHANGELOG
+      entry still asserts the CLI names the version, compares it against `/api/health`, and
+      prints `systemctl restart hal0-api` when they differ. No commit in any branch ever added
+      that. (The underlying non-restart itself is deliberate and by-design — see known-issues
+      `update-rollback-defers-hal0-api-restart` — this entry is scoped to the CLI's silence
+      specifically, which contradicts both the dashboard's own two-place notice and the closed
+      issue's acceptance criterion.)
+    repro: |
+      # On an UPGRADED box (needs /var/lib/hal0/hal0.previous — absent on a fresh install):
+      ls -l /var/lib/hal0/hal0.previous
+      hal0 update --rollback --yes
+      # Expect: only "rolled back (<channel>)" -- no restart notice, no version comparison.
+      curl -s $API/api/health | jq .version   # compare against the CLI's --version afterward
+      grep -n 'rolled_back_to\|previous_now\|schema_warning' src/hal0/cli/update_commands.py
+      # expect: no hits (the CLI never reads these fields)
+    expect: >-
+      `hal0 update --rollback`'s output names the version it reverted to, and if `/api/health`'s
+      reported version still disagrees with it (hal0-api not yet restarted), the CLI says so and
+      prints `systemctl restart hal0-api` — matching the pattern already used elsewhere for
+      restart-scoped config (`hal0/cli/memory_commands.py`'s `[memory].enabled` line) and
+      matching the dashboard's own rollback confirm dialog / success toast, which already state
+      this. A rollback whose output is silent about the restart requirement is the regression.
+
+  - id: hindsight-response-format-400-via-thinking-policy
+    issue: 2020
+    from: v1.0.0-rc.7
+    severity: ga-blocker
+    tier: judgment
+    lane: memory
+    summary: >-
+      `hal0-api`'s `/v1/chat/completions` unconditionally injects
+      `chat_template_kwargs: {"enable_thinking": false}` into every chat body that doesn't
+      already carry the kwarg (`src/hal0/normalize/thinking.py::apply_thinking_policy`, called
+      from `api/routes/v1.py`). Combined with `response_format: {"type":"json_object"}` on a
+      Qwen3-family-templated model (the installer-seeded `hal0-brain-sft-*` is the ONLY model a
+      fresh install ships), llama-server throws `Failed to initialize samplers: std::exception`
+      and returns HTTP 400 — deterministically, A/B'd on byte-identical bodies (through hal0-api
+      /v1: 400; direct to the same slot's own port: 200; with `chat_template_kwargs.
+      enable_thinking: true` instead of false, direct to the slot: 200). Hindsight's own fact-
+      extraction request never sends `chat_template_kwargs` — hal0-api adds it — so EVERY
+      `retain_extract_facts` call against the seeded model 400s, and hindsight's poller retries
+      forever. This is NOT hindsight-specific: any OpenAI-compatible client sending
+      `response_format: json_object` through hal0's `/v1` against a Qwen3-templated model hits
+      the identical 400, so the blast radius extends to any structured-output client, not just
+      memory. Root cause is `hal0-brain-sft.jinja`'s think-block emission
+      (`{%- if enable_thinking is false %}{{- '<think>\n\n</think>\n\n' }}`) colliding with the
+      json_object grammar in llama.cpp b109 sampler init. Does NOT reproduce on production
+      (ct105), because its bound extraction model has no such template branch — this is model-
+      template-scoped, not backend/hardware-scoped, and every fresh install is maximally exposed
+      because the brain-sft template is the only one staged.
+    repro: |
+      # A/B on an identical body, direct-to-slot vs through hal0-api (use the port a chat/utility
+      # llm slot serving a hal0-brain-sft-* model is bound to; find via `hal0 slot list`):
+      curl -s -X POST http://127.0.0.1:8080/v1/chat/completions -d \
+        '{"model":"hal0/utility","messages":[{"role":"user","content":"json please"}],
+          "max_tokens":24,"response_format":{"type":"json_object"}}'
+      # expect HTTP 400 "Failed to initialize samplers: std::exception"
+      curl -s -X POST http://127.0.0.1:<slot-port>/v1/chat/completions -d \
+        '{"model":"<same model id>","messages":[{"role":"user","content":"json please"}],
+          "max_tokens":24,"response_format":{"type":"json_object"}}'
+      # expect HTTP 200 -- same body, direct to the slot
+      curl -s -X POST http://127.0.0.1:8080/api/memory/add -d '{"bank_id":"shared","text":"a memory-worthy sentence"}'
+      journalctl -u hindsight-api --since -2min | grep 'Failed to initialize samplers'
+    expect: >-
+      A `response_format: json_object` request to hal0-api's `/v1/chat/completions` against a
+      chat-profile slot succeeds (matches the identical body sent direct to the slot). Hindsight
+      fact extraction against the shipped seeded model completes (op reaches `completed` or
+      `failed` with a DIFFERENT, extraction-specific error — never this sampler-init 400). Fix
+      site: `hal0/normalize/thinking.py` must not inject an unrequested `enable_thinking: false`
+      into a request carrying `response_format`, or must at minimum not inject it for templates
+      that emit a think-block incompatible with a JSON grammar.
+
+  - id: mcp-status-tools-iserror-on-error-state-resource
+    issue: 2025
+    from: v1.0.0-rc.7
+    severity: major
+    tier: mechanical
+    lane: mcp
+    promote_ready: true
+    summary: >-
+      `src/hal0/mcp/admin.py`'s tool-result wrapper treats any dict result carrying
+      `result.get("status") == "error"` as a failed tool call and raises `ToolError`
+      (json-dumping the whole result into the error message). This sentinel, added in #1807 to
+      catch `dispatch()`'s own `{"status":"error","error":{...}}` envelope, collides with the
+      slot object's own top-level `status` field, which mirrors lifecycle state. Consequence:
+      `slot_status`, `slot_by_name`, and `slot_by_id` — the three admin tools that pass a bare
+      slot object through — return `isError: true` for a fully successful read whenever the
+      target slot's `status` is literally the string `"error"`. The payload is correct and
+      complete but gets stringified behind `Error executing tool <tool>: ` with
+      `structuredContent` dropped, so a client cannot tell this apart from a genuine failure
+      without string-sniffing. `slot_state`, `slot_resolved`, `slot_config`, `slot_metrics`, and
+      `GET /api/capabilities` do NOT share the bug — their payloads have no top-level `status`
+      key (slot_state uses `state`, not `status`) — so this is keyed to the literal key name, not
+      to a family of "status/show" tools. A real failure (nonexistent slot) correctly returns a
+      typed `{"code":"slot.not_found"}` isError:true body; REST returns 200 for the identical
+      data. Hardware/box independent — reproduces wherever a slot sits in `state=error`.
+    repro: |
+      # Get a slot into state=error (e.g. a seeded gpu-rocm slot on a kfd-less box, or force one:
+      # register a zero-byte gguf and load it).
+      curl -s -X POST $API/mcp/admin/mcp -H 'content-type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize", ...}'   # then notifications/initialized
+      # tools/call slot_status {name: "<error-state slot>"}
+      # expect isError: true, content[0].text starting "Error executing tool slot_status: {...}"
+      # even though the JSON body inside is a correct, complete slot record.
+      curl -s -o /dev/null -w '%{http_code}' $API/api/slots/<error-state-slot>   # expect 200
+      grep -n 'result.get("status") == "error"' src/hal0/mcp/admin.py
+    expect: >-
+      An MCP tools/call whose underlying REST equivalent would return 200 for the same resource
+      must NOT set isError:true. `slot_status`/`slot_by_name`/`slot_by_id` on a slot whose
+      lifecycle `status` is `"error"` must return `isError: false` with `structuredContent`
+      populated, exactly like any other slot state. Fix should discriminate the failure envelope
+      on a key REST bodies cannot own (e.g. require both `status=="error"` AND an
+      `error`/`http_status` key present), not on the bare `status` string.
+
+  - id: services-health-omits-hindsight
+    issue: 2028
+    from: v1.0.0-rc.7
+    severity: minor
+    tier: mechanical
+    lane: ui
+    promote_ready: true
+    summary: >-
+      `GET /api/services/health` (src/hal0/api/routes/services_health.py) hardcodes a
+      three-branch response — comfyui, hermes, openwebui — and can never include `hindsight`
+      under any configuration, even though `hal0.services.registry` declares hindsight a
+      first-class managed companion service (unit=hindsight-api.service, full lifecycle verbs,
+      a real live `GET /api/services` probe with `unit_state`/`up`). Because the dashboard
+      footer's always-visible services pip group (post-#1899 chrome.jsx) maps 1:1 over the
+      health payload, the footer member set is exactly {hal0, comfyui, hermes, openwebui} —
+      hindsight-api going down can never move the "N / M ready" count or trip warn styling. The
+      Services page, `/api/services`, and the Memory page DO surface hindsight live — this is
+      specifically the always-visible footer's blind spot. Reproduces identically on all four
+      fleet boxes (fresh, fresh-alt, update, prod) — pure static enumeration, no hardware
+      dependency. Not a dupe of closed #1899 (that fix was about comfyui, whose id the health
+      route DOES enumerate) and not covered by any existing known-issues.yaml entry.
+    repro: |
+      diff <(curl -s $API/api/services | jq -r '.[].id' | sort) \
+           <(curl -s $API/api/services/health | jq -r '.services[].id' | sort)
+      # expect: hindsight present on the left, absent on the right
+      systemctl is-active hindsight-api.service   # confirm it's a real, live, running service
+      grep -n 'def get\|comfyui\|hermes\|openwebui' src/hal0/api/routes/services_health.py
+    expect: >-
+      `GET /api/services/health`'s service set matches `GET /api/services`'s id set (currently
+      {hal0-managed companions}: comfyui, hermes, hindsight, openwebui). Stopping
+      hindsight-api.service moves the dashboard footer's "N / M ready" count and renders a
+      non-ok pip for hindsight, the same way it already does for comfyui.
+
+  - id: capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models
+    issue: 2029
+    from: v1.0.0-rc.7
+    severity: minor
+    tier: judgment
+    lane: capabilities
+    summary: >-
+      On a host whose `/api/hardware` reports every gpu `compute_capable:false` (top-level
+      `/api/capabilities` `.backends` correctly omits gpu-rocm), every model registered via
+      `hal0 model add` (as opposed to a catalog/curated row) still carries a trailing
+      `{"id":"gpu-rocm","fit_status":"allowed",...}` backend entry the host cannot run. Root
+      cause: `capabilities/catalog.py::_backend_variants`'s vulkan/llamacpp fan-out branch
+      intersects candidates with `available_backends()`, but the sibling
+      `elif low in {"rocm","gpu-rocm"}` branch appends `gpu-rocm` unconditionally, with no host
+      check — contradicting `available_backends()`'s own documented contract ("GPU/ROCm only
+      when the GPU is compute_capable"). `hal0/registry/detect.py`'s `_GGUF_BACKENDS` list gives
+      every locally-added GGUF `["vulkan","rocm","cuda","cpu"]` unconditionally, so this fires
+      for 100% of user-added GGUFs. Impact is bounded — the bogus entry is appended LAST (the
+      picker's default stays correct) and selecting it fails LOUDLY at load via
+      `require_kfd_for_gpu_slot` with an actionable /dev/kfd message, never silent garbage. The
+      gate has no vendor check either, so it is expected (untested, code-evident only) to affect
+      non-AMD hosts too. NOTE: the `catalogs.voice.tts` row `qwen3-tts` advertising `gpu-rocm`
+      unconditionally is a SEPARATE, deliberate two-engine switch (`_TTS_ENGINES`,
+      test-locked) — do not fold that into this finding, it is by-design (see known-issues
+      `tts-catalog-lists-qwen3-on-gpu-rocm-regardless-of-host`).
+    repro: |
+      curl -s $API/api/hardware | jq '.gpus[0].compute_capable'   # expect false
+      curl -s $API/api/capabilities | jq '.backends'               # expect no gpu-rocm
+      hal0 model add /path/to/any.gguf --id zzprobe
+      curl -s $API/api/capabilities | jq '.catalogs.chat.chat[] | select(.id=="zzprobe") | .backends[].id'
+      # expect gpu-rocm present in the list -- the bug
+      hal0 model rm zzprobe -f
+    expect: >-
+      A locally-added GGUF's advertised backend list matches `available_backends()` exactly —
+      no `gpu-rocm` entry on a host with no compute_capable GPU. Fix site:
+      `capabilities/catalog.py::_backend_variants`'s rocm branch needs the same
+      `host_backends` intersection its llamacpp/provider-runtime siblings already apply.
+
+  - id: memory-retain-zero-yield-reports-completed
+    issue: 2030
+    from: v1.0.0-rc.7
+    severity: minor
+    tier: judgment
+    lane: memory
+    summary: >-
+      A retain whose fact extraction yields ZERO facts finishes as `status=completed,
+      retry_count=0, error_message=None`, stores the raw document, and is never retrievable —
+      with no surface anywhere telling the user nothing was learned. Confirmed on two ops during
+      the rc.7 run on ct151 (20:27:43 and 20:31:03), both logging `retain completed retry=0
+      error=None`, whose documents exist in hindsight (`text_length` 59/60) with
+      `memory_unit_count=0` while `POST /api/memory/search` returns `{"items":[]}`. This is
+      extraction YIELD on the small installer-seeded anchor, not a broken pipeline — the same
+      engine, slot and run extracted facts fine from 364-char hermes prose — so it sits on the
+      axis already adjudicated by-design as `memory-extraction-quality-is-anchor-dependent`. The
+      hal0-side residue is purely the missing "extracted nothing" signal, the same honesty gap as
+      #1903 with a different cause. This entry is the TIGHTENED survivor of a much larger
+      rc.7 candidate ("retain reports success while zero facts are ever stored") whose other
+      three load-bearing assertions were refuted on fresh repro: facts DO land (`shared` bank
+      ended the run with 4 retrievable facts), a failing retain DOES report a terminal `failed`
+      naming the upstream 400, and `hal0 memory status` DOES print `Writes FAILING —
+      retain_operations_failing` (the green reading is #1833's 30-second lull). Several observed
+      "0 facts" lines were duplicate-`content_hash` retains — correct dedup, not a defect.
+    repro: |
+      curl -s -X POST $API/api/memory/add -d '{"text":"<short, low-information sentence>"}'
+      curl -s $API/api/memory/operations/<op_id> | jq '{status, retry_count, error_message}'
+      # -> completed / 0 / null, for a retain that stored no retrievable unit
+      curl -s -X POST $API/api/memory/search -d '{"query":"<the same content>"}'
+      # -> {"items":[]}
+    expect: >-
+      A retain that extracts zero units says so on at least one surface the user reads — a
+      distinct terminal status, a populated `error_message`/notice on the operation record, or a
+      count in `hal0 memory status`. A terminal `completed` with `error_message: null` for a
+      retain that stored nothing retrievable is the regression. When re-probing, FIRST rule out
+      duplicate content (identical `content_hash` to an already-extracted document is correct
+      dedup) and record which anchor model served extraction — yield is anchor-dependent.
