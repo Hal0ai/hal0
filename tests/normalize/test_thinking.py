@@ -94,3 +94,79 @@ def test_does_not_mutate_input():
     src2 = {"enable_thinking": False}
     apply_thinking_policy(src2)
     assert src2 == {"enable_thinking": False}
+
+
+# --- #2020: structured output must not get an unrequested suppression kwarg ---
+#
+# The seeded hal0-brain-sft template emits a literal `<think>\n\n</think>` block
+# when `enable_thinking is false`; combined with a json_object/json_schema
+# grammar llama-server b109 throws "Failed to initialize samplers" and hard-400s.
+# A caller that never asked for reasoning suppression must not be given it.
+
+
+def test_json_object_response_format_skips_default_suppression():
+    body = {"model": "m", "messages": [], "response_format": {"type": "json_object"}}
+    out = apply_thinking_policy(body)
+    assert "chat_template_kwargs" not in out
+    assert out == body
+
+
+def test_json_schema_response_format_skips_default_suppression():
+    body = {
+        "model": "m",
+        "response_format": {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}},
+    }
+    out = apply_thinking_policy(body)
+    assert "chat_template_kwargs" not in out
+
+
+def test_llamacpp_grammar_skips_default_suppression():
+    out = apply_thinking_policy({"model": "m", "grammar": 'root ::= "a"'})
+    assert "chat_template_kwargs" not in out
+
+
+def test_llamacpp_top_level_json_schema_skips_default_suppression():
+    out = apply_thinking_policy({"model": "m", "json_schema": {"type": "object"}})
+    assert "chat_template_kwargs" not in out
+
+
+def test_text_response_format_still_suppressed():
+    # `{"type": "text"}` engages no grammar — the normal default still applies.
+    out = apply_thinking_policy({"model": "m", "response_format": {"type": "text"}})
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
+
+
+def test_structured_output_respects_explicit_caller_suppression():
+    # An explicit caller request is honoured verbatim, json mode or not — the
+    # policy only declines to *invent* a suppression the caller never asked for.
+    body = {
+        "model": "m",
+        "response_format": {"type": "json_object"},
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    assert apply_thinking_policy(body) == body
+
+    out = apply_thinking_policy(
+        {"model": "m", "response_format": {"type": "json_object"}, "enable_thinking": False}
+    )
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
+
+
+def test_structured_output_still_honours_thinking_default_true():
+    # enable_thinking=true is grammar-compatible (verified live on the seeded
+    # model), so a slot/model default of ON is still applied under json mode.
+    out = apply_thinking_policy(
+        {"model": "m", "response_format": {"type": "json_object"}}, default_thinking=True
+    )
+    assert out["chat_template_kwargs"]["enable_thinking"] is True
+
+
+def test_structured_output_policy_is_idempotent():
+    once = apply_thinking_policy({"model": "m", "response_format": {"type": "json_object"}})
+    assert apply_thinking_policy(once) == once
+
+
+def test_malformed_response_format_falls_back_to_default():
+    # Junk in response_format must not crash the normaliser.
+    out = apply_thinking_policy({"model": "m", "response_format": "json_object"})
+    assert out["chat_template_kwargs"]["enable_thinking"] is False

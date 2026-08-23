@@ -120,6 +120,28 @@ async def test_model_default_overridden_by_request():
 
 
 @pytest.mark.asyncio
+async def test_json_mode_request_leaves_route_without_injected_suppression():
+    """#2020: a json_object body must reach the dispatcher WITHOUT an
+    unrequested ``enable_thinking: false`` — that kwarg plus a JSON grammar
+    hard-400s ("Failed to initialize samplers") on Qwen3-templated models."""
+    import json
+
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"})
+    out = await v1._normalize_chat_body(
+        req,
+        {
+            "model": "hal0/agent",
+            "messages": [{"role": "user", "content": "json please"}],
+            "response_format": {"type": "json_object"},
+        },
+    )
+    assert out["model"] == "big"
+    assert "chat_template_kwargs" not in out
+    # the body the dispatcher re-reads must be clean too
+    assert "chat_template_kwargs" not in json.loads(req._body)
+
+
+@pytest.mark.asyncio
 async def test_request_body_rewritten_for_downstream_consumers():
     import json
 
