@@ -577,6 +577,18 @@ class TestRenderUnit:
         assert "StartLimitIntervalSec" not in service_section
         assert "StartLimitBurst" not in service_section
 
+    def test_restart_prevent_exit_status_lands_in_service_section(self) -> None:
+        """#2037: the runner entrypoint translates died-during-load into exit
+        64; ``RestartPreventExitStatus=64`` lets systemd fail-fast a doomed
+        model instead of burning the whole backoff ramp. Old images never emit
+        64, so the directive is inert against them — safe version skew.
+        """
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
+        service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
+        assert "RestartPreventExitStatus=64" in service_section
+
     def test_numeric_group_add_present(self) -> None:
         """GroupAdd= must use numeric GIDs (toolbox images lack group names)."""
         from hal0.providers._gpu import resolve_gpu_group_ids

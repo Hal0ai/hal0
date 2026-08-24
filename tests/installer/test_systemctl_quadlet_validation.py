@@ -333,6 +333,14 @@ ESCALATIONS = {
     "service-standardoutput-file": f"{_HEAD}\n[Service]\nStandardOutput=file:/root/.ssh/authorized_keys\n",
     "service-syslogidentifier-free": f"{_HEAD}\n[Service]\nSyslogIdentifier=../evil\n",
     "service-restart-free": f"{_HEAD}\n[Service]\nRestart=/bin/sh\n",
+    # #2037: RestartPreventExitStatus= is pinned to a single uint (the renderer
+    # emits exactly `64`); signal names / lists / ranges are refused.
+    "service-restartpreventexitstatus-signal": (
+        f"{_HEAD}\n[Service]\nRestartPreventExitStatus=SIGKILL\n"
+    ),
+    "service-restartpreventexitstatus-list": (
+        f"{_HEAD}\n[Service]\nRestartPreventExitStatus=64 78\n"
+    ),
     "service-workingdirectory": f"{_HEAD}\n[Service]\nWorkingDirectory=/root\n",
     "service-environmentfile": f"{_HEAD}\n[Service]\nEnvironmentFile=/tmp/evil.env\n",
     "service-permissionsstartonly": f"{_HEAD}\n[Service]\nPermissionsStartOnly=true\n",
