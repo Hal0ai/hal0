@@ -19,6 +19,11 @@ import {
   useRunnerImagePullsList,
   useSetDefaultImage,
 } from '@/api/hooks/useRunnerImages'
+// Explicit import rather than the legacy window-global (primitives.jsx also
+// publishes ConfirmDialog on window) — the settings pages' idiom. Keeps this
+// module renderable without chrome wiring, e.g. under vitest
+// (__tests__/runner-images-confirm-flow.test.tsx renders the confirm flow).
+import { ConfirmDialog } from '@/dash/primitives.jsx'
 
 const { useState: useStateRI, useEffect: useEffectRI } = React;
 
