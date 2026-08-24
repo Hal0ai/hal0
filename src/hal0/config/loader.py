@@ -904,11 +904,24 @@ def load_stacks_config(path: Path | None = None) -> StacksConfig:
 
     Raises:
         ConfigParseError: If the TOML is malformed or fails validation.
+        StacksStateUnreadable: If the file exists but cannot be read
+            (permissions) — a root-written 0600 stacks.toml must surface as an
+            actionable typed error, not a raw ``PermissionError`` (ct105).
     """
     target = path if path is not None else paths.stacks_toml()
     if not Path(target).exists():
         return StacksConfig.model_validate({"stack": SEED_STACKS})
-    raw = _read_toml(Path(target))
+    try:
+        raw = _read_toml(Path(target))
+    except PermissionError as exc:
+        # Lazy import: hal0.stacks.__init__ imports this module, so a
+        # module-level import here would be circular.
+        from hal0.stacks.state import StacksStateUnreadable
+
+        raise StacksStateUnreadable(
+            f"stacks.toml unreadable at {target}: {exc}; fix: chgrp hal0 && chmod 640",
+            details={"path": str(target)},
+        ) from exc
     try:
         return StacksConfig.model_validate(raw)
     except Exception as exc:

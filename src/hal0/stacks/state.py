@@ -17,6 +17,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hal0.errors import Hal0Error
+
+
+class StacksStateUnreadable(Hal0Error):
+    """Stacks state.json / stacks.toml exists but the service cannot read it.
+
+    Namespace mirrors ``hal0.slots.state.SlotError`` (``slot.*`` → ``stacks.*``).
+    Raised instead of a raw ``PermissionError`` so /api/stacks surfaces an
+    actionable 500 naming the unreadable path (ct105 outage, 2026-07-12→08-24:
+    root-written 0600 files left the hal0-user API returning ``system.internal``).
+    """
+
+    code = "stacks.state_unreadable"
+    status = 500
+
 
 @dataclass(frozen=True)
 class StackStateRecord:
@@ -79,6 +94,12 @@ def write_stack_state_atomic(path: Path | str, record: StackStateRecord) -> None
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
+                # mkstemp creates 0600 by design; this file is service-shared
+                # state under a setgid ``hal0`` dir. A root-run CLI leaving it
+                # 0600 root:root 500'd every /api/stacks read for the hal0-user
+                # API (ct105, 2026-07-12→08-24) — chmod before replace so the
+                # group always keeps rw.
+                os.fchmod(f.fileno(), 0o664)
         except BaseException:
             with suppress(OSError):
                 os.close(fd)
@@ -97,6 +118,11 @@ def read_stack_state(path: Path | str) -> StackStateRecord | None:
     A missing file is the normal "no stack applied" case. A corrupt/truncated
     state.json (invalid JSON or a non-object top-level) degrades to the same —
     a cosmetic status read must never raise.
+
+    Raises:
+        StacksStateUnreadable: If the file exists but cannot be read
+            (permissions) — unlike absence/corruption this is an operator
+            problem that must surface, not degrade to "no stack applied".
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -105,6 +131,11 @@ def read_stack_state(path: Path | str) -> StackStateRecord | None:
         return None
     except json.JSONDecodeError:
         return None
+    except PermissionError as exc:
+        raise StacksStateUnreadable(
+            f"stacks state.json unreadable at {path}: {exc}; fix: chgrp hal0 && chmod 640",
+            details={"path": str(path)},
+        ) from exc
     if not isinstance(data, dict):
         return None
     return StackStateRecord.from_dict(data)
