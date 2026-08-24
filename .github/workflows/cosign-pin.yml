@@ -82,7 +82,7 @@ jobs:
         # from the in-tree pin (its documented fallback, and what an operator
         # gets locally); installing the current release here means the
         # verifier is not itself the artifact under review.
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Check the pin against the signed sigstore checksums
         id: check
