@@ -95,6 +95,7 @@ from hal0.slots.naming import (
     slot_quadlet_name,
     slot_unit_name,
 )
+from hal0.slots.state import SlotSpawnFailed
 from hal0.system.seam import SystemCtlSeam, is_hal0_service_user
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
@@ -2360,7 +2361,32 @@ class ContainerProvider(Provider):
         # path every load/restart/swap goes through, before the start. No-op
         # for a healthy unit.
         self.reset_failed(slot_name)
-        self._run("systemctl", "restart", self._unit_name(slot_name))
+        unit = self._unit_name(slot_name)
+        try:
+            self._run("systemctl", "restart", unit)
+        except subprocess.CalledProcessError as exc:
+            # #1424 facet 2: raw, this is not a Hal0Error — it falls through
+            # SlotManager.load()'s re-raise into the API's generic Exception
+            # handler as 500 ``system.internal``, and ``str(exc)`` (the full
+            # sudo seam argv) is what gets stamped into the slot's
+            # user-visible ``metadata.message``. Wrap it typed: the envelope
+            # is ``slot.spawn_failed`` and the message is systemd's failure
+            # reason (the #1791 probe), never the argv. The raw error stays
+            # on the cause chain for logs.
+            reason = self.unit_failure_reason(slot_name)
+            if not reason:
+                # Probe read nothing terminal (seam denied the verb, race
+                # with systemd, …) — still name the unit and the next step,
+                # not the command line.
+                reason = (
+                    f"systemctl restart {unit} failed (exit {exc.returncode}) "
+                    f"— see `journalctl -u {unit}`"
+                )
+            log.error(
+                "container.unit_start_failed",
+                extra={"slot": slot_name, "unit": unit, "reason": reason},
+            )
+            raise SlotSpawnFailed(reason, details={"slot": slot_name}) from exc
         log.info(
             "container.unit_started",
             extra={"slot": slot_name, "unit": self._unit_name(slot_name)},
