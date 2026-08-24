@@ -39,6 +39,7 @@ import { useModels } from '@/api/hooks/useModels'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive, imageStatusChip } from './slot-status.js'
+import { SlotBreakerChip } from './breaker-chip.jsx'
 import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -526,6 +527,9 @@ export function SlotScard({
           </div>
         )}
         <div className={'scard-foot' + (full ? '' : ' bare')}>
+          {/* #2038: breaker first — when the slot is deliberately refusing
+              loads, that is the most actionable thing on the card. */}
+          <SlotBreakerChip s={s} />
           <BackendMismatch s={s} onEdit={onEdit} />
           <SlotImageUnknownChip s={s} />
           {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
