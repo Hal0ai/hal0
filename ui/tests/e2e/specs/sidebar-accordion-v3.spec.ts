@@ -3,11 +3,13 @@
  *
  * Two behaviours pinned here:
  *
- *  1. Accordion — parent rows with sub-links (Slots ▸ Endpoints/Profiles,
- *     Agents ▸ Memory/MCP) start COLLAPSED. The sub-links don't render until
- *     the parent is opened (via its caret), and the section you navigate into
- *     auto-expands. This is the "endpoints/profiles don't show until Slots is
- *     clicked" contract.
+ *  1. Accordion — parent rows with sub-links (Slots ▸ Endpoints/Runner
+ *     Images/Stacks, Models ▸ Profiles, Agents ▸ Memory/MCP;
+ *     runner-catalogue-v2 moved Runner Images under Slots and Profiles under
+ *     Models) start COLLAPSED. The sub-links don't render until the parent is
+ *     opened (via its caret), and the section you navigate into auto-expands.
+ *     This is the "sub-links don't show until their parent is clicked"
+ *     contract.
  *
  *  2. Services zone — a separate group pinned to the sidebar bottom, fenced off
  *     from the app/config nav above. Holds Kanban (internal #board) plus the
@@ -42,13 +44,13 @@ test.describe('sidebar accordion', () => {
 
     // Collapsed by default on an unrelated route — sub-links absent.
     await expect(sb.locator('[data-testid="nav-slots-endpoints"]')).toHaveCount(0)
-    await expect(sb.locator('[data-testid="nav-slots-profiles"]')).toHaveCount(0)
+    await expect(sb.locator('[data-testid="nav-slots-runner-images"]')).toHaveCount(0)
     await expect(sb.locator('[data-testid="nav-mcp"]')).toHaveCount(0)
 
     // Expand Slots via its caret → its sub-links appear; Agents stays closed.
     await sb.locator('[data-testid="nav-slots-toggle"]').click()
     await expect(sb.locator('[data-testid="nav-slots-endpoints"]')).toBeVisible()
-    await expect(sb.locator('[data-testid="nav-slots-profiles"]')).toBeVisible()
+    await expect(sb.locator('[data-testid="nav-slots-runner-images"]')).toBeVisible()
     await expect(sb.locator('[data-testid="nav-mcp"]')).toHaveCount(0)
 
     // Collapse again — sub-links go away.
@@ -62,7 +64,14 @@ test.describe('sidebar accordion', () => {
     await page.goto('/#slots/endpoints')
     const sb = page.locator('.sidebar')
     await expect(sb.locator('[data-testid="nav-slots-endpoints"]')).toBeVisible({ timeout: FIVE_S })
-    await expect(sb.locator('[data-testid="nav-slots-profiles"]')).toBeVisible()
+    await expect(sb.locator('[data-testid="nav-slots-runner-images"]')).toBeVisible()
+  })
+
+  test('Models hosts the Profiles sub-link (runner-catalogue-v2 IA)', async ({ page }) => {
+    await page.goto('/#models/profiles')
+    const sb = page.locator('.sidebar')
+    // Auto-expanded because the route is inside the Models section.
+    await expect(sb.locator('[data-testid="nav-models-profiles"]')).toBeVisible({ timeout: FIVE_S })
   })
 })
 

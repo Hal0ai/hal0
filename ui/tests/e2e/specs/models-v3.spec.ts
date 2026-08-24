@@ -1,7 +1,9 @@
 /**
  * models-v3 — `#models` route renders the 4-tab catalog (Inference / Image / Upstream /
- * Runner Images) with simplified OR filter chips, pagination, and download-icon
- * installed indicators.
+ * Profiles) with simplified OR filter chips, pagination, and download-icon
+ * installed indicators. (runner-catalogue-v2 IA: the Runner Images tab moved
+ * to Slots ▸ Runner Images — see runner-images-slots-v3.spec.ts — and
+ * Profiles moved here from Slots.)
  *
  * Wireup (#220 brief): the catalog drives off `useModels()` and the
  * AddByHF modal calls `POST /api/models/inspect` → `usePullJob().start()`.
@@ -21,14 +23,16 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.mdl-list')).toBeVisible()
   })
 
-  test('four tabs: Inference, Image/ComfyUI, Upstream, Runner Images', async ({ page }) => {
+  test('four tabs: Inference, Image/ComfyUI, Upstream, Profiles', async ({ page }) => {
     await page.goto('/#models')
     await expect(page.locator('.slot-tab[role="tab"]')).toHaveCount(4)
     await expect(page.locator('.slot-tab:has-text("Inference Models")')).toBeVisible()
     await expect(page.locator('.slot-tab:has-text("Image / ComfyUI")')).toBeVisible()
     await expect(page.locator('.slot-tab:has-text("Upstream Models")')).toBeVisible()
-    // Runner Images (feat/runner-image-catalogue) — subpage of Models, not top-level nav.
-    await expect(page.locator('.slot-tab:has-text("Runner Images")')).toBeVisible()
+    // Profiles (runner-catalogue-v2 IA) — moved here from Slots; Runner
+    // Images left for Slots ▸ Runner Images.
+    await expect(page.locator('.slot-tab:has-text("Profiles")')).toBeVisible()
+    await expect(page.locator('.slot-tab:has-text("Runner Images")')).toHaveCount(0)
     // Default tab is Inference
     await expect(page.locator('.slot-tab.on:has-text("Inference Models")')).toBeVisible()
   })
@@ -39,19 +43,28 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.view .vh button:has-text("Search HF")')).toBeVisible()
   })
 
-  test('Runner Images tab swaps the page heading in place — no second vh', async ({ page }) => {
+  test('Profiles tab swaps the page heading in place — no second vh', async ({ page }) => {
     await page.goto('/#models')
-    await page.locator('.slot-tab:has-text("Runner Images")').click()
+    await page.locator('.slot-tab:has-text("Profiles")').click()
+    // The tab routes through the hash so the sidebar sub-link stays in sync.
+    await expect(page).toHaveURL(/#models\/profiles/)
     // The single catalog heading renames; the view must not stack a second one.
     await expect(page.locator('.view .vh h1')).toHaveCount(1)
-    await expect(page.locator('.view .vh h1')).toHaveText('Runner Images')
-    // Header actions swap to the sync CTA; the Models CTAs leave.
-    await expect(page.getByTestId('ri-sync')).toBeVisible()
+    await expect(page.locator('.view .vh h1')).toHaveText('Profiles')
+    // The Models CTAs leave — ProfilesView carries its own actions.
     await expect(page.locator('.view .vh button:has-text("Add by HF coords")')).toHaveCount(0)
     // Switching back restores the Models heading + CTAs.
     await page.locator('.slot-tab:has-text("Inference Models")').click()
     await expect(page.locator('.view .vh h1')).toHaveText('Models')
     await expect(page.locator('.view .vh button:has-text("Add by HF coords")')).toBeVisible()
+  })
+
+  test('legacy #slots/profiles and #profiles deep-links land on Models ▸ Profiles', async ({ page }) => {
+    await page.goto('/#slots/profiles')
+    await expect(page).toHaveURL(/#models\/profiles/)
+    await expect(page.locator('.slot-tab.on:has-text("Profiles")')).toBeVisible()
+    await page.goto('/#profiles')
+    await expect(page).toHaveURL(/#models\/profiles/)
   })
 
   test('simplified filter chips toggle OR semantics', async ({ page }) => {
