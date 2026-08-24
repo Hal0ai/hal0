@@ -189,6 +189,20 @@ class TestTagPathSafety:
         with pytest.raises(RunnerImageTagInvalid):
             pull_job_file("hal0ai/hal0-toolbox-cpu", tag=bad)
 
+    def test_containment_guard_refuses_escaping_filenames(self) -> None:
+        """Belt-and-braces below the sanitise/allowlist layers: the single
+        choke point building jobs-dir paths resolves the candidate and
+        refuses anything outside the directory."""
+        from hal0.registry.runner_pull import RunnerPullPathEscape, _contained_jobs_path
+
+        with pytest.raises(RunnerPullPathEscape):
+            _contained_jobs_path("../../../etc/passwd.json")
+        with pytest.raises(RunnerPullPathEscape):
+            _contained_jobs_path("a/../../b.json")
+        ok = _contained_jobs_path("ok.json")
+        assert ok.name == "ok.json"
+        assert ok.parent == _contained_jobs_path("ok2.json").parent
+
     def test_valid_tag_lands_verbatim_inside_jobs_dir(self) -> None:
         tagged = pull_job_file("hal0ai/hal0-toolbox-cpu", tag="0824")
         untagged = pull_job_file("hal0ai/hal0-toolbox-cpu")

@@ -76,6 +76,19 @@ class RunnerImageTagInvalid(RunnerPullError):
     status = 400
 
 
+class RunnerPullPathEscape(RunnerPullError):
+    """A jobs-dir path candidate resolved outside the pull-jobs directory.
+
+    Unreachable through the public surface — ids are sanitised and tags
+    allowlist-validated before a filename is composed — but the containment
+    check is the canonical last-line barrier at the single point where
+    request-derived data becomes a filesystem path.
+    """
+
+    code = "runner_image.path_not_contained"
+    status = 400
+
+
 class RunnerImageTagNotAvailable(RunnerPullError):
     """The requested tag isn't in the row's catalogued ``available_tags``.
 
@@ -193,6 +206,22 @@ def _pull_jobs_dir() -> Path:
     return paths.var_lib() / "runner-image-pull-jobs"
 
 
+def _contained_jobs_path(filename: str) -> Path:
+    """Resolve ``filename`` inside the pull-jobs dir, refusing escapees.
+
+    The id/tag halves are sanitised/allowlist-validated before a filename
+    exists, so escape is unreachable; this containment check is the
+    belt-and-braces barrier where request-derived data becomes a path.
+    """
+    base = _pull_jobs_dir().resolve()
+    candidate = (base / filename).resolve()
+    if not candidate.is_relative_to(base):
+        raise RunnerPullPathEscape(
+            "snapshot path escapes the pull-jobs directory", details={"filename": filename}
+        )
+    return candidate
+
+
 def pull_job_file(image_id: str, *, tag: str | None = None) -> Path:
     """Snapshot path for one image's pull job — per-tag when the job has one.
 
@@ -206,7 +235,7 @@ def pull_job_file(image_id: str, *, tag: str | None = None) -> Path:
     stem = _sanitise_id(image_id)
     if tag:
         stem = f"{stem}@{validate_pull_tag(tag)}"
-    return _pull_jobs_dir() / f"{stem}.json"
+    return _contained_jobs_path(f"{stem}.json")
 
 
 def persisted_job_files(image_id: str) -> list[Path]:
@@ -220,7 +249,7 @@ def persisted_job_files(image_id: str) -> list[Path]:
     # HAL0-SUNSET: v1.1 — the bare <id>.json lookup reads snapshots written
     # before per-tag files (#2048); drop it once those have aged out of the
     # 14-day sweep_pull_jobs window.
-    out = [p for p in (jobs_dir / f"{stem}.json",) if p.is_file()]
+    out = [p for p in (_contained_jobs_path(f"{stem}.json"),) if p.is_file()]
     out.extend(sorted(jobs_dir.glob(f"{stem}@*.json")))
     return out
 
@@ -401,6 +430,7 @@ __all__ = [
     "RunnerPullError",
     "RunnerPullJob",
     "RunnerPullJobNotFound",
+    "RunnerPullPathEscape",
     "list_persisted_jobs",
     "local_marker_path",
     "make_job",
