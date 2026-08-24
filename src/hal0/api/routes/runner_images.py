@@ -251,9 +251,10 @@ async def pull_runner_image_status(
 ) -> dict[str, object]:
     """Current pull job for ``image_id``, with on-disk fallback.
 
-    ``?tag=`` answers only when the recorded job is for that tag (job
-    records carry ``tag``); a mismatch is 404, so a per-tag poller can't
-    be fooled by another tag's job in the single per-image slot.
+    ``?tag=`` answers only with a job for that tag: the in-memory slot
+    when it matches, else that tag's persisted snapshot (snapshots are
+    per-tag files, so a newer pull can't orphan an older tag's result),
+    else 404 — a per-tag poller can't be fooled by another tag's job.
     """
     jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
     return _pull_jobs.status(image_id, jobs, tag=tag)

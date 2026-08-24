@@ -175,6 +175,20 @@ class TestJobTag:
 
 
 class TestPersistence:
+    def test_tagged_jobs_persist_side_by_side(self, store: RunnerImageStore) -> None:
+        """Per-tag snapshot files: a new tag's pull must not overwrite the
+        previous tag's terminal record (review of #2048)."""
+        a = make_job("hal0ai/hal0-toolbox-cpu", "ghcr.io/hal0ai/hal0-toolbox-cpu:0822", tag="0822")
+        a.state = "completed"
+        persist_pull_job(a)
+        b = make_job("hal0ai/hal0-toolbox-cpu", "ghcr.io/hal0ai/hal0-toolbox-cpu:0824", tag="0824")
+        persist_pull_job(b)
+
+        assert pull_job_file(a.image_id, tag="0822").exists()
+        assert pull_job_file(b.image_id, tag="0824").exists()
+        tags = {s.get("tag") for s in list_persisted_jobs() if s.get("image_id") == a.image_id}
+        assert tags == {"0822", "0824"}
+
     def test_persist_and_reload_snapshot(self, store: RunnerImageStore) -> None:
         job = _job()
         job.state = "completed"

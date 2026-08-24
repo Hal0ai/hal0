@@ -349,6 +349,29 @@ class TestPerTagPull:
         assert body["tag"] == "0824"
         assert body["id"] == job.job_id
 
+    def test_status_for_previous_tag_survives_new_pull(self, client: TestClient) -> None:
+        """A terminal tag-A job stays reachable via ?tag=A after tag B's pull
+        claims the single in-memory slot — snapshots persist per (image, tag),
+        so starting a new tag's pull can't orphan the old tag's result."""
+        self._seed(client)
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+
+        first = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0822"})
+        assert first.status_code == 202
+        done = self._wait_terminal(client, params={"tag": "0822"})
+        assert done["state"] == "completed"
+
+        second = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0824"})
+        assert second.status_code == 202
+
+        old = client.get(f"/api/runner-images/{self.IMAGE_ID}/pull/status", params={"tag": "0822"})
+        assert old.status_code == 200
+        body = old.json()
+        assert body["tag"] == "0822"
+        assert body["state"] == "completed"
+        assert body["image_ref"] == "ghcr.io/hal0ai/hal0-combined:0822"
+
     def test_status_tag_filter(self, client: TestClient) -> None:
         self._seed(client)
         pulled: list[str] = []

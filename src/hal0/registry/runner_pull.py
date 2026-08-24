@@ -159,13 +159,36 @@ def _pull_jobs_dir() -> Path:
     return paths.var_lib() / "runner-image-pull-jobs"
 
 
-def pull_job_file(image_id: str) -> Path:
-    return _pull_jobs_dir() / f"{_sanitise_id(image_id)}.json"
+def pull_job_file(image_id: str, *, tag: str | None = None) -> Path:
+    """Snapshot path for one image's pull job — per-tag when the job has one.
+
+    Tagged jobs land at ``<id>@<tag>.json`` so a new tag's pull can't
+    overwrite the previous tag's terminal record (``@`` never survives
+    ``_sanitise_id``, so the separator is unambiguous); legacy/untagged
+    jobs keep the bare ``<id>.json`` name.
+    """
+    stem = _sanitise_id(image_id)
+    if tag:
+        stem = f"{stem}@{_sanitise_id(tag)}"
+    return _pull_jobs_dir() / f"{stem}.json"
+
+
+def persisted_job_files(image_id: str) -> list[Path]:
+    """Every snapshot file for ``image_id``: the legacy untagged name plus
+    any per-tag ``<id>@<tag>.json`` siblings (name order, no ranking —
+    callers pick by snapshot content, e.g. ``started_at``)."""
+    jobs_dir = _pull_jobs_dir()
+    if not jobs_dir.is_dir():
+        return []
+    stem = _sanitise_id(image_id)
+    out = [p for p in (jobs_dir / f"{stem}.json",) if p.is_file()]
+    out.extend(sorted(jobs_dir.glob(f"{stem}@*.json")))
+    return out
 
 
 def persist_pull_job(job: RunnerPullJob) -> None:
     """Atomically mirror a job snapshot to disk (best-effort, fail-soft)."""
-    path = pull_job_file(job.image_id)
+    path = pull_job_file(job.image_id, tag=job.tag)
     try:
         ensure_shared_dir(path.parent)  # 2775, umask-proof (#1896)
         fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -342,6 +365,7 @@ __all__ = [
     "local_marker_path",
     "make_job",
     "persist_pull_job",
+    "persisted_job_files",
     "pull_job_file",
     "run_runner_pull",
     "sweep_pull_jobs",
