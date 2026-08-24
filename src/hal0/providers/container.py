@@ -860,6 +860,12 @@ def _render_quadlet_from_plan(
             "RestartSec=5",
             "RestartSteps=6",
             "RestartMaxDelaySec=300",
+            # #2037 fail-fast: the runner entrypoint translates a death
+            # before /health ever answered into exit 64 ("died during model
+            # load" — corrupt GGUF, bogus flag), which would otherwise burn
+            # the whole ramp above on a doomed model. Old images never exit
+            # 64, so this is inert against them — safe version skew.
+            "RestartPreventExitStatus=64",
             f"SyslogIdentifier={container_name}",
             "StandardOutput=journal",
             "StandardError=journal",
