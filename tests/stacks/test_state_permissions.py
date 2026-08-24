@@ -40,6 +40,9 @@ def test_read_state_permission_error_is_typed(tmp_path):
     with pytest.raises(StacksStateUnreadable) as exc:
         read_stack_state(path)
     assert "state.json" in str(exc.value)
+    # The writer produces 0o664 (root CLI and hal0-user service both write) —
+    # the operator hint must match the behavior, not a read-only 640.
+    assert "chmod 664" in str(exc.value)
 
 
 def test_load_stacks_config_permission_error_is_typed(tmp_path):
@@ -54,3 +57,28 @@ def test_load_stacks_config_permission_error_is_typed(tmp_path):
     with pytest.raises(StacksStateUnreadable) as exc:
         load_stacks_config(path=p)
     assert "stacks.toml" in str(exc.value)
+    assert "chmod 664" in str(exc.value)
+
+
+def test_drift_status_degrades_when_state_unreadable(tmp_hal0_home, caplog):
+    """drift_status is a cosmetic status read — its documented philosophy is
+    that it must never raise. An unreadable state.json degrades to the same
+    shape as "no stack applied", with a warning for operator visibility (the
+    stacks list path still raises the typed error loudly)."""
+    import logging
+    from pathlib import Path
+
+    from hal0.config import paths
+    from hal0.stacks import StacksCatalog
+    from hal0.stacks.apply import StackApplyEngine
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads through 0o000")
+    state_path = paths.stacks_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text("{}", encoding="utf-8")
+    state_path.chmod(0o000)
+    catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc" / "hal0" / "stacks.toml")
+    with caplog.at_level(logging.WARNING, logger="hal0.stacks.apply"):
+        assert StackApplyEngine().drift_status(catalog) == {"active": None, "status": "none"}
+    assert any("stacks.state_unreadable_for_drift" in r.message for r in caplog.records)

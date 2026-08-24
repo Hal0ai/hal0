@@ -919,7 +919,7 @@ def load_stacks_config(path: Path | None = None) -> StacksConfig:
         from hal0.stacks.state import StacksStateUnreadable
 
         raise StacksStateUnreadable(
-            f"stacks.toml unreadable at {target}: {exc}; fix: chgrp hal0 && chmod 640",
+            f"stacks.toml unreadable at {target}: {exc}; fix: chgrp hal0 && chmod 664",
             details={"path": str(target)},
         ) from exc
     try:

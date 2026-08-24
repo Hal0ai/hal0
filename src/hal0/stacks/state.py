@@ -133,7 +133,7 @@ def read_stack_state(path: Path | str) -> StackStateRecord | None:
         return None
     except PermissionError as exc:
         raise StacksStateUnreadable(
-            f"stacks state.json unreadable at {path}: {exc}; fix: chgrp hal0 && chmod 640",
+            f"stacks state.json unreadable at {path}: {exc}; fix: chgrp hal0 && chmod 664",
             details={"path": str(path)},
         ) from exc
     if not isinstance(data, dict):
