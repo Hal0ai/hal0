@@ -1436,30 +1436,37 @@ function buildMemoryGraphStatus() {
   }
 }
 
-// ─── Runner Images (Models → Runner Images tab) ───────────────────────────
+// ─── Runner Images (Slots → Runner Images tab) ────────────────────────────
 // Shape mirrors /api/runner-images (registry rows synced from
-// hal0-runner-images images.json + GHCR). One row is enough for the
-// catalog list + card to render; the pulls list must be an ARRAY — the
-// downloads pane calls `.filter` on it directly.
+// hal0-runner-images images.json + GHCR), including the runner-catalogue-v2
+// contract enrichment (available_tags newest-first, is_default, in_use_by).
+// One row is enough for the catalog list + card + Defaults strip to render;
+// the pulls list must be an ARRAY — the downloads pane calls `.filter` on it
+// directly.
 function buildRunnerImages() {
   return {
     images: [
       {
-        id: 'rocmfpx',
-        image: 'ghcr.io/hal0ai/hal0-rocmfpx',
-        tag: 'ade07ba',
+        id: 'rocmfpx-combined',
+        image: 'ghcr.io/hal0ai/hal0-combined',
+        tag: '0822',
         digest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
         size_bytes: 7_340_032_000,
         manifest_key: null,
-        ownership: 'referenced',
-        publish: 'manual',
-        notes: 'ROCmFPX runner — HIP+Vulkan single build (mock fixture).',
+        ownership: 'owned',
+        publish: 'external',
+        notes: 'Canonical ROCmFPX+Vulkan combined runner (mock fixture).',
         build: null,
         local_path: null,
         downloaded_at: null,
         discovered_at: '2026-08-08T00:00:00Z',
         updated_at: '2026-08-08T00:00:00Z',
         extra: {},
+        // Headline deliberately trails available_tags[0] so the "newer tag"
+        // chip surface renders in mock mode.
+        available_tags: ['0824', '0822'],
+        is_default: { family: 'rocmfpx', source: 'release' },
+        in_use_by: ['agent', 'utility'],
       },
     ],
   }

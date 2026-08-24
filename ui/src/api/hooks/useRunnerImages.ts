@@ -12,8 +12,16 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPost, Hal0Error } from '../client'
+import { apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
+
+// Which family default (if any) resolves to this row's image, and where that
+// default comes from: the baked release constant or the operator's
+// [slots].default_images override (runner-catalogue-v2 contract).
+export interface RunnerImageDefault {
+  family: string
+  source: 'override' | 'release'
+}
 
 export interface RunnerImage {
   id: string
@@ -31,6 +39,12 @@ export interface RunnerImage {
   discovered_at: string | null
   updated_at: string | null
   extra: Record<string, unknown>
+  // runner-catalogue-v2 enrichment (backend PR feat/runner-catalogue-backend).
+  // Optional so rows from a pre-contract backend still type-check; the view
+  // helpers degrade gracefully when they're absent.
+  available_tags?: string[]
+  is_default?: RunnerImageDefault | null
+  in_use_by?: string[]
 }
 
 const RUNNER_IMAGES_POLL_MS = 30_000
@@ -76,6 +90,25 @@ export function useRunnerImageSync() {
   return useMutation<RunnerImageSyncResult, Hal0Error, void>({
     mutationFn: () => apiPost<RunnerImageSyncResult>(ENDPOINTS.runnerImagesSync),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['runner-images'] })
+    },
+  })
+}
+
+// ─── useSetDefaultImage ──────────────────────────────────────────────
+// Writes (or clears) a per-family operator default via the existing
+// PUT /api/settings deep-merge: {"slots": {"default_images": {family: ref}}}.
+// Clearing sends `ref: null` — the settings route treats an explicit null as
+// key removal (Task C's verified deep-merge semantics). Invalidate both the
+// settings cache and the runner-image rows: `is_default` is computed
+// server-side from the effective default map.
+export function useSetDefaultImage() {
+  const qc = useQueryClient()
+  return useMutation<unknown, Hal0Error, { family: string; ref: string | null }>({
+    mutationFn: ({ family, ref }) =>
+      apiPut(ENDPOINTS.settings, { slots: { default_images: { [family]: ref } } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['settings'] })
       qc.invalidateQueries({ queryKey: ['runner-images'] })
     },
   })
