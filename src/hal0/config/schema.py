@@ -2161,6 +2161,61 @@ class SlotsConfig(BaseModel):
         ),
     )
 
+    default_images: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-runner-family operator default-image overrides "
+            "(runner-image-catalogue v2). Keys are hal0.runners.RUNNER_IMAGES "
+            "family keys (rocmfpx, vulkanfpx, cuda, cpu, flm, kokoro, "
+            "moonshine, qwen3tts, comfyui); values are full image refs "
+            "(e.g. 'ghcr.io/hal0ai/hal0-combined:0824'). A family listed "
+            "here launches that ref instead of the release-baked default "
+            "wherever no per-slot image_pin applies "
+            "(hal0.providers.container._resolve_image_ref). CLEAR SEMANTICS: "
+            "the settings PUT deep-merge has no key-delete idiom, so sending "
+            "an explicit null value for a family removes the override (the "
+            "validator drops null-valued keys); an empty string is rejected. "
+            "Applies on the next slot (re)start."
+        ),
+    )
+
+    @field_validator("default_images", mode="before")
+    @classmethod
+    def _default_images_known_families(cls, v: Any) -> Any:
+        """Validate the override map — and implement its clear idiom.
+
+        A ``None`` VALUE is the documented way to clear one family's
+        override (the settings PUT deep-merge replaces scalars and has no
+        delete idiom, so ``{"rocmfpx": null}`` must mean "remove the key"
+        rather than fail validation). Unknown family keys and empty/
+        non-string refs are rejected with the offending key named — the
+        family vocabulary is ``hal0.runners.RUNNER_IMAGES`` (imported
+        lazily: hal0.runners imports THIS module at import time, so a
+        module-level import here would be a cycle).
+        """
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            return v  # let pydantic's dict[str, str] coercion produce the error
+        from hal0.runners import RUNNER_IMAGES
+
+        cleaned: dict[str, Any] = {}
+        for key, ref in v.items():
+            if ref is None:
+                continue  # explicit null = clear this family's override
+            if key not in RUNNER_IMAGES:
+                raise ValueError(
+                    f"[slots].default_images key {key!r} is not a known runner "
+                    f"family (valid: {', '.join(sorted(RUNNER_IMAGES))})"
+                )
+            if not isinstance(ref, str) or not ref.strip():
+                raise ValueError(
+                    f"[slots].default_images[{key!r}] must be a non-empty image "
+                    "ref (send null to clear the override)"
+                )
+            cleaned[key] = ref.strip()
+        return cleaned
+
     @field_validator("publish_host")
     @classmethod
     def _publish_host_sane(cls, v: str) -> str:

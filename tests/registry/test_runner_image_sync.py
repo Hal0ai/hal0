@@ -59,14 +59,21 @@ def _route_handler(
     ghcr_fail: set[str] | None = None,
     manifest_body: dict | None = None,
     child_manifests: dict[str, dict] | None = None,
+    tags: list[str] | None = None,
+    tags_fail: set[str] | None = None,
 ):
     """MockTransport handler for raw.githubusercontent.com + ghcr.io.
 
     ``manifest_body`` overrides the manifest returned for tag refs;
     ``child_manifests`` maps digest refs to bodies (multi-arch children).
+    ``tags`` overrides the ``tags/list`` payload (default ``["latest"]``);
+    ``tags_fail`` names repos whose ``tags/list`` call 500s (the manifest
+    probe still succeeds — exercises the degrade-to-empty path).
     """
     ghcr_fail = ghcr_fail or set()
     child_manifests = child_manifests or {}
+    tags = tags if tags is not None else ["latest"]
+    tags_fail = tags_fail or set()
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -92,7 +99,10 @@ def _route_handler(
                 json=manifest_body if manifest_body is not None else _MANIFEST_BODY,
             )
         if "/tags/list" in url:
-            return httpx.Response(200, json={"tags": ["latest"]})
+            repo = url.split("https://ghcr.io/v2/")[1].split("/tags/list")[0]
+            if repo in tags_fail:
+                return httpx.Response(500, content=b"nope")
+            return httpx.Response(200, json={"tags": tags})
         return httpx.Response(404, content=b"unrouted: " + url.encode())
 
     return handler
@@ -289,6 +299,95 @@ async def test_sync_prunes_stale_rows_but_keeps_downloaded(tmp_path: Path) -> No
 
     ids = {i.id for i in store.list()}
     assert ids == {"cpu", "hal0ai/hal0-toolbox-flm", "hal0ai/old-downloaded"}
+
+
+# ── tag tracking (runner-image-catalogue v2) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_pinned_entry_keeps_tag_but_gains_available_tags(tmp_path: Path) -> None:
+    """A pinned images.json entry keeps its pin as the headline ``tag`` but
+    still stores the full newest-first ``available_tags`` list."""
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _route_handler(images_json=_IMAGES_JSON, tags=["0822", "latest", "0824"])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu = store.get("cpu")
+    assert cpu is not None
+    assert cpu.tag == "latest"  # the images.json pin stays the headline
+    assert cpu.available_tags == ["0824", "0822", "latest"]
+
+
+@pytest.mark.asyncio
+async def test_unpinned_entry_headline_is_newest_tag(tmp_path: Path) -> None:
+    """No ``tag`` pin → the headline is the newest sorted tag, not ``latest``."""
+    images_json = {
+        "schema": "hal0.runner-images.v1",
+        "images": [
+            {"id": "combined", "image": "ghcr.io/hal0ai/hal0-combined"},
+        ],
+    }
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _route_handler(images_json=images_json, tags=["0822", "latest", "0824"])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    row = store.get("combined")
+    assert row is not None
+    assert row.tag == "0824"
+    assert row.available_tags == ["0824", "0822", "latest"]
+
+
+@pytest.mark.asyncio
+async def test_tags_list_failure_degrades_to_empty_available_tags(tmp_path: Path) -> None:
+    """A failing ``tags/list`` must not fail the row: the pinned headline
+    still resolves and ``available_tags`` degrades to ``[]``."""
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _route_handler(images_json=_IMAGES_JSON, tags_fail={"hal0ai/hal0-toolbox-cpu"})
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert "cpu" not in result.probe_errors
+    cpu = store.get("cpu")
+    assert cpu is not None
+    assert cpu.tag == "latest"
+    assert cpu.available_tags == []
+
+
+@pytest.mark.asyncio
+async def test_unpinned_entry_tags_list_failure_falls_back_to_latest(tmp_path: Path) -> None:
+    """No pin AND no tag list → the headline falls back to ``latest``."""
+    images_json = {
+        "schema": "hal0.runner-images.v1",
+        "images": [
+            {"id": "combined", "image": "ghcr.io/hal0ai/hal0-combined"},
+        ],
+    }
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _route_handler(images_json=images_json, tags_fail={"hal0ai/hal0-combined"})
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    row = store.get("combined")
+    assert row is not None
+    assert row.tag == "latest"
+    assert row.available_tags == []
 
 
 @pytest.mark.asyncio
