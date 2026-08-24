@@ -46,6 +46,13 @@ export interface SlotMetrics {
   res?: string
 }
 
+/** #2012 crash-loop breaker snapshot view — see Slot.metadata.breaker. */
+export interface SlotBreaker {
+  state: 'backoff' | 'parked' | 'half-open'
+  failures: number
+  retry_after_s: number
+}
+
 export interface Slot {
   name: string
   type: string
@@ -101,6 +108,16 @@ export interface Slot {
    *  used / max". Absent when the slot configures no context window —
    *  the UI shows an em-dash, never a fabricated number. */
   ctx_max?: number
+  /** Crash-loop breaker view (#2012), stamped into slot metadata by the
+   *  manager whenever the breaker is non-closed and ABSENT otherwise —
+   *  presence of `metadata.breaker` is the render signal. `retry_after_s`
+   *  is computed at snapshot time; the UI counts down from fetch. Prefer
+   *  this over the older `metadata.parked` extra, which is stamped only on
+   *  ERROR transitions and goes stale. */
+  metadata?: {
+    breaker?: SlotBreaker
+    [key: string]: unknown
+  }
   /** Wall-clock epoch (seconds) of the most recent request served by
    *  this slot. ``null``/undefined means hal0-api has not seen a request
    *  for this slot since startup. Used by the slots view to render the
@@ -340,6 +357,9 @@ function normalizeSlot(s: any): Slot {
     // profile image). Coerce the flag to a boolean.
     actual_image: s?.actual_image ?? null,
     image_mismatch: !!s?.image_mismatch,
+    // metadata rides the spread above; restated so the pass-through is a
+    // documented contract (breaker chip, #2038) rather than an accident.
+    metadata: s?.metadata,
     // container_status / container_health are set by _container_state_enrichment.
     container_status: s?.container_status ?? null,
     container_health: s?.container_health ?? null,
