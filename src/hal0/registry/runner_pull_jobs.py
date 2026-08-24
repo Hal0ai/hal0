@@ -211,7 +211,7 @@ def load_persisted(image_id: str, tag: str | None = None) -> dict[str, Any] | No
     Snapshots are per-(image, tag) files. With ``tag``, only that tag's
     snapshot answers (pre-per-tag snapshots carry no ``tag`` key and never
     match). Without, the most recent pull wins — highest ``started_at``
-    across the untagged legacy file and every per-tag sibling.
+    across the bare untagged file and every per-tag sibling.
     """
     if tag is not None:
         data = _read_snapshot(pull_job_file(image_id, tag=tag))

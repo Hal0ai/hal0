@@ -103,8 +103,8 @@ class RunnerPullJob:
     image_id: str
     image_ref: str
     #: The catalogue tag this job pulls (``image_ref``'s tag half). ``None``
-    #: only on legacy in-memory records; persisted pre-per-tag snapshots
-    #: simply lack the key.
+    #: only on in-memory records made without a tag; persisted pre-per-tag
+    #: snapshots simply lack the key.
     tag: str | None = None
     state: str = "queued"  # queued → running → {completed,failed,cancelled}
     layers_done: int = 0
@@ -164,8 +164,8 @@ def pull_job_file(image_id: str, *, tag: str | None = None) -> Path:
 
     Tagged jobs land at ``<id>@<tag>.json`` so a new tag's pull can't
     overwrite the previous tag's terminal record (``@`` never survives
-    ``_sanitise_id``, so the separator is unambiguous); legacy/untagged
-    jobs keep the bare ``<id>.json`` name.
+    ``_sanitise_id``, so the separator is unambiguous); untagged jobs
+    keep the bare ``<id>.json`` name.
     """
     stem = _sanitise_id(image_id)
     if tag:
@@ -174,13 +174,16 @@ def pull_job_file(image_id: str, *, tag: str | None = None) -> Path:
 
 
 def persisted_job_files(image_id: str) -> list[Path]:
-    """Every snapshot file for ``image_id``: the legacy untagged name plus
+    """Every snapshot file for ``image_id``: the bare untagged name plus
     any per-tag ``<id>@<tag>.json`` siblings (name order, no ranking —
     callers pick by snapshot content, e.g. ``started_at``)."""
     jobs_dir = _pull_jobs_dir()
     if not jobs_dir.is_dir():
         return []
     stem = _sanitise_id(image_id)
+    # HAL0-SUNSET: v1.1 — the bare <id>.json lookup reads snapshots written
+    # before per-tag files (#2048); drop it once those have aged out of the
+    # 14-day sweep_pull_jobs window.
     out = [p for p in (jobs_dir / f"{stem}.json",) if p.is_file()]
     out.extend(sorted(jobs_dir.glob(f"{stem}@*.json")))
     return out
