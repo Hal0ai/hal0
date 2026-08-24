@@ -62,6 +62,32 @@ class RunnerImageNotCatalogued(RunnerPullError):
     status = 404
 
 
+class RunnerImageTagNotAvailable(RunnerPullError):
+    """The requested tag isn't in the row's catalogued ``available_tags``.
+
+    Per-tag pulls (catalogue-v2 follow-up to #2043) are restricted to tags
+    the sync probe has actually seen — the headline ``tag`` is always
+    allowed (``available_tags`` may be ``[]`` on probe failure), anything
+    else must appear in the list. Free-text refs stay out on purpose: the
+    catalogue is the honesty boundary.
+    """
+
+    code = "runner_image.tag_not_available"
+    status = 404
+
+
+class RunnerPullConflict(RunnerPullError):
+    """A pull for a *different* tag of this image is already in flight.
+
+    Job state is keyed one-per-image (jobs dict, snapshot file, marker) —
+    honest answer to a second tag while one is downloading is 409, not a
+    silent "resumed" handle to the wrong tag.
+    """
+
+    code = "runner_image.pull_conflict"
+    status = 409
+
+
 def _sanitise_id(image_id: str) -> str:
     return _SANITISE_RE.sub("-", image_id).strip("-.") or "runner-image"
 
@@ -76,6 +102,10 @@ class RunnerPullJob:
     job_id: str
     image_id: str
     image_ref: str
+    #: The catalogue tag this job pulls (``image_ref``'s tag half). ``None``
+    #: only on legacy in-memory records; persisted pre-per-tag snapshots
+    #: simply lack the key.
+    tag: str | None = None
     state: str = "queued"  # queued → running → {completed,failed,cancelled}
     layers_done: int = 0
     layers_total: int = 0
@@ -93,6 +123,7 @@ class RunnerPullJob:
             "id": self.job_id,
             "image_id": self.image_id,
             "image_ref": self.image_ref,
+            "tag": self.tag,
             "state": self.state,
             "layers_done": self.layers_done,
             "layers_total": self.layers_total,
@@ -109,12 +140,13 @@ class RunnerPullJob:
         self.progress_event = asyncio.Event()
 
 
-def make_job(image_id: str, image_ref: str) -> RunnerPullJob:
-    """Create a fresh job record for ``image_id``."""
+def make_job(image_id: str, image_ref: str, *, tag: str | None = None) -> RunnerPullJob:
+    """Create a fresh job record for ``image_id`` (``tag`` = the ref's tag half)."""
     return RunnerPullJob(
         job_id=secrets.token_hex(8),
         image_id=image_id,
         image_ref=image_ref,
+        tag=tag,
         state="queued",
         started_at=time.time(),
     )
@@ -301,6 +333,8 @@ async def run_runner_pull(
 
 __all__ = [
     "RunnerImageNotCatalogued",
+    "RunnerImageTagNotAvailable",
+    "RunnerPullConflict",
     "RunnerPullError",
     "RunnerPullJob",
     "RunnerPullJobNotFound",

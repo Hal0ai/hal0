@@ -216,6 +216,152 @@ class TestEnrichRow:
         assert row["is_default"] is None
 
 
+# ── per-tag pull (catalogue v2 follow-up to #2043/#2044) ────────────────────
+
+
+class TestPerTagPull:
+    """POST /{id}/pull?tag=… pulls that catalogued tag, not just the headline.
+
+    #2043 scoped the UI per-tag Pull out because ``runner_pull_jobs.enqueue``
+    resolved ``image:tag`` exclusively from the row's headline tag. The route
+    now accepts an optional ``tag`` restricted to the row's ``available_tags``
+    (headline always allowed); omitting it keeps today's headline behaviour.
+    """
+
+    IMAGE_ID = "hal0ai/hal0-combined"
+
+    def _seed(self, client: TestClient) -> None:
+        from hal0.registry.runner_image import RunnerImage
+
+        client.app.state.runner_image_registry.upsert(
+            RunnerImage(
+                id=self.IMAGE_ID,
+                image="ghcr.io/hal0ai/hal0-combined",
+                tag="0824",
+                available_tags=["0824", "0822"],
+            )
+        )
+
+    def _stub_provider(self, pulled: list[str]) -> None:
+        class _RecordingProvider:
+            async def pull_image_stream(self, image: str):
+                pulled.append(image)
+                yield {"state": "completed", "layer": 1, "total_layers": 1}
+
+        runner_pull_jobs.provider_factory = lambda: _RecordingProvider()
+
+    def _wait_terminal(self, client: TestClient, params: dict[str, str] | None = None) -> dict:
+        import time
+
+        for _ in range(200):
+            resp = client.get(f"/api/runner-images/{self.IMAGE_ID}/pull/status", params=params)
+            if resp.status_code == 200 and resp.json()["state"] in (
+                "completed",
+                "failed",
+                "cancelled",
+            ):
+                return resp.json()
+            time.sleep(0.01)
+        raise AssertionError("pull job never reached a terminal state")
+
+    def test_explicit_tag_pulls_that_ref(self, client: TestClient) -> None:
+        self._seed(client)
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0822"})
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["tag"] == "0822"
+        assert body["image_ref"] == "ghcr.io/hal0ai/hal0-combined:0822"
+        assert body["id"]
+
+        status = self._wait_terminal(client)
+        assert status["state"] == "completed"
+        assert status["tag"] == "0822"
+        assert status["image_ref"] == "ghcr.io/hal0ai/hal0-combined:0822"
+        assert pulled == ["ghcr.io/hal0ai/hal0-combined:0822"]
+
+    def test_no_tag_keeps_headline_behaviour(self, client: TestClient) -> None:
+        self._seed(client)
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["tag"] == "0824"
+        assert body["image_ref"] == "ghcr.io/hal0ai/hal0-combined:0824"
+        self._wait_terminal(client)
+        assert pulled == ["ghcr.io/hal0ai/hal0-combined:0824"]
+
+    def test_unknown_tag_404s_with_available_tags(self, client: TestClient) -> None:
+        self._seed(client)
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "9999"})
+        assert resp.status_code == 404
+        err = resp.json()["error"]
+        assert err["code"] == "runner_image.tag_not_available"
+        assert err["details"]["tag"] == "9999"
+        assert err["details"]["available_tags"] == ["0824", "0822"]
+
+    def test_headline_tag_allowed_even_when_probe_failed(self, client: TestClient) -> None:
+        """available_tags may be [] on probe failure — the headline stays pullable."""
+        from hal0.registry.runner_image import RunnerImage
+
+        client.app.state.runner_image_registry.upsert(
+            RunnerImage(
+                id=self.IMAGE_ID,
+                image="ghcr.io/hal0ai/hal0-combined",
+                tag="0824",
+                available_tags=[],
+            )
+        )
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0824"})
+        assert resp.status_code == 202
+        assert resp.json()["tag"] == "0824"
+
+    def test_inflight_other_tag_conflicts_409(self, client: TestClient) -> None:
+        from hal0.registry.runner_pull import make_job
+
+        self._seed(client)
+        job = make_job(self.IMAGE_ID, "ghcr.io/hal0ai/hal0-combined:0824", tag="0824")
+        client.app.state.runner_image_pull_jobs[self.IMAGE_ID] = job
+
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0822"})
+        assert resp.status_code == 409
+        err = resp.json()["error"]
+        assert err["code"] == "runner_image.pull_conflict"
+        assert err["details"]["in_flight_tag"] == "0824"
+
+    def test_inflight_same_tag_resumes(self, client: TestClient) -> None:
+        from hal0.registry.runner_pull import make_job
+
+        self._seed(client)
+        job = make_job(self.IMAGE_ID, "ghcr.io/hal0ai/hal0-combined:0824", tag="0824")
+        client.app.state.runner_image_pull_jobs[self.IMAGE_ID] = job
+
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0824"})
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["resumed"] is True
+        assert body["tag"] == "0824"
+        assert body["id"] == job.job_id
+
+    def test_status_tag_filter(self, client: TestClient) -> None:
+        self._seed(client)
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+        client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0822"})
+        status = self._wait_terminal(client, params={"tag": "0822"})
+        assert status["tag"] == "0822"
+
+        miss = client.get(f"/api/runner-images/{self.IMAGE_ID}/pull/status", params={"tag": "0824"})
+        assert miss.status_code == 404
+        assert miss.json()["error"]["code"] == "runner_image.pull_job_not_found"
+
+
 @pytest.fixture
 def isolated_client(tmp_hal0_home: str):
     """TestClient built AFTER HAL0_HOME isolation (settings writes land in tmp).

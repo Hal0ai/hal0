@@ -231,16 +231,32 @@ async def sync_runner_images_route(request: Request) -> dict[str, Any]:
 
 
 @router.post("/{image_id:path}/pull", status_code=202)
-async def pull_runner_image(image_id: str, request: Request) -> dict[str, object]:
-    """Start a background ``podman pull`` for a catalogued runner image."""
-    return await _pull_jobs.enqueue(request, image_id=image_id)
+async def pull_runner_image(
+    image_id: str, request: Request, tag: str | None = None
+) -> dict[str, object]:
+    """Start a background ``podman pull`` for a catalogued runner image.
+
+    ``?tag=`` pulls that catalogued tag (headline or ``available_tags``
+    member — anything else is 404 ``runner_image.tag_not_available``);
+    omitted, the row's headline tag is pulled, exactly as before. One pull
+    slot per image: a different tag already in flight answers 409
+    ``runner_image.pull_conflict``.
+    """
+    return await _pull_jobs.enqueue(request, image_id=image_id, tag=tag)
 
 
 @router.get("/{image_id:path}/pull/status")
-async def pull_runner_image_status(image_id: str, request: Request) -> dict[str, object]:
-    """Current pull job for ``image_id``, with on-disk fallback."""
+async def pull_runner_image_status(
+    image_id: str, request: Request, tag: str | None = None
+) -> dict[str, object]:
+    """Current pull job for ``image_id``, with on-disk fallback.
+
+    ``?tag=`` answers only when the recorded job is for that tag (job
+    records carry ``tag``); a mismatch is 404, so a per-tag poller can't
+    be fooled by another tag's job in the single per-image slot.
+    """
     jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
-    return _pull_jobs.status(image_id, jobs)
+    return _pull_jobs.status(image_id, jobs, tag=tag)
 
 
 @router.get("/{image_id:path}/pull/stream")

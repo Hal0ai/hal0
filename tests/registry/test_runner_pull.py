@@ -160,6 +160,20 @@ class TestCancel:
         assert entry.downloaded is False
 
 
+class TestJobTag:
+    def test_make_job_carries_tag_into_as_dict(self) -> None:
+        job = make_job(
+            "hal0ai/hal0-toolbox-cpu", "ghcr.io/hal0ai/hal0-toolbox-cpu:0822", tag="0822"
+        )
+        assert job.tag == "0822"
+        assert job.as_dict()["tag"] == "0822"
+
+    def test_make_job_tag_defaults_to_none(self) -> None:
+        job = _job()
+        assert job.tag is None
+        assert job.as_dict()["tag"] is None
+
+
 class TestPersistence:
     def test_persist_and_reload_snapshot(self, store: RunnerImageStore) -> None:
         job = _job()
