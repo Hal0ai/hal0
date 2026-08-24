@@ -1010,7 +1010,13 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: (debug builds, A/B tests, etc.).  See #__hal0_image_control__ for the
 #: phasing: 0.9.5 wires slot.image + DEFAULT_ROCMFPX_IMAGE; 0.9.6 will
 #: drop ``image`` from SEED_PROFILES entirely.
-DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0822"
+#: 0824 lineage (2026-08-24): byte-for-byte the 0822 recipe — same pinned
+#: ROCmFPX source ref, same three patches, same base digest — rebuilt via
+#: packaging/runner/rocmfpx/build.sh for exactly one delta: the #2037
+#: fail-fast entrypoint (supervises llama-server, translates a non-signal
+#: death before /health ever answered 200 into exit 64 so the template's
+#: RestartPreventExitStatus=64 can park a doomed model immediately).
+DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0824"
 
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
 #: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
@@ -1040,6 +1046,10 @@ DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0822"
 #: control-token pieces are stripped before the parser sees them).
 STALE_ROCMFPX_IMAGE_REFS = frozenset(
     {
+        # Former default (rc.7). Same recipe lineage as the current 0824 pin
+        # but with the pre-#2037 exec-only entrypoint, so a slot still pinned
+        # here never fail-fasts a doomed model — creation-time debris, retag.
+        "ghcr.io/hal0ai/hal0-combined:0822",
         # Former default (rc.6). Its Vulkan backend emits invalid tokens for
         # every model (#1888) — a slot still pinned here is debris from an
         # older release, not an opt-out, and must be retagged.
@@ -1069,7 +1079,14 @@ STALE_ROCMFPX_IMAGE_REFS = frozenset(
 #: plain non-FPX ggufs, a ≥256-token generation with a clean tail, native
 #: ``tool_calls`` on the shipped brain, and a readable diagnostic instead of
 #: a SIGSEGV with zero devices mapped (#1936).
-VULKAN_FIXED_IMAGE = "ghcr.io/hal0ai/hal0-combined:0822"
+#:
+#: ``:0824`` re-earned membership per the rule below rather than inheriting
+#: it: same pinned source/patches/base as ``:0822`` (only the #2037 entrypoint
+#: differs), but the builder stage's dnf toolchain is unpinned, so "same
+#: recipe" does not prove same binaries. Probed 2026-08-24 on ct105
+#: (kfd present) and ct151 (kfd ABSENT): temp-0 Paris probe on the Vulkan
+#: lane, ≥256-token clean tail, and the #1936 device-less diagnostic.
+VULKAN_FIXED_IMAGE = "ghcr.io/hal0ai/hal0-combined:0824"
 
 #: Runner images allowed to serve the ``gpu-vulkan`` llama.cpp lane on an AMD
 #: host. Consulted by :func:`hal0.providers._gpu.image_serves_vulkan_lane`,
