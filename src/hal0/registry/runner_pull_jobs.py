@@ -48,6 +48,7 @@ from hal0.registry.runner_pull import (
     persisted_job_files,
     pull_job_file,
     run_runner_pull,
+    validate_pull_tag,
 )
 
 
@@ -100,6 +101,8 @@ async def enqueue(request: Request, *, image_id: str, tag: str | None = None) ->
     a *different* tag while one is downloading is an honest 409, not a
     "resumed" handle to the wrong ref.
     """
+    if tag is not None:
+        validate_pull_tag(tag)  # typed 400 before any lookup or path build
     jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
     existing = jobs.get(image_id)
     if existing is not None and existing.state in ("queued", "running"):
@@ -249,6 +252,8 @@ def status(
     orphan the previous tag's terminal result). Pre-per-tag persisted
     snapshots carry no ``tag`` key and never match a tag-filtered read.
     """
+    if tag is not None:
+        validate_pull_tag(tag)  # typed 400 before any lookup or path build
     job = jobs.get(image_id)
     if job is not None and (tag is None or job.tag == tag):
         return job.as_dict()

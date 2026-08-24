@@ -62,6 +62,20 @@ class RunnerImageNotCatalogued(RunnerPullError):
     status = 404
 
 
+class RunnerImageTagInvalid(RunnerPullError):
+    """The tag fails OCI tag syntax — refused before it touches any path.
+
+    Tags feed the per-tag snapshot filename (``<id>@<tag>.json``), so they
+    are allowlist-validated (:data:`_TAG_RE`, the OCI distribution-spec tag
+    grammar) rather than sanitised: a lossy transform would let distinct
+    tags collide on one file (``a/b`` vs ``a-b``), and traversal shapes
+    (``../``) must be a typed 400, never a filesystem probe.
+    """
+
+    code = "runner_image.tag_invalid"
+    status = 400
+
+
 class RunnerImageTagNotAvailable(RunnerPullError):
     """The requested tag isn't in the row's catalogued ``available_tags``.
 
@@ -90,6 +104,26 @@ class RunnerPullConflict(RunnerPullError):
 
 def _sanitise_id(image_id: str) -> str:
     return _SANITISE_RE.sub("-", image_id).strip("-.") or "runner-image"
+
+
+#: OCI distribution-spec tag grammar. Every character it admits is filename-
+#: safe (no ``/``, no ``@``, no leading ``.``), so a validated tag is used
+#: verbatim in paths.
+_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
+
+
+def validate_pull_tag(tag: str) -> str:
+    """Allowlist-validate ``tag`` before it reaches any filesystem path.
+
+    Raises :class:`RunnerImageTagInvalid` (400) on anything outside the OCI
+    tag grammar. Returns the tag unchanged so call sites can validate and
+    use in one expression.
+    """
+    if not _TAG_RE.fullmatch(tag):
+        raise RunnerImageTagInvalid(
+            f"invalid runner-image tag {tag!r} — not an OCI tag", details={"tag": tag}
+        )
+    return tag
 
 
 @dataclass
@@ -163,13 +197,15 @@ def pull_job_file(image_id: str, *, tag: str | None = None) -> Path:
     """Snapshot path for one image's pull job — per-tag when the job has one.
 
     Tagged jobs land at ``<id>@<tag>.json`` so a new tag's pull can't
-    overwrite the previous tag's terminal record (``@`` never survives
-    ``_sanitise_id``, so the separator is unambiguous); untagged jobs
-    keep the bare ``<id>.json`` name.
+    overwrite the previous tag's terminal record; untagged jobs keep the
+    bare ``<id>.json`` name. The tag half is allowlist-validated and used
+    verbatim — ``@`` survives neither ``_sanitise_id`` nor the tag
+    grammar, so the separator is unambiguous, and validating (rather than
+    sanitising) means distinct tags can never collide on one file.
     """
     stem = _sanitise_id(image_id)
     if tag:
-        stem = f"{stem}@{_sanitise_id(tag)}"
+        stem = f"{stem}@{validate_pull_tag(tag)}"
     return _pull_jobs_dir() / f"{stem}.json"
 
 
@@ -359,6 +395,7 @@ async def run_runner_pull(
 
 __all__ = [
     "RunnerImageNotCatalogued",
+    "RunnerImageTagInvalid",
     "RunnerImageTagNotAvailable",
     "RunnerPullConflict",
     "RunnerPullError",
@@ -372,5 +409,6 @@ __all__ = [
     "pull_job_file",
     "run_runner_pull",
     "sweep_pull_jobs",
+    "validate_pull_tag",
     "write_local_marker",
 ]

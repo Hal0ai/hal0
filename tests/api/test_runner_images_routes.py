@@ -372,6 +372,33 @@ class TestPerTagPull:
         assert body["state"] == "completed"
         assert body["image_ref"] == "ghcr.io/hal0ai/hal0-combined:0822"
 
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "../../etc/passwd",
+            "a/b",
+            "..",
+            ".hidden",
+            "-leading",
+            "we@ird",
+            "a" * 129,
+        ],
+    )
+    def test_malformed_tag_refused_before_any_path_use(self, client: TestClient, bad: str) -> None:
+        """Tags feed the snapshot filename (<id>@<tag>.json) — anything
+        outside strict OCI tag syntax is a typed 400 on both the pull and
+        status routes, before any filesystem path is built (CodeQL
+        py/path-injection on #2048)."""
+        self._seed(client)
+
+        pull = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": bad})
+        assert pull.status_code == 400
+        assert pull.json()["error"]["code"] == "runner_image.tag_invalid"
+
+        status = client.get(f"/api/runner-images/{self.IMAGE_ID}/pull/status", params={"tag": bad})
+        assert status.status_code == 400
+        assert status.json()["error"]["code"] == "runner_image.tag_invalid"
+
     def test_status_tag_filter(self, client: TestClient) -> None:
         self._seed(client)
         pulled: list[str] = []

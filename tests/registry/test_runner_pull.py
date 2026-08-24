@@ -174,6 +174,28 @@ class TestJobTag:
         assert job.as_dict()["tag"] is None
 
 
+class TestTagPathSafety:
+    """The tag half of a snapshot filename is allowlist-validated, never
+    sanitised: a lossy transform would let distinct tags collide on one
+    file (``a/b`` vs ``a-b``, ``a-`` vs ``a``)."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["../../etc/passwd", "a/b", "..", ".hidden", "-leading", "we@ird", "a" * 129],
+    )
+    def test_pull_job_file_rejects_non_oci_tags(self, bad: str) -> None:
+        from hal0.registry.runner_pull import RunnerImageTagInvalid
+
+        with pytest.raises(RunnerImageTagInvalid):
+            pull_job_file("hal0ai/hal0-toolbox-cpu", tag=bad)
+
+    def test_valid_tag_lands_verbatim_inside_jobs_dir(self) -> None:
+        tagged = pull_job_file("hal0ai/hal0-toolbox-cpu", tag="0824")
+        untagged = pull_job_file("hal0ai/hal0-toolbox-cpu")
+        assert tagged.parent == untagged.parent
+        assert tagged.name == "hal0ai-hal0-toolbox-cpu@0824.json"
+
+
 class TestPersistence:
     def test_tagged_jobs_persist_side_by_side(self, store: RunnerImageStore) -> None:
         """Per-tag snapshot files: a new tag's pull must not overwrite the
