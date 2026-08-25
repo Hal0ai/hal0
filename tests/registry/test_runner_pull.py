@@ -160,7 +160,71 @@ class TestCancel:
         assert entry.downloaded is False
 
 
+class TestJobTag:
+    def test_make_job_carries_tag_into_as_dict(self) -> None:
+        job = make_job(
+            "hal0ai/hal0-toolbox-cpu", "ghcr.io/hal0ai/hal0-toolbox-cpu:0822", tag="0822"
+        )
+        assert job.tag == "0822"
+        assert job.as_dict()["tag"] == "0822"
+
+    def test_make_job_tag_defaults_to_none(self) -> None:
+        job = _job()
+        assert job.tag is None
+        assert job.as_dict()["tag"] is None
+
+
+class TestTagPathSafety:
+    """The tag half of a snapshot filename is allowlist-validated, never
+    sanitised: a lossy transform would let distinct tags collide on one
+    file (``a/b`` vs ``a-b``, ``a-`` vs ``a``)."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["../../etc/passwd", "a/b", "..", ".hidden", "-leading", "we@ird", "a" * 129],
+    )
+    def test_pull_job_file_rejects_non_oci_tags(self, bad: str) -> None:
+        from hal0.registry.runner_pull import RunnerImageTagInvalid
+
+        with pytest.raises(RunnerImageTagInvalid):
+            pull_job_file("hal0ai/hal0-toolbox-cpu", tag=bad)
+
+    def test_containment_guard_refuses_escaping_filenames(self) -> None:
+        """Belt-and-braces below the sanitise/allowlist layers: the single
+        choke point building jobs-dir paths resolves the candidate and
+        refuses anything outside the directory."""
+        from hal0.registry.runner_pull import RunnerPullPathEscape, _contained_jobs_path
+
+        with pytest.raises(RunnerPullPathEscape):
+            _contained_jobs_path("../../../etc/passwd.json")
+        with pytest.raises(RunnerPullPathEscape):
+            _contained_jobs_path("a/../../b.json")
+        ok = _contained_jobs_path("ok.json")
+        assert ok.name == "ok.json"
+        assert ok.parent == _contained_jobs_path("ok2.json").parent
+
+    def test_valid_tag_lands_verbatim_inside_jobs_dir(self) -> None:
+        tagged = pull_job_file("hal0ai/hal0-toolbox-cpu", tag="0824")
+        untagged = pull_job_file("hal0ai/hal0-toolbox-cpu")
+        assert tagged.parent == untagged.parent
+        assert tagged.name == "hal0ai-hal0-toolbox-cpu@0824.json"
+
+
 class TestPersistence:
+    def test_tagged_jobs_persist_side_by_side(self, store: RunnerImageStore) -> None:
+        """Per-tag snapshot files: a new tag's pull must not overwrite the
+        previous tag's terminal record (review of #2048)."""
+        a = make_job("hal0ai/hal0-toolbox-cpu", "ghcr.io/hal0ai/hal0-toolbox-cpu:0822", tag="0822")
+        a.state = "completed"
+        persist_pull_job(a)
+        b = make_job("hal0ai/hal0-toolbox-cpu", "ghcr.io/hal0ai/hal0-toolbox-cpu:0824", tag="0824")
+        persist_pull_job(b)
+
+        assert pull_job_file(a.image_id, tag="0822").exists()
+        assert pull_job_file(b.image_id, tag="0824").exists()
+        tags = {s.get("tag") for s in list_persisted_jobs() if s.get("image_id") == a.image_id}
+        assert tags == {"0822", "0824"}
+
     def test_persist_and_reload_snapshot(self, store: RunnerImageStore) -> None:
         job = _job()
         job.state = "completed"

@@ -233,7 +233,11 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
   const routes = [
     { id: "r-dashboard", route: "dashboard", label: "Dashboard",  icon: Icons.dashboard, sub: "chat + snapshot + health", keywords: "home chat overview" },
     { id: "r-slots",     route: "slots",     label: "Slots",      icon: Icons.slots,     sub: "inventory + capability rollups", keywords: "lifecycle" },
+    // runner-catalogue-v2 IA: Runner Images is a Slots sub-page (nav id
+    // slots/runner-images); Profiles moved beneath Models (models/profiles).
+    { id: "r-runner-images", route: "slots/runner-images", label: "Runner Images", icon: Icons.slots, sub: "container image catalogue · tags, defaults, pulls", keywords: "runner images ghcr containers pull tag default" },
     { id: "r-models",    route: "models",    label: "Models",     icon: Icons.models,    sub: "catalog + downloads", keywords: "catalog hugging face" },
+    { id: "r-profiles",  route: "models/profiles", label: "Profiles", icon: Icons.models, sub: "container-slot templates", keywords: "profiles templates igpu slot" },
     { id: "r-board",     route: "board",     label: "Operator Board", icon: Icons.board, sub: "kanban · tasks, agents, orchestration", keywords: "kanban tasks board lanes orchestrator dispatch" },
     { id: "r-benchmarks", route: "benchmarks", label: "Benchmarks", icon: Icons.bench, sub: "roster board · runs · evals · run queue", keywords: "perf speed throughput decode prefill bench" },
     { id: "r-hardware",  route: "hardware",  label: "Hardware",   icon: Icons.hardware,  sub: "cpu, gpu, npu, memory" },

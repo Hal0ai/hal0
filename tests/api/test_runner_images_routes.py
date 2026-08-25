@@ -154,3 +154,352 @@ def test_downloaded_list_empty_by_default(client: TestClient) -> None:
     resp = client.get("/api/runner-images/downloaded")
     assert resp.status_code == 200
     assert resp.json() == {"images": []}
+
+
+# ── row enrichment: is_default / in_use_by (runner-image-catalogue v2) ──────
+
+
+def _row(image: str, tag: str, image_id: str = "row"):
+    from hal0.registry.runner_image import RunnerImage
+
+    return RunnerImage(id=image_id, image=image, tag=tag)
+
+
+class TestEnrichRow:
+    """Pure-function contract for the catalogue v2 row enrichment."""
+
+    def test_release_default_match_any_tag(self) -> None:
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-combined", "0777"),
+            defaults={"rocmfpx": ("ghcr.io/hal0ai/hal0-combined:0824", "release")},
+            slot_usage={},
+        )
+        # "any tag": the family default's REPO matching row.image is enough.
+        assert row["is_default"] == {"family": "rocmfpx", "source": "release"}
+
+    def test_override_source_reported(self) -> None:
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-other", "1"),
+            defaults={"rocmfpx": ("ghcr.io/hal0ai/hal0-other:1", "override")},
+            slot_usage={},
+        )
+        assert row["is_default"] == {"family": "rocmfpx", "source": "override"}
+
+    def test_no_family_match_is_null(self) -> None:
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-unrelated", "1"),
+            defaults={"rocmfpx": ("ghcr.io/hal0ai/hal0-combined:0824", "release")},
+            slot_usage={},
+        )
+        assert row["is_default"] is None
+
+    def test_in_use_by_matches_exact_image_tag(self) -> None:
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-combined", "0824"),
+            defaults={},
+            slot_usage={
+                "agent": "ghcr.io/hal0ai/hal0-combined:0824",
+                "utility": "ghcr.io/hal0ai/hal0-combined:0824",
+                "npu": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
+                "old": "ghcr.io/hal0ai/hal0-combined:0822",  # other tag: no match
+            },
+        )
+        assert row["in_use_by"] == ["agent", "utility"]
+        assert row["is_default"] is None
+
+
+# ── per-tag pull (catalogue v2 follow-up to #2043/#2044) ────────────────────
+
+
+class TestPerTagPull:
+    """POST /{id}/pull?tag=… pulls that catalogued tag, not just the headline.
+
+    #2043 scoped the UI per-tag Pull out because ``runner_pull_jobs.enqueue``
+    resolved ``image:tag`` exclusively from the row's headline tag. The route
+    now accepts an optional ``tag`` restricted to the row's ``available_tags``
+    (headline always allowed); omitting it keeps today's headline behaviour.
+    """
+
+    IMAGE_ID = "hal0ai/hal0-combined"
+
+    def _seed(self, client: TestClient) -> None:
+        from hal0.registry.runner_image import RunnerImage
+
+        client.app.state.runner_image_registry.upsert(
+            RunnerImage(
+                id=self.IMAGE_ID,
+                image="ghcr.io/hal0ai/hal0-combined",
+                tag="0824",
+                available_tags=["0824", "0822"],
+            )
+        )
+
+    def _stub_provider(self, pulled: list[str]) -> None:
+        class _RecordingProvider:
+            async def pull_image_stream(self, image: str):
+                pulled.append(image)
+                yield {"state": "completed", "layer": 1, "total_layers": 1}
+
+        runner_pull_jobs.provider_factory = lambda: _RecordingProvider()
+
+    def _wait_terminal(self, client: TestClient, params: dict[str, str] | None = None) -> dict:
+        import time
+
+        for _ in range(200):
+            resp = client.get(f"/api/runner-images/{self.IMAGE_ID}/pull/status", params=params)
+            if resp.status_code == 200 and resp.json()["state"] in (
+                "completed",
+                "failed",
+                "cancelled",
+            ):
+                return resp.json()
+            time.sleep(0.01)
+        raise AssertionError("pull job never reached a terminal state")
+
+    def test_explicit_tag_pulls_that_ref(self, client: TestClient) -> None:
+        self._seed(client)
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0822"})
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["tag"] == "0822"
+        assert body["image_ref"] == "ghcr.io/hal0ai/hal0-combined:0822"
+        assert body["id"]
+
+        status = self._wait_terminal(client)
+        assert status["state"] == "completed"
+        assert status["tag"] == "0822"
+        assert status["image_ref"] == "ghcr.io/hal0ai/hal0-combined:0822"
+        assert pulled == ["ghcr.io/hal0ai/hal0-combined:0822"]
+
+    def test_no_tag_keeps_headline_behaviour(self, client: TestClient) -> None:
+        self._seed(client)
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["tag"] == "0824"
+        assert body["image_ref"] == "ghcr.io/hal0ai/hal0-combined:0824"
+        self._wait_terminal(client)
+        assert pulled == ["ghcr.io/hal0ai/hal0-combined:0824"]
+
+    def test_unknown_tag_404s_with_available_tags(self, client: TestClient) -> None:
+        self._seed(client)
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "9999"})
+        assert resp.status_code == 404
+        err = resp.json()["error"]
+        assert err["code"] == "runner_image.tag_not_available"
+        assert err["details"]["tag"] == "9999"
+        assert err["details"]["available_tags"] == ["0824", "0822"]
+
+    def test_headline_tag_allowed_even_when_probe_failed(self, client: TestClient) -> None:
+        """available_tags may be [] on probe failure — the headline stays pullable."""
+        from hal0.registry.runner_image import RunnerImage
+
+        client.app.state.runner_image_registry.upsert(
+            RunnerImage(
+                id=self.IMAGE_ID,
+                image="ghcr.io/hal0ai/hal0-combined",
+                tag="0824",
+                available_tags=[],
+            )
+        )
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0824"})
+        assert resp.status_code == 202
+        assert resp.json()["tag"] == "0824"
+
+    def test_inflight_other_tag_conflicts_409(self, client: TestClient) -> None:
+        from hal0.registry.runner_pull import make_job
+
+        self._seed(client)
+        job = make_job(self.IMAGE_ID, "ghcr.io/hal0ai/hal0-combined:0824", tag="0824")
+        client.app.state.runner_image_pull_jobs[self.IMAGE_ID] = job
+
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0822"})
+        assert resp.status_code == 409
+        err = resp.json()["error"]
+        assert err["code"] == "runner_image.pull_conflict"
+        assert err["details"]["in_flight_tag"] == "0824"
+
+    def test_inflight_same_tag_resumes(self, client: TestClient) -> None:
+        from hal0.registry.runner_pull import make_job
+
+        self._seed(client)
+        job = make_job(self.IMAGE_ID, "ghcr.io/hal0ai/hal0-combined:0824", tag="0824")
+        client.app.state.runner_image_pull_jobs[self.IMAGE_ID] = job
+
+        resp = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0824"})
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["resumed"] is True
+        assert body["tag"] == "0824"
+        assert body["id"] == job.job_id
+
+    def test_status_for_previous_tag_survives_new_pull(self, client: TestClient) -> None:
+        """A terminal tag-A job stays reachable via ?tag=A after tag B's pull
+        claims the single in-memory slot — snapshots persist per (image, tag),
+        so starting a new tag's pull can't orphan the old tag's result."""
+        self._seed(client)
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+
+        first = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0822"})
+        assert first.status_code == 202
+        done = self._wait_terminal(client, params={"tag": "0822"})
+        assert done["state"] == "completed"
+
+        second = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0824"})
+        assert second.status_code == 202
+
+        old = client.get(f"/api/runner-images/{self.IMAGE_ID}/pull/status", params={"tag": "0822"})
+        assert old.status_code == 200
+        body = old.json()
+        assert body["tag"] == "0822"
+        assert body["state"] == "completed"
+        assert body["image_ref"] == "ghcr.io/hal0ai/hal0-combined:0822"
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "../../etc/passwd",
+            "a/b",
+            "..",
+            ".hidden",
+            "-leading",
+            "we@ird",
+            "a" * 129,
+        ],
+    )
+    def test_malformed_tag_refused_before_any_path_use(self, client: TestClient, bad: str) -> None:
+        """Tags feed the snapshot filename (<id>@<tag>.json) — anything
+        outside strict OCI tag syntax is a typed 400 on both the pull and
+        status routes, before any filesystem path is built (CodeQL
+        py/path-injection on #2048)."""
+        self._seed(client)
+
+        pull = client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": bad})
+        assert pull.status_code == 400
+        assert pull.json()["error"]["code"] == "runner_image.tag_invalid"
+
+        status = client.get(f"/api/runner-images/{self.IMAGE_ID}/pull/status", params={"tag": bad})
+        assert status.status_code == 400
+        assert status.json()["error"]["code"] == "runner_image.tag_invalid"
+
+    def test_status_tag_filter(self, client: TestClient) -> None:
+        self._seed(client)
+        pulled: list[str] = []
+        self._stub_provider(pulled)
+        client.post(f"/api/runner-images/{self.IMAGE_ID}/pull", params={"tag": "0822"})
+        status = self._wait_terminal(client, params={"tag": "0822"})
+        assert status["tag"] == "0822"
+
+        miss = client.get(f"/api/runner-images/{self.IMAGE_ID}/pull/status", params={"tag": "0824"})
+        assert miss.status_code == 404
+        assert miss.json()["error"]["code"] == "runner_image.pull_job_not_found"
+
+
+@pytest.fixture
+def isolated_client(tmp_hal0_home: str):
+    """TestClient built AFTER HAL0_HOME isolation (settings writes land in tmp).
+
+    Same idiom as tests/api/test_settings_routes.py — the shared ``client``
+    fixture builds the app before the per-test HAL0_HOME monkeypatch.
+    """
+    from fastapi import FastAPI
+
+    from hal0.api import create_app
+
+    app: FastAPI = create_app()
+    with TestClient(app) as c:
+        yield c
+
+
+class TestRunnerImageRouteEnrichment:
+    """GET /api/runner-images rows carry the frozen catalogue-v2 contract."""
+
+    def _seed_combined(self, client: TestClient):
+        from hal0.registry.runner_image import RunnerImage
+
+        return client.app.state.runner_image_registry.upsert(
+            RunnerImage(
+                id="rocmfpx-combined",
+                image="ghcr.io/hal0ai/hal0-combined",
+                tag="0824",
+                available_tags=["0824", "0822"],
+            )
+        )
+
+    def test_release_default_and_contract_fields(self, isolated_client: TestClient) -> None:
+        """The baked rocmfpx default is hal0-combined:0824 (#2041), so the
+        combined row reports source=release with no override configured."""
+        self._seed_combined(isolated_client)
+        rows = isolated_client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "rocmfpx-combined")
+        assert row["available_tags"] == ["0824", "0822"]
+        assert row["is_default"] == {"family": "rocmfpx", "source": "release"}
+        assert row["in_use_by"] == []
+
+    def test_override_set_and_null_clear_via_settings_put(
+        self, isolated_client: TestClient
+    ) -> None:
+        """[slots].default_images written/cleared through PUT /api/settings:
+        set → source=override; explicit null value → override removed."""
+        from hal0.registry.runner_image import RunnerImage
+
+        isolated_client.app.state.runner_image_registry.upsert(
+            RunnerImage(id="other", image="ghcr.io/hal0ai/hal0-other", tag="1")
+        )
+
+        r = isolated_client.put(
+            "/api/settings",
+            json={"slots": {"default_images": {"cpu": "ghcr.io/hal0ai/hal0-other:1"}}},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["slots"]["default_images"] == {"cpu": "ghcr.io/hal0ai/hal0-other:1"}
+
+        rows = isolated_client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "other")
+        assert row["is_default"] == {"family": "cpu", "source": "override"}
+
+        # CLEAR: explicit null value removes the key (deep-merge has no
+        # delete idiom; the SlotsConfig validator drops null-valued keys).
+        r = isolated_client.put("/api/settings", json={"slots": {"default_images": {"cpu": None}}})
+        assert r.status_code == 200, r.text
+        assert r.json()["slots"]["default_images"] == {}
+
+        rows = isolated_client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "other")
+        assert row["is_default"] is None
+
+    def test_in_use_by_lists_slots_resolving_to_the_row(
+        self, isolated_client: TestClient, tmp_hal0_home: str
+    ) -> None:
+        """A slot whose resolved config references image:tag shows up in the
+        row's in_use_by (resolved-config path — no rendered units in tests)."""
+        from pathlib import Path
+
+        self._seed_combined(isolated_client)
+        slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+        slots_dir.mkdir(parents=True, exist_ok=True)
+        (slots_dir / "agent.toml").write_text(
+            'name = "agent"\nport = 8081\nimage_pin = "ghcr.io/hal0ai/hal0-combined:0824"\n',
+            encoding="utf-8",
+        )
+
+        rows = isolated_client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "rocmfpx-combined")
+        assert row["in_use_by"] == ["agent"]

@@ -14,7 +14,6 @@ import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
-import { RunnerImagesView, RunnerImagesSyncButton } from '@/dash/runner-images.jsx'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
@@ -57,7 +56,9 @@ function usePageReset(deps) {
 }
 
 // ── ModelsView ─────────────────────────────────────────────────────────
-function ModelsView() {
+// `modelParam` mirrors SlotsView's slotParam: #models/profiles deep-links
+// the Profiles tab (runner-catalogue-v2 — Profiles moved here from Slots).
+function ModelsView({ modelParam = null }) {
   const [selId, setSelId] = useStateM(null);
   // Simplified multi-select OR filters
   const [filterSel, setFilterSel] = useStateM([]);
@@ -65,8 +66,14 @@ function ModelsView() {
   const [sortField, setSortField] = useStateM("name");
   const [sortDir, setSortDir] = useStateM("asc");
   const [q, setQ] = useStateM("");
-  // Tabs: "inference" (default), "image", "upstream", "runner-images"
-  const [tab, setTab] = useStateM("inference");
+  // Tabs: "inference" (default), "image", "upstream", "profiles"
+  const [tab, setTab] = useStateM(modelParam === "profiles" ? "profiles" : "inference");
+  // Sidebar sub-link #models/profiles selects the tab; navigating back to
+  // bare #models drops out of the Profiles tab (same idiom as SlotsView).
+  useEffectM(() => {
+    if (modelParam === "profiles") setTab("profiles");
+    else setTab((t) => (t === "profiles" ? "inference" : t));
+  }, [modelParam]);
   // Pagination
   const [page, setPage] = useStateM(1);
   const [perPage, setPerPage] = useStateM(25);
@@ -243,12 +250,13 @@ function ModelsView() {
       <div className="vh">
         <span className="vh-eye mono">Catalog</span>
         {/* One heading for the whole catalog — the active tab names it. The
-            Runner Images tab swaps the title and header actions in place
-            rather than stacking a second vh below the tab bar. */}
-        <h1>{tab === "runner-images" ? "Runner Images" : "Models"}</h1>
+            Profiles tab swaps the title in place (and drops the model CTAs —
+            ProfilesView carries its own actions) rather than stacking a
+            second vh below the tab bar. */}
+        <h1>{tab === "profiles" ? "Profiles" : "Models"}</h1>
         <span className="vh-spacer" />
-        {tab === "runner-images" ? (
-          <RunnerImagesSyncButton />
+        {tab === "profiles" ? (
+          null
         ) : (
           <>
             {updatable.length > 0 ? (
@@ -285,7 +293,7 @@ function ModelsView() {
           role="tab"
           aria-selected={tab === "inference"}
           className={"slot-tab" + (tab === "inference" ? " on" : "")}
-          onClick={() => setTab("inference")}
+          onClick={() => { setTab("inference"); if (modelParam) window.location.hash = "#models"; }}
         >
           <span>Inference Models</span>
           <span className="slot-tab-ct num">{inferenceRows.length}</span>
@@ -294,7 +302,7 @@ function ModelsView() {
           role="tab"
           aria-selected={tab === "image"}
           className={"slot-tab comfy" + (tab === "image" ? " on" : "")}
-          onClick={() => setTab("image")}
+          onClick={() => { setTab("image"); if (modelParam) window.location.hash = "#models"; }}
         >
           <span>Image / ComfyUI</span>
           <span className="slot-tab-ct num">{comfyTotal}</span>
@@ -303,23 +311,23 @@ function ModelsView() {
           role="tab"
           aria-selected={tab === "upstream"}
           className={"slot-tab" + (tab === "upstream" ? " on" : "")}
-          onClick={() => setTab("upstream")}
+          onClick={() => { setTab("upstream"); if (modelParam) window.location.hash = "#models"; }}
         >
           <span>Upstream Models</span>
           <span className="slot-tab-ct num">{upstreamTotal}</span>
         </button>
         <button
           role="tab"
-          aria-selected={tab === "runner-images"}
-          className={"slot-tab" + (tab === "runner-images" ? " on" : "")}
-          onClick={() => setTab("runner-images")}
+          aria-selected={tab === "profiles"}
+          className={"slot-tab" + (tab === "profiles" ? " on" : "")}
+          onClick={() => { window.location.hash = "#models/profiles"; }}
         >
-          <span>Runner Images</span>
+          <span>Profiles</span>
         </button>
       </div>
 
-      {tab === "runner-images" ? (
-        <RunnerImagesView />
+      {tab === "profiles" ? (
+        window.ProfilesView ? <window.ProfilesView /> : null
       ) : (
       <div className="models-layout" style={{marginTop: 18}}>
         {/* ── List (toolbar + rows) ── */}

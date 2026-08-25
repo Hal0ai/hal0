@@ -32,6 +32,7 @@ whole sync run.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -81,6 +82,40 @@ def _strip_registry_host(image_ref: str) -> str:
     if sep and host == "ghcr.io":
         return rest
     return ref
+
+
+#: ``v?1.2.3``-shaped tags — the "semver" bucket of :func:`sort_tags_newest_first`.
+_SEMVER_TAG_RE = re.compile(r"^v?\d+(\.\d+)+$")
+
+
+def sort_tags_newest_first(tags: list[str]) -> list[str]:
+    """Order GHCR ``tags/list`` output newest-first (catalogue-v2 contract).
+
+    Three buckets, concatenated in this order:
+
+    1. all-digit tags (the CI date/short-SHA-free shape, e.g. ``0824``) —
+       numeric descending, so the freshest date-tag leads;
+    2. semver-shaped tags (``v1.10.0`` / ``1.2.3``) — version-tuple
+       descending (NOT lexicographic: ``v1.10.0`` beats ``v1.2.0``);
+    3. everything else (``latest``, branch names, bare SHAs) — original
+       registry order, untouched, as the stable last resort.
+
+    Pure and exported: the sync path uses it for ``available_tags`` and the
+    unpinned headline tag, and tests/UI helpers can call it directly.
+    """
+    numeric: list[str] = []
+    semver: list[str] = []
+    rest: list[str] = []
+    for tag in tags:
+        if tag.isdigit():
+            numeric.append(tag)
+        elif _SEMVER_TAG_RE.match(tag):
+            semver.append(tag)
+        else:
+            rest.append(tag)
+    numeric.sort(key=int, reverse=True)
+    semver.sort(key=lambda t: tuple(int(p) for p in t.lstrip("v").split(".")), reverse=True)
+    return numeric + semver + rest
 
 
 async def fetch_images_json(client: httpx.AsyncClient) -> tuple[list[dict[str, Any]], str | None]:
@@ -231,19 +266,25 @@ async def probe_ghcr_package(
     tag: str | None = None,
     image_id: str | None = None,
 ) -> RunnerImage:
-    """Anonymously resolve one GHCR package's latest tag + digest + size.
+    """Anonymously resolve one GHCR package's tags + digest + size.
 
-    ``tag`` pins a specific tag (from an ``images.json`` entry); when
-    omitted, the newest-looking tag from ``tags/list`` is used, falling
-    back to ``latest``. ``image_id`` sets the catalogue row id (the
+    ``tag`` pins the headline tag (from an ``images.json`` entry); when
+    omitted, the newest tag per :func:`sort_tags_newest_first` is used,
+    falling back to ``latest``. Either way ``tags/list`` is always probed
+    so the row carries the full ``available_tags`` list (catalogue v2 tag
+    tracking); a failing ``tags/list`` degrades to ``available_tags=[]``
+    without failing the row. ``image_id`` sets the catalogue row id (the
     ``images.json`` short name, e.g. ``cpu``); defaults to the repo path
     for rows with no manifest entry.
     """
     token = await _ghcr_anon_token(repo, client=client)
-    resolved_tag = tag
-    if resolved_tag is None:
+    try:
         tags = await _ghcr_list_tags(repo, token=token, client=client)
-        resolved_tag = "latest" if "latest" in tags else (tags[-1] if tags else "latest")
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("runner_images.tags_list_failed repo=%s error=%s", repo, exc)
+        tags = []
+    available = sort_tags_newest_first(tags)
+    resolved_tag = tag if tag is not None else (available[0] if available else "latest")
     digest, size = await _ghcr_manifest_info(repo, resolved_tag, token=token, client=client)
     return RunnerImage(
         id=image_id or repo,
@@ -251,6 +292,7 @@ async def probe_ghcr_package(
         tag=resolved_tag,
         digest=digest,
         size_bytes=size,
+        available_tags=available,
     )
 
 
@@ -343,5 +385,6 @@ __all__ = [
     "SyncResult",
     "fetch_images_json",
     "probe_ghcr_package",
+    "sort_tags_newest_first",
     "sync_runner_images",
 ]

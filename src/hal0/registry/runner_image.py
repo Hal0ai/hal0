@@ -31,6 +31,11 @@ class RunnerImage(BaseModel):
     tag: str = "latest"
     digest: str | None = None
     size_bytes: int | None = None
+    #: Every tag the GHCR ``tags/list`` probe saw, newest first (see
+    #: ``hal0.registry.runner_image_sync.sort_tags_newest_first``). ``[]``
+    #: when the probe failed or hasn't run — the headline ``tag`` above
+    #: keeps its own semantics (images.json pin, else newest, else latest).
+    available_tags: list[str] = Field(default_factory=list)
 
     # images.json (hal0.runner-images.v1) fields — None when unmatched.
     manifest_key: str | None = None

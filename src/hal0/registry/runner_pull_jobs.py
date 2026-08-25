@@ -9,10 +9,14 @@ disk-fallback status/stream read path, and cancel.
 
 Interface contract:
 
-    enqueue(request, *, image_id) -> dict
+    enqueue(request, *, image_id, tag=None) -> dict
         POST /{id}/pull — starts a background pull, in-flight dedup.
-    status(image_id, jobs) -> dict
-        GET /{id}/pull/status — disk-fallback included.
+        ``tag`` restricts the pulled ref to a catalogued tag (headline or
+        ``available_tags`` member); None keeps the headline behaviour.
+    status(image_id, jobs, tag=None) -> dict
+        GET /{id}/pull/status — disk-fallback included; ``tag`` filters to
+        the job for that tag (in-memory slot, else that tag's persisted
+        snapshot; 404 only when neither exists).
     cancel(image_id, jobs) -> dict
         POST /{id}/pull/cancel — idempotent.
     list_all(jobs) -> list[dict]
@@ -34,13 +38,17 @@ from fastapi.responses import StreamingResponse
 
 from hal0.registry.runner_pull import (
     RunnerImageNotCatalogued,
+    RunnerImageTagNotAvailable,
+    RunnerPullConflict,
     RunnerPullJob,
     RunnerPullJobNotFound,
     list_persisted_jobs,
     make_job,
     persist_pull_job,
+    persisted_job_files,
     pull_job_file,
     run_runner_pull,
+    validate_pull_tag,
 )
 
 
@@ -79,18 +87,35 @@ def _default_provider_factory() -> Any:
 provider_factory: Any = _default_provider_factory
 
 
-async def enqueue(request: Request, *, image_id: str) -> dict[str, object]:
+async def enqueue(request: Request, *, image_id: str, tag: str | None = None) -> dict[str, object]:
     """Start a background pull for ``image_id`` and return a job handle.
 
+    ``tag`` selects which catalogued tag to pull; ``None`` means the row's
+    headline ``tag`` (exactly the pre-per-tag behaviour). An explicit tag
+    must be the headline or a member of the row's ``available_tags`` —
+    the catalogue stays the honesty boundary, no free-text refs.
+
     Idempotent-ish: an in-flight (``queued``/``running``) job is returned
-    rather than duplicated.
+    rather than duplicated — but only when it's for the same tag (or no
+    tag was requested). Job state is keyed one-per-image, so a request for
+    a *different* tag while one is downloading is an honest 409, not a
+    "resumed" handle to the wrong ref.
     """
+    if tag is not None:
+        validate_pull_tag(tag)  # typed 400 before any lookup or path build
     jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
     existing = jobs.get(image_id)
     if existing is not None and existing.state in ("queued", "running"):
+        if tag is not None and existing.tag != tag:
+            raise RunnerPullConflict(
+                f"a pull for {existing.image_ref!r} is already in flight — "
+                f"wait for it (or cancel) before pulling tag {tag!r}",
+                details={"image_id": image_id, "tag": tag, "in_flight_tag": existing.tag},
+            )
         return {
             "id": existing.job_id,
             "image_id": image_id,
+            "tag": existing.tag,
             "state": existing.state,
             "resumed": True,
         }
@@ -102,9 +127,15 @@ async def enqueue(request: Request, *, image_id: str) -> dict[str, object]:
             f"runner image {image_id!r} not in catalogue — sync first",
             details={"image_id": image_id},
         )
-    image_ref = f"{entry.image}:{entry.tag}"
+    if tag is not None and tag != entry.tag and tag not in entry.available_tags:
+        raise RunnerImageTagNotAvailable(
+            f"tag {tag!r} is not a catalogued tag of runner image {image_id!r} — sync first",
+            details={"image_id": image_id, "tag": tag, "available_tags": entry.available_tags},
+        )
+    pull_tag = tag if tag is not None else entry.tag
+    image_ref = f"{entry.image}:{pull_tag}"
 
-    job = make_job(image_id, image_ref)
+    job = make_job(image_id, image_ref, tag=pull_tag)
     jobs[image_id] = job
     persist_pull_job(job)
 
@@ -129,7 +160,13 @@ async def enqueue(request: Request, *, image_id: str) -> dict[str, object]:
                 await _emit_terminal(event_bus, job)
 
     schedule_pull_task(request.app.state, image_id, _run())
-    return {"id": job.job_id, "image_id": image_id, "state": job.state, "image_ref": image_ref}
+    return {
+        "id": job.job_id,
+        "image_id": image_id,
+        "tag": pull_tag,
+        "state": job.state,
+        "image_ref": image_ref,
+    }
 
 
 async def _emit_terminal(event_bus: Any, job: RunnerPullJob) -> None:
@@ -159,9 +196,7 @@ async def _emit_terminal(event_bus: Any, job: RunnerPullJob) -> None:
         )
 
 
-def load_persisted(image_id: str) -> dict[str, Any] | None:
-    """Read a persisted job snapshot from disk (reconciled), or None."""
-    path = pull_job_file(image_id)
+def _read_snapshot(path: Any) -> dict[str, Any] | None:
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -170,9 +205,30 @@ def load_persisted(image_id: str) -> dict[str, Any] | None:
         loaded = json.loads(raw)
     except ValueError:
         return None
-    if not isinstance(loaded, dict):
-        return None
-    return reconcile_persisted(loaded)
+    return loaded if isinstance(loaded, dict) else None
+
+
+def load_persisted(image_id: str, tag: str | None = None) -> dict[str, Any] | None:
+    """Read a persisted job snapshot from disk (reconciled), or None.
+
+    Snapshots are per-(image, tag) files. With ``tag``, only that tag's
+    snapshot answers (pre-per-tag snapshots carry no ``tag`` key and never
+    match). Without, the most recent pull wins — highest ``started_at``
+    across the bare untagged file and every per-tag sibling.
+    """
+    if tag is not None:
+        data = _read_snapshot(pull_job_file(image_id, tag=tag))
+        if data is None or data.get("tag") != tag:
+            return None
+        return reconcile_persisted(data)
+    best: dict[str, Any] | None = None
+    for path in persisted_job_files(image_id):
+        data = _read_snapshot(path)
+        if data is None:
+            continue
+        if best is None or (data.get("started_at") or 0) > (best.get("started_at") or 0):
+            best = data
+    return reconcile_persisted(best) if best is not None else None
 
 
 def reconcile_persisted(persisted: dict[str, Any]) -> dict[str, Any]:
@@ -185,16 +241,33 @@ def reconcile_persisted(persisted: dict[str, Any]) -> dict[str, Any]:
     return persisted
 
 
-def status(image_id: str, jobs: dict[str, RunnerPullJob]) -> dict[str, object]:
+def status(
+    image_id: str, jobs: dict[str, RunnerPullJob], *, tag: str | None = None
+) -> dict[str, object]:
+    """Current job record for ``image_id`` (disk fallback included).
+
+    With ``tag``, only a job for that exact tag answers — the in-memory
+    slot may hold another tag's pull, in which case the read falls through
+    to the requested tag's persisted snapshot (a newer pull must not
+    orphan the previous tag's terminal result). Pre-per-tag persisted
+    snapshots carry no ``tag`` key and never match a tag-filtered read.
+    """
+    if tag is not None:
+        validate_pull_tag(tag)  # typed 400 before any lookup or path build
     job = jobs.get(image_id)
-    if job is None:
-        persisted = load_persisted(image_id)
-        if persisted is not None:
-            return persisted
+    if job is not None and (tag is None or job.tag == tag):
+        return job.as_dict()
+    persisted = load_persisted(image_id, tag)
+    if persisted is not None:
+        return persisted
+    if tag is not None:
         raise RunnerPullJobNotFound(
-            f"no pull job for runner image {image_id!r}", details={"image_id": image_id}
+            f"no pull job for runner image {image_id!r} tag {tag!r}",
+            details={"image_id": image_id, "tag": tag},
         )
-    return job.as_dict()
+    raise RunnerPullJobNotFound(
+        f"no pull job for runner image {image_id!r}", details={"image_id": image_id}
+    )
 
 
 def cancel(image_id: str, jobs: dict[str, RunnerPullJob]) -> dict[str, object]:
@@ -209,14 +282,22 @@ def cancel(image_id: str, jobs: dict[str, RunnerPullJob]) -> dict[str, object]:
 
 
 def list_all(jobs: dict[str, RunnerPullJob]) -> list[dict[str, Any]]:
-    """All pull jobs — active in-memory + persisted terminal, deduped (in-memory wins)."""
+    """All pull jobs — active in-memory + persisted terminal, deduped per image.
+
+    In-memory wins; among one image's persisted snapshots (per-tag files),
+    the most recently started wins — one row per image, matching the
+    single in-memory pull slot.
+    """
     persisted = list_persisted_jobs()
     by_id: dict[str, dict[str, Any]] = {}
     for p in persisted:
         if p.get("state") not in ("completed", "failed", "cancelled"):
             continue
         iid = p.get("image_id")
-        if isinstance(iid, str) and iid:
+        if not (isinstance(iid, str) and iid):
+            continue
+        prev = by_id.get(iid)
+        if prev is None or (p.get("started_at") or 0) >= (prev.get("started_at") or 0):
             by_id[iid] = p
     for iid, job in jobs.items():
         by_id[iid] = job.as_dict()
