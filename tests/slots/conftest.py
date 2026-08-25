@@ -66,6 +66,11 @@ class FakeContainerProvider:
         self.fail_unload: Exception | None = None
         self.running_argv_by_slot: dict[str, list[str] | None] = {}
         self.expected_argv_by_slot: dict[str, list[str] | None] = {}
+        # #2024 — the live container's image per slot, read by the drift
+        # comparator's image-mismatch check. None (the default) means
+        # "unknown", same as a real provider whose inspect failed/found
+        # nothing — never cries wolf on missing data.
+        self.running_image_by_slot: dict[str, str | None] = {}
         # /health probe result. Default True: an active unit is also ready.
         # Set False to simulate a still-loading / wedged model server (unit
         # active but the inference server isn't answering /health yet).
@@ -137,7 +142,7 @@ class FakeContainerProvider:
     # — slot_view container_enrichment extras —
 
     def running_image(self, slot: Any) -> str | None:
-        return None
+        return self.running_image_by_slot.get(probe_slot_name(slot))
 
     def running_argv(self, slot: Any) -> list[str] | None:
         return self.running_argv_by_slot.get(probe_slot_name(slot))

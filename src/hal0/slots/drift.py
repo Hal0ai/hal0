@@ -215,6 +215,32 @@ async def compute_config_drift(
         for key in _CONFIG_DRIFT_KEYS
         if not _config_drift_values_equal(key, running_flags.get(key), rendered_flags.get(key))
     ]
+
+    # #2024: the argv comparison above never sees the container IMAGE. An
+    # ``--hardware`` edit (cpu <-> vulkan <-> rocm) changes the resolved
+    # runner image (and with it the AddDevice=/dev/dri, AddDevice=/dev/kfd,
+    # --group-add render/video passthrough baked into the same image), but
+    # none of that is an llama-server flag — so a slot whose device changed
+    # underneath a still-running old-image container compared as "no
+    # drift" here. That false negative is the single choke point BOTH
+    # reported consumers read: SlotManager._should_converge (slot edit +
+    # load short-circuits) and the updater's /api/updates/slot-drift (the
+    # post-update restart banner / --restart-slots). Fixing it here fixes
+    # both without touching either call site.
+    #
+    # Reuses the SAME resolution ``/api/slots`` already trusts for
+    # ``image_mismatch`` (#663): ``_resolve_image_ref(cfg, None)`` for the
+    # declared image (image_pin, else RUNNER_IMAGES[effective runner] —
+    # profile-independent, so no profile catalogue lookup needed here) and
+    # ``provider.running_image(cfg)`` for the live container's actual image,
+    # compared via the same canonicalising ``_image_mismatch``.
+    from hal0.providers.container import _image_mismatch, _resolve_image_ref
+
+    running_image = await loop.run_in_executor(None, provider.running_image, cfg)
+    declared_image = _resolve_image_ref(cfg, None)
+    if _image_mismatch(running_image, declared_image):
+        diffs.append({"key": "image", "running": running_image, "rendered": declared_image})
+
     return {"drifted": bool(diffs), "diffs": diffs}
 
 

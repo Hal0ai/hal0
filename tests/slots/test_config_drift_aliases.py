@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
 from hal0.slots.manager import _CONFIG_DRIFT_KEYS, SlotManager, _argv_values
 from tests.slots.conftest import FakeContainerProvider
 
@@ -298,3 +299,82 @@ async def test_drift_resolves_the_servable_model_like_the_launch_path(
 
     assert toml_id in resolved_for, "drift must go through the servable-model resolution"
     assert snap.metadata.get("config_drift") == {"drifted": False, "diffs": []}
+
+
+async def test_stale_image_surfaces_as_drift_even_with_matching_argv(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#2024: a stale runner IMAGE must flag drift, not just stale flags.
+
+    ``hal0 slot edit <s> --hardware cpu`` (or any device change) changes the
+    resolved runner image and its baked-in AddDevice=/dev/dri,
+    AddDevice=/dev/kfd, --group-add render/video passthrough — none of which
+    is an llama-server flag, so the argv comparison alone sees no drift. The
+    old container keeps running the old image while ``_should_converge``
+    (slot edit + load) and ``/api/updates/slot-drift`` (the post-update
+    restart banner) both read this SAME comparator and must see the mismatch.
+    """
+    matching_argv = ["--model", "/mnt/ai-models/qwen.gguf", "--ctx-size", "131072"]
+    container_stub.expected_argv_by_slot["chat"] = list(matching_argv)
+    container_stub.running_argv_by_slot["chat"] = list(matching_argv)
+    # The container is still running a retired/off-lane image; the slot's
+    # resolved (declared) image for backend="vulkan" is the vulkanfpx image,
+    # not this one.
+    container_stub.running_image_by_slot["chat"] = "ghcr.io/hal0ai/hal0-toolbox-cpu:retired"
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    drift = snap.metadata.get("config_drift")
+    assert drift is not None and drift["drifted"] is True
+    image_diffs = [d for d in drift["diffs"] if d["key"] == "image"]
+    assert image_diffs == [
+        {
+            "key": "image",
+            "running": "ghcr.io/hal0ai/hal0-toolbox-cpu:retired",
+            "rendered": DEFAULT_ROCMFPX_IMAGE,
+        }
+    ]
+
+
+async def test_matching_image_is_not_drift(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A running image that matches the declared image is NOT drift."""
+    matching_argv = ["--model", "/mnt/ai-models/qwen.gguf"]
+    container_stub.expected_argv_by_slot["chat"] = list(matching_argv)
+    container_stub.running_argv_by_slot["chat"] = list(matching_argv)
+    container_stub.running_image_by_slot["chat"] = DEFAULT_ROCMFPX_IMAGE
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    assert snap.metadata.get("config_drift") == {"drifted": False, "diffs": []}
+
+
+async def test_load_converges_running_container_on_image_drift(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#2024: ``load()`` on an already-ready slot with a stale IMAGE must
+    re-converge (tear down + re-spawn) rather than short-circuit — the
+    ``slot edit --hardware X`` then ``slot load`` repro from the issue.
+    """
+    matching_argv = ["--model", "/mnt/ai-models/qwen.gguf"]
+    container_stub.expected_argv_by_slot["chat"] = list(matching_argv)
+    container_stub.running_argv_by_slot["chat"] = list(matching_argv)
+    container_stub.running_image_by_slot["chat"] = "ghcr.io/hal0ai/hal0-toolbox-cpu:retired"
+
+    sm = SlotManager()
+    await sm.load("chat")
+    assert len(container_stub.load_calls) == 1
+
+    # Second load on the already-ready slot: with matching argv but a
+    # mismatched image, this must re-converge (terminate + re-spawn), not
+    # silently return the stale snapshot.
+    await sm.load("chat")
+    assert len(container_stub.load_calls) == 2
