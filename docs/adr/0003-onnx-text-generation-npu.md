@@ -2,7 +2,8 @@
 
 ## Status
 
-**PROPOSAL — awaiting operator decision (2026-08-20).**
+**ACCEPTED (operator, 2026-08-25).** Option C — defer with the trigger
+conditions below; FLM remains the sole NPU lane.
 
 Recommendation: **Option C — defer, with explicit trigger conditions.** No code
 ships from this ADR. The evidence base is
