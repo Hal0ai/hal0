@@ -82,7 +82,9 @@ def test_version_pin_installs_exact_spec(tmp_path: Path) -> None:
     assert ok is True
     pip = _pip_call(r.calls)
     assert pip is not None
-    assert pip[-1] == "hermes-agent[web]==0.15.2"
+    # ``[web,mcp]``: an exact-version upgrade must keep the MCP client extra —
+    # rebuilding the venv from ``[web]`` alone strips hermes' MCP client (#2021).
+    assert pip[-1] == "hermes-agent[web,mcp]==0.15.2"
     assert "-r" not in pip
 
 

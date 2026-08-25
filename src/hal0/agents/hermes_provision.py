@@ -827,7 +827,10 @@ def upgrade_hermes_runtime(
     if not pip.exists():
         return False, f"hermes venv missing at {venv} — run `hal0 agent install hermes` first"
 
-    spec = f"hermes-agent[web]=={version}" if version else None
+    # ``[web,mcp]`` — an exact-version upgrade must request the same extras as
+    # requirements.txt: rebuilding the venv from ``[web]`` alone strips the MCP
+    # client out from under a working install (#2021).
+    spec = f"hermes-agent[web,mcp]=={version}" if version else None
     pip_argv = [str(pip), "-m", "pip", "install", "--upgrade"]
     pip_argv += [spec] if spec else ["-r", str(requirements)]
     try:
@@ -2565,6 +2568,151 @@ def _probe_mcp_server(
     return {"ok": True, "tools": tools, "error": None}
 
 
+#: Runs inside the HERMES venv interpreter (which has no hal0 installed —
+#: stdlib + whatever hermes-agent's extras pulled in, nothing else). Emits
+#: exactly one JSON verdict line on stdout and always exits 0; the parent
+#: (:func:`_probe_mcp_client`) owns turning "no verdict" into a failure.
+_MCP_CLIENT_PROBE_SCRIPT = """\
+import asyncio, json, os, sys
+
+
+def _emit(payload):
+    sys.stdout.write(json.dumps(payload) + "\\n")
+
+
+try:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+except BaseException as exc:  # ImportError, but also half-broken installs
+    _emit({"ok": False, "stage": "import", "tools": [],
+           "error": f"{type(exc).__name__}: {exc}"})
+    sys.exit(0)
+
+url = os.environ.get("HAL0_MCP_PROBE_URL") or ""
+if not url:
+    _emit({"ok": True, "stage": "import", "tools": [], "error": None})
+    sys.exit(0)
+
+headers = json.loads(os.environ.get("HAL0_MCP_PROBE_HEADERS") or "{}")
+
+
+async def _probe():
+    async with streamablehttp_client(url, headers=headers) as (read, write, _sid):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            return [t.name for t in listed.tools]
+
+
+try:
+    tools = asyncio.run(_probe())
+except BaseException as exc:
+    _emit({"ok": False, "stage": "connect", "tools": [],
+           "error": f"{type(exc).__name__}: {exc}"})
+    sys.exit(0)
+
+_emit({"ok": True, "stage": "connected", "tools": tools, "error": None})
+"""
+
+
+def _probe_mcp_client(
+    venv_python: Path,
+    url: str | None,
+    *,
+    agent_id: str,
+    private: bool = False,
+    timeout: float = 40.0,
+) -> dict[str, Any]:
+    """Probe an MCP server THROUGH the hermes venv's own client stack.
+
+    :func:`_probe_mcp_server` answers "is the server up?" with the
+    bootstrap's stdlib HTTP client — which says nothing about whether
+    HERMES can reach it. rc.7 shipped a venv with no ``mcp`` package at all
+    and every server-side surface still read green (#2021,
+    ``hermes-venv-missing-mcp-extra``). This probe runs the venv's OWN
+    interpreter: ``import mcp`` + the streamable-HTTP transport, then a real
+    ``initialize`` → ``tools/list`` session against the exact transport URL
+    config.yaml wires — the same code path a hermes turn takes.
+
+    ``url=None`` runs the import assertion only (no server round-trip).
+
+    Returns ``{"ok": bool, "stage": str, "tools": [...], "error": str | None}``
+    where ``stage`` is where the probe got to: ``venv`` (no interpreter),
+    ``import``, ``connect``, ``connected``, or ``exec`` (probe subprocess
+    itself misbehaved). Auth mirrors :func:`_probe_mcp_server` — bearer from
+    the box service identity, resolved fresh per call.
+    """
+    from hal0.service_identity import service_key
+
+    python = Path(venv_python)
+    if not python.exists():
+        return {
+            "ok": False,
+            "stage": "venv",
+            "tools": [],
+            "error": f"venv python missing at {python}",
+        }
+    headers: dict[str, str] = {"X-hal0-Agent": agent_id}
+    bearer = service_key(prefer="admin")
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    if private:
+        headers["X-hal0-Private"] = "1"
+    env = _hal0_subprocess_env(
+        HAL0_MCP_PROBE_URL=url or "",
+        # Env, not argv: the bearer must not show up in the process list.
+        HAL0_MCP_PROBE_HEADERS=json.dumps(headers),
+    )
+    try:
+        result = subprocess.run(  # nosec B603 — fixed argv, our own venv interpreter
+            [str(python), "-c", _MCP_CLIENT_PROBE_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "stage": "exec", "tools": [], "error": str(exc)}
+    for line in reversed((result.stdout or "").strip().splitlines()):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "ok" in payload:
+            return payload
+    stderr_tail = (result.stderr or "").strip()[-400:]
+    return {
+        "ok": False,
+        "stage": "exec",
+        "tools": [],
+        "error": f"probe emitted no verdict (rc={result.returncode}): {stderr_tail}",
+    }
+
+
+#: Provisioning-side ceiling for hermes-client probes. Server entries carry
+#: their own RUNTIME timeouts (hal0-memory's 900s covers agentic
+#: memory_reflect calls; hal0-admin's is slot-lifecycle-sized) and those are
+#: the budget hermes itself renders into config.yaml — but a provisioning
+#: probe only performs ``initialize`` + ``tools/list``, and bootstrap must
+#: stay bounded: a server that cannot answer tools/list inside two minutes
+#: is not slow, it is not answering. ``min(entry timeout, this)`` keeps a
+#: slow-but-legitimate server from false-FAILing the honest gate without
+#: letting one server hang provisioning for 15 minutes (#2053 review).
+_MCP_CLIENT_PROBE_CEILING_S = 120.0
+
+
+def _mcp_client_probe_timeout(entry_timeout: Any) -> float:
+    """Bounded per-server timeout for a provisioning-time client probe."""
+    try:
+        t = float(entry_timeout)
+    except (TypeError, ValueError):
+        return 40.0
+    if t <= 0:
+        return 40.0
+    return min(t, _MCP_CLIENT_PROBE_CEILING_S)
+
+
 def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
     """Verify the two hal0-bundled MCP servers respond + record their tool list.
 
@@ -2574,8 +2722,39 @@ def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
     missing entry (or a missing allow-list file entirely) is a
     warning, NOT a hard fail — bootstrap continues so the operator
     can wire the missing piece by hand after install.
+
+    #2021: server-side reachability alone is NOT wiring. rc.7 shipped a
+    hermes venv with no ``mcp`` package (``hermes-agent[web]`` without the
+    ``mcp`` extra) and this phase still checkpointed ``ok`` — every probe
+    went through the bootstrap's stdlib HTTP client, never through the
+    client hermes actually uses. The phase now also asserts the HERMES
+    CLIENT works (:func:`_probe_mcp_client`): the venv must import ``mcp``
+    plus its streamable-HTTP transport, and every server the raw probe
+    proves live must be reachable through that client too. Either
+    client-side failure is a hard ``FAIL`` — a dead client is a broken
+    install, not a warm-up warning; the ADR-0013 degraded posture stays
+    reserved for servers that are themselves unreachable.
     """
     state = ctx.state
+    venv_python = _venv_python(Path(state.venv))
+    # Import assertion first: runs unconditionally (even if the allowlist
+    # skips every server) so "the venv has no MCP client" can never hide.
+    client_import = ctx.io.probe_mcp_client(venv_python, None, agent_id=state.agent_id)
+    if not client_import.get("ok"):
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            details={
+                "mcp_client": client_import,
+                "servers": {},
+                "allowlist_present": None,
+                "warnings": [],
+                "rendered_servers": [],
+            },
+            reason=(
+                f"hermes venv has no working MCP client "
+                f"({client_import.get('stage')}): {client_import.get('error')}"
+            ),
+        )
     allowlist = _load_agent_allowlist()
     # PR-3 Phase 6: source the canonical inventory from
     # ``_default_mcp_servers()`` so the probe loop and the template loop
@@ -2584,6 +2763,7 @@ def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
 
     results: dict[str, Any] = {}
     warnings: list[str] = []
+    client_failures: list[str] = []
     rendered_servers: list[dict[str, Any]] = []
     for entry in servers:
         name = entry["name"]
@@ -2612,32 +2792,76 @@ def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
             # later turn — degraded probe is usually just "MCP server
             # warming up", not a permanent failure. The system prompt
             # already tells the agent to retry on connection errors.
+            # No client probe against a server that is provably down: the
+            # client cannot be blamed for it, and the import assertion
+            # above already vouched for the client itself.
+            rendered_servers.append(entry)
+            continue
+        # The server is provably live — now the connection that actually
+        # matters: THROUGH the hermes client, at the FULL transport URL
+        # config.yaml hands hermes (#2021). A failure here is client-side
+        # by construction, so it fails the phase.
+        client_probe = ctx.io.probe_mcp_client(
+            venv_python,
+            entry["url"],
+            agent_id=state.agent_id,
+            private=entry["private"],
+            timeout=_mcp_client_probe_timeout(entry.get("timeout")),
+        )
+        if not client_probe.get("ok"):
+            failure = f"{name}: {client_probe.get('stage')}: {client_probe.get('error')}"
+            client_failures.append(failure)
+            results[name] = {
+                "status": "client_failed",
+                "tool_count": len(probe["tools"]),
+                "tools": probe["tools"],
+                "client": {
+                    "status": "failed",
+                    "stage": client_probe.get("stage"),
+                    "error": client_probe.get("error"),
+                },
+            }
             rendered_servers.append(entry)
             continue
         results[name] = {
             "status": "ok",
             "tool_count": len(probe["tools"]),
             "tools": probe["tools"],
+            "client": {
+                "status": "ok",
+                "tool_count": len(client_probe.get("tools") or []),
+            },
         }
         rendered_servers.append(entry)
 
-    # Even with warnings we return OK — degraded MCP connectivity is
-    # surfaced for smoke_tests + self_report to display, not a fatal
-    # bootstrap blocker (per the plan §9 contract).
+    details = {
+        "mcp_client": client_import,
+        "servers": results,
+        "allowlist_present": allowlist is not None,
+        "warnings": warnings,
+        "rendered_servers": rendered_servers,
+    }
+    if client_failures:
+        # The raw probe proved the server(s) live; the hermes client still
+        # could not connect. Reporting ok here is exactly the lie #2021
+        # shipped — fail the phase, typed, with every client failure named.
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            details=details,
+            reason="hermes MCP client cannot connect to live server(s) — "
+            + "; ".join(client_failures),
+        )
+
+    # Even with warnings we return OK — degraded MCP connectivity (the
+    # SERVER side being down/warming up) is surfaced for smoke_tests +
+    # self_report to display, not a fatal bootstrap blocker (per the plan
+    # §9 contract).
     #
     # ``rendered_servers`` is consumed by Phase 5 (config_write) on the
     # next bootstrap run — it's how Phase 6 hands the template the live
     # probe result. The list survives via the persisted ``provision.json``
     # checkpoint so re-runs use the same shape.
-    return PhaseResult(
-        status=PhaseStatus.OK,
-        details={
-            "servers": results,
-            "allowlist_present": allowlist is not None,
-            "warnings": warnings,
-            "rendered_servers": rendered_servers,
-        },
-    )
+    return PhaseResult(status=PhaseStatus.OK, details=details)
 
 
 # ── Phase H.5: persona_seed (PR-3) ──────────────────────────────────────────
@@ -5468,15 +5692,32 @@ def _smoke_anchor_context_window(state: BootstrapState, io: InstallIO) -> tuple[
 
 
 def _smoke_admin_tools_list(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
-    probe = io.probe_mcp_server(
-        "http://127.0.0.1:8080/mcp/admin",
+    """tools/list THROUGH the hermes client, not the bootstrap's HTTP probe.
+
+    #2021: this smoke used to POST at the server with the bootstrap's own
+    stdlib client and passed green while the hermes venv had no ``mcp``
+    package at all. It now runs :func:`_probe_mcp_client` — the venv's own
+    interpreter and MCP client stack, against the hal0-admin entry from
+    :func:`_default_mcp_servers` (the same inventory config_write renders,
+    so the smoke cannot drift from the transport URL config.yaml actually
+    wires) — and a dead client fails the smoke the same way it fails the
+    agent.
+    """
+    entry = next((e for e in _default_mcp_servers() if e["name"] == "hal0-admin"), None)
+    if entry is None:
+        return (False, "hal0-admin missing from the builtin MCP server inventory")
+    probe = io.probe_mcp_client(
+        _venv_python(Path(state.venv)),
+        entry["url"],
         agent_id=state.agent_id,
-        private=False,
+        private=bool(entry.get("private")),
+        timeout=_mcp_client_probe_timeout(entry.get("timeout")),
     )
-    if not probe["ok"]:
-        return (False, probe["error"] or "unreachable")
-    n = len(probe["tools"])
-    return (n >= 5, f"{n} tools advertised")
+    if not probe.get("ok"):
+        stage = probe.get("stage") or "probe"
+        return (False, f"hermes mcp client {stage}: {probe.get('error') or 'unreachable'}")
+    n = len(probe.get("tools") or [])
+    return (n >= 5, f"{n} tools via hermes mcp client")
 
 
 def _smoke_hermes_md_contains_primary(state: BootstrapState, _io: InstallIO) -> tuple[bool, str]:
@@ -6100,6 +6341,7 @@ class InstallIO:
         _fetch_anchor_models
     )
     probe_mcp_server: Callable[..., dict[str, Any]] = _probe_mcp_server
+    probe_mcp_client: Callable[..., dict[str, Any]] = _probe_mcp_client
     mcp_memory_call: Callable[..., dict[str, Any]] = _mcp_memory_call
     install_venv: Callable[..., None] = _install_venv
     read_env_probe: Callable[[], dict[str, Any]] = _read_env_probe
