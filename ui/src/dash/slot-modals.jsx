@@ -22,6 +22,7 @@ import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
 import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
+import { SlotBreakerChip } from "./breaker-chip.jsx";
 import { npuModalityOn } from "./npu-modality.js";
 import { slotModelRow, npuAnchorSlot } from "./slots/slot-shared.js";
 
@@ -1336,10 +1337,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						k="state"
 						v={
 							<span
-								data-testid="slot-state-readonly"
-								className={stateChipClass(slot)}
+								style={{ display: "inline-flex", gap: 6, alignItems: "center" }}
 							>
-								{slot.state}
+								<span
+									data-testid="slot-state-readonly"
+									className={stateChipClass(slot)}
+								>
+									{slot.state}
+								</span>
+								{/* #2038: breaker view rides next to the lifecycle state so
+								    "error" + "parked · N failures" read as one story. */}
+								<SlotBreakerChip s={slot} />
 							</span>
 						}
 					/>

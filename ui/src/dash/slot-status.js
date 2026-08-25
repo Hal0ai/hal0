@@ -276,6 +276,70 @@ export function imageStatusChip(slot) {
 }
 
 /**
+ * Chip for the crash-loop breaker view (#2012 → #2038), or null.
+ *
+ * The manager stamps `metadata.breaker = {state, failures, retry_after_s}`
+ * into every slot snapshot while the breaker is non-closed and omits it
+ * otherwise, so presence of the field IS the render signal. Prefer this over
+ * the older `metadata.parked` extra — that one is stamped only on ERROR
+ * transitions and goes stale; the breaker view is the live truth.
+ *
+ * `retry_after_s` is computed at snapshot time. The caller passes the seconds
+ * elapsed since it fetched the snapshot and the countdown is clamped at 0 —
+ * accurate enough between polls, and never shows a negative.
+ *
+ * Tone maps onto the card's colour rule (see header):
+ *   backoff   → warn    (amber — the slot is deliberately waiting, not dead)
+ *   parked    → err     (red — refusing loads until the trial; needs an eye)
+ *   half-open → neutral (a trial will run on the next request; nothing to fix)
+ *
+ * @param {object|null|undefined} slot
+ * @param {number} [elapsedS] - seconds since the snapshot was fetched
+ * @returns {{tone: string, label: string, tooltip: string}|null}
+ */
+export function breakerChip(slot, elapsedS = 0) {
+  const b = slot?.metadata?.breaker;
+  if (!b || typeof b !== "object") return null;
+  const failures = Number(b.failures) || 0;
+  const failTxt = failures === 1 ? "1 failure" : `${failures} failures`;
+  const remaining = Math.max(
+    0,
+    Math.round((Number(b.retry_after_s) || 0) - elapsedS),
+  );
+  switch (b.state) {
+    case "backoff":
+      return {
+        tone: "warn",
+        label: `retry in ${remaining}s`,
+        tooltip:
+          `Crash-loop breaker: the last load failed (${failTxt} in a row). ` +
+          `Next automatic retry in ${remaining}s.`,
+      };
+    case "parked":
+      return {
+        tone: "err",
+        label: `parked · ${failTxt}`,
+        tooltip:
+          `Crash-loop breaker: parked after ${failTxt} — the slot is ` +
+          `deliberately refusing loads. Next automatic trial in ${remaining}s; ` +
+          `a manual Start/Restart attempts a load immediately.`,
+      };
+    case "half-open":
+      return {
+        tone: "neutral",
+        label: "trial pending",
+        tooltip:
+          "Crash-loop breaker half-open: the next load request runs a single " +
+          "trial. Success closes the breaker; failure parks it again.",
+      };
+    default:
+      // Unknown state (schema drift): render nothing rather than guess a
+      // colour — same honesty rule as imageStatusChip above.
+      return null;
+  }
+}
+
+/**
  * Project slotPhase() → stateChipClass-compatible CSS class.
  * Used in slot-modals.jsx to color lifecycle state chips.
  */

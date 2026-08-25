@@ -483,6 +483,34 @@ class TestHal0Config:
             SlotsConfig(network_mode="bridge")
         assert "network_mode" in str(ei.value)
 
+    # ── [slots] default_images (runner-image-catalogue v2) ────────────────
+
+    def test_slots_default_images_defaults_empty(self) -> None:
+        assert SlotsConfig().default_images == {}
+
+    def test_slots_default_images_accepts_known_family(self) -> None:
+        cfg = SlotsConfig(default_images={"rocmfpx": "ghcr.io/hal0ai/hal0-combined:0824"})
+        assert cfg.default_images == {"rocmfpx": "ghcr.io/hal0ai/hal0-combined:0824"}
+
+    def test_slots_default_images_rejects_unknown_family(self) -> None:
+        with pytest.raises(ValidationError) as ei:
+            SlotsConfig(default_images={"warpdrive": "ghcr.io/x/y:z"})
+        msg = str(ei.value)
+        assert "warpdrive" in msg
+        assert "not a known runner family" in msg
+        assert "rocmfpx" in msg  # the error names the valid keys
+
+    def test_slots_default_images_rejects_empty_ref(self) -> None:
+        with pytest.raises(ValidationError) as ei:
+            SlotsConfig(default_images={"rocmfpx": ""})
+        assert "non-empty image ref" in str(ei.value)
+
+    def test_slots_default_images_null_value_clears_the_key(self) -> None:
+        """The settings PUT deep-merge has no delete idiom, so an explicit
+        null value IS the documented clear: the validator drops the key."""
+        cfg = SlotsConfig(default_images={"rocmfpx": None})
+        assert cfg.default_images == {}
+
     def test_extra_allow_keeps_unknown_keys(self) -> None:
         c = Hal0Config.model_validate({"future_section": {"foo": 1}})
         # extra='allow' keeps the unknown table.

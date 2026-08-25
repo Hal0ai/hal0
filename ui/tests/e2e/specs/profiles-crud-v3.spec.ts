@@ -40,9 +40,11 @@ const CUSTOM_PROFILE = {
 
 const PROFILES_WITH_CUSTOM = [...MOCK_DATA.profiles, CUSTOM_PROFILE]
 
-// Helper: navigate to profiles page and wait for it to be ready.
+// Helper: navigate to the profiles page and wait for it to be ready.
+// runner-catalogue-v2 IA: Profiles is the Models ▸ Profiles tab now (legacy
+// #profiles / #slots/profiles redirect here — models-v3.spec.ts covers it).
 async function gotoProfiles(page: any) {
-  await page.goto('/#profiles')
+  await page.goto('/#models/profiles')
   await page.waitForFunction(
     () => typeof (window as any).ProfilesView === 'function',
   )

@@ -277,7 +277,8 @@ validate_dropin_body() {  # arg: kind (gateway|hindsight); body on stdin
 #               HealthCmd= HealthStartPeriod= HealthInterval= HealthRetries=
 #               HealthTimeout= Exec=
 #   [Service]   Restart= RestartSec= RestartSteps= RestartMaxDelaySec=
-#               SyslogIdentifier= StandardOutput= StandardError=
+#               RestartPreventExitStatus= SyslogIdentifier= StandardOutput=
+#               StandardError=
 #   [Install]   WantedBy=hal0.target        (omitted when autoload = false)
 #
 # Sections may appear at most once and only in that order; [Container] is
@@ -429,13 +430,16 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
 
     # ── [Service] ───────────────────────────────────────────────────────
     # Copied VERBATIM into the generated system unit by podman's quadlet
-    # generator — i.e. host-side root. Exactly the seven the renderer emits;
+    # generator — i.e. host-side root. Exactly the eight the renderer emits;
     # every Exec*=, User=, Group=, WorkingDirectory=, … lands in the default
-    # arm below and dies.
+    # arm below and dies. RestartPreventExitStatus= (#2037) is pinned to a
+    # single uint — the renderer emits exactly `64`; signal names, lists and
+    # ranges systemd would also accept are refused here.
     'Service|Restart')           [[ "$value" =~ $_QRE_RESTART ]] || _quadlet_die "bad Restart: $value" ;;
     'Service|RestartSec')        [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSec: $value" ;;
     'Service|RestartSteps')      [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSteps: $value" ;;
     'Service|RestartMaxDelaySec') [[ "$value" =~ $_QRE_UINT ]]   || _quadlet_die "bad RestartMaxDelaySec: $value" ;;
+    'Service|RestartPreventExitStatus') [[ "$value" =~ $_QRE_UINT ]] || _quadlet_die "bad RestartPreventExitStatus: $value" ;;
     'Service|SyslogIdentifier')  [[ "$value" =~ $_QRE_CTRNAME ]] || _quadlet_die "bad SyslogIdentifier: $value" ;;
     'Service|StandardOutput')    [[ "$value" == "journal" ]]     || _quadlet_die "bad StandardOutput: $value" ;;
     'Service|StandardError')     [[ "$value" == "journal" ]]     || _quadlet_die "bad StandardError: $value" ;;

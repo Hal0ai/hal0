@@ -105,6 +105,67 @@ def test_image_gen_dict_does_not_break_resolution() -> None:
     assert _resolve_image_ref(slot_cfg, _profile()) == FALLBACK_VULKAN_IMAGE
 
 
+# --- [slots] default_images override (runner-image-catalogue v2) ------------ #
+
+
+def _fake_config(default_images: dict[str, str]):
+    """A Hal0Config stand-in exposing just what the override tier reads."""
+    return SimpleNamespace(slots=SimpleNamespace(default_images=default_images))
+
+
+def test_default_images_override_beats_baked_default(monkeypatch) -> None:
+    """No pin + [slots].default_images entry for the effective family → the
+    operator override wins over the baked registry default."""
+    monkeypatch.setattr(
+        "hal0.config.loader.load_hal0_config",
+        lambda: _fake_config({"cpu": "ghcr.io/hal0ai/hal0-combined:0824"}),
+    )
+    slot_cfg = {"binary": "cpu"}
+    assert _resolve_image_ref(slot_cfg, _profile()) == "ghcr.io/hal0ai/hal0-combined:0824"
+
+
+def test_image_pin_still_beats_default_images_override(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hal0.config.loader.load_hal0_config",
+        lambda: _fake_config({"cpu": "ghcr.io/hal0ai/hal0-combined:0824"}),
+    )
+    slot_cfg = {"image_pin": "ghcr.io/foo/debug:bar", "binary": "cpu"}
+    assert _resolve_image_ref(slot_cfg, _profile()) == "ghcr.io/foo/debug:bar"
+
+
+def test_default_images_override_applies_to_hw_gated_family(monkeypatch) -> None:
+    """No binary: the override keys on the HW-gated runner (rocmfpx here).
+
+    The override ref is deliberately NOT the baked default (which is
+    hal0-combined:0824 as of #2041) so this can only pass via the tier.
+    """
+    monkeypatch.setattr(
+        "hal0.config.loader.load_hal0_config",
+        lambda: _fake_config({"rocmfpx": "ghcr.io/hal0ai/hal0-combined:0999"}),
+    )
+    profile = SimpleNamespace(image=None, backend="rocm", device_class="gpu")
+    assert _resolve_image_ref(None, profile) == "ghcr.io/hal0ai/hal0-combined:0999"
+
+
+def test_default_images_absent_family_keeps_baked_default(monkeypatch) -> None:
+    """An override for a DIFFERENT family never leaks across families."""
+    monkeypatch.setattr(
+        "hal0.config.loader.load_hal0_config",
+        lambda: _fake_config({"rocmfpx": "ghcr.io/hal0ai/hal0-combined:0824"}),
+    )
+    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == FALLBACK_VULKAN_IMAGE
+
+
+def test_default_images_config_load_failure_fails_soft(monkeypatch) -> None:
+    """A broken hal0.toml must not wedge a slot launch — baked default wins."""
+
+    def _boom() -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr("hal0.config.loader.load_hal0_config", _boom)
+    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == FALLBACK_VULKAN_IMAGE
+
+
 # --- _profile_image_and_flags integration ---------------------------------- #
 
 

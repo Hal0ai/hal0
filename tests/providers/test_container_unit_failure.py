@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from hal0.providers.container import ContainerProvider
+from hal0.slots.state import SlotSpawnFailed
 
 
 def _completed(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess[str]:
@@ -200,3 +201,85 @@ def test_the_start_path_clears_a_start_limited_unit_before_restarting(
     assert verbs == ["daemon-reload", "reset-failed", "restart"], (
         "reset-failed must sit between the generator reload and the start"
     )
+
+
+# ── #1424 facet 2 — a failed start surfaces typed, reason-first ─────────────
+
+
+def test_a_failed_restart_raises_slot_spawn_failed_with_the_systemd_reason(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1424 facet 2 — the spawn seam's ``CalledProcessError`` must not escape raw.
+
+    Raw, it is not a ``Hal0Error``: it falls through the API's generic
+    ``Exception`` handler as ``500 system.internal``, and ``str(exc)`` — the
+    full sudo seam argv — is what gets stamped into the slot's user-visible
+    ``metadata.message``. Typed, the envelope is ``slot.spawn_failed`` and the
+    message is systemd's failure reason (#1791 probe), not the argv.
+    """
+    unit = provider._unit_name("chat")
+    seam_argv = ["sudo", "-n", "hal0-systemctl", "restart", unit]
+
+    def _run(self: Any, *args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ("systemctl", "restart"):
+            raise subprocess.CalledProcessError(1, seam_argv, stderr="Job failed.")
+        if args[:2] == ("systemctl", "show"):
+            return _completed(
+                "LoadState=loaded\nActiveState=failed\nResult=exit-code\nNRestarts=1\n"
+            )
+        return _completed("")
+
+    monkeypatch.setattr(ContainerProvider, "_run", _run)
+    monkeypatch.setattr(
+        "hal0.providers.container._SYSTEMCTL_SEAM.write_quadlet",
+        lambda path, text: None,
+    )
+
+    with pytest.raises(SlotSpawnFailed) as excinfo:
+        provider._write_and_start_unit("chat", "[Container]\n")
+
+    err = excinfo.value
+    assert err.code == "slot.spawn_failed"
+    # The message is systemd's reason, written for an operator…
+    assert "result=exit-code" in err.message
+    assert "journalctl" in err.message
+    # …never the seam argv (the original report leaked the full sudo command).
+    assert "sudo" not in err.message
+    assert "hal0-systemctl" not in err.message
+    # The raw error stays on the cause chain for logs, not for users.
+    assert isinstance(err.__cause__, subprocess.CalledProcessError)
+
+
+def test_a_failed_restart_is_typed_even_when_the_probe_has_no_reason(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``unit_failure_reason`` reads nothing terminal (seam denied the
+    verb, race with systemd, …) the error must STILL be ``slot.spawn_failed``
+    with an operator-facing fallback that names the unit — never the argv."""
+    unit = provider._unit_name("chat")
+    seam_argv = ["sudo", "-n", "hal0-systemctl", "restart", unit]
+
+    def _run(self: Any, *args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ("systemctl", "restart"):
+            raise subprocess.CalledProcessError(64, seam_argv)
+        if args[:2] == ("systemctl", "show"):
+            # Healthy-looking props → the #1791 probe returns "".
+            return _completed("LoadState=loaded\nActiveState=inactive\nResult=success\n")
+        return _completed("")
+
+    monkeypatch.setattr(ContainerProvider, "_run", _run)
+    monkeypatch.setattr(
+        "hal0.providers.container._SYSTEMCTL_SEAM.write_quadlet",
+        lambda path, text: None,
+    )
+
+    with pytest.raises(SlotSpawnFailed) as excinfo:
+        provider._write_and_start_unit("chat", "[Container]\n")
+
+    err = excinfo.value
+    assert err.code == "slot.spawn_failed"
+    assert unit in err.message
+    assert "exit 64" in err.message
+    assert "journalctl" in err.message
+    assert "sudo" not in err.message
+    assert "hal0-systemctl" not in err.message
