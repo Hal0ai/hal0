@@ -1413,7 +1413,7 @@ _LIVE_STATE_SUBJECT_RE = re.compile(
     r"vram|gtt|ram|gpu|npu|hardware|utili[sz]ation|temperature|"
     r"benchmarks?|agents?|profiles?|stacks?|approvals?|"
     r"board|tasks?|lanes?|queue|dispatcher|orchestration|"
-    r"logs?|uptime|disk|storage|settings?|version|install"
+    r"logs?|uptime|disk|storage|settings?|version|install(?:er|ation)?s?"
     r")\b",
     re.IGNORECASE,
 )

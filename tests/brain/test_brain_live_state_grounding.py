@@ -252,6 +252,8 @@ def test_grounding_fires_at_most_once_per_turn() -> None:
         "what's on the board",
         "how much VRAM is free",
         "which agents are installed",
+        "is the installer running?",
+        "did the last installation finish?",
     ],
 )
 def test_live_state_questions_are_detected(prompt: str) -> None:
